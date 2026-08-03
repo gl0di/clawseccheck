@@ -807,6 +807,13 @@ def render_self_test_corroboration(home, *, explicit_path: str | None = None,
             f"  {q} Scanned the {r['files_scanned']} most recent of {r['files_total']} "
             "trajectory file(s) — the oldest session(s) were not checked."
         )
+    elif getattr(ctx, "exhaustive", False) and r["files_total"]:
+        # F-164 SC-5: silence must never be the only signal for completeness under
+        # --exhaustive — say so affirmatively. Skipped for a plain default run that
+        # merely happened not to hit the cap (the common case; no new sentence needed
+        # every time) and for a home with zero trajectory files (nothing to affirm).
+        lines.append(f"  {ok} Scanned all {r['files_total']} of {r['files_total']} "
+                     "trajectory file(s).")
 
     prefix_by_name = {name: prefix for name, prefix, _markers in _SELFTEST_SOURCES}
     for name, info in r["sources"].items():
@@ -899,6 +906,11 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
             "trajectory file(s) — the oldest session(s) were not analyzed. Results are "
             "INCOMPLETE (treat as UNKNOWN, not authoritative)."
         )
+    elif getattr(ctx, "exhaustive", False) and r["files_total"]:
+        # F-164 SC-5: same affirmative-under-exhaustive discipline as
+        # render_self_test_corroboration above.
+        lines.append(f"  {ok} Scanned all {r['files_total']} of {r['files_total']} "
+                     "trajectory file(s).")
 
     if r["hits"]:
         lines.append(f"  {warn} INCIDENT SIGNAL — an installed skill's indicator appeared in "

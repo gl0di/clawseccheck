@@ -2811,6 +2811,12 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
             f" {skipped_for_time} log/transcript {plural} not scanned (check time budget "
             "reached) — re-run to include them."
         )
+    elif lim.exhaustive:
+        # F-164 SC-5: under --exhaustive, completeness must be stated affirmatively —
+        # silence must never be the only signal (the "no silent caps" rule). Only under
+        # --exhaustive: a default run skipping zero sinks purely by luck is the normal
+        # case and does not need its own sentence every time.
+        note += f" All {len(sinks)} log/transcript sink(s) scanned."
 
     if corroborated:
         n_sinks = len(corroborated)

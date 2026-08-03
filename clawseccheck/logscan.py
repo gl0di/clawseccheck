@@ -1105,9 +1105,26 @@ def summarize_truncation(results) -> str:
     unscanned_chars = sum(r.unscanned_middle_chars for r in results)
     any_byte_capped = any(r.byte_cap_truncated for r in results)
     any_timed_out = any(r.timed_out for r in results)
+    # F-164: every LogScanResult from one scan_log_file() run shares the same limits
+    # (constructed once at the top of that function), so any one result's is enough.
+    exhaustive = any(r.limits is not None and r.limits.exhaustive for r in results)
 
     parts = []
-    if oversized_lines:
+    if oversized_lines and exhaustive:
+        # F-164 SC-5: under --exhaustive these lines were fully covered via overlapping
+        # sliding windows (SC-4) — say so affirmatively instead of reusing the
+        # "leaving 0 outside those windows unscanned" phrasing, which would technically
+        # still be true but reads as if the old bounded-window gap still applied.
+        overlap = next(
+            (r.limits.window_overlap for r in results if r.limits is not None), 0
+        )
+        parts.append(
+            f"{oversized_lines} line(s) totalling {_fmt_chars(oversized_chars)} exceeded "
+            f"the {_MAX_LINE_LEN}-char scan cap; under --exhaustive each was scanned in "
+            "full via overlapping windows (0 bytes left unscanned; any indicator up to "
+            f"{overlap} chars is guaranteed detected even if it straddles a window edge)."
+        )
+    elif oversized_lines:
         parts.append(
             f"{oversized_lines} line(s) totalling {_fmt_chars(oversized_chars)} exceeded "
             f"the {_MAX_LINE_LEN}-char scan cap; each was scanned in bounded first/last "

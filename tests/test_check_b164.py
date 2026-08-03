@@ -51,6 +51,22 @@ def test_b164_pass_when_sinks_scanned_with_no_signal(tmp_path):
     assert f.status == PASS
 
 
+def test_b164_exhaustive_states_full_sink_coverage_affirmatively(tmp_path):
+    """F-164 SC-5: under --exhaustive, when nothing was skipped for time, say so
+    affirmatively rather than leaving it silent (the "no silent caps" rule)."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "app.log").write_text("the agent read three files and summarized them\n", encoding="utf-8")
+
+    f_default = check_log_threat_hunt(_ctx(tmp_path))
+    assert "All 1 log/transcript sink(s) scanned." not in f_default.detail
+
+    ctx = _ctx(tmp_path)
+    ctx.exhaustive = True
+    f_exhaustive = check_log_threat_hunt(ctx)
+    assert "All 1 log/transcript sink(s) scanned." in f_exhaustive.detail
+
+
 def test_b164_isolated_single_class_hit_is_pass_not_warn(tmp_path):
     """Base-rate calibration: ONE isolated low-confidence signal in an otherwise
     clean sink must be suppressed to a quiet PASS-with-hint, never a WARN."""
@@ -423,6 +439,25 @@ def test_b164_truncation_note_is_quantified(tmp_path):
     assert "1 line(s)" in f.detail
     assert "exceeded the 8000-char scan cap" in f.detail
     assert "unscanned" in f.detail
+
+
+def test_b164_exhaustive_truncation_note_states_full_coverage(tmp_path):
+    """F-164 SC-5: under --exhaustive the same oversized line is now fully covered via
+    sliding windows -- the disclosure must say so affirmatively, not reuse wording that
+    would technically read "leaving 0 ... unscanned" but sound like the old gap."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    long_benign_line = "benign filler text " * 500  # > 8000 chars, no signal at all
+    (logs_dir / "app.log").write_text(long_benign_line + "\n", encoding="utf-8")
+    ctx = _ctx(tmp_path)
+    ctx.exhaustive = True
+    f = check_log_threat_hunt(ctx)
+    assert f.status == PASS
+    assert "1 line(s)" in f.detail
+    assert "exceeded the 8000-char scan cap" in f.detail
+    assert "under --exhaustive each was scanned in full" in f.detail
+    assert "0 bytes left unscanned" in f.detail
+    assert "leaving" not in f.detail  # the old default-mode phrasing must not leak in
 
 
 # ------------------------------------------------------------- B-431: gzip/zlib line-collapse

@@ -665,6 +665,23 @@ def test_analyze_not_capped_at_max_files_no_disclosure(tmp_path):
 
     out = render_behavioral_analysis(_ctx(tmp_path))
     assert "most recent" not in out
+    assert "Scanned all" not in out  # F-164 SC-5: default mode stays silent, not affirmative
+
+
+def test_exhaustive_scans_past_the_cap_and_states_it_affirmatively(tmp_path):
+    total = _write_capped_home(tmp_path, extra_files=1)
+    ctx = _ctx(tmp_path)
+    ctx.exhaustive = True
+    r = analyze(ctx)
+    assert r["files_total"] == total
+    assert r["files_capped"] is False
+    assert r["files_scanned"] == total
+    # the oldest session's trifecta is now genuinely found, not dropped.
+    assert any(f.status == WARN for f in r["findings"])
+
+    out = render_behavioral_analysis(ctx)
+    assert "most recent" not in out
+    assert f"Scanned all {total} of {total} trajectory file(s)." in out
 
 
 # ---------------------------------------------------------------------------

@@ -1086,6 +1086,11 @@ def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_o
                 "trajectory file(s) — the oldest session(s) were not analyzed. Results are "
                 "INCOMPLETE (treat as UNKNOWN, not authoritative)."
             )
+        elif getattr(ctx, "exhaustive", False) and r["files_total"]:
+            # F-164 SC-5: silence must never be the only signal for completeness under
+            # --exhaustive — say so affirmatively, mirroring trajaudit.py's own sites.
+            lines.append(f"  {ok} Scanned all {r['files_total']} of {r['files_total']} "
+                         "trajectory file(s).")
 
     any_warn = False
     for f in r["findings"]:
