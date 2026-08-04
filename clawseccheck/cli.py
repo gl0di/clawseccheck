@@ -1445,8 +1445,9 @@ def _main(argv=None) -> int:
                         "against /proc/net/tcp{,6}, plus a read-only /proc/*/fd walk for "
                         "process-identity correlation)")
     p.add_argument("--no-deptree", action="store_true",
-                   help="skip the OpenClaw dependency-tree walk (B349: an install-lifecycle "
-                        "hook in node_modules whose target carries a code-execution signal). "
+                   help="skip the OpenClaw dependency-tree walk (B349: a package in "
+                        "node_modules whose install-time target — a lifecycle hook or a "
+                        "binding.gyp command-expansion — carries a code-execution signal). "
                         "The walk is read-only and offline, but traverses the whole installed "
                         "tree, so this is the escape hatch on a very large one")
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")

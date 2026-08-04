@@ -27,6 +27,7 @@ from ..safeio import walk_dir_safely
 from .. import deptree as _deptree  # B349: bounded, read-only dependency-tree enumeration
 from ..skillast import analyze_javascript as _analyze_javascript
 from ..textnorm import (
+    confusable_in_ascii_context,  # B349: benign i18n vs homoglyph substitution
     normalize_for_scan,
     obfuscation_signals,
 )
@@ -1629,12 +1630,31 @@ def check_install_policy(ctx: Context) -> Finding:
     )
 
 
-# ---------- B349 (F-167): obfuscated install-lifecycle hook target in the dependency tree ----------
+# ---------- B349 (F-167, B-447): obfuscated install-time target in the dependency tree ----------
 # B42 above already recognises a pre/postinstall hook -- in a SKILL's own manifest. This is its
 # sibling for the one directory nothing in this engine reasons about: the installed npm
 # dependency tree, where a compromised TRANSITIVE package lives. The threat shape is a
 # widely-depended package republished with `"preinstall": "node setup.mjs"` and an obfuscated
 # setup.mjs shipped in the tarball; the consuming project's own source contains nothing.
+#
+# TWO SURFACES, NOT ONE (B-447). The first cut enumerated `scripts` only, and that was a false
+# negative rather than a scoping choice: the node-gyp worm's tarballs declare NO lifecycle
+# script at all and execute from a `<!(node index.js ...)` command-expansion in `binding.gyp`,
+# which npm triggers automatically on the file's mere presence. A `scripts`-only check is the
+# script-focused monitoring that shape exists to walk past. `deptree` now surfaces both; they
+# are assessed by the same `_b349_assess_target`, so the crit/warn calibration below governs
+# both and neither surface gets a second, unreviewed threshold of its own.
+#
+# MEASURED FOR THE SECOND SURFACE, and measured TWICE on purpose. Across every real dependency
+# tree on a live box (163 trees, 28,350 packages) 11 packages ship a root binding.gyp carrying
+# 27 command expansions, and ZERO resolve to an in-package file -- every one is an inline
+# `node -e`/`node -p` expression or a `pkg-config` probe. That is a comfortable number and a
+# useless one on its own: nothing exercised the resolving branch, so "no false positive" would
+# have meant "no sample". So the branch was measured separately against 6,067 cached package
+# tarballs -- 8 ship a root binding.gyp and exactly one, canvas@2.11.2 (node-canvas), really
+# does resolve, running `util/has_lib.js` and `util/win_jpeg_lookup.js` from its build config.
+# It produces zero signals of any grade. The branch is live on a real, honest, widely-installed
+# package and stays silent on it.
 #
 # WHY A CONJUNCTION, MEASURED (2026-08-04, real trees on a live box):
 #   openclaw: 380 packages, 3 install-lifecycle hooks -- ALL benign
@@ -1680,6 +1700,8 @@ def _b349_assess_target(source: str, filename: str) -> "tuple[list, str | None]"
 
       * a **crit-grade** rule from the ALREADY-VALIDATED detectors -> FAIL-eligible;
       * a **warn-grade** rule -> `noted`: disclosed in the PASS evidence, never a verdict;
+      * a **confusable** signal with no ASCII-Latin word to hide in -> `noted` too; see
+        the loop below for the false-positive FAIL on non-English comments that forced it;
       * source we could not read (one long machine-generated line, or a parse failure) ->
         UNKNOWN naming the package, never FAIL. We did not read it, so we claim nothing
         about it -- and "I could not read this package's installer" is itself actionable;
@@ -1713,9 +1735,46 @@ def _b349_assess_target(source: str, filename: str) -> "tuple[list, str | None]"
     arrives minified; a readable staged one does not. Widening the JS detector is its own
     change with its own adversarial pass -- not something to smuggle in behind this check.
     """
-    signals = list(obfuscation_signals(source))
+    signals: list = []
     noted: list = []
     unreadable = None
+    for signal in obfuscation_signals(source):
+        # A confusable ALONE is not evidence in source code. `obfuscation_signals` reports
+        # "confusable characters folded to ASCII" for any Cyrillic or Greek text at all, so
+        # an installer whose only unusual property is a non-English comment earned a
+        # CRITICAL FAIL -- reproduced end-to-end on `// Определяем платформу` (C-135,
+        # 2026-08-04), and a false-positive FAIL on an entirely honest build script is a
+        # Golden-Rule-#5 blocker. The discriminator is not a new one: `textnorm` already
+        # ships `confusable_in_ascii_context` for exactly this, and its docstring records
+        # that it is what keeps B58 from firing on multilingual prose. A whole non-Latin
+        # token (`Привет`) is i18n; a lookalike swapped INTO a Latin word (`іgnore`,
+        # `requіre`) is the attack. Same principle as the crit/warn split below: inherit a
+        # calibration that already survived review rather than substitute a fresh guess.
+        # The discriminator's own limit, found by the same pass and recorded rather than
+        # hidden: identifiers of languages that genuinely MIX scripts inside one word do
+        # trip it -- highlight.js@11.11.1 ships `lib/languages/1c.js` with 152 such tokens
+        # (`httpзапрос`, `base64значение`) and `isbl.js` with `ВыборSQL`. Neither is an
+        # install-time target, so neither is reachable from this check's population; if a
+        # build script ever legitimately carries such identifiers, this is where it breaks.
+        #
+        # THE ZERO-WIDTH SIGNAL WAS DELIBERATELY *NOT* GIVEN THE SAME TREATMENT, and this
+        # is the retracted-fix note §2.5 asks for. The same C-135 sweep measured the honest
+        # base rate over 22,715 helper-shaped .js files from 3,033 cached tarballs: 45 trip
+        # `obfuscation_signals` (0.20%) and 0 trip a crit JS rule. Of those 45, 34 are the
+        # confusable class fixed above; the other 11 are zero-width in genuinely honest
+        # published files -- `lib/locale/fa.js`, `lib/locale/km.js` and bundled `umd.js`,
+        # where ZWNJ (U+200C) is REQUIRED Persian and Khmer orthography, not obfuscation.
+        # The parallel gate would be "zero-width is evidence only in an otherwise-ASCII
+        # file". It was rejected: it is new, unreviewed detection logic, and an attacker
+        # suppresses it by adding one Persian character -- trading an FP that has never
+        # been observed on this check's real population for a cheap FN in a CRITICAL check
+        # is the trade §2.5 forbids. Measured on the population B349 actually reads: 0 of
+        # 31 real install-hook targets, 0 of 4 real binding.gyp targets, 0 across 163 trees.
+        # Revisit if a real install target ever trips it; do not pre-emptively widen.
+        if signal.startswith("confusable") and not confusable_in_ascii_context(source):
+            noted.append(f"{signal} (non-Latin script only — reads as i18n)")
+        else:
+            signals.append(signal)
     longest = max((len(line) for line in source.splitlines()), default=0)
     if longest >= _HOOK_MINIFIED_LINE:
         unreadable = "minified — unreadable"
@@ -1733,7 +1792,12 @@ def _b349_assess_target(source: str, filename: str) -> "tuple[list, str | None]"
 
 
 def check_dependency_tree_hooks(ctx: Context) -> Finding:
-    """B349 (F-167): an install-lifecycle hook in the dependency tree whose target is obfuscated."""
+    """B349 (F-167, B-447): a dependency-tree package whose install-time target is obfuscated.
+
+    "Install-time" covers both ways npm runs a dependency's own code during an install:
+    a declared lifecycle hook, and a `binding.gyp` command-expansion that node-gyp runs
+    while configuring. The second needs no lifecycle script at all.
+    """
     # Reads ctx ONLY -- audit(include_deptree=True) does the single walk. This check must
     # never traverse the filesystem itself: doing so cost 2.4s per invocation (102% of a
     # whole audit) and reached into the machine's real global npm install from any Context,
@@ -1759,22 +1823,34 @@ def check_dependency_tree_hooks(ctx: Context) -> Finding:
             "If dependencies live elsewhere for this install layout, inspect that tree by hand.",
         )
 
+    # Both install-time execution surfaces, flattened into one shape and assessed by one
+    # code path. `origin` is the npm phase for a lifecycle hook and the build-config
+    # filename for a GYP expansion, so the evidence still says which one fired -- they
+    # differ in where the reader has to look, not in how dangerous they are.
+    sites = [(h.package, h.relpath, h.phase, h.command, h.targets) for h in scan.hooks]
+    sites += [
+        (d.package, d.relpath, _deptree.GYP_FILENAME, d.command, d.targets)
+        for d in scan.build_directives
+    ]
+
     hits: list = []
-    unreadable: list = []
+    # A build config the walk could not fully examine is seeded here, not dropped: the
+    # package author writes that file, so an oversized or decoy-padded one would otherwise
+    # buy a clean PASS by exhausting a budget. Same GR#4 discipline as `scan.truncated`.
+    unreadable: list = list(getattr(scan, "gyp_capped", ()) or ())
     noted: list = []
     examined = 0
-    for hook in scan.hooks:
-        for target in hook.targets:
+    for package, relpath, origin, command, targets in sites:
+        for target in targets:
             source = _deptree.read_target(target)
             if source is None:
                 unreadable.append(
-                    f"{hook.package} ({hook.relpath}) {hook.phase}: {target.name} "
-                    "(too large to read)"
+                    f"{package} ({relpath}) {origin}: {target.name} (too large to read)"
                 )
                 continue
             examined += 1
             signals, noted_rules, why = _b349_assess_target(source, target.name)
-            where = f"{hook.package} ({hook.relpath}) {hook.phase}: {hook.command} -> {target.name}"
+            where = f"{package} ({relpath}) {origin}: {command} -> {target.name}"
             if signals:
                 hits.append(f"{where} [{', '.join(sorted(set(signals))[:4])}]")
             elif why:
@@ -1787,9 +1863,9 @@ def check_dependency_tree_hooks(ctx: Context) -> Finding:
         return _finding(
             "B349",
             FAIL,
-            "An install-lifecycle hook in the OpenClaw dependency tree runs a target "
-            "carrying a code-execution or obfuscation signal, allowing code you never "
-            "chose to run the next time this package is installed or updated.",
+            "A package in the OpenClaw dependency tree runs a target carrying a "
+            "code-execution or obfuscation signal at install time, allowing code you "
+            "never chose to run the next time this package is installed or updated.",
             _B349_FIX,
             hits,
         )
@@ -1801,7 +1877,7 @@ def check_dependency_tree_hooks(ctx: Context) -> Finding:
         return _finding(
             "B349",
             UNKNOWN,
-            "An install-lifecycle hook target in the OpenClaw dependency tree could not be "
+            "An install-time execution target in the OpenClaw dependency tree could not be "
             "read, so whether it is safe is undetermined — not clean.",
             "Beautify or manually inspect each named installer before the next install or "
             "update; reinstall from a lockfile you trust (npm ci) once reviewed.",
@@ -1822,16 +1898,17 @@ def check_dependency_tree_hooks(ctx: Context) -> Finding:
     return _finding(
         "B349",
         PASS,
-        "Scanned the OpenClaw dependency tree: no install-lifecycle hook runs a target "
+        "Scanned the OpenClaw dependency tree: no package runs an install-time target "
         "carrying a code-execution or obfuscation signal.",
         "Reinstall from a lockfile you trust (npm ci) so a republished version cannot "
         "silently replace a reviewed one.",
         [
             f"packages walked: {scan.packages}; install-lifecycle hooks: {len(scan.hooks)}; "
-            f"hook targets read: {examined}",
-            "coverage: a hook whose target is not an in-package `node <file>` invocation "
-            "(a bin from another package, a shell builtin) has no bytes here to read and is "
-            "not assessed",
+            f"build-config command expansions: {len(scan.build_directives)}; "
+            f"targets read: {examined}",
+            "coverage: an install-time command whose target is not an in-package "
+            "`node <file>` invocation (a bin from another package, a shell builtin, an "
+            "inline `node -e` expression) has no bytes here to read and is not assessed",
         ]
         + noted,
     )

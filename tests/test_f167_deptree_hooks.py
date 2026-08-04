@@ -229,7 +229,9 @@ def test_clean_fixture_discloses_what_it_could_not_assess():
     f = check_dependency_tree_hooks(_Ctx(CLEAN))
     joined = "\n".join(f.evidence or [])
     assert "coverage:" in joined
-    assert "hook targets read: 1" in joined
+    # 2 = plain-hook-pkg's lifecycle target + native-addon-pkg's build-config target.
+    # The other two hooks resolve to nothing, and so does the honest inline expansion.
+    assert "targets read: 2" in joined
 
 
 def test_bad_fixture_fails_and_names_the_package_and_rule():

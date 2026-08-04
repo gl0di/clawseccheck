@@ -86,8 +86,9 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
 
     `include_deptree` (default False, same hermetic-by-default reasoning) walks the
     installed OpenClaw npm dependency tree once (`deptree.scan_dep_tree`) so B349 can
-    look for an install-lifecycle hook whose target carries a code-execution signal
-    (F-167). The CLI passes True. `openclaw_pkg_root` overrides where that tree is
+    look for an install-time target carrying a code-execution signal — reached from
+    either a lifecycle hook (F-167) or a `binding.gyp` command-expansion, which needs
+    no lifecycle script at all (B-447). The CLI passes True. `openclaw_pkg_root` overrides where that tree is
     found; None discovers it from PATH. B349 itself never touches the filesystem --
     it reads `ctx.dep_tree` only, so a Context built without this stays hermetic and
     the walk costs one traversal per audit instead of one per check call.

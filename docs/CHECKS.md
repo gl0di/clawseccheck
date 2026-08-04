@@ -2345,7 +2345,7 @@ Advisory checks are recorded for coverage but are not scored.
 
 ## Hardening checks
 
-### B349 - Obfuscated install-lifecycle hook target in the dependency tree
+### B349 - Obfuscated install-time target in the dependency tree
 
 - Severity: CRITICAL
 - Block: hardening
@@ -2353,7 +2353,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: yes
 - Confidence: MEDIUM
 - OWASP: none
-- What it checks: Obfuscated install-lifecycle hook target in the dependency tree
+- What it checks: Obfuscated install-time target in the dependency tree
 - Remediation:
   - none
 

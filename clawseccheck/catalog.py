@@ -2854,7 +2854,7 @@ CATALOG: list[CheckMeta] = [
     # confidence=MEDIUM: a filesystem+heuristic match, per this file's own convention.
     CheckMeta(
         "B349",
-        "Obfuscated install-lifecycle hook target in the dependency tree",
+        "Obfuscated install-time target in the dependency tree",
         CRITICAL,
         "hardening",
         "Supply Chain / Dependency Tree",

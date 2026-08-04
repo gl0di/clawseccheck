@@ -1,10 +1,12 @@
 """deptree — bounded, read-only enumeration of an installed npm dependency tree.
 
 Layer 1 leaf module (imports only stdlib + ``safeio``, per CLAUDE.md §3): it walks a
-``node_modules`` directory, parses each package's own manifest, and reports the
-install-lifecycle hooks it declares together with the in-package file each hook would
-actually run. It renders no verdict — ``checks/_lifecycle.py``'s B349 is the consumer,
-exactly as ``sockets.py`` is the read-only source B340 reasons over.
+``node_modules`` directory, parses each package's own manifest, and reports the two ways
+a package there can run code at install time — the install-lifecycle hooks it declares,
+and the command-expansions in its ``binding.gyp`` build config — together with the
+in-package file each would actually run. It renders no verdict —
+``checks/_lifecycle.py``'s B349 is the consumer, exactly as ``sockets.py`` is the
+read-only source B340 reasons over.
 
 WHY THIS EXISTS (F-167). Every content scanner in this package deliberately steps around
 a dependency tree: the plugin walk prunes ``node_modules`` by name, and a skill's tree is
@@ -37,6 +39,26 @@ must produce *no finding* rather than noise: a hook this module cannot resolve i
 whose bytes we never read, and a checker must not claim anything about bytes it never
 read. Resolution is deliberately narrow — only an explicit ``node <file>`` invocation
 resolves, and only to a real regular file inside that package's own directory.
+
+WHY ``binding.gyp`` IS ENUMERATED TOO (B-447). Reading only ``scripts`` was a false
+negative, not a scoping choice. The node-gyp supply-chain worm executes with **no
+lifecycle script at all**: its tarballs declare no ``preinstall``/``install``/
+``postinstall``/``prepare``, and execution comes instead from GYP's own command-expansion
+syntax inside the build config — ``"sources": ["<!(node index.js && echo stub.c)"]`` runs
+while node-gyp is merely *configuring*, long before any compiler starts. npm invokes
+node-gyp on its own for any package shipping a ``binding.gyp`` with no prebuilt binary,
+so the file's mere presence is the trigger. A scanner that enumerates lifecycle scripts
+is exactly the script-focused monitoring that shape was built to walk past.
+
+Two boundaries keep that from becoming a false-positive engine. **Only the package
+root's ``binding.gyp``** is read — that is where npm's automatic ``node-gyp configure``
+looks; a nested one is not auto-invoked, and reporting it would manufacture a finding the
+installer never triggers. And **the same narrow resolver** decides what has bytes to
+read, so the overwhelmingly common honest idiom (``<!(node -e "require('nan')")`` — an
+inline expression, no file) resolves to nothing and is never assessed, exactly as
+``node-gyp-build`` is not. What is NOT followed, and is stated rather than implied: GYP's
+own ``includes`` directive can pull in a ``.gypi`` carrying further expansions. Following
+it is its own change with its own adversarial pass.
 """
 from __future__ import annotations
 
@@ -53,6 +75,25 @@ from .safeio import walk_dir_safely
 MAX_PACKAGES = 2000
 MAX_MANIFEST_BYTES = 512_000
 MAX_TARGET_BYTES = 2_000_000
+
+# A build config is a small hand-written file; real ones measured on this box are under
+# 4 KB. The per-file expansion cap stops a hostile config from turning one package into
+# an unbounded amount of work — a config that hits it has already earned attention.
+MAX_GYP_BYTES = 256_000
+MAX_GYP_EXPANSIONS = 40
+
+# Bounds on the SCAN itself, not just its output. A `binding.gyp` arrives from an
+# untrusted package in the user's own tree, so it is adversarial input to this scanner:
+# a file of nothing but unbalanced `<!(` markers would make every one of them scan to
+# EOF, which is quadratic and is a denial-of-service on the audit rather than a finding.
+# The window is what bounds a single scan; the marker cap bounds how many can be tried.
+# 4 KB is far above any real command (the longest measured on this box is 47 bytes).
+MAX_GYP_COMMAND_BYTES = 4096
+MAX_GYP_MARKERS = 2000
+
+# node-gyp's default build config, at the package root. See the module docstring for why
+# only this path is read and no nested or `gypfile`-redirected one is.
+GYP_FILENAME = "binding.gyp"
 
 # The three npm phases that execute during an install. `prepare`/`prepublish` are
 # deliberately excluded: they run for a package being *published or developed*, not for
@@ -89,6 +130,22 @@ class LifecycleHook:
     targets: tuple = ()
 
 
+@dataclass(frozen=True)
+class BuildDirective:
+    """One GYP command-expansion in a package's root `binding.gyp`.
+
+    Same contract as `LifecycleHook`: an empty `targets` means the expansion runs
+    something whose bytes we never read (an inline `node -e` expression, a `python`
+    probe, a `pkg-config` call), never that it is fine. Unlike a lifecycle hook this
+    needs no `phase` — npm triggers it on the file's existence alone.
+    """
+
+    package: str
+    relpath: str
+    command: str
+    targets: tuple = ()
+
+
 @dataclass
 class DepTreeScan:
     """Result of one bounded dependency-tree walk.
@@ -100,6 +157,11 @@ class DepTreeScan:
     root: Path | None = None
     packages: int = 0
     hooks: tuple = ()
+    build_directives: tuple = ()
+    # Packages whose `binding.gyp` could not be fully examined, already rendered as
+    # "<package> (<relpath>): <reason>". Each entry is a place the walk fell short, and
+    # the consumer must degrade to UNKNOWN for it rather than let it read as clean.
+    gyp_capped: tuple = ()
     truncated: bool = False
     unreadable: int = 0
     errors: list = field(default_factory=list)
@@ -249,6 +311,162 @@ def _resolve_in_package(candidate: str, pkg_dir: Path) -> "Path | None":
     return None
 
 
+def extract_gyp_commands(
+    text: str, *, max_expansions: int = MAX_GYP_EXPANSIONS, capped=None
+) -> tuple:
+    """Every `<!(...)` / `<!@(...)` command-expansion body in a GYP file, in order.
+
+    GYP is not JSON — it permits comments, single quotes and trailing commas — so this
+    deliberately does NOT parse the file. It only locates the expansion syntax, because
+    that is the only part whose meaning we need and the only part a parser could get
+    wrong in a way that loses a real one.
+
+    Paren matching is balanced-depth rather than a lazy regex: real commands nest parens
+    (`<!(node -p "require('x').include")`), and stopping at the first `)` would truncate
+    the command into something we never actually saw. An expansion whose parens never
+    balance yields nothing and scanning resumes after it — we cannot say where such a
+    command ends, and a guess would be a fabricated finding (GR#4).
+
+    Each scan is bounded to `MAX_GYP_COMMAND_BYTES` ahead and the number of markers tried
+    to `MAX_GYP_MARKERS`, so the total work is linear in the file rather than quadratic in
+    the number of unbalanced markers a hostile package chooses to ship.
+
+    A BOUND THAT IS HIT IS DISCLOSED, NEVER ABSORBED. Every bound here is also an evasion
+    if it fails silently: the package author writes the `binding.gyp`, so padding it with
+    2,000 decoy `<!` markers ahead of the real expansion — or spacing one command past the
+    scan window — would evict the real command from a budget and leave a clean PASS behind.
+    So *capped* (a list, the same out-parameter idiom `safeio.walk_dir_safely` uses) gets a
+    reason appended, and B349 turns that into UNKNOWN naming the package rather than a
+    verdict over bytes it never read. An expansion whose parens simply never balance is NOT
+    a cap: that config is malformed for node-gyp too, so there is no command to have missed.
+    """
+    out: list = []
+    i, n = 0, len(text)
+    markers = 0
+    while i < n:
+        if len(out) >= max_expansions:
+            _note_cap(capped, "expansion cap reached — the rest of the build config was not examined")
+            break
+        if markers >= MAX_GYP_MARKERS:
+            _note_cap(capped, "command-marker budget exhausted — the rest of the build config was not examined")
+            break
+        start = text.find("<!", i)
+        if start < 0:
+            break
+        markers += 1
+        cur = start + 2
+        if cur < n and text[cur] == "@":  # `<!@(...)` — expands to a list, runs the same
+            cur += 1
+        if cur >= n or text[cur] != "(":
+            i = start + 2
+            continue
+        window = min(n, cur + MAX_GYP_COMMAND_BYTES)
+        depth, end = 0, -1
+        for pos in range(cur, window):
+            char = text[pos]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    end = pos
+                    break
+        if end < 0:
+            if window < n:  # stopped at the window, not at a malformed end-of-file
+                _note_cap(capped, "a command ran past the scan window and was not examined")
+            i = cur + 1
+            continue
+        body = text[cur + 1:end].strip()
+        if body and not _is_commented_out(text, start):
+            out.append(body)
+        i = end + 1
+    return tuple(out)
+
+
+def _note_cap(capped, reason: str) -> None:
+    if capped is not None and reason not in capped:
+        capped.append(reason)
+
+
+def _is_commented_out(text: str, marker: int) -> bool:
+    """True when the `<!` at *marker* sits after an unquoted `#` on its own line.
+
+    GYP takes `#` to end-of-line as a comment, and every real build config measured on
+    this box uses them. Without this, a commented-out expansion was lifted out as a live
+    command and its target read and judged — a verdict about a file the installer would
+    never run (found by the B-447 C-135 pass, reproduced end-to-end as a wrong UNKNOWN on
+    an honest package).
+
+    Scoped to the SINGLE line rather than tracking quote state across the whole file. A
+    file-wide scanner that loses its place could swallow a real expansion silently, which
+    is the one failure this must not have; GYP strings do not span lines, so a per-line
+    decision is both accurate and blast-radius-free. A `#` INSIDE a string
+    (`"sources": ["#<!(...)"]`) is correctly not a comment.
+    """
+    line_start = text.rfind("\n", 0, marker) + 1
+    quote = ""
+    escaped = False
+    for ch in text[line_start:marker]:
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            return True
+    return False
+
+
+def _gyp_directives(pkg_dir: Path, name: str, relpath: str) -> tuple:
+    """Command-expansions in *pkg_dir*'s root `binding.gyp`, and any reason we fell short.
+
+    Returns `(directives, capped_notes)`. Reached for EVERY package, including one
+    declaring no `scripts` at all — which is precisely the shape of the worm this exists
+    for (B-447).
+
+    Every early return here is a place a hostile package could hide behind, so each one
+    reports itself: an oversized build config, an unreadable one, and a SYMLINKED one
+    (node-gyp reads through the symlink; we refuse to, because a link can point the walk
+    outside the package we would attribute the finding to) all yield a note the consumer
+    turns into UNKNOWN. Silently returning nothing would let a 257 KB `binding.gyp` buy a
+    clean PASS.
+    """
+    gyp = pkg_dir / GYP_FILENAME
+    notes: list = []
+    try:
+        if gyp.is_symlink():  # before exists(): a broken link must not read as absent
+            return [], ["build config is a symlink and was not followed"]
+        if not gyp.is_file():
+            return [], notes
+        if gyp.stat().st_size > MAX_GYP_BYTES:
+            return [], ["build config is too large to examine"]
+        raw = gyp.read_bytes()
+        # A NUL byte means this is not UTF-8 text -- in practice UTF-16/UTF-32, which
+        # node-gyp reads fine and which `errors="replace"` turns into `<\x00!\x00(`, so
+        # every expansion vanishes and the package reads as clean. That silent PASS is
+        # exactly what GR#4 forbids, so it is disclosed instead of decoded hopefully.
+        if b"\x00" in raw:
+            return [], ["build config is not UTF-8 text and was not examined"]
+        text = raw.decode("utf-8", errors="replace")
+    except OSError:
+        return [], ["build config could not be read"]
+    commands = extract_gyp_commands(text, capped=notes)
+    directives = [
+        BuildDirective(
+            package=name,
+            relpath=relpath,
+            command=command[:200],
+            targets=resolve_hook_targets(command, pkg_dir),
+        )
+        for command in commands
+    ]
+    return directives, notes
+
+
 def read_target(path: Path) -> "str | None":
     """Read a hook target's source, bounded. None when unreadable or oversized."""
     try:
@@ -288,6 +506,8 @@ def scan_dep_tree(nm_root, *, max_packages: int = MAX_PACKAGES) -> DepTreeScan:
     result.truncated = bool(capped)
 
     hooks: list = []
+    directives: list = []
+    gyp_capped: list = []
     for manifest in sorted(files):
         pkg_dir = manifest.parent
         data = _read_manifest(manifest)
@@ -295,9 +515,6 @@ def scan_dep_tree(nm_root, *, max_packages: int = MAX_PACKAGES) -> DepTreeScan:
             result.unreadable += 1
             continue
         result.packages += 1
-        scripts = data.get("scripts")
-        if not isinstance(scripts, dict):
-            continue
         try:
             relpath = str(pkg_dir.relative_to(root))
         except ValueError:  # pragma: no cover — walk_dir_safely confines to root
@@ -305,6 +522,17 @@ def scan_dep_tree(nm_root, *, max_packages: int = MAX_PACKAGES) -> DepTreeScan:
         name = data.get("name")
         if not isinstance(name, str) or not name:
             name = pkg_dir.name
+
+        # Before the `scripts` guard on purpose (B-447): a package declaring no scripts
+        # at all used to `continue` straight past everything below, and that is exactly
+        # the manifest the node-gyp worm ships.
+        pkg_directives, pkg_capped = _gyp_directives(pkg_dir, name, relpath)
+        directives.extend(pkg_directives)
+        gyp_capped.extend(f"{name} ({relpath}): {reason}" for reason in pkg_capped)
+
+        scripts = data.get("scripts")
+        if not isinstance(scripts, dict):
+            continue
         for phase in INSTALL_PHASES:
             command = scripts.get(phase)
             if not isinstance(command, str) or not command.strip():
@@ -319,4 +547,6 @@ def scan_dep_tree(nm_root, *, max_packages: int = MAX_PACKAGES) -> DepTreeScan:
                 )
             )
     result.hooks = tuple(hooks)
+    result.build_directives = tuple(directives)
+    result.gyp_capped = tuple(gyp_capped)
     return result
