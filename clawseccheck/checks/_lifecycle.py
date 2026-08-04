@@ -41,6 +41,7 @@ from ._content import (
 from . import _shared
 from ._shared import (
     INJECTION_PATTERNS,
+    NPM_DEPTREE_HOOK_COVERAGE_NOTE,
     OUTBOUND_TOOL_HINTS,
     SECRET_KEY_RE,
     _DESTRUCTIVE_HINTS,
@@ -1588,6 +1589,9 @@ def check_install_policy(ctx: Context) -> Finding:
             "Run on the host where skills live (~/.openclaw/skills, workspace/skills).",
         )
     warns: list[str] = []
+    # C-358: coverage disclosure only — never gates the WARN branch below (that is
+    # `warns`' job alone), so this can never move B42's verdict.
+    notes: list[str] = [NPM_DEPTREE_HOOK_COVERAGE_NOTE]
     # install/postinstall hooks that execute code on install or auto-update
     for name, blob in skills.items():
         for m in _POSTINSTALL_RE.finditer(blob):
@@ -1609,7 +1613,7 @@ def check_install_policy(ctx: Context) -> Finding:
             "Review/disable any install hook you haven't read; pin skills to a reviewed "
             "commit; `chmod 700` skill dirs so only you can add skills; turn off skill "
             "auto-update until each hook is trusted.",
-            warns,
+            warns + notes,
         )
     return _finding(
         "B42",
@@ -1617,6 +1621,7 @@ def check_install_policy(ctx: Context) -> Finding:
         f"Scanned {len(skills)} installed skill(s): no risky install hooks, and skill "
         "dirs are not writable by other local users.",
         "Keep skill dirs owner-only and read any install/postinstall hook before trusting a skill.",
+        evidence=notes,
     )
 
 

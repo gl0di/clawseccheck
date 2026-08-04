@@ -58,6 +58,7 @@ from ..iocdb import (
 )
 
 from ._shared import (
+    NPM_DEPTREE_SKILL_COVERAGE_NOTE,
     _FM_BLOCK_BARE_RE,
     _FM_BLOCK_HEADERED_RE,
     _KNOWN_EXFIL_HOST_RE,
@@ -3225,6 +3226,10 @@ def _b13_verdict(
     winner: str,
 ) -> Finding:
     fx = _custom("B13", severity, status, detail, fix, ev)
+    # C-358: coverage disclosure only, appended to evidence (never detail) — every
+    # check_installed_skills verdict routed through this helper carries it, so it can
+    # never be mistaken for a clean "the dependency tree was looked at and is fine".
+    fx.evidence = fx.evidence + [NPM_DEPTREE_SKILL_COVERAGE_NOTE]
     fx.corroborating_buckets = [
         name for name, bucket in signal_buckets.items() if bucket and name != winner
     ]
@@ -4291,6 +4296,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         f"Scanned {n} installed skill(s); no shell-exec / exfiltration / obfuscation "
         "patterns found.",
         "Keep installing only skills whose source you've reviewed — trust no one.",
+        [NPM_DEPTREE_SKILL_COVERAGE_NOTE],
     )
 
 
