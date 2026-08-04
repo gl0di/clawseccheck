@@ -45,6 +45,24 @@ This dataset ships **in-repo as static Python data** and is refreshed only by a
 deliberate ClawSecCheck release. There is no update endpoint, no "IOC feed URL"
 setting — not even opt-in. `clawseccheck/iocdb.py` has zero I/O of any kind.
 
+## Coverage is a first-class fact too
+
+A date is a proxy for the thing that actually matters. A dataset refreshed yesterday
+that carries nothing for the ecosystem you are actually exposed to is exactly as blind
+as a stale one — and until C-361 it reported the same silence, because the only input
+freshness had was the calendar.
+
+So `iocdb.coverage_notice()` names every ecosystem the dataset carries **no** indicators
+for, and says plainly what a clean result there is worth: *nothing is known here*, not
+*nothing bad exists*. It matters most at the gate: `vet_source`'s check is an exact match
+against `known_bad_sources()`, so an empty pool simply never matches, and without this the
+output could not distinguish "checked and found nothing" from "carries nothing to check
+against".
+
+Unlike the staleness advisory it reads no clock — it is a pure function of the shipped
+data, so it is identical on any two days. And it goes quiet on its own once every
+ecosystem is populated, so the line keeps meaning something when it does appear.
+
 ## Freshness is a first-class fact, not decoration
 
 The dataset exposes its own snapshot date (`iocdb.REVISION`). Past a staleness
@@ -59,6 +77,13 @@ Cross-artifact host correlation and the install-directive/remote-dependency chec
 consult the dataset's contents (`is_known_bad_host()`) but do not yet surface this
 staleness advisory. A stale dataset never fails loudly and never blocks a scan; it just
 stops pretending to be current.
+
+**Both notices now reach a normal audit** (C-361). Before that they were visible only on
+the `--vet-source` path, so the overwhelmingly common case — auditing your own setup —
+was told nothing about how much a clean identity result was worth. They ride the same
+advisory list the report already renders as never touching score, grade or findings, and
+the same `--no-freshness-notice` opt-out silences both. Neither ever enters `--json`,
+which is a machine contract rather than a place for presentation metadata.
 
 ## Refresh cadence
 

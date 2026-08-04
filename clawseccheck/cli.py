@@ -42,6 +42,7 @@ from .monitor import (
 )
 from .update import update_notice
 from .ledger import freshness_notice as _compute_freshness, load_ledger, record_run
+from .iocdb import coverage_notice as _iocdb_coverage_notice
 from .iocdb import freshness_notice as _iocdb_freshness_notice
 from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
@@ -1887,7 +1888,7 @@ def _main(argv=None) -> int:
         # not part of either the human dossier's or --json's result payload. Reuses
         # --no-freshness-notice — the same opt-out the config-age notice already uses.
         if not args.no_freshness_notice and not os.environ.get("CLAWSECCHECK_NO_FRESHNESS_NOTICE"):
-            for _line in _iocdb_freshness_notice():
+            for _line in _iocdb_freshness_notice() + _iocdb_coverage_notice():
                 print(_line, file=sys.stderr)
         if args.json:
             _emit(render_vet_json(profile, mode="vet-source", version=__version__))
@@ -2457,6 +2458,12 @@ def _main(argv=None) -> int:
             # above the sections that run them (the freshness is computed pre-run).
             _refreshed = ("self_test", "vet_mcp") if args.full else ()
             f_notice = _compute_freshness(load_ledger(), skip=_refreshed)
+            # C-361: the IOC dataset's own age and coverage reached only --vet-source
+            # before this, so a normal audit said nothing about how much a clean
+            # identity result is worth. Same advisory list render_report already
+            # treats as never touching score/grade/findings; same --no-freshness-notice
+            # opt-out (this whole block is already inside it). NEVER a Finding (B-385).
+            f_notice = f_notice + _iocdb_freshness_notice() + _iocdb_coverage_notice()
         # Tamper Score sub-grade — human report only; presentation-layer only, never
         # alters score/grade/findings. mon_present reflects whether a --monitor
         # baseline snapshot already exists on disk for this state file.
