@@ -656,8 +656,10 @@ python3 audit.py --log audit.log            # also write log to a local file
   moves `--exit-code` (only a `DANGEROUS`/`FAIL` target does).
   `--full --json` carries all of it structured: `skill_sweep` (§19), `pluginSweep`, `phases`
   (one entry per appended phase, with an honest status — `ran`/`skipped`/`not_reached`/
-  `unavailable`/`error`, never silence), `complete`, `notScanned`, `judgePacket`, and
-  `vetPackets` — see `docs/OUTPUT_SCHEMA.md` §1.
+  `unavailable`/`error`, never silence), `complete`, `notScanned`, `judgePacket`,
+  `vetPackets`, and `coveragePage` (§20 — scanned-vs-total per subject, every gap named) —
+  see `docs/OUTPUT_SCHEMA.md` §1. The same coverage data prints as a `CLAWSECCHECK COVERAGE`
+  text section under plain `--full`.
   - **`--fast`** (only with `--full`) drops the plugin sweep, behavioral replay, and skill
     sweep — keeping just the audit, self-test, vet-mcp, and the (free) adjudication packet —
     for CI runs where the deep phases are too slow. This is today's pre-F-150 `--full` shape.
