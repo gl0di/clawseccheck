@@ -149,6 +149,17 @@ _MAX_DECODED_BLOB_BYTES = 262_144  # 256 KiB hard streaming-output cap per blob 
 # unbounded copy of it.
 _MAX_BLOBS_PER_LINE = 4  # candidate base64 blobs tried per line/window — bounds how many
 # decompression attempts one adversarial line stuffed with blob-shaped runs can force.
+_MAX_BLOB_CANDIDATES_PER_LINE = 64  # C-357: bound how many RAW candidate spans
+# `_collect_blob_tokens`'s O(n^2) containment pass below considers, before that pass
+# runs — not just the final `_MAX_BLOBS_PER_LINE` result, which used to let an
+# unbounded candidate list drive the combinatorial cost. Safe to cut the list here: the
+# containment test requires `o_start <= start` (a span can only "contain" another span
+# that starts no earlier than it does), so once candidates are sorted by start position,
+# any span still needed to prove a KEPT candidate contained is itself at or before that
+# candidate in the sort order and is never cut out from under it. A line already bounded
+# to `_MAX_LINE_LEN`/`_OVERSIZED_WINDOW_CHARS` chars cannot naturally produce more than a
+# few hundred 40+-char candidates; this cap only ever bites a line adversarially stuffed
+# well past what any real detection needs.
 
 # Trajectory schema anchors (mirrors trajectory.py's own grounded constants — recon §9.1).
 _TRACE_SCHEMA = "openclaw-trajectory"
@@ -654,6 +665,12 @@ def _collect_blob_tokens(line: str) -> list:
             if len(token) < 40:
                 continue
             candidates.append((m.start(), m.start() + len(token), token))
+
+    # C-357: sort by start position and cap BEFORE the O(n^2) containment pass — see
+    # `_MAX_BLOB_CANDIDATES_PER_LINE`'s comment for why this preserves the result for
+    # every candidate that survives the cut.
+    candidates.sort(key=lambda c: c[0])
+    candidates = candidates[:_MAX_BLOB_CANDIDATES_PER_LINE]
 
     def _is_contained(i) -> bool:
         start, end, _ = candidates[i]

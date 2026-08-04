@@ -1197,3 +1197,42 @@ def test_b432_genuine_urlsafe_fragment_still_collapsed_to_one_token():
     url_blob = base64.urlsafe_b64encode(gzip.compress(payload)).decode().rstrip("=")
     tokens = logscan._collect_blob_tokens("prefix " + url_blob + " suffix")
     assert tokens == [url_blob]
+
+
+# --------------------------------------------------------------- C-357: bound the O(n^2)
+# containment pass over candidate spans BEFORE it runs, not just the final
+# `_MAX_BLOBS_PER_LINE` result — see `_MAX_BLOB_CANDIDATES_PER_LINE`'s comment in
+# logscan.py for why sorting by start position first makes the cut safe.
+
+def test_c357_candidate_cap_preserves_earliest_maximal_tokens():
+    """A line with far more than `_MAX_BLOB_CANDIDATES_PER_LINE` distinct, non-overlapping
+    blob-shaped (but non-decodable) tokens must still return exactly the FIRST
+    `_MAX_BLOBS_PER_LINE` of them, in line order — i.e. capping the candidate list before
+    the containment pass must not change which tokens the (unbounded) pass would have
+    picked, only how much combinatorial work is spent getting there."""
+    # 40-char alnum runs that are shape-valid base64 candidates but never decode to a
+    # real compressed stream (so no containment relationship exists between any pair —
+    # each is its own maximal span, letting us pin exact output order/identity).
+    tokens_in = [f"{'A' * 39}{i % 10}" for i in range(200)]
+    assert len(tokens_in) > logscan._MAX_BLOB_CANDIDATES_PER_LINE
+    line = " ".join(tokens_in)
+    result = logscan._collect_blob_tokens(line)
+    assert result == tokens_in[: logscan._MAX_BLOBS_PER_LINE]
+
+
+def test_c357_dense_nested_candidates_stay_fast(tmp_path):
+    """Worst-case shape for the O(n^2) pass: many B-432-style hyphen-wrapped blob
+    occurrences, each contributing a genuine containment relationship (wrapper span
+    strictly contains the real blob span, and only decoding the real blob proves it) —
+    so unlike disjoint tokens, every one of these actually reaches
+    `_decodes_to_compressed_blob`. Must still complete quickly and must still detect the
+    wrapped blob — the cap must trade combinatorial cost, not correctness."""
+    blob = _b432_blob()
+    line = " ".join(f"x-cache-key-{blob}" for _ in range(80)) + "\n"
+    sink = _write(tmp_path, "a.log", line)
+
+    start = time.perf_counter()
+    result = logscan.scan_log_file(sink, None)  # must not raise
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"dense nested-candidate line took {elapsed:.3f}s — O(n^2) cap regressed"
+    assert result.counts.get("env_compromise_ioc", 0) >= 1
