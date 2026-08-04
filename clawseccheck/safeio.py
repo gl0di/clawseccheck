@@ -77,7 +77,7 @@ def _write_all(fd: int, data: bytes) -> None:
         written += n
 
 
-def secure_write_text(path: Path, data: str) -> None:
+def secure_write_bytes(path: Path, data: bytes) -> None:
     """Atomically overwrite *path* with *data* (temp-file + fsync + os.replace).
 
     Writing straight onto the destination (O_TRUNC then os.write) left a truncated,
@@ -107,7 +107,7 @@ def secure_write_text(path: Path, data: str) -> None:
     tmp = Path(tmp_name)
     try:
         try:
-            _write_all(fd, data.encode("utf-8"))
+            _write_all(fd, data)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -132,6 +132,11 @@ def secure_write_text(path: Path, data: str) -> None:
         path.chmod(0o600)
     except (OSError, NotImplementedError):
         pass
+
+
+def secure_write_text(path: Path, data: str) -> None:
+    """Atomically overwrite *path* with *data* (UTF-8) — see `secure_write_bytes`."""
+    secure_write_bytes(path, data.encode("utf-8"))
 
 
 def secure_append_text(path: Path, data: str) -> None:

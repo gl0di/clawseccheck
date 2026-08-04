@@ -79,6 +79,7 @@ from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
 from .multiturn import make_multiturn, render_multiturn
 from .sarif import render_sarif
+from .pdf import render_pdf
 from .history import (
     DEFAULT_HISTORY,
     load as history_load,
@@ -90,7 +91,7 @@ from .menu import compute_ages, render_menu, render_onboarding
 from .palette import render_palette
 from .percentile import render_percentile
 from .logsafe import get_logger
-from .safeio import secure_write_text
+from .safeio import secure_write_bytes, secure_write_text
 from .incident import render_incident
 from .trajaudit import render_trajectory_analysis
 from .behavioral import analyze as _behavioral_analyze
@@ -976,6 +977,7 @@ _PRIMARY_MODES = [
     ("badge", "--badge", "opt"),
     ("html", "--html", "opt"),
     ("sarif", "--sarif", "opt"),
+    ("pdf", "--pdf", "opt"),
     ("trend", "--trend", "bool"),
     ("percentile", "--percentile", "bool"),
     ("next", "--next", "bool"),
@@ -1031,7 +1033,7 @@ _MODE_HONORS = {
 # direction, since T3 reads ctx.attestation. "sbom", "incident", "judge_packet",
 # "judged" and "analyze_trajectory" were missing for the same reason.
 _ATTEST_CONSUMERS = frozenset({
-    "risk_paths", "badge", "html", "sarif", "trend", "percentile",
+    "risk_paths", "badge", "html", "sarif", "pdf", "trend", "percentile",
     "next", "dashboard", "dashboard_findings", "sbom", "incident",
     "judge_packet", "judged", "propose_ignore", "analyze_trajectory",
     "behavioral", "monitor",
@@ -1170,7 +1172,21 @@ def _onboarding_reason(home: Path) -> str | None:
 # (locking.journal_lock creates "<file>.lock" next to history.jsonl/events.jsonl).
 # Deliberately a fixed whitelist, never a glob/rmtree of the store directory —
 # an unrelated file a user happens to keep in ~/.clawseccheck/ must never be at risk.
-_PURGE_FILENAMES = ("history.jsonl", "events.jsonl", "state.json", "coverage.json")
+#
+# F-162: --badge/--html/--sarif/--pdf all take an explicit --flag PATH, so nothing
+# writes into the store automatically today — but SKILL.md's own promise ("writes only
+# its own local report/history, removable with --purge") reads as covering any report
+# artifact an agent is told to write there by convention, and a purge test with a
+# populated store previously left a badge file untouched among the survivors. Rather
+# than let that gap grow with every new output format, the conventional default
+# filenames for all four report renderers are whitelisted here too — inert (a plain
+# no-op) until/unless something actually writes one of them, same as any other
+# not-yet-created whitelist entry.
+_PURGE_FILENAMES = (
+    "history.jsonl", "events.jsonl", "state.json", "coverage.json",
+    "openclaw-security-badge.svg", "openclaw-security-report.html",
+    "openclaw-security-report.sarif", "openclaw-security-report.pdf",
+)
 
 
 def _confirm_purge(paths: "list[Path]") -> "tuple[bool, bool]":
@@ -1560,6 +1576,10 @@ def _main(argv=None) -> int:
                    help="print the SHA-256 digest of the ClawSecCheck engine source for tamper detection")
     p.add_argument("--sarif", metavar="PATH",
                    help="write a SARIF 2.1.0 report to PATH")
+    p.add_argument("--pdf", metavar="PATH",
+                   help="write the complete audit as a paginated PDF to PATH — attach the "
+                        "file itself into chat (a mobile client opens it inline; do not "
+                        "paste the path or re-render its contents)")
     p.add_argument("--fail-under", metavar="N", type=int, default=None,
                    help="exit 1 if score is below N")
     p.add_argument("--exit-code", action="store_true",
@@ -2056,6 +2076,19 @@ def _main(argv=None) -> int:
             return 0
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
+            return 1
+
+    if args.pdf:
+        try:
+            secure_write_bytes(Path(args.pdf).expanduser(), render_pdf(findings, score, native=ctx.native))
+            _emit(
+                f"(PDF report written to {args.pdf} — attach this file itself into the "
+                "chat, do not re-render its contents or paste the path; a mobile client "
+                "opens a PDF inline where an HTML attachment would just be a download)"
+            )
+            return 0
+        except OSError as exc:
+            _emit(f"(could not write PDF report: {exc})")
             return 1
 
     if args.trend:

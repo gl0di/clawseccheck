@@ -8,6 +8,13 @@ kept here so the always-loaded playbook stays lean.
 - `--save PATH` — write the report to a local file.
 - `--sarif PATH` — write a local SARIF 2.1.0 file (for CI / GitHub Code Scanning; never uploaded).
   Works with `--vet`/`--vet-mcp` too, as a side output alongside the human report.
+- `--pdf PATH` — write the complete audit (every FAIL/WARN finding, paginated) as a base-14-only
+  PDF — no font embedding, no JavaScript, no forms. This is the mobile-chat deliverable: a
+  filesystem path is useless to a user reading from a phone, but a PDF opens inline in a chat
+  client's own viewer (unlike `--html`, which most mobile clients hand over as a download). If
+  the user is talking from a phone/chat client, attach the PDF file itself into the reply — never
+  paste its path or re-render its contents into the chat text (same doctrine as the `--badge`
+  SVG: attach the artifact, don't redraw it).
 - `--json` with `--vet`/`--vet-mcp` — emits the risk-dossier JSON object (`mode`, `target`,
   `target_type`, `verdict`, `grade`, `score`, `axes[]`, `findings[]`): the five risk axes
   (danger / build / behavior / persistence / connections) plus an A–F grade. Exit code is 1 on

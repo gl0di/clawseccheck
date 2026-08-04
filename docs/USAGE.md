@@ -84,8 +84,10 @@ To keep a copy, add `--save report.txt` and ClawSecCheck writes the full report 
 
 Chat rendering is best-effort — the host agent relays and re-composes that text over its own
 channel. The **canonical, deterministic output is always a saved file**: `--save`, `--html`,
-or `--badge grade.svg`. If you need something you can rely on byte-for-byte (or attach as a
-real image, in the badge's case), use the saved file, not the chat paste.
+`--pdf report.pdf`, or `--badge grade.svg`. If you need something you can rely on byte-for-byte
+(or attach as a real file, in the badge/PDF case), use the saved file, not the chat paste. On a
+phone/mobile chat client specifically, prefer `--pdf` over `--html` — most mobile clients hand an
+HTML attachment over as a download, while a PDF opens inline in the client's own viewer.
 
 ## Guided mode
 
@@ -251,8 +253,8 @@ The only thing it writes by default is a one-line
 entry to a **private, owner-only** local score history (`~/.clawseccheck/history.jsonl`) so you can
 track your grade over time — opt out with `--no-history`. Everything else is written only when you
 ask: a report file (`--save`), the `--monitor` snapshot and change journal
-(`~/.clawseccheck/state.json`, `events.jsonl`), a badge (`--badge`), HTML/SARIF (`--html`/`--sarif`),
-a log (`--log`), a small freshness ledger (`~/.clawseccheck/coverage.json`) recording when you
+(`~/.clawseccheck/state.json`, `events.jsonl`), a badge (`--badge`),
+HTML/SARIF/PDF (`--html`/`--sarif`/`--pdf`), a log (`--log`), a small freshness ledger (`~/.clawseccheck/coverage.json`) recording when you
 last ran an active self-test (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`), and —
 the one write that lands inside the audited OpenClaw home rather than under
 `~/.clawseccheck/` — `--apply-ignore-proposals`, opt-in and confirmation-gated, appending
@@ -585,6 +587,7 @@ ask, noted below):
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
 | Attestation template / feed it back | `clawseccheck --ask` · `clawseccheck --attest attest.json` |
 | Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
+| Attachable-into-chat report (mobile-friendly, unlike HTML) | `clawseccheck --pdf report.pdf` |
 | Trend & percentile | `clawseccheck --trend` · `clawseccheck --percentile` |
 | Accept a finding (show suppressed) | edit `.clawseccheckignore` · `clawseccheck --show-suppressed` |
 | Skip native audit / host posture / socket scan | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` |
@@ -605,6 +608,7 @@ python3 audit.py --redteam                   # a multi-scenario adversarial payl
 python3 audit.py --dryrun                     # runtime behavioral test (fake secret + fake tools; sources: email, web, MCP response, memory, subagent)
 python3 audit.py --badge badge.svg          # write a shareable SVG grade badge
 python3 audit.py --html report.html         # standalone HTML report (private — owner view)
+python3 audit.py --pdf report.pdf           # complete audit as a paginated PDF — attach it into chat, don't paste the path
 python3 audit.py --verify-self               # SHA-256 of ClawSecCheck's own source (anti-tamper)
 python3 audit.py --trend                     # print local score trend (stored in ~/.clawseccheck/history.jsonl)
 python3 audit.py --percentile                # show where your score sits vs. an offline reference profile
@@ -780,6 +784,11 @@ python3 audit.py --log audit.log            # also write log to a local file
   agent — if the agent echoes the token, it obeyed an injection (**VULNERABLE**), otherwise
   **RESISTANT**. This is the live "battle-tested" complement to the passive checks.
 - **`--badge PATH`** writes a shields-style SVG (grade + score only) for your README / posts.
+- **`--pdf PATH`** writes the complete audit (every FAIL/WARN finding, paginated, base-14 fonts
+  only — no font embedding, no JavaScript, no forms) as a PDF. This is the deliverable-into-chat
+  format: a filesystem path is useless from a phone, but a PDF opens inline in a mobile chat
+  client's own viewer where an HTML attachment would just be a download. Attach the file itself;
+  never re-render its contents into the chat or substitute a path (same doctrine as `--badge`).
 - **`--trend`** records the current audit result to a local append-only history file and prints
   a table of past scores with per-run arrows. Every recorded row is shown, each tagged with the
   run that produced it (`[audit]`, or `[test]`/`[dev]` for a development/CI run picked up via

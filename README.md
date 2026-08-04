@@ -133,7 +133,7 @@ with respect to your OpenClaw setup, its engine is **offline by design**, and
 by default it writes only its own local history under `~/.clawseccheck/` —
 removable any time by asking your agent to *"purge the clawseccheck data"*.
 A few flags write local files only when you explicitly ask for them
-(`--save`, `--badge`, `--html`, `--sarif`, `--monitor`, `--log`) — see the
+(`--save`, `--badge`, `--html`, `--sarif`, `--pdf`, `--monitor`, `--log`) — see the
 [User guide](docs/USAGE.md) for the full list. The one exception that touches
 the audited home itself is also opt-in and confirmation-gated:
 `--apply-ignore-proposals` can append entries — never invent them — to its
@@ -188,6 +188,7 @@ clawseccheck                         # audits ~/.openclaw by default
 clawseccheck --json                  # machine-readable result
 clawseccheck --sarif results.sarif   # SARIF 2.1.0 for GitHub Code Scanning
 clawseccheck --html report.html      # standalone HTML report (private)
+clawseccheck --pdf report.pdf        # complete audit as a paginated PDF (attach into chat)
 clawseccheck --fail-under 70         # CI gate: exit 1 if score < 70
 ```
 

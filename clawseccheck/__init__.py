@@ -30,6 +30,7 @@ from .risk import risk_paths, render_risk_paths
 from .scanbudget import limits_for
 from .scoring import ScoreResult, compute
 from .sarif import render_sarif
+from .pdf import render_pdf
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 from .guide import suggest_actions, render_next_actions
 from .update import update_notice, read_latest_hint, DEFAULT_LATEST
@@ -114,6 +115,7 @@ __all__ = [
     "record_events", "load_events", "render_events", "DEFAULT_EVENTS",
     "load_ignore", "apply_baseline", "fingerprint",
     "render_sarif",
+    "render_pdf",
     "history_load", "history_record", "render_trend", "DEFAULT_HISTORY",
     "suggest_actions", "render_next_actions",
     "risk_paths", "render_risk_paths",
