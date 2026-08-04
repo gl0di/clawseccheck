@@ -2343,6 +2343,20 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
+### B349 - Obfuscated install-lifecycle hook target in the dependency tree
+
+- Severity: CRITICAL
+- Block: hardening
+- Framework: Supply Chain / Dependency Tree
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Obfuscated install-lifecycle hook target in the dependency tree
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

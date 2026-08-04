@@ -494,6 +494,19 @@ class Context:
     # second, independent "/proc" hardcode. Always set by audit(), not just when
     # include_sockets=True, so it is available whenever ctx.sockets happens to be populated.
     proc_root: str = "/proc"
+    # F-167: deptree.scan_dep_tree() result for the OpenClaw install; set by
+    # audit(include_deptree=True), exactly as `sockets` above is set by
+    # include_sockets. B349 READS this and never walks the filesystem itself --
+    # hermetic-by-default, and one walk per audit rather than one per check call.
+    # (Without this, B349's PATH discovery ran on every Context: measured at 2.4s,
+    # 102% of a whole audit's runtime, and it reached into the real machine's global
+    # npm install from tests that had built a Context over a fixture home.)
+    dep_tree: object = None
+    include_deptree: bool = False  # OpenClaw dependency-tree walk enabled
+    # Root override for that walk. None means "discover it from PATH"
+    # (deptree.find_package_root); tests and fixtures set a synthetic tree, exactly as
+    # proc_root lets a test drive B340 without a real /proc.
+    openclaw_pkg_root: "Path | None" = None
     # B-231 sub-item 1: normalized cron jobs (from ~/.openclaw/cron/jobs.json, or the
     # SQLite-backed cron_jobs table when the JSON file is absent). Each entry is a plain
     # dict: id, name, enabled, delete_after_run, trigger_script, payload_kind,

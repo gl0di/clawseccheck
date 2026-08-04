@@ -590,7 +590,7 @@ ask, noted below):
 | Attachable-into-chat report (mobile-friendly, unlike HTML) | `clawseccheck --pdf report.pdf` |
 | Trend & percentile | `clawseccheck --trend` · `clawseccheck --percentile` |
 | Accept a finding (show suppressed) | edit `.clawseccheckignore` · `clawseccheck --show-suppressed` |
-| Skip native audit / host posture / socket scan | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` |
+| Skip native audit / host posture / socket scan / dependency-tree walk | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` · `clawseccheck --no-deptree` |
 | Disable local history / age notice | `clawseccheck --no-history` · `clawseccheck --no-update-notice` |
 | CI gate | `clawseccheck --fail-under 70` · `clawseccheck --exit-code` |
 | Verify the engine itself | `clawseccheck --verify-self` |
@@ -964,7 +964,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 481 test files and 13,700
+A security tool should be heavily tested — so it is: 481 test files and 13,900
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

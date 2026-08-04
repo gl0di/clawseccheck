@@ -2847,6 +2847,20 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="mcp",
     ),
+    # B349 (F-167): B42's sibling for the installed npm dependency tree -- the one directory
+    # every content scanner here steps around, and where a compromised TRANSITIVE package
+    # actually lives. FAIL requires a conjunction (install-lifecycle hook AND an obfuscated
+    # hook target), because a hook alone measured 3 benign hits on a real clean tree.
+    # confidence=MEDIUM: a filesystem+heuristic match, per this file's own convention.
+    CheckMeta(
+        "B349",
+        "Obfuscated install-lifecycle hook target in the dependency tree",
+        CRITICAL,
+        "hardening",
+        "Supply Chain / Dependency Tree",
+        confidence="MEDIUM",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

@@ -24,11 +24,15 @@ from ..collector import (
     dig,
 )
 from ..safeio import walk_dir_safely
+from .. import deptree as _deptree  # B349: bounded, read-only dependency-tree enumeration
+from ..skillast import analyze_javascript as _analyze_javascript
 from ..textnorm import (
     normalize_for_scan,
+    obfuscation_signals,
 )
 
 from ._content import (
+    _HOOK_MINIFIED_LINE,  # B349: B97's own "minified — unreadable" threshold, reused
     _B58_HTML_COMMENT_RE,
     _B64_HIGH_CONFIDENCE_RE,
     _b64_classify,
@@ -1622,6 +1626,214 @@ def check_install_policy(ctx: Context) -> Finding:
         "dirs are not writable by other local users.",
         "Keep skill dirs owner-only and read any install/postinstall hook before trusting a skill.",
         evidence=notes,
+    )
+
+
+# ---------- B349 (F-167): obfuscated install-lifecycle hook target in the dependency tree ----------
+# B42 above already recognises a pre/postinstall hook -- in a SKILL's own manifest. This is its
+# sibling for the one directory nothing in this engine reasons about: the installed npm
+# dependency tree, where a compromised TRANSITIVE package lives. The threat shape is a
+# widely-depended package republished with `"preinstall": "node setup.mjs"` and an obfuscated
+# setup.mjs shipped in the tarball; the consuming project's own source contains nothing.
+#
+# WHY A CONJUNCTION, MEASURED (2026-08-04, real trees on a live box):
+#   openclaw: 380 packages, 3 install-lifecycle hooks -- ALL benign
+#   clawhub:   39 packages, 0
+# So "a hook exists" would have started life with three false-positive FAILs, which is three
+# more than Golden Rule #5 permits. The gate is the hook's TARGET tripping the obfuscation
+# detectors we already ship (textnorm + skillast) -- 0 hits across those same real trees.
+#
+# WHY THE OPENCLAW INSTALL TREE AND NOT SKILL/PLUGIN DIRS: measured on the same box, no skill
+# and no plugin has a node_modules at all, while every real tree sits under the npm global
+# root. A check scoped to skill/plugin dirs would scan nothing and report clean -- the exact
+# lying-PASS this project exists to prevent. When a skill DOES ship a tree, the skill content
+# scan already walks it as ordinary files (see NPM_DEPTREE_SKILL_COVERAGE_NOTE); what it does
+# not do -- and what this check adds -- is reason about it AS a dependency tree.
+# NO COUNT MAY ENTER `detail` HERE. baseline.fingerprint() hashes `finding.detail` alone,
+# and EVERY number this check can quote (packages walked, hooks found, targets read) is a
+# property of the MACHINE's OpenClaw install, not of the audited config's content. Quoting
+# one would mean a user's `.clawseccheckignore` fingerprint suppression silently orphans
+# the moment they `npm install` anything -- the exact self-orphaning defect
+# tests/test_finding_fingerprint_manifest.py exists to prevent, and which B176's age fix
+# already had to undo once. The counts live in `evidence=`, which is not hashed.
+_B349_FIX = (
+    "Do not run the install. Inspect the named package's hook target by hand, then reinstall "
+    "from a lockfile you trust (npm ci) so the resolved version is the one you reviewed."
+)
+
+
+def _b349_assess_target(source: str, filename: str) -> "tuple[list, str | None]":
+    """Assess one hook target. Returns (fail_signals, unreadable_reason).
+
+    THE CORRECTION THAT SHAPED THIS (F-167). The brief assumed an obfuscation detector
+    already existed to reuse. It does not, for this shape: `textnorm.obfuscation_signals`
+    detects UNICODE trickery (zero-width, bidi, Tag-block, confusables), and against
+    machine-mangled JavaScript -- hex identifiers, a hex string table, index arithmetic --
+    it correctly returns nothing, because none of that is a Unicode trick. Verified by
+    running both detectors against a synthesised obfuscator-shaped file: no signal from
+    either. Writing a bespoke "looks obfuscated" heuristic instead was rejected: its whole
+    false-positive surface is honest minified bundles, which are everywhere in a real
+    dependency tree, and establishing that boundary is a project of its own.
+
+    So the split follows the precedent this repo already set for unreadable hook content
+    (B97, `_content.py`'s `_HOOK_MINIFIED_LINE` -> "minified — unreadable" UNKNOWN):
+
+      * a **crit-grade** rule from the ALREADY-VALIDATED detectors -> FAIL-eligible;
+      * a **warn-grade** rule -> `noted`: disclosed in the PASS evidence, never a verdict;
+      * source we could not read (one long machine-generated line, or a parse failure) ->
+        UNKNOWN naming the package, never FAIL. We did not read it, so we claim nothing
+        about it -- and "I could not read this package's installer" is itself actionable;
+      * anything else -> nothing.
+
+    THE CRIT/WARN SPLIT IS NOT COSMETIC -- it is a C-135 blocker fix (2026-08-04). The
+    first cut treated every non-`AST_UNANALYZABLE` rule as FAIL-eligible, collapsing a
+    distinction `analyze_javascript` deliberately makes: it grades `JS_EVAL_DECODED` and
+    `JS_EVAL_REMOTE` "crit" but `JS_CHILD_PROCESS_DYNAMIC` / `JS_DYNAMIC_REQUIRE` /
+    `JS_NATIVE_DLOPEN` "warn", documented in its own docstring as "often legit".
+    An independent adversarial sweep over 124 real dependency trees (25,834 packages)
+    plus 2,906 cached package tarballs found 8 FAILs, ALL of them `esbuild` and ALL of
+    them false: esbuild's official `postinstall` installer legitimately shells out with
+    an interpolated version string, and it has done so across at least six releases
+    (0.21.5 -> 0.28.1). Not hypothetical for this project -- **OpenClaw pins
+    `esbuild@0.28.1` in its own devDependencies**, so any source or contributor install
+    would have earned a CRITICAL FAIL. Reading severity off the detector rather than
+    re-deciding it here means B349 inherits a calibration that already survived its own
+    adversarial review, instead of substituting a fresh guess for it.
+
+    `AST_UNANALYZABLE` is deliberately routed to the unreadable bucket rather than the
+    signal bucket: it means the parse failed, which is an absence of evidence.
+
+    KNOWN FALSE NEGATIVE, stated rather than papered over. This check's FAIL inherits the
+    shipped JS detector's recall exactly. `_JS_EVAL_DECODED_RE` requires the decode to sit
+    INSIDE the eval/Function call (`eval(atob(x))`); a STAGED form that decodes into a
+    variable first and evals it a line later is deliberately silent there, and its own
+    docstring says so ("base64 decode without eval — stays silent"). So a readable,
+    staged decode-then-exec installer reaches no verdict here. The UNKNOWN path above is
+    what covers the common real case, since a staged loader shipped by this campaign
+    arrives minified; a readable staged one does not. Widening the JS detector is its own
+    change with its own adversarial pass -- not something to smuggle in behind this check.
+    """
+    signals = list(obfuscation_signals(source))
+    noted: list = []
+    unreadable = None
+    longest = max((len(line) for line in source.splitlines()), default=0)
+    if longest >= _HOOK_MINIFIED_LINE:
+        unreadable = "minified — unreadable"
+    try:
+        for finding in _analyze_javascript(source, filename):
+            if finding.rule == "AST_UNANALYZABLE":
+                unreadable = unreadable or "could not be parsed"
+            elif finding.severity == "crit":
+                signals.append(finding.rule)
+            else:
+                noted.append(finding.rule)
+    except (RecursionError, ValueError):
+        unreadable = unreadable or "could not be parsed"
+    return signals, noted, unreadable
+
+
+def check_dependency_tree_hooks(ctx: Context) -> Finding:
+    """B349 (F-167): an install-lifecycle hook in the dependency tree whose target is obfuscated."""
+    # Reads ctx ONLY -- audit(include_deptree=True) does the single walk. This check must
+    # never traverse the filesystem itself: doing so cost 2.4s per invocation (102% of a
+    # whole audit) and reached into the machine's real global npm install from any Context,
+    # including ones a test had built over a fixture home. Same hermetic-by-default shape
+    # as `ctx.sockets`/`include_sockets` (B340).
+    scan = getattr(ctx, "dep_tree", None)
+    if scan is None:
+        return _finding(
+            "B349",
+            UNKNOWN,
+            "The OpenClaw dependency tree was not walked this run, so it is unexamined — "
+            "not clean. It is scanned when the audit is run with the dependency-tree pass "
+            "enabled and an OpenClaw installation is locatable on PATH.",
+            "Run the audit on the host where OpenClaw is installed, with its bin directory "
+            "on PATH.",
+        )
+    if not scan.scanned:
+        return _finding(
+            "B349",
+            UNKNOWN,
+            "The OpenClaw installation carries no node_modules directory, so no dependency "
+            "tree could be examined.",
+            "If dependencies live elsewhere for this install layout, inspect that tree by hand.",
+        )
+
+    hits: list = []
+    unreadable: list = []
+    noted: list = []
+    examined = 0
+    for hook in scan.hooks:
+        for target in hook.targets:
+            source = _deptree.read_target(target)
+            if source is None:
+                unreadable.append(
+                    f"{hook.package} ({hook.relpath}) {hook.phase}: {target.name} "
+                    "(too large to read)"
+                )
+                continue
+            examined += 1
+            signals, noted_rules, why = _b349_assess_target(source, target.name)
+            where = f"{hook.package} ({hook.relpath}) {hook.phase}: {hook.command} -> {target.name}"
+            if signals:
+                hits.append(f"{where} [{', '.join(sorted(set(signals))[:4])}]")
+            elif why:
+                unreadable.append(f"{where} ({why})")
+            elif noted_rules:
+                # Disclosed, never a verdict: a platform-binary installer shelling out with
+                # an interpolated version is the shape here, and it is ordinary.
+                noted.append(f"{where} [{', '.join(sorted(set(noted_rules)))} — not a verdict]")
+    if hits:
+        return _finding(
+            "B349",
+            FAIL,
+            "An install-lifecycle hook in the OpenClaw dependency tree runs a target "
+            "carrying a code-execution or obfuscation signal, allowing code you never "
+            "chose to run the next time this package is installed or updated.",
+            _B349_FIX,
+            hits,
+        )
+
+    # Unreadable is not clean. A machine-generated installer we could not parse is exactly
+    # the shape the campaign ships, and claiming a PASS over bytes we never read would be
+    # the silent lying-PASS this project exists to prevent (B97 sets the same precedent).
+    if unreadable:
+        return _finding(
+            "B349",
+            UNKNOWN,
+            "An install-lifecycle hook target in the OpenClaw dependency tree could not be "
+            "read, so whether it is safe is undetermined — not clean.",
+            "Beautify or manually inspect each named installer before the next install or "
+            "update; reinstall from a lockfile you trust (npm ci) once reviewed.",
+            unreadable,
+        )
+
+    # A truncated walk is not a clean tree. Say so rather than let a partial scan read as
+    # coverage (GR#4) -- the same discipline the skill scanner's own cap-hit UNKNOWN applies.
+    if scan.truncated:
+        return _finding(
+            "B349",
+            UNKNOWN,
+            "The OpenClaw dependency tree exceeded this check's package budget, so the "
+            "remainder was never examined.",
+            "Inspect the tree by hand, or re-run with a wider budget once one is available.",
+            [f"packages walked before the budget was hit: {scan.packages}"],
+        )
+    return _finding(
+        "B349",
+        PASS,
+        "Scanned the OpenClaw dependency tree: no install-lifecycle hook runs a target "
+        "carrying a code-execution or obfuscation signal.",
+        "Reinstall from a lockfile you trust (npm ci) so a republished version cannot "
+        "silently replace a reviewed one.",
+        [
+            f"packages walked: {scan.packages}; install-lifecycle hooks: {len(scan.hooks)}; "
+            f"hook targets read: {examined}",
+            "coverage: a hook whose target is not an in-package `node <file>` invocation "
+            "(a bin from another package, a shell builtin) has no bytes here to read and is "
+            "not assessed",
+        ]
+        + noted,
     )
 
 

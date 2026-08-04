@@ -1443,6 +1443,11 @@ def _main(argv=None) -> int:
                    help="skip the effective-bind socket scan (B340: corroborates gateway.bind "
                         "against /proc/net/tcp{,6}, plus a read-only /proc/*/fd walk for "
                         "process-identity correlation)")
+    p.add_argument("--no-deptree", action="store_true",
+                   help="skip the OpenClaw dependency-tree walk (B349: an install-lifecycle "
+                        "hook in node_modules whose target carries a code-execution signal). "
+                        "The walk is read-only and offline, but traverses the whole installed "
+                        "tree, so this is the escape hatch on a very large one")
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")
     p.add_argument("--monitor", action="store_true",
                    help="monitor mode: alert on what changed since the last check")
@@ -1961,6 +1966,7 @@ def _main(argv=None) -> int:
             # here.
             ctx, findings, _ = audit(args.home, include_native=False,
                                      include_sockets=not args.no_sockets,
+                                     include_deptree=not args.no_deptree,
                                      exhaustive=args.exhaustive)
             suppressed = [f for f in findings if getattr(f, "suppressed", False)]
             # B-154: a bare "RISK-NN" entry matches a RiskPath.id, not any Finding —
@@ -2025,6 +2031,7 @@ def _main(argv=None) -> int:
         ctx, findings, score = audit(args.home, include_native=not args.no_native,
                                      include_host=not args.no_host,
                                      include_sockets=not args.no_sockets,
+                                     include_deptree=not args.no_deptree,
                                      attestation=attestation,
                                      exhaustive=args.exhaustive)
     except (PermissionError, OSError) as exc:

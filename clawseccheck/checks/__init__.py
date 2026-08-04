@@ -351,6 +351,7 @@ from ._lifecycle import (
     check_cron_run_log_orphans,
     check_cron_scheduler,
     check_declared_skill_reconciliation,
+    check_dependency_tree_hooks,
     check_exec_approvals_grants,
     check_hook_policy_bypass,
     check_human_approval,
@@ -1361,6 +1362,7 @@ CHECKS = [
     check_declared_skill_reconciliation,  # B158 — declared-but-unresolved skill-load source (F-119)
     check_audit_suppressions,  # B173 — security.audit.suppressions self-blinds native audit (B-237)
     check_install_policy_gate,  # B174 — security.installPolicy.* gate + exec-hook escape flags (B-238)
+    check_dependency_tree_hooks,  # B349 — obfuscated install-lifecycle hook target in the dependency tree (F-167)
     check_hooks_enable_toggles,  # B179 — hooks.enabled / hooks.internal(.load.extraDirs) enable-toggle inventory (B-250)
     check_plugin_clawhub_trust,  # B177 — OpenClaw's own persisted per-plugin ClawHub trust verdict (B-240)
     check_plugin_tool_result_middleware,  # B187 — non-bundled plugin declares agentToolResultMiddleware (B-292, RT-2)

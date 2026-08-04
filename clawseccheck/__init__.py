@@ -45,6 +45,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
           native_bin: str = "openclaw", native_timeout: int = 60,
           attestation: dict | None = None,
           include_sockets: bool = False, proc_root: str = "/proc",
+          include_deptree: bool = False, openclaw_pkg_root=None,
           exhaustive: bool = False):
     """Run the full audit. Returns (ctx, findings, ScoreResult).
 
@@ -64,6 +65,14 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     `proc_root` is always recorded on `ctx.proc_root` (regardless of `include_sockets`)
     so B340's best-effort PID-identity corroboration (C-135 bug 1) reads from the same
     root the socket scan itself used.
+
+    `include_deptree` (default False, same hermetic-by-default reasoning) walks the
+    installed OpenClaw npm dependency tree once (`deptree.scan_dep_tree`) so B349 can
+    look for an install-lifecycle hook whose target carries a code-execution signal
+    (F-167). The CLI passes True. `openclaw_pkg_root` overrides where that tree is
+    found; None discovers it from PATH. B349 itself never touches the filesystem --
+    it reads `ctx.dep_tree` only, so a Context built without this stays hermetic and
+    the walk costs one traversal per audit instead of one per check call.
 
     `attestation` (the agent's self-report; see attest.py) enriches the audit: when
     omitted, the attestation checks (B43/B44) report UNKNOWN and the score is
@@ -87,6 +96,12 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     ctx.proc_root = proc_root
     if include_sockets:
         ctx.sockets = _scan_listening_sockets(proc_root=proc_root)
+    ctx.include_deptree = include_deptree
+    ctx.openclaw_pkg_root = openclaw_pkg_root
+    if include_deptree:
+        from . import deptree as _deptree
+        root = openclaw_pkg_root or _deptree.find_package_root("openclaw")
+        ctx.dep_tree = _deptree.scan_dep_tree(_deptree.find_dep_tree(root)) if root else None
     if attestation:
         ctx.attestation = attestation
     ctx.exhaustive = exhaustive
