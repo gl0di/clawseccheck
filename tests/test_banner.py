@@ -88,14 +88,17 @@ class TestBannerGroundedInBrand:
         text = BANNER_PATH.read_text(encoding="utf-8")
         assert brand.BRAND_RED in text
 
-    def test_banner_carries_the_brand_logo_svg(self):
+    def test_banner_carries_the_real_logo_mark(self):
         """The banner is an HTML/badge-only surface (brand.py's Tier 3): it must
-        carry the graphical LOGO_SVG mark itself — the same rule report.py's
-        --html export follows — not the MASCOT text glyph. CLAWSECCHECK-C-247
-        (E-048's third LOGO_SVG leg); single-sourced, never a second hand-pasted
-        copy of the SVG markup."""
+        carry the real graphical mark — not the MASCOT text glyph, and (since
+        CLAWSECCHECK-B-441) not brand.LOGO_SVG's abstract placeholder either.
+        LOGO_SVG stays reserved for the size-constrained 14px badge context
+        (report.py); the banner has room for the real docs/assets/logo.png art,
+        base64-inlined so it never drifts from the shipped source file."""
         text = BANNER_PATH.read_text(encoding="utf-8")
-        assert brand.LOGO_SVG in text
+        assert "data:image/png;base64," in text
+        expected = gen_banner._logo_data_uri()
+        assert expected in text
 
     def test_banner_no_longer_embeds_the_mascot_glyph(self):
         """Pins the design choice, not just today's output: the banner used to
@@ -129,16 +132,14 @@ class TestBannerGroundedInBrand:
         assert "justify-content: center" in body
 
     def test_logo_wrapper_is_aria_hidden_so_the_brand_is_announced_once(self):
-        """brand.LOGO_SVG carries its own ``role="img" aria-label="ClawSecCheck"``
-        and it sits immediately before ``<h1>ClawSecCheck</h1>``. Without
-        aria-hidden on the wrapper a screen reader announces the brand name twice.
-        report.py's --html export wraps the same constant in
-        ``aria-hidden="true"`` for exactly this reason; the banner must not diverge
-        from the pattern it copies."""
+        """The logo <img> carries an empty alt and sits inside an aria-hidden
+        wrapper, immediately before ``<h1>ClawSecCheck</h1>``. Without aria-hidden
+        (or with real alt text) a screen reader would announce the brand name
+        twice; the wordmark right after it is the real accessible name."""
         body = build_banner_html()
         assert '<div class="claw" aria-hidden="true">' in body
-        # the wordmark right after it is the real accessible name
-        assert 'aria-hidden="true">' + brand.LOGO_SVG in body
+        assert 'aria-hidden="true"><img src="data:image/png;base64,' in body
+        assert 'alt="" width="84" height="84">' in body
         assert "<h1>Claw" in body
 
     def test_banner_is_byte_identical_to_the_generator_output(self):
@@ -174,4 +175,4 @@ class TestGenBannerIsDeterministic:
 
     def test_generated_html_has_no_leftover_template_placeholders(self):
         body = build_banner_html()
-        assert "{rgb}" not in body and "{red}" not in body and "{logo_svg}" not in body
+        assert "{rgb}" not in body and "{red}" not in body and "{logo_tag}" not in body
