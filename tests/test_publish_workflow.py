@@ -760,9 +760,9 @@ def test_preflight_shell_passes_when_every_link_resolves(tmp_path) -> None:
 def test_publish_workflow_node_satisfies_clawhub_engine() -> None:
     """Node must be >= the pinned clawhub's declared engine (C-248).
 
-    clawhub@0.22.0 declares "engines": {"node": ">=22"}; running it on Node 20 emitted an
-    EBADENGINE warning on every publish — the release-token-holding step executing outside
-    its supported range.
+    clawhub@0.23.3 declares "engines": {"node": ">=22"} (unchanged since 0.22.0); running
+    it on Node 20 emitted an EBADENGINE warning on every publish — the release-token-holding
+    step executing outside its supported range.
     """
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
     match = re.search(r'node-version:\s*"?(\d+)"?', text)
@@ -776,8 +776,9 @@ def test_publish_workflow_node_satisfies_clawhub_engine() -> None:
 def test_publish_workflow_dry_runs_before_publishing() -> None:
     """A --dry-run preflight must precede the real upload (C-248).
 
-    Grounded: clawhub 0.22.0's `publish` command exposes --dry-run ("Preview without
-    publishing"), which validates the folder/manifest/semver without uploading.
+    Grounded: clawhub 0.23.3's `publish` command exposes --dry-run (options.dryRun in
+    dist/cli/commands/publish.js), which validates the folder/manifest/semver without
+    uploading.
 
     Reads --dry-run out of an actual invocation's argument list, never out of the file
     as text. The earlier version matched the word inside this step's own explanatory
