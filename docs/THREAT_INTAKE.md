@@ -36,6 +36,55 @@ So the bias in triage is explicit: **prefer a form rule over an indicator, every
 An indicator is what you add when the form rule is not yet possible, or as corroboration
 for one that is.
 
+## The channel that is not release-bound: the user's own agent
+
+The engine never opens a socket. **The agent running it does** — [SKILL.md](../SKILL.md)
+states the boundary in those terms: the tool reaches the network only through your own host
+agent. This is not a loophole in Golden Rule #1, it is the topology the project chose
+deliberately, and it is already shipped three times over: `--vet` / `--vet-source` guide the
+host agent to fetch a package; `--judge-packet` / `--vet-judge-packet` hand the borderline
+band to the host agent to adjudicate; `--ask` / `--attest` let the agent report what static
+analysis structurally cannot see. [design/judge-topology.md](design/judge-topology.md) is
+the decision record.
+
+For intake this matters for one reason: **the host agent's knowledge is newer than our last
+release.** It is the only part of the picture that is not release-bound.
+
+| Use of the agent | When | Sound? |
+| --- | --- | --- |
+| The maintainer's agent runs the watchlist sweep | build time | Yes, unreservedly — this is not the engine at all |
+| The host agent enriches a finding the engine already surfaced | run time | Yes, within the existing judge authority scoping |
+| The host agent reports a miss back to us | after a run | Yes — it is a watchlist source in its own right |
+| The host agent supplies indicators the engine then trusts | run time | **No** |
+
+**Why the maintainer's agent is the easy win.** Reading advisories is already what a
+maintainer does; an agent just does it on a cadence a human does not keep. Nothing about it
+touches the shipped tool — it produces triage input, which then goes through the same five
+buckets as any other signal. If any part of this document ever becomes automated, this is
+the part.
+
+**Why the last row is a hard no**, for two independent reasons, either of which is
+sufficient. Provenance: every shipped record is verified against a named, checkable primary
+source before it lands, and an agent-supplied indicator has no such chain — the agent may
+have read it off a page an attacker controls. Determinism: a score that depends on what a
+model happened to know that afternoon is not reproducible, and therefore not auditable.
+
+**The template for any agent-supplied fact already exists.** `clawseccheck/update.py` reads
+a local hint file that "the user's ClawHub client / auto-updater / their agent" may drop,
+and treats it as **untrusted**: it accepts one narrowly-typed value and reconstructs it from
+parsed integers, so a hostile hint can at most misstate a number — never inject text, a URL,
+or an action. Any future agent-to-engine channel copies that shape or it does not ship.
+
+The same discipline governs the judge band, scoped by content **provenance** rather than one
+global rule: a judge reviewing the user's own config may only *suppress* noise, and a judge
+reviewing an untrusted `--vet` target may only *escalate*. A successful injection against
+either path can only move the verdict in the direction that costs the attacker nothing.
+
+**The honest limit.** The agent reasons over what the engine surfaced; it does not scan. It
+cannot find what the engine never looked at, so this channel sharpens and enriches — it does
+not substitute for a form rule. **A blind spot stays blind until bucket 2 or bucket 3
+handles it**, no matter how capable the agent is.
+
 ## Watchlist — where signals come from
 
 These are the source classes that have actually produced records or grounded prose in
@@ -50,7 +99,7 @@ the vocabulary of the triage buckets below.
 | OpenClaw's own releases and advisories | new config surface, changed defaults, fixed bugs | schema drift; sometimes a brand-new check surface |
 | The ClawHub registry | trust dispositions, removed listings | indicators |
 | Peer scanners and public benchmarks | competitive review, corpus evaluation | blind spots and false negatives |
-| Our own runs and user reports | real-fleet audits, GitHub issues | false positives, false negatives, blind spots |
+| Our own runs, and reports from a user's host agent | real-fleet audits, GitHub issues, an agent that judged a finding worse than the engine did | false positives, false negatives, blind spots |
 | Threat-model frameworks | OWASP LLM Top 10, OWASP Agentic, MITRE ATLAS | coverage gaps, never a specific indicator |
 
 Two of these deserve a note. **Framework updates never yield an indicator** — they yield a
@@ -76,7 +125,10 @@ recording is the point. An untriaged incident and a triaged one that produced no
 identical in the repo unless the second one is written down.
 
 **No fixed sweep schedule is claimed.** If one is ever adopted it belongs here, in this
-section, with a date — not as an implication elsewhere.
+section, with a date — not as an implication elsewhere. The likeliest way that changes is a
+maintainer-side agent sweep over the watchlist above, which is build-time work and touches
+nothing in the shipped tool; until such a sweep is actually running, this section keeps
+saying no rather than describing an intention.
 
 ## Triage — five buckets
 
@@ -212,8 +264,11 @@ triage step that looks at the dataset rather than only at the incident.
 
 - **Not a feed.** No part of this becomes a runtime fetch, an update endpoint, or a
   reputation lookup. That boundary is permanent, not a phase.
-- **Not a promise of speed.** Intake latency is release latency. A user's protection against
-  something published today comes from form rules already shipped, not from this process.
+- **Not a promise of speed — for the engine.** The *engine's* intake latency is release
+  latency, and its protection against something published today comes from form rules
+  already shipped. A *session's* protection is not bounded the same way: the host agent
+  brings knowledge newer than our last release, within the authority limits above. Do not
+  collapse those two into one claim in either direction.
 - **Not a substitute for the user-side signal.** The strongest early warning in the tool
   does not require knowing what is bad at all: monitoring mode reports what appeared since
   the last run. A brand-new skill, MCP server, or channel is worth a look regardless of
