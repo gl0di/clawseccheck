@@ -17,6 +17,7 @@ from .checks import detect_vet_type, run_all, vet_mcp, vet_plugin, vet_skill, ve
 from .collector import collect
 from .hostwatch import detect as _host_detect
 from .sockets import scan_listening_sockets as _scan_listening_sockets
+
 from .monitor import (
     DEFAULT_EVENTS, diff, load_events, load_state, record_events, save_state, snapshot,
 )
@@ -34,6 +35,23 @@ from .pdf import render_pdf
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 from .guide import suggest_actions, render_next_actions
 from .update import update_notice, read_latest_hint, DEFAULT_LATEST
+
+
+def _deptree_scan(root=None):
+    """Walk the OpenClaw install's dependency tree once for B349 (F-167).
+
+    A single module-level seam on purpose, mirroring `_host_detect` above: the suite's
+    autouse conftest stub patches THIS name, so no test — including the CLI end-to-end
+    ones — reaches the real machine's global npm install. Returns None when no install
+    root can be located, which B349 reports as UNKNOWN rather than a clean tree.
+    """
+    from . import deptree as _deptree
+
+    resolved = root or _deptree.find_package_root("openclaw")
+    if resolved is None:
+        return None
+    return _deptree.scan_dep_tree(_deptree.find_dep_tree(resolved))
+
 
 __version__ = "3.59.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
@@ -99,9 +117,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     ctx.include_deptree = include_deptree
     ctx.openclaw_pkg_root = openclaw_pkg_root
     if include_deptree:
-        from . import deptree as _deptree
-        root = openclaw_pkg_root or _deptree.find_package_root("openclaw")
-        ctx.dep_tree = _deptree.scan_dep_tree(_deptree.find_dep_tree(root)) if root else None
+        ctx.dep_tree = _deptree_scan(openclaw_pkg_root)
     if attestation:
         ctx.attestation = attestation
     ctx.exhaustive = exhaustive
