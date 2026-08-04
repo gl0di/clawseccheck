@@ -777,13 +777,35 @@ def test_skill_ioc_hits_are_always_a_subset_of_input_tokens(tmp_path):
 # only (mirrors test_risk.py's `_fleet_home_dirs`): runs against the real, local
 # ~/.openclaw trajectory corpus when present; a no-op (skip) everywhere else, including
 # CI, where the directory is absent.
+#
+# B-441: this used to call `logscan.scan_log_file(sink, None)` directly in a raw loop —
+# `deadline=None` bypasses BOTH of check_log_threat_hunt's own internal budgets
+# (`_LOG_HUNT_PER_FILE_BUDGET_S`, `_LOG_HUNT_CHECK_BUDGET_S` in checks/_egress.py), so it
+# was timing a code path B164 never actually runs in production and comparing that
+# against the wrong ceiling (the outer per-check SIGALRM, not B164's own ~4.5s internal
+# cap). On a real 78-sink corpus that raw loop measured 23.55s against the 15.0s
+# DEFAULT_CHECK_BUDGET_S bound — a false failure: the real, budgeted check_log_threat_hunt
+# finished the same corpus in 4.52s, degrading gracefully sink-by-sink (disclosed via
+# `skipped_for_time`) long before the outer budget could matter. Calling the real check
+# function directly, as below, tests what B164 actually does in an audit.
+#
+# CI-invisibility (still skips when `~/.openclaw` is absent, which is always true in CI):
+# accepted, same as `test_risk.py`'s `_fleet_home_dirs`-driven tests and
+# `test_fleet_fp_gate.py`'s documented local-only tier — the release gate (CLAUDE.md §6.1)
+# already requires a green full suite on the maintainer's own box before tagging, so this
+# assertion is not silently unrun for a release. Its CI-always-on complement is
+# `test_b314_check_perf.py::TestLogThreatHuntCumulativeBudget` (a deterministic synthetic
+# 6-sink corpus exercising the same cumulative-budget mechanism), so B164's budget
+# behavior is never *entirely* untested in CI even though this specific real-corpus
+# timing is.
 def test_real_fleet_trajectory_scan_stays_within_check_budget():
-    """C-159 (scanbudget) envelope check: scanning every real trajectory sidecar this
-    box has must stay comfortably within scanbudget.DEFAULT_CHECK_BUDGET_S (the hard
-    per-check wall-clock cap `run_all` enforces) — a check that exceeds it gets
-    SIGALRM-interrupted mid-scan and degrades to UNKNOWN, losing exactly the coverage
-    this fix is meant to add."""
-    from clawseccheck.collector import Context
+    """C-159 (scanbudget) envelope check: running check_log_threat_hunt (B164) against
+    every real log/transcript sink this box has must stay comfortably within
+    scanbudget.DEFAULT_CHECK_BUDGET_S (the hard per-check wall-clock cap `run_all`
+    enforces) — a check that exceeds it gets SIGALRM-interrupted mid-scan and degrades to
+    UNKNOWN, losing exactly the coverage this fix is meant to add."""
+    from clawseccheck.checks import check_log_threat_hunt
+    from clawseccheck.collector import collect
     from clawseccheck.logdiscovery import discover_log_sinks
     from clawseccheck.scanbudget import DEFAULT_CHECK_BUDGET_S
 
@@ -791,19 +813,19 @@ def test_real_fleet_trajectory_scan_stays_within_check_budget():
     if not real_home.is_dir():
         pytest.skip("real ~/.openclaw not present on this box")
 
-    ctx = Context(home=real_home)
+    ctx = collect(real_home)
     sinks = [s for s in discover_log_sinks(ctx) if s.kind == "trajectory"]
     if not sinks:
         pytest.skip("no real trajectory sidecars present")
 
     start = time.perf_counter()
-    for sink in sinks:
-        logscan.scan_log_file(sink, None)
+    finding = check_log_threat_hunt(ctx)
     elapsed = time.perf_counter() - start
     assert elapsed < DEFAULT_CHECK_BUDGET_S, (
-        f"real-fleet trajectory scan took {elapsed:.2f}s over {len(sinks)} file(s) — "
-        f"over the {DEFAULT_CHECK_BUDGET_S}s per-check hard budget"
+        f"check_log_threat_hunt took {elapsed:.2f}s over {len(sinks)} trajectory "
+        f"sidecar(s) — over the {DEFAULT_CHECK_BUDGET_S}s per-check hard budget"
     )
+    assert finding.status != "FAIL", "B164 must never FAIL (Golden Rule #5)"
 
 
 # ------------------------------------------------------------------- C-327: gzip/zlib
