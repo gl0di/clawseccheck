@@ -1757,20 +1757,52 @@ def _b349_assess_target(source: str, filename: str) -> "tuple[list, str | None]"
         # install-time target, so neither is reachable from this check's population; if a
         # build script ever legitimately carries such identifiers, this is where it breaks.
         #
-        # THE ZERO-WIDTH SIGNAL WAS DELIBERATELY *NOT* GIVEN THE SAME TREATMENT, and this
-        # is the retracted-fix note §2.5 asks for. The same C-135 sweep measured the honest
-        # base rate over 22,715 helper-shaped .js files from 3,033 cached tarballs: 45 trip
-        # `obfuscation_signals` (0.20%) and 0 trip a crit JS rule. Of those 45, 34 are the
-        # confusable class fixed above; the other 11 are zero-width in genuinely honest
-        # published files -- `lib/locale/fa.js`, `lib/locale/km.js` and bundled `umd.js`,
-        # where ZWNJ (U+200C) is REQUIRED Persian and Khmer orthography, not obfuscation.
-        # The parallel gate would be "zero-width is evidence only in an otherwise-ASCII
-        # file". It was rejected: it is new, unreviewed detection logic, and an attacker
-        # suppresses it by adding one Persian character -- trading an FP that has never
-        # been observed on this check's real population for a cheap FN in a CRITICAL check
-        # is the trade §2.5 forbids. Measured on the population B349 actually reads: 0 of
-        # 31 real install-hook targets, 0 of 4 real binding.gyp targets, 0 across 163 trees.
-        # Revisit if a real install target ever trips it; do not pre-emptively widen.
+        # THE ZERO-WIDTH SIGNAL IS DELIBERATELY *NOT* GIVEN THE SAME TREATMENT. Every
+        # invisible character in an install-time target stays FAIL-eligible, and this is
+        # the retracted-fix note §2.5 asks for -- written after the narrowing was BUILT,
+        # measured, adversarially reviewed and then withdrawn (B-448), not merely imagined.
+        #
+        # THE PULL. `obfuscation_signals` fires on any invisible character, and ZWNJ
+        # (U+200C) is REQUIRED Persian orthography and is used in Khmer -- so an honest
+        # installer can carry one. Measured over 112,421 published .js/.cjs/.mjs files from
+        # the real npm cache: 231 trip the raw signal.
+        #
+        # THE NARROWING THAT WAS TRIED. Inherit C-038's invisible-channel discriminator
+        # (`_mcp.py`: a channel is a consecutive RUN >= 4, or a TOTAL >= 32 the attacker
+        # cannot lower) and grade the halves apart -- run spends the FAIL, total-without-run
+        # degrades to UNKNOWN, an isolated invisible reads as typography. The corpus looked
+        # decisive: the run half is clean at 0 of 112,421, and all 27 survivors of
+        # `run OR total` are honest Persian locale and media bundles passing on the total
+        # alone. It was implemented, tested and measured before it was thrown away.
+        #
+        # WHY IT WAS WITHDRAWN -- two false negatives, each reproduced end-to-end against
+        # both the old and new trees, in a CRITICAL check:
+        #
+        #   * TROJAN SOURCE, cost TWO code points. U+200C/U+200D are valid ECMAScript
+        #     IdentifierPart (verified on node v22.23.2), so `HOST` and `HO<ZWJ>ST` are two
+        #     DIFFERENT bindings that render identically. An installer that resolves its
+        #     download host through the second one went FAIL -> PASS. The invisible signal
+        #     was the only leg holding that file: the AST leg sees a literal first argument
+        #     to execFileSync and says nothing.
+        #   * THE COUNTED FLOOR IS UNBOUNDED-EVADABLE. `INVISIBLE_COUNTED_RE` excludes ZWJ,
+        #     so a PRESENCE/ABSENCE encoding -- one ZWJ after a carrier character means 1,
+        #     none means 0 -- keeps every run at 1 and the counted total at 0 for a payload
+        #     of ANY length. 185 ZWJ carrying a 52-character directive: FAIL -> PASS.
+        #     C-038's own rationale ("a ZWJ-carrying payload still contributes non-ZWJ code
+        #     points at roughly half its length") assumes a two-SYMBOL alphabet; here the
+        #     second symbol is the ABSENCE of a character and costs nothing. That is where
+        #     the inherited reasoning breaks, and it is inherited verbatim -- see B-449.
+        #
+        # So the trade was an FP that has never been observed on this check's own population
+        # (0 of 35 resolved install targets across 3,033 real packages; 0 across 163 real
+        # dependency trees) for two demonstrated FNs. That is exactly the trade §2.5 forbids,
+        # and it does not become acceptable because the FP class is real -- an unrealised FP
+        # and a working bypass are not the same currency.
+        #
+        # WHAT WOULD CHANGE THE ANSWER: a real install target observed carrying an invisible
+        # character, AND a discriminator that closes the presence/absence channel rather than
+        # only the run. Both FNs above are pinned by tests/test_b448_invisible_fn_guards.py
+        # so a future narrowing has to keep catching them. Do not re-narrow without that.
         if signal.startswith("confusable") and not confusable_in_ascii_context(source):
             noted.append(f"{signal} (non-Latin script only — reads as i18n)")
         else:
