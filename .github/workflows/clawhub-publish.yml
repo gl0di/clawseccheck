@@ -41,16 +41,28 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          # clawhub@0.22.0 declares "engines": { "node": ">=22" } in its package.json.
-          # On Node 20 every publish ran under an npm EBADENGINE warning — the CLI was
-          # executing outside its supported range while holding the release token.
+          # clawhub@0.23.3 declares "engines": { "node": ">=22" } in its package.json
+          # (unchanged since 0.22.0). On Node 20 every publish ran under an npm
+          # EBADENGINE warning — the CLI was executing outside its supported range
+          # while holding the release token.
           # Keep this >= the pinned clawhub's declared engine (C-248).
           node-version: "22"
 
       - name: Install ClawHub CLI
         # Pinned to exact version to prevent supply-chain risk from a compromised
         # or typosquatted release executing with the CLAWHUB_TOKEN release secret.
-        run: npm i -g clawhub@0.22.0
+        # Bumped 0.22.0 -> 0.23.3 (CLAWSECCHECK-B-440): v3.59.0's publish 413'd
+        # (Request Entity Too Large) on a bundle well under ClawHub's documented
+        # 50MB limit — filed openclaw/clawhub#3375. Root cause per their fix,
+        # openclaw/clawhub#3391 ("upload skill files directly to Convex"): the old
+        # path sent the whole bundle through a Vercel-fronted route with an
+        # undocumented, much lower infra body-size cap. 0.23.3 is the first CLI
+        # release built against the new bounded-ticket Convex upload route; older
+        # pins would keep hitting the old (now-replaced) path. Confirmed by reading
+        # the 0.23.3 tarball: publish.js now requests an `uploadUrl`/`uploadTicket`
+        # pair instead of building the old raw multipart form body, and --dry-run
+        # (options.dryRun) is unchanged.
+        run: npm i -g clawhub@0.23.3
 
       - name: Resolve & verify version
         id: ver
@@ -79,7 +91,7 @@ jobs:
           # Pinned to exact versions (not `-U`): this job later authenticates with the
           # CLAWHUB_TOKEN release secret and holds contents/id-token:write, so a
           # compromised or typosquatted pytest/ruff release must not be able to execute
-          # here (C-183 — same supply-chain discipline as the pinned clawhub@0.22.0
+          # here (C-183 — same supply-chain discipline as the pinned clawhub@0.23.3
           # install above). Bump these deliberately, like clawhub@ / markdownlint-cli@.
           python -m pip install pytest==7.4.4 ruff==0.15.20
           python -m pytest -q
@@ -339,8 +351,8 @@ jobs:
       # preflight cannot shadow the real Publish step's path/--name guards. Do not go back
       # to locating "the publish command" by first-match on a raw line scan.
       - name: Preflight — dry-run the upload (no write)
-        # Grounded: the CLI exposes `--dry-run` ("Preview without publishing", clawhub
-        # 0.22.0 dist/cli.js) on the same `publish` command used below. It validates the
+        # Grounded: the CLI exposes `--dry-run` (options.dryRun, clawhub 0.23.3
+        # dist/cli/commands/publish.js) on the same `publish` command used below. It validates the
         # folder, rejects a plugin-shaped tree, requires SKILL.md, checks the semver, and
         # resolves the version against the registry — all WITHOUT uploading. Running it
         # with the identical flag set means a bundle that fails here would have failed the
