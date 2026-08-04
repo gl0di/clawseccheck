@@ -1,5 +1,4 @@
-"""Minimal, dependency-free PDF 1.4 writer, plus the audit report laid out on top of it
-(CLAWSECCHECK-F-162).
+"""Minimal, dependency-free PDF 1.4 writer, plus the audit report laid out on top of it.
 
 Why this exists: a filesystem path is worthless to a user reading their agent's report
 from a phone (e.g. over Telegram) — a mobile chat client does not render an HTML
