@@ -53,7 +53,7 @@ release.** It is the only part of the picture that is not release-bound.
 | Use of the agent | When | Sound? |
 | --- | --- | --- |
 | The maintainer's agent runs the watchlist sweep | build time | Yes, unreservedly — this is not the engine at all |
-| The host agent enriches a finding the engine already surfaced | run time | Yes, within the existing judge authority scoping |
+| The host agent enriches a finding the engine already surfaced | run time | Yes, but under its **own** narrower authority — see [design/agent-knowledge-enrichment.md](design/agent-knowledge-enrichment.md) |
 | The host agent reports a miss back to us | after a run | Yes — it is a watchlist source in its own right |
 | The host agent supplies indicators the engine then trusts | run time | **No** |
 

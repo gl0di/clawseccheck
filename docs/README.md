@@ -32,6 +32,9 @@ read one when you want to know *why* something is the way it is.
    SkillTrustBench, and what the recommendation costs
 2. [design/judge-topology.md](design/judge-topology.md) — why the LLM judge
    lives in the host agent and never inside the scanner
+3. [design/agent-knowledge-enrichment.md](design/agent-knowledge-enrichment.md) —
+   whether that agent may add what it knows to a finding, and the four gates
+   that bound it
 
 ## I want to integrate it
 
