@@ -298,7 +298,12 @@ jobs:
           # above — 5.6MB before it). Revisit this NUMBER, not this guard, once the real
           # upstream limit is confirmed or raised.
           MAX_STAGED_BYTES=5242880  # 5 MiB
-          STAGED_BYTES="$(du -sb dist/clawseccheck | cut -f1)"
+          # python3, not `du -sb`: -b/--bytes is a GNU coreutils extension, absent from
+          # BSD du (macOS runners in the CI matrix) — `du: invalid option -- b`. python3
+          # is unconditionally on PATH in this job already (the smoke gate above runs
+          # pytest) and sums real file bytes the same way -b does (apparent size, not
+          # allocated blocks), on every platform this workflow runs on.
+          STAGED_BYTES="$(python3 -c 'import pathlib; print(sum(f.stat().st_size for f in pathlib.Path("dist/clawseccheck").rglob("*") if f.is_file()))')"
           if [ "$STAGED_BYTES" -gt "$MAX_STAGED_BYTES" ]; then
             echo "::error::Staged bundle is ${STAGED_BYTES} bytes, over the pre-upload guard" \
                  "threshold of ${MAX_STAGED_BYTES} bytes (5 MiB). ClawHub has previously" \
