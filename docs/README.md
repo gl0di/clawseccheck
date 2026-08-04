@@ -50,8 +50,10 @@ They live outside it so its always-in-context body stays small.
 ## I want to contribute
 
 1. [CONTRIBUTING.md](https://github.com/gl0di/clawseccheck/blob/main/CONTRIBUTING.md) — ground rules, dev setup, PR flow
-2. [CHECK_AUTHORING.md](CHECK_AUTHORING.md) — how to write a new check
-3. [RELEASING.md](RELEASING.md) — the maintainer release protocol
+2. [THREAT_INTAKE.md](THREAT_INTAKE.md) — which threat sources are watched, and the
+   five-bucket triage that decides what a new signal actually changes
+3. [CHECK_AUTHORING.md](CHECK_AUTHORING.md) — how to write a new check
+4. [RELEASING.md](RELEASING.md) — the maintainer release protocol
 
 ## Reporting
 

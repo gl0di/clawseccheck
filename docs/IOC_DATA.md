@@ -62,6 +62,12 @@ stops pretending to be current.
 
 ## Refresh cadence
 
-Refreshed opportunistically as new, independently-verifiable advisories surface —
-not on a fixed schedule. Each release that touches the dataset bumps `iocdb.REVISION`
-to that release's verification date, in the same change that adds the new record(s).
+Refreshed as new, independently-verifiable advisories surface — not on a fixed
+schedule. Each release that touches the dataset bumps `iocdb.REVISION` to that
+release's verification date, in the same change that adds the new record(s).
+
+**Which advisories are watched, and how one becomes a record, is a documented
+process:** see [THREAT_INTAKE.md](THREAT_INTAKE.md). Adding an indicator here is
+bucket 1 of that triage — and deliberately the *least* preferred outcome. An offline
+list of names is always behind a live registry, so intake prefers a rule that keys on
+the attack's **form** and treats this dataset as corroboration for it.
