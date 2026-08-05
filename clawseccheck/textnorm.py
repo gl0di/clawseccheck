@@ -499,3 +499,51 @@ def _nfkc_ascii_fold_changed(text: str) -> bool:
         if folded != token and folded.isascii():
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Output-side ASCII folding (--ascii)
+#
+# The counterpart to the input-side normalization above: this folds the unicode
+# THIS TOOL EMITS down for a console that cannot render it. Deliberately a
+# separate table from `_CONFUSABLES` — that one exists to defeat an attacker's
+# homoglyph obfuscation on untrusted input, this one exists so a legacy terminal
+# still reads our own prose.
+#
+# B-484: it lives here, in the leaf, because there were SIX ascii-folding sites
+# in the package and only two of them applied a mapping table at all — the other
+# four did a bare `.encode("ascii", "replace")`, so every em dash, ellipsis and
+# arrow in `--self-test`, `--dryrun`, `--multiturn`, `--next` and the PDF came
+# out as a literal `?`. Measured: 60 lines of `--self-test --ascii` output,
+# including the harness material an operator pastes to their agent
+# (`[UNTRUSTED INPUT ? simulated email body]`). The two sites that DID map had
+# drifted into two different tables. One table, one function, one import.
+ASCII_MAP = str.maketrans({
+    # dashes / spacing punctuation (escapes, not literals: a non-breaking and a thin
+    # space are indistinguishable in source and one shadows the other silently)
+    "—": "-", "–": "-", "‑": "-", "‒": "-", "―": "-",
+    "\u00a0": " ", "\u2009": " ", "\u202f": " ",
+    # separators used as list/field dividers in our own output
+    "·": "-", "•": "*", "‣": "*", "▪": "*",
+    # quotes
+    "’": "'", "‘": "'", "‚": "'", "“": '"', "”": '"', "„": '"',
+    # math / comparison
+    "×": "x", "÷": "/", "≤": "<=", "≥": ">=", "≈": "~", "≠": "!=", "±": "+/-",
+    "\u2212": "-",  # MINUS SIGN — pdf.py's one entry this table lacked
+    # arrows
+    "→": "->", "←": "<-", "↔": "<->", "⇒": "=>",
+    # misc prose
+    "…": "...", "§": "S", "©": "(c)", "®": "(r)", "™": "(tm)", "°": " deg",
+    "½": "1/2", "¼": "1/4", "¾": "3/4",
+})
+
+
+def asciify(text: str) -> str:
+    """Fold the unicode we emit down to pure ASCII for legacy consoles.
+
+    Anything with no sensible ASCII spelling still becomes `?` — that is the
+    honest outcome for a glyph the console cannot show, and callers that own a
+    real ASCII alternative (icon tables, box-drawing rules) are expected to
+    substitute it BEFORE calling this, exactly as they already do. This is the
+    backstop, not the first line."""
+    return text.translate(ASCII_MAP).encode("ascii", "replace").decode("ascii")

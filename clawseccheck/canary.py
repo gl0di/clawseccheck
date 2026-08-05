@@ -14,6 +14,8 @@ from __future__ import annotations
 import hashlib
 import secrets
 
+from .textnorm import asciify
+
 from . import brand
 
 TOKEN_PREFIX = "CLAWSECCHECK-CANARY-"
@@ -109,4 +111,4 @@ def render_canary(canary: dict, ascii_only: bool = False) -> str:
         "Report the verdict to the user (RESISTANT is good).",
     ]
     out = "\n".join(lines)
-    return out.encode("ascii", "replace").decode("ascii") if ascii_only else out
+    return asciify(out) if ascii_only else out

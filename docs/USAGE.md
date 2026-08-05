@@ -143,7 +143,7 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 | "Are my MCP servers trustworthy?" | Vets every connected MCP server for supply-chain risk (unpinned installs, plaintext transports, broad OAuth scopes) *and* scans each server's declared tool descriptions for the same malware/injection patterns `--vet` checks a skill for. | `--vet-mcp` |
 | "What's the single most important thing to fix?" | Prints a prioritised "what you can do next" list based on your actual findings — still just further checks, never auto-fixes. | `--next` |
 | "Fix this for me" | It won't — ClawSecCheck reports problems and risks, never fixes. Each finding states what's wrong and why; `--json`/SARIF carry structured `fix`/`remediation` data for your own tooling, and the [check catalog](CHECKS.md) documents remediation guidance per check. Nothing is ever applied for you. | `clawseccheck` (read the report) / `--json` |
-| "Am I vulnerable to prompt injection?" | Runs live self-tests: a benign injection canary, a broader dry-run harness, or both plus red-team payloads together. | `--canary` · `--dryrun` · `--self-test` |
+| "Am I vulnerable to prompt injection?" | Runs live self-tests: a benign injection canary, a broader dry-run harness, or all four harnesses together (canary + red-team + dry-run + multi-turn). | `--canary` · `--dryrun` · `--self-test` |
 | "What dangerous actions can my agent actually take?" | Emits a self-report template for your agent to fill in with its real tool/verb inventory, then scores the blast radius (EXEC, DESTRUCTIVE, EGRESS, …) once you feed it back. | `--ask` then `--attest <file>` |
 | "Watch for changes over time" | Re-audits and alerts on what changed since last time (new skill, config drift, a memory-file edit, a check leaving PASS). **Note:** this is the one opt-in exception to read-only — it writes a small local snapshot (`~/.clawseccheck/state.json`) so it has something to diff against next run. | `--monitor` |
 | "Am I improving? How do I rank?" | Shows your score history over time, or how your current score compares to an offline reference profile — no network either way. | `--trend` · `--percentile` |
@@ -273,7 +273,9 @@ HTML/SARIF/PDF (`--html`/`--sarif`/`--pdf`), a log (`--log`), a small freshness 
 last ran an active self-test (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`), and —
 the one write that lands inside the audited OpenClaw home rather than under
 `~/.clawseccheck/` — `--apply-ignore-proposals`, opt-in and confirmation-gated, appending
-previously-proposed entries to `<home>/.clawseccheckignore` (never inventing one).
+previously-proposed entries to `<home>/.clawseccheckignore` (never inventing one). It is
+idempotent and says so: re-applying the same proposals reports which entries were already
+present instead of asking you to confirm writes it is not going to make.
 
 The **only** external command it can run is your own, fixed and read-only:
 
@@ -864,7 +866,14 @@ python3 audit.py --log audit.log            # also write log to a local file
 - **`--percentile`** compares your score against a bundled offline reference profile — no network,
   no telemetry.
 - **`--verbose` / `--debug` / `--log PATH`** activate structured local logging. Config values
-  that may hold secrets are redacted before being written.
+  that may hold secrets are redacted before being written. `--verbose`/`--debug` set what
+  reaches the **console** (stderr); `--log PATH` writes to a **file** and raises the file's
+  level to INFO on its own, so you never get an empty log for asking for one — it does not
+  make the console chattier. Nothing is written anywhere without `--log`.
+- **`--yes`** skips the confirmation prompt for `--purge` and `--apply-ignore-proposals`, the
+  only two commands that have one. Pass it with anything else and the run says so on stderr
+  rather than accepting it silently — a script that thinks it disabled a gate it never
+  reached is exactly the failure that note exists to prevent.
 - **`--exhaustive`** raises the trajectory-file / log-sink / per-line scan caps a normal run
   keeps small for speed: every trajectory file instead of the most recent 60, a much larger
   log/transcript-sink time budget (raised, not removed — a sink still skipped for time is

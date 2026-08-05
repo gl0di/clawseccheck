@@ -50,6 +50,7 @@ from .report import (
     _worth_a_glance_lines, build_inventory,
 )
 from .scoring import ScoreResult
+from .textnorm import asciify
 
 # ---------------------------------------------------------------------------
 # Standard Adobe Core-14 Helvetica AFM glyph widths, per 1000 text-space units,
@@ -93,28 +94,16 @@ _TOP_Y = _PAGE_H - _MARGIN
 _BOTTOM_Y = _MARGIN + _FOOTER_H
 
 
-# Common typographic Unicode -> ASCII, folded BEFORE the lossy `?` replacement so the
-# base-14 PDF renders "a -> b" / "x" / straight quotes instead of "a ? b" for punctuation
-# that has a clean ASCII equivalent. Anything NOT in this map still falls back to `?`.
-_ASCII_FOLD = {
-    "→": "->", "←": "<-", "↔": "<->",
-    "—": "-", "–": "-", "−": "-",
-    "≥": ">=", "≤": "<=", "≠": "!=", "±": "+/-",
-    "‘": "'", "’": "'", "“": '"', "”": '"',
-    "…": "...", "·": "-", "•": "-", "×": "x", " ": " ",
-}
-
-
 def _ascii_safe(s: str) -> str:
     """Encode *s* for the base-14 content stream. Never raises — common typographic Unicode
     (arrows, dashes, curly quotes, middot, multiply sign) is first folded to an ASCII
-    equivalent via `_ASCII_FOLD`; anything still outside printable ASCII then becomes ``?``
-    (the CLI's own `--ascii` fallback, ``text.encode("ascii", "replace")``)."""
-    s = s or ""
-    for u, a in _ASCII_FOLD.items():
-        if u in s:
-            s = s.replace(u, a)
-    return s.encode("ascii", "replace").decode("ascii")
+    equivalent; anything still outside printable ASCII then becomes ``?``.
+
+    B-484: this used to carry its OWN third fold table, a strict subset of
+    `textnorm.ASCII_MAP` except for U+2212 MINUS SIGN (now in the shared table). Folding
+    through the one table means a dash renders identically in the PDF and in the terminal
+    report it mirrors."""
+    return asciify(s or "")
 
 
 def _pdf_literal(s: str) -> str:

@@ -29,6 +29,7 @@ from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
 from .scoring import ScoreResult, assessment_coverage
+from .textnorm import ASCII_MAP, asciify
 
 # Findings, skill names, decoded payload previews and native-audit fields are UNTRUSTED
 # data. Strip terminal-control sequences (ANSI/OSC incl. OSC-52 clipboard), bidi overrides
@@ -439,15 +440,12 @@ def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
         lines.append(f"{_g('roadmap')} roadmap {len(roadmap)} (no check yet): {names}")
     return lines
 
-_ASCII_MAP = str.maketrans({
-    "×": "x", "≤": "<=", "≥": ">=", "—": "-", "–": "-", "…": "...",
-    "’": "'", "‘": "'", "“": '"', "”": '"', "≈": "~", "→": "->", "•": "*",
-})
-
-
-def _asciify(text: str) -> str:
-    """Fold the unicode we emit down to pure ASCII for legacy consoles."""
-    return text.translate(_ASCII_MAP).encode("ascii", "replace").decode("ascii")
+# B-484: the table and the function now live in the `textnorm` leaf, because five other
+# modules folded output to ASCII too and only one of them mapped anything. Re-exported
+# under the private names this module has always used so every existing importer (tests
+# included) is unaffected.
+_ASCII_MAP = ASCII_MAP
+_asciify = asciify
 
 
 def compute_scan_receipt(findings) -> str:
@@ -3183,7 +3181,13 @@ def render_advise(profile, ascii_only: bool = False) -> str:
         lines.append("  If this is your real installed skill, do NOT delete it — act on the")
         lines.append("  verdict above instead (e.g. uninstall through your normal flow).")
     lines.append("  (run --json for the full finding list + axis breakdown)")
-    return "\n".join(lines)
+    out = "\n".join(lines)
+    # B-484: this renderer read `ascii_only` for its icon table and its `dash` variable and
+    # then emitted hardcoded em dashes anyway (the verdict headline, the CAUTION fallback),
+    # plus whatever unicode a finding's own text carries — so `--advise --ascii` was the one
+    # mode that still printed raw unicode. Same closing guard every other renderer here ends
+    # with, so nothing depends on remembering to use `dash`.
+    return asciify(out) if ascii_only else out
 
 
 def render_advise_json(profile, *, version: str) -> str:

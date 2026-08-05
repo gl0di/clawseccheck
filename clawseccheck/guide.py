@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from .catalog import FAIL, WARN, Finding
 from .scoring import ScoreResult
+from .textnorm import asciify
 
 
 @dataclass
@@ -156,5 +157,5 @@ def render_next_actions(
 
     out = "\n".join(lines).rstrip() + "\n"
     if ascii_only:
-        out = out.encode("ascii", "replace").decode("ascii")
+        out = asciify(out)
     return out

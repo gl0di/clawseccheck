@@ -51,6 +51,10 @@ from .checks import (
 )
 from .collector import Context, dig
 from .scanbudget import limits_for
+# B-484: `_asciify` was a SECOND, narrower copy of report.py's table (no ·, ×,
+# ≤, ≥, ≈, •) — the drift a duplicated table always produces. Both surfaces now
+# fold through the one table in the textnorm leaf.
+from .textnorm import asciify as _asciify
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data model
@@ -2382,21 +2386,6 @@ def risk_paths(ctx: Context, findings: list[Finding],
 # ──────────────────────────────────────────────────────────────────────────────
 # Renderer
 # ──────────────────────────────────────────────────────────────────────────────
-
-_ASCII_MAP = str.maketrans({
-    "→": "->",  # →
-    "—": "-",   # —
-    "–": "-",   # –
-    "…": "...", # …
-    "‘": "'",   # '
-    "’": "'",   # '
-    "“": '"',   # "
-    "”": '"',   # "
-})
-
-
-def _asciify(text: str) -> str:
-    return text.translate(_ASCII_MAP).encode("ascii", "replace").decode("ascii")
 
 
 def render_risk_paths(paths: list[RiskPath], ascii_only: bool = False) -> str:

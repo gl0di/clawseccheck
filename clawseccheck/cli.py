@@ -96,6 +96,7 @@ from .palette import render_palette
 from .percentile import render_percentile
 from .logsafe import get_logger
 from .safeio import secure_write_bytes, secure_write_text
+from .textnorm import asciify
 from .incident import render_incident
 from .trajaudit import render_trajectory_analysis
 from .behavioral import analyze as _behavioral_analyze
@@ -135,7 +136,7 @@ def _emit(text: str) -> None:
     try:
         print(text)
     except UnicodeEncodeError:
-        print(text.encode("ascii", "replace").decode("ascii"))
+        print(asciify(text))
 
 
 @contextlib.contextmanager
@@ -1080,6 +1081,14 @@ def _flag_coherence_notes(args) -> list[str]:
         # with no primary mode active here, --dashboard cannot be the one that ran.
         if bool(getattr(args, "compact", False)):
             notes.append("note: --compact has no effect without --dashboard --full")
+        # B-483: --purge / --apply-ignore-proposals are the only two consumers of --yes,
+        # and both are primary modes — so reaching HERE at all means no mode that can
+        # honor it ran. Checked in this branch too (not only the winning-mode one below),
+        # because the default report path is exactly where a scripted `--yes` most often
+        # lands, believing it disabled a confirmation gate it never reached.
+        if bool(getattr(args, "yes", False)):
+            notes.append("note: --yes has no effect without --purge or "
+                         "--apply-ignore-proposals")
         return notes  # the default path honors every tracked global modifier
     win_attr, win_flag = active[0]
     ignored = [
@@ -1163,6 +1172,14 @@ def _flag_coherence_notes(args) -> list[str]:
     # default path or writes no history at all, where --no-history is a no-op).
     if win_attr in ("trend", "monitor") and bool(getattr(args, "no_history", False)):
         no_effect.append("--no-history")
+    # B-483: --yes skips the confirmation prompt for exactly two commands, and its own
+    # help already says "has no effect without one of those two" — but nothing enforced
+    # that, so passing it anywhere else was silently accepted. That is the specific
+    # failure this whole warn-and-continue mechanism exists to prevent: a scripted run
+    # that believes it disabled an interactive gate it never reached.
+    if (bool(getattr(args, "yes", False))
+            and win_attr not in ("purge", "apply_ignore_proposals")):
+        no_effect.append("--yes")
     if no_effect:
         notes.append(f"note: {', '.join(no_effect)} has no effect with {win_flag}")
     return notes
@@ -1343,6 +1360,21 @@ def _run_apply_ignore_proposals(args) -> int:
         return 0
 
     ignore_path = Path(args.home).expanduser() / ".clawseccheckignore"
+    # B-478: `append_entries` skips entries the file already holds, so a second apply of
+    # the same proposals printed the full list under "will be appended to ..." and then
+    # "Applied 0" — which reads as a failed write, not as the idempotency it actually is.
+    # Split the two here so the confirmation asks about what will really be written, and
+    # the outcome line accounts for every entry. `written` below stays authoritative
+    # (append_entries re-reads the file, so a concurrent edit is reflected there, not here).
+    # Read the file ONCE: `load_ignore` inside the comprehension would re-read it per
+    # entry, and would also compare different entries against different on-disk states.
+    _existing = load_ignore(args.home)
+    already = [e for e in entries if e in _existing]
+    entries = [e for e in entries if e not in _existing]
+    if not entries:
+        _emit(f"Nothing to apply — all {len(already)} proposed "
+              f"entr{'y is' if len(already) == 1 else 'ies are'} already in {ignore_path}.")
+        return 0
     if not args.yes:
         proceed, eof = _confirm_apply_ignore(entries, ignore_path)
         if not proceed:
@@ -1366,7 +1398,8 @@ def _run_apply_ignore_proposals(args) -> int:
         # writing through it — surface that plainly instead of a generic crash.
         _emit(f"clawseccheck: could not write {ignore_path} ({type(exc).__name__}); nothing applied.")
         return 1
-    _emit(f"Applied {written} judge-proposed suppression(s) to {ignore_path}.")
+    tail = (f" ({len(already)} more were already present.)" if already else "")
+    _emit(f"Applied {written} judge-proposed suppression(s) to {ignore_path}.{tail}")
     return 0
 
 
@@ -1583,11 +1616,22 @@ def _main(argv=None) -> int:
                    help="print a two-phase multi-turn taint harness (plant a poisoned rule, "
                         "then trigger it in a later turn)")
     p.add_argument("--self-test", action="store_true",
-                   help="run canary + live red-team + dry-run harnesses together")
+                   # B-480: this named three of the four harnesses it renders — the
+                   # multi-turn plant/trigger harness has always been in this mode's
+                   # output and was missing from its own description.
+                   help="render all four self-test harnesses together: canary + live "
+                        "red-team + dry-run + multi-turn (use --seed for reproducible "
+                        "tokens)")
     p.add_argument("--full", action="store_true",
-                   help="run audit + self-test + vet-mcp in one command "
-                        "(human output path; self-test emits deterministic test material only, "
-                        "does not attack; extra sections skipped in --json / --card mode)")
+                   # B-481: "extra sections skipped in --json / --card" was half wrong.
+                   # --json runs the whole pipeline and merges its output as additional
+                   # top-level keys (judgePacket, coveragePage, phases, vetPackets, ...);
+                   # only --card drops them. Telling a CI user their --json run skips the
+                   # deep phases misdescribes both its cost and its content.
+                   help="run audit + self-test + vet-mcp + the deep phases in one command "
+                        "(self-test emits deterministic test material only, does not "
+                        "attack; --json delivers the extra sections as additional keys "
+                        "rather than printed blocks, --card drops them)")
     p.add_argument("--quiet", action="store_true",
                    help="only with --full: collapse the appended self-test and vet-mcp "
                         "sections to one-line summaries (lighter for CI logs / scroll); the "
@@ -1719,7 +1763,9 @@ def _main(argv=None) -> int:
     p.add_argument("--debug", action="store_true",
                    help="emit DEBUG-level log breadcrumbs to stderr")
     p.add_argument("--log", metavar="PATH", default=None,
-                   help="also write log output to PATH (only when given)")
+                   help="also write INFO-level log output to PATH (only when given; "
+                        "raises the FILE's level to INFO, never the console's — pass "
+                        "--verbose/--debug for that)")
     args = p.parse_args(argv)
 
     # Surface (on stderr) any second mode flag or global modifier the resolved mode

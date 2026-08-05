@@ -258,13 +258,24 @@ def get_logger(
     else:
         level = logging.WARNING
 
-    logger.setLevel(level)
+    # B-479: a requested log FILE is never empty. The default level is WARNING and this
+    # tool warns almost never, so `--log run.log` on its own produced no file at all (the
+    # handler creates it lazily, on the first record) — the flag whose whole purpose is
+    # "write log output to PATH" did nothing unless you also happened to pass --verbose.
+    # Asking for a log file is asking for log lines.
+    #
+    # The LOGGER's level drops to INFO so records reach the file, and the STDERR handler
+    # keeps the level the flags actually asked for — so --log changes what is written to
+    # the file, never what is printed at the user. Without the per-handler level, --log
+    # would silently turn on verbose console output nobody requested.
+    logger.setLevel(min(level, logging.INFO) if logfile is not None else level)
 
     fmt = logging.Formatter("%(levelname)s %(name)s: %(message)s")
     filt = _RedactingFilter()
 
     # Handler 1: stderr (always)
     stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(level)
     stderr_handler.setFormatter(fmt)
     stderr_handler.addFilter(filt)
     logger.addHandler(stderr_handler)
