@@ -61,7 +61,7 @@ can append entries to its own suppression file — see
 <summary>See a longer excerpt of the same report</summary>
 
 <p align="center">
-  <img src="docs/assets/report.png" alt="A longer excerpt: score header, counts, and findings grouped by area, most urgent first" width="740">
+  <img src="docs/assets/report.png" alt="A longer excerpt: score header, counts, an inventory-by-subject summary, and findings grouped by subject, most urgent first" width="740">
 </p>
 
 </details>

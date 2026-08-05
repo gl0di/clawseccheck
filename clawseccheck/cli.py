@@ -2071,7 +2071,7 @@ def _main(argv=None) -> int:
         try:
             secure_write_text(
                 Path(args.html).expanduser(),
-                render_html(findings, score, native=ctx.native),
+                render_html(findings, score, native=ctx.native, ctx=ctx),
             )
             _emit(f"(HTML report written to {args.html})")
             return 0
@@ -2090,7 +2090,8 @@ def _main(argv=None) -> int:
 
     if args.pdf:
         try:
-            secure_write_bytes(Path(args.pdf).expanduser(), render_pdf(findings, score, native=ctx.native))
+            secure_write_bytes(Path(args.pdf).expanduser(),
+                               render_pdf(findings, score, native=ctx.native, ctx=ctx))
             _emit(
                 f"(PDF report written to {args.pdf} — attach this file itself into the "
                 "chat, do not re-render its contents or paste the path; a mobile client "

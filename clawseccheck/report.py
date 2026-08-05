@@ -861,6 +861,88 @@ def _subject_of(f) -> str | None:
     return SUBJECT_OF.get(meta.surface)
 
 
+def _group_issues_by_subject(issues):
+    """Group findings by their Inventory subject (catalog.SUBJECT_ORDER), lossless: every
+    finding lands in exactly one bucket, and any finding whose `_subject_of` is None (an id
+    outside CATALOG) falls into a trailing "Other" bucket so nothing is ever silently
+    dropped (B-444 class). Returns an ordered list of `(subject_key, label, [findings])`
+    for each subject that has >=1 member; empty subjects are skipped so the detail view
+    stays focused (the per-subject summary above still names all of them). This is the
+    single grouping the terminal, HTML and PDF renderers all consume, so they cannot drift
+    — the same role `_family_of` + the `(*FAMILY_ORDER, None)` loop played for the old
+    family view (F-131 subject taxonomy, promoted from summary-only to the detail view)."""
+    grouped: dict = {}
+    for f in issues:
+        grouped.setdefault(_subject_of(f), []).append(f)
+    out = []
+    for subj_key in SUBJECT_ORDER:
+        members = grouped.get(subj_key)
+        if members:
+            out.append((subj_key, SUBJECT_LABEL.get(subj_key, subj_key), members))
+    other = grouped.get(None)
+    if other:
+        out.append((None, "Other", other))
+    return out
+
+
+def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
+    """Uniform per-subject summary rows — one `(label, status, count_text)` tuple per
+    catalog.SUBJECT_ORDER entry — for the HTML and PDF report headers. Derived entirely
+    from `build_inventory()`, so this summary can never disagree with the JSON `inventory`
+    payload or the terminal "Inventory by subject" block (`render_subject_inventory`).
+    Returns [] when `ctx` is unavailable (same skip-don't-guess stance those surfaces
+    already take)."""
+    if ctx is None:
+        return []
+    inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
+
+    def _issues_count(subj):
+        n = len(inv[subj].get("findings") or [])
+        return f"{n} issue(s)" if n else "clear"
+
+    rows = [
+        (SUBJECT_LABEL["openclaw"], inv["openclaw"]["status"], _issues_count("openclaw")),
+        (SUBJECT_LABEL["host"], inv["host"]["status"], _issues_count("host")),
+    ]
+    ag = inv["agents"]
+    n_ag = len(ag.get("roster") or [])
+    rows.append((SUBJECT_LABEL["agents"], ag["status"],
+                 f"{_issues_count('agents')} · {n_ag} agent{'' if n_ag == 1 else 's'}"))
+
+    skills = inv["skills"]
+    sk_flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
+    sk_status = _worst_of_statuses(s.get("status") for s in sk_flagged) if sk_flagged else PASS
+    sk_count = f"{len(sk_flagged)} flagged · {len(skills)} installed" if skills else "none installed"
+    rows.append((SUBJECT_LABEL["skills"], sk_status, sk_count))
+
+    mcp = inv["mcp"]
+    mcp_bad = [m for m in mcp if m.get("verdict") != "ok"]
+    mcp_status = _worst_of_statuses(m.get("verdict") for m in mcp_bad) if mcp_bad else PASS
+    mcp_count = f"{len(mcp_bad)} flagged · {len(mcp)} configured" if mcp else "none configured"
+    rows.append((SUBJECT_LABEL["mcp"], mcp_status, mcp_count))
+
+    plug = inv["plugins"]
+    if not plug.get("scanned"):
+        rows.append((SUBJECT_LABEL["plugins"], UNKNOWN, "not scanned — run --full"))
+    else:
+        prows = plug.get("rows") or []
+        # Fold TRUNCATED/SKIPPED into UNKNOWN for the rollup, as _plugins_inventory_lines
+        # does — _worst_of_statuses only recognizes FAIL/WARN/UNKNOWN/PASS (_STATUS_ORDER).
+        pstat = [r["status"] if r["status"] in _STATUS_ORDER else UNKNOWN for r in prows]
+        p_flagged = sum(1 for s in pstat if s in (FAIL, WARN, UNKNOWN))
+        p_status = _worst_of_statuses(pstat) if prows else PASS
+        p_count = f"{p_flagged} flagged · {len(prows)} installed" if prows else "none installed"
+        rows.append((SUBJECT_LABEL["plugins"], p_status, p_count))
+
+    ch = inv["channels"]
+    n_ch = len(ch.get("roster") or [])
+    ch_count = _issues_count("channels") + (f" · {n_ch} channel{'' if n_ch == 1 else 's'}" if n_ch else "")
+    rows.append((SUBJECT_LABEL["channels"], ch["status"], ch_count))
+
+    rows.append((SUBJECT_LABEL["logs"], inv["logs"]["status"], _issues_count("logs")))
+    return rows
+
+
 def _render_finding_compact(lines, icon, f):
     """One-line roster entry for PASS/UNKNOWN — full detail would bury the FAILs/WARNs."""
     lines.append(f"  {icon[f.status]} [{f.severity}] {_sanitize(f.title)}")
@@ -1461,7 +1543,7 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
                                           ascii_only=ascii_only))
 
     lines.append(rule_char * 68)
-    lines.append(" (details by security family below)")
+    lines.append(" (details by subject below)")
     out = "\n".join(lines).rstrip() + "\n"
     if ascii_only:
         return _asciify(out)
@@ -1777,24 +1859,27 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(f"No known attack pattern matched. Keep it that way. {ok}")
     else:
         if issues:
-            lines.append(f"{len(issues)} issue(s), grouped by area — most urgent first within each:")
+            lines.append(f"{len(issues)} issue(s), grouped by subject — most urgent first within each:")
         else:
             lines.append(f"No known attack pattern matched. Keep it that way. {ok}")
         lines.append("")
-        # Group EVERY finding (not just FAIL/WARN) by its OpenClaw surface family so the
-        # Dashboard reads as coverage-by-category rather than a flat severity dump, and so
-        # the Lethal Trifecta (A1) shows up as one Privilege & Execution finding among
-        # others instead of a standalone headline (F-044). PASS/UNKNOWN are collapsed to a
-        # one-line roster per family — still listed (nothing hidden), just not walled in green.
+        # Group EVERY finding (not just FAIL/WARN) by its Inventory subject (OpenClaw core /
+        # Host / Agents / Skills / MCP / Channels / Logs) so the report reads as coverage-
+        # by-subject — matching the "Inventory by subject" block directly above — rather
+        # than a flat severity dump. A1 (Lethal Trifecta) routes to Agents via its
+        # "trifecta" surface (SUBJECT_OF), so it shows up as one Agents finding among others
+        # instead of a standalone headline (F-044). Findings with an id outside CATALOG fall
+        # into a trailing "Other" bucket (nothing silently dropped). PASS/UNKNOWN are
+        # collapsed to a one-line roster per subject — still listed, just not walled in green.
         grouped: dict[str | None, list[Finding]] = {}
         for f in unsuppressed_all:
-            grouped.setdefault(_family_of(f), []).append(f)
-        for fam_key in (*FAMILY_ORDER, None):
-            members = grouped.get(fam_key)
+            grouped.setdefault(_subject_of(f), []).append(f)
+        for subj_key in (*SUBJECT_ORDER, None):
+            members = grouped.get(subj_key)
             if not members:
                 continue
             members.sort(key=lambda f: (_STATUS_ORDER.get(f.status, 9), _SEV_ORDER.get(f.severity, 9)))
-            label = FAMILY_LABEL.get(fam_key, "Other")
+            label = SUBJECT_LABEL.get(subj_key, "Other")
             label_disp = paint(label, "bold", enabled=True) if color else label
             n_bad = sum(1 for f in members if f.status in (FAIL, WARN))
             count_text = f"{n_bad} issue(s)" if n_bad else "clear"
@@ -3168,7 +3253,8 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     return json.dumps(_sanitize_tree(payload), ensure_ascii=True, indent=2)
 
 
-def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str:
+def render_html(findings: list[Finding], score: ScoreResult, native=None,
+                *, ctx=None, plugin_sweep=None) -> str:
     """Standalone self-contained HTML report (inline CSS, no external assets).
 
     Includes the brand mark + wordmark, a grade badge (colored via
@@ -3241,25 +3327,17 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
         findings_html = f'<div class="all-clear">✓ {no_issues_text}</div>'
         nav_html = ""
     else:
-        grouped: dict = {}
-        for f in issues:
-            grouped.setdefault(_family_of(f), []).append(f)
-
         nav_items = []
         sections = []
-        for fam_key in (*FAMILY_ORDER, None):
-            fam_issues = grouped.get(fam_key)
-            if not fam_issues:
-                continue
-            label = FAMILY_LABEL.get(fam_key, "Other")
-            anchor = "fam-" + (fam_key or "other")
+        for subj_key, label, subj_issues in _group_issues_by_subject(issues):
+            anchor = "subj-" + (subj_key or "other")
             nav_items.append(
                 f'<a class="nav-chip" href="#{anchor}">{esc(label)} '
-                f'<span class="nav-count">{len(fam_issues)}</span></a>')
-            cards = "".join(_finding_card(f) for f in fam_issues)
+                f'<span class="nav-count">{len(subj_issues)}</span></a>')
+            cards = "".join(_finding_card(f) for f in subj_issues)
             sections.append(f'''
             <section class="family" id="{anchor}">
-                <h3 class="family-head">{esc(label)}<span class="family-count">{len(fam_issues)}</span></h3>
+                <h3 class="family-head">{esc(label)}<span class="family-count">{len(subj_issues)}</span></h3>
                 {cards}
             </section>''')
         nav_html = f'<nav class="famnav" aria-label="Jump to finding group">{"".join(nav_items)}</nav>'
@@ -3271,6 +3349,27 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
         f'<span class="sev-chip-n">{n}</span>{esc(sev)}</span>'
         for sev, n in sev_counts.items() if n)
     summary_html = f'<div class="summary">{summary_chips}</div>' if summary_chips else ""
+
+    # F-131 subject taxonomy, promoted into the HTML export: a compact "Inventory by
+    # subject" table above the findings, derived from the SAME build_inventory() the JSON
+    # payload and the terminal "Inventory by subject" block use (single source of truth).
+    # "" when ctx is unavailable (a bare render_html(findings, score) call) — degrades to
+    # no table, never a fabricated one.
+    summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
+    if summary_rows:
+        _st_color = {FAIL: "#d9534f", WARN: "#d9a406", PASS: "#1a7f37", UNKNOWN: "#8a8f98"}
+        _inv_rows = "".join(
+            f'<tr><td class="subj-name">{esc(label)}</td>'
+            f'<td class="subj-count">{esc(count_text)}</td>'
+            f'<td class="subj-status"><span class="subj-dot" style="--dot:{_st_color.get(status, "#8a8f98")};"></span>'
+            f'{esc(status)}</td></tr>'
+            for label, status, count_text in summary_rows)
+        subject_inventory_html = (
+            '<section class="inventory" aria-label="Inventory by subject">'
+            '<h2 class="section-title">Inventory by subject</h2>'
+            f'<table class="subj-table"><tbody>{_inv_rows}</tbody></table></section>')
+    else:
+        subject_inventory_html = ""
 
     # B-306 (C-135 follow-up #3, 2026-07-21): gate on the granular cap signals, not
     # `score.capped` alone — see the matching comment in render_report for why
@@ -3446,6 +3545,14 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
             color: #1a7f37; background: color-mix(in srgb, #1a7f37 12%, transparent);
             border: 1px solid color-mix(in srgb, #1a7f37 35%, transparent);
         }}
+        .inventory {{ margin: 1.75rem 0 0; }}
+        .subj-table {{ width: 100%; border-collapse: collapse; font-size: 0.92rem; margin-top: 0.5rem; }}
+        .subj-table td {{ padding: 0.5rem 0; border-bottom: 1px solid var(--line); }}
+        .subj-name {{ font-weight: 700; color: var(--ink); }}
+        .subj-count {{ color: var(--muted); }}
+        .subj-status {{ text-align: right; white-space: nowrap; color: var(--muted); }}
+        .subj-dot {{ display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%;
+            background: var(--dot); margin-right: 0.4rem; vertical-align: middle; }}
         .footer {{ margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
             text-align: center; color: var(--muted); font-size: 0.8rem; }}
         @media (max-width: 560px) {{ .container {{ padding: 1.4rem; }} .header h1 {{ font-size: 1.3rem; }} }}
@@ -3469,6 +3576,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None) -> str
             <span class="warn-title">{esc(private_title)}</span>
             <span>{private_body} Use the shareable badge instead (available via <code>--badge</code>).</span>
         </div>
+
+        {subject_inventory_html}
 
         <h2 class="section-title">{esc(section_findings)}</h2>
         {nav_html}

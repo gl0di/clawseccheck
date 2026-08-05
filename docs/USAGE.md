@@ -73,9 +73,10 @@ When you run the skill inside OpenClaw, the agent executes `audit.py`, captures 
 and shows it to you **right there in the chat** — no terminal, no setup. You see:
 
 1. your **Score / Grade**,
-2. **findings grouped by area** (network, privilege, supply chain, secrets, …), most urgent
-   first within each — the Lethal Trifecta shows up here too, as a Privilege & Execution
-   finding, not a separate headline, and
+2. an **Inventory by subject** summary (OpenClaw core, host, agents, skills, MCP, channels,
+   logs) — each with a rolled-up verdict — followed by **findings grouped by that same
+   subject**, most urgent first within each; the Lethal Trifecta shows up here too, as an
+   Agents finding, not a separate headline, and
 3. a **shareable card** — grade + score + Lethal Trifecta ratio, safe to post (the findings stay
    private; `--badge` writes the same grade + score as an SVG).
 
@@ -136,7 +137,7 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 
 | You say | What happens | Under the hood |
 |---|---|---|
-| "Audit my setup, what's my grade?" | Runs the full audit, shows Score + Grade (A–F) and findings grouped by area, most urgent first. | `clawseccheck` (no flags) |
+| "Audit my setup, what's my grade?" | Runs the full audit, shows Score + Grade (A–F), an inventory-by-subject summary, and findings grouped by subject, most urgent first. | `clawseccheck` (no flags) |
 | "Is this skill safe to install?" / "Vet this before I install it" | Scans the skill's content for malware patterns, injection directives, and supply-chain risk *before* you enable it — type is autodetected. | `--vet <path>` (or `--vet-skill <path>` / `--vet-plugin <path>` to force an engine) |
 | "Is this safe to even download?" | Checks the *source*'s identity (typosquat, known-bad, unpinned ref) with zero network before anything is fetched. | `--vet-source <slug\|url\|pkg>` |
 | "Are my MCP servers trustworthy?" | Vets every connected MCP server for supply-chain risk (unpinned installs, plaintext transports, broad OAuth scopes) *and* scans each server's declared tool descriptions for the same malware/injection patterns `--vet` checks a skill for. | `--vet-mcp` |

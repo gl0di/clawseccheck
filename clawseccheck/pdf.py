@@ -39,10 +39,11 @@ from __future__ import annotations
 
 import zlib
 
-from .brand import SEVERITY, grade_hex
-from .catalog import CRITICAL, FAIL, FAMILY_LABEL, FAMILY_ORDER, HIGH, LOW, MEDIUM, WARN, Finding
+from .brand import BRAND_RED, GRADE_HEX, SEVERITY, WORDMARK, grade_hex
+from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
 from .report import (
-    _cap_also_clause, _cap_cascade, _cap_primary_reason_text, _family_of, _sanitize, _SEV_ORDER, _trifecta_ratio,
+    _cap_also_clause, _cap_cascade, _cap_primary_reason_text, _group_issues_by_subject,
+    _sanitize, _SEV_ORDER, _subject_summary_rows, _trifecta_ratio,
 )
 from .scoring import ScoreResult
 
@@ -88,11 +89,28 @@ _TOP_Y = _PAGE_H - _MARGIN
 _BOTTOM_Y = _MARGIN + _FOOTER_H
 
 
+# Common typographic Unicode -> ASCII, folded BEFORE the lossy `?` replacement so the
+# base-14 PDF renders "a -> b" / "x" / straight quotes instead of "a ? b" for punctuation
+# that has a clean ASCII equivalent. Anything NOT in this map still falls back to `?`.
+_ASCII_FOLD = {
+    "→": "->", "←": "<-", "↔": "<->",
+    "—": "-", "–": "-", "−": "-",
+    "≥": ">=", "≤": "<=", "≠": "!=", "±": "+/-",
+    "‘": "'", "’": "'", "“": '"', "”": '"',
+    "…": "...", "·": "-", "•": "-", "×": "x", " ": " ",
+}
+
+
 def _ascii_safe(s: str) -> str:
-    """Encode *s* for the base-14 content stream. Never raises — any byte outside the
-    printable ASCII range becomes ``?``, matching the CLI's own `--ascii` fallback
-    (`cli.py`'s ``text.encode("ascii", "replace")``)."""
-    return (s or "").encode("ascii", "replace").decode("ascii")
+    """Encode *s* for the base-14 content stream. Never raises — common typographic Unicode
+    (arrows, dashes, curly quotes, middot, multiply sign) is first folded to an ASCII
+    equivalent via `_ASCII_FOLD`; anything still outside printable ASCII then becomes ``?``
+    (the CLI's own `--ascii` fallback, ``text.encode("ascii", "replace")``)."""
+    s = s or ""
+    for u, a in _ASCII_FOLD.items():
+        if u in s:
+            s = s.replace(u, a)
+    return s.encode("ascii", "replace").decode("ascii")
 
 
 def _pdf_literal(s: str) -> str:
@@ -292,6 +310,151 @@ class _PageFlow:
         self.ensure_space(h)
         self.y -= h
 
+    def raw(self, op: str) -> None:
+        """Append a raw content-stream fragment (path/graphics ops) to the current page.
+        Used for the header band + logo mark — absolute vector drawing rather than the
+        line-flow text every other method funnels through. The caller owns the graphics
+        state it sets (colours/line-width); `_logo_ops` wraps its own ops in q/Q so
+        nothing leaks into the text that follows."""
+        self._page_ops.append(op)
+
+    def text_abs(self, x: float, y: float, text: str, size: float, *,
+                 bold: bool = False, rgb: tuple = (0.0, 0.0, 0.0)) -> None:
+        """Draw one line of text at an ABSOLUTE (x, y) baseline — no wrapping, no y-advance,
+        no page break. For the header/badge/summary-table cells, whose layout is positioned
+        by hand near the top of page 1; callers pass short fixed-width label text that fits.
+        Same sanitize -> ascii-safe -> pdf-literal pipeline as `line`."""
+        safe = _pdf_literal(_ascii_safe(_sanitize(text)))
+        r, g, b = rgb
+        font = "/F2" if bold else "/F1"
+        self._page_ops.append(
+            f"BT {font} {size:g} Tf {r:.3f} {g:.3f} {b:.3f} rg "
+            f"1 0 0 1 {x:.2f} {y:.2f} Tm ({safe}) Tj ET")
+
+
+# ---------------------------------------------------------------------------
+# Vector drawing — the brand mark as native PDF path ops, plus the branded header,
+# severity chips and per-subject summary table. base-14 forbids embedding a font, but
+# PDF draws vector paths itself, so the logo is the SAME geometry as brand.LOGO_SVG,
+# rendered crisp at any size (no raster, no external asset — Golden Rule #1).
+# ---------------------------------------------------------------------------
+_KAPPA = 0.5522847498  # cubic-bezier control-point factor for a quarter-circle arc
+
+# status -> swatch colour for the subject-summary table (grade ramp; UNKNOWN neutral grey)
+_STATUS_HEX = {FAIL: GRADE_HEX["F"], WARN: GRADE_HEX["C"], PASS: GRADE_HEX["B"], UNKNOWN: "#9f9f9f"}
+
+
+def _circle_path(cx: float, cy: float, r: float) -> str:
+    """Four cubic-bezier arcs approximating a full circle (PDF has no arc primitive).
+    Path-construction ops only (no paint op) — the caller appends ``S`` (stroke) or
+    ``f`` (fill)."""
+    k = _KAPPA * r
+    return (f"{cx + r:.2f} {cy:.2f} m "
+            f"{cx + r:.2f} {cy + k:.2f} {cx + k:.2f} {cy + r:.2f} {cx:.2f} {cy + r:.2f} c "
+            f"{cx - k:.2f} {cy + r:.2f} {cx - r:.2f} {cy + k:.2f} {cx - r:.2f} {cy:.2f} c "
+            f"{cx - r:.2f} {cy - k:.2f} {cx - k:.2f} {cy - r:.2f} {cx:.2f} {cy - r:.2f} c "
+            f"{cx + k:.2f} {cy - r:.2f} {cx + r:.2f} {cy - k:.2f} {cx + r:.2f} {cy:.2f} c")
+
+
+def _quad_to_cubic_path(p0, ctrl, p1) -> str:
+    """One quadratic Bezier (LOGO_SVG's ``Q`` claw arcs) exactly converted to the cubic
+    ``c`` PDF operator: cp1 = p0 + 2/3(ctrl-p0), cp2 = p1 + 2/3(ctrl-p1). Returns
+    ``m ... c`` (no paint op)."""
+    x0, y0 = p0
+    cx, cy = ctrl
+    x1, y1 = p1
+    c1x, c1y = x0 + 2.0 / 3.0 * (cx - x0), y0 + 2.0 / 3.0 * (cy - y0)
+    c2x, c2y = x1 + 2.0 / 3.0 * (cx - x1), y1 + 2.0 / 3.0 * (cy - y1)
+    return (f"{x0:.2f} {y0:.2f} m "
+            f"{c1x:.2f} {c1y:.2f} {c2x:.2f} {c2y:.2f} {x1:.2f} {y1:.2f} c")
+
+
+def _logo_ops(x0: float, y0: float, size: float, rgb=(1.0, 1.0, 1.0)) -> str:
+    """`brand.LOGO_SVG` rendered as native PDF path ops, in *rgb*, inside a *size*-point
+    box whose bottom-left is (x0, y0): a ring, two claw arcs and a centre dot — the same
+    geometry as the SVG, drawn white for the BRAND_RED header band. SVG is y-down, PDF is
+    y-up, so every point is flipped through (64 - sy). Wrapped in q/Q so its colour and
+    line-width never leak into later content."""
+    s = size / 64.0
+
+    def _p(sx, sy):
+        return (x0 + sx * s, y0 + (64.0 - sy) * s)
+
+    r, g, b = rgb
+    out = [f"q {r:.3f} {g:.3f} {b:.3f} RG {r:.3f} {g:.3f} {b:.3f} rg 1 J 1 j"]
+    out.append(f"{2.6 * s:.2f} w " + _circle_path(*_p(32, 32), 29.0 * s) + " S")
+    out.append(f"{4.0 * s:.2f} w " + _quad_to_cubic_path(_p(20, 24), _p(13, 32), _p(20, 40)) + " S")
+    out.append(_quad_to_cubic_path(_p(44, 24), _p(51, 32), _p(44, 40)) + " S")
+    out.append(_circle_path(*_p(32, 32), 5.0 * s) + " f")
+    out.append("Q")
+    return "\n".join(out)
+
+
+def _draw_header(flow: "_PageFlow", version: str) -> None:
+    """The BRAND_RED header band (page 1): full-bleed rectangle + white logo mark +
+    wordmark + subtitle + version. Sets `flow.y` to just below the band so the body
+    starts under it. No date is stamped — render_pdf output is deterministic byte-for-byte
+    per its docstring, and a clock read would break that."""
+    band_h = 74.0
+    flow.rect(0.0, _PAGE_H - band_h, _PAGE_W, band_h, BRAND_RED)
+    logo_sz = 36.0
+    flow.raw(_logo_ops(_MARGIN, _PAGE_H - band_h / 2.0 - logo_sz / 2.0, logo_sz, (1.0, 1.0, 1.0)))
+    tx = _MARGIN + logo_sz + 14.0
+    flow.text_abs(tx, _PAGE_H - 34.0, WORDMARK, 19, bold=True, rgb=(1.0, 1.0, 1.0))
+    flow.text_abs(tx, _PAGE_H - 50.0, "Security Audit Report", 10.5, rgb=(1.0, 0.86, 0.83))
+    right = f"v{version}"
+    flow.text_abs(_PAGE_W - _MARGIN - _text_width(right, 9.5), _PAGE_H - 34.0, right,
+                  9.5, rgb=(1.0, 0.86, 0.83))
+    flow.y = _PAGE_H - band_h - 20.0
+
+
+def _draw_chips(flow: "_PageFlow", sev_counts: dict) -> None:
+    """A row of filled severity chips (CRITICAL/HIGH/MEDIUM/LOW n) in the SEVERITY ramp,
+    white text — only the severities that actually occur."""
+    active = [(sev, n) for sev, n in sev_counts.items() if n]
+    if not active:
+        return
+    flow.ensure_space(22.0)
+    y = flow.y
+    x = _MARGIN
+    for sev, n in active:
+        text = f"{sev} {n}"
+        w = _text_width(text, 9, bold=True) + 14.0
+        style = SEVERITY.get(sev)
+        flow.rect(x, y - 15.0, w, 15.0, style.hex if style else "#999999")
+        flow.text_abs(x + 7.0, y - 11.0, text, 9, bold=True, rgb=(1.0, 1.0, 1.0))
+        x += w + 6.0
+    flow.y = y - 15.0 - 8.0
+
+
+def _draw_subject_summary(flow: "_PageFlow", rows) -> None:
+    """The "Inventory by subject" table: one row per subject — status swatch, label, and a
+    right-aligned "count · STATUS". Rows come from report._subject_summary_rows (derived
+    from build_inventory, so this cannot disagree with the JSON inventory)."""
+    for label, status, count in rows:
+        flow.ensure_space(16.0)
+        y = flow.y
+        flow.rect(_MARGIN, y - 10.0, 7.0, 7.0, _STATUS_HEX.get(status, "#9f9f9f"))
+        flow.text_abs(_MARGIN + 13.0, y - 9.0, label, 10)
+        right = f"{count}    {status}"
+        flow.text_abs(_PAGE_W - _MARGIN - _text_width(right, 9), y - 9.0, right,
+                      9, rgb=(0.42, 0.42, 0.42))
+        flow.y = y - 16.0
+        flow.rect(_MARGIN, flow.y + 4.0, _CONTENT_W, 0.4, "#e2e2e2")
+
+
+def _draw_subject_header(flow: "_PageFlow", label: str, n: int) -> None:
+    """A per-subject section header: a light bar with a BRAND_RED left accent and the
+    subject label + issue count."""
+    flow.ensure_space(26.0)
+    flow.spacer(4.0)
+    y = flow.y
+    flow.rect(_MARGIN, y - 17.0, _CONTENT_W, 19.0, "#f4efe9")
+    flow.rect(_MARGIN, y - 17.0, 3.0, 19.0, BRAND_RED)
+    flow.text_abs(_MARGIN + 11.0, y - 13.0, f"{label} - {n} issue(s)", 12, bold=True,
+                  rgb=(0.16, 0.16, 0.16))
+    flow.y = y - 17.0 - 8.0
+
 
 def _finding_block(flow: _PageFlow, f: Finding) -> None:
     sev_style = SEVERITY.get(f.severity)
@@ -318,9 +481,11 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
     flow.spacer(6.0)
 
 
-def render_pdf(findings: list[Finding], score: ScoreResult, native=None) -> bytes:
-    """Render the complete audit (all FAIL/WARN findings, grouped the same way
-    `render_html` groups them) as a paginated, base-14-only PDF. Returns bytes — this
+def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
+               *, ctx=None, plugin_sweep=None) -> bytes:
+    """Render the complete audit (all FAIL/WARN findings, grouped BY SUBJECT the same way
+    `render_html` groups them, under a branded header band + a per-subject summary table)
+    as a paginated, base-14-only PDF. Returns bytes — this
     renderer has no text form, unlike every other `render_*` in the package.
 
     Byte-level guarantees a caller can rely on (pinned by `tests/test_pdf.py`): starts
@@ -341,12 +506,34 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None) -> byte
     issues = [f for f in findings if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
 
-    flow.line("ClawSecCheck Security Audit Report", size=16, bold=True, gap_after=10.0)
+    # Lazy import: __version__ is assigned in __init__.py AFTER `from .pdf import
+    # render_pdf` runs, so a module-level import here would be a circular-import
+    # ImportError at package-init time (same reasoning as report.py's lazy imports).
+    from . import __version__ as _pkg_version  # noqa: PLC0415
+
+    # ── Branded header band (page 1) + grade badge ───────────────────────────────
+    _draw_header(flow, _pkg_version)
     grade_color = grade_hex(score.grade)
-    flow.rect(_MARGIN, flow.y - 40, 40, 40, grade_color)
-    flow.line(score.grade, size=22, bold=True, color="#ffffff", indent=13.0, gap_before=8.0, gap_after=8.0)
-    flow.line(f"Security score: {score.score}/100", size=11, indent=52.0, gap_after=2.0)
-    flow.line(f"Lethal Trifecta: {_trifecta_ratio(findings)}", size=10, indent=52.0, gap_after=2.0)
+    badge_top = flow.y
+    badge_s = 54.0
+    flow.rect(_MARGIN, badge_top - badge_s, badge_s, badge_s, grade_color)
+    # Centre the grade LETTER inside the badge — the old layout drew it a size above the
+    # box (baseline maths put a white glyph on the white page: invisible). Cap height is
+    # ~0.70 of the point size for Helvetica, so this centres it vertically in the square.
+    g_size = 30.0
+    g_w = _text_width(score.grade, g_size, bold=True)
+    flow.text_abs(_MARGIN + (badge_s - g_w) / 2.0, badge_top - badge_s + (badge_s - g_size * 0.70) / 2.0,
+                  score.grade, g_size, bold=True, rgb=(1.0, 1.0, 1.0))
+    tx = _MARGIN + badge_s + 16.0
+    flow.text_abs(tx, badge_top - 15.0, f"Security score {score.score}/100", 13, bold=True)
+    bar_y = badge_top - 27.0
+    flow.rect(tx, bar_y - 7.0, 210.0, 7.0, "#e6e6e6")
+    pct = max(0, min(100, int(score.score)))
+    if pct:
+        flow.rect(tx, bar_y - 7.0, 210.0 * pct / 100.0, 7.0, grade_color)
+    flow.text_abs(tx, badge_top - 46.0, f"Lethal Trifecta {_trifecta_ratio(findings)}",
+                  9.5, rgb=(0.40, 0.40, 0.40))
+    flow.y = badge_top - badge_s - 12.0
 
     degraded_n = getattr(score, "degraded_count", 0)
     if degraded_n:
@@ -354,39 +541,37 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None) -> byte
         flow.wrapped(
             f"Incomplete: {degraded_n} {plural} could not reach a reliable verdict this run "
             "(crashed, timed out, or hit unreadable/corrupted input) - this grade is incomplete.",
-            size=9.5, color="#b94a48", indent=52.0,
+            size=9.5, color="#b94a48",
         )
     primary, extras = _cap_cascade(score)
     if primary is not None:
         reason = _cap_primary_reason_text(primary, score)
         also = _cap_also_clause(extras)
-        flow.wrapped(f"Capped from {score.raw_score} ({reason}{also})", size=9.5, color="#b94a48", indent=52.0)
+        flow.wrapped(f"Capped from {score.raw_score} ({reason}{also})", size=9.5, color="#b94a48")
 
-    flow.spacer(10.0)
-    sev_counts = {sev: sum(1 for f in issues if f.severity == sev) for sev in (CRITICAL, HIGH, MEDIUM, LOW)}
-    summary = "  ".join(f"{sev}: {n}" for sev, n in sev_counts.items() if n)
-    if summary:
-        flow.line(summary, size=10, bold=True, gap_after=8.0)
-
+    # ── Severity chips ───────────────────────────────────────────────────────────
     flow.spacer(6.0)
+    sev_counts = {sev: sum(1 for f in issues if f.severity == sev) for sev in (CRITICAL, HIGH, MEDIUM, LOW)}
+    _draw_chips(flow, sev_counts)
 
+    # ── Inventory by subject (summary table) ─────────────────────────────────────
+    summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
+    if summary_rows:
+        flow.spacer(8.0)
+        flow.line("Inventory by subject", size=12.5, bold=True, gap_after=6.0)
+        _draw_subject_summary(flow, summary_rows)
+
+    # ── Findings, grouped by subject ─────────────────────────────────────────────
+    flow.spacer(10.0)
     if not issues:
         flow.line(
             "No known attack pattern matched across the audited surfaces. Keep it that way.",
             size=11, bold=True, color="#1a7f37",
         )
     else:
-        grouped: dict = {}
-        for f in issues:
-            grouped.setdefault(_family_of(f), []).append(f)
-        for fam_key in (*FAMILY_ORDER, None):
-            fam_issues = grouped.get(fam_key)
-            if not fam_issues:
-                continue
-            label = FAMILY_LABEL.get(fam_key, "Other")
-            flow.spacer(4.0)
-            flow.line(f"{label} ({len(fam_issues)})", size=12.5, bold=True, gap_after=6.0)
-            for f in fam_issues:
+        for _subj_key, subj_label, subj_issues in _group_issues_by_subject(issues):
+            _draw_subject_header(flow, subj_label, len(subj_issues))
+            for f in subj_issues:
                 _finding_block(flow, f)
 
     flow.finish()
@@ -394,11 +579,6 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None) -> byte
     pages_body = f"<< /Type /Pages /Kids [{' '.join(f'{n} 0 R' for n in flow.pages)}] /Count {len(flow.pages)} >>"
     doc.set_object(pages_num, pages_body.encode("ascii"))
     catalog_num = doc.add_object(f"<< /Type /Catalog /Pages {pages_num} 0 R >>".encode("ascii"))
-    # Lazy import: __version__ is assigned in __init__.py AFTER its `from .pdf import
-    # render_pdf` line runs, so a module-level import here would be a circular-import
-    # ImportError at package-init time (same reasoning as report.py's lazy `from
-    # .logsafe import redact` inside `_sanitize` — see that comment).
-    from . import __version__ as _pkg_version  # noqa: PLC0415
     info_num = doc.add_object(
         f"<< /Producer ({_pdf_literal(_ascii_safe('ClawSecCheck v' + _pkg_version))}) "
         f"/Title (ClawSecCheck Security Audit Report) >>".encode("ascii")

@@ -445,14 +445,15 @@ def test_render_report_includes_inventory_block_above_family_view():
     ctx, findings, score = audit(VULN)
     out = render_report(findings, score, ctx=ctx)
     assert "== INVENTORY BY SUBJECT" in out
-    # Locked decision 1 (design section 3): the block sits above the 7-FAMILY VIEW, not
-    # above the whole report. The grade is the headline and must stay at the top —
+    # Locked decision 1 (design section 3): the block sits above the SUBJECT DETAIL VIEW,
+    # not above the whole report. The grade is the headline and must stay at the top —
     # prepending the block to the entire report buried it under ~40 lines of findings,
-    # and the block's own closing line ("details by security family below") only reads
-    # correctly when the family view is what actually follows it.
+    # and the block's own closing line ("details by subject below") only reads correctly
+    # when the subject detail view is what actually follows it (C-372 promoted the detail
+    # view from families to subjects; the summary already led with subjects).
     assert out.index("Score:") < out.index("INVENTORY BY SUBJECT")
-    assert out.index("INVENTORY BY SUBJECT") < out.index("grouped by area")
-    assert out.index("details by security family below") < out.index("grouped by area")
+    assert out.index("INVENTORY BY SUBJECT") < out.index("grouped by subject")
+    assert out.index("details by subject below") < out.index("grouped by subject")
 
 
 def test_render_report_without_ctx_omits_inventory_block():
@@ -492,7 +493,7 @@ def test_family_view_content_unchanged_by_inventory_prepend(monkeypatch):
     # family view is carried over verbatim, and the preamble above it is unchanged.
     def _split_at_family(text):
         rows = text.split("\n")
-        i = next(i for i, row in enumerate(rows) if "grouped by area" in row)
+        i = next(i for i, row in enumerate(rows) if "grouped by subject" in row)
         return "\n".join(rows[:i]), "\n".join(rows[i:])
 
     pre_with, family_with = _split_at_family(with_inv)
@@ -503,3 +504,51 @@ def test_family_view_content_unchanged_by_inventory_prepend(monkeypatch):
     # not content, so compare rstripped.
     pre_with_no_block = pre_with[:pre_with.index("== INVENTORY BY SUBJECT")]
     assert pre_with_no_block.rstrip() == pre_without.rstrip()
+
+
+# ── C-372: shared subject grouping the report/HTML/PDF detail views consume ─────────────
+
+def test_group_issues_by_subject_is_lossless_ordered_and_buckets_other():
+    """Lossless (every finding in exactly one bucket), ordered by SUBJECT_ORDER, and an
+    off-catalog id routes into a trailing 'Other' bucket rather than being dropped
+    (B-444 class). Empty subjects are omitted from the detail view."""
+    from clawseccheck.catalog import FAIL, Finding, SUBJECT_ORDER, WARN
+    from clawseccheck.report import _group_issues_by_subject
+
+    def mk(i, st=FAIL):
+        return Finding(id=i, title=f"t {i}", severity="HIGH", status=st,
+                       detail="", fix="", framework="Test")
+
+    # B2 -> openclaw, A1 -> agents, C5 -> host, B26 -> channels, NATIVE-Z -> None (Other)
+    issues = [mk("B2"), mk("A1"), mk("C5", WARN), mk("B26", WARN), mk("NATIVE-Z")]
+    groups = _group_issues_by_subject(issues)
+
+    placed = [f for _k, _lbl, members in groups for f in members]
+    assert len(placed) == len(issues)
+    assert {id(f) for f in placed} == {id(f) for f in issues}
+
+    keys = [k for k, _lbl, _m in groups]
+    non_other = [k for k in keys if k is not None]
+    assert non_other == sorted(non_other, key=SUBJECT_ORDER.index)
+    assert keys[-1] is None
+    _k, other_label, other_members = groups[-1]
+    assert other_label == "Other"
+    assert [f.id for f in other_members] == ["NATIVE-Z"]
+    assert "skills" not in keys  # empty subjects omitted from the detail groups
+
+
+def test_subject_summary_rows_match_inventory_and_empty_without_ctx():
+    """The HTML/PDF summary rows are one per subject (SUBJECT_ORDER), agree with
+    build_inventory's per-subject status (single source of truth), and are [] without
+    ctx (skip-don't-guess, mirroring render_subject_inventory)."""
+    from clawseccheck.catalog import SUBJECT_LABEL, SUBJECT_ORDER
+    from clawseccheck.report import _subject_summary_rows, build_inventory
+
+    ctx, findings, _score = audit(VULN)
+    rows = _subject_summary_rows(findings, ctx)
+    assert [lbl for lbl, _st, _c in rows] == [SUBJECT_LABEL[s] for s in SUBJECT_ORDER]
+    inv = build_inventory(findings, ctx)
+    by_label = {lbl: st for lbl, st, _c in rows}
+    assert by_label[SUBJECT_LABEL["openclaw"]] == inv["openclaw"]["status"]
+    assert by_label[SUBJECT_LABEL["host"]] == inv["host"]["status"]
+    assert _subject_summary_rows(findings, None) == []

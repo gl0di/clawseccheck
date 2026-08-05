@@ -151,10 +151,11 @@ def test_single_finding_straddling_a_page_break_draws_no_broken_bar():
     the severity-color accent bar's start-y captured on one page and its end-y read on
     another — two different pages' coordinate spaces combined into one rect, which
     landed a meaningless-height rectangle on the wrong page. The bar is now skipped for
-    a block that straddles a page break rather than drawn broken; assert no `re f` rect
-    op appears in a content stream whose page differs from where the block started —
-    concretely, for this one-finding, multi-page document, no rect op should appear at
-    all after the header's grade-box rect on page 1."""
+    a block that straddles a page break rather than drawn broken. The finding's severity
+    accent bar is uniquely 2.2pt wide (see _finding_block); every OTHER rect the report
+    draws (header band, grade badge, score bar, severity chips, the subject summary
+    swatches/separators, the subject-section header accent) has a different width, so its
+    absence is a precise signal the straddled bar was skipped, not drawn broken."""
     long_detail = "word " * 3000  # forces this single finding across several pages
     f = _finding("B1", FAIL, detail=long_detail)
     data = render_pdf([f], compute([f]))
@@ -169,9 +170,9 @@ def test_single_finding_straddling_a_page_break_draws_no_broken_bar():
     assert len(page_streams) >= 2, "test setup: this detail must actually force >1 page"
     rect_lines = [line for s in page_streams for line in s.decode("ascii").splitlines()
                   if line.strip().endswith("re f")]
-    # The header's own grade-box rect is the only fill rect expected anywhere in this
-    # document — the straddled finding's accent bar must not add a second one.
-    assert len(rect_lines) == 1, f"expected exactly the grade-box rect, got: {rect_lines}"
+    # A rect op is "x y w h re f"; the finding accent bar is the only one 2.2pt wide.
+    accent_bars = [line for line in rect_lines if line.split()[2] == "2.20"]
+    assert not accent_bars, f"straddled finding must not draw its accent bar, got: {accent_bars}"
 
 
 @pytest.mark.skipif(not _HAS_PDFTOTEXT, reason="pdftotext not available")
