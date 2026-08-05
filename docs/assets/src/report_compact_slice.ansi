@@ -1,0 +1,19 @@
+🦞 ClawSecCheck · OpenClaw Security Audit
+============================================
+Score: 49/100   Grade: [31;1mF[0m
+[31m████████[0m[90m░░░░░░░░[0m
+(capped from 70 - open CRITICAL finding)
+        …
+26 issue(s), grouped by subject — most urgent first within each:
+
+┌──────────────────────────────
+│ [1mOpenClaw core[0m — 13 issue(s)
+└──────────────────────────────
+🔴 [31;1mCRITICAL[0m  Secrets in plaintext config / bootstrap files
+    why: gateway.auth.password set in config; hooks.token set in config
+        …
+┌──────────────────────────────
+│ [1mAgents[0m — 6 issue(s)
+└──────────────────────────────
+🔴 [31;1mCRITICAL[0m  Lethal Trifecta (untrusted input × sensitive data × outbound)
+    why: Active legs 3/3: untrusted input, sensitive data, outbound actions. Rule: keep ≤2 of 3. All three legs are active — your agent takes outside input, can reach sensitive data, and can act outbound; one injected prompt is enough to exfiltrate everything.
