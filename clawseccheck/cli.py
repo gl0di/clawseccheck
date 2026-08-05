@@ -1623,7 +1623,8 @@ def _main(argv=None) -> int:
                    help="suppress the offline 'your build may be stale' reminder "
                         "(also suppressible via CLAWSECCHECK_NO_UPDATE_NOTICE=1; offline, never a network call)")
     p.add_argument("--no-freshness-notice", action="store_true",
-                   help="suppress the coverage-freshness reminder for opt-in tests "
+                   help="suppress the coverage-freshness reminder for opt-in tests and the "
+                        "IOC dataset's own staleness and coverage-gap notices "
                         "(also suppressible via CLAWSECCHECK_NO_FRESHNESS_NOTICE=1; offline, never a network call)")
     p.add_argument("--next", action="store_true",
                    help="print recommended next actions based on the audit result")

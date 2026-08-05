@@ -9,10 +9,12 @@ connectors) may rely on the field names, types, and envelope shapes described he
 - `--lang` / `--lang he` CLI flag removed; output is English-only.
 - No `lang` field in any JSON or SARIF output.
 
-**Stability rule:** field names and top-level envelope shapes are frozen. New
-**optional** top-level fields may be added in any minor release. Fields will not
-be removed or renamed without a major version bump (see `CHANGELOG.md` and
-versioning §6 in `CLAUDE.md`).
+**Stability rule:** top-level field names and envelope shapes are frozen. New
+**optional** top-level fields may be added in any minor release. A top-level field
+will not be removed or renamed without a major version bump (see `CHANGELOG.md` and
+versioning §6 in `CLAUDE.md`). §17 states exactly what "frozen" covers — read it
+before assuming a nested key is part of the contract; notably, the subject keys inside
+`inventory` (§18) track the check taxonomy and are **not** frozen.
 
 ---
 
@@ -1052,7 +1054,9 @@ is unaffected by this extension). This is an accepted, disclosed limitation.
 
 ### Frozen (breaking change requires major version bump)
 
-- Top-level field names in all three output modes.
+- Top-level field names in all three output modes. **Only the top level.** A key nested
+  inside a top-level object is frozen only if it is named below — this list is the whole
+  contract, not an illustration of it.
 - `Finding` object field names and their enumerated values (`severity`, `status`, `confidence`).
 - SARIF `$schema` URI, `version`, and the `runs[0].tool.driver` shape.
 - `verdict` enumeration in `--vet` mode.
@@ -1076,6 +1080,10 @@ is unaffected by this extension). This is an accepted, disclosed limitation.
 
 ### Not part of the public contract
 
+- The subject keys inside `inventory` (§18) and `coveragePage` (§20). Both objects are
+  presentation regroupings of `findings`, and their keys follow the check taxonomy: v3.60.0
+  replaced `inventory.system` with `openclaw` + `host` and added `plugins` + `logs`, in a
+  minor release, deliberately. Key off `findings[].id` if you need stability.
 - Text content of `title`, `detail`, `fix`, `why`, `question`, and `message.text`
   fields — these may change to improve accuracy without a version bump.
 - `runs[0].properties.*` SARIF extension fields — present only when context is

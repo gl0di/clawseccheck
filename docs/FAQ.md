@@ -180,10 +180,10 @@ score. To confirm what is suppressed, use `--show-suppressed` again.
 
 ClawSecCheck never changes your OpenClaw config, and by default only writes its own
 score history under `~/.clawseccheck/` — a few flags write other local files when you
-ask (`--save`, `--badge`, `--html`, `--sarif`, `--monitor`), and the one exception that
-touches the audited home itself is `--apply-ignore-proposals`, opt-in and
-confirmation-gated (see above). Permission errors mean the *audit* cannot read a file
-it needs to inspect.
+ask (`--save`, `--badge`, `--html`, `--sarif`, `--pdf`, `--monitor`), and the one
+exception that touches the audited home itself is `--apply-ignore-proposals`, opt-in
+and confirmation-gated (see above). Permission errors mean the *audit* cannot read a
+file it needs to inspect.
 
 **Most common causes and fixes:**
 

@@ -51,8 +51,26 @@ kept here so the always-loaded playbook stays lean.
   `--next` each honor it on its own to cap the reported score/percentile.
 - `--verbose` / `--debug` / `--log PATH` — local logging with secret redaction.
 - `--no-native` — skip the built-in `openclaw security audit` (for offline / hermetic testing).
+- `--no-deptree` — skip the OpenClaw dependency-tree walk behind B349 ("Obfuscated install-time
+  target in the dependency tree"). That walk is on by default here, and is the one part of an
+  audit that reads outside the OpenClaw home: it resolves the installed OpenClaw package root
+  from `PATH` (`shutil.which`, no subprocess), then walks that package's `node_modules` and reads
+  each package's `package.json`, each package root's `binding.gyp`, and the in-package files
+  those name as install-time targets. Read-only and offline throughout: symlinks are never
+  followed, nothing is ever executed, and the walk is bounded to 2000 packages (a walk truncated
+  by that budget is reported as UNKNOWN, never as a clean tree). Use it on a very large installed
+  tree, or to keep the scan inside the OpenClaw home. Note the asymmetry with the library API:
+  `audit()` takes `include_deptree=False` by default, so only the CLI walks unless asked.
 - `--no-update-notice` — suppress the offline "your build may be stale" reminder
   (also via `CLAWSECCHECK_NO_UPDATE_NOTICE=1`). The reminder is offline-only — never a network call.
+- `--no-freshness-notice` — suppress the report's advisory freshness lines (also via
+  `CLAWSECCHECK_NO_FRESHNESS_NOTICE=1`). On a normal audit that is three advisories: the
+  coverage-freshness reminder for the opt-in capabilities (`--self-test` / `--redteam` /
+  `--dryrun` / `--canary`, and `--vet-mcp`) when one is stale or has never been run; the IOC
+  dataset's own staleness notice; and the coverage notice naming the ecosystems that dataset
+  ships no indicators for. The same switch suppresses the IOC pair on `--vet-source`, where the
+  two print to stderr. All of it is offline and advisory — never a network call, never a finding,
+  and never a change to score or grade; none of it appears in `--json` / `--card` / `--sarif`.
 - `--verify-self` — print SHA-256 digest of ClawSecCheck's source files for tamper detection.
 - `--show-suppressed` — list any findings the user has silenced via `.clawseccheckignore`.
 - `--ask` — emit a JSON attestation template (the facts config can't show: real tool inventory,

@@ -53,6 +53,11 @@ It runs a **read-only** local script that inspects the user's own agent. **Full 
   (`http_proxy`/`https_proxy`/...); and on Windows only, a handful of read-only registry queries
   under `HKEY_LOCAL_MACHINE` for the same signals (a service key's existence, the firewall's on/off
   state — never a secret value). Reads only, no subprocess, no network
+- **the installed npm dependency tree (beyond OpenClaw's own scope, skip with `--no-deptree`):**
+  the OpenClaw package root is located from `PATH` (no subprocess), then its `node_modules` is
+  walked to read each package's `package.json`, each package root's `binding.gyp`, and the
+  in-package files those name as install-time targets — the two ways a dependency can run code at
+  install time. Bounded (2000 packages), symlinks never followed, nothing ever executed
 - credential-store path-existence inventory: checks whether `.env`, SSH key dirs, keychain/keyring
   directories, and browser cookie stores **exist** near the agent home (never reads their contents)
 - the ClawHub CLI's own plaintext token-store config (outside the OpenClaw home) — opened to check
@@ -77,7 +82,8 @@ step; a crash-artifact `.tmp` sibling, if one is ever left behind, is not touche
 needs a manual `rm`. Scoping flags at a glance: `--no-history` (skip
 local history), `--no-host` (skip the host-recon bullet above), `--no-native` (skip the one external
 command below), `--no-sockets` (skip the B340 effective-bind socket scan — the escape hatch if it
-false-FAILs on an unusual host). Pure Python standard library, no dependencies.
+false-FAILs on an unusual host), `--no-deptree` (skip the npm dependency-tree walk — the escape
+hatch on a very large tree). Pure Python standard library, no dependencies.
 
 It also runs OpenClaw's **built-in** audit — the one fixed, read-only external command
 `openclaw security audit --json` (its read-only mode, never a fixing one; the only subprocess call
