@@ -3885,6 +3885,28 @@ def check_installed_skills(ctx: Context) -> Finding:
                 _signal_buckets,
                 "skill_limit_hits",
             )
+        # B-458: a file that is PRESENT but could not be OPENED is a different gap from
+        # every cap above, and the generic remediation below ("split oversized files")
+        # would be false advice for it. Nothing was truncated — the file was never read
+        # at all, so its content is unknown rather than partially known. This must never
+        # collapse into a PASS: making a payload unreadable would otherwise be a way to
+        # buy a clean bill of health (chmod 000 on an exfiltration script flipped this
+        # check from FAIL to "no malware signature or known-bad indicator").
+        unreadable = list(getattr(ctx, "unreadable_files", None) or [])
+        if unreadable:
+            return _b13_verdict(
+                HIGH,
+                UNKNOWN,
+                "Part of this skill could not be READ, so it was not scanned — coverage "
+                f"is incomplete ({len(unreadable)} file(s)): " + "; ".join(unreadable[:6]),
+                "These files are present but unopenable (permissions, a dangling link, or "
+                "an I/O error), so nothing can be concluded about what they contain. Make "
+                "them readable and re-run, or inspect them manually before trusting this "
+                "skill — an unreadable file is not an absent one.",
+                unreadable,
+                _signal_buckets,
+                "skill_limit_hits",
+            )
         return _b13_verdict(
             HIGH,
             UNKNOWN,

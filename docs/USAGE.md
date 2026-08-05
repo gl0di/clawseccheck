@@ -652,8 +652,11 @@ python3 audit.py --log audit.log            # also write log to a local file
   DANGEROUS verdict. Add `--json` for the machine-readable dossier (grade + per-axis breakdown +
   findings), or `--sarif PATH` to drop a SARIF file for CI / code scanning; exit code is `1` on
   SUSPICIOUS/DANGEROUS so `--vet … || fail` gates an install pipeline.
-  If the scan hits its own per-target budget, or a collector size/file cap, before it has
-  read everything, that is **never** reported as a clean result. The gap lands on the
+  If the scan hits its own per-target budget, or a collector size/file cap, or a file that
+  is present but cannot be **opened** (permissions, a dangling link, an I/O error), before
+  it has read everything, that is **never** reported as a clean result. An unreadable file
+  is not an absent one: it is named, and the danger axis degrades to `UNKNOWN` rather than
+  claiming no malware signature was found in content nothing ever read. The gap lands on the
   `danger` axis — as a synthetic `VET-COVERAGE` finding when the content-ring budget runs
   out, and as a `"coverage is incomplete"` detail otherwise — which caps the grade at
   `C`/79 and makes the overall verdict `SUSPICIOUS`, so a partially-scanned target *does*
