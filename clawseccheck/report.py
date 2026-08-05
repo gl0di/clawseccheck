@@ -2548,6 +2548,22 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         f"{_score_bar(score.score, score.grade, ascii_only=ascii_only)}"
         f"  {sep}  {n_issues} {issues_word}",
     ]
+    # B-465: the card is the surface people actually paste into a chat, and it was the ONE
+    # renderer that dropped the "we never found an OpenClaw config" disclosure. A directory
+    # with no OpenClaw in it produced a confident `Grade F · 49/100 · 4 issues` — a failing
+    # verdict on a setup the tool never located. The text report says so plainly and --json
+    # carries config_found/config_blind_capped; the card said nothing. Golden Rule #4.
+    if getattr(score, "config_blind_capped", False):
+        _blind = {
+            "absent": "no OpenClaw config was found at the audited path",
+            "unreadable": "the OpenClaw config could not be read",
+            "unparsable": "the OpenClaw config could not be parsed",
+        }.get(getattr(score, "config_blind_reason", None) or "", "the OpenClaw config could not be read")
+        _mark = "!" if ascii_only else "⚠️"
+        grade_lines.append(
+            f"{_mark} {_blind} — this grade reflects what could NOT be checked, "
+            "not a verdict on your setup. Point --home at the right directory."
+        )
     # `--full` keeps its existing header (grade card + the "· Findings ·" section label
     # immediately below); the C-373 default card opens with the grade lines only and
     # labels its own sections as it goes.

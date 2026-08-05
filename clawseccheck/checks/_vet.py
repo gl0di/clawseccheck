@@ -4519,6 +4519,61 @@ def coverage_gap_finding(detail: str) -> Finding:
     )
 
 
+_HTML_DOC_RE = re.compile(
+    r"<!doctype\s+html|<html[\s>]|<head[\s>]|<body[\s>]|<meta\s+charset", re.I
+)
+
+
+def _reads_as_html(text: str) -> bool:
+    """True when *text* is positively identifiable as an HTML document.
+
+    Two independent markers are required, so a skill whose SKILL.md merely *mentions*
+    ``<html>`` in prose or a code fence is never mistaken for a web page. Only used to
+    describe an artifact that has already failed every skill test.
+    """
+    if not text:
+        return False
+    return len(set(m.group(0).lower()[:5] for m in _HTML_DOC_RE.finditer(text))) >= 2
+
+
+def _looks_like_a_skill_package(p: Path, text, py, sh, js, ctx=None) -> bool:
+    """Whether *p* has ANY surface that makes it assessable as a skill (B-456).
+
+    The bar is deliberately low, and it is set by the false-NEGATIVE risk rather than the
+    false-positive one: anything executable, or any manifest, means scan it. A gate keyed
+    on "has a SKILL.md" would let an attacker disable the scanner by deleting the manifest,
+    which is a far worse trade than the false positive this exists to stop.
+    """
+    if py or sh or js:
+        return True
+    # An empty collection is only evidence of "not a skill" when the collection was CLEAN.
+    # If anything was refused or unreadable — a path-traversal member, an escaping symlink,
+    # a cap, a permission error — then we DID find a package and were blocked inside it,
+    # which is the opposite conclusion. Caught by the existing suite: a bare zip whose only
+    # members are traversal paths collects nothing, and gating on emptiness alone turned
+    # its FAIL into "not a skill package".
+    if ctx is not None and any((
+        getattr(ctx, "path_traversal_violations", None),
+        getattr(ctx, "symlink_skips", None),
+        getattr(ctx, "unreadable_files", None),
+        getattr(ctx, "limit_hits", None),
+    )):
+        return True
+    if isinstance(p, Path) and p.is_dir():
+        try:
+            for child in p.iterdir():
+                if child.name.lower() == "skill.md":
+                    return True
+        except OSError:
+            # Unopenable directory: not our call to make — let the normal engine run and
+            # report its own coverage gap (B-458) rather than declaring "not a skill".
+            return True
+    # A manifest reached through an archive/bare-file target shows up in the text blob
+    # rather than on disk, so accept frontmatter or a file-header for one.
+    blob = text or ""
+    return "SKILL.md" in blob or blob.lstrip().startswith("---")
+
+
 def resolve_skill_target(path: str | Path) -> Path:
     """The directory a --vet skill target actually refers to.
 
@@ -4600,6 +4655,34 @@ def vet_skill(path: str | Path) -> Finding:
             UNKNOWN,
             f"no skill found at {p}",
             "Point --vet at a skill dir or SKILL.md.",
+        )
+        finding.ctx = ctx
+        return finding
+    # B-456: refuse to grade something that is not a skill package at all.
+    #
+    # A user pointed --vet at a downloaded ClawHub *web page* (a lone index.html, no
+    # SKILL.md) and got `detected type: skill` plus a real letter grade — B (SUSPICIOUS)
+    # on a benign page, and D (DANGEROUS) once the page's own prose happened to contain a
+    # trigger phrase, which --advise then reported as DO-NOT-INSTALL. The tool condemned
+    # an artifact it had never seen. Golden Rules #4 and #5.
+    #
+    # The gate is deliberately NOT "no SKILL.md". That would hand an attacker a way to
+    # switch the scanner off by deleting the manifest (C-135: trading this false positive
+    # for a far worse false negative). It fires only when there is no executable surface
+    # AND no manifest AND the text is positively identifiable as something else — an HTML
+    # document — or there is simply nothing to read. Any python/shell/js source, or any
+    # frontmatter, means "scan it" regardless of what else is or isn't present.
+    if not _looks_like_a_skill_package(p, text, py_sources, shell_sources, js_sources, ctx):
+        finding = _custom(
+            "B13",
+            HIGH,
+            UNKNOWN,
+            "This target is not a skill package — no SKILL.md, no executable files, and "
+            "its contents read as "
+            + ("an HTML web page" if _reads_as_html(text) else "neither code nor a skill manifest")
+            + ". Nothing here can be assessed, so no verdict is given.",
+            "If you downloaded a ClawHub page rather than the skill, fetch the skill "
+            "archive or the extracted skill directory and point --vet at that.",
         )
         finding.ctx = ctx
         return finding

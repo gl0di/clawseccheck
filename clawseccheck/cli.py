@@ -1795,6 +1795,25 @@ def _main(argv=None) -> int:
     # F-072 (D1): --vet autodetects the artifact type by content and routes to the
     # right engine; --vet-skill / --vet-plugin / --vet-mcp are the explicit escape
     # hatches. The detected-type note goes to stderr so machine stdout stays clean.
+    # B-466: an EMPTY target ("--vet ''") used to be falsy here, so the vet dispatch was
+    # skipped entirely and the run fell through to a full audit of the local machine —
+    # printing a normal grade and exiting 0. The user asked to vet something and got a
+    # verdict about something else, with nothing saying so.
+    #
+    # `--vet-mcp` is deliberately absent from this list: it is declared nargs="?" const="",
+    # so an empty value is its documented "every configured MCP server" form.
+    _empty_target = [
+        flag for flag, attr in (
+            ("--vet", "vet"), ("--vet-skill", "vet_skill"), ("--vet-plugin", "vet_plugin"),
+            ("--vet-source", "vet_source"), ("--advise", "advise"),
+        )
+        if getattr(args, attr, None) is not None and not str(getattr(args, attr)).strip()
+    ]
+    if _empty_target:
+        print(f"{_empty_target[0]} needs a target — got an empty value. "
+              "Pass a path, slug, or URL.", file=sys.stderr)
+        return 2
+
     _vet_route = None  # (kind, target) with kind in {"skill", "plugin", "mcp"}
     if args.vet:
         detected = detect_vet_type(args.vet, home=args.home)

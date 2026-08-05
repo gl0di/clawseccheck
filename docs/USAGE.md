@@ -652,6 +652,12 @@ python3 audit.py --log audit.log            # also write log to a local file
   DANGEROUS verdict. Add `--json` for the machine-readable dossier (grade + per-axis breakdown +
   findings), or `--sarif PATH` to drop a SARIF file for CI / code scanning; exit code is `1` on
   SUSPICIOUS/DANGEROUS so `--vet … || fail` gates an install pipeline.
+  A target that is **not a skill package at all** — no `SKILL.md`, no executable files, and
+  contents that read as an HTML document (the shape you get by saving a ClawHub *web page*
+  instead of the skill) — is refused with `UNKNOWN` and **no grade**: the tool will not
+  recommend for or against installing something it never saw. Anything executable, or any
+  manifest, is scanned regardless, so deleting `SKILL.md` is not a way to switch the
+  scanner off.
   If the scan hits its own per-target budget, or a collector size/file cap, or a file that
   is present but cannot be **opened** (permissions, a dangling link, an I/O error), before
   it has read everything, that is **never** reported as a clean result. An unreadable file
