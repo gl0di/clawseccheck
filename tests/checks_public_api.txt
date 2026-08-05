@@ -301,6 +301,7 @@ detect_vet_type
 dig
 normalize_for_scan
 parse_bind_host
+resolve_skill_target
 run_all
 vet_mcp
 vet_plugin

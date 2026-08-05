@@ -1706,6 +1706,21 @@ def render_report(findings: list[Finding], score: ScoreResult,
         f" — {n_pass} pass, {n_warn} warn (half weight), {n_fail} fail."
         " UNKNOWN/advisory checks are excluded."
     )
+    # B-464: because UNKNOWNs are excluded, switching a subsystem OFF removes its checks
+    # from the denominator — and if any of them were WARNing, the score goes UP (measured:
+    # 97 -> 98 with --no-host). Nothing in the number itself reveals that, so a
+    # deliberately-narrowed run was indistinguishable from a better-configured one. Name
+    # the opt-outs so the figure is not read as comparable to a full audit.
+    # Read from an explicit opt-out list the CLI sets, NOT from `ctx.include_host`:
+    # that field defaults to False, so a plain library `audit(home)` call would have
+    # printed this note while naming a flag the caller never passed.
+    _opted_out = list(getattr(ctx, "cli_opt_outs", ()) or ())
+    if _opted_out:
+        lines.append(
+            "Note: " + " and ".join(_opted_out) + " removed whole check groups from that "
+            "denominator, so this score is NOT comparable to a full audit — opting a "
+            "subsystem out can raise the number without changing your setup."
+        )
     if n_fail > 0 or n_warn > 0:
         _sev_counts: dict[str, int] = {}
         for f in scored_findings:

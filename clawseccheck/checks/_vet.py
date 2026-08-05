@@ -4519,9 +4519,35 @@ def coverage_gap_finding(detail: str) -> Finding:
     )
 
 
+def resolve_skill_target(path: str | Path) -> Path:
+    """The directory a --vet skill target actually refers to.
+
+    B-460: a ``SKILL.md`` is the skill's MANIFEST, not the skill — the skill is the
+    directory containing it, which is how OpenClaw's own loader resolves one. Passing the
+    manifest is a documented input form ("point it at a downloaded folder or ``SKILL.md``",
+    docs/USAGE.md), but it used to fall through to the bare-file branch of ``vet_skill``,
+    which scans that one file and nothing else. Measured: the same skill graded
+    ``F (DANGEROUS)`` / exit 1 by directory came back ``A (NO KNOWN ISSUE)`` / exit 0 by
+    manifest — labelled 'SKILL.md' — while a sibling ``run.sh`` exfiltrated credentials. A
+    documented way to ask the question must not silently narrow the scan and then answer
+    for the whole skill.
+
+    Deliberately keyed on the manifest FILENAME only, so the bare-archive input that branch
+    exists for (B-152: ``--vet skill.tar.gz``) is untouched, and so an arbitrary file can
+    never widen the scan to whatever else happens to sit beside it.
+
+    Shared by ``vet_skill`` and the CLI's dossier label so the two cannot drift: the report
+    must name what was actually scanned, not what was typed.
+    """
+    p = Path(path).expanduser()
+    if p.is_file() and p.name.lower() == "skill.md" and p.parent.is_dir():
+        return p.parent
+    return p
+
+
 def vet_skill(path: str | Path) -> Finding:
     """Vet a skill BEFORE installing it: run the B13 scan on a local skill dir or SKILL.md."""
-    p = Path(path).expanduser()
+    p = resolve_skill_target(path)
     ctx = Context(home=p)
     if p.is_dir():
         if _is_own_source(p):

@@ -34,6 +34,9 @@ from . import (
 )
 from . import __released__, __version__
 from .brand import WORDMARK
+# B-460: same rationale as the .monitor import below — taken from the submodule so this
+# internal resolver does not have to widen the curated public API in __init__.py.
+from .checks import resolve_skill_target
 from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
@@ -96,6 +99,7 @@ from .safeio import secure_write_bytes, secure_write_text
 from .incident import render_incident
 from .trajaudit import render_trajectory_analysis
 from .behavioral import analyze as _behavioral_analyze
+from .behavioral import explicit_path_problem as _behavioral_path_problem
 from .behavioral import grade_cap_signal as _behavioral_grade_cap_signal
 from .behavioral import render_behavioral_analysis
 from .sbom import render_sbom
@@ -1819,6 +1823,11 @@ def _main(argv=None) -> int:
 
     if _vet_route and _vet_route[0] in ("skill", "plugin"):
         vet_kind, vet_path = _vet_route
+        # B-460: a SKILL.md target resolves to the skill DIRECTORY that contains it. Relabel
+        # here too, from the same helper the engine uses, so the dossier names what was
+        # actually scanned rather than what was typed (it read "skill 'SKILL.md'" before).
+        if vet_kind == "skill":
+            vet_path = str(resolve_skill_target(vet_path))
         vet_target = Path(vet_path).expanduser()
         f = vet_skill(vet_path) if vet_kind == "skill" else vet_plugin(vet_path)
         # C-254: use with --vet/--vet-skill/--vet-plugin only (checked above) — a
@@ -2057,6 +2066,18 @@ def _main(argv=None) -> int:
         _emit(f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}")
         _emit("Fix the permissions (or run as the owning user) and re-run the audit.")
         return 1
+    # B-464: record which subsystems the OPERATOR opted out of, so the score rationale can
+    # disclose that its denominator was narrowed. Set here, from the parsed flags, because
+    # ctx.include_host/native default to "off" and cannot tell an explicit opt-out from an
+    # ordinary library audit() call.
+    ctx.cli_opt_outs = tuple(
+        flag for flag, passed in (
+            ("--no-host", args.no_host),
+            ("--no-native", args.no_native),
+            ("--no-sockets", args.no_sockets),
+            ("--no-deptree", args.no_deptree),
+        ) if passed
+    )
     logger.debug("ran %d checks", len(findings))
     logger.info("score=%s grade=%s", score.score, score.grade)
 
@@ -2341,8 +2362,14 @@ def _main(argv=None) -> int:
 
     if args.behavioral is not None:
         _record_run("behavioral", args)
+        _behavioral_target = args.behavioral or None
         _emit(render_behavioral_analysis(
-            ctx, explicit_path=args.behavioral or None, ascii_only=ascii_only))
+            ctx, explicit_path=_behavioral_target, ascii_only=ascii_only))
+        # B-462: a path the user named that does not resolve is an operational failure of
+        # THIS invocation, not an inconclusive audit — exit non-zero so a typo in a script
+        # cannot pass for a clean behavioural run.
+        if _behavioral_path_problem(_behavioral_target):
+            return 1
         return 0
 
     if args.monitor:

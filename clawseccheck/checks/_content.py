@@ -8923,6 +8923,17 @@ def check_frontmatter_hygiene(ctx: Context) -> Finding:
     for name, blob in skills.items():
         fm = _skill_frontmatter_block(blob)
         if fm is None:
+            # B-461: "absent" and "present but unreadable" are different facts, and only
+            # the first supports the claim below. A SKILL.md we could not open may be
+            # perfectly well-formed — asserting the skill "will not appear to the agent"
+            # would send the user chasing an authoring bug that does not exist.
+            if name in getattr(ctx, "unreadable_manifests", ()):
+                warns.append(
+                    f"{name}: SKILL.md could not be read, so its frontmatter was not "
+                    "checked — this is a coverage gap, not a known authoring defect. "
+                    "Make the file readable and re-run to assess it"
+                )
+                continue
             warns.append(
                 f"{name}: no SKILL.md frontmatter block found — OpenClaw's loader "
                 "requires a `description:` field to load a skill at all; this skill "

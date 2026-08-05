@@ -73,9 +73,19 @@ def build_sbom(ctx) -> dict:
         for name, detail in sorted(mcp_detail.items())
     ]
 
+    # B-463: an empty BOM is two very different facts — "this setup has no components" and
+    # "we never found the setup". They used to serialise BYTE-IDENTICALLY, so a typo'd
+    # --home in a diff/archive pipeline read as "every component was uninstalled". The
+    # audit already knows the difference (`config_found`); record it rather than asserting
+    # zero components for a path the tool never found. Golden Rule #4.
+    home = getattr(ctx, "home", None)
+    config_found = bool(getattr(ctx, "config_found", False))
     return {
         "version": SBOM_VERSION,
         "generated_by": f"clawseccheck v{__version__}",
+        "scanned_home": str(home) if home is not None else None,
+        "config_found": config_found,
+        "complete": config_found,
         "skills": skills,
         "mcp_servers": mcp_servers,
     }

@@ -663,6 +663,11 @@ class Context:
     # generic "truncated / split oversized files" remediation, which would be false
     # advice here (mirrors how padding_anomalies earns its own narrower channel).
     unreadable_files: list[str] = field(default_factory=list)
+    # B-461: skill names whose SKILL.md itself could not be read. Without this, B88 sees an
+    # empty text blob and reports the manifest as ABSENT ("no SKILL.md frontmatter block
+    # found — this skill will not appear to the agent"), which is a false statement about a
+    # file that is present and well-formed and merely unopenable.
+    unreadable_manifests: set = field(default_factory=set)
     filename_obfuscations: list[str] = field(default_factory=list)  # F-061: homoglyph/RTL/zero-width filenames
     # F-087: skill names whose text-scan was truncated by a LOW-ENTROPY cut tail — the
     # shape of deliberate cap-evasion padding, distinct from limit_hits (which fires on
@@ -1324,6 +1329,11 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         rel = _rel(p)
         ctx.unreadable_files.append(f"{rel}: {exc.strerror or exc}")
         ctx.file_manifest[rel] = "unreadable"
+        if p.name.lower() == "skill.md":
+            # Keyed the same way vet_skill/the skill sweep key ctx.installed_skills (the
+            # skill DIRECTORY's name), so B88 can tell "unreadable" from "absent".
+            owner = skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+            ctx.unreadable_manifests.add(owner)
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_SKILL,
             f"Could not read {_cap_name(rel)}: {exc.strerror or exc}",
