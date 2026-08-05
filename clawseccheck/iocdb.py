@@ -339,10 +339,17 @@ def freshness_notice(*, today: date | None = None) -> list:
     """Advisory-only staleness notice for the IOC dataset (never affects any verdict).
 
     Returns an empty list when the dataset is within STALE_AFTER_DAYS of REVISION.
-    Past the threshold, returns explicit plain-English lines a caller can fold into
-    a Finding's evidence (see checks/_vet.py's vet_source) -- mirrors the style of
+    Past the threshold, returns explicit plain-English lines -- mirrors the style of
     `ledger.freshness_notice` / `update.update_notice`. `today` is injectable for
     deterministic tests; `None` uses the real local clock. Never makes a network call.
+
+    RENDERER-ONLY. These lines must never reach a `Finding` (evidence or detail).
+    B-385 removed exactly that: the text is `date.today()`-derived, so it changes on an
+    unchanged config the day the dataset crosses the threshold, which drifts
+    `tests/finding_fingerprint_manifest.txt` and silently orphans real users'
+    `.clawseccheckignore` fingerprint suppressions. This docstring used to say the
+    opposite ("lines a caller can fold into a Finding's evidence") and outlived the fix
+    -- corrected here so it stops inviting the regression back.
     """
     today = today or date.today()
     age = max(0, (today - revision_date()).days)
@@ -358,3 +365,59 @@ def freshness_notice(*, today: date | None = None) -> list:
             "was made)",
         ]
     return []
+
+
+# Wildcard, not an ecosystem: an "any" record is matched against every pool, so it is
+# never a pool that can be empty. Excluded from the coverage report below.
+_WILDCARD_SOURCE_TYPE = "any"
+
+
+def coverage_notice() -> list:
+    """Advisory-only notice naming the ecosystems this dataset carries NO indicators for.
+
+    WHY THIS EXISTS (C-361). Freshness was calibrated on the calendar alone, and a date is
+    a proxy for the thing that actually matters. A dataset refreshed yesterday that carries
+    nothing for the ecosystem a user is exposed to is exactly as blind as a stale one, and
+    reported the same silence. Concretely, `_SOURCES_TYPE_VOCAB` has shipped `npm` and
+    `pypi` slots since B-384 with no records behind either -- the dataset's *shape*
+    anticipated those ecosystems, its *contents* did not.
+
+    That gap is invisible where it matters most: `vet_source`'s gate is an exact match
+    against `known_bad_sources()`, so an empty pool simply never matches, and the output
+    cannot distinguish "checked against npm indicators and found nothing" from "carries no
+    npm indicators at all". The first is a result; the second is an unexamined surface.
+    Naming it is the same UNKNOWN-is-never-a-silent-PASS rule this project applies to
+    findings, applied one level up to the dataset itself.
+
+    Unlike `freshness_notice()` this reads no clock -- it is a pure function of the shipped
+    data, so it is deterministic across days. It is still routed through the same
+    renderer-only channel, because the reason to keep dataset metadata out of a `Finding`
+    is that it describes the SCANNER rather than the audited subject, and that reason holds
+    regardless of determinism.
+    """
+    missing = sorted(
+        eco for eco in _SOURCES_TYPE_VOCAB
+        if eco != _WILDCARD_SOURCE_TYPE
+        and not any(rec["type"] == eco for rec in SOURCES)
+    )
+    if not missing:
+        return []
+    empty_tables = [
+        label for label, table in (("publisher accounts", PUBLISHERS), ("hosts/IPs", HOSTS))
+        if not table
+    ]
+    lines = [
+        "IOC dataset carries no indicators for: " + ", ".join(missing)
+        + ". A clean identity result for a source in one of those ecosystems means "
+        "'nothing is known here', not 'nothing bad exists'.",
+    ]
+    if empty_tables:
+        lines.append(
+            "It also carries no " + " and no ".join(empty_tables)
+            + " at all, so those surfaces contribute no signal either."
+        )
+    lines.append(
+        "(offline notice: a property of the shipped dataset, not of your setup; no network "
+        "call was made)"
+    )
+    return lines

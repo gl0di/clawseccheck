@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """Generate docs/assets/src/banner.html from clawseccheck.brand — the single source
-of brand truth — so the README banner's logo mark and accent colour can never drift
-from brand.py the way they previously could (the file matched brand.py's values only
-by hand-kept coincidence, not by construction).
+of brand truth — so the README banner's accent colour can never drift from brand.py
+the way it previously could (the file matched brand.py's values only by hand-kept
+coincidence, not by construction).
+
+The logo MARK is a separate story (CLAWSECCHECK-B-441): it is embedded directly from
+docs/assets/logo.png — the real mascot art, base64-inlined — not from brand.LOGO_SVG.
+LOGO_SVG stays a small abstract vector because it is also re-nested inside the 14px
+shields.io badge icon (report.py's `_LOGO_INNER`), where the detailed shield/claws/
+checkmark illustration would be an illegible blob; the banner has no such size limit,
+so it carries the real art directly instead of a simplified stand-in.
 
 Scope, fixed on purpose (do not silently grow this):
   * This script owns ONLY the deterministic generation of the banner's HTML/CSS
-    *source* (docs/assets/src/banner.html) from brand.py constants.
+    *source* (docs/assets/src/banner.html) from brand.py constants plus the logo.png
+    asset.
   * It does NOT rasterize banner.html into the shipped PNGs
     (docs/assets/banner.png, docs/assets/banner-readme.png). Producing those stays
     a manual step, exactly as it was before this script existed — this repo has
@@ -19,13 +27,14 @@ Usage:
     python3 scripts/gen_banner.py             # print the generated HTML to stdout
     python3 scripts/gen_banner.py --write     # write docs/assets/src/banner.html
 
-Deterministic: the same brand.py constants always produce byte-identical output, so
-running this twice in a row never changes the file a second time (idempotent). No
-network, no clock, no randomness.
+Deterministic: the same brand.py constants plus the same logo.png bytes always
+produce byte-identical output, so running this twice in a row never changes the file
+a second time (idempotent). No network, no clock, no randomness.
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import sys
 from pathlib import Path
 
@@ -36,6 +45,7 @@ if str(ROOT) not in sys.path:
 from clawseccheck import brand  # noqa: E402  (sys.path bootstrap above must run first)
 
 OUTPUT = ROOT / "docs" / "assets" / "src" / "banner.html"
+LOGO_PNG = ROOT / "docs" / "assets" / "logo.png"
 
 # ── The logo slot's geometry ─────────────────────────────────────────────────
 #
@@ -60,9 +70,10 @@ OUTPUT = ROOT / "docs" / "assets" / "src" / "banner.html"
 # the composition no longer depends on which emoji font the rasterizing machine
 # happens to have installed.
 #
-# This is a deliberate design constant, not a stray magic number. brand.LOGO_SVG is
-# PROVISIONAL (see brand.py) — when the final mark art lands, revisit the slot
-# rather than assuming this number still serves it.
+# This is a deliberate design constant, not a stray magic number. The mark swapped
+# from the MASCOT emoji to LOGO_SVG's abstract vector to the real logo.png art
+# (CLAWSECCHECK-B-441) without ever changing size — 84x84 the whole time — so this
+# slot geometry has outlived two mark swaps already and should outlive the next one.
 MARK_PX = 84
 SLOT_W_PX = 104.81
 
@@ -74,23 +85,34 @@ def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
+def _logo_data_uri() -> str:
+    """docs/assets/logo.png, base64-inlined — self-contained, matching the --html
+    export's "single self-contained file" rule (and brand.FAVICON_DATA_URI, which
+    inlines a crop of this same source art for the same reason)."""
+    data = LOGO_PNG.read_bytes()
+    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+
 def build_banner_html() -> str:
-    """Return the banner's HTML/CSS source, built entirely from brand.py constants.
-    Pure — no I/O, no filesystem access — safe to call from a test."""
+    """Return the banner's HTML/CSS source, built from brand.py's colour constants
+    plus docs/assets/logo.png's bytes. Reads that one local repo file (no network, no
+    randomness) — deterministic and idempotent, but no longer I/O-free like the
+    LOGO_SVG-only version was; see the module docstring for why the mark comes from
+    the raster asset instead of brand.LOGO_SVG."""
     r, g, b = _hex_to_rgb(brand.BRAND_RED)
     rgb = f"{r},{g},{b}"
     red = brand.BRAND_RED
-    # E-048's third LOGO_SVG leg: the banner is an HTML/badge-only surface (brand.py's
-    # Tier 3), so it carries the graphical mark itself rather than the MASCOT emoji
-    # glyph — single-sourced from brand.LOGO_SVG, never pasted/hand-drawn here or in the
-    # generated HTML. Two details are copied deliberately from report.py's --html export,
-    # which embeds the same constant:
-    #   * the SVG is inlined verbatim and sized purely via CSS on the wrapper;
-    #   * the wrapper is aria-hidden. LOGO_SVG carries its own
-    #     role="img" aria-label="ClawSecCheck", and it sits immediately before the
-    #     <h1>ClawSecCheck</h1> wordmark — without aria-hidden a screen reader would
-    #     announce the brand name twice. The adjacent text is the real accessible name.
-    logo_svg = brand.LOGO_SVG
+    # CLAWSECCHECK-B-441: the banner is an HTML/badge-only surface (brand.py's Tier 3),
+    # so it carries the real graphical mark rather than the MASCOT emoji glyph — the
+    # same img bytes every time, never hand-pasted/re-encoded here. Two details are
+    # copied deliberately from the LOGO_SVG-based version this replaced (and from
+    # report.py's --html export, which still uses LOGO_SVG for its own, size-constrained
+    # 14px badge context):
+    #   * the mark is sized purely via CSS on the wrapper;
+    #   * the wrapper is aria-hidden, and the img carries an empty alt — the adjacent
+    #     <h1>ClawSecCheck</h1> wordmark right after it is the real accessible name, so
+    #     a screen reader is not made to announce the brand name twice.
+    logo_tag = f'<img src="{_logo_data_uri()}" alt="" width="{MARK_PX}" height="{MARK_PX}">'
     return f"""<!doctype html><meta charset="utf-8">
 <style>
   * {{ box-sizing: border-box; }}
@@ -106,7 +128,7 @@ def build_banner_html() -> str:
   .brand {{ display: flex; align-items: center; gap: 22px; }}
   .claw {{ width: {SLOT_W_PX}px; height: {MARK_PX}px; display: flex; line-height: 0;
           align-items: center; justify-content: center; }}
-  .claw svg {{ width: {MARK_PX}px; height: {MARK_PX}px; display: block;
+  .claw img {{ width: {MARK_PX}px; height: {MARK_PX}px; display: block; object-fit: contain;
               filter: drop-shadow(0 6px 22px rgba({rgb},.45)); }}
   h1 {{ margin: 0; font-size: 78px; font-weight: 800; letter-spacing: -1.5px; }}
   h1 .sec {{ color: {red}; }}
@@ -143,7 +165,7 @@ def build_banner_html() -> str:
 <body>
 <div class="wrap">
   <div class="left">
-    <div class="brand"><div class="claw" aria-hidden="true">{logo_svg}</div>
+    <div class="brand"><div class="claw" aria-hidden="true">{logo_tag}</div>
       <h1>Claw<span class="sec">Sec</span>Check</h1>
     </div>
     <div class="tag">The claw that checks your claws.</div>

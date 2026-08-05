@@ -42,6 +42,7 @@ from .monitor import (
 )
 from .update import update_notice
 from .ledger import freshness_notice as _compute_freshness, load_ledger, record_run
+from .iocdb import coverage_notice as _iocdb_coverage_notice
 from .iocdb import freshness_notice as _iocdb_freshness_notice
 from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
@@ -79,6 +80,7 @@ from .redteam import make_suite, render_suite
 from .dryrun import make_scenarios, render_dryrun
 from .multiturn import make_multiturn, render_multiturn
 from .sarif import render_sarif
+from .pdf import render_pdf
 from .history import (
     DEFAULT_HISTORY,
     load as history_load,
@@ -90,7 +92,7 @@ from .menu import compute_ages, render_menu, render_onboarding
 from .palette import render_palette
 from .percentile import render_percentile
 from .logsafe import get_logger
-from .safeio import secure_write_text
+from .safeio import secure_write_bytes, secure_write_text
 from .incident import render_incident
 from .trajaudit import render_trajectory_analysis
 from .behavioral import analyze as _behavioral_analyze
@@ -976,6 +978,7 @@ _PRIMARY_MODES = [
     ("badge", "--badge", "opt"),
     ("html", "--html", "opt"),
     ("sarif", "--sarif", "opt"),
+    ("pdf", "--pdf", "opt"),
     ("trend", "--trend", "bool"),
     ("percentile", "--percentile", "bool"),
     ("next", "--next", "bool"),
@@ -1031,7 +1034,7 @@ _MODE_HONORS = {
 # direction, since T3 reads ctx.attestation. "sbom", "incident", "judge_packet",
 # "judged" and "analyze_trajectory" were missing for the same reason.
 _ATTEST_CONSUMERS = frozenset({
-    "risk_paths", "badge", "html", "sarif", "trend", "percentile",
+    "risk_paths", "badge", "html", "sarif", "pdf", "trend", "percentile",
     "next", "dashboard", "dashboard_findings", "sbom", "incident",
     "judge_packet", "judged", "propose_ignore", "analyze_trajectory",
     "behavioral", "monitor",
@@ -1127,6 +1130,14 @@ def _flag_coherence_notes(args) -> list[str]:
         no_effect.append("--compact")
     if getattr(args, "attest", None) is not None and win_attr not in _ATTEST_CONSUMERS:
         no_effect.append("--attest")
+    # F-164: --exhaustive is consumed by the same audit() call --attest's consumers
+    # already share downstream, plus --show-suppressed (which re-runs audit() itself
+    # to keep B164/B180 fingerprints matching a real --exhaustive run — see its own
+    # comment). Every other mode (vet/menu/live-test family, etc.) never touches a
+    # real check-execution audit() call, so --exhaustive genuinely has no effect there.
+    if (bool(getattr(args, "exhaustive", False))
+            and win_attr not in _ATTEST_CONSUMERS and win_attr != "show_suppressed"):
+        no_effect.append("--exhaustive")
     # --trend / --monitor record a score-history point as part of their job, so
     # --no-history cannot suppress it there (every other mode either records on the
     # default path or writes no history at all, where --no-history is a no-op).
@@ -1162,7 +1173,21 @@ def _onboarding_reason(home: Path) -> str | None:
 # (locking.journal_lock creates "<file>.lock" next to history.jsonl/events.jsonl).
 # Deliberately a fixed whitelist, never a glob/rmtree of the store directory —
 # an unrelated file a user happens to keep in ~/.clawseccheck/ must never be at risk.
-_PURGE_FILENAMES = ("history.jsonl", "events.jsonl", "state.json", "coverage.json")
+#
+# F-162: --badge/--html/--sarif/--pdf all take an explicit --flag PATH, so nothing
+# writes into the store automatically today — but SKILL.md's own promise ("writes only
+# its own local report/history, removable with --purge") reads as covering any report
+# artifact an agent is told to write there by convention, and a purge test with a
+# populated store previously left a badge file untouched among the survivors. Rather
+# than let that gap grow with every new output format, the conventional default
+# filenames for all four report renderers are whitelisted here too — inert (a plain
+# no-op) until/unless something actually writes one of them, same as any other
+# not-yet-created whitelist entry.
+_PURGE_FILENAMES = (
+    "history.jsonl", "events.jsonl", "state.json", "coverage.json",
+    "openclaw-security-badge.svg", "openclaw-security-report.html",
+    "openclaw-security-report.sarif", "openclaw-security-report.pdf",
+)
 
 
 def _confirm_purge(paths: "list[Path]") -> "tuple[bool, bool]":
@@ -1419,6 +1444,12 @@ def _main(argv=None) -> int:
                    help="skip the effective-bind socket scan (B340: corroborates gateway.bind "
                         "against /proc/net/tcp{,6}, plus a read-only /proc/*/fd walk for "
                         "process-identity correlation)")
+    p.add_argument("--no-deptree", action="store_true",
+                   help="skip the OpenClaw dependency-tree walk (B349: a package in "
+                        "node_modules whose install-time target — a lifecycle hook or a "
+                        "binding.gyp command-expansion — carries a code-execution signal). "
+                        "The walk is read-only and offline, but traverses the whole installed "
+                        "tree, so this is the escape hatch on a very large one")
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")
     p.add_argument("--monitor", action="store_true",
                    help="monitor mode: alert on what changed since the last check")
@@ -1518,6 +1549,16 @@ def _main(argv=None) -> int:
                         "only the audit + self-test + vet-mcp sections — this is today's "
                         "--full shape, for CI runs the deep phases are too slow for. The "
                         "judge packet is still emitted; it re-runs no check and is free")
+    p.add_argument("--exhaustive", action="store_true",
+                   help="F-164: raise the trajectory-file / log-sink / per-line scan caps "
+                        "instead of today's interactive-fast defaults, and scan the full "
+                        "byte range of over-length log lines via overlapping windows instead "
+                        "of only their head/tail. Applies to B164/B180, which run on every "
+                        "audit (not only --full) — so this has effect with or without --full. "
+                        "The per-check and whole-audit wall-clock budgets are raised in the "
+                        "same step so a wider scan cannot degrade a check into a capped "
+                        "UNKNOWN. Slower; use when a normal run flagged something suspicious "
+                        "and you want maximum coverage")
     p.add_argument("--judged-bundle", metavar="PATH", dest="judged_bundle",
                    help="only with --full: feed back one file holding a host-agent judge's "
                         "answers to a prior '--full --json' packet — an 'attestation' "
@@ -1542,6 +1583,10 @@ def _main(argv=None) -> int:
                    help="print the SHA-256 digest of the ClawSecCheck engine source for tamper detection")
     p.add_argument("--sarif", metavar="PATH",
                    help="write a SARIF 2.1.0 report to PATH")
+    p.add_argument("--pdf", metavar="PATH",
+                   help="write the complete audit as a paginated PDF to PATH — attach the "
+                        "file itself into chat (a mobile client opens it inline; do not "
+                        "paste the path or re-render its contents)")
     p.add_argument("--fail-under", metavar="N", type=int, default=None,
                    help="exit 1 if score is below N")
     p.add_argument("--exit-code", action="store_true",
@@ -1578,7 +1623,8 @@ def _main(argv=None) -> int:
                    help="suppress the offline 'your build may be stale' reminder "
                         "(also suppressible via CLAWSECCHECK_NO_UPDATE_NOTICE=1; offline, never a network call)")
     p.add_argument("--no-freshness-notice", action="store_true",
-                   help="suppress the coverage-freshness reminder for opt-in tests "
+                   help="suppress the coverage-freshness reminder for opt-in tests and the "
+                        "IOC dataset's own staleness and coverage-gap notices "
                         "(also suppressible via CLAWSECCHECK_NO_FRESHNESS_NOTICE=1; offline, never a network call)")
     p.add_argument("--next", action="store_true",
                    help="print recommended next actions based on the audit result")
@@ -1844,7 +1890,7 @@ def _main(argv=None) -> int:
         # not part of either the human dossier's or --json's result payload. Reuses
         # --no-freshness-notice — the same opt-out the config-age notice already uses.
         if not args.no_freshness_notice and not os.environ.get("CLAWSECCHECK_NO_FRESHNESS_NOTICE"):
-            for _line in _iocdb_freshness_notice():
+            for _line in _iocdb_freshness_notice() + _iocdb_coverage_notice():
                 print(_line, file=sys.stderr)
         if args.json:
             _emit(render_vet_json(profile, mode="vet-source", version=__version__))
@@ -1917,9 +1963,14 @@ def _main(argv=None) -> int:
             # detail differs here from a normal run (ctx.sockets is None => a
             # different "socket scan was not run" UNKNOWN text) — since
             # fingerprint() hashes the detail, a suppression captured from a real run
-            # was silently never found here, and the reverse also held.
+            # was silently never found here, and the reverse also held. F-164:
+            # --exhaustive changes B164/B180's disclosure text the same way, so it
+            # needs the same mirroring or an --exhaustive suppression stops matching
+            # here.
             ctx, findings, _ = audit(args.home, include_native=False,
-                                     include_sockets=not args.no_sockets)
+                                     include_sockets=not args.no_sockets,
+                                     include_deptree=not args.no_deptree,
+                                     exhaustive=args.exhaustive)
             suppressed = [f for f in findings if getattr(f, "suppressed", False)]
             # B-154: a bare "RISK-NN" entry matches a RiskPath.id, not any Finding —
             # surface those explicitly too, or --show-suppressed silently missed them.
@@ -1983,7 +2034,9 @@ def _main(argv=None) -> int:
         ctx, findings, score = audit(args.home, include_native=not args.no_native,
                                      include_host=not args.no_host,
                                      include_sockets=not args.no_sockets,
-                                     attestation=attestation)
+                                     include_deptree=not args.no_deptree,
+                                     attestation=attestation,
+                                     exhaustive=args.exhaustive)
     except (PermissionError, OSError) as exc:
         _emit(f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}")
         _emit("Fix the permissions (or run as the owning user) and re-run the audit.")
@@ -2033,6 +2086,19 @@ def _main(argv=None) -> int:
             return 0
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
+            return 1
+
+    if args.pdf:
+        try:
+            secure_write_bytes(Path(args.pdf).expanduser(), render_pdf(findings, score, native=ctx.native))
+            _emit(
+                f"(PDF report written to {args.pdf} — attach this file itself into the "
+                "chat, do not re-render its contents or paste the path; a mobile client "
+                "opens a PDF inline where an HTML attachment would just be a download)"
+            )
+            return 0
+        except OSError as exc:
+            _emit(f"(could not write PDF report: {exc})")
             return 1
 
     if args.trend:
@@ -2394,6 +2460,12 @@ def _main(argv=None) -> int:
             # above the sections that run them (the freshness is computed pre-run).
             _refreshed = ("self_test", "vet_mcp") if args.full else ()
             f_notice = _compute_freshness(load_ledger(), skip=_refreshed)
+            # C-361: the IOC dataset's own age and coverage reached only --vet-source
+            # before this, so a normal audit said nothing about how much a clean
+            # identity result is worth. Same advisory list render_report already
+            # treats as never touching score/grade/findings; same --no-freshness-notice
+            # opt-out (this whole block is already inside it). NEVER a Finding (B-385).
+            f_notice = f_notice + _iocdb_freshness_notice() + _iocdb_coverage_notice()
         # Tamper Score sub-grade — human report only; presentation-layer only, never
         # alters score/grade/findings. mon_present reflects whether a --monitor
         # baseline snapshot already exists on disk for this state file.

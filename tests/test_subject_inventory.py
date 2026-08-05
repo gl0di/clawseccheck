@@ -20,12 +20,13 @@ import pytest
 
 from clawseccheck import audit
 from clawseccheck.catalog import (
-    FAIL, PASS, SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER, SURFACES, UNKNOWN,
+    BY_ID, FAIL, PASS, SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER, SURFACES, UNKNOWN,
 )
+from clawseccheck.checks._mcp import PluginSweep
 from clawseccheck.collector import Context, collect
 from clawseccheck.report import (
-    _agents_roster, _channels_roster, _mcp_inventory, _skill_inventory, _subject_of,
-    build_inventory, render_json, render_report, render_subject_inventory,
+    _agents_roster, _channels_roster, _mcp_inventory, _plugin_inventory, _skill_inventory,
+    _subject_of, build_inventory, render_json, render_report, render_subject_inventory,
 )
 
 posix_only = pytest.mark.skipif(os.name != "posix", reason="symlinks are POSIX-only")
@@ -66,24 +67,46 @@ def _skill_ctx(skills: dict, config: dict | None = None) -> Context:
 # ── SUBJECT_OF map completeness (mirrors test_surface.py's FAMILY_OF pattern) ────────
 
 def test_subject_of_keys_equal_all_surfaces():
-    """SUBJECT_OF must map EVERY SURFACES slug (all 14, incl. 'trifecta') -- unlike
-    FAMILY_OF, 'trifecta' is not excluded (it routes to 'agents')."""
+    """SUBJECT_OF must map EVERY SURFACES slug (all 15, incl. 'trifecta' and 'logs') --
+    unlike FAMILY_OF, 'trifecta' is not excluded (it routes to 'agents')."""
     assert frozenset(SUBJECT_OF.keys()) == frozenset(SURFACES)
 
 
-def test_subject_of_values_are_one_of_five_subjects():
+def test_subject_of_values_are_one_of_eight_subjects():
     for surface, subject in SUBJECT_OF.items():
         assert subject in SUBJECT_ORDER, f"surface {surface!r} maps to unknown subject {subject!r}"
 
 
-def test_subject_of_has_exactly_five_distinct_subjects():
-    assert frozenset(SUBJECT_OF.values()) == frozenset(SUBJECT_ORDER)
+def test_subject_of_has_exactly_eight_distinct_subjects_minus_plugins():
+    # "plugins" has no SURFACES/CheckMeta entry (F-163) -- it is populated purely from
+    # the --full plugin-sweep inventory, so SUBJECT_OF's value set is SUBJECT_ORDER
+    # minus "plugins", not equal to it.
+    assert frozenset(SUBJECT_OF.values()) == frozenset(SUBJECT_ORDER) - {"plugins"}
 
 
 def test_subject_label_and_order_are_consistent():
     assert frozenset(SUBJECT_LABEL.keys()) == frozenset(SUBJECT_ORDER)
-    assert len(SUBJECT_ORDER) == 5
-    assert len(set(SUBJECT_ORDER)) == 5  # no duplicates
+    assert len(SUBJECT_ORDER) == 8
+    assert len(set(SUBJECT_ORDER)) == 8  # no duplicates
+
+
+def test_host_class_checks_route_to_host_not_openclaw():
+    """F-163 defect 2: the host-machine checks (network IDS, audit logging,
+    file-integrity, EDR, native PATH) must not be folded into the OpenClaw-core
+    bucket -- they answer "is this MACHINE monitored", not "is OpenClaw configured
+    well"."""
+    assert SUBJECT_OF["host"] == "host"
+
+
+def test_logs_surface_routes_trajectory_and_behavioral_checks():
+    """F-163: the audit/trajectory-trail half of the old "monitoring" bucket (B164,
+    B180, B85, T1-T3, B191) moved to its own "logs" surface + subject; the
+    config-integrity half (B10, B14, B16, B77, B78, B173, B183, C014) stays on
+    "monitoring" -> "openclaw"."""
+    assert SUBJECT_OF["logs"] == "logs"
+    assert SUBJECT_OF["monitoring"] == "openclaw"
+    for cid in ("B164", "B180", "B85", "T1", "T2", "T3", "B191"):
+        assert BY_ID[cid].surface == "logs", f"{cid} should be on surface=logs"
 
 
 def test_trifecta_surface_routes_to_agents():
@@ -215,6 +238,51 @@ def test_mcp_inventory_covers_legacy_mcpservers_shape():
     assert "legacy-server" in names
 
 
+# ── Plugins: additive JSON bucket (F-163), fed by the --full plugin sweep only ───────
+
+def test_plugins_inventory_not_scanned_when_sweep_is_none():
+    assert _plugin_inventory(None) == {"scanned": False, "rows": []}
+
+
+def test_plugins_inventory_not_scanned_when_index_unreadable():
+    sweep = PluginSweep(home_dir=Path("/nonexistent"), checked_dirs=[], rows=[])
+    assert _plugin_inventory(sweep) == {"scanned": False, "rows": []}
+
+
+def test_plugins_inventory_present_but_empty_when_zero_installed():
+    sweep = PluginSweep(home_dir=Path("/nonexistent"), checked_dirs=[Path("/plugins")], rows=[])
+    assert _plugin_inventory(sweep) == {"scanned": True, "rows": []}
+
+
+def test_plugins_inventory_populated_from_a_real_sweep():
+    sweep = PluginSweep(
+        home_dir=Path("/nonexistent"), checked_dirs=[Path("/plugins")],
+        rows=[("good-plugin", PASS, 0), ("bad-plugin", FAIL, 2)],
+    )
+    inv = _plugin_inventory(sweep)
+    assert inv["scanned"] is True
+    assert inv["rows"] == [
+        {"name": "good-plugin", "status": PASS},
+        {"name": "bad-plugin", "status": FAIL},
+    ]
+
+
+def test_build_inventory_threads_plugin_sweep_through():
+    ctx, findings, _ = audit(VULN)
+    sweep = PluginSweep(
+        home_dir=Path("/nonexistent"), checked_dirs=[Path("/plugins")],
+        rows=[("some-plugin", PASS, 0)],
+    )
+    inv = build_inventory(findings, ctx, plugin_sweep=sweep)
+    assert inv["plugins"] == {"scanned": True, "rows": [{"name": "some-plugin", "status": PASS}]}
+
+
+def test_render_text_says_not_scanned_when_no_plugin_sweep():
+    ctx, findings, score = audit(SAFE)
+    out = render_subject_inventory(findings, ctx)
+    assert "Plugins (not scanned — run --full to include)" in out
+
+
 # ── Agents / Channels rosters ──────────────────────────────────────────────────────
 
 def test_agents_roster_falls_back_to_default_when_nothing_declared():
@@ -262,32 +330,43 @@ def test_agents_surface_finding_routes_to_agents_subject():
     assert "A1" in agent_ids
 
 
-def test_gateway_finding_routes_to_system_subject():
+def test_gateway_finding_routes_to_openclaw_subject():
     _, findings, _ = audit(VULN)
-    system_ids = {f.id for f in findings if _subject_of(f) == "system"}
-    assert "B2" in system_ids  # B2 = gateway surface
+    openclaw_ids = {f.id for f in findings if _subject_of(f) == "openclaw"}
+    assert "B2" in openclaw_ids  # B2 = gateway surface
+
+
+def test_host_surface_finding_routes_to_host_subject():
+    _, findings, _ = audit(VULN)
+    host_ids = {f.id for f in findings if _subject_of(f) == "host"}
+    # B50 (host network IDS) is a real signal on home_vuln (no monitoring configured).
+    assert "B50" in host_ids
 
 
 # ── build_inventory invariants (design §4.7: additive, never fabricates a Finding) ────
 
 def test_build_inventory_never_invents_a_finding_id():
-    """Every id build_inventory surfaces (system/agents/channels buckets) must already be
-    present in the findings list it was given -- the block regroups, it never adds."""
+    """Every id build_inventory surfaces (openclaw/host/agents/channels/logs buckets)
+    must already be present in the findings list it was given -- the block regroups,
+    it never adds."""
     ctx, findings, _ = audit(VULN)
     inv = build_inventory(findings, ctx)
     known_ids = {f.id for f in findings}
-    for bucket_name in ("system", "agents", "channels"):
+    for bucket_name in ("openclaw", "host", "agents", "channels", "logs"):
         for fid in inv[bucket_name]["findings"]:
             assert fid in known_ids, f"{bucket_name} bucket cites unknown id {fid!r}"
 
 
 def test_build_inventory_ctx_none_returns_neutral_shape():
     assert build_inventory([], None) == {
-        "system": {"status": PASS, "findings": []},
+        "openclaw": {"status": PASS, "findings": []},
+        "host": {"status": PASS, "findings": []},
         "agents": {"status": PASS, "findings": [], "roster": [], "attested": False},
         "skills": [],
         "mcp": [],
+        "plugins": {"scanned": False, "rows": []},
         "channels": {"status": PASS, "findings": [], "roster": []},
+        "logs": {"status": PASS, "findings": []},
     }
 
 
@@ -312,11 +391,16 @@ def test_json_inventory_key_present_with_expected_subjects():
     ctx, findings, score = audit(VULN)
     payload = json.loads(render_json(findings, score, ctx=ctx))
     inv = payload["inventory"]
-    assert set(inv.keys()) == {"system", "agents", "skills", "mcp", "channels"}
+    assert set(inv.keys()) == {
+        "openclaw", "host", "agents", "skills", "mcp", "plugins", "channels", "logs",
+    }
     assert "roster" in inv["agents"]
     assert "attested" in inv["agents"]
     assert "roster" in inv["channels"]
     assert inv["channels"]["roster"] == ["telegram"]
+    # render_json's own caller (no --full pipeline in this test) never swept plugins --
+    # "not scanned" is the honest default, not a fabricated clear/empty verdict.
+    assert inv["plugins"] == {"scanned": False, "rows": []}
 
 
 def test_json_previously_asserted_top_level_keys_still_present():

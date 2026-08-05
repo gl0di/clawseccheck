@@ -238,7 +238,8 @@ def _server_from_namespaced_name(name: str) -> "str | None":
     return head or None
 
 
-def from_trajectory(home: "str | Path") -> list:
+def from_trajectory(home: "str | Path", *, max_files: int | None = None,
+                     max_bytes_per_file: int | None = None) -> list:
     """Build ToolSurfaces from what the host actually compiled and sent the model.
 
     POST-HOC FORENSIC evidence only (via
@@ -253,8 +254,17 @@ def from_trajectory(home: "str | Path") -> list:
     here — the host's own metadata sanitizer already ran on this text before
     it reached the model (see the design doc §2.2 for what that sanitizer
     does and does not catch).
+
+    ``max_files``/``max_bytes_per_file`` (F-164, optional): widen the trajectory
+    cap under --exhaustive; ``None`` reproduces today's real defaults.
     """
-    tool_dicts, meta = _trajectory.read_compiled_tool_descriptions(Path(str(home)).expanduser())
+    kwargs = {}
+    if max_files is not None:
+        kwargs["max_files"] = max_files
+    if max_bytes_per_file is not None:
+        kwargs["max_bytes_per_file"] = max_bytes_per_file
+    tool_dicts, meta = _trajectory.read_compiled_tool_descriptions(
+        Path(str(home)).expanduser(), **kwargs)
     truncated = bool(meta.get("truncated"))
     by_server: dict = {}
     for entry in tool_dicts:

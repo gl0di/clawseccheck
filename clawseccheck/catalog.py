@@ -45,6 +45,7 @@ SURFACES: tuple[str, ...] = (
     "host",
     "update",
     "trifecta",  # cross-cutting: A1 headline check only — not a bucket surface
+    "logs",  # F-163: trajectory/audit-trail/behavioral checks split out of "monitoring"
 )
 
 # 13-surface → 7-family roll-up (dashboard grouping; unblocks F-029).
@@ -61,6 +62,7 @@ FAMILY_OF: dict[str, str] = {
     "secrets": "secrets",  # Secrets & Data
     "monitoring": "detection",  # Detection & Host
     "host": "detection",
+    "logs": "detection",  # F-163: trajectory/audit-trail/behavioral checks
     "hooks": "automation",  # Automation & Maintenance
     "update": "automation",
 }
@@ -79,39 +81,61 @@ FAMILY_LABEL: dict[str, str] = {
 }
 FAMILY_ORDER: tuple[str, ...] = tuple(FAMILY_LABEL.keys())
 
-# 14-surface -> 5-subject roll-up (F-131 Phase 1: owner-facing "Inventory by subject").
+# 15-surface -> 8-subject roll-up (F-131 Phase 1, extended by F-163: owner-facing
+# "Inventory by subject" grows from 5 to 8 subjects).
 # Additive metadata only, next to FAMILY_OF — no verdict/score impact. Distinct from
 # FAMILY_OF (analyst-facing security categories): this groups findings the way an owner
-# actually owns things — "my system", "my agents", "each of my skills" — per the approved
-# design docs/design/2026-07-17-subject-inventory-block-design.md (workspace-root only,
-# not shipped). Every SURFACES slug (incl. "trifecta") maps to exactly one subject; a
-# coherence test asserts completeness, mirroring FAMILY_OF's own contract.
+# actually owns things — "my openclaw core", "my host machine", "my agents", "each of my
+# skills" — per the approved design docs/design/2026-07-17-subject-inventory-block-design.md
+# (workspace-root only, not shipped). Every SURFACES slug (incl. "trifecta" and "logs")
+# maps to exactly one subject; a coherence test asserts completeness, mirroring FAMILY_OF's
+# own contract. F-163 split the old "system" bucket three ways: "host" (already its own
+# SURFACES slug — B50/B51/B52/B53/B54/C5/B150) gets a standalone subject instead of being
+# folded into "system"; "system" itself is renamed "openclaw" (it was always OpenClaw-core
+# concerns, not the whole host); and the audit/trajectory-trail half of "monitoring" moves
+# to a NEW "logs" surface + subject (B164/B180/B85/T1/T2/T3/B191) while the remaining
+# config-integrity half of "monitoring" (B10/B14/B16/B77/B78/B173/B183/C014) stays mapped
+# to "openclaw". "plugins" has no SURFACES/CheckMeta entry — it is populated purely from
+# the --full plugin-sweep inventory in report.py, not from CATALOG.
 SUBJECT_OF: dict[str, str] = {
-    "gateway": "system",
-    "tools": "system",
-    "secrets": "system",
-    "monitoring": "system",
-    "hooks": "system",
-    "host": "system",
-    "update": "system",
-    "sessions": "system",
+    "gateway": "openclaw",
+    "tools": "openclaw",
+    "secrets": "openclaw",
+    "monitoring": "openclaw",
+    "hooks": "openclaw",
+    "update": "openclaw",
+    "sessions": "openclaw",
+    "host": "host",
     "agents": "agents",
     "bootstrap": "agents",
     "trifecta": "agents",  # A1: an agent-behavior signal, not a standalone bucket
     "skills": "skills",
     "mcp": "mcp",
     "channels": "channels",
+    "logs": "logs",
 }
 
 # Human-facing subject labels, in the fixed order the Inventory block renders them.
 SUBJECT_LABEL: dict[str, str] = {
-    "system": "System (OpenClaw core)",
+    "openclaw": "OpenClaw core",
+    "host": "Host machine",
     "agents": "Agents",
     "skills": "Skills",
     "mcp": "MCP servers",
+    "plugins": "Plugins",
     "channels": "Channels",
+    "logs": "Logs & trajectories",
 }
-SUBJECT_ORDER: tuple[str, ...] = ("system", "agents", "skills", "mcp", "channels")
+SUBJECT_ORDER: tuple[str, ...] = (
+    "openclaw",
+    "host",
+    "agents",
+    "skills",
+    "mcp",
+    "plugins",
+    "channels",
+    "logs",
+)
 
 
 @dataclass(frozen=True)
@@ -1231,7 +1255,7 @@ CATALOG: list[CheckMeta] = [
         "Log Threat Intel",
         scored=False,
         confidence="MEDIUM",
-        surface="monitoring",
+        surface="logs",
     ),
     # B180 (F-127/E-044 Phase 5): the agent's own MEMORY corpus (the `memory` LogSink
     # kind in logdiscovery.py — `<workspace>/memory/**`, the same convention B7/B19
@@ -1271,7 +1295,7 @@ CATALOG: list[CheckMeta] = [
         "Log Threat Intel / Memory Re-consumption",
         scored=False,
         confidence="MEDIUM",
-        surface="monitoring",
+        surface="logs",
     ),
     # B67 (C-092): per-source tool-output trust contracts.
     # Complements B21 (generic trust boundary): checks that bootstrap has
@@ -1472,7 +1496,7 @@ CATALOG: list[CheckMeta] = [
         "hardening",
         "Incident Response / Audit Trail",
         scored=False,
-        surface="monitoring",
+        surface="logs",
     ),
     # B86 (defensibility axis — D1) — import-path hijack surface. A benign skill that
     # extends sys.path with a relative / writable / env-derived location can be weaponized
@@ -2554,7 +2578,7 @@ CATALOG: list[CheckMeta] = [
         "Lethal Trifecta (behavioral)",
         scored=False,
         confidence="MEDIUM",
-        surface="monitoring",
+        surface="logs",
     ),
     # T2: outcome anomaly — a fail -> fail -> success series on a sensitive verb within
     # one thread (from tool.result status/isError/success). Conservative on purpose: only
@@ -2569,7 +2593,7 @@ CATALOG: list[CheckMeta] = [
         "Anomalous Behavior",
         scored=False,
         confidence="MEDIUM",
-        surface="monitoring",
+        surface="logs",
     ),
     # T3: runtime capability drift — a HIGH-BLAST verb PROVEN in the trajectory log that is
     # NOT in the declared (tools.allow / gateway.tools.allow) ∪ attested grant. Complements
@@ -2586,7 +2610,7 @@ CATALOG: list[CheckMeta] = [
         "Excessive Agency (behavioral)",
         scored=False,
         confidence="MEDIUM",
-        surface="monitoring",
+        surface="logs",
     ),
     # B191 (F-134, DISK-1): OpenClaw's OWN runtime audit trail (`audit_events` in the
     # shared state SQLite DB — grep for "audit_events" across this package was ZERO hits
@@ -2633,7 +2657,7 @@ CATALOG: list[CheckMeta] = [
         "Incident Response / Runtime Audit Trail (behavioral)",
         scored=False,
         confidence="HIGH",
-        surface="monitoring",
+        surface="logs",
     ),
     # B340 (F-156): every OTHER gateway-exposure verdict (B2, B70) is declared-state
     # only -- it reads gateway.bind out of the config and reasons about that string,
@@ -2802,6 +2826,38 @@ CATALOG: list[CheckMeta] = [
         CRITICAL,
         "hardening",
         "Command & Control / Dead-Drop Resolver",
+        confidence="MEDIUM",
+        surface="skills",
+    ),
+    # B348 (F-161): a plugins.load.paths entry resolves to an on-disk directory whose
+    # openclaw.plugin.json manifest declares an "id" with no matching
+    # plugins.entries.<id> record. plugins.load.paths (config_plugin_load_paths, reused
+    # from B158) is an auto-load surface independent of plugins.entries. Advisory,
+    # WARN-only (Golden Rule #5): a load path with no entries record is normal
+    # local-dev shape, not proof of malice — the operational consequence (that removing
+    # the entries record alone does not stop the plugin loading) is surfaced only in the
+    # check's WARN detail/fix text, not here.
+    CheckMeta(
+        "B348",
+        "Plugin load path with no matching plugins.entries record",
+        LOW,
+        "advisory",
+        "Supply Chain / Plugin Hygiene",
+        scored=False,
+        confidence="MEDIUM",
+        surface="mcp",
+    ),
+    # B349 (F-167): B42's sibling for the installed npm dependency tree -- the one directory
+    # every content scanner here steps around, and where a compromised TRANSITIVE package
+    # actually lives. FAIL requires a conjunction (install-lifecycle hook AND an obfuscated
+    # hook target), because a hook alone measured 3 benign hits on a real clean tree.
+    # confidence=MEDIUM: a filesystem+heuristic match, per this file's own convention.
+    CheckMeta(
+        "B349",
+        "Obfuscated install-time target in the dependency tree",
+        CRITICAL,
+        "hardening",
+        "Supply Chain / Dependency Tree",
         confidence="MEDIUM",
         surface="skills",
     ),
@@ -2976,6 +3032,7 @@ AST_MAP = {
     "B186": ("AST02",),  # relocated bundled skills/hooks root = supply-chain code-load root the scanners never enumerated (cf. B184)
     "B187": ("AST02",),  # non-bundled plugin declares agentToolResultMiddleware = supply-chain interception capability disclosure (cf. B151/B152/B177)
     "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
+    "B348": ("AST02",),  # plugins.load.paths entry not in plugins.entries = supply-chain visibility gap (cf. B152/B158)
 }
 
 # Each check mapped to the OWASP-LLM-2025 category/categories it addresses ON THE AGENT

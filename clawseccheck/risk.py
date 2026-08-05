@@ -50,6 +50,7 @@ from .checks import (
     OUTBOUND_TOOL_HINTS,
 )
 from .collector import Context, dig
+from .scanbudget import limits_for
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data model
@@ -1449,7 +1450,9 @@ def _rule_open_group_proven_blast(ctx: Context, cfg: dict) -> RiskPath | None:
     home = getattr(ctx, "home", None)
     if not isinstance(home, Path):
         return None
-    by_origin, meta = _trajectory.read_proven_tools_by_origin(home)
+    lim = limits_for(ctx)
+    by_origin, meta = _trajectory.read_proven_tools_by_origin(
+        home, max_files=lim.traj_max_files, max_bytes_per_file=lim.traj_max_bytes_per_file)
     if not meta.get("present"):
         return None
 

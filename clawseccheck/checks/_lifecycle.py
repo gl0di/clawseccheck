@@ -24,11 +24,16 @@ from ..collector import (
     dig,
 )
 from ..safeio import walk_dir_safely
+from .. import deptree as _deptree  # B349: bounded, read-only dependency-tree enumeration
+from ..skillast import analyze_javascript as _analyze_javascript
 from ..textnorm import (
+    confusable_in_ascii_context,  # B349: benign i18n vs homoglyph substitution
     normalize_for_scan,
+    obfuscation_signals,
 )
 
 from ._content import (
+    _HOOK_MINIFIED_LINE,  # B349: B97's own "minified — unreadable" threshold, reused
     _B58_HTML_COMMENT_RE,
     _B64_HIGH_CONFIDENCE_RE,
     _b64_classify,
@@ -41,6 +46,7 @@ from ._content import (
 from . import _shared
 from ._shared import (
     INJECTION_PATTERNS,
+    NPM_DEPTREE_HOOK_COVERAGE_NOTE,
     OUTBOUND_TOOL_HINTS,
     SECRET_KEY_RE,
     _DESTRUCTIVE_HINTS,
@@ -1588,6 +1594,9 @@ def check_install_policy(ctx: Context) -> Finding:
             "Run on the host where skills live (~/.openclaw/skills, workspace/skills).",
         )
     warns: list[str] = []
+    # C-358: coverage disclosure only — never gates the WARN branch below (that is
+    # `warns`' job alone), so this can never move B42's verdict.
+    notes: list[str] = [NPM_DEPTREE_HOOK_COVERAGE_NOTE]
     # install/postinstall hooks that execute code on install or auto-update
     for name, blob in skills.items():
         for m in _POSTINSTALL_RE.finditer(blob):
@@ -1609,7 +1618,7 @@ def check_install_policy(ctx: Context) -> Finding:
             "Review/disable any install hook you haven't read; pin skills to a reviewed "
             "commit; `chmod 700` skill dirs so only you can add skills; turn off skill "
             "auto-update until each hook is trusted.",
-            warns,
+            warns + notes,
         )
     return _finding(
         "B42",
@@ -1617,6 +1626,323 @@ def check_install_policy(ctx: Context) -> Finding:
         f"Scanned {len(skills)} installed skill(s): no risky install hooks, and skill "
         "dirs are not writable by other local users.",
         "Keep skill dirs owner-only and read any install/postinstall hook before trusting a skill.",
+        evidence=notes,
+    )
+
+
+# ---------- B349 (F-167, B-447): obfuscated install-time target in the dependency tree ----------
+# B42 above already recognises a pre/postinstall hook -- in a SKILL's own manifest. This is its
+# sibling for the one directory nothing in this engine reasons about: the installed npm
+# dependency tree, where a compromised TRANSITIVE package lives. The threat shape is a
+# widely-depended package republished with `"preinstall": "node setup.mjs"` and an obfuscated
+# setup.mjs shipped in the tarball; the consuming project's own source contains nothing.
+#
+# TWO SURFACES, NOT ONE (B-447). The first cut enumerated `scripts` only, and that was a false
+# negative rather than a scoping choice: the node-gyp worm's tarballs declare NO lifecycle
+# script at all and execute from a `<!(node index.js ...)` command-expansion in `binding.gyp`,
+# which npm triggers automatically on the file's mere presence. A `scripts`-only check is the
+# script-focused monitoring that shape exists to walk past. `deptree` now surfaces both; they
+# are assessed by the same `_b349_assess_target`, so the crit/warn calibration below governs
+# both and neither surface gets a second, unreviewed threshold of its own.
+#
+# MEASURED FOR THE SECOND SURFACE, and measured TWICE on purpose. Across every real dependency
+# tree on a live box (163 trees, 28,350 packages) 11 packages ship a root binding.gyp carrying
+# 27 command expansions, and ZERO resolve to an in-package file -- every one is an inline
+# `node -e`/`node -p` expression or a `pkg-config` probe. That is a comfortable number and a
+# useless one on its own: nothing exercised the resolving branch, so "no false positive" would
+# have meant "no sample". So the branch was measured separately against 6,067 cached package
+# tarballs -- 8 ship a root binding.gyp and exactly one, canvas@2.11.2 (node-canvas), really
+# does resolve, running `util/has_lib.js` and `util/win_jpeg_lookup.js` from its build config.
+# It produces zero signals of any grade. The branch is live on a real, honest, widely-installed
+# package and stays silent on it.
+#
+# WHY A CONJUNCTION, MEASURED (2026-08-04, real trees on a live box):
+#   openclaw: 380 packages, 3 install-lifecycle hooks -- ALL benign
+#   clawhub:   39 packages, 0
+# So "a hook exists" would have started life with three false-positive FAILs, which is three
+# more than Golden Rule #5 permits. The gate is the hook's TARGET tripping the obfuscation
+# detectors we already ship (textnorm + skillast) -- 0 hits across those same real trees.
+#
+# WHY THE OPENCLAW INSTALL TREE AND NOT SKILL/PLUGIN DIRS: measured on the same box, no skill
+# and no plugin has a node_modules at all, while every real tree sits under the npm global
+# root. A check scoped to skill/plugin dirs would scan nothing and report clean -- the exact
+# lying-PASS this project exists to prevent. When a skill DOES ship a tree, the skill content
+# scan already walks it as ordinary files (see NPM_DEPTREE_SKILL_COVERAGE_NOTE); what it does
+# not do -- and what this check adds -- is reason about it AS a dependency tree.
+# NO COUNT MAY ENTER `detail` HERE. baseline.fingerprint() hashes `finding.detail` alone,
+# and EVERY number this check can quote (packages walked, hooks found, targets read) is a
+# property of the MACHINE's OpenClaw install, not of the audited config's content. Quoting
+# one would mean a user's `.clawseccheckignore` fingerprint suppression silently orphans
+# the moment they `npm install` anything -- the exact self-orphaning defect
+# tests/test_finding_fingerprint_manifest.py exists to prevent, and which B176's age fix
+# already had to undo once. The counts live in `evidence=`, which is not hashed.
+_B349_FIX = (
+    "Do not run the install. Inspect the named package's hook target by hand, then reinstall "
+    "from a lockfile you trust (npm ci) so the resolved version is the one you reviewed."
+)
+
+
+def _b349_assess_target(source: str, filename: str) -> "tuple[list, str | None]":
+    """Assess one hook target. Returns (fail_signals, unreadable_reason).
+
+    THE CORRECTION THAT SHAPED THIS (F-167). The brief assumed an obfuscation detector
+    already existed to reuse. It does not, for this shape: `textnorm.obfuscation_signals`
+    detects UNICODE trickery (zero-width, bidi, Tag-block, confusables), and against
+    machine-mangled JavaScript -- hex identifiers, a hex string table, index arithmetic --
+    it correctly returns nothing, because none of that is a Unicode trick. Verified by
+    running both detectors against a synthesised obfuscator-shaped file: no signal from
+    either. Writing a bespoke "looks obfuscated" heuristic instead was rejected: its whole
+    false-positive surface is honest minified bundles, which are everywhere in a real
+    dependency tree, and establishing that boundary is a project of its own.
+
+    So the split follows the precedent this repo already set for unreadable hook content
+    (B97, `_content.py`'s `_HOOK_MINIFIED_LINE` -> "minified — unreadable" UNKNOWN):
+
+      * a **crit-grade** rule from the ALREADY-VALIDATED detectors -> FAIL-eligible;
+      * a **warn-grade** rule -> `noted`: disclosed in the PASS evidence, never a verdict;
+      * a **confusable** signal with no ASCII-Latin word to hide in -> `noted` too; see
+        the loop below for the false-positive FAIL on non-English comments that forced it;
+      * source we could not read (one long machine-generated line, or a parse failure) ->
+        UNKNOWN naming the package, never FAIL. We did not read it, so we claim nothing
+        about it -- and "I could not read this package's installer" is itself actionable;
+      * anything else -> nothing.
+
+    THE CRIT/WARN SPLIT IS NOT COSMETIC -- it is a C-135 blocker fix (2026-08-04). The
+    first cut treated every non-`AST_UNANALYZABLE` rule as FAIL-eligible, collapsing a
+    distinction `analyze_javascript` deliberately makes: it grades `JS_EVAL_DECODED` and
+    `JS_EVAL_REMOTE` "crit" but `JS_CHILD_PROCESS_DYNAMIC` / `JS_DYNAMIC_REQUIRE` /
+    `JS_NATIVE_DLOPEN` "warn", documented in its own docstring as "often legit".
+    An independent adversarial sweep over 124 real dependency trees (25,834 packages)
+    plus 2,906 cached package tarballs found 8 FAILs, ALL of them `esbuild` and ALL of
+    them false: esbuild's official `postinstall` installer legitimately shells out with
+    an interpolated version string, and it has done so across at least six releases
+    (0.21.5 -> 0.28.1). Not hypothetical for this project -- **OpenClaw pins
+    `esbuild@0.28.1` in its own devDependencies**, so any source or contributor install
+    would have earned a CRITICAL FAIL. Reading severity off the detector rather than
+    re-deciding it here means B349 inherits a calibration that already survived its own
+    adversarial review, instead of substituting a fresh guess for it.
+
+    `AST_UNANALYZABLE` is deliberately routed to the unreadable bucket rather than the
+    signal bucket: it means the parse failed, which is an absence of evidence.
+
+    KNOWN FALSE NEGATIVE, stated rather than papered over. This check's FAIL inherits the
+    shipped JS detector's recall exactly. `_JS_EVAL_DECODED_RE` requires the decode to sit
+    INSIDE the eval/Function call (`eval(atob(x))`); a STAGED form that decodes into a
+    variable first and evals it a line later is deliberately silent there, and its own
+    docstring says so ("base64 decode without eval — stays silent"). So a readable,
+    staged decode-then-exec installer reaches no verdict here. The UNKNOWN path above is
+    what covers the common real case, since a staged loader shipped by this campaign
+    arrives minified; a readable staged one does not. Widening the JS detector is its own
+    change with its own adversarial pass -- not something to smuggle in behind this check.
+    """
+    signals: list = []
+    noted: list = []
+    unreadable = None
+    for signal in obfuscation_signals(source):
+        # A confusable ALONE is not evidence in source code. `obfuscation_signals` reports
+        # "confusable characters folded to ASCII" for any Cyrillic or Greek text at all, so
+        # an installer whose only unusual property is a non-English comment earned a
+        # CRITICAL FAIL -- reproduced end-to-end on `// Определяем платформу` (C-135,
+        # 2026-08-04), and a false-positive FAIL on an entirely honest build script is a
+        # Golden-Rule-#5 blocker. The discriminator is not a new one: `textnorm` already
+        # ships `confusable_in_ascii_context` for exactly this, and its docstring records
+        # that it is what keeps B58 from firing on multilingual prose. A whole non-Latin
+        # token (`Привет`) is i18n; a lookalike swapped INTO a Latin word (`іgnore`,
+        # `requіre`) is the attack. Same principle as the crit/warn split below: inherit a
+        # calibration that already survived review rather than substitute a fresh guess.
+        # The discriminator's own limit, found by the same pass and recorded rather than
+        # hidden: identifiers of languages that genuinely MIX scripts inside one word do
+        # trip it -- highlight.js@11.11.1 ships `lib/languages/1c.js` with 152 such tokens
+        # (`httpзапрос`, `base64значение`) and `isbl.js` with `ВыборSQL`. Neither is an
+        # install-time target, so neither is reachable from this check's population; if a
+        # build script ever legitimately carries such identifiers, this is where it breaks.
+        #
+        # THE ZERO-WIDTH SIGNAL IS DELIBERATELY *NOT* GIVEN THE SAME TREATMENT. Every
+        # invisible character in an install-time target stays FAIL-eligible, and this is
+        # the retracted-fix note §2.5 asks for -- written after the narrowing was BUILT,
+        # measured, adversarially reviewed and then withdrawn (B-448), not merely imagined.
+        #
+        # THE PULL. `obfuscation_signals` fires on any invisible character, and ZWNJ
+        # (U+200C) is REQUIRED Persian orthography and is used in Khmer -- so an honest
+        # installer can carry one. Measured over 112,421 published .js/.cjs/.mjs files from
+        # the real npm cache: 231 trip the raw signal.
+        #
+        # THE NARROWING THAT WAS TRIED. Inherit C-038's invisible-channel discriminator
+        # (`_mcp.py`: a channel is a consecutive RUN >= 4, or a TOTAL >= 32 the attacker
+        # cannot lower) and grade the halves apart -- run spends the FAIL, total-without-run
+        # degrades to UNKNOWN, an isolated invisible reads as typography. The corpus looked
+        # decisive: the run half is clean at 0 of 112,421, and all 27 survivors of
+        # `run OR total` are honest Persian locale and media bundles passing on the total
+        # alone. It was implemented, tested and measured before it was thrown away.
+        #
+        # WHY IT WAS WITHDRAWN -- two false negatives, each reproduced end-to-end against
+        # both the old and new trees, in a CRITICAL check:
+        #
+        #   * TROJAN SOURCE, cost TWO code points. U+200C/U+200D are valid ECMAScript
+        #     IdentifierPart (verified on node v22.23.2), so `HOST` and `HO<ZWJ>ST` are two
+        #     DIFFERENT bindings that render identically. An installer that resolves its
+        #     download host through the second one went FAIL -> PASS. The invisible signal
+        #     was the only leg holding that file: the AST leg sees a literal first argument
+        #     to execFileSync and says nothing.
+        #   * THE COUNTED FLOOR IS UNBOUNDED-EVADABLE. `INVISIBLE_COUNTED_RE` excludes ZWJ,
+        #     so a PRESENCE/ABSENCE encoding -- one ZWJ after a carrier character means 1,
+        #     none means 0 -- keeps every run at 1 and the counted total at 0 for a payload
+        #     of ANY length. 185 ZWJ carrying a 52-character directive: FAIL -> PASS.
+        #     C-038's own rationale ("a ZWJ-carrying payload still contributes non-ZWJ code
+        #     points at roughly half its length") assumes a two-SYMBOL alphabet; here the
+        #     second symbol is the ABSENCE of a character and costs nothing. That is where
+        #     the inherited reasoning breaks, and it is inherited verbatim -- see B-449.
+        #
+        # So the trade was an FP that has never been observed on this check's own population
+        # (0 of 35 resolved install targets across 3,033 real packages; 0 across 163 real
+        # dependency trees) for two demonstrated FNs. That is exactly the trade §2.5 forbids,
+        # and it does not become acceptable because the FP class is real -- an unrealised FP
+        # and a working bypass are not the same currency.
+        #
+        # WHAT WOULD CHANGE THE ANSWER: a real install target observed carrying an invisible
+        # character, AND a discriminator that closes the presence/absence channel rather than
+        # only the run. Both FNs above are pinned by tests/test_b448_invisible_fn_guards.py
+        # so a future narrowing has to keep catching them. Do not re-narrow without that.
+        if signal.startswith("confusable") and not confusable_in_ascii_context(source):
+            noted.append(f"{signal} (non-Latin script only — reads as i18n)")
+        else:
+            signals.append(signal)
+    longest = max((len(line) for line in source.splitlines()), default=0)
+    if longest >= _HOOK_MINIFIED_LINE:
+        unreadable = "minified — unreadable"
+    try:
+        for finding in _analyze_javascript(source, filename):
+            if finding.rule == "AST_UNANALYZABLE":
+                unreadable = unreadable or "could not be parsed"
+            elif finding.severity == "crit":
+                signals.append(finding.rule)
+            else:
+                noted.append(finding.rule)
+    except (RecursionError, ValueError):
+        unreadable = unreadable or "could not be parsed"
+    return signals, noted, unreadable
+
+
+def check_dependency_tree_hooks(ctx: Context) -> Finding:
+    """B349 (F-167, B-447): a dependency-tree package whose install-time target is obfuscated.
+
+    "Install-time" covers both ways npm runs a dependency's own code during an install:
+    a declared lifecycle hook, and a `binding.gyp` command-expansion that node-gyp runs
+    while configuring. The second needs no lifecycle script at all.
+    """
+    # Reads ctx ONLY -- audit(include_deptree=True) does the single walk. This check must
+    # never traverse the filesystem itself: doing so cost 2.4s per invocation (102% of a
+    # whole audit) and reached into the machine's real global npm install from any Context,
+    # including ones a test had built over a fixture home. Same hermetic-by-default shape
+    # as `ctx.sockets`/`include_sockets` (B340).
+    scan = getattr(ctx, "dep_tree", None)
+    if scan is None:
+        return _finding(
+            "B349",
+            UNKNOWN,
+            "The OpenClaw dependency tree was not walked this run, so it is unexamined — "
+            "not clean. It is scanned when the audit is run with the dependency-tree pass "
+            "enabled and an OpenClaw installation is locatable on PATH.",
+            "Run the audit on the host where OpenClaw is installed, with its bin directory "
+            "on PATH.",
+        )
+    if not scan.scanned:
+        return _finding(
+            "B349",
+            UNKNOWN,
+            "The OpenClaw installation carries no node_modules directory, so no dependency "
+            "tree could be examined.",
+            "If dependencies live elsewhere for this install layout, inspect that tree by hand.",
+        )
+
+    # Both install-time execution surfaces, flattened into one shape and assessed by one
+    # code path. `origin` is the npm phase for a lifecycle hook and the build-config
+    # filename for a GYP expansion, so the evidence still says which one fired -- they
+    # differ in where the reader has to look, not in how dangerous they are.
+    sites = [(h.package, h.relpath, h.phase, h.command, h.targets) for h in scan.hooks]
+    sites += [
+        (d.package, d.relpath, _deptree.GYP_FILENAME, d.command, d.targets)
+        for d in scan.build_directives
+    ]
+
+    hits: list = []
+    # A build config the walk could not fully examine is seeded here, not dropped: the
+    # package author writes that file, so an oversized or decoy-padded one would otherwise
+    # buy a clean PASS by exhausting a budget. Same GR#4 discipline as `scan.truncated`.
+    unreadable: list = list(getattr(scan, "gyp_capped", ()) or ())
+    noted: list = []
+    examined = 0
+    for package, relpath, origin, command, targets in sites:
+        for target in targets:
+            source = _deptree.read_target(target)
+            if source is None:
+                unreadable.append(
+                    f"{package} ({relpath}) {origin}: {target.name} (too large to read)"
+                )
+                continue
+            examined += 1
+            signals, noted_rules, why = _b349_assess_target(source, target.name)
+            where = f"{package} ({relpath}) {origin}: {command} -> {target.name}"
+            if signals:
+                hits.append(f"{where} [{', '.join(sorted(set(signals))[:4])}]")
+            elif why:
+                unreadable.append(f"{where} ({why})")
+            elif noted_rules:
+                # Disclosed, never a verdict: a platform-binary installer shelling out with
+                # an interpolated version is the shape here, and it is ordinary.
+                noted.append(f"{where} [{', '.join(sorted(set(noted_rules)))} — not a verdict]")
+    if hits:
+        return _finding(
+            "B349",
+            FAIL,
+            "A package in the OpenClaw dependency tree runs a target carrying a "
+            "code-execution or obfuscation signal at install time, allowing code you "
+            "never chose to run the next time this package is installed or updated.",
+            _B349_FIX,
+            hits,
+        )
+
+    # Unreadable is not clean. A machine-generated installer we could not parse is exactly
+    # the shape the campaign ships, and claiming a PASS over bytes we never read would be
+    # the silent lying-PASS this project exists to prevent (B97 sets the same precedent).
+    if unreadable:
+        return _finding(
+            "B349",
+            UNKNOWN,
+            "An install-time execution target in the OpenClaw dependency tree could not be "
+            "read, so whether it is safe is undetermined — not clean.",
+            "Beautify or manually inspect each named installer before the next install or "
+            "update; reinstall from a lockfile you trust (npm ci) once reviewed.",
+            unreadable,
+        )
+
+    # A truncated walk is not a clean tree. Say so rather than let a partial scan read as
+    # coverage (GR#4) -- the same discipline the skill scanner's own cap-hit UNKNOWN applies.
+    if scan.truncated:
+        return _finding(
+            "B349",
+            UNKNOWN,
+            "The OpenClaw dependency tree exceeded this check's package budget, so the "
+            "remainder was never examined.",
+            "Inspect the tree by hand, or re-run with a wider budget once one is available.",
+            [f"packages walked before the budget was hit: {scan.packages}"],
+        )
+    return _finding(
+        "B349",
+        PASS,
+        "Scanned the OpenClaw dependency tree: no package runs an install-time target "
+        "carrying a code-execution or obfuscation signal.",
+        "Reinstall from a lockfile you trust (npm ci) so a republished version cannot "
+        "silently replace a reviewed one.",
+        [
+            f"packages walked: {scan.packages}; install-lifecycle hooks: {len(scan.hooks)}; "
+            f"build-config command expansions: {len(scan.build_directives)}; "
+            f"targets read: {examined}",
+            "coverage: an install-time command whose target is not an in-package "
+            "`node <file>` invocation (a bin from another package, a shell builtin, an "
+            "inline `node -e` expression) has no bytes here to read and is not assessed",
+        ]
+        + noted,
     )
 
 
@@ -2161,7 +2487,7 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
     # `check_log_threat_hunt` (B164, checks/_egress.py) imports it lazily too.
     from ..logdiscovery import discover_log_sinks  # noqa: PLC0415
     from ..logscan import scan_log_file, summarize_truncation  # noqa: PLC0415
-    from ..scanbudget import audit_deadline  # noqa: PLC0415
+    from ..scanbudget import audit_deadline, limits_for  # noqa: PLC0415
 
     memory_sinks = [s for s in discover_log_sinks(ctx) if s.kind == "memory"]
     if not memory_sinks:
@@ -2180,9 +2506,12 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
     any_scanned = False
     isolated_hits = 0
 
+    # F-164: --exhaustive widens the per-sink budget and full-line coverage via
+    # limits_for(ctx); DEFAULT_LIMITS reproduces _B180_PER_FILE_BUDGET_S exactly.
+    lim = limits_for(ctx)
     for sink in memory_sinks:
-        deadline = audit_deadline(_B180_PER_FILE_BUDGET_S)
-        result = scan_log_file(sink, deadline)
+        deadline = audit_deadline(lim.log_per_file_budget_s)
+        result = scan_log_file(sink, deadline, limits=lim)
         all_results.append(result)
         if result.bytes_scanned == 0:
             continue

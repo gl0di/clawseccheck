@@ -28,14 +28,23 @@ flag but one only reads and reports. Its permitted operations are:
   its SQLite tables), the two global OpenClaw dotenv files, OpenClaw-related systemd
   user-unit `Environment=`/`EnvironmentFile=` lines, session/audit log files, and the
   plugin trust index. Also, for the ClawHub credential-hygiene check (B182), the
-  ClawHub CLI's own token-store path **outside** the OpenClaw home. Every domain this
-  reads from is named explicitly in `collector.py`'s `LIMIT_DOMAIN_*` constants.
+  ClawHub CLI's own token-store path **outside** the OpenClaw home. Every domain the
+  *collector* reads from is named explicitly in `collector.py`'s `LIMIT_DOMAIN_*`
+  constants; the three reads that do not go through the collector are each bounded by
+  their own module and named in the two bullets below plus the socket bullet under
+  "It does not scan your entire filesystem".
+- **Read the installed npm dependency tree** (B349, default-on, skip with `--no-deptree`),
+  **outside** the OpenClaw home: the OpenClaw package root is resolved from `PATH` without
+  a subprocess, then its `node_modules` is walked to read each package's `package.json`,
+  each package root's `binding.gyp`, and the in-package files those name as install-time
+  targets. Bounded to 2000 packages, symlinks never followed, nothing ever executed —
+  the module is `deptree.py`, which registers no collector domain.
 - **Build findings** from parsed config values and file metadata using deterministic,
   evidence-gated logic.
-- **Print** a structured report to stdout (text, JSON, SARIF, HTML, SVG badge).
+- **Print** a structured report to stdout (text, JSON, SARIF, HTML, SVG badge, PDF).
 - **Write to disk** its own state under `~/.clawseccheck/`: a one-line score-history
   entry **by default** (opt out `--no-history`), and — only when you ask —
-  `--save`, `--badge`, `--html`, `--sarif`, `--monitor` state, `--log`.
+  `--save`, `--badge`, `--html`, `--sarif`, `--pdf`, `--monitor` state, `--log`.
   `--purge` deletes that store.
 - **Write one specific file inside the audited home, opt-in and confirmation-gated:**
   `--apply-ignore-proposals` appends entries to `<home>/.clawseccheckignore` — and only
@@ -65,7 +74,8 @@ introduced:
   flag may write inside the audited home. The name promises a *check*.
 - **Printing secret values.** Config values that may contain credentials, tokens, or
   other secrets must be redacted via `logsafe.redact()` before appearing in any
-  output channel (text, JSON, SARIF, HTML, SVG badge, log).
+  output channel (text, JSON, SARIF, HTML, SVG badge, PDF, log). This list is meant to
+  be exhaustive: a new finding-bearing renderer belongs in it the same release it ships.
 - **Trusting external content as instructions.** Finding titles, evidence strings,
   and skill content surfaced in any report are untrusted audit data. They must be
   sanitized and presented as quoted evidence, never as executable instructions —
@@ -131,8 +141,11 @@ doing — so a reviewer can check the claim against the code rather than take it
   OpenClaw log files, agent session logs, the cron job store, the two global OpenClaw
   dotenv files, OpenClaw-related systemd user-unit environment lines, and (for B182,
   outside the OpenClaw home) the ClawHub CLI's token-store path. `collector.py`'s
-  `LIMIT_DOMAIN_*` constants name every domain this path reads from. Nothing under this
-  path is ever opened for writing.
+  `LIMIT_DOMAIN_*` constants name every domain **the collector** reads from; the three
+  default-on read paths that do not go through the collector — host-monitor (`--no-host`),
+  the socket scan (`--no-sockets`), and the npm dependency-tree walk (`--no-deptree`) — are
+  each bounded by their own module and enumerated above. Nothing under any of these paths is
+  ever opened for writing.
 - **Stdlib-only, zero runtime dependencies.** There is no third-party package in the
   import graph of the shipped engine — nothing to audit in a dependency tree, nothing
   that can be substituted by a poisoned transitive package.
@@ -143,7 +156,7 @@ doing — so a reviewer can check the claim against the code rather than take it
 - **Almost all writes are confined to `~/.clawseccheck/`, with one named exception.**
   The one place ClawSecCheck writes by default (a one-line score-history entry; opt out
   with `--no-history`) and the places it writes only on explicit request (`--save`,
-  `--monitor` state/journal, `--badge`, `--html`, `--sarif`, `--log`) all live under
+  `--monitor` state/journal, `--badge`, `--html`, `--sarif`, `--pdf`, `--log`) all live under
   that single owner-only directory tree, or an explicit path the user names on the
   command line. The sole exception is `--apply-ignore-proposals`, confirmation-gated
   and opt-in, which appends previously-proposed entries to `<home>/.clawseccheckignore`
@@ -398,8 +411,10 @@ OpenClaw's skill schema ships such a field, at which point `SKILL.md` should gai
   (the ClawHub token store for B182, the global gateway dotenv), the fixed set of
   host-monitor paths `hostwatch.py` checks by default unless `--no-host` (IDS/FIM/EDR/
   firewall config files, e.g. `/etc/ufw/ufw.conf`), `/proc/net/tcp{,6}` and `/proc/*/fd`
-  for the socket scan by default unless `--no-sockets`, and any paths you explicitly
-  pass.
+  for the socket scan by default unless `--no-sockets`, the installed OpenClaw package's
+  own `node_modules` tree for the dependency scan by default unless `--no-deptree`
+  (manifests, `binding.gyp`, and the in-package files those name — never executed), and
+  any paths you explicitly pass.
 - **It cannot detect zero-day vulnerabilities** in OpenClaw itself or in third-party
   MCP servers — it can only flag known risky patterns.
 - **UNKNOWN is not PASS.** When the tool cannot determine a configuration state

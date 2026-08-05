@@ -50,6 +50,7 @@ from clawseccheck.adjudication import (
     render_judged_json,
 )
 from clawseccheck.catalog import FAIL, HIGH, MEDIUM, PASS, UNKNOWN, WARN, Finding
+from clawseccheck.checks._shared import NPM_DEPTREE_SKILL_COVERAGE_NOTE
 from clawseccheck.checks._vet import check_installed_skills
 from clawseccheck.collector import Context, collect
 from clawseccheck.scoring import compute
@@ -298,7 +299,9 @@ def test_fixture_bad_f113_tt4_file_net_is_silently_dropped_by_real_check():
     ctx = collect(fixture)
     f = check_installed_skills(ctx)
     assert f.status == PASS
-    assert f.evidence == []
+    # C-358: only the npm dependency-tree coverage disclosure — no signal about this
+    # fixture's own (deliberately uncaught-by-the-engine) payload.
+    assert f.evidence == [NPM_DEPTREE_SKILL_COVERAGE_NOTE]
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +329,9 @@ def test_fixture_bad_b190_is_silently_dropped_by_real_check():
     ctx = collect(fixture)
     f = check_installed_skills(ctx)
     assert f.status == PASS
-    assert f.evidence == []
+    # C-358: only the npm dependency-tree coverage disclosure — no signal about this
+    # fixture's own (deliberately uncaught-by-the-engine) payload.
+    assert f.evidence == [NPM_DEPTREE_SKILL_COVERAGE_NOTE]
 
 
 def test_env_auth_kwarg_item_via_synthetic_context():

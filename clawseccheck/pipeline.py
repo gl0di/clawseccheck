@@ -972,6 +972,7 @@ class PipelineResult:
     phases: list[PhaseResult] = field(default_factory=list)
     budget_s: float = DEFAULT_FULL_BUDGET_S
     fast: bool = False
+    coverage_page: dict = field(default_factory=dict)  # F-165: see build_coverage_page
 
     def add(self, phase: PhaseResult) -> PhaseResult:
         self.phases.append(phase)
@@ -1027,6 +1028,7 @@ class PipelineResult:
             "phases": [p.to_json() for p in self.phases],
             "complete": self.complete,
             "notScanned": self.not_scanned(),
+            "coveragePage": self.coverage_page,  # F-165
         }
         adj = self.by_name(PHASE_ADJUDICATION)
         if adj is not None and isinstance(adj.data, dict):
@@ -1069,6 +1071,10 @@ def render_sections(result: PipelineResult, ascii_only: bool = False) -> list[st
                 lines.append(f"  {bullet} {name}")
             if len(phase.not_scanned) > 12:
                 lines.append(f"  {bullet} (+{len(phase.not_scanned) - 12} more)")
+    if result.coverage_page:
+        from .coverage import coverage_page_lines  # noqa: PLC0415 — see build_coverage_page
+        lines.extend(_banner("COVERAGE"))
+        lines.extend(coverage_page_lines(result.coverage_page, ascii_only=ascii_only))
     return lines
 
 
@@ -1159,4 +1165,10 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
         list(plugin_sweep_obj.vet_targets()) if plugin_sweep_obj is not None else [])
     result.add(run_adjudication(ctx, findings, vet_targets=combined_vet_targets,
                                 version=version, bundle=bundle))
+    from .coverage import build_coverage_page  # noqa: PLC0415 — deferred: coverage.py
+    # locally imports report.py (see build_coverage_page's own docstring), and this
+    # module already imports report.py at top level, so a top-level import here would
+    # risk a cycle at import time; deferred keeps it safe.
+    result.coverage_page = build_coverage_page(
+        ctx, findings, skill_sweep=skill_sweep, plugin_sweep=plugin_sweep_obj)
     return result

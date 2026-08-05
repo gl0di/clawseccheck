@@ -143,6 +143,26 @@ def _deterministic_fixture_perms():
 
 
 @pytest.fixture(autouse=True)
+def _stub_deptree_scan(monkeypatch):
+    """Keep B349's dependency-tree walk off the real machine across the suite.
+
+    The CLI enables the walk by default, so without this every CLI end-to-end test
+    traversed this box's actual global npm install: measured at ~2.4s per invocation,
+    which turned four `test_b351_full_save` tests from ~0.11s into ~2.5s each and the
+    whole suite from ~340s into ~1350s. Worse than slow, it is the same hermeticity
+    break `_stub_host_detect` below exists to prevent — a test reading real machine
+    state it never set up.
+
+    Every audit()/CLI run therefore sees no tree, and B349 reports UNKNOWN (never a
+    clean PASS over something unexamined). Tests that exercise the walk build their own
+    ctx.dep_tree from a fixture tree (tests/test_f167_deptree_hooks.py) and are
+    unaffected by this stub.
+    """
+    import clawseccheck
+    monkeypatch.setattr(clawseccheck, "_deptree_scan", lambda root=None: None)
+
+
+@pytest.fixture(autouse=True)
 def _stub_host_detect(monkeypatch):
     """Keep host-monitor detection deterministic and offline across the suite.
 

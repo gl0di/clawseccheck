@@ -849,7 +849,11 @@ def _mcp_observed_surfaces(ctx) -> dict:
     if not isinstance(home, Path):
         return {}
     from .mcpsurface import from_trajectory  # noqa: PLC0415 (leaf import, no cycle)
-    return {surface.server: surface for surface in from_trajectory(home)}
+    from .scanbudget import limits_for  # noqa: PLC0415 (leaf import, no cycle)
+    lim = limits_for(ctx)
+    return {surface.server: surface for surface in
+            from_trajectory(home, max_files=lim.traj_max_files,
+                             max_bytes_per_file=lim.traj_max_bytes_per_file)}
 
 
 def _mcp_detail_sig(ctx) -> dict:

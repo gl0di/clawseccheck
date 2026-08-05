@@ -3,6 +3,102 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [3.60.0] — 2026-08-05
+
+Install-time supply chain, a deep-scan mode, and a report you can attach. A new
+CRITICAL check reads the two ways an npm dependency can execute code the moment it is
+installed; `--exhaustive` lifts the caps a default run trades for speed; the audit now
+renders as a PDF. Two surfaces that counted more than they printed now print what they
+count, and a hidden channel that used to slip past the MCP tool-description gate is
+closed.
+
+### Breaking (JSON consumers)
+
+- **`inventory.system` is gone.** The `--json` subject grouping went from 5 keys to 8:
+  `system` split into `openclaw` + `host`, and `plugins` + `logs` are new. Top-level
+  field names are unchanged and `inventory` itself is still present — only its subject
+  keys moved. `docs/OUTPUT_SCHEMA.md` §17 now states explicitly that a nested key is
+  frozen only when it is named there, and that `inventory`'s subject keys track the check
+  taxonomy. Key off `findings[].id` for a stable contract.
+
+### Added
+
+- **B349 — "Obfuscated install-time target in the dependency tree" (CRITICAL).** Walks
+  the installed OpenClaw package's `node_modules` and reads *both* install-time execution
+  surfaces: lifecycle hooks (`scripts.preinstall` / `install` / `postinstall`) and a
+  package root's `binding.gyp` `<!(...)` command-expansions — which run at configure time
+  on the file's mere presence, with no lifecycle script declared at all. It FAILs only on
+  the conjunction of an install-time target and a code-execution or obfuscation signal
+  inside that target, and reports UNKNOWN (never a clean PASS) when the tree is truncated
+  or a target is unreadable. Bounded to 2,000 packages, symlinks never followed, nothing
+  ever executed; `--no-deptree` opts out. The library API stays hermetic by default
+  (`audit(include_deptree=False)`) — only the CLI defaults it on, and every doc that
+  enumerates the read surface now names it.
+- **`--exhaustive`** — an opt-in deep scan that raises the trajectory-file, log-sink and
+  per-line caps a default run keeps small for speed, and reads over-length log lines
+  through overlapping sliding windows instead of head-and-tail. It finds what a default
+  run provably misses: a poisoned tool description in the oldest of 61 trajectory sessions
+  goes PASS → FAIL. The wall-clock budgets rise in the same step, so the wider scan cannot
+  degrade a check into a capped UNKNOWN, and every raised bound is disclosed affirmatively.
+- **`--pdf PATH`** — the complete audit as a paginated PDF, written by a dependency-free
+  PDF 1.4 writer (base-14 fonts only, no font embedding, no JavaScript, no forms).
+  Pagination is lossless; secret values are redacted before they reach the page, like every
+  other output channel.
+- **B348 — "Plugin load path with no matching plugins.entries record" (LOW, advisory).**
+  A `plugins.load.paths` entry whose plugin declares an id with no matching
+  `plugins.entries` record keeps auto-loading on every gateway start — what
+  `openclaw plugins uninstall` leaves behind. WARN-only and unscored, because it is also
+  the ordinary shape of local plugin development.
+- **A coverage section** in `--full`'s report and `coveragePage` in `--full --json`:
+  per-subject scanned-vs-total, with every gap named rather than merely counted.
+- **The IOC dataset now reports its own coverage.** An ecosystem slot carrying zero records
+  is named out loud, so a clean identity result can never imply it was checked against
+  something. Both this and the freshness notice now reach a normal audit rather than only
+  `--vet-source`; `--no-freshness-notice` silences both.
+- The subject inventory grows from 5 subjects to 8, and plugins swept under `--full` reach
+  the inventory for the first time. A self-contained favicon for the `--html` export.
+
+### Fixed
+
+- **A hidden channel passed silently through the MCP tool-description gate.** The
+  escalation gate counted a run of invisible characters or a total, and excluded U+200D
+  ZWJ from that total — so a presence/absence encoding (one joiner after a carrier means
+  1, none means 0) kept every run at 1 and the total at 0 for a payload of any length. The
+  total now counts invisible code points whatever the alphabet, with the emoji-joiner
+  carve-out applied per character. Measured cost on 270,954 files and 3,033 npm tarballs:
+  one newly-flagged file, and not a tool description. This closes the joiner channel
+  specifically; `docs/THREAT_COVERAGE.md` now declares the limit that remains — the shared
+  invisible-character class is six code points wide.
+- **B349 no longer FAILs on a non-Latin comment.** A confusable-character signal alone
+  earned a CRITICAL FAIL, so an honest build script carrying a Cyrillic comment was a false
+  positive; the signal now requires a confusable inside an otherwise-ASCII word.
+- **`--dashboard`'s header counted findings it did not print** — up to a HIGH-severity one
+  on a real config. The count and the render now share one filter, and the card states how
+  many more a `--full` run would show.
+- **B13 and B42 now disclose the npm dependency-tree blind spot** in their evidence.
+- **`--purge` now covers every renderer's output filename** (badge, HTML, SARIF were
+  written but not purgeable).
+- **The read-surface disclosure is complete again.** The dependency-tree walk reads outside
+  the OpenClaw home and is on by default, and `SECURITY_MODEL.md` / `SKILL.md` / `README.md`
+  / `docs/USAGE.md` now name it and the `/proc` socket scan in every enumeration that claims
+  to be exhaustive — correcting a `LIMIT_DOMAIN_*`-covers-everything claim those modules
+  falsify.
+
+### Changed
+
+- Seven checks move from the `monitoring` surface to the new `logs` subject — grouping only,
+  no verdict changes.
+- The publish pipeline is unblocked: the ClawHub CLI pin moves to 0.23.3 (the first release
+  built against the replacement Convex upload route), the fleet-FP gate now runs the
+  dependency-tree and socket scans it had been blind to, and the pre-upload bundle-size
+  guard is re-grounded on a bundle that really did publish rather than on a retracted 413.
+
+### Internal
+
+- `logscan` bounds base64-shaped candidates before an O(n²) containment pass; the test
+  suite no longer walks the machine's global npm tree (a full run had gone from 338s to
+  1351s); the automated-test count is restamped 13,900 → 14,100.
+
 ## [3.59.0] — 2026-08-02
 
 179 commits over v3.58.0. Fourteen new detection checks widen the content-security

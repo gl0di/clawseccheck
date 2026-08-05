@@ -18,7 +18,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="182 security checks · 26 attack-chain detectors · 13,700 automated tests · 0 dependencies · 0 network calls" width="900">
+    <img src="docs/assets/stats-light.svg" alt="184 security checks · 26 attack-chain detectors · 14,100 automated tests · 0 dependencies · 0 network calls" width="900">
   </picture>
 </p>
 
@@ -91,7 +91,7 @@ No flags, no commands. Everything works as a conversation:
 | 🔐 **Secrets & data at rest** | Are your tokens, keys, and conversations lying around readable? |
 | 📡 **Monitoring & readiness** | Would you even notice a compromise — and could you investigate it? |
 
-On top of the 182 individual checks, a **risk engine** hunts for deadly
+On top of the 184 individual checks, a **risk engine** hunts for deadly
 *combinations* — chains like "untrusted input → reachable secrets → outbound
 tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)**.
 
@@ -120,7 +120,7 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
   capabilities — plus a documented zero-false-positive-FAIL release
   discipline: an alarm reaching you is a specific, reproducible, test-pinned
   condition in your own config, not a keyword match dressed up as a scan.
-- **Built like it matters.** 13,700 automated tests run on every change, a
+- **Built like it matters.** 14,100 automated tests run on every change, a
   false alarm is treated as a release-blocking bug, and every release is
   cryptographically signed.
 - **Free and readable.** MIT-licensed, pure Python standard library, zero
@@ -133,11 +133,21 @@ with respect to your OpenClaw setup, its engine is **offline by design**, and
 by default it writes only its own local history under `~/.clawseccheck/` —
 removable any time by asking your agent to *"purge the clawseccheck data"*.
 A few flags write local files only when you explicitly ask for them
-(`--save`, `--badge`, `--html`, `--sarif`, `--monitor`, `--log`) — see the
+(`--save`, `--badge`, `--html`, `--sarif`, `--pdf`, `--monitor`, `--log`) — see the
 [User guide](docs/USAGE.md) for the full list. The one exception that touches
 the audited home itself is also opt-in and confirmation-gated:
 `--apply-ignore-proposals` can append entries — never invent them — to its
-own `.clawseccheckignore` suppression file there. See the
+own `.clawseccheckignore` suppression file there.
+
+The widest read that reaches **outside** your OpenClaw home is on by default: to
+catch a dependency that would run code the moment it is installed, the tool
+locates your installed OpenClaw package through your `PATH` (no subprocess),
+then walks that package's `node_modules` to read each dependency's manifest,
+its build config, and the in-package files those name as install-time targets.
+Bounded to 2,000 packages, symlinks are never followed, and nothing is ever
+executed — `--no-deptree` skips the walk. (The host-posture scan and the
+listening-socket scan also read outside the home; `--no-host` and `--no-sockets`
+skip those.) See the
 [security model](SECURITY_MODEL.md) for the complete, itemized capability
 surface.
 
@@ -188,6 +198,8 @@ clawseccheck                         # audits ~/.openclaw by default
 clawseccheck --json                  # machine-readable result
 clawseccheck --sarif results.sarif   # SARIF 2.1.0 for GitHub Code Scanning
 clawseccheck --html report.html      # standalone HTML report (private)
+clawseccheck --pdf report.pdf        # complete audit as a paginated PDF (attach into chat)
+clawseccheck --exhaustive            # raise the scan caps: slower, maximum coverage
 clawseccheck --fail-under 70         # CI gate: exit 1 if score < 70
 ```
 
@@ -211,7 +223,7 @@ complete flag list.
 | Document | What it covers |
 |---|---|
 | [User guide](docs/USAGE.md) | Recipes, monitoring modes, and trust details |
-| [Check catalog](docs/CHECKS.md) | All 182 checks: what they verify and how to remediate |
+| [Check catalog](docs/CHECKS.md) | All 184 checks: what they verify and how to remediate |
 | [Threat coverage](docs/THREAT_COVERAGE.md) | OWASP LLM Top 10 / Agentic threat mapping |
 | [Bundled IOC dataset](docs/IOC_DATA.md) | Provenance policy, refresh cadence, and freshness discipline for the known-bad catalog |
 | [Output schema](docs/OUTPUT_SCHEMA.md) | The frozen `--json` / SARIF contract |

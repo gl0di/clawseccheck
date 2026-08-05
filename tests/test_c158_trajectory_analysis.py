@@ -238,8 +238,52 @@ def test_files_not_capped_at_max_files_no_disclosure(tmp_path):
     assert r["files_total"] == _MAX_FILES
     assert r["files_capped"] is False
 
-    out = render_trajectory_analysis(c)
+
+# ---------------------------------------------------------------------------
+# F-164 SC-2 — --exhaustive raises the per-file cap so nothing is dropped.
+# ---------------------------------------------------------------------------
+
+def test_exhaustive_scans_every_file_past_the_default_cap(tmp_path):
+    from clawseccheck.trajectory import _MAX_FILES
+
+    total = _MAX_FILES + 5
+    _write_many_sessions(tmp_path, total)
+    c = Context(home=tmp_path)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {}
+    c.exhaustive = True
+    r = analyze(c)
+    assert r["files_total"] == total
+    assert r["files_capped"] is False
+    assert r["files_scanned"] == total
+
+    # ledger_home scoped to an empty, isolated file: this test asserts the trajectory
+    # cap disclosure, not self-test corroboration -- without this the real machine's
+    # ~/.clawseccheck/coverage.json (if it happens to record a prior canary/multiturn
+    # run) would make self_test_corroboration run its OWN separate capped scan and
+    # falsely fail this assertion on a polluted dev box.
+    out = render_trajectory_analysis(c, ledger_home=str(tmp_path / "no_such_ledger.json"))
     assert "most recent" not in out
+    # F-164 SC-5: completeness must be stated affirmatively under --exhaustive, not
+    # left as silence.
+    assert f"Scanned all {total} of {total} trajectory file(s)." in out
+
+
+def test_default_mode_silent_when_not_capped_no_affirmative_line(tmp_path):
+    """Regression pin: the new SC-5 affirmative line is --exhaustive-only. A default
+    run that merely happens not to hit the cap must stay exactly as silent as before —
+    no new sentence on every ordinary clean run."""
+    from clawseccheck.trajectory import _MAX_FILES
+
+    _write_many_sessions(tmp_path, _MAX_FILES)
+    c = Context(home=tmp_path)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {}
+    out = render_trajectory_analysis(c, ledger_home=str(tmp_path / "no_such_ledger.json"))
+    assert "most recent" not in out
+    assert "Scanned all" not in out
 
 
 def test_explicit_path_files_total_and_not_capped(tmp_path):

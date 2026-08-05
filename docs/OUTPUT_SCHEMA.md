@@ -9,10 +9,12 @@ connectors) may rely on the field names, types, and envelope shapes described he
 - `--lang` / `--lang he` CLI flag removed; output is English-only.
 - No `lang` field in any JSON or SARIF output.
 
-**Stability rule:** field names and top-level envelope shapes are frozen. New
-**optional** top-level fields may be added in any minor release. Fields will not
-be removed or renamed without a major version bump (see `CHANGELOG.md` and
-versioning §6 in `CLAUDE.md`).
+**Stability rule:** top-level field names and envelope shapes are frozen. New
+**optional** top-level fields may be added in any minor release. A top-level field
+will not be removed or renamed without a major version bump (see `CHANGELOG.md` and
+versioning §6 in `CLAUDE.md`). §17 states exactly what "frozen" covers — read it
+before assuming a nested key is part of the contract; notably, the subject keys inside
+`inventory` (§18) track the check taxonomy and are **not** frozen.
 
 ---
 
@@ -53,7 +55,7 @@ versioning §6 in `CLAUDE.md`).
 | `behavioral_cap_reason` | `str \| null` | yes | Stable label naming which behavioral detector(s) drove `behavioral_capped`, e.g. `"T1 behavioral trifecta"` (joined with `"; "` when more than one fired) — never free text. `null` when `behavioral_capped` is `false`. |
 | `config_parse_reason` | `string \| null` | yes | Short diagnostic for why `config_parse_error` is `true` (the raw loader message), OR a note that a dotfiles-style symlink was safely followed when `config_symlink_escapes_home` is `true`. `null` when the config parsed cleanly with no relocation. Never contains a secret or file-content value. |
 | `errors` | `array[str]` | yes | Human-readable collection/parse messages (e.g. the `openclaw.json` parse error). Empty array on a clean run. |
-| `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (System/Agents/Skills/MCP/Channels) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §18. |
+| `inventory` | `object` | yes | Owner-facing "Inventory by subject" regrouping (OpenClaw core/Host machine/Agents/Skills/MCP/Plugins/Channels/Logs & trajectories) of the SAME `findings` above. Purely additive/presentation — never affects `score`/`grade`. See §18. |
 | `skill_sweep` | `object` | only with `--full` | Per-skill vet verdict for every installed skill (the second engine, on top of the audit) — the machine-readable form of `--full`'s printed SKILL SWEEP section. Absent (key not present) on a plain `--json` run without `--full`. Visibility only — never affects `score`/`grade`. See §19. |
 | `scan_receipt` | `str` | yes | Deterministic content-integrity hash over all findings, formatted `"sha256:<64-hex-chars>"`. Same findings set (any order) always yields the same receipt; a changed finding set changes it. Not a security signature — a drift/tamper-evidence checksum for the scan output itself. |
 | `phases` | `array[object]` | only with `--full` | One entry per `--full` pipeline phase (skill sweep, plugin sweep, behavioral, adjudication), in run order. Each entry: `name` (`str`), `status` (`"ran"`/`"skipped"`/`"not_reached"`/`"unavailable"`/`"error"`), `elapsed_s` (`float`, wall-clock — the one non-deterministic value in the payload), `complete` (`bool`, false when the phase could not account for everything it is responsible for), `detail` (`str`, one plain-English sentence), `notScanned` (`array[str]`, every target this phase cannot vouch for). Absent on a plain `--json` run without `--full`. |
@@ -63,6 +65,7 @@ versioning §6 in `CLAUDE.md`).
 | `vetPackets` | `array[object]` | only with `--full` | One judge packet per `--vet` target passed alongside `--full` (empty array when none were), each shaped `{"target": str, "targetFingerprint": str, "judgePacket": array[JudgePacketItem]}` — same item shape as `judgePacket` above, scoped per target. Absent without `--full`. |
 | `attestTemplate` | `object` | only with `--full` | Pre-run attestation template — the same structure produced standalone by the attestation self-report path (see `attest.py`), included here so a `--full` consumer does not need a second invocation to get it. Absent without `--full`. |
 | `pluginSweep` | `object` | only with `--full` | Per-plugin vet verdict for every installed plugin (P7), the machine-readable form of `--full`'s printed PLUGIN SWEEP section — same shape as `skill_sweep` above: `no_roots` (`bool`, the installed-plugin index itself could not be read), `no_targets` (`bool`, the index was read but names zero plugins), `complete` (`bool`), `counts` (`object`: `total`/`fails`/`warns`/`safe`/`truncated`/`skipped`), `not_scanned` (`array[str]`). Absent (key not present) when the phase did not run — e.g. `--full --fast`, or a build with no plugin-sweep implementation. Visibility only — never affects `score`/`grade`. |
+| `coveragePage` | `object` | only with `--full` | Per-subject (8-subject taxonomy) scanned-vs-total, every gap named rather than merely counted — a different question from `inventory`'s "what did we find". See §20. |
 | `secondOpinion` | `array[object]` | only with `--full --judged-bundle <file>` | One row per borderline-band item, annotated with a submitted judge verdict when the bundle supplied one: `finding_id` (`str`), `target` (`str`), `engine_disposition` (`str`), `judge_verdict` (`str` or `null` — unreviewed items still appear), `annotation` (`str`, human-readable). Advisory only — annotates an existing finding, never alters `score`/`grade`/`findings`. Absent unless a judged bundle was supplied. |
 | `vetSecondOpinion` | `array[object]` | only with `--full --judged-bundle <file>` carrying a non-empty `vetJudged` array | F-152: the escalate-only counterpart to `secondOpinion` above, for the bundle's SEPARATE `vetJudged` bucket (untrusted content swept by the skill/plugin sweeps) rather than the user's own config. One row per vet-target finding that was actually ESCALATED (rows with no status change are omitted — an empty array means "verdicts were submitted, nothing escalated", not "nothing was submitted"): `finding_id` (`str`), `target` (`str`, the swept target's bare name), `engine_disposition` (`str`, the pre-escalation status), `judge_verdict` (`str`, the POST-escalation status — never a field named `verdict`, to avoid implying it echoes the submitted `SAFE`/`SUSPICIOUS`/`DANGEROUS` value verbatim), `annotation` (`str`, human-readable). Escalate-only and per-target-fingerprint-bound, exactly like the standalone `--vet-judged` path (§15) this reuses: a row's underlying finding can only ever rank higher than the deterministic engine already ranked it, never lower, and a `vetJudged` entry is matched to a target ONLY by that target's own `targetFingerprint` (C-135) — an entry whose fingerprint matches no currently swept target is dropped wholesale, never applied to a different target as a fallback. Never alters `score`/`grade`/the top-level `findings` array — those describe the user's OWN config, which a vet target's own escalated pool never touches. Absent unless the bundle's `vetJudged` array was non-empty. **Includes the three always-offered C-255 pre-install prose-attestation ids** (`ATTEST-PROSE-MISMATCH`/`ATTEST-PROSE-INJECTION`/`ATTEST-PROSE-SOCIAL-ENG`) when a SUSPICIOUS/DANGEROUS verdict creates a brand-new finding for one — `engine_disposition` reads `"UNKNOWN"` for that row (there was no pre-existing finding at all, matching the `engine_disposition: "UNKNOWN"` the judge packet item itself already carried — see §12's `redacted_evidence` note for these ids) and `judge_verdict` reads `"WARN"` (the safety ceiling these three ids are capped at — never `"FAIL"`, since they carry zero independent deterministic signal). The join binding a packet item to its row is by `finding_id`, not position, precisely so this always-offered, no-prior-finding case is never structurally excluded. |
 
@@ -102,11 +105,14 @@ versioning §6 in `CLAUDE.md`).
   "config_parse_reason": null,
   "errors": [],
   "inventory": {
-    "system": { "status": "FAIL", "findings": ["B2"] },
+    "openclaw": { "status": "FAIL", "findings": ["B2"] },
+    "host": { "status": "WARN", "findings": ["B50"] },
     "agents": { "status": "PASS", "findings": [], "roster": ["(default)"], "attested": false },
     "skills": [ { "name": "pdf", "verdict": "NO KNOWN ISSUE", "status": "PASS", "reasons": [] } ],
     "mcp": [ { "name": "slack", "verdict": "ok", "reasons": [] } ],
-    "channels": { "status": "WARN", "findings": ["B26"], "roster": ["telegram"] }
+    "plugins": { "scanned": false, "rows": [] },
+    "channels": { "status": "WARN", "findings": ["B26"], "roster": ["telegram"] },
+    "logs": { "status": "PASS", "findings": [] }
   },
   "scan_receipt": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 }
@@ -1048,7 +1054,9 @@ is unaffected by this extension). This is an accepted, disclosed limitation.
 
 ### Frozen (breaking change requires major version bump)
 
-- Top-level field names in all three output modes.
+- Top-level field names in all three output modes. **Only the top level.** A key nested
+  inside a top-level object is frozen only if it is named below — this list is the whole
+  contract, not an illustration of it.
 - `Finding` object field names and their enumerated values (`severity`, `status`, `confidence`).
 - SARIF `$schema` URI, `version`, and the `runs[0].tool.driver` shape.
 - `verdict` enumeration in `--vet` mode.
@@ -1072,6 +1080,10 @@ is unaffected by this extension). This is an accepted, disclosed limitation.
 
 ### Not part of the public contract
 
+- The subject keys inside `inventory` (§18) and `coveragePage` (§20). Both objects are
+  presentation regroupings of `findings`, and their keys follow the check taxonomy: v3.60.0
+  replaced `inventory.system` with `openclaw` + `host` and added `plugins` + `logs`, in a
+  minor release, deliberately. Key off `findings[].id` if you need stability.
 - Text content of `title`, `detail`, `fix`, `why`, `question`, and `message.text`
   fields — these may change to improve accuracy without a version bump.
 - `runs[0].properties.*` SARIF extension fields — present only when context is
@@ -1081,28 +1093,39 @@ is unaffected by this extension). This is an accepted, disclosed limitation.
 
 ---
 
-## 18. `inventory` Object (F-131 — Inventory by Subject, Phase 1)
+## 18. `inventory` Object (F-131 — Inventory by Subject, Phase 1; extended to 8 subjects by F-163)
 
 Owner-facing regrouping of the SAME `findings` (§2) above by the entities an owner
-actually owns — System, Agents, Skills, MCP servers, Channels — instead of the 7
-analyst-facing security families the text report groups by underneath it. Purely
-additive and presentation-only: it never changes `score`, `grade`, or any `Finding`;
-every finding id it lists also appears, unchanged, in the top-level `findings` array.
+actually owns — OpenClaw core, Host machine, Agents, Skills, MCP servers, Plugins,
+Channels, Logs & trajectories — instead of the 7 analyst-facing security families the
+text report groups by underneath it. Purely additive and presentation-only: it never
+changes `score`, `grade`, or any `Finding`; every finding id it lists also appears,
+unchanged, in the top-level `findings` array.
 
-Skills and MCP servers get a **per-instance** verdict (one entry per installed skill /
-configured MCP server, reusing the same scoring paths `--vet <skill>` / `--vet-mcp` use).
-System, Agents, and Channels stay **bucket-level** in Phase 1 — one rolled-up status plus
-the ids of the surface's own FAIL/WARN findings — because no `Finding` carries a
-precise per-instance (e.g. "which channel") attribution yet; that is deferred to a
-possible Phase 2.
+Skills, MCP servers, and Plugins get a **per-instance** verdict (one entry per
+installed skill / configured MCP server / swept plugin, reusing the same scoring
+paths `--vet <skill>` / `--vet-mcp` / the plugin sweep use). OpenClaw core, Host
+machine, Agents, Channels, and Logs & trajectories stay **bucket-level** — one
+rolled-up status plus the ids of the surface's own FAIL/WARN findings — because no
+`Finding` carries a precise per-instance (e.g. "which channel") attribution yet; that
+is deferred to a possible Phase 2.
+
+**F-163 change note**: the old 5-subject shape's `"system"` key is gone, replaced by
+two subjects — `"openclaw"` (OpenClaw's own configuration: gateway, tools, secrets,
+monitoring, hooks, update, sessions) and `"host"` (the host machine: network IDS,
+audit logging, file-integrity monitoring, EDR, native binary PATH). `"plugins"` and
+`"logs"` are new. A JSON consumer keyed on the old 5-key shape must be updated.
 
 | Field | Type | Description |
 |---|---|---|
-| `system` | `object` | Bucket: `{"status": str, "findings": array[str]}`. `status` is the worst status (`FAIL` > `WARN` > `UNKNOWN` > `PASS`) among findings on the system surfaces (gateway, tools, secrets, monitoring, hooks, host, update, sessions); `findings` lists the ids of that bucket's own FAIL/WARN findings. |
-| `agents` | `object` | Bucket, same shape as `system`, plus: `roster` (`array[str]`) — agent names, preferring an attested roster (`--attest`) over the static `agents.list` config, falling back to `["(default)"]`; `attested` (`bool`) — `true` when the roster came from an attestation self-report. |
+| `openclaw` | `object` | Bucket: `{"status": str, "findings": array[str]}`. `status` is the worst status (`FAIL` > `WARN` > `UNKNOWN` > `PASS`) among findings on the OpenClaw-core surfaces (gateway, tools, secrets, monitoring, hooks, update, sessions); `findings` lists the ids of that bucket's own FAIL/WARN findings. |
+| `host` | `object` | Bucket, same shape as `openclaw`, scoped to the `host` surface (network IDS, audit logging, file-integrity monitoring, EDR, native binary PATH safety, systemd persistence) — answers "is this MACHINE monitored", a distinct question from "is OpenClaw configured well". |
+| `agents` | `object` | Bucket, same shape as `openclaw`, plus: `roster` (`array[str]`) — agent names, preferring an attested roster (`--attest`) over the static `agents.list` config, falling back to `["(default)"]`; `attested` (`bool`) — `true` when the roster came from an attestation self-report. |
 | `skills` | `array[object]` | One entry per installed skill: `{"name": str, "verdict": str, "status": str, "reasons": array[str]}`. `verdict` reuses the same word set `--vet` uses (`"NO KNOWN ISSUE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, `"UNKNOWN"`); `status` is the underlying `PASS`/`WARN`/`FAIL`/`UNKNOWN`; `reasons` holds up to 3 sanitised detail strings. Empty array when no skills are installed. A skill the per-skill scan budget could not reach reports `status: "UNKNOWN"` with a reason explaining why — never a false `"NO KNOWN ISSUE"`. |
 | `mcp` | `array[object]` | One entry per configured MCP server (both `mcp.servers` nesting and legacy `mcpServers`/`mcp_servers`): `{"name": str, "verdict": str, "reasons": array[str]}`. `verdict` is `"ok"` (no supply-chain/trust signal), or `"WARN"`/`"FAIL"`/`"UNKNOWN"`. Empty array when no MCP servers are configured. |
-| `channels` | `object` | Bucket, same shape as `system`, plus: `roster` (`array[str]`) — configured channel provider names (the `defaults` pseudo-provider excluded). |
+| `plugins` | `object` | `{"scanned": bool, "rows": array[object]}`. `scanned` is `false` when this run never swept plugins (plain `audit()`/`--json` without `--full` — a plugin sweep is `--full`-only) — distinct from `true` with an empty `rows` (a real sweep found zero installed plugins). Each row: `{"name": str, "status": str}` (`PASS`/`WARN`/`FAIL`/`UNKNOWN`/`"SKIPPED"`/`"TRUNCATED"`). |
+| `channels` | `object` | Bucket, same shape as `openclaw`, plus: `roster` (`array[str]`) — configured channel provider names (the `defaults` pseudo-provider excluded). |
+| `logs` | `object` | Bucket, same shape as `openclaw`, scoped to the `logs` surface (trajectory sidecar / audit-trail / log-content-scan / behavioral checks — B164, B180, B85, T1, T2, T3, B191). |
 
 ### Notes
 
@@ -1168,3 +1191,52 @@ top-level `score`/`grade`/`findings` above.
   CI gate that would otherwise be green.
 - The sweep runs silently under `--json` (no narrated output mixed into stdout) — the
   JSON document on stdout is the complete, sole output.
+
+---
+
+## 20. `coveragePage` Object (F-165 — "was everything looked at", V1)
+
+Present under `--full --json` only (a plugin/skill sweep pass has to have run to
+answer the question at all — omitted, key absent, on a plain `--json` without
+`--full`). Answers a different question than `inventory` (§18): that states what each
+subject's checks/instances *found*; this states, per subject, how much of that
+subject was actually *scanned* — and names every gap rather than only counting it, the
+same "no silent caps" rule the rest of this tool follows.
+
+One entry per subject in the 8-subject taxonomy (§18):
+
+| Field | Type | Description |
+|---|---|---|
+| `total` | `int \| null` | How many things this subject owns (checks for a bucket subject, installed targets for a sweep subject). `null` means this run never swept the subject at all (`skills`/`plugins` on a run without `--full` or under `--fast`) — distinct from `0` (swept, and there was nothing to scan). |
+| `scanned` | `int \| null` | How many of `total` reached a conclusive verdict. For `openclaw`/`host`/`agents`/`channels`/`logs` (bucket subjects): checks that returned `PASS`/`FAIL`/`WARN` rather than `UNKNOWN`. For `skills`/`plugins`: installed targets the sweep fully scanned (neither `SKIPPED` nor `TRUNCATED`). `mcp` is always fully scanned (`scanned == total`) — MCP vetting is not sweep-budgeted. `null` mirrors `total`'s `null`. |
+| `not_scanned` | `array[str]` | Every gap, named — check ids (bucket subjects) or target names (`skills`/`plugins`), never merely a count. Empty when `scanned == total`. |
+| `note` | `str \| null` | Present only for the `null`/`0` cases above: `"not scanned this run (needs --full)"`, `"none installed"`, or `"none configured"` (`mcp` with zero configured servers). `null` for every ordinary scanned-vs-total entry. |
+
+### Skeleton
+
+```json
+{
+  "coveragePage": {
+    "openclaw": {"total": 68, "scanned": 33, "not_scanned": ["B17", "B31", "..."]},
+    "host": {"total": 8, "scanned": 6, "not_scanned": ["B101", "B150"]},
+    "agents": {"total": 34, "scanned": 24, "not_scanned": ["B18", "B22", "..."]},
+    "skills": {"total": 0, "scanned": 0, "not_scanned": [], "note": "none installed"},
+    "mcp": {"total": 0, "scanned": 0, "not_scanned": [], "note": "none configured"},
+    "plugins": {"total": 0, "scanned": 0, "not_scanned": [], "note": "none installed"},
+    "channels": {"total": 3, "scanned": 3, "not_scanned": []},
+    "logs": {"total": 7, "scanned": 0, "not_scanned": ["B164", "B180", "..."]}
+  }
+}
+```
+
+### Notes
+
+- Presentation-only, same as `inventory` — never alters `score`/`grade`/`findings`.
+- **V1 scope**: `logs` is CHECK-granularity here (same as the other bucket subjects),
+  not the file/byte-level detail ("N of M trajectory files, X of Y MB scanned") a
+  future revision may add — that data exists today only as prose inside
+  `B164`/trajectory-audit/behavioral findings, not as structured counts.
+- **V1 scope**: also rendered as a text section (`--full`, banner `CLAWSECCHECK
+  COVERAGE`) built from the same `build_coverage_page` function. `--dashboard --full`,
+  `--html`, and `--pdf` do not carry this page yet — they render through a separate
+  code path that does not call `pipeline.run_pipeline`.

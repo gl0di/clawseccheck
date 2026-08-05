@@ -40,9 +40,11 @@ from ..scanbudget import (
     budget_exceeded,
     cpu_deadline,
     cpu_exceeded,
+    limits_for,
 )
 from ..textnorm import (
     _has_suspicious_zero_width,
+    _is_zwj_between_emoji,  # B-449: the emoji carve-out, reused for the COUNT half
     _nfkc_ascii_fold_changed,
     confusable_in_ascii_context,
     normalize_for_scan,
@@ -1389,6 +1391,82 @@ _C038_INVISIBLE_RUN_RE = re.compile(
 )
 _C038_INVISIBLE_TOTAL_MIN = 32
 _C038_INVISIBLE_COUNTED_RE = re.compile("[\u200b\u200c\ufeff\u00ad\u2060]")
+_C038_ZWJ = "\u200d"
+
+
+def _c038_invisible_total(text: str) -> int:
+    """Invisible code points that could be carrying payload, emoji joiners excused.
+
+    THE FIX THIS FUNCTION IS (B-449). The count above deliberately dropped ZWJ, on the
+    reasoning that "a channel needs at least two symbols, so a ZWJ-carrying payload still
+    contributes non-ZWJ code points at roughly half its length". That holds for a
+    two-SYMBOL SUBSTITUTION alphabet (ZWSP=0, ZWJ=1). It does not hold for a
+    PRESENCE/ABSENCE encoding, where the second symbol is *the absence of a character*:
+    one ZWJ after a carrier character means 1, none means 0. Every ZWJ is then isolated
+    between visible characters, so the longest run stays 1 and the old count stayed at
+    ZERO for a payload of any length. Reproduced against the shipped constants: a
+    44-character exfiltration directive rode in 177 ZWJ and reached neither half of the
+    gate -- no WARN, no FAIL -- on this project's primary prompt-injection surface.
+
+    The invariant the attacker genuinely cannot lower is the one used here: carrying K
+    bits costs invisible CODE POINTS, whatever the alphabet, because the positions have
+    to be distinguishable. So ZWJ is no longer dropped as a class -- only the one
+    legitimate mass use of it is excused, per character, via the SAME
+    `_is_zwj_between_emoji` exemption `obfuscation_signals` itself applies. That is an
+    inherited carve-out, not a new threshold: a description full of family emoji
+    contributes nothing here, while a lone ZWJ spliced between two ordinary letters
+    counts, because that is what it is doing.
+
+    WHAT THIS COUNTS, STATED EXACTLY, because an earlier draft of this docstring claimed
+    it counted "every invisible character" and that was false: it counts the five members
+    of `_C038_INVISIBLE_COUNTED_RE` plus non-emoji ZWJ -- SIX code points. It is bounded
+    by `obfuscation_signals`' own class, which is upstream and shared, and the residuals
+    below are all consequences of that boundary rather than of the arithmetic here.
+
+    `_C038_INVISIBLE_COUNTED_RE` is left exactly as it was -- it mirrors a class pinned
+    against `textnorm` by test, and widening the regex would have hidden the emoji
+    exemption inside a character class where it cannot be expressed.
+
+    MEASURED FALSE-POSITIVE COST: one file. Across 270,954 real text files plus 3,033 npm
+    tarballs, 228 carry a non-emoji ZWJ and exactly ONE newly reaches the floor --
+    react-devtools-core@6.1.5's bundled parser, whose ZWJs are literally the Unicode
+    character-class and HTML-entity tables it needs to name (`zwnj:"..", zwj:".."`). It is
+    a 2 MB bundle, not a tool description, so it is outside this leg's population
+    entirely; on real MCP manifests the delta is zero.
+
+    TWO RESIDUALS, NAMED RATHER THAN IMPLIED. Neither is made worse by this change -- the
+    old count was 0 for every ZWJ channel -- but both bound what this gate is worth:
+
+      * FLANK-EXEMPTED ZWJ, and the flank need NOT be conspicuous. Placing the channel's
+        ZWJs between two code points that `textnorm._EMOJI_RANGES` accepts earns the
+        exemption per character, so a presence/absence payload rides at a total of ~1.
+        An earlier draft of this note bounded that by "the carrier is then a wall of
+        emoji", and an adversarial pass falsified it: `_EMOJI_RANGES` spans whole Arrows
+        and Dingbats blocks, so `->` (U+2192) or a check mark (U+2713) work as flanks, and
+        so does U+20E3, which is itself ZERO-ADVANCE. All three were executed end-to-end
+        and reached PASS. So this residual is bounded by nothing here -- it is the price of
+        the exemption that keeps honest emoji descriptions quiet, and revoking it trades a
+        false negative for a false-positive class.
+      * THE UPSTREAM CLASS IS NARROW, WHICH IS THE BIGGER HOLE. Everything above sits
+        DOWNSTREAM of `obfuscation_signals`' own six-member class, so any invisible code
+        point outside it never fires the raw signal and this leg never runs at all. Not a
+        near-miss: a plain two-symbol substitution channel over U+2062 INVISIBLE TIMES /
+        U+2063 INVISIBLE SEPARATOR carries a full directive and returns a clean PASS with
+        NO finding, executed end-to-end. The sharpest members are U+2061-2064, the
+        immediate neighbours of U+2060 WORD JOINER, which IS in the class and is *more*
+        legitimate in prose than they are. Tracked separately, not patched here: a class
+        every consumer shares must not be widened from inside one consumer, or B349 and
+        the content ring stay blind while this leg implies coverage.
+    """
+    total = len(_C038_INVISIBLE_COUNTED_RE.findall(text))
+    if _C038_ZWJ not in text:
+        return total
+    chars = list(text)
+    return total + sum(
+        1
+        for idx, ch in enumerate(chars)
+        if ch == _C038_ZWJ and not _is_zwj_between_emoji(chars, idx)
+    )
 
 
 # Signal strings returned by `textnorm.obfuscation_signals()`. Named here so this leg
@@ -1558,7 +1636,7 @@ def _vet_mcp_tool_poisoning(name: str, spec: dict) -> tuple[list[str], list[str]
                 "the model receives"
             )
         if _C038_SIGNAL_INVISIBLE in obf_signals:
-            invisible_total = len(_C038_INVISIBLE_COUNTED_RE.findall(description))
+            invisible_total = _c038_invisible_total(description)
             shape = ""
             if _C038_INVISIBLE_RUN_RE.search(description):
                 shape = "a run of zero-width / invisible characters"
@@ -5442,6 +5520,117 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
     )
 
 
+# ---------- B348: undeclared plugins.load.paths entry (uninstall won't stop it) ----------
+def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
+    """B348 (F-161) — a plugin loads via plugins.load.paths with no matching
+    plugins.entries.<id> record.
+
+    Grounded observable config fact: OpenClaw's ``plugins.load.paths`` (resolved via
+    the shared ``config_plugin_load_paths`` — same helper B158 already reconciles
+    against disk) is an independent auto-load surface from ``plugins.entries``. A
+    directory on that load-path list, carrying an ``openclaw.plugin.json`` manifest
+    that declares an "id" with no corresponding ``plugins.entries.<id>`` record, still
+    loads on every gateway start; only removing the load path itself changes that
+    (verified live on a real host, F-161).
+
+    Fires only when ALL hold: plugins.allow is unset/None (no reachability allowlist
+    could gate it at a different layer), a plugins.load.paths entry resolves to an
+    on-disk directory, that directory carries an openclaw.plugin.json manifest with a
+    declared id, and that id has no plugins.entries.<id> record.
+
+    WARN (LOW/advisory), never FAIL — a load path with no entries record is normal
+    local-dev shape (e.g. a plugin mid-development, deliberately left unregistered).
+
+    PASS    — plugins.allow is set, or every plugins.load.paths manifest id has a
+              matching plugins.entries record.
+    UNKNOWN — no config found / unreadable, or no plugins.load.paths entry resolves
+              to an on-disk manifest with a declared id.
+    """
+    if not ctx.config_found:
+        return _finding(
+            "B348",
+            UNKNOWN,
+            "No openclaw.json found — plugins.load.paths can't be reconciled against "
+            "plugins.entries.",
+            "Run the audit against the OpenClaw profile directory (its openclaw.json).",
+        )
+    unreadable = _config_unreadable("B348", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    cfg = ctx.config
+    plugins = cfg.get("plugins") if isinstance(cfg, dict) else None
+    allow = plugins.get("allow") if isinstance(plugins, dict) else None
+    if allow is not None:
+        return _finding(
+            "B348",
+            PASS,
+            "plugins.allow is set — an explicit reachability allowlist gates which "
+            "plugins may load.",
+            "Keep plugins.allow in sync as plugins.load.paths entries change.",
+        )
+
+    from ..skilldiscovery import config_plugin_load_paths
+
+    import json as _json
+
+    load_paths = config_plugin_load_paths(ctx.home, cfg)
+    declared = set(_plugins(cfg))
+
+    undeclared: list[str] = []
+    checked_any = False
+    for load_path in load_paths:
+        if not load_path.is_dir():
+            continue
+        manifest_file = load_path / _PLUGIN_MANIFEST
+        if not manifest_file.is_file():
+            continue
+        try:
+            manifest = _json.loads(manifest_file.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(manifest, dict):
+            continue
+        pid = manifest.get("id")
+        if not isinstance(pid, str) or not pid:
+            continue
+        checked_any = True
+        if pid not in declared:
+            undeclared.append(f"{pid} ({load_path})")
+
+    if not checked_any:
+        return _finding(
+            "B348",
+            UNKNOWN,
+            "No plugins.load.paths entry resolves to an on-disk directory carrying an "
+            f"{_PLUGIN_MANIFEST} manifest with a declared id — not applicable.",
+            "No action needed unless a plugin load path is added later.",
+        )
+
+    if undeclared:
+        extra = f" (+{len(undeclared) - 6} more)" if len(undeclared) > 6 else ""
+        return _finding(
+            "B348",
+            WARN,
+            "plugins.load.paths declares plugin(s) with no matching plugins.entries "
+            "record: " + ", ".join(undeclared[:6]) + extra + ". This plugin loads on "
+            "every gateway start regardless of its plugins.entries record — running "
+            "`openclaw plugins uninstall` only removes the entries record, it does not "
+            "stop the plugin from loading; the load path itself must be removed.",
+            "Remove the plugin's directory from plugins.load.paths (or delete the "
+            "directory) to actually stop it loading, not just its plugins.entries "
+            "record.",
+            evidence=undeclared,
+        )
+
+    return _finding(
+        "B348",
+        PASS,
+        "plugins.load.paths plugin(s) all have a matching plugins.entries record.",
+        "Keep plugins.entries in sync with plugins.load.paths as load paths change.",
+    )
+
+
 # ---------- B177 (B-240): OpenClaw's own persisted per-plugin ClawHub trust verdict ----------
 def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     """B177 (B-240) — OpenClaw's OWN persisted per-plugin ClawHub trust verdict.
@@ -6665,7 +6854,9 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             "Run the audit on the host where the agent's session logs live.",
         )
 
-    tool_defs, meta = _trajectory.read_compiled_tool_descriptions(home)
+    lim = limits_for(ctx)
+    tool_defs, meta = _trajectory.read_compiled_tool_descriptions(
+        home, max_files=lim.traj_max_files, max_bytes_per_file=lim.traj_max_bytes_per_file)
 
     if not tool_defs:
         why = (

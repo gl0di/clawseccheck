@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 3.59.0
+version: 3.60.0
 description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Scores your setup (A–F) and reports the most urgent holes — it never changes your OpenClaw setup. No API key; the scanner itself makes no network calls. Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score.
 license: MIT
 metadata: {"openclaw":{"emoji":"🦞","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Scores your setup (A–F) and reports the most urgent holes — it never changes your OpenClaw setup. No API key; the scanner itself makes no network calls. Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
@@ -53,6 +53,11 @@ It runs a **read-only** local script that inspects the user's own agent. **Full 
   (`http_proxy`/`https_proxy`/...); and on Windows only, a handful of read-only registry queries
   under `HKEY_LOCAL_MACHINE` for the same signals (a service key's existence, the firewall's on/off
   state — never a secret value). Reads only, no subprocess, no network
+- **the installed npm dependency tree (beyond OpenClaw's own scope, skip with `--no-deptree`):**
+  the OpenClaw package root is located from `PATH` (no subprocess), then its `node_modules` is
+  walked to read each package's `package.json`, each package root's `binding.gyp`, and the
+  in-package files those name as install-time targets — the two ways a dependency can run code at
+  install time. Bounded (2000 packages), symlinks never followed, nothing ever executed
 - credential-store path-existence inventory: checks whether `.env`, SSH key dirs, keychain/keyring
   directories, and browser cookie stores **exist** near the agent home (never reads their contents)
 - the ClawHub CLI's own plaintext token-store config (outside the OpenClaw home) — opened to check
@@ -66,7 +71,7 @@ named, opt-in, confirmation-gated exception, covered below. What it *does* write
 own machine and is never uploaded**: almost all of it lands in ClawSecCheck's own state, not your
 OpenClaw setup — a private local audit history under `~/.clawseccheck/` (owner-only — opt out with
 `--no-history`), any report files you explicitly request via a flag (`--save`, `--badge`, `--html`,
-`--sarif`, `--monitor`, `--trend`, `--log`), and a small freshness ledger
+`--sarif`, `--pdf`, `--monitor`, `--trend`, `--log`), and a small freshness ledger
 (`~/.clawseccheck/coverage.json`) recording when you last ran an opt-in active self-test
 (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`). The one write that lands inside the
 audited OpenClaw home is `--apply-ignore-proposals` (opt-in, confirmation-gated): it appends
@@ -77,7 +82,8 @@ step; a crash-artifact `.tmp` sibling, if one is ever left behind, is not touche
 needs a manual `rm`. Scoping flags at a glance: `--no-history` (skip
 local history), `--no-host` (skip the host-recon bullet above), `--no-native` (skip the one external
 command below), `--no-sockets` (skip the B340 effective-bind socket scan — the escape hatch if it
-false-FAILs on an unusual host). Pure Python standard library, no dependencies.
+false-FAILs on an unusual host), `--no-deptree` (skip the npm dependency-tree walk — the escape
+hatch on a very large tree). Pure Python standard library, no dependencies.
 
 It also runs OpenClaw's **built-in** audit — the one fixed, read-only external command
 `openclaw security audit --json` (its read-only mode, never a fixing one; the only subprocess call
@@ -699,6 +705,11 @@ routing index only, not the flow.
 - **trend** — `--trend`
 - **percentile** — `--percentile`
 - **share grade** — `--badge grade.svg` or `--card`
+- **attachable report for a phone / mobile chat** — `--pdf report.pdf` — a filesystem path is
+  useless to a user reading from a phone, but a PDF opens inline in a mobile chat client's own
+  viewer where an HTML attachment would just be a download. **Attach the PDF file itself into
+  the reply — never paste its path, and never re-render its contents into chat text** (same
+  doctrine as the `--badge` SVG: attach the artifact, don't redraw it).
 - **behavioral audit** — `--behavioral` (always relay its output in full)
 - **trajectory incident analysis** — `--analyze-trajectory` (a `⚠ INCIDENT SIGNAL` line is a real incident finding)
 - **judge packet** — `--judge-packet` (summarize it; never paste the raw JSON, never drop it)
@@ -727,10 +738,12 @@ dispatcher; the full protocol behind each row is the matching `## Choice:` secti
 | "percentile", "compare", "above average", "how do I rank" | `--percentile` |
 | "badge", "share my grade", "shareable", "certificate" | `--badge` or `--card` |
 | "HTML report", "full report" | `--html report.html` |
+| "PDF", "send me a PDF", "phone", "mobile", "attach the report" | `--pdf report.pdf` — attach the file itself, never paste the path |
 | "JSON", "machine readable", "raw data" | `--json` |
 | "what did my agent actually do", "behavioral", "runtime audit", "did it really do that", "prove it happened" | `--behavioral` — post-hoc, proof-by-log tool-call sequences from the trajectory sidecar; metadata-only, WARN-only, never scored. **Always relay the output — never drop it.** (Item 1's `--dashboard --full` also runs this as its "Behavioural" block — F-151 — but that block is a one-paragraph summary; a fired T1/T2/T3/B191 detector there also caps the grade, F-154. A user asking for this by name should still get the standalone command for the full per-line detail.) |
 | "did a suspicious skill's instructions actually run", "was this indicator acted on" | `--analyze-trajectory` — post-hoc, correlates installed-skill indicators against real tool-call arguments. **Any `⚠ INCIDENT SIGNAL` line is a real incident finding — never drop it.** (Folded into item 1's `--dashboard --full` "Behavioural" block too, F-151 — same one-paragraph-summary caveat as the row above; ask for the standalone command for full detail.) |
 | "second opinion", "judge packet", "review the borderline findings" | Outside item 1's flow: `--judge-packet` — JSON list of borderline findings for host-agent review; summarize item count + per-item verdicts, offer to save large output to a file, **never paste raw JSON, never drop it** — then feed panel verdicts back with `--judged <file>` (see `docs/FLOW_CHOICES.md`). Inside item 1's flow this already ran, MANDATORY, in Step 2 — its verdicts are already in the pasted "Second opinion (advisory)" block, nothing further to do (C-297). |
+| "scan everything", "maximum coverage", "don't skip anything", "check the full logs" | add `--exhaustive` to whatever command is already running (composes with `--full`; has effect on its own too, since B164/B180 run on every audit) — raises the trajectory-file / log-sink / per-line scan caps instead of the interactive-fast defaults. Slower; offer it after a normal run's own disclosure names something skipped (a file-count cap, a time-budget skip, an oversized-line gap) and the user wants that specific gap closed, not as a default suggestion on every run. |
 
 ---
 

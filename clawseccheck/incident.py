@@ -25,13 +25,14 @@ from pathlib import Path
 from . import trajectory as _trajectory
 from .monitor import DEFAULT_EVENTS, load_events
 from .sbom import build_sbom
+from .scanbudget import limits_for
 
 INCIDENT_VERSION = 1
 
 _MAX_TRAJECTORY_BYTES = 8_000_000  # mirrors trajectory.py's own per-file scan cap
 
 
-def _trajectory_hash_entries(home) -> list[dict]:
+def _trajectory_hash_entries(home, *, max_files: int | None = None) -> list[dict]:
     """Hash each trajectory sidecar file's raw bytes — never parses/reads call
     content. A hash lets an investigator later prove a file wasn't altered
     without this pack itself having read anything sensitive out of it.
@@ -41,11 +42,18 @@ def _trajectory_hash_entries(home) -> list[dict]:
     the digest only covers the first ``_MAX_TRAJECTORY_BYTES`` bytes, and
     ``truncated: True`` is always surfaced so a consumer can never mistake a
     partial digest for a whole-file one (mirrors collector.py's
-    ``_read_with_limit`` (bytes, truncated) contract)."""
+    ``_read_with_limit`` (bytes, truncated) contract).
+
+    ``_MAX_TRAJECTORY_BYTES`` itself is a digest-completeness cap, not a scan cap
+    (F-164 out of scope — deliberately not widened by --exhaustive). ``max_files``
+    (F-164, optional) widens only the FILE-COUNT cap under --exhaustive; ``None``
+    reproduces today's default (``trajectory._MAX_FILES``).
+    """
     if not isinstance(home, Path):
         return []
     entries: list[dict] = []
-    for path in _trajectory.find_trajectory_files(home):
+    kwargs = {} if max_files is None else {"max_files": max_files}
+    for path in _trajectory.find_trajectory_files(home, **kwargs):
         try:
             raw = path.read_bytes()
             rel = path.relative_to(home)
@@ -105,7 +113,8 @@ def build_incident(ctx, findings, score, *, when: str | None = None,
         "score": {"score": score.score, "grade": score.grade},
         "findings": [_finding_to_dict(f) for f in findings],
         "sbom": build_sbom(ctx),
-        "trajectory_hashes": _trajectory_hash_entries(ctx.home),
+        "trajectory_hashes": _trajectory_hash_entries(
+            ctx.home, max_files=limits_for(ctx).traj_max_files),
         "credential_rotation_list": _credential_rotation_list(findings),
         "monitor_events": load_events(events_path),
         # B-277: provenance. An evidence pack that quotes a journal must say WHICH

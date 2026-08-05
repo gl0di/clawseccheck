@@ -127,6 +127,8 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "a standalone HTML report"),
         PaletteEntry("SARIF", 'sarif', "--sarif",
                      "findings as SARIF 2.1.0 (CI / code scanning)"),
+        PaletteEntry("PDF report", 'pdf', "--pdf",
+                     "complete audit as a paginated PDF — attach it into chat, don't paste the path"),
         PaletteEntry("Save", 'save <path>', "--save",
                      "also write the report to a file"),
     )),

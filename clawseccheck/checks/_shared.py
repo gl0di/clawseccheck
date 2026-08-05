@@ -300,6 +300,27 @@ def parse_bind_host(value) -> str:
 SECRET_KEY_RE = re.compile(r"(password|secret|token|api[_-]?key|apikey|bottoken)", re.I)
 
 
+# C-358: the npm dependency-tree blind spot, declared rather than left silent. _mcp.py's
+# plugin content scan already discloses its own (stronger, name-pruned) exclusion —
+# "coverage: node_modules/ (third-party npm deps) excluded from the content scan"
+# (checks/_mcp.py, _PLUGIN_SKIP_DIRS). Neither the installed-skill path (B13/vet_skill)
+# nor B42 prune node_modules/ by name — a skill's dependency tree is walked as ordinary
+# skill content, capped like everything else (collector.py's _MAX_FILES_PER_SKILL /
+# _MAX_BYTES_PER_SKILL truncation already surfaces honestly as its own UNKNOWN when hit —
+# that is NOT this gap). The real gap: the tree is never analysed AS a dependency tree —
+# no lockfile reconciliation, no per-package lifecycle-hook review. These two notes are
+# evidence-only (appended to Finding.evidence, never to detail) — they must never move a
+# verdict, grade, or finding id.
+NPM_DEPTREE_HOOK_COVERAGE_NOTE = (
+    "coverage: install-lifecycle hooks in the installed dependency tree (node_modules/) "
+    "are not examined"
+)
+NPM_DEPTREE_SKILL_COVERAGE_NOTE = (
+    "coverage: a skill's dependency tree is scanned as ordinary files, not analysed as a "
+    "dependency tree — no lockfile reconciliation, no per-package lifecycle-hook review"
+)
+
+
 SECRET_PATTERNS = [
     re.compile(r"sk-ant-[a-z0-9-]{8,}", re.I),
     re.compile(r"sk-[a-zA-Z0-9]{20,}"),

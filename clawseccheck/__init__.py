@@ -17,6 +17,7 @@ from .checks import detect_vet_type, run_all, vet_mcp, vet_plugin, vet_skill, ve
 from .collector import collect
 from .hostwatch import detect as _host_detect
 from .sockets import scan_listening_sockets as _scan_listening_sockets
+
 from .monitor import (
     DEFAULT_EVENTS, diff, load_events, load_state, record_events, save_state, snapshot,
 )
@@ -27,22 +28,43 @@ from .report import (
     render_monitor, render_report, render_subject_inventory, render_svg, render_vet_json,
 )
 from .risk import risk_paths, render_risk_paths
+from .scanbudget import limits_for
 from .scoring import ScoreResult, compute
 from .sarif import render_sarif
+from .pdf import render_pdf
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 from .guide import suggest_actions, render_next_actions
 from .update import update_notice, read_latest_hint, DEFAULT_LATEST
 
-__version__ = "3.59.0"
+
+def _deptree_scan(root=None):
+    """Walk the OpenClaw install's dependency tree once for B349 (F-167).
+
+    A single module-level seam on purpose, mirroring `_host_detect` above: the suite's
+    autouse conftest stub patches THIS name, so no test — including the CLI end-to-end
+    ones — reaches the real machine's global npm install. Returns None when no install
+    root can be located, which B349 reports as UNKNOWN rather than a clean tree.
+    """
+    from . import deptree as _deptree
+
+    resolved = root or _deptree.find_package_root("openclaw")
+    if resolved is None:
+        return None
+    return _deptree.scan_dep_tree(_deptree.find_dep_tree(resolved))
+
+
+__version__ = "3.60.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
-__released__ = "2026-08-02"
+__released__ = "2026-08-05"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
           include_host: bool = False, host_root: str = "/",
           native_bin: str = "openclaw", native_timeout: int = 60,
           attestation: dict | None = None,
-          include_sockets: bool = False, proc_root: str = "/proc"):
+          include_sockets: bool = False, proc_root: str = "/proc",
+          include_deptree: bool = False, openclaw_pkg_root=None,
+          exhaustive: bool = False):
     """Run the full audit. Returns (ctx, findings, ScoreResult).
 
     `include_native=False` and `include_host=False` keep the engine fully offline
@@ -62,9 +84,23 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     so B340's best-effort PID-identity corroboration (C-135 bug 1) reads from the same
     root the socket scan itself used.
 
+    `include_deptree` (default False, same hermetic-by-default reasoning) walks the
+    installed OpenClaw npm dependency tree once (`deptree.scan_dep_tree`) so B349 can
+    look for an install-time target carrying a code-execution signal — reached from
+    either a lifecycle hook (F-167) or a `binding.gyp` command-expansion, which needs
+    no lifecycle script at all (B-447). The CLI passes True. `openclaw_pkg_root` overrides where that tree is
+    found; None discovers it from PATH. B349 itself never touches the filesystem --
+    it reads `ctx.dep_tree` only, so a Context built without this stays hermetic and
+    the walk costs one traversal per audit instead of one per check call.
+
     `attestation` (the agent's self-report; see attest.py) enriches the audit: when
     omitted, the attestation checks (B43/B44) report UNKNOWN and the score is
     unchanged. Passed straight through to ctx so the engine stays deterministic.
+
+    `exhaustive` (default False, F-164) records `ctx.exhaustive` and, via
+    `scanbudget.limits_for(ctx)`, widens the per-check/whole-audit wall-clock
+    budgets `run_all` enforces. False reproduces `scanbudget.DEFAULT_LIMITS`
+    exactly, so the default path is byte-identical to before this parameter existed.
 
     I-025/B-309: the returned ScoreResult may be capped — never given an ordinary
     scored point — by a corroborated runtime signal (a trajaudit-style skill/bootstrap
@@ -79,9 +115,15 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     ctx.proc_root = proc_root
     if include_sockets:
         ctx.sockets = _scan_listening_sockets(proc_root=proc_root)
+    ctx.include_deptree = include_deptree
+    ctx.openclaw_pkg_root = openclaw_pkg_root
+    if include_deptree:
+        ctx.dep_tree = _deptree_scan(openclaw_pkg_root)
     if attestation:
         ctx.attestation = attestation
-    findings = run_all(ctx)
+    ctx.exhaustive = exhaustive
+    lim = limits_for(ctx)
+    findings = run_all(ctx, check_budget_s=lim.check_budget_s, audit_budget_s=lim.audit_budget_s)
     ignore = _baseline.load_ignore(home)
     _baseline.apply(findings, ignore)
     # I-025/B-309: pass ctx so scoring.compute can also see a trajaudit-style indicator
@@ -105,6 +147,7 @@ __all__ = [
     "record_events", "load_events", "render_events", "DEFAULT_EVENTS",
     "load_ignore", "apply_baseline", "fingerprint",
     "render_sarif",
+    "render_pdf",
     "history_load", "history_record", "render_trend", "DEFAULT_HISTORY",
     "suggest_actions", "render_next_actions",
     "risk_paths", "render_risk_paths",

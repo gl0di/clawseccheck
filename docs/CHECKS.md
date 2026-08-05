@@ -2329,6 +2329,34 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B348 - Plugin load path with no matching plugins.entries record
+
+- Severity: LOW
+- Block: advisory
+- Framework: Supply Chain / Plugin Hygiene
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Plugin load path with no matching plugins.entries record
+- Remediation:
+  - none
+
+## Hardening checks
+
+### B349 - Obfuscated install-time target in the dependency tree
+
+- Severity: CRITICAL
+- Block: hardening
+- Framework: Supply Chain / Dependency Tree
+- Scored: yes
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Obfuscated install-time target in the dependency tree
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

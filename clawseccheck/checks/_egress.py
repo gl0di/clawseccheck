@@ -2682,7 +2682,7 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     from ..logdiscovery import discover_log_sinks  # noqa: PLC0415
     from ..logsafe import redact  # noqa: PLC0415
     from ..logscan import scan_log_file, summarize_truncation  # noqa: PLC0415
-    from ..scanbudget import audit_deadline  # noqa: PLC0415
+    from ..scanbudget import audit_deadline, limits_for  # noqa: PLC0415
 
     sinks = discover_log_sinks(ctx)
     if not sinks:
@@ -2712,7 +2712,10 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
 
     # B-314: the cumulative ceiling starts once, before the loop — not re-armed per sink
     # (that would defeat the point; see _LOG_HUNT_CHECK_BUDGET_S's docstring).
-    check_deadline = audit_deadline(_LOG_HUNT_CHECK_BUDGET_S)
+    # F-164: both budgets read limits_for(ctx) so --exhaustive widens them; DEFAULT_LIMITS
+    # reproduces _LOG_HUNT_CHECK_BUDGET_S / _LOG_HUNT_PER_FILE_BUDGET_S exactly.
+    lim = limits_for(ctx)
+    check_deadline = audit_deadline(lim.log_check_budget_s)
 
     for sink in sinks:
         remaining = None if check_deadline is None else check_deadline - time.monotonic()
@@ -2724,11 +2727,11 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         # the last sink before the cumulative deadline can't still spend a full fresh
         # 3.0s and blow past it (a naive "check-then-always-give-3.0s" loop still let the
         # total overshoot by up to one sink's worth).
-        per_sink_budget = _LOG_HUNT_PER_FILE_BUDGET_S
+        per_sink_budget = lim.log_per_file_budget_s
         if remaining is not None:
             per_sink_budget = min(per_sink_budget, remaining)
         deadline = audit_deadline(per_sink_budget)
-        result = scan_log_file(sink, deadline, skill_iocs)
+        result = scan_log_file(sink, deadline, skill_iocs, limits=lim)
         all_results.append(result)
         if result.bytes_scanned == 0:
             continue
@@ -2808,6 +2811,12 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
             f" {skipped_for_time} log/transcript {plural} not scanned (check time budget "
             "reached) — re-run to include them."
         )
+    elif lim.exhaustive:
+        # F-164 SC-5: under --exhaustive, completeness must be stated affirmatively —
+        # silence must never be the only signal (the "no silent caps" rule). Only under
+        # --exhaustive: a default run skipping zero sinks purely by luck is the normal
+        # case and does not need its own sentence every time.
+        note += f" All {len(sinks)} log/transcript sink(s) scanned."
 
     if corroborated:
         n_sinks = len(corroborated)

@@ -84,8 +84,10 @@ To keep a copy, add `--save report.txt` and ClawSecCheck writes the full report 
 
 Chat rendering is best-effort — the host agent relays and re-composes that text over its own
 channel. The **canonical, deterministic output is always a saved file**: `--save`, `--html`,
-or `--badge grade.svg`. If you need something you can rely on byte-for-byte (or attach as a
-real image, in the badge's case), use the saved file, not the chat paste.
+`--pdf report.pdf`, or `--badge grade.svg`. If you need something you can rely on byte-for-byte
+(or attach as a real file, in the badge/PDF case), use the saved file, not the chat paste. On a
+phone/mobile chat client specifically, prefer `--pdf` over `--html` — most mobile clients hand an
+HTML attachment over as a download, while a PDF opens inline in the client's own viewer.
 
 ## Guided mode
 
@@ -150,6 +152,7 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 | "Did a suspicious skill's instruction actually run?" | Post-hoc correlation: checks whether the credential/exfil/secret-path indicators an installed skill names show up in real `tool.call` arguments in your OpenClaw trajectory sidecars — "acted on" vs "present but not acted on". Reads args in memory only; never echoes them. | `--analyze-trajectory` |
 | "What did my agent actually DO, not just what it could do?" | Reconstructs observed tool-call sequences from your OpenClaw trajectory sidecars and flags a proven-by-log ingress→sensitive→egress verb order, or a repeated-failure-then-success pattern on a sensitive-data call. Also reads OpenClaw's OWN runtime `audit_events` trail (a separate, metadata-only record: `tool_name` alone, no argv/command/path/host) for a runtime tool-block, an evasive/malformed tool name, or a session your trajectory sidecar no longer has (it was disabled or rotated out while `audit_events` still retained it). Metadata-only throughout — verb identity and sequencing, never call/return payloads. WARN-only, never scored. | `--behavioral` |
 | "Gate my CI on this" | Machine-readable output plus a non-zero exit when the score drops below a bar or an unsuppressed FAIL exists — wire straight into a pipeline. | `--json` · `--sarif results.sarif` · `--fail-under 70` · `--exit-code` |
+| "Don't skip anything — scan everything" | Raises the trajectory-file / log-sink / per-line scan caps a normal run keeps small for speed: every trajectory file (not just the most recent 60), every log/transcript sink (not cut off by the time budget), and the full byte range of an over-length log line (not just its head and tail). Slower — a normal run already discloses exactly what it skipped, so this is for closing that specific gap, not a default. | `--exhaustive` (composes with `--full`; has effect on its own too) |
 
 ## What it checks
 
@@ -241,17 +244,31 @@ config. **The scanner itself makes no network calls.** Full read scope:
   `PATH`, the text of a few known firewall config files (`/etc/ufw/ufw.conf`,
   `/etc/nftables.conf`, macOS `com.apple.alf.plist` — read for on/off and default outbound
   policy), and on Windows a handful of read-only registry queries for the same signals
+- the host's real listening TCP sockets, read from `/proc/net/tcp` and `/proc/net/tcp6`, plus a
+  read-only `/proc/*/fd` walk (and the matched process's `comm`/`cmdline`) to identify which
+  process holds a listener — the runtime signal B340 corroborates the declared `gateway.bind`
+  against. No subprocess is ever run, and where `/proc` is unavailable the result is an honest
+  "unavailable", never a guess; skip it with `--no-sockets`
+- the installed OpenClaw npm dependency tree — **outside the OpenClaw home**: the OpenClaw
+  package root is located from your `PATH` (no subprocess, and the manifest it finds there must
+  name the package it claims to be), then that package's `node_modules` is walked for each
+  package's `package.json`, each package root's `binding.gyp`, and the in-package files those
+  name as install-time targets (B349). Bounded to 2,000 packages, symlinks are never followed,
+  and nothing found there is ever executed; skip it with `--no-deptree`
 - credential-store path-existence inventory: whether `.env`, SSH key dirs, keychain/keyring
   directories, and browser cookie stores **exist** near the agent home — contents never read.
 
-(`collector.py`'s `LIMIT_DOMAIN_*` constants name every domain above explicitly.)
+(`collector.py`'s `LIMIT_DOMAIN_*` constants name the collector's own read domains: config,
+bootstrap, skill, plugin, cron, approvals, env, agents, audit. The socket scan and the
+dependency-tree walk are separate read-only modules — `sockets.py` and `deptree.py` — and
+register no collector domain of their own.)
 
 The only thing it writes by default is a one-line
 entry to a **private, owner-only** local score history (`~/.clawseccheck/history.jsonl`) so you can
 track your grade over time — opt out with `--no-history`. Everything else is written only when you
 ask: a report file (`--save`), the `--monitor` snapshot and change journal
-(`~/.clawseccheck/state.json`, `events.jsonl`), a badge (`--badge`), HTML/SARIF (`--html`/`--sarif`),
-a log (`--log`), a small freshness ledger (`~/.clawseccheck/coverage.json`) recording when you
+(`~/.clawseccheck/state.json`, `events.jsonl`), a badge (`--badge`),
+HTML/SARIF/PDF (`--html`/`--sarif`/`--pdf`), a log (`--log`), a small freshness ledger (`~/.clawseccheck/coverage.json`) recording when you
 last ran an active self-test (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`), and —
 the one write that lands inside the audited OpenClaw home rather than under
 `~/.clawseccheck/` — `--apply-ignore-proposals`, opt-in and confirmation-gated, appending
@@ -584,9 +601,10 @@ ask, noted below):
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
 | Attestation template / feed it back | `clawseccheck --ask` · `clawseccheck --attest attest.json` |
 | Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
+| Attachable-into-chat report (mobile-friendly, unlike HTML) | `clawseccheck --pdf report.pdf` |
 | Trend & percentile | `clawseccheck --trend` · `clawseccheck --percentile` |
 | Accept a finding (show suppressed) | edit `.clawseccheckignore` · `clawseccheck --show-suppressed` |
-| Skip native audit / host posture / socket scan | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` |
+| Skip native audit / host posture / socket scan / dependency-tree walk | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` · `clawseccheck --no-deptree` |
 | Disable local history / age notice | `clawseccheck --no-history` · `clawseccheck --no-update-notice` |
 | CI gate | `clawseccheck --fail-under 70` · `clawseccheck --exit-code` |
 | Verify the engine itself | `clawseccheck --verify-self` |
@@ -604,6 +622,7 @@ python3 audit.py --redteam                   # a multi-scenario adversarial payl
 python3 audit.py --dryrun                     # runtime behavioral test (fake secret + fake tools; sources: email, web, MCP response, memory, subagent)
 python3 audit.py --badge badge.svg          # write a shareable SVG grade badge
 python3 audit.py --html report.html         # standalone HTML report (private — owner view)
+python3 audit.py --pdf report.pdf           # complete audit as a paginated PDF — attach it into chat, don't paste the path
 python3 audit.py --verify-self               # SHA-256 of ClawSecCheck's own source (anti-tamper)
 python3 audit.py --trend                     # print local score trend (stored in ~/.clawseccheck/history.jsonl)
 python3 audit.py --percentile                # show where your score sits vs. an offline reference profile
@@ -651,8 +670,10 @@ python3 audit.py --log audit.log            # also write log to a local file
   moves `--exit-code` (only a `DANGEROUS`/`FAIL` target does).
   `--full --json` carries all of it structured: `skill_sweep` (§19), `pluginSweep`, `phases`
   (one entry per appended phase, with an honest status — `ran`/`skipped`/`not_reached`/
-  `unavailable`/`error`, never silence), `complete`, `notScanned`, `judgePacket`, and
-  `vetPackets` — see `docs/OUTPUT_SCHEMA.md` §1.
+  `unavailable`/`error`, never silence), `complete`, `notScanned`, `judgePacket`,
+  `vetPackets`, and `coveragePage` (§20 — scanned-vs-total per subject, every gap named) —
+  see `docs/OUTPUT_SCHEMA.md` §1. The same coverage data prints as a `CLAWSECCHECK COVERAGE`
+  text section under plain `--full`.
   - **`--fast`** (only with `--full`) drops the plugin sweep, behavioral replay, and skill
     sweep — keeping just the audit, self-test, vet-mcp, and the (free) adjudication packet —
     for CI runs where the deep phases are too slow. This is today's pre-F-150 `--full` shape.
@@ -779,6 +800,11 @@ python3 audit.py --log audit.log            # also write log to a local file
   agent — if the agent echoes the token, it obeyed an injection (**VULNERABLE**), otherwise
   **RESISTANT**. This is the live "battle-tested" complement to the passive checks.
 - **`--badge PATH`** writes a shields-style SVG (grade + score only) for your README / posts.
+- **`--pdf PATH`** writes the complete audit (every FAIL/WARN finding, paginated, base-14 fonts
+  only — no font embedding, no JavaScript, no forms) as a PDF. This is the deliverable-into-chat
+  format: a filesystem path is useless from a phone, but a PDF opens inline in a mobile chat
+  client's own viewer where an HTML attachment would just be a download. Attach the file itself;
+  never re-render its contents into the chat or substitute a path (same doctrine as `--badge`).
 - **`--trend`** records the current audit result to a local append-only history file and prints
   a table of past scores with per-run arrows. Every recorded row is shown, each tagged with the
   run that produced it (`[audit]`, or `[test]`/`[dev]` for a development/CI run picked up via
@@ -788,6 +814,22 @@ python3 audit.py --log audit.log            # also write log to a local file
   no telemetry.
 - **`--verbose` / `--debug` / `--log PATH`** activate structured local logging. Config values
   that may hold secrets are redacted before being written.
+- **`--exhaustive`** raises the trajectory-file / log-sink / per-line scan caps a normal run
+  keeps small for speed: every trajectory file instead of the most recent 60, a much larger
+  log/transcript-sink time budget (raised, not removed — a sink still skipped for time is
+  disclosed, not silently dropped), and the full byte range of an over-length log line (via
+  overlapping windows) instead of only its head and tail. It applies
+  to B164/B180, which run on **every** audit, so it has effect with or without `--full`. The
+  per-check and whole-audit wall-clock budgets are raised in the same step, so the wider scan
+  cannot degrade a check into a capped `UNKNOWN`. Slower — a normal run already discloses
+  exactly what it skipped, so this is for closing that specific gap, not a default.
+- **`--no-deptree`** skips the OpenClaw dependency-tree walk that feeds **B349** (a package in
+  `node_modules` whose install-time target — a lifecycle hook or a `binding.gyp`
+  command-expansion — carries a code-execution signal). The walk is on by default, read-only
+  and offline, but it traverses the whole installed tree and reads outside your OpenClaw home
+  (see "Full read scope" above), so this is the escape hatch on a very large tree or when you
+  want the run confined. `--no-host` and `--no-sockets` skip host-monitor detection and the
+  listening-socket scan the same way, and `--no-native` skips the built-in native audit.
 
 ## Uninstall / cleanup
 
@@ -920,10 +962,15 @@ hard false positives on real configs.
   files, agent session logs, the cron job store, the two global OpenClaw dotenv files,
   OpenClaw-related systemd user-unit environment lines, host OS recon (security-tool paths,
   a few firewall config files, proxy env-var names, and on Windows read-only registry
-  queries), the ClawHub CLI's own token-store path (outside the OpenClaw home, for the
-  B182 credential-hygiene check), and credential-store path presence elsewhere — not an
-  exhaustive scan of your filesystem, and credential-store *contents* are never read.
-  `collector.py`'s `LIMIT_DOMAIN_*` constants name every domain in full.
+  queries), the host's listening TCP sockets (`/proc/net/tcp` and `/proc/net/tcp6` plus a
+  `/proc/*/fd` walk — `--no-sockets` to skip), the installed OpenClaw npm dependency tree
+  (`node_modules` manifests, `binding.gyp` build configs, and the in-package install-time
+  targets they name — outside the OpenClaw home, `--no-deptree` to skip), the ClawHub CLI's
+  own token-store path (outside the OpenClaw home, for the B182 credential-hygiene check),
+  and credential-store path presence elsewhere — not an exhaustive scan of your filesystem,
+  and credential-store *contents* are never read. `collector.py`'s `LIMIT_DOMAIN_*` constants
+  name the collector's own read domains in full; the socket scan and the dependency-tree walk
+  sit outside them, in the separate read-only modules `sockets.py` and `deptree.py`.
 - **UNKNOWN is not PASS.** Unreadable files or unparseable configs are reported as
   UNKNOWN and excluded from the score, never silently marked safe.
 - **Vetting the scanner itself** (`--vet` pointed at ClawSecCheck's own source) reports
@@ -952,7 +999,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 481 test files and 13,700
+A security tool should be heavily tested — so it is: 492 test files and 14,100
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

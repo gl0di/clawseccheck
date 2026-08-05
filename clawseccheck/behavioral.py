@@ -48,6 +48,7 @@ from .checks import (
     check_audit_trail_signals,
 )
 from .collector import dig
+from .scanbudget import limits_for
 from .trajectory import EXTERNAL_ORIGIN_KINDS, read_events, read_proven_tools
 
 # C-170 adversarial pass found the naive "reuse A1's three hint tuples verbatim"
@@ -738,7 +739,9 @@ def check_capability_drift(ctx) -> object:
             "No OpenClaw home to read a trajectory log from — capability drift can't be assessed.",
             "Run --behavioral on a host with an OpenClaw agent's session trajectories.",
         )
-    observed, meta = read_proven_tools(home)
+    lim = limits_for(ctx)
+    observed, meta = read_proven_tools(home, max_files=lim.traj_max_files,
+                                        max_bytes_per_file=lim.traj_max_bytes_per_file)
     if not meta.get("present"):
         return _finding(
             "T3",
@@ -936,7 +939,10 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     sidecar exists — which correctly makes every audit_events session "divergent").
     """
     home = getattr(ctx, "home", None)
-    events, meta = read_events(home, explicit_path=explicit_path)
+    lim = limits_for(ctx)
+    events, meta = read_events(home, explicit_path=explicit_path,
+                                max_files=lim.traj_max_files,
+                                max_bytes_per_file=lim.traj_max_bytes_per_file)
     result = {
         "present": meta["present"],
         "files_scanned": meta["files_scanned"],
@@ -1080,6 +1086,11 @@ def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_o
                 "trajectory file(s) — the oldest session(s) were not analyzed. Results are "
                 "INCOMPLETE (treat as UNKNOWN, not authoritative)."
             )
+        elif getattr(ctx, "exhaustive", False) and r["files_total"]:
+            # F-164 SC-5: silence must never be the only signal for completeness under
+            # --exhaustive — say so affirmatively, mirroring trajaudit.py's own sites.
+            lines.append(f"  {ok} Scanned all {r['files_total']} of {r['files_total']} "
+                         "trajectory file(s).")
 
     any_warn = False
     for f in r["findings"]:

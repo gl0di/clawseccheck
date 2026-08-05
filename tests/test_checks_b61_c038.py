@@ -760,12 +760,16 @@ def test_c038_invisible_run_class_mirrors_textnorm_signal():
 
 
 def test_c038_invisible_counted_class_is_the_run_class_minus_zwj():
-    """The COUNT half of the gate deliberately drops U+200D ZWJ and keeps every other
-    member. ZWJ is the one invisible with a mass legitimate high-count use (emoji
-    sequences) and the one member `obfuscation_signals()` itself carves out, so counting
-    it would let a description full of emoji reach the floor. Nothing is lost: a
-    zero-width channel needs at least two symbols, so it always contributes non-ZWJ code
-    points too."""
+    """The regex COUNT class drops U+200D ZWJ and keeps every other member.
+
+    Its original rationale — "nothing is lost, a channel needs at least two symbols, so
+    it always contributes non-ZWJ code points too" — was **disproved** (B-449): that holds
+    for a two-symbol SUBSTITUTION alphabet, not for a presence/absence encoding whose
+    second symbol is the absence of a character. ZWJ is no longer dropped as a class;
+    `_c038_invisible_total` counts every ZWJ that is not an emoji joiner, which is where
+    the one legitimate mass use is excused per character rather than by dropping the whole
+    code point. This test now pins only the REGEX class, which is deliberately unchanged
+    so it keeps mirroring `textnorm`'s — see `test_b449_*` for the counting behaviour."""
     for ch in (_ZWSP, _ZWNJ, _BOM, _SHY, _WJ):
         assert _C038_INVISIBLE_COUNTED_RE.findall(ch * 3) == [ch] * 3, (
             f"_C038_INVISIBLE_COUNTED_RE does not count {ch!r}"

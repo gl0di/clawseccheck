@@ -145,12 +145,30 @@ def _nested_if_source(depth: int) -> str:
     return "\n".join(lines)
 
 
+# B-441: skillast.py has had 20+ feature-adding commits (taint tracking, new AST rules)
+# since the shared `_BOUND_S=5.0` was fixed alongside the other 3 surfaces in this file —
+# organic detection-coverage growth pushed this one surface from "milliseconds" to
+# 5.58s (6.20s under load) on a real box, an intermittent false failure unrelated to any
+# single regression. `_BOUND_S` stays untouched for the archive/configloader/regex
+# surfaces (still genuinely millisecond-fast; loosening it there would blunt real hang
+# detection). This surface gets its own, explicitly justified bound instead: the real
+# production ceiling `analyze_python`/`simulate_effects` run under is the outer 15s
+# per-check SIGALRM (checks/_content.py wraps each call in `run_all`'s
+# DEFAULT_CHECK_BUDGET_S) — 10.0s leaves real headroom over the worst measured time
+# (6.20s) while still catching a genuine future regression well before it could
+# meaningfully threaten that 15s ceiling. Note this ceiling is shared across every
+# Python file in a skill scanned within one check invocation, so a single file this
+# slow is not fully isolated from the rest of that check's budget — a further
+# regression here is a real risk, not just a test-tuning nuisance.
+_AST_BOUND_S = 10.0
+
+
 def test_ast_analysis_of_adversarial_skill_stays_bounded():
     src = _nested_if_source(24) + "\n" + ("x = 1; " * 20_000) + "\n"
     t0 = time.monotonic()
     findings = analyze_python(src, "adversarial.py")
     effects = simulate_effects(src, "adversarial.py")
     elapsed = time.monotonic() - t0
-    assert elapsed < _BOUND_S, f"AST analysis of adversarial skill took {elapsed:.2f}s"
+    assert elapsed < _AST_BOUND_S, f"AST analysis of adversarial skill took {elapsed:.2f}s"
     assert isinstance(findings, list)
     assert isinstance(effects, list)

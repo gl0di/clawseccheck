@@ -160,7 +160,12 @@ def test_html_report_inline_css_no_external_assets():
     # Should NOT reference external resources
     assert "http" not in html.lower() or "http" in html  # Allow internal mentions only
     assert "<!link" not in html.lower()
-    assert '<link' not in html.lower()
+    # The only <link> allowed is the self-contained data-URI favicon (brand.
+    # FAVICON_DATA_URI) — a `data:` href never triggers a network fetch, so it
+    # doesn't violate "no external assets"; an external stylesheet/font <link> would.
+    links = re.findall(r"<link[^>]*>", html, re.IGNORECASE)
+    assert len(links) == 1, f"unexpected <link> tag(s): {links}"
+    assert 'rel="icon"' in links[0] and 'href="data:' in links[0], links[0]
 
 
 def test_html_report_no_lens_emoji():
@@ -204,6 +209,16 @@ def test_html_report_svg_logo_is_self_contained():
         assert match.group(0) == _ALLOWED_HTTP_URL, (
             f"unexpected external reference in render_html() output: {match.group(0)!r}"
         )
+
+
+def test_html_report_has_self_contained_favicon():
+    """render_html's <head> must carry a browser-tab icon sourced from brand.
+    FAVICON_DATA_URI — single-sourced (not a hand-copied duplicate) and inline
+    (a `data:` URI, never an external file the report would fail to resolve once
+    saved/moved elsewhere)."""
+    _, findings, score = audit(FIXTURES / "home_safe")
+    html = render_html(findings, score)
+    assert f'<link rel="icon" type="image/png" href="{brand.FAVICON_DATA_URI}">' in html
 
 
 def test_html_report_badge_color_matches_brand_grade_hex():
