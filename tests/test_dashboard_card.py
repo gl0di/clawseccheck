@@ -153,11 +153,11 @@ class TestRenderDashboard:
         assert "fix:" not in out
         assert "Projected" not in out
 
-    def test_findings_header_and_family_emoji(self):
+    def test_findings_header_and_subject_emoji(self):
         out, _ = self._out()
         assert "· Findings ·" in out
-        assert "│ 🌐 Exposure & Network" in out
-        assert "│ 🔑 Privilege & Execution" in out
+        assert "│ ⚙️ OpenClaw core" in out
+        assert "│ 🤖 Agents" in out
 
     def test_severity_dots_used(self):
         out, _ = self._out()
@@ -173,7 +173,7 @@ class TestRenderDashboard:
     def test_ascii_is_pure_ascii(self):
         out, _ = self._out(ascii_only=True)
         assert out.isascii()
-        assert "[Exposure & Network]" in out
+        assert "[OpenClaw core]" in out
 
     def test_no_score_line_or_receipt(self):
         # It is the chat card, not the full report.
@@ -191,7 +191,7 @@ class TestCliDashboard:
         assert rc == 0
         out = capsys.readouterr().out
         assert out.startswith("🦞 ClawSecCheck · OpenClaw Security Audit")
-        assert "│ 🌐 Exposure & Network" in out
+        assert "│ ⚙️ OpenClaw core" in out
         assert "Scan receipt" not in out
 
     def test_dashboard_ascii(self, capsys):
@@ -200,7 +200,7 @@ class TestCliDashboard:
         assert rc == 0
         out = capsys.readouterr().out
         assert out.isascii()
-        assert "[Exposure & Network]" in out
+        assert "[OpenClaw core]" in out
 
 
 # ─── Section 3: Skills (B-356) ───────────────────────────────────────────────

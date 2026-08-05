@@ -32,7 +32,7 @@ def test_emits_open_three_sided_frame():
     out = render_dashboard_findings([f])
 
     assert "┌" in out
-    assert "│ 🌐 Exposure & Network — 1 issue(s)" in out
+    assert "│ ⚙️ OpenClaw core — 1 issue(s)" in out
     assert "└" in out
 
     # The open 3-sided box must NOT close the right side
@@ -67,7 +67,7 @@ def test_medium_and_attested_excluded():
     """MEDIUM/ATTESTED-confidence FAILs are excluded; HIGH-confidence FAIL is present."""
     med_fail     = _f("B2",   FAIL, CRITICAL, confidence=MEDIUM)
     attested_fail = _f("B3",  FAIL, HIGH,     confidence=ATTESTED)
-    high_fail    = _f("B15",  FAIL, HIGH,     confidence="HIGH")  # mcp -> supply_chain
+    high_fail    = _f("B15",  FAIL, HIGH,     confidence="HIGH")  # mcp -> MCP servers
 
     out = render_dashboard_findings([med_fail, attested_fail, high_fail])
 
@@ -81,30 +81,30 @@ def test_medium_and_attested_excluded():
 
 # ─── 4. Empty families are omitted ─────────────────────────────────────────
 
-def test_empty_families_omitted():
-    """When findings land only in Exposure, other family headers must not appear."""
-    f = _f("B2", FAIL, CRITICAL)   # exposure only
+def test_empty_subjects_omitted():
+    """When findings land only under one subject, other subject headers must not appear."""
+    f = _f("B2", FAIL, CRITICAL)   # OpenClaw core only
 
     out = render_dashboard_findings([f])
 
-    assert "Privilege & Execution" not in out
-    assert "Supply Chain" not in out
+    assert "Host machine" not in out
+    assert "Agents" not in out
     assert "— clear" not in out
 
 
-# ─── 5. A1 lands under Privilege & Execution ───────────────────────────────
+# ─── 5. A1 lands under Agents ──────────────────────────────────────────────
 
-def test_a1_lands_under_privilege():
-    """A1 (Lethal Trifecta) routes to Privilege & Execution, not a standalone headline."""
+def test_a1_lands_under_agents():
+    """A1 (Lethal Trifecta) routes to Agents (via its trifecta surface), not a standalone headline."""
     a1 = _f("A1", FAIL, CRITICAL,
              evidence=["untrusted input", "sensitive data", "outbound actions"])
 
     out = render_dashboard_findings([a1])
 
-    assert "│ 🔑 Privilege & Execution" in out
-    priv_idx = out.index("│ 🔑 Privilege & Execution")
+    assert "│ 🤖 Agents" in out
+    subj_idx = out.index("│ 🤖 Agents")
     title_idx = out.index("title A1")
-    assert title_idx > priv_idx
+    assert title_idx > subj_idx
 
 
 # ─── 6. Suppressed findings excluded ───────────────────────────────────────
@@ -119,11 +119,11 @@ def test_suppressed_excluded():
     assert "No high-confidence issues to fix." in out
 
 
-# ─── 7. Severity order within a family ─────────────────────────────────────
+# ─── 7. Severity order within a subject ────────────────────────────────────
 
-def test_severity_order_within_family():
-    """CRITICAL must appear before HIGH within the same family."""
-    # B2 and B11 both map to gateway -> exposure
+def test_severity_order_within_subject():
+    """CRITICAL must appear before HIGH within the same subject."""
+    # B2 and B11 both map to gateway -> OpenClaw core
     high_f     = _f("B11",  FAIL, HIGH)
     critical_f = _f("B2",   FAIL, CRITICAL)
 
@@ -137,16 +137,16 @@ def test_severity_order_within_family():
 # ─── 8. ascii_only uses bracket format ────────────────────────────────────
 
 def test_ascii_only_uses_brackets():
-    """ascii_only=True: [Exposure & Network] bracket, no box chars, no unicode icons."""
+    """ascii_only=True: [OpenClaw core] bracket, no box chars, no unicode icons."""
     f = _f("B2", FAIL, CRITICAL)
 
     out = render_dashboard_findings([f], ascii_only=True)
 
-    assert "[Exposure & Network]" in out
+    assert "[OpenClaw core]" in out
 
     # Box-drawing and unicode icons must be absent
     assert "┌" not in out
-    assert "│ Exposure" not in out
+    assert "│ OpenClaw core" not in out
     assert "└" not in out
     assert "⛔" not in out
 

@@ -500,7 +500,7 @@ order (F-153):
   a 16-cell score-bar, and the count of non-suppressed FAIL/WARN findings.
   **No standalone Lethal Trifecta chip (F-044)** — trifecta state is one Privilege &
   Execution finding among others in Section 2.
-- **Section 2 — Findings, grouped by area** (details below).
+- **Section 2 — Findings, grouped by subject** (details below).
 - **Skills** (B-356, when skills are installed): a compact per-skill vet verdict — install
   count, a `clean:` list, and a `verdict - reason` line for anything flagged. Reuses the
   same scoring path `--vet-skill` uses.
@@ -532,31 +532,32 @@ plain-language rule.
 
 **Section 2 — what the pasted findings block contains**
 
-The pasted card's findings block holds the FAIL/WARN findings already grouped into the
-7 OpenClaw surface families, each under an **open 3-sided frame**
-(`┌─ / │ {icon} {family} — {N} issue(s) / └─`, no right border), most-severe-first within
-a family, a `🔴/🟠/🟡/⚪` severity dot on every issue line, and the `why:` explanation on
+The pasted card's findings block holds the FAIL/WARN findings already grouped by their
+8 Inventory subjects, each under an **open 3-sided frame**
+(`┌─ / │ {icon} {subject} — {N} issue(s) / └─`, no right border), most-severe-first within
+a subject, a `🔴/🟠/🟡/⚪` severity dot on every issue line, and the `why:` explanation on
 every finding. **No remediation appears anywhere — ClawSecCheck reports; it does not fix
 (F-074).**
 
 The renderer already guarantees the findings contract, so **you filter nothing yourself**:
 - **PASS/UNKNOWN are dropped** — coverage is Section 3's job, not here;
 - **`MEDIUM`/`ATTESTED`-confidence findings are dropped** — they surface in Section 4 ("Worth a glance");
-- families with nothing to fix are **omitted** (no empty "— clear" headers);
-- the Lethal Trifecta (A1) is folded into **Privilege & Execution** as one finding (no standalone
+- subjects with nothing to fix are **omitted** (no empty "— clear" headers);
+- the Lethal Trifecta (A1) is folded into **Agents** as one finding (no standalone
   headline, F-044), with its active legs named in the finding's own `why:` line.
 
-The 7 families, in the fixed order the command renders them:
+The 8 subjects, in the fixed order the command renders them:
 
-| Icon | Family | Surfaces |
-|------|--------|---------|
-| 🌐 | Exposure & Network | gateway · channels · sessions |
-| 🔑 | Privilege & Execution | tools · agents (**+ A1, the Lethal Trifecta**) |
-| 📦 | Supply Chain | skills · mcp |
-| 📝 | Content & Memory Integrity | bootstrap |
-| 🔒 | Secrets & Data | secrets |
-| 🛰️ | Detection & Host | monitoring · host |
-| 🔧 | Automation & Maintenance | hooks · update |
+| Icon | Subject | Surfaces |
+|------|---------|---------|
+| ⚙️ | OpenClaw core | gateway · tools · secrets · monitoring · hooks · update · sessions |
+| 🖥️ | Host machine | host |
+| 🤖 | Agents | agents · bootstrap (**+ A1, the Lethal Trifecta**) |
+| 🧩 | Skills | skills |
+| 🔌 | MCP servers | mcp |
+| 📦 | Plugins | installed plugins (populated by the `--full` sweep) |
+| 📡 | Channels | channels |
+| 📝 | Logs & trajectories | logs |
 
 Plain-language still governs **your own prose** around the pasted block (any framing
 sentence) — never raw codes like "B2 FAIL". The block's `why:` lines are the tool's own

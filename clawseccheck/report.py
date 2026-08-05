@@ -20,7 +20,6 @@ from pathlib import Path
 from . import brand
 from .catalog import (
     BY_ID,
-    FAMILY_LABEL, FAMILY_OF, FAMILY_ORDER,
     SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER,
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
 )
@@ -322,12 +321,12 @@ _ICON_ASCII = {FAIL: "[X]", WARN: "[!]", PASS: "[OK]", UNKNOWN: "[?]", "SKILL_AR
 _SEV_GLYPH = {CRITICAL: "🔴", HIGH: "🟠", MEDIUM: "🟡", LOW: "⚪"}
 _SEV_COLOR = {CRITICAL: "red", HIGH: "red", MEDIUM: "yellow", LOW: "grey"}
 
-# Family → emoji for the chat Dashboard paste ONLY (SKILL.md Step-3 table). The CLI
-# report's family headers deliberately stay emoji-less (design-system.md Layer-2 decision).
-_FAMILY_EMOJI = {
-    "exposure": "🌐", "privilege": "🔑", "supply_chain": "📦",
-    "content_integrity": "📝", "secrets": "🔒", "detection": "🛰️",
-    "automation": "🔧",
+# Subject → emoji for the chat Dashboard paste ONLY (SKILL.md Step-3 table). The CLI
+# report / HTML / PDF subject headers deliberately stay emoji-less (design-system.md
+# Layer-2 decision); only the chat card carries the emoji.
+_SUBJECT_EMOJI = {
+    "openclaw": "⚙️", "host": "🖥️", "agents": "🤖", "skills": "🧩",
+    "mcp": "🔌", "plugins": "📦", "channels": "📡", "logs": "📝",
 }
 
 
@@ -832,29 +831,14 @@ def compute_blast_radius(cfg: dict, finding_cid: str) -> dict:  # noqa: ARG001
     }
 
 
-def _family_of(f) -> str | None:
-    """Map a finding to one of the 7 Dashboard families via its catalog surface.
-
-    A1 (Lethal Trifecta) is cross-cutting in the catalog (surface="trifecta", no
-    family bucket) but it IS an agent-behavior signal, so the Dashboard routes it
-    to Privilege & Execution rather than giving it a standalone headline (F-044).
-    Findings with an id outside CATALOG (native-audit passthrough, test doubles)
-    return None -> the "Other" bucket, so nothing is ever silently dropped.
-    """
-    if f.id == "A1":
-        return "privilege"
-    meta = BY_ID.get(f.id)
-    if meta is None:
-        return None
-    return FAMILY_OF.get(meta.surface)
-
-
 def _subject_of(f) -> str | None:
-    """Map a finding to one of the 5 Inventory-by-subject buckets (F-131 §4.2) via its
-    catalog surface. Unlike `_family_of`, A1 needs no special case: its surface is
+    """Map a finding to one of the 8 Inventory-by-subject buckets (F-131 §4.2) via its
+    catalog surface. A1 (Lethal Trifecta) needs no special case: its surface is
     "trifecta", already present in SUBJECT_OF (routed to "agents" — an agent-behavior
-    signal). Findings with an id outside CATALOG return None (dropped from every bucket,
-    same "nothing silently counted" stance as _family_of's "Other" fallback)."""
+    signal). Findings with an id outside CATALOG (native-audit passthrough, test doubles)
+    return None -> the trailing "Other" bucket in _group_issues_by_subject, so nothing is
+    ever silently dropped (C-372 promoted subjects to the single report/HTML/PDF/dashboard
+    grouping, retiring the old 7-family view)."""
     meta = BY_ID.get(f.id)
     if meta is None:
         return None
@@ -868,9 +852,9 @@ def _group_issues_by_subject(issues):
     dropped (B-444 class). Returns an ordered list of `(subject_key, label, [findings])`
     for each subject that has >=1 member; empty subjects are skipped so the detail view
     stays focused (the per-subject summary above still names all of them). This is the
-    single grouping the terminal, HTML and PDF renderers all consume, so they cannot drift
-    — the same role `_family_of` + the `(*FAMILY_ORDER, None)` loop played for the old
-    family view (F-131 subject taxonomy, promoted from summary-only to the detail view)."""
+    single grouping the terminal, HTML, PDF and chat-dashboard renderers all consume, so
+    they cannot drift (F-131 subject taxonomy, promoted from summary-only to every detail
+    view — C-372, retiring the old 7-family grouping)."""
     grouped: dict = {}
     for f in issues:
         grouped.setdefault(_subject_of(f), []).append(f)
@@ -2063,24 +2047,16 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
         out = f"No high-confidence issues to fix. {ok}\n"
         return _asciify(out) if ascii_only else out
 
-    grouped: dict = {}
-    for f in qualifying:
-        grouped.setdefault(_family_of(f), []).append(f)
-
     lines: list = []
-    for fam_key in (*FAMILY_ORDER, None):
-        members = grouped.get(fam_key)
-        if not members:
-            continue
+    for subj_key, label, members in _group_issues_by_subject(qualifying):
         members.sort(key=lambda f: (_STATUS_ORDER.get(f.status, 9), _SEV_ORDER.get(f.severity, 9)))
-        label = FAMILY_LABEL.get(fam_key, "Other")
         count_text = f"{len(members)} issue(s)"
         if ascii_only:
             lines.append(f"[{label}] — {count_text}")
         else:
-            # Chat paste carries the family emoji (SKILL.md Step-3 table, B-077);
-            # the CLI report's family headers stay emoji-less by design.
-            emoji = _FAMILY_EMOJI.get(fam_key)
+            # Chat paste carries the subject emoji (SKILL.md Step-3 table, B-077);
+            # the CLI report / HTML / PDF subject headers stay emoji-less by design.
+            emoji = _SUBJECT_EMOJI.get(subj_key)
             head = f"{emoji} {label}" if emoji else label
             # B-381: --compact narrows the frame's own border rule (still an open
             # 3-sided box -- same shape, fewer dashes) -- one of several small per-
@@ -3318,8 +3294,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
                     {why_html}
                 </article>'''
 
-    # Build the findings body: grouped by the 7 OpenClaw surface families so a long
-    # list (dozens of findings) reads as coverage-by-area, matching the Dashboard.
+    # Build the findings body: grouped by Inventory subject so a long list (dozens of
+    # findings) reads as coverage-by-subject, matching the summary table above.
     if not issues:
         no_issues_text = esc(
             "No known attack pattern matched across the audited surfaces. Keep it that way."
