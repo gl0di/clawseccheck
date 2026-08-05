@@ -817,7 +817,7 @@ def _resolve_runtime_caps(ctx, findings, score, args):
     # check_deadline block, whose disarm-on-exit would delete an outer deadline.
     full_deadline = _pipeline.start_deadline(DEFAULT_FULL_BUDGET_S) if args.full else None
     judged_bundle = (
-        _pipeline.read_judged_bundle(args.judged_bundle)
+        _judged_bundle(args.judged_bundle)
         if (args.full and args.judged_bundle is not None) else None
     )
     # F-155: a VULNERABLE live injection-test verdict (canary/dryrun/redteam/multiturn),
@@ -895,7 +895,7 @@ def _apply_live_test_cap(ctx, findings, score, args):
     function was written to close.
     """
     judged_bundle = (
-        _pipeline.read_judged_bundle(args.judged_bundle)
+        _judged_bundle(args.judged_bundle)
         if args.judged_bundle is not None else None
     )
     live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
@@ -1433,7 +1433,29 @@ def main(argv=None) -> int:
         return 1
 
 
+_JUDGED_BUNDLE_CACHE: dict = {}
+
+
+def _judged_bundle(path: str) -> dict:
+    """``pipeline.read_judged_bundle`` memoized for the duration of ONE run.
+
+    B-476: ``--judged-bundle -`` reads stdin, and stdin can be consumed exactly once —
+    but the bundle already had two independent readers (``_resolve_runtime_caps`` and
+    the --trend/--monitor cap helper), and B-476 added a third (the ``attestation``
+    bucket, which must be resolved BEFORE ``audit()`` so B43/B44 can see it). Whoever
+    read second got an empty document and silently lost every bucket. Caching also
+    removes the pre-existing redundant re-read of a bundle FILE on the branches that
+    call both helpers.
+
+    Cleared at the top of every ``_main`` so an in-process second run (the whole test
+    suite, and any library caller) never inherits the previous run's bundle."""
+    if path not in _JUDGED_BUNDLE_CACHE:
+        _JUDGED_BUNDLE_CACHE[path] = _pipeline.read_judged_bundle(path)
+    return _JUDGED_BUNDLE_CACHE[path]
+
+
 def _main(argv=None) -> int:
+    _JUDGED_BUNDLE_CACHE.clear()
     p = argparse.ArgumentParser(
         prog="clawseccheck",
         description=(
@@ -1546,8 +1568,15 @@ def _main(argv=None) -> int:
     p.add_argument("--redteam", action="store_true",
                    help="print a live red-team payload suite for adversarial self-testing")
     p.add_argument("--seed", default=None, metavar="VALUE",
-                   help="fixed seed for --redteam tokens (reproducible CI runs); "
-                        "default is a fresh random seed each run")
+                   # B-475: this reached make_suite only, so `--seed X --self-test` gave
+                   # reproducible red-team tokens and freshly random canary/dry-run/
+                   # multi-turn ones in the same output — three of the four harnesses
+                   # silently ignored it, though all four have taken a seed all along.
+                   help="fixed seed for the self-test harness tokens — --canary, "
+                        "--redteam, --dryrun, --multiturn and the --self-test/--full "
+                        "sections that render them (reproducible CI runs, and the seed a "
+                        "--judged-bundle liveTest verdict must carry to be eligible for "
+                        "history/trend); default is a fresh random seed each run")
     p.add_argument("--dryrun", action="store_true",
                    help="print a behavioral dry-run harness (prompt-injection self-test across all sources)")
     p.add_argument("--multiturn", action="store_true",
@@ -1959,7 +1988,7 @@ def _main(argv=None) -> int:
         return _advise_rc
 
     if args.canary:
-        _emit(render_canary(make_canary(), ascii_only))
+        _emit(render_canary(make_canary(args.seed), ascii_only))
         _record_run("self_test", args)
         return 0
 
@@ -1970,24 +1999,24 @@ def _main(argv=None) -> int:
         return 0
 
     if args.dryrun:
-        _emit(render_dryrun(make_scenarios(), ascii_only))
+        _emit(render_dryrun(make_scenarios(args.seed), ascii_only))
         _record_run("self_test", args)
         return 0
 
     if args.multiturn:
-        _emit(render_multiturn(make_multiturn(), ascii_only))
+        _emit(render_multiturn(make_multiturn(args.seed), ascii_only))
         _record_run("self_test", args)
         return 0
 
     if args.self_test:
         seed = args.seed if args.seed is not None else secrets.token_hex(8)
-        _emit(render_canary(make_canary(), ascii_only))
+        _emit(render_canary(make_canary(args.seed), ascii_only))
         _emit("")
         _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
         _emit("")
-        _emit(render_dryrun(make_scenarios(), ascii_only))
+        _emit(render_dryrun(make_scenarios(args.seed), ascii_only))
         _emit("")
-        _emit(render_multiturn(make_multiturn(), ascii_only))
+        _emit(render_multiturn(make_multiturn(args.seed), ascii_only))
         _record_run("self_test", args)
         return 0
 
@@ -2002,7 +2031,7 @@ def _main(argv=None) -> int:
         if not ignore:
             _emit("No .clawseccheckignore entries found.")
         else:
-            _emit(f"{len(ignore)} suppressed entry/entries in .clawseccheckignore:")
+            _emit(f"{len(ignore)} entry/entries in .clawseccheckignore.")
             # B-379: match the real audit path's include_sockets, or B340's finding
             # detail differs here from a normal run (ctx.sockets is None => a
             # different "socket scan was not run" UNKNOWN text) — since
@@ -2011,7 +2040,19 @@ def _main(argv=None) -> int:
             # --exhaustive changes B164/B180's disclosure text the same way, so it
             # needs the same mirroring or an --exhaustive suppression stops matching
             # here.
-            ctx, findings, _ = audit(args.home, include_native=False,
+            # B-474 (C-135 on B-474's own fix): include_host/include_native must be
+            # mirrored too, for the reason B-379 already gave for include_sockets —
+            # fingerprint() hashes the finding DETAIL, and a subsystem that did not run
+            # here produces different detail text (or no finding at all) than it does on a
+            # real run. Before this, a suppression captured from a normal run of a host
+            # (B50-B54) or native (`openclaw security audit`) finding simply never matched
+            # here. That was merely invisible while this command only listed matches; the
+            # moment it began NAMING unmatched entries it would have become an active
+            # false claim — "this entry matches nothing", about an entry that matches
+            # perfectly well on every real run. Fidelity beats speed here, same call
+            # B-379 made: the point of this command is to answer what IS suppressed.
+            ctx, findings, _ = audit(args.home, include_native=not args.no_native,
+                                     include_host=not args.no_host,
                                      include_sockets=not args.no_sockets,
                                      include_deptree=not args.no_deptree,
                                      exhaustive=args.exhaustive)
@@ -2020,19 +2061,43 @@ def _main(argv=None) -> int:
             # surface those explicitly too, or --show-suppressed silently missed them.
             suppressed_risk = [p for p in _risk.risk_paths(ctx, findings, ignore=ignore)
                                 if p.suppressed]
+            # B-474: the headline counted ENTRIES IN THE FILE and the list below showed
+            # MATCHED FINDINGS, so "3 suppressed entry/entries" printed above a single
+            # line was routine — and the two entries that matched nothing were invisible
+            # in the one command whose job is to show what is suppressed. A dead entry is
+            # not cosmetic: it means the finding is gone (fixed) or its fingerprint has
+            # drifted (the suppression silently stopped working and the finding is live
+            # again). Both are things the owner of the file needs told.
+            matched_entries: set[str] = set()
+            for f in suppressed:
+                matched_entries.update({f.id, fingerprint(f)} & ignore)
+            for p in suppressed_risk:
+                matched_entries.update({p.id} & ignore)
+            dead = sorted(ignore - matched_entries)
             if suppressed or suppressed_risk:
+                _emit(f"{len(suppressed) + len(suppressed_risk)} suppressed in this run:")
                 for f in suppressed:
                     _emit(f"  {f.id}  {fingerprint(f)}  ({f.title})")
                 for p in suppressed_risk:
                     _emit(f"  {p.id}  ({p.title})")
-            else:
-                for entry in sorted(ignore):
+            if dead:
+                _emit("")
+                _emit(f"{len(dead)} entry/entries match nothing in this run — the finding "
+                      "is either fixed, or its fingerprint changed and the suppression is "
+                      "no longer in effect:")
+                for entry in dead:
                     _emit(f"  {entry}")
         return 0
 
     if args.watch_log:
         _emit(render_events(load_events(args.events), ascii_only))
         return 0
+
+    # B-476: read the bundle's attestation bucket at most once — `--judged-bundle -` reads
+    # stdin, and stdin can only be consumed once.
+    _bundle_att = None
+    if args.full and args.judged_bundle is not None and args.attest != "-":
+        _bundle_att = _judged_bundle(args.judged_bundle).get("attestation")
 
     attestation = None
     if args.attest:
@@ -2049,6 +2114,32 @@ def _main(argv=None) -> int:
             print(f"⚠ could not read a valid attestation from {src} "
                   "(ignored; B43/B44 stay UNKNOWN). See 'clawseccheck --ask'.",
                   file=sys.stderr)
+    elif args.full and args.judged_bundle is not None:
+        # B-476: --judged-bundle's own --help promises four buckets, and
+        # `split_judged_bundle` has always parsed all four — but nothing in the codebase
+        # ever read the `attestation` one. An agent that answered the judge packet by
+        # filling in the attestation object alongside its verdicts got B43/B44 left at
+        # UNKNOWN with no indication its answers had been dropped: a documented input,
+        # silently discarded. Routed through the SAME parse_attestation() the --attest
+        # file path uses, so an invalid object degrades identically rather than being
+        # trusted because it arrived by a different door.
+        #
+        # Gated on --full to match the flag's documented "only with --full" contract and
+        # `_resolve_runtime_caps`'s own gate — a bucket honored where the flag itself is
+        # reported as having no effect would be a new incoherence, not a fix for one.
+        # --attest wins when both are given (an explicit flag beats an embedded bucket),
+        # which is why this is `elif`; the note below says so rather than dropping it
+        # silently.
+        from . import attest as _attest  # noqa: PLC0415
+        if _bundle_att is not None:
+            attestation = _attest.parse_attestation(_bundle_att)
+            if not attestation:
+                print("⚠ the --judged-bundle 'attestation' object is not a valid "
+                      "attestation (ignored; B43/B44 stay UNKNOWN). "
+                      "See 'clawseccheck --ask'.", file=sys.stderr)
+    if args.attest and _bundle_att is not None:
+        print("note: --attest was given, so the --judged-bundle 'attestation' object "
+              "was not used.", file=sys.stderr)
 
     # First-run onboarding (Screen 13): when there is genuinely nothing to audit —
     # ~/.openclaw missing, or an empty directory — don't render a wall of UNKNOWNs;
@@ -2611,7 +2702,15 @@ def _main(argv=None) -> int:
         parts = [render_report(findings, score, ascii_only, native=ctx.native,
                                risk=paths, update_notice=notice, freshness_notice=f_notice,
                                openclaw_detected=ctx.config_found, ctx=ctx, color=use_color,
-                               tamper=tamper),
+                               tamper=tamper,
+                               # B-473: the plugin sweep is pipeline phase P7, which runs
+                               # BELOW this body (the tee block). There is no sweep object
+                               # to render here, but "not scanned — run --full" is a lie on
+                               # a run that is about to print the sweep a few hundred lines
+                               # down. --fast drops P7/P8 and the pipeline prints its own
+                               # honest "skipped" line in that slot, so the section exists
+                               # either way and the pointer stays true.
+                               plugins_deferred=args.full),
                  "", render_card(score, findings, ascii_only)]
         if ctx.errors:
             parts.append("\nnotes:\n" + "\n".join(f"  - {_sanitize(e)}" for e in ctx.errors))
@@ -2656,8 +2755,8 @@ def _main(argv=None) -> int:
                 # record_run() / vm_has_fail still fire, so ledger freshness and
                 # --exit-code behave identically to the verbose path.
                 n_rt = len(make_suite(seed))
-                n_dr = len(make_scenarios())
-                n_mt = len(make_multiturn())
+                n_dr = len(make_scenarios(args.seed))
+                n_mt = len(make_multiturn(args.seed))
                 _emit("")
                 _emit(f"SELF-TEST: 1 canary + {n_rt} red-team + {n_dr} dry-run + {n_mt} multi-turn "
                       "injection scenario(s) generated — run them against your agent "
@@ -2699,13 +2798,13 @@ def _main(argv=None) -> int:
                 _emit("=" * 60)
                 _emit("CLAWSECCHECK SELF-TEST")
                 _emit("=" * 60)
-                _emit(render_canary(make_canary(), ascii_only))
+                _emit(render_canary(make_canary(args.seed), ascii_only))
                 _emit("")
                 _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
                 _emit("")
-                _emit(render_dryrun(make_scenarios(), ascii_only))
+                _emit(render_dryrun(make_scenarios(args.seed), ascii_only))
                 _emit("")
-                _emit(render_multiturn(make_multiturn(), ascii_only))
+                _emit(render_multiturn(make_multiturn(args.seed), ascii_only))
                 _record_run("self_test", args)
                 # --- vet-mcp section ---
                 _emit("")

@@ -387,7 +387,10 @@ config; if none is found it warns you and tells you how to add one.
 
 **`--monitor` — Agent Watch.** One way to *get* monitoring: re-audit on a schedule and alert,
 **by severity**, on what **changed** — a new or modified installed skill, `SOUL.md` drift, **any
-change to a file under `<workspace>/memory/`**, a dropped score, **a check leaving PASS (for FAIL,
+file appearing, changing or disappearing under `<workspace>/memory/`** (a new file there is
+reported even when nothing in it looks hostile — that subtree is where OpenClaw's own
+pre-compaction flush writes, so its appearance is INFO, not an accusation), a dropped
+score, **a check leaving PASS (for FAIL,
 WARN or UNKNOWN)**, **a newly connected MCP server, a new channel, the gateway becoming
 network-exposed, or a host monitor disappearing**. Each run appends the changes to a private local
 journal (`~/.clawseccheck/events.jsonl`, owner-only, never uploaded); view the timeline with
@@ -688,7 +691,10 @@ python3 audit.py --log audit.log            # also write log to a local file
     sweep — keeping just the audit, self-test, vet-mcp, and the (free) adjudication packet —
     for CI runs where the deep phases are too slow. This is today's pre-F-150 `--full` shape.
   - **`--judged-bundle PATH`** (only with `--full`, `-` for stdin) feeds back one file holding
-    a host-agent judge's answers to a prior `--full --json` packet: an `attestation` object,
+    a host-agent judge's answers to a prior `--full --json` packet: an `attestation` object
+    (the same shape `--ask` emits and `--attest` reads, so the judge can answer the packet
+    and self-report B43/B44's facts in one file — an explicit `--attest` wins if you pass
+    both, and says so on stderr),
     a `judged` verdicts object for your own config (advisory — never changes the score or
     grade), a `vetJudged` array of per-target verdicts for the swept skills/plugins
     (escalate-only — can never downgrade a finding on untrusted content), and a `liveTest`
@@ -838,6 +844,12 @@ python3 audit.py --log audit.log            # also write log to a local file
 - **`--canary`** emits a benign injection hidden in untrusted-looking content; feed it to your
   agent — if the agent echoes the token, it obeyed an injection (**VULNERABLE**), otherwise
   **RESISTANT**. This is the live "battle-tested" complement to the passive checks.
+- **`--seed VALUE`** fixes the tokens every self-test harness generates — `--canary`,
+  `--redteam`, `--dryrun`, `--multiturn`, and the `--self-test`/`--full` sections that
+  render them. Same seed ⇒ byte-identical output, which is what makes a CI run diffable
+  and what a `--judged-bundle` `liveTest` verdict needs in order to be eligible for
+  history/trend. Without it each harness rolls a fresh random token every run, so the
+  agent under test cannot be pre-trained on it — that stays the default deliberately.
 - **`--badge PATH`** writes a shields-style SVG (grade + score only) for your README / posts.
 - **`--pdf PATH`** writes the complete audit (every FAIL/WARN finding, paginated, base-14 fonts
   only — no font embedding, no JavaScript, no forms) as a PDF. This is the deliverable-into-chat

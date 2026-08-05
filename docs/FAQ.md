@@ -162,6 +162,13 @@ Lines beginning with `#` are comments. The fingerprint for any finding is shown 
 Re-run `clawseccheck`. Suppressed findings no longer appear in the report or affect the
 score. To confirm what is suppressed, use `--show-suppressed` again.
 
+`--show-suppressed` reports two things, and the difference matters: the entries that are
+currently suppressing a finding, and — separately — any entry that **matches nothing in
+this run**. A dead entry means either the finding is gone (you fixed it, and the line can
+be deleted) or the finding's detail text changed, so its fingerprint no longer matches and
+the suppression has quietly stopped working. Bare check ids (`B14`) never drift this way;
+fingerprints (`B14:ab12cd34`) can.
+
 > **Note on false positives.** If you believe a finding is wrong about your config,
 > please also open an issue at <https://github.com/gl0di/clawseccheck/issues> with the
 > output of `clawseccheck --json` (it redacts secret *values* — only key names and paths

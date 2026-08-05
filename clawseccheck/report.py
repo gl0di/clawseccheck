@@ -869,6 +869,27 @@ def _group_issues_by_subject(issues):
     return out
 
 
+def _subject_count_text(n_issues: int, n_unassessed: int) -> str:
+    """The one phrase every subject rollup uses for "how did this subject do".
+
+    Golden Rule #4: a subject whose checks could not reach a verdict is NOT clear. Saying
+    "clear" next to an UNKNOWN marker reads as an assessed all-good — the exact fake-PASS
+    this project refuses to emit — and B-472 found the terminal inventory block and the
+    by-subject detail header doing precisely that while the card summary (the first caller
+    of this rule) already got it right: `Logs & trajectories — [?] clear` printed directly
+    above `3 not assessed (config can't tell)` for the same three findings.
+
+    Shared rather than repeated so the three surfaces cannot drift again. `n_unassessed`
+    counts genuine UNKNOWNs only — a `not_applicable` finding IS an assessment (the
+    surface was positively confirmed absent), so it must not turn a clean subject into an
+    unassessed one."""
+    if n_issues:
+        return f"{n_issues} issue(s)"
+    if n_unassessed:
+        return "not assessed"
+    return "clear"
+
+
 def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     """Uniform per-subject summary rows — one `(label, status, count_text)` tuple per
     catalog.SUBJECT_ORDER entry — for the HTML and PDF report headers. Derived entirely
@@ -882,13 +903,8 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
 
     def _issues_count(subj):
         bucket = inv[subj]
-        n = len(bucket.get("findings") or [])
-        if n:
-            return f"{n} issue(s)"
-        # Golden Rule #4: a subject whose checks could not reach a verdict is NOT clear.
-        # Saying "clear" next to an UNKNOWN marker reads as an assessed all-good, which is
-        # the exact fake-PASS this project refuses to emit.
-        return "not assessed" if bucket.get("status") == UNKNOWN else "clear"
+        return _subject_count_text(len(bucket.get("findings") or []),
+                                   int(bucket.get("unassessed") or 0))
 
     rows = [
         (SUBJECT_LABEL["openclaw"], inv["openclaw"]["status"], _issues_count("openclaw")),
@@ -1318,14 +1334,15 @@ def _empty_inventory() -> dict:
     """A fresh, all-clear inventory shape — every nested list/dict is newly allocated
     per call (no shared mutable state across callers) — for when `ctx` is unavailable."""
     return {
-        "openclaw": {"status": PASS, "findings": []},
-        "host": {"status": PASS, "findings": []},
-        "agents": {"status": PASS, "findings": [], "roster": [], "attested": False},
+        "openclaw": {"status": PASS, "findings": [], "unassessed": 0},
+        "host": {"status": PASS, "findings": [], "unassessed": 0},
+        "agents": {"status": PASS, "findings": [], "unassessed": 0,
+                   "roster": [], "attested": False},
         "skills": [],
         "mcp": [],
         "plugins": {"scanned": False, "rows": []},
-        "channels": {"status": PASS, "findings": [], "roster": []},
-        "logs": {"status": PASS, "findings": []},
+        "channels": {"status": PASS, "findings": [], "unassessed": 0, "roster": []},
+        "logs": {"status": PASS, "findings": [], "unassessed": 0},
     }
 
 
@@ -1374,7 +1391,19 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
     def _bucket(subject: str) -> dict:
         members = by_subject.get(subject, [])
         issues = [f for f in members if f.status in (FAIL, WARN)]
-        return {"status": _worst_status(members), "findings": [f.id for f in issues]}
+        # B-472: `unassessed` is carried separately from `status` because neither of the
+        # two existing fields can answer "was this subject actually looked at". `status`
+        # rolls UNKNOWN up over PASS, so it cannot tell one unreachable check among ten
+        # clean ones from a subject nothing could read; and it also folds in
+        # `not_applicable` members (a surface positively confirmed absent), which ARE
+        # assessed. Additive key — every existing consumer of `status`/`findings` is
+        # unchanged.
+        return {
+            "status": _worst_status(members),
+            "findings": [f.id for f in issues],
+            "unassessed": sum(1 for f in members
+                              if f.status == UNKNOWN and not getattr(f, "not_applicable", False)),
+        }
 
     openclaw = _bucket("openclaw")
     host = _bucket("host")
@@ -1405,7 +1434,7 @@ def _inventory_bucket_lines(label: str, bucket: dict, by_id: dict, *, ascii_only
     status = bucket.get("status", PASS)
     fids = bucket.get("findings") or []
     marker = icon.get(status, icon.get(UNKNOWN, "?"))
-    count_text = f"{len(fids)} issue(s)" if fids else "clear"
+    count_text = _subject_count_text(len(fids), int(bucket.get("unassessed") or 0))
     out = [f" {label} — {marker} {count_text}"]
     for fid in fids:
         f = by_id.get(fid)
@@ -1495,7 +1524,8 @@ def _mcp_inventory_lines(inv: dict, *, ascii_only: bool = False, compact: bool =
 
 
 def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool = False,
-                              color: bool = False, plugin_sweep=None) -> str:
+                              color: bool = False, plugin_sweep=None,
+                              plugins_deferred: bool = False) -> str:
     """Owner-facing "Inventory by subject" block (F-131 Phase 1, extended by F-163) --
     OpenClaw core / Host machine / Agents / Skills / MCP / Plugins / Channels / Logs &
     trajectories, each with a rolled-up status; Skills, MCP and Plugins additionally get
@@ -1534,6 +1564,15 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
 
     if inv["plugins"]["scanned"]:
         lines.extend(_plugins_inventory_lines(plugin_sweep, ascii_only=ascii_only))
+    elif plugins_deferred:
+        # B-473: on a plain `--full` text run the plugin sweep is pipeline phase P7, which
+        # runs AFTER this body is assembled (deliberately — the report-body byte order is
+        # the prefix `--full --quiet` is compared against), so this renderer genuinely has
+        # no sweep object to show. Printing "run --full to include" there told the reader
+        # to run the very flag they had just run, about a sweep whose results were printed
+        # a few hundred lines further down the same output.
+        lines.append(f" {SUBJECT_LABEL['plugins']} (swept later in this run — "
+                     "see the PLUGIN SWEEP section below)")
     else:
         lines.append(f" {SUBJECT_LABEL['plugins']} (not scanned — run --full to include)")
 
@@ -1562,7 +1601,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
                   freshness_notice: list[str] | None = None,
                   openclaw_detected: bool = True, ctx=None,
                   verbose: bool = False, color: bool = False,
-                  tamper: ScoreResult | None = None, plugin_sweep=None) -> str:
+                  tamper: ScoreResult | None = None, plugin_sweep=None,
+                  plugins_deferred: bool = False) -> str:
     findings = deduplicate_findings(findings)
     icon = _color_icons(_ICON_ASCII if ascii_only else _ICON, color)
     ok = "[OK]" if ascii_only else "✅"
@@ -1870,7 +1910,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # forbade ("nothing existing is restructured"). Presentational only, and "" when ctx
     # is unavailable (mirrors the ctx-gated sections above).
     inv_text = render_subject_inventory(findings, ctx, ascii_only=ascii_only, color=color,
-                                         plugin_sweep=plugin_sweep)
+                                         plugin_sweep=plugin_sweep,
+                                         plugins_deferred=plugins_deferred)
     if inv_text:
         lines.append("")
         lines.extend(inv_text.split("\n"))
@@ -1903,7 +1944,14 @@ def render_report(findings: list[Finding], score: ScoreResult,
             label = SUBJECT_LABEL.get(subj_key, "Other")
             label_disp = paint(label, "bold", enabled=True) if color else label
             n_bad = sum(1 for f in members if f.status in (FAIL, WARN))
-            count_text = f"{n_bad} issue(s)" if n_bad else "clear"
+            # B-472: this header used a bare `else "clear"` and so contradicted the
+            # "N not assessed (config can't tell)" line this same block prints a few lines
+            # below, for the same members. Same rule as the inventory block above.
+            count_text = _subject_count_text(
+                n_bad,
+                sum(1 for f in members
+                    if f.status == UNKNOWN and not getattr(f, "not_applicable", False)),
+            )
             if ascii_only:
                 lines.append(f"[{label_disp}] — {count_text}")
             else:
