@@ -914,16 +914,26 @@ def _size_guard_shell_block() -> str:
     stop matching (CLAWSECCHECK-B-440).
     """
     lines = _lines()
+    # Anchored on the constant the guard IS, not on its display name: the step was renamed
+    # once already (2026-08-05 recalibration) and a prose-keyed extractor turned that into
+    # four unrelated test failures. `MAX_STAGED_BYTES=` appears nowhere else in the file.
+    const_i = next(
+        (i for i, ln in enumerate(lines) if "MAX_STAGED_BYTES=" in ln),
+        None,
+    )
+    assert const_i is not None, (
+        "No MAX_STAGED_BYTES= assignment anywhere in the workflow — the pre-upload "
+        "bundle-size guard is gone, not merely renamed."
+    )
     start = next(
         (
-            i for i, ln in enumerate(lines)
-            if ln.strip().startswith("- name:") and "too big to upload" in ln
+            i for i in range(const_i, -1, -1)
+            if lines[i].strip().startswith("- name:")
         ),
         None,
     )
     assert start is not None, (
-        "Could not find the pre-upload bundle-size guard step (name containing "
-        "'too big to upload') in the workflow — it was renamed; update this extractor."
+        "Found MAX_STAGED_BYTES= but no enclosing '- name:' step header above it."
     )
     run_i = None
     for i in range(start + 1, len(lines)):
@@ -968,8 +978,14 @@ def test_size_guard_step_runs_right_after_staging_and_before_any_publish() -> No
     staging_idx = next(
         (i for i, n in enumerate(names) if "Stage publishable files" in n), None
     )
+    # Same rename-proof anchor as _size_guard_shell_block(): identify the guard by the
+    # constant it declares, not by its display name.
     guard_idx = next(
-        (i for i, n in enumerate(names) if "too big to upload" in n), None
+        (
+            i for i, step in enumerate(steps)
+            if any("MAX_STAGED_BYTES=" in ln for _, ln in step)
+        ),
+        None,
     )
     assert staging_idx is not None, "Could not find the 'Stage publishable files' step."
     assert guard_idx is not None, "Could not find the pre-upload bundle-size guard step."
@@ -989,26 +1005,40 @@ def test_size_guard_step_runs_right_after_staging_and_before_any_publish() -> No
     )
 
 
-def test_size_guard_threshold_is_between_the_known_good_and_known_bad_sizes() -> None:
-    """The threshold must sit strictly between the last known-good and known-bad sizes.
+def test_size_guard_threshold_clears_the_last_known_good_publish() -> None:
+    """The threshold must sit ABOVE a bundle size that really did publish.
 
-    Evidence (CLAWSECCHECK-B-440, 2026-08-02/03): v3.58.0's ~4.5MB staged tree published
-    fine; v3.59.0's ~5.3MB staged tree (after the CHANGELOG.md trim above; ~5.6MB before
-    it) still 413'd. A threshold outside this gap either blocks an ordinary release or
-    misses the exact failure mode it exists to catch fast.
+    This assertion used to pin the threshold inside a 4.5MB-5.3MB gap, on the reading that
+    v3.58.0's tree published fine while v3.59.0's 413'd. That bracket has since been
+    disproved: the 413 was ClawHub routing uploads through a Vercel request-body cap far
+    under its own documented 50MB limit (upstream openclaw/clawhub#3375), and once PR #3391
+    moved staging to a direct Convex upload, the *same* v3.59.0 tree published successfully
+    on 2026-08-05. So the old gap measured someone else's infrastructure, not our size, and
+    a threshold inside it now blocks ordinary releases.
+
+    What the guard is actually for is unchanged: catch accidental bloat — a stray binary, a
+    re-added docs/assets tree — before the release-environment approval is spent on it.
     """
     threshold = _size_guard_threshold_bytes()
-    known_good_bytes = int(4.5 * 1024 * 1024)   # v3.58.0 — published fine
-    known_bad_bytes = int(5.3 * 1024 * 1024)    # v3.59.0 — 413'd
-    assert known_good_bytes < threshold < known_bad_bytes, (
-        f"MAX_STAGED_BYTES={threshold} is not strictly between the known-good size "
-        f"({known_good_bytes}, v3.58.0) and the known-bad size ({known_bad_bytes}, "
-        "v3.59.0) — either it will block a normal release or it will miss the failure "
-        "mode it exists to catch fast."
+    # Measured from the v3.59.0 tag by replaying the staging step above, not quoted from a
+    # `du -sh` figure: du reports allocated blocks, the guard sums real file bytes, and
+    # conflating the two is what put the original threshold on the wrong side of this tree.
+    last_known_good_publish = 5_235_253   # v3.59.0, published 2026-08-05 via the Convex route
+    assert threshold > last_known_good_publish, (
+        f"MAX_STAGED_BYTES={threshold} is at or below {last_known_good_publish} bytes — a "
+        "staged tree that is known to have published successfully. A guard set below a "
+        "proven-good size blocks ordinary releases instead of catching real bloat."
     )
     assert threshold < 50 * 1024 * 1024, (
         f"MAX_STAGED_BYTES={threshold} is not comfortably under ClawHub's documented "
         "50MB limit — check for a typo."
+    )
+    # The other failure direction: a threshold so loose it would wave through a bundle
+    # nobody meant to publish. Keep it well inside the documented cap so it still has teeth.
+    assert threshold <= 25 * 1024 * 1024, (
+        f"MAX_STAGED_BYTES={threshold} is more than half ClawHub's documented 50MB cap — "
+        "at that point the guard no longer catches accidental bloat before the approval "
+        "gate, which is its only job."
     )
 
 

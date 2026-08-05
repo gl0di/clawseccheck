@@ -275,29 +275,30 @@ jobs:
           echo "Staged for publish:" && ls -1 dist/clawseccheck
           echo "Staged size: $(du -sh dist/clawseccheck | cut -f1)"
 
-      - name: Guard — fail fast if the staged bundle is too big to upload
-        # v3.59.0 was accepted by every step below (preflight, dry-run) but rejected by
-        # ClawHub ITSELF with a 413 (Request Entity Too Large) at real-upload time — after
-        # the release tag was already pushed and the `environment: release` manual
-        # approval already spent on a bundle that was always going to fail. ClawHub's
-        # documented limit is 50MB, but the real effective limit is lower and undocumented
-        # (filed upstream: github.com/openclaw/clawhub#3375). `clawhub publish` uploads
-        # every staged file as a raw, uncompressed multipart form part (no tar/gzip on
-        # this path — confirmed by reading the installed CLI), so the staged tree size on
-        # disk IS the upload size.
+      - name: Guard — fail fast if the staged bundle is unexpectedly large
+        # The `environment: release` approval is a human-spent resource, and every step
+        # after this one consumes it. This guard exists so an obviously-wrong bundle — a
+        # stray binary, a re-added docs/assets tree — is caught before that click rather
+        # than after. `clawhub publish` uploads every staged file as a raw, uncompressed
+        # multipart form part (no tar/gzip on this path — confirmed by reading the
+        # installed CLI), so the staged tree size on disk IS the upload size.
         #
-        # This step only fails fast on a bundle already known to be in the bad range — it
-        # deliberately does NOT decide how to get back under the limit (trim docs/ further
-        # vs wait on upstream to raise/document the real limit). That call is Dave's;
-        # see CLAWSECCHECK-B-440.
+        # RECALIBRATED 2026-08-05. The original 5 MiB threshold was bracketed against a
+        # 413 that turned out not to be a bundle-size limit at all: uploads went through a
+        # Vercel-fronted route whose request-body cap sat far below ClawHub's documented
+        # 50MB (upstream openclaw/clawhub#3375). PR #3391 reroutes staging to a direct
+        # Convex upload, and once that was deployed v3.59.0's 5,235,253-byte staged tree —
+        # the very bundle the old bracket called "known bad" — published successfully.
+        # The old gap was measuring someone else's infrastructure, not our size; holding
+        # the threshold there would block ordinary releases for a defect that is gone.
         run: |
           set -euo pipefail
-          # Threshold set 2026-08-03 (evidence: CLAWSECCHECK-B-440). Strictly between the
-          # largest staged size known to have PUBLISHED FINE (v3.58.0, ~4.5MB) and the
-          # smallest known to have 413'd (v3.59.0, ~5.3MB after the CHANGELOG.md trim
-          # above — 5.6MB before it). Revisit this NUMBER, not this guard, once the real
-          # upstream limit is confirmed or raised.
-          MAX_STAGED_BYTES=5242880  # 5 MiB
+          # Anchored to two measured facts rather than to a failure bracket:
+          #   * last known-good publish — 5,235,253 bytes (v3.59.0, 2026-08-05, Convex route)
+          #   * ClawHub's documented cap for POST /api/v1/skills — 50MB
+          # 10 MiB is ~2x the former and ~20% of the latter: loose enough that ordinary
+          # growth never trips it, tight enough that accidental bloat still does.
+          MAX_STAGED_BYTES=10485760  # 10 MiB
           # python3, not `du -sb`: -b/--bytes is a GNU coreutils extension, absent from
           # BSD du (macOS runners in the CI matrix) — `du: invalid option -- b`. python3
           # is unconditionally on PATH in this job already (the smoke gate above runs
@@ -306,11 +307,12 @@ jobs:
           STAGED_BYTES="$(python3 -c 'import pathlib; print(sum(f.stat().st_size for f in pathlib.Path("dist/clawseccheck").rglob("*") if f.is_file()))')"
           if [ "$STAGED_BYTES" -gt "$MAX_STAGED_BYTES" ]; then
             echo "::error::Staged bundle is ${STAGED_BYTES} bytes, over the pre-upload guard" \
-                 "threshold of ${MAX_STAGED_BYTES} bytes (5 MiB). ClawHub has previously" \
-                 "rejected staged trees in this size range with a 413 (Request Entity Too" \
-                 "Large) — see CLAWSECCHECK-B-440. Trim the staged tree (or raise this" \
-                 "threshold only once the real upstream limit is confirmed) before pushing" \
-                 "a release tag."
+                 "threshold of ${MAX_STAGED_BYTES} bytes (10 MiB). That is far above any" \
+                 "bundle this project has ever published, so treat it as accidental bloat" \
+                 "— check for a stray binary or a re-added docs/assets tree — rather than" \
+                 "as a limit to raise. ClawHub's documented cap is 50MB; if the staged tree" \
+                 "has genuinely grown this much on purpose, re-ground this threshold" \
+                 "against a real publish before pushing a release tag."
             exit 1
           fi
           echo "Staged bundle size OK: ${STAGED_BYTES} bytes (guard limit ${MAX_STAGED_BYTES})."

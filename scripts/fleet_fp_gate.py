@@ -179,13 +179,25 @@ def build_snapshot(home=DEFAULT_HOME, *, vet_kind="skill"):
     """Run the audit over the real config and ``--vet`` over every discovered installed
     skill; return the snapshot dict.
 
+    The rule is: gate exactly what a plain CLI run scores, minus only the one step a
+    gate may not take.
+
     ``include_native=False``: the native fold-in is the one part of a normal CLI run
-    that launches the audited software, and a gate must stay subprocess-free.
-    ``include_host=True`` matches what a user actually sees on a plain run -- host
-    posture is part of the real configuration being gated.
+    that launches the audited software, and a gate must stay subprocess-free -- the
+    sole deviation from "what the user sees".
+    ``include_host=True``, ``include_sockets=True``, ``include_deptree=True``: each is
+    on by default in the CLI (``cli.py`` passes ``include_deptree=not args.no_deptree``
+    and ``include_sockets=not args.no_sockets``), so each is part of the real posture a
+    user is graded on. ``include_deptree`` in particular runs B349 (CRITICAL) against the
+    installed npm tree; leaving it off here left the fleet-FP gate structurally blind to
+    the newest FAIL-capable check -- exactly the surface C-303 exists to guard. All three
+    are read-only and subprocess-free, so a gate may take them.
     """
     home_path = Path(home).expanduser()
-    _ctx, findings, score = audit(home_path, include_native=False, include_host=True)
+    _ctx, findings, score = audit(
+        home_path, include_native=False, include_host=True,
+        include_sockets=True, include_deptree=True,
+    )
 
     rows = fail_rows(findings, scope="audit")
     suppressed = sum(
