@@ -53,9 +53,9 @@ def _deptree_scan(root=None):
     return _deptree.scan_dep_tree(_deptree.find_dep_tree(resolved))
 
 
-__version__ = "3.59.0"
+__version__ = "3.60.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
-__released__ = "2026-08-02"
+__released__ = "2026-08-05"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
