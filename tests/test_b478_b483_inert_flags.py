@@ -1,4 +1,4 @@
-"""B-478 … B-484 — flags that did nothing, and help text that described something else.
+"""B-478 … B-483 — flags that did nothing, and help text that described something else.
 
 The tail of E-070. Each is a flag whose documented behaviour and actual behaviour had
 come apart:
@@ -8,18 +8,17 @@ come apart:
   second apply of the same proposals read as a failed write rather than as idempotency.
 - B-479 `--log PATH` on its own created NO FILE. The default level is WARNING, this tool
   warns almost never, and the handler creates the file lazily on the first record.
-- B-480 `--self-test`'s help named three harnesses; the mode renders four.
-- B-481 `--full`'s help said the extra sections are "skipped in --json / --card mode".
-  `--json` runs the whole pipeline and merges its output as additional top-level keys;
-  only `--card` drops them.
-- B-482 the judge packet reported "1 evidence entry in the full report" for findings with
+- B-480 `--self-test`'s help named three harnesses (the mode renders four), and `--full`'s
+  said the extra sections are "skipped in --json / --card mode" — `--json` runs the whole
+  pipeline and merges its output as additional top-level keys; only `--card` drops them.
+- B-481 the judge packet reported "1 evidence entry in the full report" for findings with
   ZERO evidence entries — on a real `--full` run of home_vuln, 86 of 87 items.
-- B-483 `--yes` outside `--purge`/`--apply-ignore-proposals` was silently accepted, though
+- B-482 `--yes` outside `--purge`/`--apply-ignore-proposals` was silently accepted, though
   its own help already said it has no effect there.
-- B-484 six ASCII-folding sites, two mapping tables, four bare `.encode("ascii",
-  "replace")` calls: `--ascii` turned every em dash into a literal `?` across
-  `--self-test`/`--dryrun`/`--multiturn`/`--next`/the PDF, `·` became `?` everywhere, and
-  `--advise` ignored `--ascii` altogether.
+- B-483 seven ASCII-folding sites, three divergent mapping tables, and five sites doing a
+  bare `.encode("ascii", "replace")` with no table at all: `--ascii` turned every em dash
+  into a literal `?` across `--self-test`/`--canary`/`--dryrun`/`--multiturn`/`--next`/the
+  PDF, `·` became `?` everywhere, and `--advise` ignored `--ascii` altogether.
 
 Offline; writes only under pytest's tmp_path.
 """
@@ -137,7 +136,7 @@ def test_debug_still_wins_over_the_log_implication(tmp_path):
     assert lg.level == logging.DEBUG
 
 
-# ---- B-480 / B-481: help text that describes what the flag does ----
+# ---- B-480: help text that describes what the flag does ----
 
 def _help_block(capsys, flag: str, next_flag: str) -> str:
     """The help text for one option, isolated. argparse wraps prose across lines and other
@@ -179,7 +178,7 @@ def test_full_json_really_carries_the_extra_sections(capsys):
         assert key in doc, f"--full --json is missing {key}"
 
 
-# ---- B-482: never report evidence that does not exist ----
+# ---- B-481: never report evidence that does not exist ----
 
 def test_an_evidence_free_finding_is_not_credited_with_one_entry(capsys):
     _, out, _ = _run(capsys, "--full", "--fast", "--home", VULN, "--json", "--no-history")
@@ -221,7 +220,7 @@ def test_a_finding_with_neither_evidence_nor_detail_says_nothing():
     assert _evidence_locations(f) == ""
 
 
-# ---- B-483: --yes must not be silently accepted where it does nothing ----
+# ---- B-482: --yes must not be silently accepted where it does nothing ----
 
 @pytest.mark.parametrize("argv", [
     ["--home", SAFE, "--card", "--no-history"],
@@ -244,7 +243,7 @@ def test_no_yes_means_no_note(capsys):
     assert "--yes" not in err
 
 
-# ---- B-484: one ASCII folding, applied everywhere ----
+# ---- B-483: one ASCII folding, applied everywhere ----
 
 def test_the_folding_table_covers_what_we_actually_emit():
     assert asciify("a — b") == "a - b"

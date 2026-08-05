@@ -300,7 +300,7 @@ def _evidence_locations(f) -> str:
         n = len(f.evidence)
         return (f"{n} evidence entr{'y' if n == 1 else 'ies'} in the full report "
                 "(not reproduced here)")
-    # B-482: this used to fall through to `1 if f.detail else 0` and report "1 evidence
+    # B-481: this used to fall through to `1 if f.detail else 0` and report "1 evidence
     # entry in the full report" for a finding that has NO evidence entries at all — a
     # count of something that does not exist, told to the one reader (the adjudicating
     # judge) whose entire job is to weigh how much evidence there is. Measured on a real

@@ -99,7 +99,7 @@ def _ascii_safe(s: str) -> str:
     (arrows, dashes, curly quotes, middot, multiply sign) is first folded to an ASCII
     equivalent; anything still outside printable ASCII then becomes ``?``.
 
-    B-484: this used to carry its OWN third fold table, a strict subset of
+    B-483: this used to carry its OWN third fold table, a strict subset of
     `textnorm.ASCII_MAP` except for U+2212 MINUS SIGN (now in the shared table). Folding
     through the one table means a dash renders identically in the PDF and in the terminal
     report it mirrors."""

@@ -440,7 +440,7 @@ def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
         lines.append(f"{_g('roadmap')} roadmap {len(roadmap)} (no check yet): {names}")
     return lines
 
-# B-484: the table and the function now live in the `textnorm` leaf, because five other
+# B-483: the table and the function now live in the `textnorm` leaf, because five other
 # modules folded output to ASCII too and only one of them mapped anything. Re-exported
 # under the private names this module has always used so every existing importer (tests
 # included) is unaffected.
@@ -3182,7 +3182,7 @@ def render_advise(profile, ascii_only: bool = False) -> str:
         lines.append("  verdict above instead (e.g. uninstall through your normal flow).")
     lines.append("  (run --json for the full finding list + axis breakdown)")
     out = "\n".join(lines)
-    # B-484: this renderer read `ascii_only` for its icon table and its `dash` variable and
+    # B-483: this renderer read `ascii_only` for its icon table and its `dash` variable and
     # then emitted hardcoded em dashes anyway (the verdict headline, the CAUTION fallback),
     # plus whatever unicode a finding's own text carries — so `--advise --ascii` was the one
     # mode that still printed raw unicode. Same closing guard every other renderer here ends

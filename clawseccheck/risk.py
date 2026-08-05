@@ -51,7 +51,7 @@ from .checks import (
 )
 from .collector import Context, dig
 from .scanbudget import limits_for
-# B-484: `_asciify` was a SECOND, narrower copy of report.py's table (no ·, ×,
+# B-483: `_asciify` was a SECOND, narrower copy of report.py's table (no ·, ×,
 # ≤, ≥, ≈, •) — the drift a duplicated table always produces. Both surfaces now
 # fold through the one table in the textnorm leaf.
 from .textnorm import asciify as _asciify

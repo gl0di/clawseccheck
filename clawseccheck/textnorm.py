@@ -510,7 +510,7 @@ def _nfkc_ascii_fold_changed(text: str) -> bool:
 # homoglyph obfuscation on untrusted input, this one exists so a legacy terminal
 # still reads our own prose.
 #
-# B-484: it lives here, in the leaf, because there were SIX ascii-folding sites
+# B-483: it lives here, in the leaf, because there were SIX ascii-folding sites
 # in the package and only two of them applied a mapping table at all — the other
 # four did a bare `.encode("ascii", "replace")`, so every em dash, ellipsis and
 # arrow in `--self-test`, `--dryrun`, `--multiturn`, `--next` and the PDF came

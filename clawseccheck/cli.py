@@ -1081,7 +1081,7 @@ def _flag_coherence_notes(args) -> list[str]:
         # with no primary mode active here, --dashboard cannot be the one that ran.
         if bool(getattr(args, "compact", False)):
             notes.append("note: --compact has no effect without --dashboard --full")
-        # B-483: --purge / --apply-ignore-proposals are the only two consumers of --yes,
+        # B-482: --purge / --apply-ignore-proposals are the only two consumers of --yes,
         # and both are primary modes — so reaching HERE at all means no mode that can
         # honor it ran. Checked in this branch too (not only the winning-mode one below),
         # because the default report path is exactly where a scripted `--yes` most often
@@ -1172,7 +1172,7 @@ def _flag_coherence_notes(args) -> list[str]:
     # default path or writes no history at all, where --no-history is a no-op).
     if win_attr in ("trend", "monitor") and bool(getattr(args, "no_history", False)):
         no_effect.append("--no-history")
-    # B-483: --yes skips the confirmation prompt for exactly two commands, and its own
+    # B-482: --yes skips the confirmation prompt for exactly two commands, and its own
     # help already says "has no effect without one of those two" — but nothing enforced
     # that, so passing it anywhere else was silently accepted. That is the specific
     # failure this whole warn-and-continue mechanism exists to prevent: a scripted run
@@ -1623,7 +1623,7 @@ def _main(argv=None) -> int:
                         "red-team + dry-run + multi-turn (use --seed for reproducible "
                         "tokens)")
     p.add_argument("--full", action="store_true",
-                   # B-481: "extra sections skipped in --json / --card" was half wrong.
+                   # B-480: "extra sections skipped in --json / --card" was half wrong.
                    # --json runs the whole pipeline and merges its output as additional
                    # top-level keys (judgePacket, coveragePage, phases, vetPackets, ...);
                    # only --card drops them. Telling a CI user their --json run skips the
