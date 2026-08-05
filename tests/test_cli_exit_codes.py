@@ -1,7 +1,8 @@
 """Exit-code contracts for CLI operational failures (CLAWSECCHECK-B-054).
 
 Verifies:
-- --badge/--html/--sarif/--save on an unwritable path → rc != 0, file absent.
+- --badge/--html/--sarif/--save when the write itself fails → rc != 0, file absent.
+  (A merely *missing* parent directory is created, not fatal — see B-459.)
 - --vet on a non-existent target → rc != 0.
 - --vet on a valid skill target that yields PASS or UNKNOWN → rc == 0.
 """
@@ -9,6 +10,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from clawseccheck import cli
 from clawseccheck.catalog import Finding
 from clawseccheck.cli import main
 
@@ -18,61 +22,83 @@ BASE = ["--no-native", "--no-history"]
 
 
 def _no_parent_path(tmp_path: Path, suffix: str) -> Path:
-    """Return a path whose parent directory does not exist, so any write raises OSError."""
+    """Return a report path whose parent directory does not exist.
+
+    B-459: this is no longer a *failing* path — a missing report directory is now created
+    rather than fatal, because SKILL.md's own guided flow writes to
+    ``~/.clawseccheck/report.pdf`` and nothing before it creates that directory, so a
+    first run died with ENOENT. Tests that need a genuine write failure use
+    ``_break_writes`` below instead; this helper now exercises the create-it path.
+    """
     return tmp_path / "no_such_dir" / ("output" + suffix)
+
+
+@pytest.fixture
+def _break_writes(monkeypatch):
+    """Force every artifact write to fail, at any uid.
+
+    An unwritable directory would be the obvious mechanism, but root ignores directory
+    permissions, so such a test would pass for the wrong reason wherever the suite runs as
+    root. Raising from the writer itself exercises the same handler at every uid.
+    """
+    def boom(path, data):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(cli, "secure_write_text", boom)
+    monkeypatch.setattr(cli, "secure_write_bytes", boom)
 
 
 # ---------------------------------------------------------------------------
 # Artifact-writer failures: OSError on write → rc != 0 and file absent
 # ---------------------------------------------------------------------------
 
-def test_badge_write_failure_returns_nonzero(tmp_path, capsys):
+def test_badge_write_failure_returns_nonzero(tmp_path, capsys, _break_writes):
     out = _no_parent_path(tmp_path, ".svg")
     rc = main(["--home", VULN] + BASE + ["--badge", str(out)])
     assert rc != 0
     assert not out.exists()
 
 
-def test_badge_write_failure_emits_message(tmp_path, capsys):
+def test_badge_write_failure_emits_message(tmp_path, capsys, _break_writes):
     out = _no_parent_path(tmp_path, ".svg")
     main(["--home", VULN] + BASE + ["--badge", str(out)])
     assert "could not write badge" in capsys.readouterr().out
 
 
-def test_html_write_failure_returns_nonzero(tmp_path, capsys):
+def test_html_write_failure_returns_nonzero(tmp_path, capsys, _break_writes):
     out = _no_parent_path(tmp_path, ".html")
     rc = main(["--home", VULN] + BASE + ["--html", str(out)])
     assert rc != 0
     assert not out.exists()
 
 
-def test_html_write_failure_emits_message(tmp_path, capsys):
+def test_html_write_failure_emits_message(tmp_path, capsys, _break_writes):
     out = _no_parent_path(tmp_path, ".html")
     main(["--home", VULN] + BASE + ["--html", str(out)])
     assert "could not write HTML report" in capsys.readouterr().out
 
 
-def test_sarif_write_failure_returns_nonzero(tmp_path, capsys):
+def test_sarif_write_failure_returns_nonzero(tmp_path, capsys, _break_writes):
     out = _no_parent_path(tmp_path, ".sarif")
     rc = main(["--home", VULN] + BASE + ["--sarif", str(out)])
     assert rc != 0
     assert not out.exists()
 
 
-def test_sarif_write_failure_emits_message(tmp_path, capsys):
+def test_sarif_write_failure_emits_message(tmp_path, capsys, _break_writes):
     out = _no_parent_path(tmp_path, ".sarif")
     main(["--home", VULN] + BASE + ["--sarif", str(out)])
     assert "could not write SARIF" in capsys.readouterr().out
 
 
-def test_save_write_failure_returns_nonzero(tmp_path, capsys):
+def test_save_write_failure_returns_nonzero(tmp_path, capsys, _break_writes):
     out = _no_parent_path(tmp_path, ".txt")
     rc = main(["--home", VULN] + BASE + ["--save", str(out)])
     assert rc != 0
     assert not out.exists()
 
 
-def test_save_write_failure_emits_message(tmp_path, capsys):
+def test_save_write_failure_emits_message(tmp_path, capsys, _break_writes):
     out = _no_parent_path(tmp_path, ".txt")
     main(["--home", VULN] + BASE + ["--save", str(out)])
     assert "could not save report" in capsys.readouterr().out

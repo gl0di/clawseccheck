@@ -2071,9 +2071,31 @@ def _main(argv=None) -> int:
         _emit(_risk.render_risk_paths(paths, ascii_only=ascii_only))
         return 0
 
+    def _report_dest(raw: str) -> Path:
+        """Resolve a user-requested report path, creating its directory if it is missing.
+
+        B-459: SKILL.md's guided flow hardcodes ``--pdf ~/.clawseccheck/report.pdf``, but
+        none of the commands that precede it create ``~/.clawseccheck`` — so on a first run
+        the very command the docs tell the host agent to run died with ENOENT from
+        ``mkstemp``, and (because the card had already been collapsed in anticipation of the
+        attachment) the whole audit was discarded: 118 bytes of stdout, exit 1, no grade and
+        no findings. Every first-time user hit that.
+
+        Only a directory we create ourselves is touched, and it is created 0700 because a
+        report carries the user's audit detail. A parent that already exists is left exactly
+        as it is — ``secure_dir`` would ``chmod 0700`` it, which for a shared parent like
+        ``/tmp`` (``--pdf /tmp/report.pdf``) would be a destructive surprise well outside
+        what this tool is allowed to do to the user's machine.
+        """
+        p = Path(raw).expanduser()
+        parent = p.parent
+        if not parent.exists():
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return p
+
     if args.badge:
         try:
-            secure_write_text(Path(args.badge).expanduser(), render_svg(score, findings))
+            secure_write_text(_report_dest(args.badge), render_svg(score, findings))
             _emit(
                 f"(badge written to {args.badge} — attach this SVG file as-is; "
                 "do not redraw, rasterize, or generate your own badge image)"
@@ -2086,7 +2108,7 @@ def _main(argv=None) -> int:
     if args.html:
         try:
             secure_write_text(
-                Path(args.html).expanduser(),
+                _report_dest(args.html),
                 render_html(findings, score, native=ctx.native, ctx=ctx),
             )
             _emit(f"(HTML report written to {args.html})")
@@ -2097,7 +2119,7 @@ def _main(argv=None) -> int:
 
     if args.sarif:
         try:
-            secure_write_text(Path(args.sarif).expanduser(), render_sarif(findings, score, __version__, ctx=ctx))
+            secure_write_text(_report_dest(args.sarif), render_sarif(findings, score, __version__, ctx=ctx))
             _emit(f"(SARIF written to {args.sarif})")
             return 0
         except OSError as exc:
@@ -2117,9 +2139,10 @@ def _main(argv=None) -> int:
     _defer_pdf = bool(args.pdf) and args.dashboard and args.full
     if args.pdf and not _defer_pdf:
         try:
-            secure_write_bytes(Path(args.pdf).expanduser(),
+            _pdf_dest = _report_dest(args.pdf)
+            secure_write_bytes(_pdf_dest,
                                render_pdf(findings, score, native=ctx.native, ctx=ctx))
-            pdf_written = str(Path(args.pdf).expanduser())
+            pdf_written = str(_pdf_dest)
         except OSError as exc:
             _emit(f"(could not write PDF report: {exc})")
             return 1
@@ -2246,14 +2269,18 @@ def _main(argv=None) -> int:
             version=__version__, bundle=judged_bundle)
         if _defer_pdf:
             try:
-                secure_write_bytes(Path(args.pdf).expanduser(), render_pdf(
+                _pdf_dest = _report_dest(args.pdf)
+                secure_write_bytes(_pdf_dest, render_pdf(
                     findings, score, native=ctx.native, ctx=ctx,
                     plugin_sweep=plugin_sweep, risk=paths,
                     behavioral=behavioral_phase, adjudication=adjudication_phase))
-                pdf_written = str(Path(args.pdf).expanduser())
+                pdf_written = str(_pdf_dest)
             except OSError as exc:
-                _emit(f"(could not write PDF report: {exc})")
-                return 1
+                # B-459: the PDF is the DELIVERY of this audit, not the audit. Failing to
+                # write it must never destroy the analysis: fall through with
+                # pdf_written=None so render_dashboard renders every section inline
+                # instead of collapsing to a card that points at a file we never wrote.
+                _emit(f"(could not write PDF report: {exc} — showing the full report inline)")
         _emit(render_dashboard(
             findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
             risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
@@ -2712,7 +2739,7 @@ def _main(argv=None) -> int:
             # `_full_lines` is empty on every non---full path, so this is exactly
             # today's behaviour there.
             _saved = "\n".join([body, *_full_lines]) if _full_lines else body
-            secure_write_text(Path(args.save).expanduser(), strip_ansi(_saved))
+            secure_write_text(_report_dest(args.save), strip_ansi(_saved))
             _emit(f"\n(report saved to {args.save})")
         except OSError as exc:
             _emit(f"\n(could not save report: {exc})")
