@@ -42,8 +42,11 @@ import zlib
 from .brand import BRAND_RED, GRADE_HEX, SEVERITY, WORDMARK, grade_hex
 from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
 from .report import (
-    _cap_also_clause, _cap_cascade, _cap_primary_reason_text, _group_issues_by_subject,
-    _sanitize, _SEV_ORDER, _subject_summary_rows, _trifecta_ratio,
+    _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
+    _coverage_lines, _group_issues_by_subject, _mcp_inventory_lines,
+    _plugins_inventory_lines, _risk_chain_lines, _sanitize, _second_opinion_lines,
+    _SEV_ORDER, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
+    _worth_a_glance_lines, build_inventory,
 )
 from .scoring import ScoreResult
 
@@ -443,17 +446,50 @@ def _draw_subject_summary(flow: "_PageFlow", rows) -> None:
         flow.rect(_MARGIN, flow.y + 4.0, _CONTENT_W, 0.4, "#e2e2e2")
 
 
-def _draw_subject_header(flow: "_PageFlow", label: str, n: int) -> None:
-    """A per-subject section header: a light bar with a BRAND_RED left accent and the
-    subject label + issue count."""
+def _draw_section_header(flow: "_PageFlow", text: str) -> None:
+    """A section header bar: light fill with a BRAND_RED left accent."""
     flow.ensure_space(26.0)
     flow.spacer(4.0)
     y = flow.y
     flow.rect(_MARGIN, y - 17.0, _CONTENT_W, 19.0, "#f4efe9")
     flow.rect(_MARGIN, y - 17.0, 3.0, 19.0, BRAND_RED)
-    flow.text_abs(_MARGIN + 11.0, y - 13.0, f"{label} - {n} issue(s)", 12, bold=True,
-                  rgb=(0.16, 0.16, 0.16))
+    flow.text_abs(_MARGIN + 11.0, y - 13.0, text, 12, bold=True, rgb=(0.16, 0.16, 0.16))
     flow.y = y - 17.0 - 8.0
+
+
+def _draw_subject_header(flow: "_PageFlow", label: str, n: int) -> None:
+    """A per-subject findings section header."""
+    _draw_section_header(flow, f"{label} - {n} issue(s)")
+
+
+def _pipeline_block(flow: "_PageFlow", title: str, lines) -> None:
+    """Render one `--full` pipeline block (Skills / Plugins / MCP / RISK chains /
+    Behavioural / Second opinion / Coverage / Worth a glance) into the PDF.
+
+    *lines* comes from report.py's OWN line renderer for that block, called with
+    ``ascii_only=True`` — so the PDF and the chat card are one system rather than two
+    formatters that can drift, and every glyph is already base-14-safe ([X]/[!]/[OK]/[?]
+    instead of the unicode markers, which would each become '?'). Leading indentation is
+    preserved as a left inset so nested roster/reason lines still read as nested; the text
+    itself word-wraps rather than overflowing (nothing is ever dropped)."""
+    if not lines:
+        return
+    # One renderer (_coverage_lines) already opens with its own text rule
+    # ("-- Coverage of OpenClaw surfaces --") because the terminal report splices it in
+    # unlabelled. Drop that line rather than drawing the title twice — matched by content,
+    # not by position, so a change to its decoration cannot silently reintroduce the dupe.
+    lines = list(lines)
+    if lines and lines[0].strip(" -=").casefold() == title.casefold():
+        lines = lines[1:]
+    _draw_section_header(flow, title)
+    for raw in lines:
+        text = raw.rstrip()
+        if not text.strip():
+            flow.spacer(4.0)
+            continue
+        indent = (len(text) - len(text.lstrip(" "))) * 3.0
+        flow.wrapped(text.lstrip(" "), size=9, color="#333333", indent=min(indent, 60.0))
+    flow.spacer(6.0)
 
 
 def _finding_block(flow: _PageFlow, f: Finding) -> None:
@@ -482,7 +518,8 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
 
 
 def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
-               *, ctx=None, plugin_sweep=None) -> bytes:
+               *, ctx=None, plugin_sweep=None, risk=None, behavioral=None,
+               adjudication=None) -> bytes:
     """Render the complete audit (all FAIL/WARN findings, grouped BY SUBJECT the same way
     `render_html` groups them, under a branded header band + a per-subject summary table)
     as a paginated, base-14-only PDF. Returns bytes — this
@@ -573,6 +610,29 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
             _draw_subject_header(flow, subj_label, len(subj_issues))
             for f in subj_issues:
                 _finding_block(flow, f)
+
+    # ── The --full pipeline (C-374) ──────────────────────────────────────────────
+    # Same fixed order `render_dashboard(full=True)` uses, rendered from the SAME line
+    # renderers, so the PDF can carry everything the combined chat card carries — which
+    # is what lets that card collapse to an overview + this attachment instead of pasting
+    # 11.5 KB into a chat message. Every block is caller-supplied: a run that skipped a
+    # phase (a plain audit, --fast, or the phase's own budget) passes None and only that
+    # block is omitted. Nothing here re-scans or re-judges anything.
+    inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep) if ctx is not None else None
+    if inv is not None and inv["skills"]:
+        _pipeline_block(flow, "Skills", _skills_inventory_lines(inv, ctx, ascii_only=True))
+    _pipeline_block(flow, "Plugins", _plugins_inventory_lines(plugin_sweep, ascii_only=True))
+    if inv is not None and inv["mcp"]:
+        _pipeline_block(flow, "MCP servers", _mcp_inventory_lines(inv, ascii_only=True))
+    _pipeline_block(flow, "RISK chains", _risk_chain_lines(risk or [], ascii_only=True))
+    # Behavioural / Second opinion are shown whenever the phase RAN, even to report
+    # "nothing fired" (Golden Rule #4) — their own renderers already encode that.
+    _pipeline_block(flow, "Behavioural", _behavioral_block_lines(behavioral, ascii_only=True))
+    _pipeline_block(flow, "Second opinion (advisory)",
+                    _second_opinion_lines(adjudication, ascii_only=True))
+    _pipeline_block(flow, "Coverage of OpenClaw surfaces",
+                    _coverage_lines(findings, ascii_only=True))
+    _pipeline_block(flow, "Worth a glance", _worth_a_glance_lines(findings, ascii_only=True))
 
     flow.finish()
 

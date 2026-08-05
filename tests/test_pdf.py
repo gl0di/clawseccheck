@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from clawseccheck import audit
-from clawseccheck.catalog import FAIL, HIGH, PASS, UNKNOWN, WARN, Finding
+from clawseccheck.catalog import CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding
 from clawseccheck.pdf import render_pdf
 from clawseccheck.safeio import secure_write_bytes
 from clawseccheck.scoring import compute
@@ -40,6 +40,19 @@ def _finding(id_: str, status: str, severity: str = HIGH,
         scored=True,
         evidence=[],
     )
+
+
+def _content_text(data: bytes) -> str:
+    """All page content streams, decompressed and concatenated — lets a test assert on
+    what was actually DRAWN without needing poppler installed. Note PDF string literals
+    escape parens, so `(advisory)` appears as `\\(advisory\\)`."""
+    out = ""
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, re.S):
+        try:
+            out += zlib.decompress(m.group(1)).decode("latin-1", "replace")
+        except zlib.error:
+            continue
+    return out
 
 
 def _pdftotext(data: bytes) -> str:
@@ -262,3 +275,86 @@ def test_writes_via_secure_write_bytes(tmp_path):
     secure_write_bytes(dest, data)
     assert dest.read_bytes() == data
     assert oct(dest.stat().st_mode)[-3:] == "600"
+
+
+# ── C-374: the PDF carries the whole --full pipeline ────────────────────────────────
+#
+# This is what lets `--dashboard --full --pdf` collapse its 11.5 KB chat card into an
+# overview plus this attachment. If a block lived only in the card, collapsing would
+# silently drop analysis the run actually performed.
+
+# Card section label -> the PDF's title for the same block. Wording differs in two spots
+# (the card says "MCP"/"RISK Chains", the PDF spells them out), so the mapping is
+# declared rather than string-matched — and declaring it is the point: a NEW block added
+# to the dashboard has no entry here and trips the drift guard below.
+_CARD_TO_PDF_BLOCK = {
+    "Skills": "Skills",
+    "Plugins": "Plugins",
+    "MCP": "MCP servers",
+    "RISK Chains": "RISK chains",
+    "Behavioural": "Behavioural",
+    "Second opinion (advisory)": "Second opinion (advisory)",
+    "Worth a glance": "Worth a glance",
+}
+# Card-only sections: the chat card's own furniture, never PDF pipeline blocks.
+_CARD_ONLY_SECTIONS = {"Findings", "Inventory by subject", "Most urgent"}
+
+
+def _dashboard_section_labels() -> set:
+    """Section labels render_dashboard draws, read out of its source."""
+    src = (Path(__file__).resolve().parent.parent / "clawseccheck" / "report.py").read_text()
+    found = set()
+    for m in re.finditer(r'f"\{sep\} (?:\{glance_marker\})?([^{]*?) \{sep\}"', src):
+        found.add(m.group(1).strip())
+    return found
+
+
+def _pdf_block_titles() -> set:
+    src = (Path(__file__).resolve().parent.parent / "clawseccheck" / "pdf.py").read_text()
+    return set(re.findall(r'_pipeline_block\(\s*flow,\s*"([^"]+)"', src))
+
+
+def test_every_dashboard_block_has_a_pdf_counterpart():
+    """Drift guard: a block added to the combined card must also reach the PDF, or the
+    card can no longer be collapsed behind the attachment without losing it."""
+    card = _dashboard_section_labels() - _CARD_ONLY_SECTIONS
+    unmapped = sorted(card - set(_CARD_TO_PDF_BLOCK))
+    assert not unmapped, (
+        f"dashboard block(s) with no declared PDF counterpart: {unmapped} — render them "
+        "in pdf.py's --full pipeline section and add them to _CARD_TO_PDF_BLOCK")
+    pdf_titles = _pdf_block_titles()
+    missing = sorted(t for t in _CARD_TO_PDF_BLOCK.values() if t not in pdf_titles)
+    assert not missing, f"declared PDF block(s) not actually rendered by pdf.py: {missing}"
+
+
+def test_full_pipeline_blocks_are_drawn_into_the_pdf():
+    """End-to-end: with phase results supplied, every pipeline block's title is really
+    drawn in the PDF content stream (not merely wired up in source)."""
+    class _Phase:
+        def __init__(self, detail):
+            self.ran, self.detail, self.lines = True, detail, [detail]
+
+    class _RiskPath:
+        id, severity = "RISK-01", CRITICAL
+        title, why = "chain title", "chain why"
+        chain = ["untrusted input", "exec"]
+
+    findings = [_finding("B1", FAIL), _finding("B2", WARN)]
+    data = render_pdf(
+        findings, compute(findings),
+        risk=[_RiskPath()],
+        behavioral=_Phase("nothing fired"),
+        adjudication=_Phase("nothing in the borderline band"),
+    )
+    text = _content_text(data)
+    for title in ("RISK chains", "Behavioural", "Second opinion", "Coverage of OpenClaw surfaces"):
+        assert title in text, f"{title!r} missing from the PDF"
+    # Parens are escaped in a PDF literal — assert on the escaped form, not the raw one.
+    assert r"Second opinion \(advisory\)" in text
+
+
+def test_coverage_block_header_is_not_drawn_twice():
+    """_coverage_lines carries its own text rule; the PDF must not print the title twice."""
+    findings = [_finding("B1", FAIL)]
+    text = _content_text(render_pdf(findings, compute(findings)))
+    assert text.count("Coverage of OpenClaw surfaces") == 1

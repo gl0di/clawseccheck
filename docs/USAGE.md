@@ -729,6 +729,20 @@ python3 audit.py --log audit.log            # also write log to a local file
   finding with its why and evidence — and the card names that file. The PDF is a **local
   file to attach**, never a link (there is no URL: ClawSecCheck is local-only). Use
   `--dashboard-findings` if you want the full grouped findings block inline instead.
+
+  Add `--full` to the pair and the PDF also carries the whole pipeline — Skills, Plugins,
+  MCP, RISK chains, Behavioural, Second opinion and Coverage:
+
+  ```bash
+  clawseccheck --dashboard --full --pdf report.pdf
+  ```
+
+  The card then collapses to the same chat-sized overview and points at the report,
+  instead of pasting ~11.5 KB of blocks into the message. **Without `--pdf`,
+  `--dashboard --full` still renders every block inline** — nothing becomes unreachable
+  just because you didn't ask for a file. (`--full` on a bare `--pdf`, with no
+  `--dashboard`, has no effect: that path never runs the pipeline phases, and the CLI
+  says so.)
   - **`--compact`** (only with `--dashboard --full`) is the ~4096-character Telegram-safe
     layout: Plugins/MCP/RISK-chain blocks collapse to headline counts only; the Findings
     and "Worth a glance" blocks keep every finding (nothing dropped) but trim each one's

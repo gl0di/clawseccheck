@@ -913,7 +913,10 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
 
     plug = inv["plugins"]
     if not plug.get("scanned"):
-        rows.append((SUBJECT_LABEL["plugins"], UNKNOWN, "not scanned — run --full"))
+        # Distinguish "no sweep ran" from "a sweep ran and found no plugin index" —
+        # telling a user who just ran --full to "run --full" is a lie about what happened.
+        note = "not scanned — run --full" if plugin_sweep is None else "no plugin index found"
+        rows.append((SUBJECT_LABEL["plugins"], UNKNOWN, note))
     else:
         prows = plug.get("rows") or []
         # Fold TRUNCATED/SKIPPED into UNKNOWN for the rollup, as _plugins_inventory_lines
@@ -2381,7 +2384,8 @@ def _card_top_urgent_lines(findings, *, limit: int = _CARD_TOP_URGENT,
     return lines, len(named)
 
 
-def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool = False) -> list[str]:
+def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool = False,
+                               full: bool = False) -> list[str]:
     """Where the rest of the detail is. Two jobs: disclose how many findings the card did
     NOT name, and point at the full report.
 
@@ -2391,11 +2395,17 @@ def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool =
     path at the user or re-render the contents. Wording mirrors cli.py's own `--pdf`
     message, which set that precedent."""
     lines: list[str] = []
+    # Under --full the PDF additionally carries the pipeline blocks (Skills/Plugins/MCP/
+    # RISK chains/Behavioural/Second opinion/Coverage/Worth a glance) — say so, so the
+    # reader knows the attachment is the whole run, not just a findings list.
+    full_pipeline = (", plus the skills/plugins/MCP, RISK-chain, behavioural,"
+                     " second-opinion and coverage blocks") if full else ""
     if n_more > 0:
         word = "finding" if n_more == 1 else "findings"
         lines.append(f"(+{n_more} more {word} not named above — the full list is in the report.)")
     if pdf_path:
-        lines.append(f"Full detail — every finding, with its why and evidence — is in: {pdf_path}")
+        lines.append(f"Full detail — every finding, with its why and evidence{full_pipeline}"
+                     f" — is in: {pdf_path}")
         lines.append("Attach that PDF file itself into the chat; do not paste its path or"
                      " re-render its contents.")
     else:
@@ -2546,7 +2556,13 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             card_skills_block = ("\n" + f"{sep} Skills {sep}" + "\n"
                                  + "\n".join(card_skill_lines) + "\n")
 
-    if not full:
+    # C-374: `--dashboard --full --pdf <path>` ALSO renders the overview card. Under
+    # `--full` the PDF now carries the whole pipeline (Skills/Plugins/MCP/RISK/
+    # Behavioural/Second opinion/Coverage/Worth a glance), so collapsing the card no
+    # longer hides anything — it moves it into the attachment. Without `--pdf`, `--full`
+    # still renders every block inline: nothing becomes unreachable just because the
+    # user didn't ask for a file.
+    if not full or pdf_path:
         # C-373: the default card is an OVERVIEW — grade, the per-subject inventory, and
         # only the most urgent findings by name; the full findings list (with why and
         # evidence) lives in the PDF report this run may have written. The old shape
@@ -2578,7 +2594,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             elif n_issues == 0:
                 out += f"\nNo known attack pattern matched. Keep it that way. {ok}\n"
             out += ("\n" + "\n".join(_card_detail_pointer_lines(
-                n_issues - n_named, pdf_path, ascii_only=ascii_only)) + "\n")
+                n_issues - n_named, pdf_path, ascii_only=ascii_only, full=full)) + "\n")
             return out + card_skills_block
 
         return _finalize_card(_assemble_card, ascii_only=ascii_only)

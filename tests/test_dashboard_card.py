@@ -188,6 +188,25 @@ class TestRenderDashboard:
         # ...and it still says where the rest is, rather than being cut off mid-sentence.
         assert "/tmp/r.pdf" in out
 
+    def test_full_card_collapses_to_the_overview_when_a_pdf_was_written(self):
+        # C-374: --dashboard --full pastes 11535 bytes inline. With --pdf the PDF now
+        # carries the whole pipeline, so the card collapses to the same chat-sized
+        # overview — nothing is lost, it moved into the attachment.
+        from clawseccheck.report import _COMPACT_CHAR_BUDGET
+        out, _ = self._out(full=True, ctx=_skill_ctx({}), pdf_path="/tmp/r.pdf")
+        assert len(out) <= _COMPACT_CHAR_BUDGET
+        assert "· Inventory by subject ·" in out
+        assert "· Most urgent ·" in out
+        # ...and it says the attachment holds the pipeline blocks too, not just findings.
+        assert "RISK-chain" in out and "/tmp/r.pdf" in out
+
+    def test_full_card_without_a_pdf_still_renders_everything_inline(self):
+        # The flip side: no --pdf means no attachment to point at, so nothing may be
+        # collapsed away — --dashboard --full keeps rendering every block.
+        out, _ = self._out(full=True)
+        assert "· Findings ·" in out
+        assert "Worth a glance" in out
+
     def test_pdf_pointer_names_the_file_and_never_a_url(self):
         # Golden Rule #1 (local-only): there is no URL to link to — the card tells the
         # host agent to ATTACH the local file.

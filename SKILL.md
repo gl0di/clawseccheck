@@ -457,8 +457,21 @@ in Step 2's internal pull — each invocation is its own fresh process, so `--at
 passed again) and folds in the mandatory judge panel's verdicts:
 
 ```
-python3 {baseDir}/audit.py --dashboard --full --attest <path-or- -> --judged-bundle <verdicts-path-or- ->
+python3 {baseDir}/audit.py --dashboard --full --attest <path-or- -> --judged-bundle <verdicts-path-or- -> --pdf ~/.clawseccheck/report.pdf
 ```
+
+**`--pdf` is what makes this fit a chat message (C-374).** With it, the run writes a
+complete PDF — every finding with its why and evidence, *plus* the Skills/Plugins/MCP,
+RISK-chain, Behavioural, Second-opinion and Coverage blocks — and the card collapses to a
+chat-sized overview that points at that file. Without `--pdf` the same command pastes the
+whole pipeline inline (~11.5 KB), which a channel like Telegram will truncate or reject.
+
+So: **paste the card, then attach `~/.clawseccheck/report.pdf` as a file.** Never paste
+its path at the user as if it were the deliverable, and never present it as a link —
+ClawSecCheck is local-only, so no URL exists. If your channel cannot attach files, say so
+plainly and offer `--dashboard --full` (everything inline, split across messages) instead
+— the card names the most urgent findings either way, so the user is never left with only
+a grade.
 
 `<verdicts-path-or- ->` is the file (or `-` for stdin) holding `{"judged": {...}}` — the
 verdicts map Step 2's mandatory judge panel just built. Omit `--judged-bundle` entirely only

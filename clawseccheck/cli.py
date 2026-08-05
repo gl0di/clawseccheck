@@ -1007,6 +1007,11 @@ _MODE_HONORS = {
     # F-153: --dashboard --full renders the whole combined pipeline report (the
     # phases --full itself runs); --compact only ever modifies THAT combined render.
     "dashboard": frozenset({"full", "compact"}),
+    # C-374: --pdf wins the mode race over --dashboard (it is earlier in _PRIMARY_MODES),
+    # but both are honored now — and under `--dashboard --full --pdf` the --full phases
+    # are what the PDF's pipeline blocks are rendered FROM, so --full genuinely has an
+    # effect here. Saying "no effect" was true of the findings-only PDF, not this one.
+    "pdf": frozenset({"full", "compact"}),
     # F-155 fix (C-135): --judged-bundle's `liveTest` bucket now caps the score
     # reaching --trend/--monitor too (see _apply_live_test_cap) — a SEPARATE honor
     # from "full", deliberately not folded into it the way --dashboard's is: --full/
@@ -1089,6 +1094,12 @@ def _flag_coherence_notes(args) -> list[str]:
     if ignored:
         notes.append(f"note: {', '.join(ignored)} ignored (running {win_flag})")
     honored = _MODE_HONORS.get(win_attr, frozenset())
+    # C-374: --pdf consumes --full/--compact ONLY alongside --dashboard — that is the
+    # path which computes the pipeline phases the PDF's blocks are rendered from. A bare
+    # `--pdf --full` genuinely ignores --full, and must keep saying so; silencing that
+    # note for every --pdf run would trade one lie for another.
+    if win_attr == "pdf" and not bool(getattr(args, "dashboard", False)):
+        honored = honored - {"full", "compact"}
     no_effect: list[str] = []
     if bool(getattr(args, "json", False)) and "json" not in honored:
         no_effect.append("--json")
@@ -2099,7 +2110,12 @@ def _main(argv=None) -> int:
     # dashboard branch (which points the card at this exact path) instead of returning;
     # `--pdf` on its own keeps its pre-existing standalone behaviour, byte-identical.
     pdf_written = None
-    if args.pdf:
+    # C-374: under `--dashboard --full` the PDF must also carry the pipeline blocks, and
+    # those phases are computed further down (in the dashboard branch). Defer the write
+    # to there rather than emitting a findings-only PDF the card would then describe as
+    # complete.
+    _defer_pdf = bool(args.pdf) and args.dashboard and args.full
+    if args.pdf and not _defer_pdf:
         try:
             secure_write_bytes(Path(args.pdf).expanduser(),
                                render_pdf(findings, score, native=ctx.native, ctx=ctx))
@@ -2228,6 +2244,16 @@ def _main(argv=None) -> int:
             ctx, findings,
             vet_targets=_dashboard_vet_targets,
             version=__version__, bundle=judged_bundle)
+        if _defer_pdf:
+            try:
+                secure_write_bytes(Path(args.pdf).expanduser(), render_pdf(
+                    findings, score, native=ctx.native, ctx=ctx,
+                    plugin_sweep=plugin_sweep, risk=paths,
+                    behavioral=behavioral_phase, adjudication=adjudication_phase))
+                pdf_written = str(Path(args.pdf).expanduser())
+            except OSError as exc:
+                _emit(f"(could not write PDF report: {exc})")
+                return 1
         _emit(render_dashboard(
             findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
             risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
