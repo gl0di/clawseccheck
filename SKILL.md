@@ -530,6 +530,19 @@ plain-language rule.
 
 (`--dashboard-findings` still prints Section 2 alone, if you ever need just the findings block.)
 
+**Plain `--dashboard` (no `--full`) is the chat-sized card (C-373).** It is a different
+shape from the full render above, built for a single chat message: the grade card, an
+**Inventory by subject** overview (one line per subject with its rolled-up verdict), the
+**most urgent** findings by name only (no `why:`, no evidence), a disclosure of how many
+findings it did not name, and a pointer to where the rest is. It is hard-capped under
+~4096 characters on any input, so it always fits.
+
+Pair it with `--pdf` — `--dashboard --pdf <path>` — and one run produces both: the card
+(the message you paste) and a complete PDF report (every finding with its why and
+evidence). The card then names that file. **Attach the PDF file itself; never paste its
+path at the user and never present it as a link** — ClawSecCheck is local-only, so there
+is no URL, and a path is not a deliverable. Without `--pdf`, the card says how to get one.
+
 **Section 2 — what the pasted findings block contains**
 
 The pasted card's findings block holds the FAIL/WARN findings already grouped by their

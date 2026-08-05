@@ -100,8 +100,18 @@ class TestRenderDashboardHeader:
         assert "—" not in first
         assert first.count(brand.SEPARATOR.strip()) >= 3
 
-    def test_findings_rule_uses_the_brand_separator(self):
+    def test_section_rules_use_the_brand_separator(self):
+        # C-373 renamed the card's sections (the grouped "Findings" block moved out of
+        # the chat-sized card into --dashboard-findings / the PDF), but the invariant is
+        # unchanged: every section rule is drawn with the ONE brand separator, never a
+        # stray em-dash.
         out = render_dashboard(_findings(), _score())
+        sep = brand.SEPARATOR.strip()
+        assert f"{sep} Most urgent {sep}" in out
+        assert "— Most urgent —" not in out
+
+    def test_full_card_findings_rule_uses_the_brand_separator(self):
+        out = render_dashboard(_findings(), _score(), full=True)
         sep = brand.SEPARATOR.strip()
         assert f"{sep} Findings {sep}" in out
         assert "— Findings —" not in out

@@ -1077,6 +1077,11 @@ def _flag_coherence_notes(args) -> list[str]:
         f for a, f in active[1:]
         # --sarif is a side output under --vet/--vet-mcp, not an ignored mode.
         if not (a == "sarif" and win_attr in ("vet", "vet_skill", "vet_plugin", "vet_mcp"))
+        # C-373: --pdf and --dashboard COMPOSE rather than supersede — the card is the
+        # chat message that fits, the PDF is the attachment it points at, and both are
+        # produced in one run. Reporting "--dashboard ignored (running --pdf)" was true
+        # of the old early-return dispatch and is a lie about the new one.
+        and not (a == "dashboard" and win_attr == "pdf")
     ]
     # --card is a default-path output selector; any primary mode supersedes it.
     if bool(getattr(args, "card", False)):
@@ -2088,19 +2093,27 @@ def _main(argv=None) -> int:
             _emit(f"(could not write SARIF: {exc})")
             return 1
 
+    # C-373: `--dashboard --pdf <path>` is the chat delivery PAIR — the card is the
+    # message that fits, the PDF is the attachment carrying every finding with its why
+    # and evidence. When both are asked for, write the file here and fall through to the
+    # dashboard branch (which points the card at this exact path) instead of returning;
+    # `--pdf` on its own keeps its pre-existing standalone behaviour, byte-identical.
+    pdf_written = None
     if args.pdf:
         try:
             secure_write_bytes(Path(args.pdf).expanduser(),
                                render_pdf(findings, score, native=ctx.native, ctx=ctx))
+            pdf_written = str(Path(args.pdf).expanduser())
+        except OSError as exc:
+            _emit(f"(could not write PDF report: {exc})")
+            return 1
+        if not args.dashboard:
             _emit(
                 f"(PDF report written to {args.pdf} — attach this file itself into the "
                 "chat, do not re-render its contents or paste the path; a mobile client "
                 "opens a PDF inline where an HTML attachment would just be a download)"
             )
             return 0
-        except OSError as exc:
-            _emit(f"(could not write PDF report: {exc})")
-            return 1
 
     if args.trend:
         # F-155 fix (C-135): resolve the liveTest cap BEFORE recording/rendering, so a
@@ -2141,7 +2154,8 @@ def _main(argv=None) -> int:
             # Byte-identical to before F-153: the overwhelming majority of callers
             # (every pre-existing test, and every plain `--dashboard` invocation)
             # never asked for the rest of the pipeline, so nothing extra is computed.
-            _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx))
+            _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
+                                   pdf_path=pdf_written))
             return 0
         # F-153: Dave settled 2026-07-30 that --dashboard must fully render
         # everything --full does, in the fixed order (Skills · Plugins · MCP · RISK
@@ -2217,7 +2231,8 @@ def _main(argv=None) -> int:
         _emit(render_dashboard(
             findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
             risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
-            adjudication=adjudication_phase, compact=args.compact))
+            adjudication=adjudication_phase, compact=args.compact,
+            pdf_path=pdf_written))
         return 0
 
     if args.dashboard_findings:

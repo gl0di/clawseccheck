@@ -881,8 +881,14 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
 
     def _issues_count(subj):
-        n = len(inv[subj].get("findings") or [])
-        return f"{n} issue(s)" if n else "clear"
+        bucket = inv[subj]
+        n = len(bucket.get("findings") or [])
+        if n:
+            return f"{n} issue(s)"
+        # Golden Rule #4: a subject whose checks could not reach a verdict is NOT clear.
+        # Saying "clear" next to an UNKNOWN marker reads as an assessed all-good, which is
+        # the exact fake-PASS this project refuses to emit.
+        return "not assessed" if bucket.get("status") == UNKNOWN else "clear"
 
     rows = [
         (SUBJECT_LABEL["openclaw"], inv["openclaw"]["status"], _issues_count("openclaw")),
@@ -1406,7 +1412,8 @@ def _inventory_bucket_lines(label: str, bucket: dict, by_id: dict, *, ascii_only
     return out
 
 
-def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False) -> list[str]:
+def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
+                            clean_roster_limit=None) -> list[str]:
     """Per-skill verdict lines (design §4.4) -- single source of truth shared by
     render_subject_inventory (full report's "Inventory by subject" block) and
     render_dashboard (B-356: the same verdicts, compact, in the chat-pasted card)."""
@@ -1437,9 +1444,21 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False) -> list
     # Skill names are untrusted (directory names) -- _sanitize() every one before it
     # reaches a line, same as finding title/detail elsewhere in this file (B164: no raw
     # ANSI/control chars may reach the terminal).
+    # C-373: the clean roster is the one UNBOUNDED part of this block — it names every
+    # clean skill, so a home with hundreds of them produces thousands of characters on
+    # its own. The chat card (which must fit ~4096 chars in total) passes a
+    # `clean_roster_limit` so the names still appear — B-356 added them deliberately, and
+    # a home with a handful of skills should still see them — but a 300-skill home cannot
+    # blow the budget with a name list. The count stays exact either way, and the overflow
+    # is disclosed, never silently cut. `None` (the full report, `--dashboard --full`)
+    # lists them all, exactly as before.
     clean = [_sanitize(s["name"]) for s in skills if s["name"] not in flagged_names]
     if clean:
-        lines.append(f"   {icon.get(PASS, '?')} {len(clean)} clean: " + ", ".join(clean))
+        shown = clean if clean_roster_limit is None else clean[:clean_roster_limit]
+        roster = ", ".join(shown)
+        if len(shown) < len(clean):
+            roster += f", +{len(clean) - len(shown)} more"
+        lines.append(f"   {icon.get(PASS, '?')} {len(clean)} clean: " + roster)
     for s in flagged:
         reason_text = "; ".join(s.get("reasons") or []) or s["verdict"]
         lines.append(f"   {icon.get(s['status'], '?')} {_sanitize(s['name'])}  {s['verdict']} - {reason_text}")
@@ -2286,10 +2305,126 @@ def _finalize_compact_dashboard(assemble, *, compact: bool, ascii_only: bool) ->
     return _hard_truncate_compact(result, _COMPACT_CHAR_BUDGET)
 
 
+# ── C-373: the default chat card is an OVERVIEW, not the full findings dump ──────────
+#
+# Measured on dev@2a78be6: plain `--dashboard` rendered 7225 chars on fixtures/home_vuln
+# and 3946 on the CLEAN fixtures/home_safe, against the ~4096 chars a Telegram message
+# holds — and the B-381/B-405 budget machinery was unreachable there (`--compact` is a
+# no-op without `--full`, so the one output SKILL.md tells the host agent to paste had no
+# size control at all). The card now leads with the per-subject overview, names only the
+# most urgent findings, and routes full detail to the attachable PDF report.
+_CARD_TOP_URGENT = 5
+# Longest finding title the card prints, so one long title cannot drive the card's size.
+_CARD_TITLE_LIMIT = 78
+# Reduction ladder if the card still doesn't fit: fewer named findings, never the
+# overview or the where-is-the-detail pointer (those are what make the card useful at
+# all). `_hard_truncate_compact` stays the deterministic last resort.
+_CARD_TOP_URGENT_LEVELS = (_CARD_TOP_URGENT, 3, 0)
+# Most clean skill names the card's Skills block lists by name before collapsing the
+# rest to a "+N more" count (see _skills_inventory_lines' clean_roster_limit).
+_CARD_CLEAN_SKILLS = 10
+
+
+def _card_trim_title(title: str, limit: int = _CARD_TITLE_LIMIT) -> str:
+    """Word-boundary trim for a card title line. Never raises; returns *title* unchanged
+    when it already fits."""
+    t = _sanitize(title)
+    if len(t) <= limit:
+        return t
+    cut = t[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    return (cut or t[:limit]) + "…"
+
+
+def _card_summary_lines(findings, ctx, *, plugin_sweep=None, ascii_only: bool = False) -> list[str]:
+    """Per-subject overview lines for the chat card — built from the SAME
+    `_subject_summary_rows` the HTML and PDF summary tables use, so all three surfaces
+    (and the JSON `inventory`) can never disagree. Returns [] when `ctx` is unavailable,
+    the same skip-don't-guess stance `render_subject_inventory` already takes."""
+    rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
+    if not rows:
+        return []
+    icon = _ICON_ASCII if ascii_only else _ICON
+    # Label -> subject key, so each row can carry its subject emoji. Chat-paste only:
+    # the CLI report / HTML / PDF subject headers stay emoji-less by design.
+    key_of = {label: key for key, label in SUBJECT_LABEL.items()}
+    out = []
+    for label, status, count_text in rows:
+        marker = icon.get(status, icon.get(UNKNOWN, "?"))
+        emoji = "" if ascii_only else f"{_SUBJECT_EMOJI.get(key_of.get(label), '')} "
+        out.append(f" {emoji}{label} — {marker} {count_text}")
+    return out
+
+
+def _card_top_urgent_lines(findings, *, limit: int = _CARD_TOP_URGENT,
+                           ascii_only: bool = False) -> tuple[list[str], int]:
+    """The most urgent findings as ONE line each (severity token + trimmed title, no
+    `why:` and no evidence bullets — that is what the PDF is for).
+
+    Draws from the same qualifying set `render_dashboard_findings` renders
+    (non-suppressed FAIL/WARN, excluding MEDIUM/ATTESTED confidence) and sorts it the
+    same way, so the card's "most urgent" and the full block agree on what is worst.
+    Returns `(lines, n_named)`; the caller reconciles `n_named` against the header's own
+    issue count and DISCLOSES the difference (Golden Rule #4 — a card that quietly names
+    5 of 26 findings would read as a complete list)."""
+    qualifying = [
+        f for f in findings
+        if f.status in (FAIL, WARN)
+        and not getattr(f, "suppressed", False)
+        and getattr(f, "confidence", "HIGH") not in (MEDIUM, ATTESTED)
+    ]
+    qualifying.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), _STATUS_ORDER.get(f.status, 9)))
+    named = qualifying[:limit] if limit else []
+    lines = [
+        f"{_sev_token(f.severity, ascii_only=ascii_only)}  {_card_trim_title(f.title)}"
+        for f in named
+    ]
+    return lines, len(named)
+
+
+def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool = False) -> list[str]:
+    """Where the rest of the detail is. Two jobs: disclose how many findings the card did
+    NOT name, and point at the full report.
+
+    When a PDF was written this run (`--dashboard --pdf <path>`) the path is printed for
+    the HOST AGENT to attach — never as a link: ClawSecCheck is local-only (Golden Rule
+    #1), so there is no URL and the agent must send the file itself rather than paste a
+    path at the user or re-render the contents. Wording mirrors cli.py's own `--pdf`
+    message, which set that precedent."""
+    lines: list[str] = []
+    if n_more > 0:
+        word = "finding" if n_more == 1 else "findings"
+        lines.append(f"(+{n_more} more {word} not named above — the full list is in the report.)")
+    if pdf_path:
+        lines.append(f"Full detail — every finding, with its why and evidence — is in: {pdf_path}")
+        lines.append("Attach that PDF file itself into the chat; do not paste its path or"
+                     " re-render its contents.")
+    else:
+        lines.append("For the full detail, re-run with `--pdf <path>` (an attachable report)"
+                     " — or `--save <path>` / `--html <path>`.")
+    return lines
+
+
+def _finalize_card(assemble_with_limit, *, ascii_only: bool) -> str:
+    """Hard budget guarantee for the default chat card (C-373).
+
+    Unlike `_finalize_compact_dashboard` (whose ladder drops `why:` lines, which this
+    card does not have), the card reduces by naming FEWER findings — the per-subject
+    overview and the detail pointer are never what gets dropped, since a card without
+    them is a grade and nothing else. `_hard_truncate_compact` remains the deterministic
+    last resort, so the return value is never over budget on any input."""
+    out = ""
+    for limit in _CARD_TOP_URGENT_LEVELS:
+        out = assemble_with_limit(limit)
+        out = _asciify(out) if ascii_only else out
+        if len(out) <= _COMPACT_CHAR_BUDGET:
+            return out
+    return _hard_truncate_compact(out, _COMPACT_CHAR_BUDGET)
+
+
 def render_dashboard(findings: list[Finding], score: ScoreResult, *,
                      ascii_only: bool = False, ctx=None, full: bool = False,
                      risk=None, plugin_sweep=None, behavioral=None,
-                     adjudication=None, compact: bool = False) -> str:
+                     adjudication=None, compact: bool = False, pdf_path=None) -> str:
     """Deterministic chat Dashboard card — Sections 1-2 of SKILL.md Step 3, pasted verbatim,
     plus an optional Section 3 (B-356) with per-skill vet verdicts, plus (F-153) the rest
     of --full's pipeline when `full=True`.
@@ -2383,46 +2518,70 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # the wordmark still lands on the ascii path (mascot alone used to become empty
     # there with nothing to replace it).
     head = brand.header(subtitle="OpenClaw Security Audit", ascii_only=ascii_only)
-    header_lines = [
+    grade_lines = [
         f"{head} {sep} Grade {score.grade} {sep} {score.score}/100",
         f"{_score_bar(score.score, score.grade, ascii_only=ascii_only)}"
         f"  {sep}  {n_issues} {issues_word}",
-        "",
-        f"{sep} Findings {sep}",
     ]
-    header_block = "\n".join(header_lines) + "\n"
+    # `--full` keeps its existing header (grade card + the "· Findings ·" section label
+    # immediately below); the C-373 default card opens with the grade lines only and
+    # labels its own sections as it goes.
+    header_block = "\n".join([*grade_lines, "", f"{sep} Findings {sep}"]) + "\n"
+    card_header_block = "\n".join(grade_lines) + "\n"
 
     # Skills is a fixed block (unaffected by why_drop_severities): computed once.
     inv = None
     skills_block = ""
+    card_skills_block = ""
     if ctx is not None:
         inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
         if inv["skills"]:
             skill_lines = _skills_inventory_lines(inv, ctx, ascii_only=ascii_only)
             skills_block = "\n" + f"{sep} Skills {sep}" + "\n" + "\n".join(skill_lines) + "\n"
+            # C-373: the card caps the clean roster (the one unbounded part — see
+            # _skills_inventory_lines); flagged skills are always named in full, since
+            # those are the ones the reader has to act on.
+            card_skill_lines = _skills_inventory_lines(
+                inv, ctx, ascii_only=ascii_only, clean_roster_limit=_CARD_CLEAN_SKILLS)
+            card_skills_block = ("\n" + f"{sep} Skills {sep}" + "\n"
+                                 + "\n".join(card_skill_lines) + "\n")
 
     if not full:
-        # B-444 bug A: render_dashboard_findings only renders HIGH-confidence FAIL/WARN
-        # (it excludes MEDIUM/ATTESTED -- see its own docstring), but `n_issues` above
-        # counts EVERY non-suppressed FAIL/WARN regardless of confidence. `full=True`
-        # covers that gap by also rendering _worth_a_glance_lines, but `full=False`
-        # (plain `--dashboard`) never calls it, so a MEDIUM/ATTESTED-confidence
-        # FAIL/WARN used to be counted in the header and rendered nowhere -- a real
-        # repro dropped 12 findings (incl. one HIGH check) silently this way. Per the
-        # project's no-silent-caps doctrine, the fix is a disclosure line, not quietly
-        # matching the header count down to what's rendered (that would just trade an
-        # overstatement for an understatement).
-        glance_n = len(_glance_qualifying_findings(findings))
+        # C-373: the default card is an OVERVIEW — grade, the per-subject inventory, and
+        # only the most urgent findings by name; the full findings list (with why and
+        # evidence) lives in the PDF report this run may have written. The old shape
+        # pasted the entire grouped findings block and measured 7225 chars against
+        # Telegram's ~4096 (see _CARD_TOP_URGENT's comment). `--dashboard-findings` still
+        # prints the complete grouped block for anyone who wants it inline, and
+        # `--dashboard --full` still renders the whole pipeline.
+        #
+        # Disclosure (Golden Rule #4, the B-444 lesson): `n_issues` counts EVERY
+        # non-suppressed FAIL/WARN, while the named lines come from the HIGH-confidence
+        # subset. The pointer block reconciles the two out loud ("+N more not named
+        # above") instead of letting the header count and the rendered list silently
+        # disagree — and every one of those N IS in the PDF, which renders all
+        # FAIL/WARN regardless of confidence.
+        summary_lines = _card_summary_lines(findings, ctx, plugin_sweep=plugin_sweep,
+                                            ascii_only=ascii_only)
+        ok = "[OK]" if ascii_only else "✅"
 
-        def _assemble(why_drop_severities: frozenset = frozenset()) -> str:
-            body = render_dashboard_findings(
-                findings, ascii_only=ascii_only, compact=compact,
-                why_drop_severities=why_drop_severities).rstrip("\n")
-            if glance_n:
-                body += f"\n\n(+{glance_n} more — run --full for the rest)"
-            return header_block + body + "\n" + skills_block
+        def _assemble_card(limit: int) -> str:
+            top_lines, n_named = _card_top_urgent_lines(
+                findings, limit=limit, ascii_only=ascii_only)
+            out = card_header_block
+            if summary_lines:
+                out += ("\n" + f"{sep} Inventory by subject {sep}" + "\n"
+                        + "\n".join(summary_lines) + "\n")
+            if top_lines:
+                out += ("\n" + f"{sep} Most urgent {sep}" + "\n"
+                        + "\n".join(top_lines) + "\n")
+            elif n_issues == 0:
+                out += f"\nNo known attack pattern matched. Keep it that way. {ok}\n"
+            out += ("\n" + "\n".join(_card_detail_pointer_lines(
+                n_issues - n_named, pdf_path, ascii_only=ascii_only)) + "\n")
+            return out + card_skills_block
 
-        return _finalize_compact_dashboard(_assemble, compact=compact, ascii_only=ascii_only)
+        return _finalize_card(_assemble_card, ascii_only=ascii_only)
 
     # F-153: the rest of --full's pipeline, fixed order, each block independently
     # omitted when there is genuinely nothing to show for it (see the docstring).
@@ -2473,6 +2632,14 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         if glance_lines:
             out += ("\n" + f"{sep} {glance_marker}Worth a glance {sep}" + "\n"
                    + "\n".join(glance_lines) + "\n")
+
+        # C-373: `--dashboard --full --pdf <path>` wrote an attachable report this run —
+        # say so here rather than letting cli.py print a note the host agent would paste
+        # along with the card. n_more is 0: the full card already renders every finding,
+        # so this is purely "the attachment exists", not a truncation disclosure.
+        if pdf_path:
+            out += "\n" + "\n".join(
+                _card_detail_pointer_lines(0, pdf_path, ascii_only=ascii_only)) + "\n"
 
         return out + footer_block
 

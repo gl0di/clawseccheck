@@ -598,7 +598,7 @@ ask, noted below):
 | Reputation gate before download | `clawseccheck --vet-source clawhub:some-skill` |
 | Active injection self-test | `clawseccheck --canary` · `clawseccheck --redteam` · `clawseccheck --dryrun` |
 | All-in-one (audit + self-test + vet-mcp + skill sweep + plugin sweep + behavioral replay + judge packet) | `clawseccheck --full` · add `--quiet` to collapse the appended sections to one-line summaries (lighter for CI logs) · add `--fast` to drop the deep phases entirely (CI) · `--judged-bundle PATH` to feed back verdicts |
-| Combined pipeline chat card (grade + findings + the SAME sections `--full` runs, one fixed-order render) | `clawseccheck --dashboard --full` · add `--compact` for a ~4096-char Telegram-safe layout (headline counts only + a `--save`/`--html` pointer) · plain `--dashboard` (no `--full`) stays the lighter grade+findings(+Skills) card it always was |
+| Combined pipeline chat card (grade + findings + the SAME sections `--full` runs, one fixed-order render) | `clawseccheck --dashboard --full` · add `--compact` for a ~4096-char Telegram-safe layout (headline counts only + a `--save`/`--html` pointer) · plain `--dashboard` (no `--full`) is the chat-sized card: grade + inventory-by-subject + most-urgent only, hard-capped under ~4096 chars; pair with `--pdf <path>` to also emit the attachable full report |
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
 | Attestation template / feed it back | `clawseccheck --ask` · `clawseccheck --attest attest.json` |
 | Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
@@ -702,9 +702,8 @@ python3 audit.py --log audit.log            # also write log to a local file
   genuinely nothing to show (no skills/plugins/MCP servers installed, no RISK chain
   detected) — Behavioural and Second opinion are always shown once computed, even to say
   "nothing fired", per the same never-guess-a-PASS rule the rest of the audit follows.
-  Plain `--dashboard` (no `--full`) is **byte-identical** to before this existed — grade,
-  findings, and the optional Skills block (B-356), nothing else — so anything already
-  parsing that output is unaffected. `--fast` and `--judged-bundle PATH` are honored the
+  Plain `--dashboard` (no `--full`) is a **different, chat-sized card** since C-373 — see
+  the entry below. `--fast` and `--judged-bundle PATH` are honored the
   same way they are under plain `--full` (drop the deep phases; feed back a judge's
   verdicts) — `--quiet` is not, since `--compact` (below) is the dashboard's own
   channel-limit lever. This does not add a second engine: every block reuses the exact
@@ -714,6 +713,22 @@ python3 audit.py --log audit.log            # also write log to a local file
   the card can never disagree with what a plain `--full` run of the same config would
   say — including the F-154/F-155 cap-only grade adjustments (see "Threat monitoring"
   and `docs/OUTPUT_SCHEMA.md`).
+- **`--dashboard`** (no `--full`) is the **chat-sized card** (C-373): the grade card, an
+  **Inventory by subject** overview (one line per subject, rolled-up verdict), the **most
+  urgent** findings by name only (no `why:`, no evidence), an explicit count of the
+  findings it did not name, and a pointer to where the rest is. It is hard-capped under
+  ~4096 characters on any input — the previous shape pasted the whole grouped findings
+  block and measured 7225 characters on `fixtures/home_vuln`, well past what a Telegram
+  message holds. Pair it with `--pdf`:
+
+  ```bash
+  clawseccheck --dashboard --pdf report.pdf
+  ```
+
+  One run then produces both — the card to paste and a complete PDF carrying every
+  finding with its why and evidence — and the card names that file. The PDF is a **local
+  file to attach**, never a link (there is no URL: ClawSecCheck is local-only). Use
+  `--dashboard-findings` if you want the full grouped findings block inline instead.
   - **`--compact`** (only with `--dashboard --full`) is the ~4096-character Telegram-safe
     layout: Plugins/MCP/RISK-chain blocks collapse to headline counts only; the Findings
     and "Worth a glance" blocks keep every finding (nothing dropped) but trim each one's
