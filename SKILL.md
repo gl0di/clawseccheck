@@ -374,7 +374,7 @@ rest on demand. The number, the phrase, or a tap all select an item; free phrasi
 | 1 Check everything ("check" / "go") | `--dashboard --full` (+ auto capability self-report AND a mandatory judge panel, see Step 2) | Full pipeline in one go: audit **+** capability self-report (B43/B44 resolved inline instead of UNKNOWN — F-043) **+** MCP vet **+** per-skill/per-plugin sweeps (`Skills`/`Plugins`, one merged verdict per item, F-150) **+** the highest-risk chains (`RISK Chains`) **+** a behavioral/trajectory replay (`Behavioural`, F-151) **+** a MANDATORY judge-panel second opinion (`Second opinion (advisory)` — see Step 2's "Judge-panel fan-out" protocol above). Everything here is **visibility/advisory-only** — it never moves the score or grade — except two disclosed, cap-only exceptions: a fired behavioral detector (F-154) and a VULNERABLE live-test verdict (F-155, Section 6). All rendered as ONE fixed-order Dashboard card by the merged Step 2+3 command (F-153) — see Step 2/3 below for the exact protocol, and [`docs/USAGE.md`](docs/USAGE.md) for the full flag-by-flag composition. The live injection test (⚡, Section 6 item a) stays a separate, opt-in step — not part of item 1. |
 | 2 Check before install | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug\|url>` (before anything is even downloaded) | Supply-chain check on something you're about to trust. See the vet flow in Step 5 → [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md). |
 | 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
-| 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) |
+| 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) **It is ~6 KB — longer than a single Telegram/Slack message.** Send it as its own message, split on the blank line between categories if the channel still truncates, and say which categories you left out. Never let the host silently cut it. |
 | "private" modifier | Add `--no-history` to any mode | "1 private" = Check everything + `--no-history`. Nothing written to `~/.clawseccheck/` for the audit/vet/self-test modes — but `--monitor` and `--trend` always write their own state regardless of `--no-history`; it is not a suppressor for those two. |
 | "update" | Offline notice + agent check | ClawSecCheck never phones home. On "update" the **host agent** checks ClawHub for a newer version and, if there is one, offers `openclaw skills update clawseccheck` — the tool itself stays offline. |
 
@@ -495,7 +495,10 @@ prints it (see below) because its frame relies on monospace alignment.
 **Channel-aware delivery:** the combined card can exceed a chat channel's message limit (e.g.
 Telegram's ~4096-character cap — Sections 1-2 alone can already run to ≈6,482 characters,
 before the pipeline blocks below add more). If the destination channel truncates long
-messages, add `--compact` to the command above instead — it condenses Plugins/MCP/RISK
+messages, drop `--pdf` and add `--compact` instead — `--compact` has no effect while
+`--pdf` is present (with an attachment the card is already collapsed to an overview;
+the CLI says so on stderr). So the truncation remedy is `--dashboard --full --compact`.
+It condenses Plugins/MCP/RISK
 Chains to headline counts, trims each Findings/"Worth a glance" finding's "why" text and
 drops its evidence bullets (kept, not dropped — just condensed, since Findings is what
 actually scales with a bad config's FAIL/WARN count), and appends a `--save`/`--html`
@@ -562,8 +565,10 @@ The pasted card's findings block holds the FAIL/WARN findings already grouped by
 8 Inventory subjects, each under an **open 3-sided frame**
 (`┌─ / │ {icon} {subject} — {N} issue(s) / └─`, no right border), most-severe-first within
 a subject, a `🔴/🟠/🟡/⚪` severity dot on every issue line, and the `why:` explanation on
-every finding. **No remediation appears anywhere — ClawSecCheck reports; it does not fix
-(F-074).**
+every finding. **ClawSecCheck reports; it never changes anything (F-074).** The `why:`
+text and a finding's `fix:` line may name the corrective action — that is description, not
+action — so paste them as they are. What the tool never does, and what you must not do on
+its behalf, is *apply* a change: no edits to the config, no commands run to "fix" a finding.
 
 The renderer already guarantees the findings contract, so **you filter nothing yourself**:
 - **PASS/UNKNOWN are dropped** — coverage is Section 3's job, not here;

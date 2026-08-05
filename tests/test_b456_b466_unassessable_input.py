@@ -125,14 +125,17 @@ def test_card_discloses_that_no_openclaw_config_was_found(tmp_path, capsys):
     d.mkdir()
     main(["--dashboard", "--home", str(d), "--no-color"])
     out = capsys.readouterr().out
-    assert "no OpenClaw config was found" in out
+    # Routed through the shared cap cascade (the same one render_report uses) so the
+    # card cannot grow a second, drifting explanation of the same fact.
+    assert "capped from" in out
+    assert "no OpenClaw config found" in out
     assert "not a verdict on your setup" in out
 
 
 def test_card_for_a_real_home_carries_no_such_note(capsys):
     main(["--dashboard", "--home", SAFE, "--no-color", "--no-history"])
     out = capsys.readouterr().out
-    assert "no OpenClaw config was found" not in out
+    assert "no OpenClaw config found" not in out
 
 
 # ---- B-466: an empty target is an error, not a silent full audit ----

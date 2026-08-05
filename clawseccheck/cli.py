@@ -2172,6 +2172,22 @@ def _main(argv=None) -> int:
     # dashboard branch (which points the card at this exact path) instead of returning;
     # `--pdf` on its own keeps its pre-existing standalone behaviour, byte-identical.
     pdf_written = None
+
+    def _emit_attach_instruction(path):
+        """B-468: tell the HOST AGENT what to do with the report — on stderr.
+
+        stdout is the card the agent pastes verbatim into a chat, so an instruction
+        addressed to the agent must not sit inside it. That contradiction is not
+        theoretical: in a real session the agent, handed "attach this file" inside text it
+        had been ordered to reproduce word for word, resolved it by sending the user a
+        link — twice — before ever attaching anything. ClawSecCheck is local-only (Golden
+        Rule #1): there is no URL, only a file to send.
+        """
+        if not path:
+            return
+        print(f"note: report written to {path} — attach this PDF file itself into the "
+              "chat. Do not paste its path, do not send a link (there is none — the tool "
+              "is local-only), and do not re-render its contents.", file=sys.stderr)
     # C-374: under `--dashboard --full` the PDF must also carry the pipeline blocks, and
     # those phases are computed further down (in the dashboard branch). Defer the write
     # to there rather than emitting a findings-only PDF the card would then describe as
@@ -2235,6 +2251,7 @@ def _main(argv=None) -> int:
             # never asked for the rest of the pipeline, so nothing extra is computed.
             _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
                                    pdf_path=pdf_written))
+            _emit_attach_instruction(pdf_written)
             return 0
         # F-153: Dave settled 2026-07-30 that --dashboard must fully render
         # everything --full does, in the fixed order (Skills · Plugins · MCP · RISK
@@ -2326,6 +2343,7 @@ def _main(argv=None) -> int:
             risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
             adjudication=adjudication_phase, compact=args.compact,
             pdf_path=pdf_written))
+        _emit_attach_instruction(pdf_written)
         return 0
 
     if args.dashboard_findings:

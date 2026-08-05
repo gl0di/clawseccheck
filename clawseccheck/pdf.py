@@ -44,7 +44,8 @@ from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Fin
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
     _coverage_lines, _group_issues_by_subject, _mcp_inventory_lines,
-    _plugins_inventory_lines, _risk_chain_lines, _sanitize, _second_opinion_lines,
+    _plugins_inventory_lines, _risk_chain_lines, _sanitize, _second_opinion_item_lines,
+    _second_opinion_lines,
     _SEV_ORDER, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
     _worth_a_glance_lines, build_inventory,
 )
@@ -629,7 +630,11 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     # "nothing fired" (Golden Rule #4) — their own renderers already encode that.
     _pipeline_block(flow, "Behavioural", _behavioral_block_lines(behavioral, ascii_only=True))
     _pipeline_block(flow, "Second opinion (advisory)",
-                    _second_opinion_lines(adjudication, ascii_only=True))
+                    _second_opinion_lines(adjudication, ascii_only=True)
+                    # B-470: the attachment has the room the chat card does not, so the
+                    # judge panel's per-item verdicts land here instead of being computed
+                    # and discarded behind a bare count.
+                    + _second_opinion_item_lines(adjudication))
     _pipeline_block(flow, "Coverage of OpenClaw surfaces",
                     _coverage_lines(findings, ascii_only=True))
     _pipeline_block(flow, "Worth a glance", _worth_a_glance_lines(findings, ascii_only=True))

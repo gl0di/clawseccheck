@@ -2234,6 +2234,41 @@ def _second_opinion_lines(phase, *, ascii_only: bool = False) -> list[str]:
     return [f"{marker} {_sanitize(phase.detail)}"]
 
 
+def _second_opinion_item_lines(phase, *, limit: int = 60) -> list[str]:
+    """The PER-ITEM judge verdicts behind the Second-opinion summary count (B-470).
+
+    `_second_opinion_lines` renders one summary line, which is right for a chat-sized
+    card. But that count was the ONLY thing rendered anywhere: a mandatory judge fan-out
+    over dozens of items produced `86 of 86 borderline item(s) judged` and nothing else,
+    in the card AND in the PDF, while SKILL.md promised "real per-item verdicts rather
+    than a bare pending count" and "per-item annotations". The rows exist all along on
+    the phase (`data["secondOpinion"]`, one dict per item) — nothing consumed them.
+
+    The PDF is the right home: it is the attachment, so it has the room the card does not.
+    Bounded, with the drop disclosed (Golden Rule #4 — no silent caps).
+    """
+    data = getattr(phase, "data", None) or {}
+    rows = [r for r in (data.get("secondOpinion") or []) if r.get("judge_verdict")]
+    if not rows:
+        return []
+    lines = []
+    for row in rows[:limit]:
+        target = row.get("target")
+        # A config-scoped item's target IS its finding id; printing "B100 [B100]" is noise.
+        where = ("" if not target or str(target) == str(row.get("finding_id"))
+                 else f" [{_sanitize(str(target))}]")
+        line = (f"  - {_sanitize(str(row.get('finding_id')))}{where}: "
+                f"{_sanitize(str(row.get('engine_disposition')))} -> "
+                f"{_sanitize(str(row.get('judge_verdict')))}")
+        note = row.get("annotation")
+        if note:
+            line += f" ({_sanitize(str(note))})"
+        lines.append(line)
+    if len(rows) > limit:
+        lines.append(f"  - (+{len(rows) - limit} more judged item(s) not listed)")
+    return lines
+
+
 def _glance_qualifying_findings(findings: list[Finding]) -> list[Finding]:
     """The non-suppressed, MEDIUM/ATTESTED-confidence FAIL/WARN findings —
     render_dashboard_findings's own HIGH-confidence filter excludes exactly this set
@@ -2404,11 +2439,15 @@ def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool =
     """Where the rest of the detail is. Two jobs: disclose how many findings the card did
     NOT name, and point at the full report.
 
-    When a PDF was written this run (`--dashboard --pdf <path>`) the path is printed for
-    the HOST AGENT to attach — never as a link: ClawSecCheck is local-only (Golden Rule
-    #1), so there is no URL and the agent must send the file itself rather than paste a
-    path at the user or re-render the contents. Wording mirrors cli.py's own `--pdf`
-    message, which set that precedent."""
+    B-468: this text is PASTED VERBATIM into a chat by the host agent, so it may contain
+    only what a human reader should see. It used to carry the absolute report path and the
+    line "Attach that PDF file itself into the chat; do not paste its path or re-render its
+    contents" — an instruction aimed at the agent, sitting inside the very block the agent
+    is ordered to reproduce word for word. That is a contradiction the model has to resolve
+    on its own, and the observed resolution was the one this project least wants: a real
+    session where the agent handed the user a link, twice, before ever attaching the file.
+    The path and the instruction now go to stderr (cli.py), which is the agent's channel;
+    the card states only that the report is attached."""
     lines: list[str] = []
     # Under --full the PDF additionally carries the pipeline blocks (Skills/Plugins/MCP/
     # RISK chains/Behavioural/Second opinion/Coverage/Worth a glance) — say so, so the
@@ -2420,9 +2459,7 @@ def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool =
         lines.append(f"(+{n_more} more {word} not named above — the full list is in the report.)")
     if pdf_path:
         lines.append(f"Full detail — every finding, with its why and evidence{full_pipeline}"
-                     f" — is in: {pdf_path}")
-        lines.append("Attach that PDF file itself into the chat; do not paste its path or"
-                     " re-render its contents.")
+                     " — is in the attached PDF report.")
     else:
         lines.append("For the full detail, re-run with `--pdf <path>` (an attachable report)"
                      " — or `--save <path>` / `--html <path>`.")
@@ -2548,21 +2585,25 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         f"{_score_bar(score.score, score.grade, ascii_only=ascii_only)}"
         f"  {sep}  {n_issues} {issues_word}",
     ]
-    # B-465: the card is the surface people actually paste into a chat, and it was the ONE
-    # renderer that dropped the "we never found an OpenClaw config" disclosure. A directory
-    # with no OpenClaw in it produced a confident `Grade F · 49/100 · 4 issues` — a failing
-    # verdict on a setup the tool never located. The text report says so plainly and --json
-    # carries config_found/config_blind_capped; the card said nothing. Golden Rule #4.
-    if getattr(score, "config_blind_capped", False):
-        _blind = {
-            "absent": "no OpenClaw config was found at the audited path",
-            "unreadable": "the OpenClaw config could not be read",
-            "unparsable": "the OpenClaw config could not be parsed",
-        }.get(getattr(score, "config_blind_reason", None) or "", "the OpenClaw config could not be read")
-        _mark = "!" if ascii_only else "⚠️"
+    # B-465 / B-467: the card is the ONLY artifact SKILL.md tells the agent to paste, and it
+    # was the one renderer that dropped WHY the grade is what it is. Two measured shapes:
+    # a directory with no OpenClaw in it produced a confident `Grade F · 49/100 · 4 issues`
+    # (a failing verdict on a setup the tool never located), and a submitted liveTest
+    # VULNERABLE self-report took home_safe from `Grade A · 97/100` to `Grade F · 49/100`
+    # over the same 11 findings with no explanation anywhere in the card. The terminal
+    # report has disclosed both all along, through this exact shared cascade — the card
+    # simply never called it. Golden Rule #4.
+    _mark = "!" if ascii_only else "⚠️"
+    _cap_primary, _cap_extras = _cap_cascade(score)
+    if _cap_primary is not None:
         grade_lines.append(
-            f"{_mark} {_blind} — this grade reflects what could NOT be checked, "
-            "not a verdict on your setup. Point --home at the right directory."
+            f"{_mark} capped from {score.raw_score}/100 — "
+            f"{_cap_primary_reason_text(_cap_primary, score)}{_cap_also_clause(_cap_extras)}"
+        )
+    if getattr(score, "config_blind_capped", False):
+        grade_lines.append(
+            "   This grade reflects what could NOT be checked, not a verdict on your "
+            "setup — point --home at the directory that holds your OpenClaw config."
         )
     # `--full` keeps its existing header (grade card + the "· Findings ·" section label
     # immediately below); the C-373 default card opens with the grade lines only and

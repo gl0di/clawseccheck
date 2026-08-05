@@ -221,6 +221,9 @@ def _header_tag(kind: str, ascii_only: bool) -> str:
     return _ascii(tag) if ascii_only else tag
 
 
+_MAX_BLURB_COL = 58  # B-471: cap the blurb padding (see render_palette)
+
+
 def render_palette(*, n_checks: int | None = None, ascii_only: bool = False) -> str:
     """Render the full capability palette as plain text. Pure — no I/O, no clock read.
 
@@ -235,7 +238,13 @@ def render_palette(*, n_checks: int | None = None, ascii_only: bool = False) -> 
     # Global column widths so every row lines up under its section header.
     tw = max(len(e.title) for e in entries)
     pw = max(len(_q(e.prompt)) for e in entries)
-    bw = max(len(e.blurb.replace("{n}", count)) for e in entries)
+    # B-471: the blurb column was padded to the longest blurb in the WHOLE palette, so a
+    # single verbose entry stretched every row to 273 characters. In a wrapping chat client
+    # — and SKILL.md tells the host agent to present this output — that shreds the layout
+    # for all 60 rows to align one. Bound it: rows whose blurb fits keep their alignment,
+    # the few longer ones simply push the flag column right instead of dragging everyone
+    # with them. Nothing is truncated; only the padding is capped.
+    bw = min(max(len(e.blurb.replace("{n}", count)) for e in entries), _MAX_BLURB_COL)
 
     head = brand.header(subtitle="everything it can do", ascii_only=ascii_only)
     lines = [head]

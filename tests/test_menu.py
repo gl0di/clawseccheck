@@ -22,8 +22,12 @@ def test_render_menu_lists_the_four_items():
     # numbered, so "say the number" works
     for n in ("1", "2", "3", "4"):
         assert f"  {n}  " in out
-    # the live-agent test is disclosed up front on item 1
-    assert "⚡" in out
+    # B-469: item 1 is `--dashboard --full` — entirely READ-ONLY. It used to advertise
+    # "config + live agent test ⚡", which both misdescribed a read-only mode and
+    # contradicted SKILL.md's own statement that the live injection test is a separate,
+    # opt-in step. The ⚡ marker must not appear against item 1.
+    assert "⚡" not in out
+    assert "config + capability audit" in out
 
 
 def test_render_menu_ascii_is_pure_ascii():
@@ -31,7 +35,6 @@ def test_render_menu_ascii_is_pure_ascii():
     # encodes cleanly as ASCII — no emoji / unicode leaks through --ascii
     out.encode("ascii")
     assert "🦞" not in out and "⚡" not in out and "·" not in out
-    assert "(live)" in out
     assert "Last check:" in out
     assert "Update:" in out
 

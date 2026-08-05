@@ -186,7 +186,9 @@ class TestRenderDashboard:
         out = render_dashboard(findings, compute(findings), pdf_path="/tmp/r.pdf")
         assert len(out) <= _COMPACT_CHAR_BUDGET, f"{len(out)} chars"
         # ...and it still says where the rest is, rather than being cut off mid-sentence.
-        assert "/tmp/r.pdf" in out
+        # B-468: the path must NOT be in the pasted card (it goes to stderr instead).
+        assert "/tmp/r.pdf" not in out
+        assert "attached PDF report" in out
 
     def test_full_card_collapses_to_the_overview_when_a_pdf_was_written(self):
         # C-374: --dashboard --full pastes 11535 bytes inline. With --pdf the PDF now
@@ -198,7 +200,9 @@ class TestRenderDashboard:
         assert "· Inventory by subject ·" in out
         assert "· Most urgent ·" in out
         # ...and it says the attachment holds the pipeline blocks too, not just findings.
-        assert "RISK-chain" in out and "/tmp/r.pdf" in out
+        assert "RISK-chain" in out
+        assert "/tmp/r.pdf" not in out  # B-468: path lives on stderr, not in the paste
+        assert "attached PDF report" in out
 
     def test_full_card_without_a_pdf_still_renders_everything_inline(self):
         # The flip side: no --pdf means no attachment to point at, so nothing may be
@@ -207,12 +211,15 @@ class TestRenderDashboard:
         assert "· Findings ·" in out
         assert "Worth a glance" in out
 
-    def test_pdf_pointer_names_the_file_and_never_a_url(self):
-        # Golden Rule #1 (local-only): there is no URL to link to — the card tells the
-        # host agent to ATTACH the local file.
+    def test_pdf_pointer_never_carries_a_url_a_path_or_an_agent_instruction(self):
+        # Golden Rule #1 (local-only): there is no URL to link to. B-468: and the card is
+        # pasted VERBATIM, so it may carry neither the path nor an instruction addressed to
+        # the agent — both now go to stderr (cli.py `_emit_attach_instruction`).
         out, _ = self._out(pdf_path="/home/u/report.pdf")
-        assert "/home/u/report.pdf" in out
-        assert "Attach that PDF file itself" in out
+        assert "/home/u/report.pdf" not in out
+        assert "attached PDF report" in out
+        assert "Attach that PDF file itself" not in out
+        assert "do not paste" not in out.lower()
         assert "http://" not in out and "https://" not in out
 
     def test_without_pdf_the_card_says_how_to_get_one(self):
@@ -276,7 +283,8 @@ class TestCliDashboard:
         out = capsys.readouterr().out
         assert pdf.exists() and pdf.read_bytes().startswith(b"%PDF-")
         assert out.startswith("🦞 ClawSecCheck · OpenClaw Security Audit")
-        assert str(pdf) in out
+        assert str(pdf) not in out  # B-468: the paste carries no path
+        assert "attached PDF report" in out
         assert "ignored (running --pdf)" not in out
 
 
