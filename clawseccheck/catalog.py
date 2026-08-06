@@ -2883,48 +2883,6 @@ OWASP_LLM_2025 = {
     "LLM10": "Unbounded Consumption",
 }
 
-# OWASP GenAI LLM Top 10 2026 (published 2026-08-04) — titles verbatim from the
-# project's own repo README (github.com/GenAI-Security-Project/GenAI-LLM-Top10);
-# genai.owasp.org/resource/owasp-genai-llm-top-10-2026/ is the publication page.
-# The 2026 edition is the first ranked partly on observed incidents (community vote
-# 75% / incident data 25%), and it MOVED EIGHT OF THE TEN CODES.
-OWASP_LLM_2026 = {
-    "LLM01": "Prompt Injection",
-    "LLM02": "Sensitive Information Disclosure",
-    "LLM03": "Excessive Agency",
-    "LLM04": "Supply Chain",
-    "LLM05": "Data and Model Poisoning",
-    "LLM06": "Unbounded Consumption",
-    "LLM07": "Misinformation",
-    "LLM08": "Hidden Context Exposure",
-    "LLM09": "Vector and Embedding Weaknesses",
-    "LLM10": "Improper Output Handling",
-}
-
-# 2025 code -> 2026 code, keyed by the risk that KEPT ITS IDENTITY across the two
-# editions. `owasp_2026_for()` derives the 2026 view from OWASP_MAP through this
-# table rather than from a second hand-maintained per-check map: two independent
-# maps of the same 190-odd checks would drift the first time one is edited alone,
-# and the drift would be silent (both would still be well-formed). One map, one
-# remap, and `test_owasp_2026_is_derived_not_duplicated` pins that invariant.
-#
-# LLM07:2025 System Prompt Leakage -> LLM08:2026 Hidden Context Exposure is a RENAME,
-# not a new category: the 2026 title widens the surface from the system prompt alone
-# to any withheld context (policy logic, tool preambles), which is why the mapping is
-# 1:1 and B9 needs no re-tagging.
-OWASP_2025_TO_2026 = {
-    "LLM01": "LLM01",  # Prompt Injection                 -> unchanged
-    "LLM02": "LLM02",  # Sensitive Information Disclosure -> unchanged
-    "LLM03": "LLM04",  # Supply Chain
-    "LLM04": "LLM05",  # Data and Model Poisoning
-    "LLM05": "LLM10",  # Improper Output Handling         (furthest fall)
-    "LLM06": "LLM03",  # Excessive Agency                 (biggest climb)
-    "LLM07": "LLM08",  # System Prompt Leakage -> Hidden Context Exposure (renamed)
-    "LLM08": "LLM09",  # Vector and Embedding Weaknesses
-    "LLM09": "LLM07",  # Misinformation
-    "LLM10": "LLM06",  # Unbounded Consumption
-}
-
 # OWASP Agentic Skills Top 10 (2026 Edition) — agent-SKILL-specific threat classes.
 # Grounded against owasp.org/www-project-agentic-skills-top-10 (v1.0 2026, status:
 # "candidate / active development"). Titles verbatim from the published list.
@@ -3201,24 +3159,8 @@ OWASP_MAP = {
 
 
 def owasp_for(check_id: str) -> tuple:
-    """OWASP-LLM-2025 code(s) a check maps to, or () if it has no clean LLM-Top-10 analog.
-
-    Deliberately still 2025: this backs the long-standing `"owasp"` JSON/SARIF field,
-    and renumbering it in place would silently change what an existing consumer reads
-    out of an unchanged field name. `owasp_2026_for()` is the current edition.
-    """
+    """OWASP-LLM-2025 code(s) a check maps to, or () if it has no clean LLM-Top-10 analog."""
     return OWASP_MAP.get(check_id, ())
-
-
-def owasp_2026_for(check_id: str) -> tuple:
-    """OWASP-GenAI-LLM-2026 code(s) a check maps to, or () if it has no clean analog.
-
-    Derived from `owasp_for()` through `OWASP_2025_TO_2026` — never a second map.
-    Order is preserved from the 2025 tuple and duplicates cannot arise (the remap is
-    injective), so a check tagged ("LLM02", "LLM03") in 2025 reads ("LLM02", "LLM04")
-    here, in that order.
-    """
-    return tuple(OWASP_2025_TO_2026[c] for c in OWASP_MAP.get(check_id, ()))
 
 
 def ast_for(check_id: str) -> tuple:
