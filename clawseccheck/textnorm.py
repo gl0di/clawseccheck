@@ -380,11 +380,13 @@ def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> b
     """True when *text* contains a zero-width / invisible char that is NOT
     explained away as part of a legitimate emoji ZWJ sequence (B-088 / A3).
 
-    U+200B (zero-width space), U+FEFF (BOM), and U+2060 (word joiner) are
-    always suspicious — there is no legitimate reason for them to appear in
-    bootstrap/skill text. U+200D (ZWJ) is suspicious UNLESS it sits between
-    two emoji code points (see *_is_zwj_between_emoji*), in which case it is
-    a normal emoji ZWJ sequence (e.g. 🧑‍⚖️) and must not be flagged.
+    Every code point *zero_width_re* matches is unconditionally suspicious --
+    see the class comment above ``_ZERO_WIDTH_RE`` in *obfuscation_signals* for
+    the full, curated list (B-450) and why each member has no honest use in
+    agent-facing text -- with exactly ONE exception: U+200D (ZWJ) is suspicious
+    UNLESS it sits between two emoji code points (see *_is_zwj_between_emoji*),
+    in which case it is a normal emoji ZWJ sequence (e.g. 🧑‍⚖️) and must
+    not be flagged.
 
     Iterates over Python ``str`` code points directly (each element of a
     Python 3 ``str`` is already a full code point, astral chars included —
@@ -418,9 +420,68 @@ def obfuscation_signals(text: str) -> list[str]:
     """
     signals: list[str] = []
 
-    # Check invisible chars (zero-width, soft hyphen, BOM, word joiner).
+    # ------------------------------------------------------------------------
+    # B-450 (Tier 1): the "zero-width / invisible characters found" class below.
+    # EVERY downstream consumer of this signal -- C-038's MCP tool-description
+    # band, B349's install-time dependency-tree targets, the skill content ring,
+    # B58 -- runs ONLY if this class matches, so a code point missing here is
+    # invisible to the whole engine, not just to this function.
+    #
+    # ORIGINAL SIX (pre-B-450): U+200B-200D (ZWSP/ZWNJ/ZWJ), U+FEFF (BOM),
+    # U+00AD (soft hyphen), U+2060 (word joiner).
+    #
+    # TIER 1 ADDED HERE -- format characters (Unicode category Cf) with no
+    # honest use in agent-facing prose, unconditionally suspicious like the
+    # original six (no per-character exemption needed, unlike U+200D below):
+    #   U+2061-2064 : FUNCTION APPLICATION, INVISIBLE TIMES, INVISIBLE SEPARATOR,
+    #                 INVISIBLE PLUS -- mathematical-notation invisibles, the
+    #                 immediate neighbours of U+2060 WORD JOINER (already in the
+    #                 class) and strictly LESS legitimate in a tool description
+    #                 than it is. This is the must-have: a two-symbol
+    #                 substitution channel over U+2062/U+2063 alone carried a
+    #                 44-char exfiltration directive as 352 invisible code points
+    #                 through `vet_mcp` with verdict PASS and no finding at all.
+    #   U+FFF9-FFFB : interlinear annotation anchor/separator/terminator -- a
+    #                 deprecated Unicode mechanism with no rendering support in
+    #                 any mainstream font/terminal; nothing in agent-facing text
+    #                 has a legitimate reason to carry one.
+    #   U+206A-206F : deprecated format controls (inhibit/activate symmetric
+    #                 swapping, inhibit/activate Arabic-form shaping,
+    #                 national/nominal digit shapes) -- formally deprecated by
+    #                 Unicode since version 6.3.0; the replacement markup
+    #                 mechanism carries no reason to appear in a tool
+    #                 description or bootstrap file either.
+    #   U+180E      : MONGOLIAN VOWEL SEPARATOR -- category Cf (format,
+    #                 invisible) since Unicode 10.0; no honest reason to appear
+    #                 outside literal Mongolian text runs, and never in an MCP
+    #                 tool description or install-time target.
+    #
+    # TIER 2 -- DELIBERATELY DEFERRED, NOT IN THIS CLASS (record only; do not
+    # add without the per-character discriminator described below):
+    #   U+FE00-FE0F : variation selectors. Legitimate and PERVASIVE here --
+    #                 U+FE0F alone is what turns a base glyph into emoji
+    #                 presentation (an emoji heart, warning sign or check mark
+    #                 each carry it), so a bare presence signal would false-fire
+    #                 on ordinary emoji-using prose across the whole engine
+    #                 (B58, the content ring, C-038).
+    #   U+2800      : BRAILLE PATTERN BLANK -- legitimate whenever real Braille
+    #                 text is present (a blank cell inside a Braille run),
+    #                 indistinguishable from an invisible-channel member without
+    #                 knowing whether it sits among other Braille Patterns code
+    #                 points (U+2800-28FF).
+    #   U+3164, U+FFA0 : HANGUL FILLER / HALFWIDTH HANGUL FILLER -- legitimate
+    #                 as Hangul jamo composition placeholders in real Korean
+    #                 text.
+    #   Sound direction for a future Tier 2: count the code point, but excuse it
+    #   per character when it sits among genuinely related script/emoji context
+    #   -- not a bare presence class. `_is_emoji_codepoint` (above) and
+    #   `_is_zwj_between_emoji`'s flanking-character check are the existing
+    #   precedent for that shape; adding Tier 2 to this class without one would
+    #   just move the false-positive class B-450 was scoped to avoid (punishing
+    #   an ordinary emoji/Korean/Braille user) onto these code points instead.
+    # ------------------------------------------------------------------------
     _ZERO_WIDTH_RE = re.compile(
-        "[​-‍﻿­⁠]"
+        "[­᠎​-‍⁠-⁤⁪-⁯﻿￹-￻]"
     )
     _BIDI_RE = re.compile(
         "[‪-‮⁦-⁩]"

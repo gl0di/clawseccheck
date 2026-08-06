@@ -1385,12 +1385,22 @@ def _c038_has_rtl_script(text: str) -> bool:
 # test_c038_invisible_run_class_mirrors_textnorm_signal so a drift is caught. This leg
 # only ever NARROWS that signal -- the signal is required first, so its emoji-ZWJ
 # exemption keeps holding untouched.
+#
+# B-450 (Tier 1, 2026-08-06): widened alongside the upstream class -- see
+# textnorm.obfuscation_signals' own comment above its `_ZERO_WIDTH_RE` for the full
+# rationale. Both classes below now carry the SAME twenty code points upstream does:
+# the original six (U+200B-200D, U+FEFF, U+00AD, U+2060) plus Tier 1
+# (U+2061-2064, U+FFF9-FFFB, U+206A-206F, U+180E). Tier 2 (variation selectors,
+# Braille blank, Hangul filler) stays out on both sides, same as upstream.
 _C038_INVISIBLE_RUN_MIN = 4
 _C038_INVISIBLE_RUN_RE = re.compile(
-    "[\u200b-\u200d\ufeff\u00ad\u2060]{" + str(_C038_INVISIBLE_RUN_MIN) + ",}"
+    "[\u00ad\u180e\u200b-\u200d\u2060-\u2064\u206a-\u206f\ufeff\ufff9-\ufffb]{"
+    + str(_C038_INVISIBLE_RUN_MIN) + ",}"
 )
 _C038_INVISIBLE_TOTAL_MIN = 32
-_C038_INVISIBLE_COUNTED_RE = re.compile("[\u200b\u200c\ufeff\u00ad\u2060]")
+_C038_INVISIBLE_COUNTED_RE = re.compile(
+    "[\u00ad\u180e\u200b\u200c\u2060-\u2064\u206a-\u206f\ufeff\ufff9-\ufffb]"
+)
 _C038_ZWJ = "\u200d"
 
 
@@ -1418,14 +1428,17 @@ def _c038_invisible_total(text: str) -> int:
     counts, because that is what it is doing.
 
     WHAT THIS COUNTS, STATED EXACTLY, because an earlier draft of this docstring claimed
-    it counted "every invisible character" and that was false: it counts the five members
-    of `_C038_INVISIBLE_COUNTED_RE` plus non-emoji ZWJ -- SIX code points. It is bounded
-    by `obfuscation_signals`' own class, which is upstream and shared, and the residuals
-    below are all consequences of that boundary rather than of the arithmetic here.
+    it counted "every invisible character" and that was false: it counts the nineteen
+    members of `_C038_INVISIBLE_COUNTED_RE` plus non-emoji ZWJ -- TWENTY code points as of
+    B-450 (Tier 1; was six before it). It is bounded by `obfuscation_signals`' own class,
+    which is upstream and shared, and the residuals below are all consequences of that
+    boundary rather than of the arithmetic here.
 
-    `_C038_INVISIBLE_COUNTED_RE` is left exactly as it was -- it mirrors a class pinned
-    against `textnorm` by test, and widening the regex would have hidden the emoji
-    exemption inside a character class where it cannot be expressed.
+    `_C038_INVISIBLE_COUNTED_RE` mirrors `obfuscation_signals`' class exactly, minus ZWJ --
+    widening the regex to add a new upstream member is fine (B-450 did exactly that); what
+    it must never do is fold the emoji exemption INTO the character class, because that
+    exemption is per-character-context (see `_is_zwj_between_emoji`) and cannot be
+    expressed as a static set of code points.
 
     MEASURED FALSE-POSITIVE COST: one file. Across 270,954 real text files plus 3,033 npm
     tarballs, 228 carry a non-emoji ZWJ and exactly ONE newly reaches the floor --
@@ -1447,16 +1460,19 @@ def _c038_invisible_total(text: str) -> int:
         and reached PASS. So this residual is bounded by nothing here -- it is the price of
         the exemption that keeps honest emoji descriptions quiet, and revoking it trades a
         false negative for a false-positive class.
-      * THE UPSTREAM CLASS IS NARROW, WHICH IS THE BIGGER HOLE. Everything above sits
-        DOWNSTREAM of `obfuscation_signals`' own six-member class, so any invisible code
-        point outside it never fires the raw signal and this leg never runs at all. Not a
-        near-miss: a plain two-symbol substitution channel over U+2062 INVISIBLE TIMES /
-        U+2063 INVISIBLE SEPARATOR carries a full directive and returns a clean PASS with
-        NO finding, executed end-to-end. The sharpest members are U+2061-2064, the
-        immediate neighbours of U+2060 WORD JOINER, which IS in the class and is *more*
-        legitimate in prose than they are. Tracked separately, not patched here: a class
-        every consumer shares must not be widened from inside one consumer, or B349 and
-        the content ring stay blind while this leg implies coverage.
+      * THE UPSTREAM CLASS WAS NARROW -- CLOSED FOR TIER 1 BY B-450. This bullet used to
+        record a live hole: everything above sat DOWNSTREAM of `obfuscation_signals`' own
+        six-member class, so a plain two-symbol substitution channel over U+2062 INVISIBLE
+        TIMES / U+2063 INVISIBLE SEPARATOR carried a full directive and returned a clean
+        PASS with NO finding, executed end-to-end. `obfuscation_signals` itself was widened
+        upstream (B-450, Tier 1: U+2061-2064, U+FFF9-FFFB, U+206A-206F, U+180E added, in
+        the shared class every consumer reads from -- not from inside this one consumer),
+        so both classes above widened with it and that channel now fires. Tier 2 (variation
+        selectors, Braille pattern blank, Hangul filler) is deliberately still NOT in the
+        upstream class -- see the comment above `textnorm.obfuscation_signals`'
+        `_ZERO_WIDTH_RE` for why (pervasive legitimate per-character use, e.g. emoji
+        presentation via U+FE0F, needs a per-character discriminator this class doesn't
+        have) -- so a Tier-2-only channel is still a live gap, tracked there, not here.
     """
     total = len(_C038_INVISIBLE_COUNTED_RE.findall(text))
     if _C038_ZWJ not in text:
@@ -2732,10 +2748,24 @@ def _b332_is_generic(name: str) -> bool:
 
 # H3 (independent C-135 review): the SAME zero-width/invisible character class
 # textnorm.obfuscation_signals's own (function-local, not itself importable)
-# _ZERO_WIDTH_RE checks — U+200B-200D (zero-width space/ZWNJ/ZWJ), U+FEFF (BOM),
+# _ZERO_WIDTH_RE checks -- U+200B-200D (zero-width space/ZWNJ/ZWJ), U+FEFF (BOM),
 # U+00AD (soft hyphen), U+2060 (word joiner). Mirrored here as a module-level
 # constant rather than redefined with different characters, so this check's
-# zero-width signal matches the project's one existing definition exactly.
+# zero-width signal matches the project's existing definition -- WITH ONE
+# DELIBERATE EXCEPTION (B-450, 2026-08-06): the upstream class was widened to
+# twenty code points (Tier 1: U+2061-2064, U+FFF9-FFFB, U+206A-206F, U+180E added
+# -- see the comment above `textnorm.obfuscation_signals`' `_ZERO_WIDTH_RE`), and
+# `_C038_INVISIBLE_RUN_RE`/`_C038_INVISIBLE_COUNTED_RE` above were widened to match
+# it, but THIS class was deliberately left at the original six. Unlike the C-038
+# leg (WARN-only, run/total-gated), a hit here is UNCONDITIONALLY FAIL --
+# `_b332_homoglyph_signal` feeds `_b332_finding_from_surfaces`' homoglyph leg,
+# which FAILs "always, regardless of genericness/length" (see the FAIL/WARN split
+# in this check's own docstring). Widening a FAIL-capable class needs its own
+# C-135 adversarial pass against real MCP tool-name corpora before it ships, per
+# this project's standing rule for exactly this shape (widening a detection regex
+# needs C-135) -- out of scope for B-450 Tier 1, which is scoped to the
+# WARN-graded C-038 band plus the shared upstream signal itself. Tracked as a
+# separate follow-up: widen this class to match, with its own adversarial review.
 _B332_ZERO_WIDTH_RE = re.compile("[​-‍﻿­⁠]")
 
 
