@@ -13,6 +13,7 @@ import os
 import html
 import json
 import re
+import shlex
 import tempfile
 import time
 from pathlib import Path
@@ -3125,6 +3126,60 @@ def _advise_reasons(profile, limit: int = 5) -> list[str]:
     return [f"{f.id} ({f.status}): {_sanitize(f.detail)}" for f in worst_first[:limit]]
 
 
+# B-487, second round: `shlex.quote` is necessary but NOT sufficient here, because these
+# commands are consumed LINE BY LINE (a printed block a host agent copies, per
+# docs/FLOW_CHOICES.md). A target carrying a newline is quoted correctly as ONE shell
+# argument, yet the quoted token spans two rendered LINES — so the plan's line structure
+# becomes attacker-controlled. In the `#`-commented ecosystem branches that is a real
+# shell-level escape, not a cosmetic one: `#` comments to end of LINE only, so the tail of
+# a newline-bearing target lands on an UNcommented line and reaches command position.
+# Found by this change's own test matrix, not by the original report.
+#
+# No legitimate target — package name, URL, git ref, or slug — contains a control
+# character, so refusing is free of false positives and is itself the honest answer:
+# fabricating a command for such a target is exactly the "no fabricated facts" failure the
+# project forbids. Refuse the command block and say why.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _refuse_command_plan(target: str) -> str:
+    """The --vet-plan output for a target carrying a control character: no commands.
+
+    Renders the same 4-step plain-language preamble (a reader still deserves to know what
+    the flow does) but replaces every command line with a refusal. The target is shown
+    with its control characters escaped via `repr`, so the refusal itself cannot smuggle a
+    line break into the output it is protecting.
+    """
+    return "\n".join([
+        "I will not build a fetch plan for this target.",
+        "",
+        f"  target (escaped): {target!r}",
+        "",
+        "It contains a control character (a newline, carriage return, or similar). No real",
+        "package name, URL, git ref, or skill slug does. Because these commands are meant to",
+        "be copied and run line by line, a target that spans lines would let the target's own",
+        "text land on a line of its own — which is how injected text reaches command position.",
+        "",
+        "Treat this as a strong signal about the target itself: something produced an",
+        "identifier that cannot be one. Check where it came from before going further.",
+    ])
+
+
+def _shq(value) -> str:
+    """Shell-quote *value* for safe interpolation into a printed command line.
+
+    B-487: every renderer in this module that stitches a caller-supplied string (a
+    --vet-plan target, an --advise target/profile.target, …) into a shell command line
+    MUST route it through this helper rather than interpolating it raw. `docs/
+    FLOW_CHOICES.md` tells the host agent to actually run these printed commands, so an
+    unquoted field is a command-injection sink, not just a display glitch. `shlex.quote`
+    is a no-op on already-safe strings (letters/digits/`-_./=:@`), so ordinary targets
+    render byte-identically to before this fix — only strings carrying shell
+    metacharacters change output at all.
+    """
+    return shlex.quote(str(value))
+
+
 def _looks_like_quarantine(target: str) -> bool:
     """True if *target* sits under the system temp dir (a --vet-plan quarantine copy),
     False otherwise. --advise can be pointed at ANY path, including a real installed
@@ -3172,12 +3227,19 @@ def render_advise(profile, ascii_only: bool = False) -> str:
     lines.append("Next steps:")
     if verdict != "INSTALL":
         lines.append("  Review the reasons above before proceeding; when you're done:")
-    if _looks_like_quarantine(profile.target):
-        lines.append(f"  rm -rf {profile.target}    # remove the quarantine copy — do this either way")
+    if _CONTROL_CHAR_RE.search(str(profile.target)):
+        # B-487: same line-structure hazard as --vet-plan. A quoted token carrying a
+        # newline spans two rendered lines, so the path's own text would land on a line of
+        # its own inside a copy-and-run block. Name the path escaped and emit no command.
+        lines.append(f"  This path contains a control character: {str(profile.target)!r}")
+        lines.append("  No cleanup command is printed for it — a `rm -rf` spanning two lines")
+        lines.append("  is not safe to copy. Remove it by hand if it is a quarantine copy.")
+    elif _looks_like_quarantine(profile.target):
+        lines.append(f"  rm -rf {_shq(profile.target)}    # remove the quarantine copy — do this either way")
     else:
         lines.append(f"  '{profile.target}' is not under the system temp dir — this does not")
         lines.append("  look like a --vet-plan quarantine copy. If it IS one, remove it with:")
-        lines.append(f"    rm -rf {profile.target}")
+        lines.append(f"    rm -rf {_shq(profile.target)}")
         lines.append("  If this is your real installed skill, do NOT delete it — act on the")
         lines.append("  verdict above instead (e.g. uninstall through your normal flow).")
     lines.append("  (run --json for the full finding list + axis breakdown)")
@@ -3200,12 +3262,19 @@ def render_advise_json(profile, *, version: str) -> str:
     payload["advise_verdict"] = _ADVISE_VERDICT.get(profile.overall_status, "CAUTION")
     payload["reasons"] = _advise_reasons(profile)
     payload["is_quarantine_path"] = is_quarantine
-    payload["cleanup"] = (
-        f"rm -rf {profile.target}" if is_quarantine else
-        f"# '{profile.target}' is not under the system temp dir — only run "
-        f"'rm -rf {profile.target}' if you're sure this is a --vet-plan quarantine "
-        "copy, not your real installed skill"
-    )
+    if _CONTROL_CHAR_RE.search(str(profile.target)):
+        # B-487: no command for a path that would break the line it is printed on.
+        payload["cleanup"] = (
+            f"# path contains a control character ({str(profile.target)!r}) — no cleanup "
+            "command is emitted; remove it by hand if it is a quarantine copy"
+        )
+    else:
+        payload["cleanup"] = (
+            f"rm -rf {_shq(profile.target)}" if is_quarantine else
+            f"# '{profile.target}' is not under the system temp dir — only run "
+            f"'rm -rf {_shq(profile.target)}' if you're sure this is a --vet-plan quarantine "
+            "copy, not your real installed skill"
+        )
     payload["coverage"] = _coverage(profile.findings)
     return json.dumps(_sanitize_tree(payload), ensure_ascii=True, indent=2)
 
@@ -3226,14 +3295,20 @@ def render_advise_json(profile, *, version: str) -> str:
 def render_vet_plan(target: str) -> str:
     from .checks import _parse_source_target  # noqa: PLC0415
 
+    if _CONTROL_CHAR_RE.search(target):
+        return _refuse_command_plan(target)
+
     info = _parse_source_target(target)
     eco, name, version = info["ecosystem"], info["name"], info.get("version")
     ver_suffix = f"@{version}" if version else ""
 
     if eco == "npm":
-        fetch = f"npm pack {name}{ver_suffix} --pack-destination \"$QUARANTINE\""
+        # `name + ver_suffix` (e.g. "left-pad@1.0.0") is ONE npm package-spec argument —
+        # quote it as a single unit so quoting can't split it into two shell words.
+        fetch = f"npm pack {_shq(name + ver_suffix)} --pack-destination \"$QUARANTINE\""
     elif eco == "pypi":
-        fetch = f"pip download --no-deps -d \"$QUARANTINE\" {name}{'==' + version if version else ''}"
+        fetch = (f"pip download --no-deps -d \"$QUARANTINE\" "
+                  f"{_shq(name + ('==' + version if version else ''))}")
     elif eco == "git":
         # info only keeps host + the repo-name tail, not the full owner/repo path — pull
         # host/path back out of the raw "git:<host>/<path>[@ref]" target instead of
@@ -3242,13 +3317,13 @@ def render_vet_plan(target: str) -> str:
         ref = info.get("ref")
         if ref:
             path = path.rsplit("@", 1)[0]
-        branch_flag = f" --branch {ref}" if ref else ""
-        fetch = f"git clone --depth 1{branch_flag} https://{path} \"$QUARANTINE/repo\""
+        branch_flag = f" --branch {_shq(ref)}" if ref else ""
+        fetch = f"git clone --depth 1{branch_flag} https://{_shq(path)} \"$QUARANTINE/repo\""
     elif eco == "clawhub":
         fetch = (f"# resolve '{name}' via your ClawHub client's normal pull/install path, "
                   "but redirect the output into \"$QUARANTINE\" instead of the live skills dir")
     else:  # "url" or an unresolved bare "registry" name
-        fetch = (f"curl -fsSL {target} -o \"$QUARANTINE/download\"" if eco == "url" else
+        fetch = (f"curl -fsSL {_shq(target)} -o \"$QUARANTINE/download\"" if eco == "url" else
                   f"# '{name}' has no resolvable ecosystem — fetch via your package manager's "
                   "normal lookup, into \"$QUARANTINE\"")
     # the concrete-command ecosystems get a shared "this line varies" annotation; the
@@ -3270,7 +3345,7 @@ def render_vet_plan(target: str) -> str:
         "",
         "Commands (for the agent — clawseccheck never touches the network itself):",
         "",
-        f"  clawseccheck --vet-source {target}   # 1: reputation, zero network",
+        f"  clawseccheck --vet-source {_shq(target)}   # 1: reputation, zero network",
         "  QUARANTINE=$(mktemp -d)   # 2: throwaway, outside auto-load",
         f"  {fetch}{fetch_note}",
         "  clawseccheck --advise \"$QUARANTINE\"   # 3: verdict",
