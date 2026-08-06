@@ -44,17 +44,17 @@ import unicodedata
 # characters were the entire bypass. Both halves now derive from one source.
 # ---------------------------------------------------------------------------
 _ZERO_WIDTH_CLASS_SRC = (
-    "­"          # soft hyphen
-    "᠎"          # Mongolian vowel separator
-    "​-‍"   # zero-width space / ZWNJ / ZWJ
-    "⁠-⁤"   # word joiner + invisible times / separator / plus / function application
-    "⁪-⁯"   # deprecated format controls
-    "﻿"          # BOM / ZWNBSP
-    "￹-￻"   # interlinear annotation
+    "\u00ad"          # soft hyphen
+    "\u180e"          # Mongolian vowel separator
+    "\u200b-\u200d"   # zero-width space / ZWNJ / ZWJ
+    "\u2060-\u2064"   # word joiner + invisible times / separator / plus / function application
+    "\u206a-\u206f"   # deprecated format controls
+    "\ufeff"          # BOM / ZWNBSP
+    "\ufff9-\ufffb"   # interlinear annotation
 )
 _BIDI_CLASS_SRC = (
-    "‪-‮"   # bidi embedding / override controls
-    "⁦-⁩"   # bidi isolates
+    "\u202a-\u202e"   # bidi embedding / override controls
+    "\u2066-\u2069"   # bidi isolates
 )
 _INVISIBLE_RE = re.compile("[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + "]")
 
@@ -66,17 +66,17 @@ _INVISIBLE_RE = re.compile("[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + "]")
 # first JOINS them into one. For the six that is long-settled behaviour. Joining
 # on the fourteen added above would newly fuse a pure-Cyrillic token to a
 # pure-ASCII one into a single mixed token -- verified to flip
-# `confusable_in_ascii_context` False->True on "о⁢k", "а᠎z"
-# and "ο⁣n" -- and that signal is FAIL-capable (B332 homoglyph,
+# `confusable_in_ascii_context` False->True on "\u043e\u2062k", "\u0430\u180ez"
+# and "\u03bf\u2063n" -- and that signal is FAIL-capable (B332 homoglyph,
 # typosquat). Widening the STRIPPER closes a live bypass; widening the TOKENIZER
 # would only trade a false negative for a false positive. So this one does not
 # move with the other.
 _INVISIBLE_TOKEN_RE = re.compile(
     "["
-    "­"          # soft hyphen
-    "​-‍"   # zero-width space / ZWNJ / ZWJ
-    "⁠"          # word joiner
-    "﻿"          # BOM / ZWNBSP
+    "\u00ad"          # soft hyphen
+    "\u200b-\u200d"   # zero-width space / ZWNJ / ZWJ
+    "\u2060"          # word joiner
+    "\ufeff"          # BOM / ZWNBSP
     + _BIDI_CLASS_SRC +
     "]"
 )

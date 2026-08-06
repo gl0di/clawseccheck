@@ -139,7 +139,8 @@ Shared by `--json` and `--vet` mode.
 | `pass_confidence` | `str \| null` | For PASS findings only: `"verified"` (evidence-based pass), `"no_signal"` (check found nothing but couldn't confirm safety), or `null` (FAIL/WARN/UNKNOWN — not applicable). |
 | `scored` | `bool` | `false` for advisory findings excluded from the weighted score (they still appear in the report but don't move the grade); `true` for findings that count toward the score. Lets a JSON consumer reproduce the human report's "N to fix vs M warn" arithmetic, which excludes advisory items. |
 | `suppressed` | `bool` | `true` if the finding was suppressed by the user's baseline. |
-| `owasp` | `array[str]` | OWASP LLM Top 10 codes that apply, e.g. `["LLM01", "LLM02"]`. May be empty. |
+| `owasp` | `array[str]` | OWASP Top 10 for LLM Applications **2025** codes that apply, e.g. `["LLM01", "LLM02"]`. May be empty. Pinned to the 2025 edition for backward compatibility — eight of the ten codes changed meaning in 2026, so renumbering this field in place would have silently changed what an unchanged key means. Read `owasp_2026` for the current edition. |
+| `owasp_2026` | `array[str]` | OWASP **GenAI LLM Top 10 2026** codes that apply (published 2026-08-04), e.g. `["LLM01", "LLM03"]`. Same length and order as `owasp`, element-wise remapped. May be empty. The two differ for eight codes: most visibly Excessive Agency, `LLM06` in 2025 and `LLM03` in 2026. |
 | `ast` | `array[str]` | OWASP Agentic Skills Top 10 (2026) codes that apply, e.g. `["AST03", "AST05"]`. May be empty. Additive metadata only — no scoring or verdict impact. |
 | `remediation` | `object` | Paste-ready remediation. Keys: `commands` (`array[str]`) and `config` (`array[object]`). |
 | `evidence` | `array[str]` | Supporting evidence strings (sanitised; no raw secrets). May be empty. |
@@ -194,6 +195,7 @@ item describes a manual configuration step.
   "confidence": "HIGH",
   "suppressed": false,
   "owasp": ["LLM02"],
+  "owasp_2026": ["LLM02"],
   "ast": [],
   "remediation": {
     "commands": [],

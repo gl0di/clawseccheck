@@ -211,8 +211,9 @@ The narrative version, in one paragraph per theme:
 - **Incident readiness:** presence and tamper-resistance of OpenClaw's per-session
   trajectory sidecars — the on-disk record a post-incident investigation depends on.
 
-**Mapped to OWASP.** Each check is tagged with its **OWASP Top 10 for LLM Applications (2025)**
-category (surfaced per finding in `--json` as `"owasp": [...]`), and the checks are mapped to the
+**Mapped to OWASP.** Each check is tagged with its **OWASP GenAI LLM Top 10 (2026)** category,
+surfaced per finding in `--json` as `"owasp_2026": [...]`; the superseded 2025 codes stay in
+`"owasp": [...]` so existing consumers keep reading what they always read. The checks are also mapped to the
 agent-specific **OWASP Agentic (ASI)** threat classes — tool misuse, multi-agent identity/privilege
 abuse, insecure inter-agent communication, cascading blast-radius — that an app-code reviewer never
 sees. Full matrix in [`THREAT_COVERAGE.md`](THREAT_COVERAGE.md).

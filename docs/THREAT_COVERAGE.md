@@ -294,30 +294,44 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
 ## Framework mapping (OWASP)
 
 ClawSecCheck audits the **agent**, so it maps the OWASP categories onto the agent surface
-(not app code). The machine-readable mapping is `catalog.OWASP_MAP` / `owasp_for(id)` and is
-surfaced per finding in `--json` (`"owasp": [...]`); this table is its human view. Only clear
-fits are tagged — checks with no clean LLM-Top-10 analog are covered by the agent-specific
-OWASP Agentic (ASI) classes below, not stretched into a category they don't fit.
+(not app code). The machine-readable mapping is `catalog.OWASP_MAP`, read through
+`owasp_2026_for(id)` for the current edition and `owasp_for(id)` for 2025; both are surfaced
+per finding in `--json` (`"owasp_2026": [...]` and `"owasp": [...]`). This table is their
+human view. Only clear fits are tagged — checks with no clean LLM-Top-10 analog are covered
+by the agent-specific OWASP Agentic (ASI) classes below, not stretched into a category they
+don't fit.
 
-### OWASP Top 10 for LLM Applications (2025)
+### OWASP GenAI LLM Top 10 (2026) — current
 
-| Code | Category | ClawSecCheck checks |
-|---|---|---|
-| LLM01 | Prompt Injection | A1, B2, B6, B21, B23, B26, B30, B48, B56, B58, B59, B60, B61, B64, B67, B74, B88, B140, B170, B180, B185, C074 |
-| LLM02 | Sensitive Information Disclosure | B1, B9, B11, B12, B14, B19, B39, B41, B59, B61, B67, B82, B83, B170, B182, B193, C014, C015 |
-| LLM03 | Supply Chain | B5, B13, B15, B24, B25, B33, B42, B57, B103, B135, B151, B152, B174, B177, B181, B182, B184, B186, B187, B194, C4, C5, C047 |
-| LLM04 | Data and Model Poisoning | B7, B20, B22, B55, B175, B180 |
-| LLM05 | Improper Output Handling | B21, B47, B187 |
-| LLM06 | Excessive Agency | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79, B81, B84, B105, B136, B138, B150, B175, B176, T1, T3 |
-| LLM07 | System Prompt Leakage | B9 |
-| LLM08 | Vector and Embedding Weaknesses | — (no agent-config surface; RAG/embedding concern) |
-| LLM09 | Misinformation | — (model output / overreliance; out of scope) |
-| LLM10 | Unbounded Consumption | B17, B80, B150 |
+Published 2026-08-04. The first edition ranked partly on observed incidents (community vote
+75%, incident data 25%), and it **moved eight of the ten codes**. The `2025` column is kept
+because our long-standing `"owasp"` JSON field still carries those codes; see the note below.
 
-LLM08/LLM09 are honest non-coverage: they live in the model/RAG layer, not the agent config
-ClawSecCheck reads. **Excessive Agency (LLM06)** is where the tool is densest — the whole
-multi-agent privilege-separation arc (B45/B46/B47) lands here, exactly the agent-specific
-surface a web/code reviewer never sees.
+| Code | Category | 2025 code | ClawSecCheck checks |
+|---|---|---|---|
+| LLM01 | Prompt Injection | LLM01 | A1, B2, B6, B21, B23, B26, B30, B48, B56, B58, B59, B60, B61, B64, B67, B74, B88, B140, B170, B180, B185, C074 |
+| LLM02 | Sensitive Information Disclosure | LLM02 | B1, B9, B11, B12, B14, B19, B39, B41, B59, B61, B67, B82, B83, B170, B182, B193, C014, C015 |
+| LLM03 | Excessive Agency | LLM06 | A1, B3, B4, B8, B17, B18, B22, B23, B31, B32, B41, B43, B44, B45, B46, B47, B48, B55, B57, B62, B63, B65, B66, B68, B69, B71, B72, B76, B79, B81, B84, B105, B136, B138, B150, B175, B176, T1, T3 |
+| LLM04 | Supply Chain | LLM03 | B5, B13, B15, B24, B25, B33, B42, B57, B103, B135, B151, B152, B174, B177, B181, B182, B184, B186, B187, B194, C4, C5, C047 |
+| LLM05 | Data and Model Poisoning | LLM04 | B7, B20, B22, B55, B175, B180 |
+| LLM06 | Unbounded Consumption | LLM10 | B17, B80, B150 |
+| LLM07 | Misinformation | LLM09 | — (model output / overreliance; out of scope) |
+| LLM08 | Hidden Context Exposure | LLM07 | B9 |
+| LLM09 | Vector and Embedding Weaknesses | LLM08 | — (no agent-config surface; RAG/embedding concern) |
+| LLM10 | Improper Output Handling | LLM05 | B21, B47, B187 |
+
+LLM07/LLM09 are honest non-coverage: they live in the model/RAG layer, not the agent config
+ClawSecCheck reads. **Excessive Agency (LLM03:2026)** is where the tool is densest — the
+whole multi-agent privilege-separation arc (B45/B46/B47) lands here, exactly the
+agent-specific surface a web/code reviewer never sees. Its climb from LLM06 to LLM03 is the
+biggest move in the 2026 edition, driven by agentic incident data.
+
+> **The `"owasp"` field is still 2025, on purpose.** Eight codes changed meaning between the
+> editions, and the worst collision is ours: `LLM06` meant Excessive Agency in 2025 and means
+> Unbounded Consumption in 2026. Renumbering an unchanged field name would have silently
+> handed existing consumers a different risk under the same key, so 2026 rides alongside in
+> `"owasp_2026"` instead. `catalog.OWASP_2025_TO_2026` is the single remap both views derive
+> from — there is deliberately no second per-check map to drift.
 
 ### OWASP Agentic Skills Top 10 (2026)
 
@@ -379,7 +393,10 @@ historical continuity. The numbered AST-2026 table above supersedes this for new
 | Human-agent trust / decision-fatigue | B8, B18, B23 |
 | Rogue agent misalignment | B17, B22 (partial) |
 
-**Sources (grounded):** OWASP Top 10 for LLM Applications 2025
+**Sources (grounded):** OWASP GenAI LLM Top 10 2026, published 2026-08-04
+(<https://genai.owasp.org/resource/owasp-genai-llm-top-10-2026/>; codes and titles taken from
+the project's own repo, <https://github.com/GenAI-Security-Project/GenAI-LLM-Top10>); the
+superseded OWASP Top 10 for LLM Applications 2025
 (<https://genai.owasp.org/llm-top-10/>); OWASP Agentic Skills Top 10 2026
 (<https://owasp.org/www-project-agentic-skills-top-10>); OWASP Agentic Security Initiative
 (<https://genai.owasp.org/initiatives/agentic-security-initiative/>) and Agentic AI — Threats
