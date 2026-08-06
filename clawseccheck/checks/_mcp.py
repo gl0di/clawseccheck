@@ -2764,8 +2764,31 @@ def _b332_is_generic(name: str) -> bool:
 # C-135 adversarial pass against real MCP tool-name corpora before it ships, per
 # this project's standing rule for exactly this shape (widening a detection regex
 # needs C-135) -- out of scope for B-450 Tier 1, which is scoped to the
-# WARN-graded C-038 band plus the shared upstream signal itself. Tracked as a
-# separate follow-up: widen this class to match, with its own adversarial review.
+# WARN-graded C-038 band plus the shared upstream signal itself.
+#
+# B-488 (2026-08-06): that follow-up was attempted and RETRACTED, and the
+# reason is a live trade rather than a technicality -- so read this before
+# widening it anyway.
+#
+# The homoglyph leg needs BOTH fold-equality (`a["fold"] == b["fold"]` below)
+# and a homoglyph signal on one side. Since B-490 widened
+# `textnorm._INVISIBLE_RE`, `normalize_for_scan` strips Tier-1 code points too,
+# so a name carrying one IS now fold-equal to its clean counterpart. The only
+# thing still holding the verdict at PASS is this class staying at six, which
+# keeps `homoglyph_signal` False on both sides.
+#
+# So widening is NOT inert -- measured on the post-B-490 tree, it flips exactly
+# two populations from PASS to FAIL together, and there is no rule separating
+# them:
+#   - the attack:  one Tier-1 char inserted into one of two otherwise-identical
+#                  tool names on different servers (real shadowing) -> gained.
+#   - legitimate:  Japanese ruby annotation (U+FFF9-FFFB IS the Unicode
+#                  interlinear-annotation mechanism) and Mongolian orthography
+#                  (U+180E), where both names carry the same character and
+#                  differ only in something NFKC folds -> false FAIL.
+# Golden Rule #5 makes the false FAIL the blocker whatever the detection gain,
+# so this class stays at six and the missed shadowing is an accepted residual.
+# Reopening it needs a discriminator for the benign pair, not a wider class.
 _B332_ZERO_WIDTH_RE = re.compile("[​-‍﻿­⁠]")
 
 
