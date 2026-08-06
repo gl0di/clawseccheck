@@ -22,7 +22,8 @@ from . import brand
 from .catalog import (
     BY_ID,
     SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER,
-    ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
+    ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_2026_for, owasp_for,
+    remediation_for,
 )
 from .ansi import paint
 from .brand import BRAND_RED, FAVICON_DATA_URI, LOGO_SVG, SEVERITY, WORDMARK, grade_ansi, grade_hex
@@ -3008,6 +3009,7 @@ def _finding_to_dict(f: Finding) -> dict:
             "scored": bool(getattr(f, "scored", True)),
             "suppressed": bool(getattr(f, "suppressed", False)),
             "owasp": list(owasp_for(f.id)),
+            "owasp_2026": list(owasp_2026_for(f.id)),
             "ast": list(ast_for(f.id)),
             "remediation": remediation_for(f.id),
             "evidence": [_sanitize(e) for e in (f.evidence or [])],

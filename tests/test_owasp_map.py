@@ -5,10 +5,13 @@ from clawseccheck import audit, render_json
 from clawseccheck.catalog import (
     AST_MAP,
     BY_ID,
+    OWASP_2025_TO_2026,
     OWASP_AST_2026,
     OWASP_LLM_2025,
+    OWASP_LLM_2026,
     OWASP_MAP,
     ast_for,
+    owasp_2026_for,
     owasp_for,
 )
 
@@ -47,6 +50,76 @@ def test_supply_chain_checks_map_to_llm03():
         assert "LLM03" in owasp_for(cid)
 
 
+# ---- OWASP GenAI LLM Top 10 2026 (published 2026-08-04) ----
+def test_owasp_llm_2026_has_ten_canonical_codes():
+    assert len(OWASP_LLM_2026) == 10
+    assert set(OWASP_LLM_2026) == {f"LLM{n:02d}" for n in range(1, 11)}
+
+
+def test_remap_is_a_bijection_over_all_ten_codes():
+    # Every 2025 code has exactly one 2026 code and no two share a target — this is
+    # what lets owasp_2026_for() be a pure derivation with no dedup step.
+    assert set(OWASP_2025_TO_2026) == set(OWASP_LLM_2025)
+    assert set(OWASP_2025_TO_2026.values()) == set(OWASP_LLM_2026)
+    assert len(set(OWASP_2025_TO_2026.values())) == 10
+
+
+def test_remap_preserves_the_risk_identity_not_the_number():
+    # The remap must pair a risk with ITSELF across editions. Titles are identical for
+    # nine of ten; LLM07 System Prompt Leakage was RENAMED to Hidden Context Exposure,
+    # which is the one pair where the title legitimately differs.
+    renamed = {"LLM07": "Hidden Context Exposure"}
+    for old, new in OWASP_2025_TO_2026.items():
+        want = renamed.get(old, OWASP_LLM_2025[old])
+        assert OWASP_LLM_2026[new] == want, (
+            f"{old} -> {new}: 2025 title {OWASP_LLM_2025[old]!r} does not match "
+            f"2026 title {OWASP_LLM_2026[new]!r}"
+        )
+
+
+def test_eight_of_ten_codes_moved():
+    # The reason this migration exists. If a future edition changes this count, the
+    # docs' "8 of 10" claim has to move with it.
+    moved = [o for o, n in OWASP_2025_TO_2026.items() if o != n]
+    assert len(moved) == 8
+    assert set(OWASP_2025_TO_2026[c] for c in ("LLM01", "LLM02")) == {"LLM01", "LLM02"}
+
+
+def test_excessive_agency_is_llm06_in_2025_and_llm03_in_2026():
+    # The collision that motivated the whole change: the SAME string means two
+    # different risks depending on which edition the reader has open.
+    for cid in ("A1", "B45", "B46", "B47"):
+        assert "LLM06" in owasp_for(cid)
+        assert "LLM03" in owasp_2026_for(cid)
+    assert OWASP_LLM_2025["LLM06"] == "Excessive Agency"
+    assert OWASP_LLM_2026["LLM06"] == "Unbounded Consumption"
+
+
+def test_unbounded_consumption_moved_the_other_way():
+    for cid in ("B17", "B80", "B150"):
+        if "LLM10" in owasp_for(cid):
+            assert "LLM06" in owasp_2026_for(cid)
+
+
+def test_owasp_2026_is_derived_not_duplicated():
+    # The invariant that keeps one map instead of two: for EVERY mapped check the
+    # 2026 tuple is exactly the 2025 tuple pushed through the remap, order preserved.
+    for cid in OWASP_MAP:
+        assert owasp_2026_for(cid) == tuple(OWASP_2025_TO_2026[c] for c in owasp_for(cid))
+        assert len(owasp_2026_for(cid)) == len(owasp_for(cid))
+
+
+def test_owasp_2026_for_unmapped_returns_empty():
+    assert owasp_2026_for("B50") == ()      # host-watch: intentionally unmapped
+    assert owasp_2026_for("ZZ99") == ()     # unknown id
+
+
+def test_every_2026_code_is_valid():
+    for cid in OWASP_MAP:
+        for code in owasp_2026_for(cid):
+            assert code in OWASP_LLM_2026, f"{cid} maps to unknown 2026 code {code!r}"
+
+
 # ---- JSON surfacing ----
 def test_render_json_includes_owasp_per_finding(tmp_path):
     _, findings, score = audit("fixtures/home_vuln", include_native=False, include_host=False)
@@ -60,6 +133,13 @@ def test_render_json_includes_owasp_per_finding(tmp_path):
     # a mapped check exposes its codes; an unmapped one is an empty list (not absent)
     assert by_id["A1"]["owasp"] == ["LLM01", "LLM06"]
     assert by_id["B50"]["owasp"] == []
+    # the 2026 edition rides alongside — the 2025 field keeps its long-standing meaning
+    for f in data["findings"]:
+        assert "owasp_2026" in f and isinstance(f["owasp_2026"], list)
+        for code in f["owasp_2026"]:
+            assert code in OWASP_LLM_2026
+    assert by_id["A1"]["owasp_2026"] == ["LLM01", "LLM03"]
+    assert by_id["B50"]["owasp_2026"] == []
     # every serialized finding carries an ast list; codes are valid AST codes
     for f in data["findings"]:
         assert "ast" in f and isinstance(f["ast"], list)
