@@ -164,6 +164,13 @@ class ScanLimits:
     log_check_budget_s: float
     log_per_file_budget_s: float
     log_max_bytes_per_file: int
+    # B-484: total bytes B164 will admit into one scan, decided BEFORE opening anything.
+    # `log_check_budget_s` alone made the scanned SET a function of wall-clock speed, so
+    # two runs over an unchanged corpus disagreed (measured: 38 then 41 of 132 sinks).
+    # Bytes are the honest portable unit — a measured seconds-per-MiB constant would make
+    # the selected set differ per host, which is the same defect in a new costume.
+    # The clock stays as a backstop; this only decides WHAT is offered to it.
+    log_max_total_bytes: int
     window_chars: int
     window_overlap: int
     check_budget_s: float
@@ -190,6 +197,38 @@ DEFAULT_LIMITS = ScanLimits(
     log_check_budget_s=4.5,
     log_per_file_budget_s=3.0,
     log_max_bytes_per_file=2 * 1024 * 1024,
+    # B-484: measured on a real 132-sink / 41.1 MiB corpus, an uncapped scan costs
+    # 13.6s at ~2.9 MiB/s. That technically fits under the 15s DEFAULT_CHECK_BUDGET_S,
+    # but it would spend ~90% of the whole per-check ceiling on ONE check — precisely
+    # the situation B-314's cumulative ceiling exists to prevent (its own comment cites
+    # 4 sinks summing to 11.6s/15s as the problem) — and it grows past 15s as a fleet
+    # ages. 10 MiB is what fits inside B164's own 4.5s share with headroom.
+    #
+    # Calibrated by measurement against that 4.5s share on the real 132-sink corpus, with
+    # `_plan_log_hunt_sinks`' oldest-reserve in place — NOT picked as a round number:
+    #
+    # This is a budget of CHARGED cost, not of bytes on disk: `_plan_log_hunt_sinks` bills
+    # each sink `min(size, log_max_bytes_per_file)`, because that is the most
+    # `scan_log_file` will ever read from it.
+    #
+    # Measured on the real 132-sink corpus, two runs each:
+    #
+    #      8 MiB -> 40 sinks (30%), 2.83s        16 MiB -> 55 (42%), 5.69s  OVER
+    #      9 MiB -> 53 sinks (40%), 3.19s        20 MiB -> 75 (57%), 6.96s  OVER
+    #     10 MiB -> 51 sinks (39%), 3.64s        32 MiB -> 97 (73%), 10.93s OVER
+    #     11 MiB -> 50 sinks (38%), 3.89s
+    #
+    # Note the NON-MONOTONICITY between 9 and 11 MiB — more budget buys FEWER sinks. A
+    # larger allowance lets more sinks that individually cost the full per-file cap into
+    # the main pool, and they crowd out cheap small ones. So this is a measured optimum,
+    # not a ceiling: raising it is not automatically an improvement, and "just bump the
+    # budget" is the wrong instinct here. Re-measure the whole table if
+    # `log_max_bytes_per_file`, `log_per_file_budget_s` or the reserve fraction moves.
+    #
+    # 9 MiB: the best coverage of any row AND the cheapest of the rows near it — 3.19s,
+    # 71% of B164's 4.5s share, leaving real headroom so the PLAN and not the wall clock
+    # keeps deciding the set on a box slower than this one.
+    log_max_total_bytes=9 * 1024 * 1024,
     window_chars=3000,
     window_overlap=0,
     check_budget_s=DEFAULT_CHECK_BUDGET_S,
@@ -213,6 +252,14 @@ EXHAUSTIVE_LIMITS = ScanLimits(
     log_per_file_budget_s=30.0,                # 10x DEFAULT: one sink may legitimately
                                                 # run far longer scanning more of a corpus
     log_max_bytes_per_file=32 * 1024 * 1024,   # 16x DEFAULT (2 MiB -> 32 MiB)
+    log_max_total_bytes=_UNBOUNDED,            # B-484: --exhaustive offers the WHOLE
+                                                # corpus to the scan and stays bound only
+                                                # by log_check_budget_s. It still does not
+                                                # finish a large corpus (measured 126/132
+                                                # at the full 60.0s), and raising that
+                                                # cascades into check_budget_s /
+                                                # audit_budget_s below — a separate,
+                                                # separately-measured change.
     window_chars=3000,                         # unchanged here — a later F-164 sub-change's
                                                 # job, not this one; reserved field only
     window_overlap=512,                        # reserved: no reader consumes this yet

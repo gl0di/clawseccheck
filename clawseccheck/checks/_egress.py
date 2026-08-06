@@ -2630,6 +2630,174 @@ _LOG_HUNT_PER_FILE_BUDGET_S = 3.0
 _LOG_HUNT_CHECK_BUDGET_S = 4.5
 
 
+# B-484: which sinks B164 offers to the scan, decided from (kind, mtime, size) BEFORE
+# anything is opened. Rank puts the cheap high-signal singletons first, then the corpora
+# newest-first; `str(path)` is the total-order tiebreak so two sinks sharing an mtime can
+# never swap between runs.
+#
+# A kind absent from this table sorts last rather than raising — logdiscovery may learn a
+# new kind before this table does, and a scan-ordering helper must never be the thing that
+# breaks the audit.
+_LOG_SINK_KIND_RANK = {
+    "config_audit": 0,
+    "config_log": 0,
+    "cache_trace": 0,
+    "trajectory": 1,
+    "transcript": 2,
+    "memory": 3,
+    "backup": 4,
+}
+_LOG_SINK_KIND_RANK_LAST = 9
+
+# B-484 / C-135: the share of the byte budget spent on the OLDEST sinks rather than the
+# newest. Exists so no single mtime value is a safe hiding place — see the reasoning in
+# `_plan_log_hunt_sinks`. 25% is small enough that the recent corpus (where a live
+# compromise actually writes) still gets the large majority, and large enough that the
+# reserve admits several real sinks rather than rounding to one.
+_LOG_HUNT_OLDEST_RESERVE = 0.25
+
+
+class _ReverseStr:
+    """Sort key that inverts string order, so one `sorted()` can order a field ascending
+    and another descending without reversing the whole sequence (which would also invert
+    the primary key). Used by `_plan_log_hunt_sinks`' reserve pass — see the comment
+    there for why the two passes must break ties in opposite directions.
+    """
+
+    __slots__ = ("_s",)
+
+    def __init__(self, s: str) -> None:
+        self._s = s
+
+    def __lt__(self, other: "_ReverseStr") -> bool:
+        return self._s > other._s
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _ReverseStr) and self._s == other._s
+
+    def __hash__(self) -> int:
+        return hash(self._s)
+
+
+def _plan_log_hunt_sinks(sinks: list, lim) -> tuple[list, int]:
+    """Pick the sinks B164 will scan, and say how many were left out.
+
+    Returns ``(admitted, planned_out)``.
+
+    Before this, the loop simply walked `discover_log_sinks`' lexicographic order until the
+    wall clock ran out. Session filenames are UUIDs, so the covered slice was effectively
+    random AND unstable — two consecutive runs over an unchanged real corpus scanned 38 and
+    then 41 of 132 sinks, which makes B164's verdict irreproducible and drifts the skipped
+    count embedded in its own detail.
+
+    Two deliberate choices:
+
+    * **Skip-and-continue, not a strict prefix.** A single oversized old sink must not shut
+      the door on many small recent ones; admission keeps going past one that does not fit.
+    * **``size == 0`` is admitted at zero cost.** That is the "unknown" value — a
+      hand-built ``LogSink`` (tests/test_b314_check_perf.py) or a failed stat(). Planning
+      such a sink OUT would silently drop it; admitting it hands the decision to the clock
+      backstop, which is exactly the pre-B-484 behaviour.
+
+    This does NOT raise coverage to 100%: the byte budget is absolute, so the covered
+    FRACTION still falls as a fleet grows. What it buys is that the uncovered tail is
+    provably the oldest rather than arbitrary, and that the set is the same on every run.
+    """
+    budget = getattr(lim, "log_max_total_bytes", None)
+    ordered = sorted(
+        sinks,
+        key=lambda s: (
+            _LOG_SINK_KIND_RANK.get(s.kind, _LOG_SINK_KIND_RANK_LAST),
+            -getattr(s, "mtime", 0.0),
+            str(s.path),
+        ),
+    )
+    if not budget or budget <= 0:
+        return (ordered, 0)
+
+    # C-135 finding, and the reason this is not a plain recency prefix. Ordering newest
+    # first hands an attacker a cheap exclusion lever that the old lexicographic order did
+    # not have: one os.utime() backdating a sink pushes it behind the whole corpus and out
+    # of the budget. Measured on a 21-sink probe — a backdated evidence sink was read by
+    # the old order and NOT by a pure-recency plan. (Renaming to sort last defeats both,
+    # so the filename lever survives as the tiebreak; recency alone was strictly worse.)
+    #
+    # So the budget is split: most of it goes to the newest, a reserve to the OLDEST.
+    #
+    # WHAT THIS DOES AND DOES NOT BUY — stated precisely, because the first version of
+    # this comment claimed "there is no safe mtime" and a C-135 pass disproved it three
+    # ways. It does NOT make evasion impossible, and the uncovered middle band is not a
+    # narrow seam: on the real corpus it measured as a single contiguous window covering
+    # most of the mtime range, reachable by `touch -d @<median mtime>` — one `ls -lt`, no
+    # size knowledge. What the reserve removes is specifically the ZERO-KNOWLEDGE lever:
+    # backdating to the epoch, the obvious move, now lands in the reserve and is read.
+    # An attacker who profiles the corpus first can still aim at the middle.
+    #
+    # Closing the middle band is not possible with a fixed budget — some band must go
+    # unread while only ~40% of the corpus is affordable. Treat that as the standing
+    # limitation of a budgeted scanner, and note that an attacker who can rewrite these
+    # files can also simply truncate them.
+    reserve = int(budget * _LOG_HUNT_OLDEST_RESERVE)
+    main_budget = budget - reserve
+
+    admitted: list = []
+    chosen: set = set()
+    used = 0
+
+    # A sink can never cost more to scan than `log_max_bytes_per_file`: scan_log_file
+    # stops there (logscan.py, the `bytes_scanned + line_bytes > lim.log_max_bytes_per_file`
+    # guard). Charging the file's FULL size was not conservative, it was wrong — a 64 MiB
+    # sink was billed 32x its real 2 MiB cost, which made every sink larger than the total
+    # budget unadmittable at EVERY mtime, at both passes. That handed an attacker a lever
+    # needing no corpus knowledge at all: append until the file exceeds a public shipped
+    # constant. Found by the C-135 pass on the reserve.
+    per_file_cap = getattr(lim, "log_max_bytes_per_file", 0) or 0
+
+    def _cost(sink) -> int:
+        size = max(0, getattr(sink, "size", 0) or 0)
+        return min(size, per_file_cap) if per_file_cap else size
+
+    def _fill(candidates, allowance: int) -> int:
+        # Skip-and-continue, never stop-at-first-miss: a single oversized sink must not
+        # shut the door on many small ones behind it.
+        spent = 0
+        for sink in candidates:
+            if id(sink) in chosen:
+                continue
+            cost = _cost(sink)
+            if spent + cost > allowance:
+                continue
+            chosen.add(id(sink))
+            admitted.append(sink)
+            spent += cost
+        return spent
+
+    used += _fill(ordered, main_budget)
+    # Reserve pass: genuinely oldest-first ACROSS kinds, not `reversed(ordered)`.
+    # `ordered` is sorted by kind rank first, so reversing it walks the whole of the LAST
+    # KIND before it ever reaches an old trajectory sidecar — on any home carrying an
+    # install-backup directory the reserve was spent entirely on backups and the
+    # backdating lever came straight back. Also found by the C-135 pass.
+    # The path tiebreak is REVERSED here on purpose. Both passes ordering ties the same
+    # way means a sink that loses the tie in the main pool loses it again in the reserve
+    # and is covered by neither — which re-opened the name lever the moment the reserve
+    # stopped keying on kind rank. Disagreeing on ties is what makes the two passes
+    # complementary rather than two views of the same ordering.
+    oldest_first = sorted(
+        ordered, key=lambda s: (getattr(s, "mtime", 0.0), _ReverseStr(str(s.path)))
+    )
+    used += _fill(oldest_first, budget - used)
+
+    # Restore plan order for the scan loop so the newest are still read FIRST: if the
+    # clock backstop does fire, it should cut into the reserve, not into the recent pool.
+    # Keyed by id() and not by list.index(): LogSink is a frozen dataclass, so two sinks
+    # with identical fields compare equal and index() would return the wrong position for
+    # one of them — and index() would make this O(n^2) besides.
+    position = {id(s): i for i, s in enumerate(ordered)}
+    admitted.sort(key=lambda s: position[id(s)])
+    return (admitted, len(ordered) - len(admitted))
+
+
 def _log_hunt_corroborated(nonzero_classes: set, world_readable: bool) -> bool:
     """True when a sink's nonzero signal classes clear the quiet-by-default WARN bar."""
     strong_single = "exfil_evidence" in nonzero_classes or (
@@ -2717,7 +2885,21 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     lim = limits_for(ctx)
     check_deadline = audit_deadline(lim.log_check_budget_s)
 
-    for sink in sinks:
+    # B-484: choose the sinks up front, newest-first within kind, inside a byte budget —
+    # so the covered set is a pure function of (kind, mtime, size, path) instead of of how
+    # fast this box happened to be. Sinks planned out are counted into the SAME disclosure
+    # the clock backstop uses: from the reader's side "not scanned" means the same thing
+    # either way, and Golden Rule #4 cares that the number is honest, not why.
+    # NOTE: bound to a NEW name. `sinks` must keep meaning "everything discovered" —
+    # three later sentences count off it (`len(sinks)` in the none-readable return, the
+    # --exhaustive completeness line, and the "N scanned" roll-up). Rebinding it here made
+    # all three report the ADMITTED count instead, which produced a literal
+    # "-2 log/transcript sink(s) scanned" once `skipped_for_time` carried the planned-out
+    # sinks as well. Found by the C-135 pass on this change.
+    planned, planned_out = _plan_log_hunt_sinks(sinks, lim)
+    skipped_for_time += planned_out
+
+    for sink in planned:
         remaining = None if check_deadline is None else check_deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
             skipped_for_time += 1
@@ -2791,11 +2973,21 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
             isolated_hits += len(nonzero) + len(weak_cross)
 
     if not any_scanned:
+        # This path returns BEFORE the `if skipped_for_time:` disclosure below, so it has
+        # to carry the count itself — otherwise a run where the budget planned everything
+        # out reports "none were readable", blaming permissions for what was actually a
+        # scan-budget decision, and discloses no truncation at all (Golden Rule #4).
+        unread = (
+            f" {skipped_for_time} of them were not offered to the scan (scan budget "
+            "reached) — re-run with --exhaustive to include them."
+            if skipped_for_time
+            else ""
+        )
         return _finding(
             "B164",
             UNKNOWN,
             f"{len(sinks)} log/transcript sink(s) found but none were readable/non-empty "
-            "— nothing to content-scan.",
+            f"— nothing to content-scan.{unread}",
             "Ensure the agent's log/transcript files are readable by the auditing user.",
         )
 
@@ -2807,9 +2999,16 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     # deadline (_LOG_HUNT_CHECK_BUDGET_S) — never silently omitted from the count.
     if skipped_for_time:
         plural = "sink" if skipped_for_time == 1 else "sinks"
+        # B-484: the old sentence ended "— re-run to include them", which was true only
+        # while the cutoff was the wall clock and a second run could land differently.
+        # Now that the set is planned deterministically, a plain re-run skips exactly the
+        # same sinks, so that remedy would be a lie; --exhaustive is the real one. The
+        # oldest-first phrasing tells the reader WHICH sinks they are missing — the point
+        # of ordering them in the first place.
         note += (
-            f" {skipped_for_time} log/transcript {plural} not scanned (check time budget "
-            "reached) — re-run to include them."
+            f" {skipped_for_time} log/transcript {plural} not scanned (scan budget "
+            "reached; the oldest are left out first) — re-run with --exhaustive to "
+            "include them."
         )
     elif lim.exhaustive:
         # F-164 SC-5: under --exhaustive, completeness must be stated affirmatively —
