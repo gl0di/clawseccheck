@@ -1674,10 +1674,22 @@ _JSONL_SCAN_CAP = 1_000_000  # B-104: byte budget for tailing append-only JSONL 
 _MCP_REMOTE_TRANSPORTS = ("sse", "http", "streamable-http", "streamablehttp", "websocket", "ws")
 
 
-def _custom(cid, severity, status, detail, fix, ev=None, not_applicable=False) -> Finding:
+def _custom(
+    cid, severity, status, detail, fix, ev=None, not_applicable=False, engine_degraded=False
+) -> Finding:
     """Build a finding with an explicit severity (for dynamic-severity checks).
 
     *not_applicable* (F-138/B1): see Finding.not_applicable / _finding()'s docstring.
+
+    *engine_degraded* (B-455): same contract as ``_finding()``'s own parameter — pass
+    True only for an UNKNOWN whose cause is ENGINE-SIDE (an input the check expected to
+    read that turned out unreadable/corrupt/unparseable), never for a plain "nothing to
+    check" UNKNOWN. Defaults False, so every existing caller is unaffected. Before this,
+    ``_custom()`` had no way to set the flag at all — every dynamic-severity check
+    (B13's ``check_installed_skills`` chain included) was structurally incapable of
+    marking its own engine-side UNKNOWN, so it silently dropped out of
+    ``scoring.compute()``'s denominator instead of hard-capping the grade like
+    ``_config_unreadable()``'s ``_finding()``-built UNKNOWN already does.
     """
     m = BY_ID[cid]
     return Finding(
@@ -1692,6 +1704,7 @@ def _custom(cid, severity, status, detail, fix, ev=None, not_applicable=False) -
         ev or [],
         confidence=m.confidence,
         not_applicable=not_applicable,
+        engine_degraded=engine_degraded,
     )
 
 

@@ -3224,8 +3224,17 @@ def _b13_verdict(
     ev: list[str] | None,
     signal_buckets: dict[str, list],
     winner: str,
+    engine_degraded: bool = False,
 ) -> Finding:
-    fx = _custom("B13", severity, status, detail, fix, ev)
+    # B-455: *engine_degraded* defaults False (every existing caller unaffected) — see
+    # the parse_error_paths call site below, the only winner that passes True. An
+    # unparseable bundled file is scoring.py's own definition of engine-side degraded
+    # (Finding.engine_degraded's docstring, catalog.py): the AST/taint layer tried to
+    # read it and failed, not "nothing here to check". Without this, B13's parse-error
+    # UNKNOWN silently dropped out of scoring.compute()'s denominator (scored filter,
+    # scoring.py) instead of hard-capping the grade via DEGRADED_CHECK_CAP the way
+    # `_config_unreadable()`'s engine-side UNKNOWN already does.
+    fx = _custom("B13", severity, status, detail, fix, ev, engine_degraded=engine_degraded)
     # C-358: coverage disclosure only, appended to evidence (never detail) — every
     # check_installed_skills verdict routed through this helper carries it, so it can
     # never be mistaken for a clean "the dependency tree was looked at and is fine".
@@ -3846,6 +3855,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             parse_error_paths,
             _signal_buckets,
             "parse_error_paths",
+            engine_degraded=True,
         )
 
     # B-074: scanning hit a size/file/nesting cap (text/py truncation or archive limits) —
