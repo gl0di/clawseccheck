@@ -1,7 +1,18 @@
 # ClawSecCheck — User guide
 
-This is the full user guide: every install path, flag, recipe, and trust
-detail. The short version lives in the [README](../README.md).
+This is the full user guide: install paths, the main flags, recipes, and trust
+detail. Not every flag from `--help` is walked through here individually — some
+live in [`SKILL.md`](../SKILL.md), [`docs/FLOW_CHOICES.md`](FLOW_CHOICES.md),
+[`docs/OUTPUT_SCHEMA.md`](OUTPUT_SCHEMA.md), [`docs/FAQ.md`](FAQ.md), or
+[`references/cli-flags.md`](../references/cli-flags.md) instead; `clawseccheck --help`
+is always the exhaustive list. The short version lives in the [README](../README.md).
+
+**`--emit-manifest`** prints a proposed permission manifest (YAML-shaped), derived from
+static effect analysis, for a single skill vetted via `--vet`/`--vet-skill`:
+
+```bash
+clawseccheck --vet ./some-skill --emit-manifest
+```
 
 Everything below is **local against your OpenClaw setup**, and the scanner
 itself makes no network calls. Reading goes beyond just the config file — see

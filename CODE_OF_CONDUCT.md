@@ -63,6 +63,11 @@ reported to the community leaders:
 
 * **Security vulnerabilities:** please read [SECURITY.md](SECURITY.md) instead
   of opening a public issue.
+* **Code of Conduct incidents (harassment or other unacceptable behavior):**
+  email the maintainer privately at `gllodi@gmail.com` — the same private
+  contact [SECURITY.md](SECURITY.md) lists as its vulnerability-reporting
+  alternative. Do not open a public issue for these; see the privacy promise
+  below.
 * **Other questions or concerns:** open a GitHub issue in this repository.
 
 All complaints will be reviewed and investigated promptly and fairly.

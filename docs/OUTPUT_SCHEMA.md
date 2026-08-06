@@ -105,14 +105,14 @@ before assuming a nested key is part of the contract; notably, the subject keys 
   "config_parse_reason": null,
   "errors": [],
   "inventory": {
-    "openclaw": { "status": "FAIL", "findings": ["B2"] },
-    "host": { "status": "WARN", "findings": ["B50"] },
-    "agents": { "status": "PASS", "findings": [], "roster": ["(default)"], "attested": false },
+    "openclaw": { "status": "FAIL", "findings": ["B2"], "unassessed": 24 },
+    "host": { "status": "WARN", "findings": ["B50"], "unassessed": 0 },
+    "agents": { "status": "PASS", "findings": [], "unassessed": 0, "roster": ["(default)"], "attested": false },
     "skills": [ { "name": "pdf", "verdict": "NO KNOWN ISSUE", "status": "PASS", "reasons": [] } ],
     "mcp": [ { "name": "slack", "verdict": "ok", "reasons": [] } ],
     "plugins": { "scanned": false, "rows": [] },
-    "channels": { "status": "WARN", "findings": ["B26"], "roster": ["telegram"] },
-    "logs": { "status": "PASS", "findings": [] }
+    "channels": { "status": "WARN", "findings": ["B26"], "unassessed": 0, "roster": ["telegram"] },
+    "logs": { "status": "PASS", "findings": [], "unassessed": 0 }
   },
   "scan_receipt": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 }
@@ -1118,7 +1118,7 @@ audit logging, file-integrity monitoring, EDR, native binary PATH). `"plugins"` 
 
 | Field | Type | Description |
 |---|---|---|
-| `openclaw` | `object` | Bucket: `{"status": str, "findings": array[str]}`. `status` is the worst status (`FAIL` > `WARN` > `UNKNOWN` > `PASS`) among findings on the OpenClaw-core surfaces (gateway, tools, secrets, monitoring, hooks, update, sessions); `findings` lists the ids of that bucket's own FAIL/WARN findings. |
+| `openclaw` | `object` | Bucket: `{"status": str, "findings": array[str], "unassessed": int}`. `status` is the worst status (`FAIL` > `WARN` > `UNKNOWN` > `PASS`) among findings on the OpenClaw-core surfaces (gateway, tools, secrets, monitoring, hooks, update, sessions); `findings` lists the ids of that bucket's own FAIL/WARN findings; `unassessed` counts members whose `status` is `UNKNOWN` **and** `not_applicable` is `false` — a surface positively confirmed absent (`not_applicable: true`) was still assessed, so it is deliberately NOT counted here even though it is also `UNKNOWN`. |
 | `host` | `object` | Bucket, same shape as `openclaw`, scoped to the `host` surface (network IDS, audit logging, file-integrity monitoring, EDR, native binary PATH safety, systemd persistence) — answers "is this MACHINE monitored", a distinct question from "is OpenClaw configured well". |
 | `agents` | `object` | Bucket, same shape as `openclaw`, plus: `roster` (`array[str]`) — agent names, preferring an attested roster (`--attest`) over the static `agents.list` config, falling back to `["(default)"]`; `attested` (`bool`) — `true` when the roster came from an attestation self-report. |
 | `skills` | `array[object]` | One entry per installed skill: `{"name": str, "verdict": str, "status": str, "reasons": array[str]}`. `verdict` reuses the same word set `--vet` uses (`"NO KNOWN ISSUE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, `"UNKNOWN"`); `status` is the underlying `PASS`/`WARN`/`FAIL`/`UNKNOWN`; `reasons` holds up to 3 sanitised detail strings. Empty array when no skills are installed. A skill the per-skill scan budget could not reach reports `status: "UNKNOWN"` with a reason explaining why — never a false `"NO KNOWN ISSUE"`. |
@@ -1210,7 +1210,7 @@ One entry per subject in the 8-subject taxonomy (§18):
 | `total` | `int \| null` | How many things this subject owns (checks for a bucket subject, installed targets for a sweep subject). `null` means this run never swept the subject at all (`skills`/`plugins` on a run without `--full` or under `--fast`) — distinct from `0` (swept, and there was nothing to scan). |
 | `scanned` | `int \| null` | How many of `total` reached a conclusive verdict. For `openclaw`/`host`/`agents`/`channels`/`logs` (bucket subjects): checks that returned `PASS`/`FAIL`/`WARN` rather than `UNKNOWN`. For `skills`/`plugins`: installed targets the sweep fully scanned (neither `SKIPPED` nor `TRUNCATED`). `mcp` is always fully scanned (`scanned == total`) — MCP vetting is not sweep-budgeted. `null` mirrors `total`'s `null`. |
 | `not_scanned` | `array[str]` | Every gap, named — check ids (bucket subjects) or target names (`skills`/`plugins`), never merely a count. Empty when `scanned == total`. |
-| `note` | `str \| null` | Present only for the `null`/`0` cases above: `"not scanned this run (needs --full)"`, `"none installed"`, or `"none configured"` (`mcp` with zero configured servers). `null` for every ordinary scanned-vs-total entry. |
+| `note` | `str \| null` | Present only for the `null`/`0` cases above, one of four strings: `"not scanned this run (needs --full)"` (a run WITHOUT `--full` at all — `skills`/`plugins` only); `"not scanned this run (--fast drops the sweep phases)"` (`--full --fast --json` — the sweep phases ran, so naming `--full` again would be telling the operator to pass a flag they already passed); `"none installed"` (`skills`/`plugins` swept, nothing found); or `"none configured"` (`mcp` with zero configured servers). `null` for every ordinary scanned-vs-total entry. |
 
 ### Skeleton
 
@@ -1231,6 +1231,15 @@ One entry per subject in the 8-subject taxonomy (§18):
 
 ### Notes
 
+- **Its gap and `inventory.unassessed` (§18) use different denominators for the same
+  subject, by design.** Measured on `fixtures/home_vuln --full --json`:
+  `coveragePage.openclaw` shows `total: 68, scanned: 33` (a gap of 35), while
+  `inventory.openclaw.unassessed` is `24`. The 11-item difference is exactly the
+  `openclaw`-subject findings that are `UNKNOWN` **and** `not_applicable: true` (a
+  surface positively confirmed absent, e.g. no MCP servers configured at all): this
+  page's `scanned` only counts `PASS`/`FAIL`/`WARN`, so a `not_applicable` `UNKNOWN`
+  still counts as a gap here, while `inventory.unassessed` deliberately excludes it
+  (that surface WAS assessed — it just resolved to "nothing there"). Not a bug.
 - Presentation-only, same as `inventory` — never alters `score`/`grade`/`findings`.
 - **V1 scope**: `logs` is CHECK-granularity here (same as the other bucket subjects),
   not the file/byte-level detail ("N of M trajectory files, X of Y MB scanned") a

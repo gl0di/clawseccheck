@@ -37,15 +37,22 @@ as `<REDACTED>` or `sk-XXXX`.
 
 ClawSecCheck is a **local, read-only** audit tool. Its read scope is bounded and
 documented: your OpenClaw config, bootstrap markdown, installed-skill text, OpenClaw log
-files and agent session logs, and — unless you pass `--no-host` — a host-posture scan
-beyond OpenClaw's own scope (security-tool config paths and binaries on `PATH`, the text
-of a few known firewall config files, the names of proxy-shaped env vars, and on Windows
-read-only `HKEY_LOCAL_MACHINE` registry queries). `SKILL.md` and
-[`SECURITY_MODEL.md`](SECURITY_MODEL.md) list the full surface. It writes only
-its own state under `~/.clawseccheck/` — by default a one-line score-history entry
-(opt out with `--no-history`), and other files only when you ask (`--save`, `--badge`,
-`--sarif`, `--monitor`, `--log`). It never writes to your OpenClaw config, and it makes
-no network calls. Findings stay on your machine.
+files and agent session logs, the ClawHub CLI's own token-store path outside the OpenClaw
+home (B182, credential-hygiene check), and three default-on scans, each individually
+disabled with its own flag: a host-posture scan beyond OpenClaw's own scope (`--no-host`:
+security-tool config paths and binaries on `PATH`, the text of a few known firewall config
+files, the names of proxy-shaped env vars, and on Windows read-only
+`HKEY_LOCAL_MACHINE` registry queries), a socket scan (`--no-sockets`: `/proc/net/tcp{,6}`
+and a read-only `/proc/*/fd` walk), and an npm dependency-tree walk (`--no-deptree`:
+`node_modules` under the installed OpenClaw package, outside the OpenClaw home —
+manifests and install-time targets only, nothing executed). `SKILL.md` and
+[`SECURITY_MODEL.md`](SECURITY_MODEL.md) list the full surface. It writes only its own
+state under `~/.clawseccheck/` — by default a one-line score-history entry (opt out with
+`--no-history`), and other files only when you ask (`--save`, `--badge`, `--html`,
+`--sarif`, `--pdf`, `--monitor`, `--log`). The one named exception, opt-in and
+confirmation-gated: `--apply-ignore-proposals` appends previously-proposed entries to
+`<home>/.clawseccheckignore` inside the audited OpenClaw home. Otherwise it never writes
+to your OpenClaw config, and it makes no network calls. Findings stay on your machine.
 
 For the full breakdown of the tool's own capability surface, least-privilege posture,
 data-handling/redaction discipline, tamper-evident audit trail, and the forward-looking
