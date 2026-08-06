@@ -553,7 +553,7 @@ The `--risk-paths` output is also appended to the default report when any chain 
 ```bash
 python3 audit.py --sarif results.sarif      # write SARIF 2.1.0 locally (for GitHub Code Scanning upload step)
 python3 audit.py --fail-under 70            # exit 1 if score < 70 (use in CI pipelines)
-python3 audit.py --exit-code                # exit 1 on any FAIL verdict (four sources — see below)
+python3 audit.py --exit-code                # exit 1 on any FAIL verdict (six sources — see below)
 ```
 
 The SARIF file is written to the path you choose — ClawSecCheck never uploads it anywhere.
@@ -773,23 +773,24 @@ python3 audit.py --log audit.log            # also write log to a local file
     Chains/Behavioural/Second opinion/Coverage/Worth a glance, in that fixed order):
 
     ```text
-    🦞 OpenClaw Security Audit — Grade F · 49/100
-    ████████░░░░░░░░  ·  3 issues
+    🦞 ClawSecCheck · OpenClaw Security Audit · Grade F · 49/100
+    ████████░░░░░░░░  ·  26 issues
+    ⚠️ capped from 70/100 — open CRITICAL finding
 
-    — Findings —
+    · Findings ·
     ┌──────────────────────────────
-    │ 🌐 Exposure & Network — 1 issue(s)
+    │ ⚙️ OpenClaw core — 13 issue(s)
     └──────────────────────────────
-    🔴 CRITICAL  insecure control-UI auth
-        why: anyone on your local network can send commands to your agent right now — no pairing or auth required
+    🔴 CRITICAL  Gateway exposure & channel authentication
+        why: gateway.bind=0.0.0.0 exposed with auth.mode=none; gateway.tailscale.mode=funnel exposes the gateway publicly
 
     ┌──────────────────────────────
-    │ 🔑 Privilege & Execution — 2 issue(s)
+    │ 🤖 Agents — 4 issue(s)
     └──────────────────────────────
     🔴 CRITICAL  Lethal Trifecta (untrusted input × sensitive data × outbound)
-        why: all three legs are active — outside input, sensitive data, and outbound actions; one injected prompt is enough to exfiltrate everything
-    🟠 HIGH  tool profile broader than minimal
-        why: the "coding" profile gives the agent filesystem write, shell, and package-install access — a hijacked agent can run arbitrary code
+        why: Active legs 3/3: untrusted input, sensitive data, outbound actions. All three legs are active — one injected prompt is enough to exfiltrate everything.
+    🟠 HIGH  Execution sandbox
+        why: agents.defaults.sandbox.mode is off (exec runs on the host)
     ```
 
     This is a **sample for illustration only** — the guided flow ([`SKILL.md`](../SKILL.md)

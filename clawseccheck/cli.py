@@ -2986,12 +2986,12 @@ def _main(argv=None) -> int:
         # F-149: sweep_has_fail joins the disjunction on exactly the terms vm_has_fail
         # already sits on — FAIL-only. A SUSPICIOUS (WARN) skill does not redden the
         # gate, and neither does an incomplete sweep: the contract this gate keeps is
-        # "a FAIL verdict from any of the four sources below, plus an unreadable
+        # "a FAIL verdict from any of the six sources below, plus an unreadable
         # config" — an ABSENT verdict is not a FAIL, and flipping the gate on
         # truncation would silently redden every CI run that passes today. An
         # incomplete sweep is reported honestly in its printed section instead.
-        # docs/USAGE.md ("CI / automation") and references/cli-flags.md state all four
-        # sources; keep them in step with this disjunction if a fifth is ever added.
+        # docs/USAGE.md ("CI / automation") and references/cli-flags.md state all six
+        # sources; keep them in step with this disjunction if a seventh is ever added.
         #
         # F-153: pipeline_has_fail joins on identical terms — FAIL-only, aggregated
         # across the pipeline phases. A phase that was skipped (--fast), never reached

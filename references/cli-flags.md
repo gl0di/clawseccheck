@@ -20,12 +20,14 @@ kept here so the always-loaded playbook stays lean.
   (danger / build / behavior / persistence / connections) plus an A–F grade. Exit code is 1 on
   SUSPICIOUS/DANGEROUS. See `docs/OUTPUT_SCHEMA.md` §11.
 - `--fail-under N` — exit with code 1 if score is below N (useful for CI pipelines).
-- `--exit-code` — exit 1 on a FAIL verdict from any of five sources: (1) an unsuppressed
+- `--exit-code` — exit 1 on a FAIL verdict from any of six sources: (1) an unsuppressed
   `FAIL` audit finding; (2) under `--full`, a `FAIL` MCP server; (3) under `--full`, a
   `DANGEROUS` installed skill from the skill sweep; (4) under `--full` (and not `--fast`), a
   `DANGEROUS` installed plugin from the plugin sweep; (5) on any run, a present-but-unparseable
   `openclaw.json` (which yields only UNKNOWN/WARN findings, so a FAIL-only gate would
-  otherwise stay green on a broken config). Sources 2-4 are FAIL-only — a SUSPICIOUS
+  otherwise stay green on a broken config); (6) on any run, a wholly absent `openclaw.json`
+  (B-363) — strictly less information than a present-but-unparseable one, so it trips the
+  gate the same way rather than falling through to a misleading green. Sources 2-4 are FAIL-only — a SUSPICIOUS
   (WARN) server, skill, or plugin does not trip it, and neither does a skipped or
   partially-scanned target: an incomplete sweep is disclosed in its printed section, never
   by reddening the gate. The adjudication phase (judge packet / second opinion) never trips

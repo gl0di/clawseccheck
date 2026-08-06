@@ -72,7 +72,7 @@ No flags, no commands. Everything works as a conversation:
 
 | You say | You get |
 |---|---|
-| *"Audit my OpenClaw setup"* | One combined report, in your chat: your A–F grade, the urgent problems most dangerous first, plus every installed skill/plugin/MCP server vetted, the riskiest capability chains, a behavioral replay, and a second opinion on any borderline call — not just the top-line grade |
+| *"Audit my OpenClaw setup"* | A chat-sized card — your A–F grade, an inventory by subject, and the urgent problems most dangerous first — with a **PDF companion** carrying the rest: every installed skill/plugin/MCP server vetted, the riskiest capability chains, a behavioral replay, and a second opinion on any borderline call |
 | *"Is this skill safe to install?"* | A pre-install risk verdict with the reasons — flags **suspicious** and **dangerous** skills before you enable them |
 | *"Am I vulnerable to prompt injection?"* | An optional canary self-test you run against your own agent, alongside the static audit |
 | *"Watch my setup for changes"* | Alerts when something changes — a new skill, config drift, a dropped score |

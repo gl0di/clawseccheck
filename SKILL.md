@@ -508,14 +508,16 @@ and offer to save the full report via `--save <path>` / `--html <path>`.
 **Do not compose the card — paste it.**
 
 Live testing showed that when the model composes the grade card / findings sections
-itself, the 🦞 header and the family frame silently vanish. So the WHOLE card above is one
+itself, the 🦞 header and the per-subject frames silently vanish. So the WHOLE card above is one
 deterministic render — paste its **entire stdout here, verbatim**. It emits, in this fixed
 order (F-153):
 
-- **Section 1 — Grade card:** `🦞 OpenClaw Security Audit — Grade {grade} · {score}/100`,
-  a 16-cell score-bar, and the count of non-suppressed FAIL/WARN findings.
-  **No standalone Lethal Trifecta chip (F-044)** — trifecta state is one Privilege &
-  Execution finding among others in Section 2.
+- **Section 1 — Grade card:** `🦞 ClawSecCheck · OpenClaw Security Audit · Grade {grade} ·
+  {score}/100`, a 16-cell score-bar carrying the count of non-suppressed FAIL/WARN findings,
+  and — whenever the score was capped — a disclosure line naming the reason
+  (`⚠️ capped from 70/100 — open CRITICAL finding`).
+  **No standalone Lethal Trifecta chip (F-044)** — trifecta state is one **Agents** finding
+  among others in Section 2.
 - **Section 2 — Findings, grouped by subject** (details below).
 - **Skills** (B-356, when skills are installed): a compact per-skill vet verdict — install
   count, a `clean:` list, and a `verdict - reason` line for anything flagged. Reuses the
@@ -620,7 +622,7 @@ that bucket is non-empty):
 Since the pasted Section 2 no longer tallies UNKNOWN, this coverage line is the single place
 unassessed surfaces are surfaced.
 
-For each partial surface (all findings returned UNKNOWN): if it's Privilege & Execution (B43/B44)
+For each partial surface (all findings returned UNKNOWN): if it's OpenClaw core (B43/B44)
 and item 1 already ran the capability self-report in Step 2, it's likely already resolved — don't
 tell the user to run something that just ran. For any other still-partial surface, note that
 answering `--ask` then `--attest` ([`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md) →
