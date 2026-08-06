@@ -58,6 +58,33 @@ check needs:
   concise; the body explains *why* when it isn't obvious.
 - Keep commits atomic; update the affected docs in the same PR (docs must never
   lag the code they describe).
+- **First-time contributors sign a CLA** — one comment on your PR, once, for all
+  future contributions. See below for what it means.
+
+## Contributor License Agreement
+
+Your first pull request will get a bot comment asking you to sign
+[CLA.md](CLA.md) by replying with a single sentence. It takes a moment and you
+only ever do it once.
+
+Being upfront about why, because a contributor should know before signing rather
+than discover it later:
+
+- **ClawSecCheck is and stays MIT.** Your contribution ships in the free, open
+  tool under the same licence as everything else here.
+- **You keep your copyright.** The CLA is a licence, not an assignment — your own
+  code remains yours to use anywhere else.
+- **The maintainer may also use contributions in commercial products** built on
+  this engine, without asking again. That is the substantive term, and it is the
+  reason the agreement exists at all.
+
+If that trade isn't for you, please don't sign — [open an
+issue](https://github.com/gl0di/clawseccheck/issues) instead. A precise bug
+report or a reproduction case is a genuinely valuable contribution and needs no
+agreement whatsoever.
+
+The project's name and logo are separate from its code and are not covered by
+the MIT licence — see [TRADEMARK.md](TRADEMARK.md).
 
 ## Reporting issues
 

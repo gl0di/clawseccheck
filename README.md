@@ -242,4 +242,7 @@ complete flag list.
   [Start a discussion](https://github.com/gl0di/clawseccheck/discussions) — see
   [SUPPORT.md](SUPPORT.md) for where each kind of report goes.
 - **Found a vulnerability?** Report privately via [SECURITY.md](SECURITY.md).
-- **License:** [MIT](LICENSE). Maintained by [gl0di](https://github.com/gl0di).
+- **License:** [MIT](LICENSE) for the code. The ClawSecCheck name and logo are not covered by
+  it — see [TRADEMARK.md](TRADEMARK.md). Contributors sign a short
+  [CLA](https://github.com/gl0di/clawseccheck/blob/main/CLA.md).
+  Maintained by [gl0di](https://github.com/gl0di).
