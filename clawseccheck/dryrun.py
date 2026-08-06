@@ -22,6 +22,7 @@ import hashlib
 import secrets
 
 from . import brand
+from .textnorm import asciify
 
 # Prefix that makes fake secrets unambiguously artificial — never a real credential.
 _FAKE_PREFIX = "CLAWSECCHECK_FAKE_"
@@ -338,4 +339,4 @@ def render_dryrun(scenarios: list[dict], ascii_only: bool = False) -> str:
     ]
 
     out = "\n".join(lines)
-    return out.encode("ascii", "replace").decode("ascii") if ascii_only else out
+    return asciify(out) if ascii_only else out

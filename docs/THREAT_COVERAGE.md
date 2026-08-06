@@ -2,7 +2,7 @@
 
 Honest map of what ClawSecCheck checks today, what it does **not** yet check, and where
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
-all (so they can't even surface as a finding). Updated 2026-08-05 for v3.60.0.
+all (so they can't even surface as a finding). Updated 2026-08-06 for v3.61.0.
 
 Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 179 catalogued,
 of which **175 run in a default audit**; the three T-series behavioral checks plus B191
@@ -170,8 +170,9 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
 - Deep dirty-input content normalization (bidi/zero-width stripping, hidden-text channel
   neutralization beyond what B26/B21/B58 already flag as a *finding*) — OpenClaw exposes no
   sanitizer config field to check; this is a filtering *capability* gap, not a
-  detection one, **for the invisible characters the class already covers** — where the class
-  itself falls short is a detection gap, declared separately below `[CEILING]`
+  detection one, **for the invisible characters the class already covers** — the two
+  narrower classes and the Tier-2 code points still outside it are declared separately
+  below `[CEILING]`
 - **AST10 — Cross-Platform Reuse** (OWASP Agentic Skills Top 10) — ClawSecCheck audits a
   single install; cross-platform reuse hazards need a multi-deployment view that is out of
   scope for this tool `[CEILING]`
@@ -269,21 +270,26 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
   config parsing `[CEILING]`
 - **Hidden channel built from an invisible character outside the detected class** —
   `textnorm.obfuscation_signals` raises its "zero-width / invisible characters found" signal
-  for exactly six code points (U+200B zero-width space, U+200C ZWNJ, U+200D ZWJ, U+FEFF BOM,
-  U+00AD soft hyphen, U+2060 word joiner), and `normalize_for_scan` strips that same set plus
-  the bidi controls. An invisible code point outside it is neither stripped nor reported.
-  U+2062 INVISIBLE TIMES and U+2063 INVISIBLE SEPARATOR are the clean demonstration: both
-  render as nothing, both pass through `normalize_for_scan` unchanged, and both return an
-  empty signal list — so a two-symbol hidden channel built from that pair produces no signal
-  at all, a silent PASS rather than even an UNKNOWN. The blind spot is shared rather than
-  per-check, because every consumer of that signal reads the one class: B58 and the
-  content-security ring, the MCP tool name/description legs, B349's dependency-tree
-  hook-target scan, and the collected-filename check on the `--vet` path. The separate Tag-block detector (U+E0000–U+E007F) is unaffected and still
-  fires on that family; what is declared here is specifically the non-Tag invisible code
-  points the class omits. Widening it is not a one-line fix — every code point added is a new
-  false-positive surface on legitimate text, and the class is shared by every check that calls
-  `normalize_for_scan`, so the honest fix is a re-derivation of the class with its own
-  adversarial pass, never a per-check patch `[CEILING]`
+  for **twenty** code points (U+00AD soft hyphen, U+180E, U+200B–200D, U+2060–2064,
+  U+206A–206F, U+FEFF, U+FFF9–FFFB), and `normalize_for_scan` strips that same set plus the
+  nine bidi controls — **29** in all. Both halves derive from one source, so the detector
+  cannot again report a channel the normalizer is unable to read through. The separate
+  Tag-block detector (U+E0000–U+E007F) covers that family independently. What remains is
+  two named, deliberate residuals rather than one open-ended gap:
+  **(1) Tier-2 code points, still outside the class** — variation selectors U+FE00–FE0F,
+  U+2800 BRAILLE PATTERN BLANK, and U+3164 / U+FFA0 HANGUL FILLER. Each is legitimate and
+  common in its own context (U+FE0F alone is what gives a base glyph emoji presentation), so
+  a bare presence class would false-fire on ordinary emoji, Korean and Braille text across
+  every consumer at once. The sound direction is per-character excusal by surrounding script
+  context — the shape `_is_zwj_between_emoji` already uses — not a wider class.
+  **(2) Two FAIL-capable paths held deliberately narrower than the shared class** — the MCP
+  tool-**NAME** homoglyph leg (`_B332_ZERO_WIDTH_RE`, six code points) and the two
+  token-level confusable/NFKC signals (`_INVISIBLE_TOKEN_RE`, fifteen). Widening either
+  trades a false negative for a false positive on legitimate text — Japanese ruby annotation
+  and Mongolian orthography for the first, mixed-script token joining for the second — and a
+  false FAIL is decisive whatever the detection gain. Each is recorded in-source next to its
+  own class with the measurement that settled it. Reopening either needs a discriminator for
+  the benign population, not more code points `[CEILING]`
 
 ## Framework mapping (OWASP)
 

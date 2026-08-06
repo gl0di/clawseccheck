@@ -34,6 +34,9 @@ from . import (
 )
 from . import __released__, __version__
 from .brand import WORDMARK
+# B-460: same rationale as the .monitor import below — taken from the submodule so this
+# internal resolver does not have to widen the curated public API in __init__.py.
+from .checks import resolve_skill_target
 from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
@@ -93,9 +96,11 @@ from .palette import render_palette
 from .percentile import render_percentile
 from .logsafe import get_logger
 from .safeio import secure_write_bytes, secure_write_text
+from .textnorm import asciify
 from .incident import render_incident
 from .trajaudit import render_trajectory_analysis
 from .behavioral import analyze as _behavioral_analyze
+from .behavioral import explicit_path_problem as _behavioral_path_problem
 from .behavioral import grade_cap_signal as _behavioral_grade_cap_signal
 from .behavioral import render_behavioral_analysis
 from .sbom import render_sbom
@@ -131,7 +136,7 @@ def _emit(text: str) -> None:
     try:
         print(text)
     except UnicodeEncodeError:
-        print(text.encode("ascii", "replace").decode("ascii"))
+        print(asciify(text))
 
 
 @contextlib.contextmanager
@@ -813,7 +818,7 @@ def _resolve_runtime_caps(ctx, findings, score, args):
     # check_deadline block, whose disarm-on-exit would delete an outer deadline.
     full_deadline = _pipeline.start_deadline(DEFAULT_FULL_BUDGET_S) if args.full else None
     judged_bundle = (
-        _pipeline.read_judged_bundle(args.judged_bundle)
+        _judged_bundle(args.judged_bundle)
         if (args.full and args.judged_bundle is not None) else None
     )
     # F-155: a VULNERABLE live injection-test verdict (canary/dryrun/redteam/multiturn),
@@ -891,7 +896,7 @@ def _apply_live_test_cap(ctx, findings, score, args):
     function was written to close.
     """
     judged_bundle = (
-        _pipeline.read_judged_bundle(args.judged_bundle)
+        _judged_bundle(args.judged_bundle)
         if args.judged_bundle is not None else None
     )
     live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
@@ -1007,6 +1012,11 @@ _MODE_HONORS = {
     # F-153: --dashboard --full renders the whole combined pipeline report (the
     # phases --full itself runs); --compact only ever modifies THAT combined render.
     "dashboard": frozenset({"full", "compact"}),
+    # C-374: --pdf wins the mode race over --dashboard (it is earlier in _PRIMARY_MODES),
+    # but both are honored now — and under `--dashboard --full --pdf` the --full phases
+    # are what the PDF's pipeline blocks are rendered FROM, so --full genuinely has an
+    # effect here. Saying "no effect" was true of the findings-only PDF, not this one.
+    "pdf": frozenset({"full", "compact"}),
     # F-155 fix (C-135): --judged-bundle's `liveTest` bucket now caps the score
     # reaching --trend/--monitor too (see _apply_live_test_cap) — a SEPARATE honor
     # from "full", deliberately not folded into it the way --dashboard's is: --full/
@@ -1071,12 +1081,25 @@ def _flag_coherence_notes(args) -> list[str]:
         # with no primary mode active here, --dashboard cannot be the one that ran.
         if bool(getattr(args, "compact", False)):
             notes.append("note: --compact has no effect without --dashboard --full")
+        # B-482: --purge / --apply-ignore-proposals are the only two consumers of --yes,
+        # and both are primary modes — so reaching HERE at all means no mode that can
+        # honor it ran. Checked in this branch too (not only the winning-mode one below),
+        # because the default report path is exactly where a scripted `--yes` most often
+        # lands, believing it disabled a confirmation gate it never reached.
+        if bool(getattr(args, "yes", False)):
+            notes.append("note: --yes has no effect without --purge or "
+                         "--apply-ignore-proposals")
         return notes  # the default path honors every tracked global modifier
     win_attr, win_flag = active[0]
     ignored = [
         f for a, f in active[1:]
         # --sarif is a side output under --vet/--vet-mcp, not an ignored mode.
         if not (a == "sarif" and win_attr in ("vet", "vet_skill", "vet_plugin", "vet_mcp"))
+        # C-373: --pdf and --dashboard COMPOSE rather than supersede — the card is the
+        # chat message that fits, the PDF is the attachment it points at, and both are
+        # produced in one run. Reporting "--dashboard ignored (running --pdf)" was true
+        # of the old early-return dispatch and is a lie about the new one.
+        and not (a == "dashboard" and win_attr == "pdf")
     ]
     # --card is a default-path output selector; any primary mode supersedes it.
     if bool(getattr(args, "card", False)):
@@ -1084,6 +1107,12 @@ def _flag_coherence_notes(args) -> list[str]:
     if ignored:
         notes.append(f"note: {', '.join(ignored)} ignored (running {win_flag})")
     honored = _MODE_HONORS.get(win_attr, frozenset())
+    # C-374: --pdf consumes --full/--compact ONLY alongside --dashboard — that is the
+    # path which computes the pipeline phases the PDF's blocks are rendered from. A bare
+    # `--pdf --full` genuinely ignores --full, and must keep saying so; silencing that
+    # note for every --pdf run would trade one lie for another.
+    if win_attr == "pdf" and not bool(getattr(args, "dashboard", False)):
+        honored = honored - {"full", "compact"}
     no_effect: list[str] = []
     if bool(getattr(args, "json", False)) and "json" not in honored:
         no_effect.append("--json")
@@ -1143,6 +1172,14 @@ def _flag_coherence_notes(args) -> list[str]:
     # default path or writes no history at all, where --no-history is a no-op).
     if win_attr in ("trend", "monitor") and bool(getattr(args, "no_history", False)):
         no_effect.append("--no-history")
+    # B-482: --yes skips the confirmation prompt for exactly two commands, and its own
+    # help already says "has no effect without one of those two" — but nothing enforced
+    # that, so passing it anywhere else was silently accepted. That is the specific
+    # failure this whole warn-and-continue mechanism exists to prevent: a scripted run
+    # that believes it disabled an interactive gate it never reached.
+    if (bool(getattr(args, "yes", False))
+            and win_attr not in ("purge", "apply_ignore_proposals")):
+        no_effect.append("--yes")
     if no_effect:
         notes.append(f"note: {', '.join(no_effect)} has no effect with {win_flag}")
     return notes
@@ -1323,6 +1360,21 @@ def _run_apply_ignore_proposals(args) -> int:
         return 0
 
     ignore_path = Path(args.home).expanduser() / ".clawseccheckignore"
+    # B-478: `append_entries` skips entries the file already holds, so a second apply of
+    # the same proposals printed the full list under "will be appended to ..." and then
+    # "Applied 0" — which reads as a failed write, not as the idempotency it actually is.
+    # Split the two here so the confirmation asks about what will really be written, and
+    # the outcome line accounts for every entry. `written` below stays authoritative
+    # (append_entries re-reads the file, so a concurrent edit is reflected there, not here).
+    # Read the file ONCE: `load_ignore` inside the comprehension would re-read it per
+    # entry, and would also compare different entries against different on-disk states.
+    _existing = load_ignore(args.home)
+    already = [e for e in entries if e in _existing]
+    entries = [e for e in entries if e not in _existing]
+    if not entries:
+        _emit(f"Nothing to apply — all {len(already)} proposed "
+              f"entr{'y is' if len(already) == 1 else 'ies are'} already in {ignore_path}.")
+        return 0
     if not args.yes:
         proceed, eof = _confirm_apply_ignore(entries, ignore_path)
         if not proceed:
@@ -1346,7 +1398,8 @@ def _run_apply_ignore_proposals(args) -> int:
         # writing through it — surface that plainly instead of a generic crash.
         _emit(f"clawseccheck: could not write {ignore_path} ({type(exc).__name__}); nothing applied.")
         return 1
-    _emit(f"Applied {written} judge-proposed suppression(s) to {ignore_path}.")
+    tail = (f" ({len(already)} more were already present.)" if already else "")
+    _emit(f"Applied {written} judge-proposed suppression(s) to {ignore_path}.{tail}")
     return 0
 
 
@@ -1413,7 +1466,29 @@ def main(argv=None) -> int:
         return 1
 
 
+_JUDGED_BUNDLE_CACHE: dict = {}
+
+
+def _judged_bundle(path: str) -> dict:
+    """``pipeline.read_judged_bundle`` memoized for the duration of ONE run.
+
+    B-476: ``--judged-bundle -`` reads stdin, and stdin can be consumed exactly once —
+    but the bundle already had two independent readers (``_resolve_runtime_caps`` and
+    the --trend/--monitor cap helper), and B-476 added a third (the ``attestation``
+    bucket, which must be resolved BEFORE ``audit()`` so B43/B44 can see it). Whoever
+    read second got an empty document and silently lost every bucket. Caching also
+    removes the pre-existing redundant re-read of a bundle FILE on the branches that
+    call both helpers.
+
+    Cleared at the top of every ``_main`` so an in-process second run (the whole test
+    suite, and any library caller) never inherits the previous run's bundle."""
+    if path not in _JUDGED_BUNDLE_CACHE:
+        _JUDGED_BUNDLE_CACHE[path] = _pipeline.read_judged_bundle(path)
+    return _JUDGED_BUNDLE_CACHE[path]
+
+
 def _main(argv=None) -> int:
+    _JUDGED_BUNDLE_CACHE.clear()
     p = argparse.ArgumentParser(
         prog="clawseccheck",
         description=(
@@ -1526,19 +1601,37 @@ def _main(argv=None) -> int:
     p.add_argument("--redteam", action="store_true",
                    help="print a live red-team payload suite for adversarial self-testing")
     p.add_argument("--seed", default=None, metavar="VALUE",
-                   help="fixed seed for --redteam tokens (reproducible CI runs); "
-                        "default is a fresh random seed each run")
+                   # B-475: this reached make_suite only, so `--seed X --self-test` gave
+                   # reproducible red-team tokens and freshly random canary/dry-run/
+                   # multi-turn ones in the same output — three of the four harnesses
+                   # silently ignored it, though all four have taken a seed all along.
+                   help="fixed seed for the self-test harness tokens — --canary, "
+                        "--redteam, --dryrun, --multiturn and the --self-test/--full "
+                        "sections that render them (reproducible CI runs, and the seed a "
+                        "--judged-bundle liveTest verdict must carry to be eligible for "
+                        "history/trend); default is a fresh random seed each run")
     p.add_argument("--dryrun", action="store_true",
                    help="print a behavioral dry-run harness (prompt-injection self-test across all sources)")
     p.add_argument("--multiturn", action="store_true",
                    help="print a two-phase multi-turn taint harness (plant a poisoned rule, "
                         "then trigger it in a later turn)")
     p.add_argument("--self-test", action="store_true",
-                   help="run canary + live red-team + dry-run harnesses together")
+                   # B-480: this named three of the four harnesses it renders — the
+                   # multi-turn plant/trigger harness has always been in this mode's
+                   # output and was missing from its own description.
+                   help="render all four self-test harnesses together: canary + live "
+                        "red-team + dry-run + multi-turn (use --seed for reproducible "
+                        "tokens)")
     p.add_argument("--full", action="store_true",
-                   help="run audit + self-test + vet-mcp in one command "
-                        "(human output path; self-test emits deterministic test material only, "
-                        "does not attack; extra sections skipped in --json / --card mode)")
+                   # B-480: "extra sections skipped in --json / --card" was half wrong.
+                   # --json runs the whole pipeline and merges its output as additional
+                   # top-level keys (judgePacket, coveragePage, phases, vetPackets, ...);
+                   # only --card drops them. Telling a CI user their --json run skips the
+                   # deep phases misdescribes both its cost and its content.
+                   help="run audit + self-test + vet-mcp + the deep phases in one command "
+                        "(self-test emits deterministic test material only, does not "
+                        "attack; --json delivers the extra sections as additional keys "
+                        "rather than printed blocks, --card drops them)")
     p.add_argument("--quiet", action="store_true",
                    help="only with --full: collapse the appended self-test and vet-mcp "
                         "sections to one-line summaries (lighter for CI logs / scroll); the "
@@ -1670,7 +1763,9 @@ def _main(argv=None) -> int:
     p.add_argument("--debug", action="store_true",
                    help="emit DEBUG-level log breadcrumbs to stderr")
     p.add_argument("--log", metavar="PATH", default=None,
-                   help="also write log output to PATH (only when given)")
+                   help="also write INFO-level log output to PATH (only when given; "
+                        "raises the FILE's level to INFO, never the console's — pass "
+                        "--verbose/--debug for that)")
     args = p.parse_args(argv)
 
     # Surface (on stderr) any second mode flag or global modifier the resolved mode
@@ -1775,6 +1870,25 @@ def _main(argv=None) -> int:
     # F-072 (D1): --vet autodetects the artifact type by content and routes to the
     # right engine; --vet-skill / --vet-plugin / --vet-mcp are the explicit escape
     # hatches. The detected-type note goes to stderr so machine stdout stays clean.
+    # B-466: an EMPTY target ("--vet ''") used to be falsy here, so the vet dispatch was
+    # skipped entirely and the run fell through to a full audit of the local machine —
+    # printing a normal grade and exiting 0. The user asked to vet something and got a
+    # verdict about something else, with nothing saying so.
+    #
+    # `--vet-mcp` is deliberately absent from this list: it is declared nargs="?" const="",
+    # so an empty value is its documented "every configured MCP server" form.
+    _empty_target = [
+        flag for flag, attr in (
+            ("--vet", "vet"), ("--vet-skill", "vet_skill"), ("--vet-plugin", "vet_plugin"),
+            ("--vet-source", "vet_source"), ("--advise", "advise"),
+        )
+        if getattr(args, attr, None) is not None and not str(getattr(args, attr)).strip()
+    ]
+    if _empty_target:
+        print(f"{_empty_target[0]} needs a target — got an empty value. "
+              "Pass a path, slug, or URL.", file=sys.stderr)
+        return 2
+
     _vet_route = None  # (kind, target) with kind in {"skill", "plugin", "mcp"}
     if args.vet:
         detected = detect_vet_type(args.vet, home=args.home)
@@ -1803,6 +1917,11 @@ def _main(argv=None) -> int:
 
     if _vet_route and _vet_route[0] in ("skill", "plugin"):
         vet_kind, vet_path = _vet_route
+        # B-460: a SKILL.md target resolves to the skill DIRECTORY that contains it. Relabel
+        # here too, from the same helper the engine uses, so the dossier names what was
+        # actually scanned rather than what was typed (it read "skill 'SKILL.md'" before).
+        if vet_kind == "skill":
+            vet_path = str(resolve_skill_target(vet_path))
         vet_target = Path(vet_path).expanduser()
         f = vet_skill(vet_path) if vet_kind == "skill" else vet_plugin(vet_path)
         # C-254: use with --vet/--vet-skill/--vet-plugin only (checked above) — a
@@ -1915,7 +2034,7 @@ def _main(argv=None) -> int:
         return _advise_rc
 
     if args.canary:
-        _emit(render_canary(make_canary(), ascii_only))
+        _emit(render_canary(make_canary(args.seed), ascii_only))
         _record_run("self_test", args)
         return 0
 
@@ -1926,24 +2045,24 @@ def _main(argv=None) -> int:
         return 0
 
     if args.dryrun:
-        _emit(render_dryrun(make_scenarios(), ascii_only))
+        _emit(render_dryrun(make_scenarios(args.seed), ascii_only))
         _record_run("self_test", args)
         return 0
 
     if args.multiturn:
-        _emit(render_multiturn(make_multiturn(), ascii_only))
+        _emit(render_multiturn(make_multiturn(args.seed), ascii_only))
         _record_run("self_test", args)
         return 0
 
     if args.self_test:
         seed = args.seed if args.seed is not None else secrets.token_hex(8)
-        _emit(render_canary(make_canary(), ascii_only))
+        _emit(render_canary(make_canary(args.seed), ascii_only))
         _emit("")
         _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
         _emit("")
-        _emit(render_dryrun(make_scenarios(), ascii_only))
+        _emit(render_dryrun(make_scenarios(args.seed), ascii_only))
         _emit("")
-        _emit(render_multiturn(make_multiturn(), ascii_only))
+        _emit(render_multiturn(make_multiturn(args.seed), ascii_only))
         _record_run("self_test", args)
         return 0
 
@@ -1958,7 +2077,7 @@ def _main(argv=None) -> int:
         if not ignore:
             _emit("No .clawseccheckignore entries found.")
         else:
-            _emit(f"{len(ignore)} suppressed entry/entries in .clawseccheckignore:")
+            _emit(f"{len(ignore)} entry/entries in .clawseccheckignore.")
             # B-379: match the real audit path's include_sockets, or B340's finding
             # detail differs here from a normal run (ctx.sockets is None => a
             # different "socket scan was not run" UNKNOWN text) — since
@@ -1967,7 +2086,19 @@ def _main(argv=None) -> int:
             # --exhaustive changes B164/B180's disclosure text the same way, so it
             # needs the same mirroring or an --exhaustive suppression stops matching
             # here.
-            ctx, findings, _ = audit(args.home, include_native=False,
+            # B-474 (C-135 on B-474's own fix): include_host/include_native must be
+            # mirrored too, for the reason B-379 already gave for include_sockets —
+            # fingerprint() hashes the finding DETAIL, and a subsystem that did not run
+            # here produces different detail text (or no finding at all) than it does on a
+            # real run. Before this, a suppression captured from a normal run of a host
+            # (B50-B54) or native (`openclaw security audit`) finding simply never matched
+            # here. That was merely invisible while this command only listed matches; the
+            # moment it began NAMING unmatched entries it would have become an active
+            # false claim — "this entry matches nothing", about an entry that matches
+            # perfectly well on every real run. Fidelity beats speed here, same call
+            # B-379 made: the point of this command is to answer what IS suppressed.
+            ctx, findings, _ = audit(args.home, include_native=not args.no_native,
+                                     include_host=not args.no_host,
                                      include_sockets=not args.no_sockets,
                                      include_deptree=not args.no_deptree,
                                      exhaustive=args.exhaustive)
@@ -1976,19 +2107,43 @@ def _main(argv=None) -> int:
             # surface those explicitly too, or --show-suppressed silently missed them.
             suppressed_risk = [p for p in _risk.risk_paths(ctx, findings, ignore=ignore)
                                 if p.suppressed]
+            # B-474: the headline counted ENTRIES IN THE FILE and the list below showed
+            # MATCHED FINDINGS, so "3 suppressed entry/entries" printed above a single
+            # line was routine — and the two entries that matched nothing were invisible
+            # in the one command whose job is to show what is suppressed. A dead entry is
+            # not cosmetic: it means the finding is gone (fixed) or its fingerprint has
+            # drifted (the suppression silently stopped working and the finding is live
+            # again). Both are things the owner of the file needs told.
+            matched_entries: set[str] = set()
+            for f in suppressed:
+                matched_entries.update({f.id, fingerprint(f)} & ignore)
+            for p in suppressed_risk:
+                matched_entries.update({p.id} & ignore)
+            dead = sorted(ignore - matched_entries)
             if suppressed or suppressed_risk:
+                _emit(f"{len(suppressed) + len(suppressed_risk)} suppressed in this run:")
                 for f in suppressed:
                     _emit(f"  {f.id}  {fingerprint(f)}  ({f.title})")
                 for p in suppressed_risk:
                     _emit(f"  {p.id}  ({p.title})")
-            else:
-                for entry in sorted(ignore):
+            if dead:
+                _emit("")
+                _emit(f"{len(dead)} entry/entries match nothing in this run — the finding "
+                      "is either fixed, or its fingerprint changed and the suppression is "
+                      "no longer in effect:")
+                for entry in dead:
                     _emit(f"  {entry}")
         return 0
 
     if args.watch_log:
         _emit(render_events(load_events(args.events), ascii_only))
         return 0
+
+    # B-476: read the bundle's attestation bucket at most once — `--judged-bundle -` reads
+    # stdin, and stdin can only be consumed once.
+    _bundle_att = None
+    if args.full and args.judged_bundle is not None and args.attest != "-":
+        _bundle_att = _judged_bundle(args.judged_bundle).get("attestation")
 
     attestation = None
     if args.attest:
@@ -2005,6 +2160,32 @@ def _main(argv=None) -> int:
             print(f"⚠ could not read a valid attestation from {src} "
                   "(ignored; B43/B44 stay UNKNOWN). See 'clawseccheck --ask'.",
                   file=sys.stderr)
+    elif args.full and args.judged_bundle is not None:
+        # B-476: --judged-bundle's own --help promises four buckets, and
+        # `split_judged_bundle` has always parsed all four — but nothing in the codebase
+        # ever read the `attestation` one. An agent that answered the judge packet by
+        # filling in the attestation object alongside its verdicts got B43/B44 left at
+        # UNKNOWN with no indication its answers had been dropped: a documented input,
+        # silently discarded. Routed through the SAME parse_attestation() the --attest
+        # file path uses, so an invalid object degrades identically rather than being
+        # trusted because it arrived by a different door.
+        #
+        # Gated on --full to match the flag's documented "only with --full" contract and
+        # `_resolve_runtime_caps`'s own gate — a bucket honored where the flag itself is
+        # reported as having no effect would be a new incoherence, not a fix for one.
+        # --attest wins when both are given (an explicit flag beats an embedded bucket),
+        # which is why this is `elif`; the note below says so rather than dropping it
+        # silently.
+        from . import attest as _attest  # noqa: PLC0415
+        if _bundle_att is not None:
+            attestation = _attest.parse_attestation(_bundle_att)
+            if not attestation:
+                print("⚠ the --judged-bundle 'attestation' object is not a valid "
+                      "attestation (ignored; B43/B44 stay UNKNOWN). "
+                      "See 'clawseccheck --ask'.", file=sys.stderr)
+    if args.attest and _bundle_att is not None:
+        print("note: --attest was given, so the --judged-bundle 'attestation' object "
+              "was not used.", file=sys.stderr)
 
     # First-run onboarding (Screen 13): when there is genuinely nothing to audit —
     # ~/.openclaw missing, or an empty directory — don't render a wall of UNKNOWNs;
@@ -2041,6 +2222,18 @@ def _main(argv=None) -> int:
         _emit(f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}")
         _emit("Fix the permissions (or run as the owning user) and re-run the audit.")
         return 1
+    # B-464: record which subsystems the OPERATOR opted out of, so the score rationale can
+    # disclose that its denominator was narrowed. Set here, from the parsed flags, because
+    # ctx.include_host/native default to "off" and cannot tell an explicit opt-out from an
+    # ordinary library audit() call.
+    ctx.cli_opt_outs = tuple(
+        flag for flag, passed in (
+            ("--no-host", args.no_host),
+            ("--no-native", args.no_native),
+            ("--no-sockets", args.no_sockets),
+            ("--no-deptree", args.no_deptree),
+        ) if passed
+    )
     logger.debug("ran %d checks", len(findings))
     logger.info("score=%s grade=%s", score.score, score.grade)
 
@@ -2055,9 +2248,31 @@ def _main(argv=None) -> int:
         _emit(_risk.render_risk_paths(paths, ascii_only=ascii_only))
         return 0
 
+    def _report_dest(raw: str) -> Path:
+        """Resolve a user-requested report path, creating its directory if it is missing.
+
+        B-459: SKILL.md's guided flow hardcodes ``--pdf ~/.clawseccheck/report.pdf``, but
+        none of the commands that precede it create ``~/.clawseccheck`` — so on a first run
+        the very command the docs tell the host agent to run died with ENOENT from
+        ``mkstemp``, and (because the card had already been collapsed in anticipation of the
+        attachment) the whole audit was discarded: 118 bytes of stdout, exit 1, no grade and
+        no findings. Every first-time user hit that.
+
+        Only a directory we create ourselves is touched, and it is created 0700 because a
+        report carries the user's audit detail. A parent that already exists is left exactly
+        as it is — ``secure_dir`` would ``chmod 0700`` it, which for a shared parent like
+        ``/tmp`` (``--pdf /tmp/report.pdf``) would be a destructive surprise well outside
+        what this tool is allowed to do to the user's machine.
+        """
+        p = Path(raw).expanduser()
+        parent = p.parent
+        if not parent.exists():
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return p
+
     if args.badge:
         try:
-            secure_write_text(Path(args.badge).expanduser(), render_svg(score, findings))
+            secure_write_text(_report_dest(args.badge), render_svg(score, findings))
             _emit(
                 f"(badge written to {args.badge} — attach this SVG file as-is; "
                 "do not redraw, rasterize, or generate your own badge image)"
@@ -2070,8 +2285,8 @@ def _main(argv=None) -> int:
     if args.html:
         try:
             secure_write_text(
-                Path(args.html).expanduser(),
-                render_html(findings, score, native=ctx.native),
+                _report_dest(args.html),
+                render_html(findings, score, native=ctx.native, ctx=ctx),
             )
             _emit(f"(HTML report written to {args.html})")
             return 0
@@ -2081,25 +2296,56 @@ def _main(argv=None) -> int:
 
     if args.sarif:
         try:
-            secure_write_text(Path(args.sarif).expanduser(), render_sarif(findings, score, __version__, ctx=ctx))
+            secure_write_text(_report_dest(args.sarif), render_sarif(findings, score, __version__, ctx=ctx))
             _emit(f"(SARIF written to {args.sarif})")
             return 0
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
             return 1
 
-    if args.pdf:
+    # C-373: `--dashboard --pdf <path>` is the chat delivery PAIR — the card is the
+    # message that fits, the PDF is the attachment carrying every finding with its why
+    # and evidence. When both are asked for, write the file here and fall through to the
+    # dashboard branch (which points the card at this exact path) instead of returning;
+    # `--pdf` on its own keeps its pre-existing standalone behaviour, byte-identical.
+    pdf_written = None
+
+    def _emit_attach_instruction(path):
+        """B-468: tell the HOST AGENT what to do with the report — on stderr.
+
+        stdout is the card the agent pastes verbatim into a chat, so an instruction
+        addressed to the agent must not sit inside it. That contradiction is not
+        theoretical: in a real session the agent, handed "attach this file" inside text it
+        had been ordered to reproduce word for word, resolved it by sending the user a
+        link — twice — before ever attaching anything. ClawSecCheck is local-only (Golden
+        Rule #1): there is no URL, only a file to send.
+        """
+        if not path:
+            return
+        print(f"note: report written to {path} — attach this PDF file itself into the "
+              "chat. Do not paste its path, do not send a link (there is none — the tool "
+              "is local-only), and do not re-render its contents.", file=sys.stderr)
+    # C-374: under `--dashboard --full` the PDF must also carry the pipeline blocks, and
+    # those phases are computed further down (in the dashboard branch). Defer the write
+    # to there rather than emitting a findings-only PDF the card would then describe as
+    # complete.
+    _defer_pdf = bool(args.pdf) and args.dashboard and args.full
+    if args.pdf and not _defer_pdf:
         try:
-            secure_write_bytes(Path(args.pdf).expanduser(), render_pdf(findings, score, native=ctx.native))
+            _pdf_dest = _report_dest(args.pdf)
+            secure_write_bytes(_pdf_dest,
+                               render_pdf(findings, score, native=ctx.native, ctx=ctx))
+            pdf_written = str(_pdf_dest)
+        except OSError as exc:
+            _emit(f"(could not write PDF report: {exc})")
+            return 1
+        if not args.dashboard:
             _emit(
                 f"(PDF report written to {args.pdf} — attach this file itself into the "
                 "chat, do not re-render its contents or paste the path; a mobile client "
                 "opens a PDF inline where an HTML attachment would just be a download)"
             )
             return 0
-        except OSError as exc:
-            _emit(f"(could not write PDF report: {exc})")
-            return 1
 
     if args.trend:
         # F-155 fix (C-135): resolve the liveTest cap BEFORE recording/rendering, so a
@@ -2140,7 +2386,9 @@ def _main(argv=None) -> int:
             # Byte-identical to before F-153: the overwhelming majority of callers
             # (every pre-existing test, and every plain `--dashboard` invocation)
             # never asked for the rest of the pipeline, so nothing extra is computed.
-            _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx))
+            _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
+                                   pdf_path=pdf_written))
+            _emit_attach_instruction(pdf_written)
             return 0
         # F-153: Dave settled 2026-07-30 that --dashboard must fully render
         # everything --full does, in the fixed order (Skills · Plugins · MCP · RISK
@@ -2213,10 +2461,26 @@ def _main(argv=None) -> int:
             ctx, findings,
             vet_targets=_dashboard_vet_targets,
             version=__version__, bundle=judged_bundle)
+        if _defer_pdf:
+            try:
+                _pdf_dest = _report_dest(args.pdf)
+                secure_write_bytes(_pdf_dest, render_pdf(
+                    findings, score, native=ctx.native, ctx=ctx,
+                    plugin_sweep=plugin_sweep, risk=paths,
+                    behavioral=behavioral_phase, adjudication=adjudication_phase))
+                pdf_written = str(_pdf_dest)
+            except OSError as exc:
+                # B-459: the PDF is the DELIVERY of this audit, not the audit. Failing to
+                # write it must never destroy the analysis: fall through with
+                # pdf_written=None so render_dashboard renders every section inline
+                # instead of collapsing to a card that points at a file we never wrote.
+                _emit(f"(could not write PDF report: {exc} — showing the full report inline)")
         _emit(render_dashboard(
             findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
             risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
-            adjudication=adjudication_phase, compact=args.compact))
+            adjudication=adjudication_phase, compact=args.compact,
+            pdf_path=pdf_written))
+        _emit_attach_instruction(pdf_written)
         return 0
 
     if args.dashboard_findings:
@@ -2272,8 +2536,14 @@ def _main(argv=None) -> int:
 
     if args.behavioral is not None:
         _record_run("behavioral", args)
+        _behavioral_target = args.behavioral or None
         _emit(render_behavioral_analysis(
-            ctx, explicit_path=args.behavioral or None, ascii_only=ascii_only))
+            ctx, explicit_path=_behavioral_target, ascii_only=ascii_only))
+        # B-462: a path the user named that does not resolve is an operational failure of
+        # THIS invocation, not an inconclusive audit — exit non-zero so a typo in a script
+        # cannot pass for a clean behavioural run.
+        if _behavioral_path_problem(_behavioral_target):
+            return 1
         return 0
 
     if args.monitor:
@@ -2478,7 +2748,15 @@ def _main(argv=None) -> int:
         parts = [render_report(findings, score, ascii_only, native=ctx.native,
                                risk=paths, update_notice=notice, freshness_notice=f_notice,
                                openclaw_detected=ctx.config_found, ctx=ctx, color=use_color,
-                               tamper=tamper),
+                               tamper=tamper,
+                               # B-473: the plugin sweep is pipeline phase P7, which runs
+                               # BELOW this body (the tee block). There is no sweep object
+                               # to render here, but "not scanned — run --full" is a lie on
+                               # a run that is about to print the sweep a few hundred lines
+                               # down. --fast drops P7/P8 and the pipeline prints its own
+                               # honest "skipped" line in that slot, so the section exists
+                               # either way and the pointer stays true.
+                               plugins_deferred=args.full),
                  "", render_card(score, findings, ascii_only)]
         if ctx.errors:
             parts.append("\nnotes:\n" + "\n".join(f"  - {_sanitize(e)}" for e in ctx.errors))
@@ -2523,8 +2801,8 @@ def _main(argv=None) -> int:
                 # record_run() / vm_has_fail still fire, so ledger freshness and
                 # --exit-code behave identically to the verbose path.
                 n_rt = len(make_suite(seed))
-                n_dr = len(make_scenarios())
-                n_mt = len(make_multiturn())
+                n_dr = len(make_scenarios(args.seed))
+                n_mt = len(make_multiturn(args.seed))
                 _emit("")
                 _emit(f"SELF-TEST: 1 canary + {n_rt} red-team + {n_dr} dry-run + {n_mt} multi-turn "
                       "injection scenario(s) generated — run them against your agent "
@@ -2566,13 +2844,13 @@ def _main(argv=None) -> int:
                 _emit("=" * 60)
                 _emit("CLAWSECCHECK SELF-TEST")
                 _emit("=" * 60)
-                _emit(render_canary(make_canary(), ascii_only))
+                _emit(render_canary(make_canary(args.seed), ascii_only))
                 _emit("")
                 _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
                 _emit("")
-                _emit(render_dryrun(make_scenarios(), ascii_only))
+                _emit(render_dryrun(make_scenarios(args.seed), ascii_only))
                 _emit("")
-                _emit(render_multiturn(make_multiturn(), ascii_only))
+                _emit(render_multiturn(make_multiturn(args.seed), ascii_only))
                 _record_run("self_test", args)
                 # --- vet-mcp section ---
                 _emit("")
@@ -2670,7 +2948,7 @@ def _main(argv=None) -> int:
             # `_full_lines` is empty on every non---full path, so this is exactly
             # today's behaviour there.
             _saved = "\n".join([body, *_full_lines]) if _full_lines else body
-            secure_write_text(Path(args.save).expanduser(), strip_ansi(_saved))
+            secure_write_text(_report_dest(args.save), strip_ansi(_saved))
             _emit(f"\n(report saved to {args.save})")
         except OSError as exc:
             _emit(f"\n(could not save report: {exc})")
@@ -2708,12 +2986,12 @@ def _main(argv=None) -> int:
         # F-149: sweep_has_fail joins the disjunction on exactly the terms vm_has_fail
         # already sits on — FAIL-only. A SUSPICIOUS (WARN) skill does not redden the
         # gate, and neither does an incomplete sweep: the contract this gate keeps is
-        # "a FAIL verdict from any of the four sources below, plus an unreadable
+        # "a FAIL verdict from any of the six sources below, plus an unreadable
         # config" — an ABSENT verdict is not a FAIL, and flipping the gate on
         # truncation would silently redden every CI run that passes today. An
         # incomplete sweep is reported honestly in its printed section instead.
-        # docs/USAGE.md ("CI / automation") and references/cli-flags.md state all four
-        # sources; keep them in step with this disjunction if a fifth is ever added.
+        # docs/USAGE.md ("CI / automation") and references/cli-flags.md state all six
+        # sources; keep them in step with this disjunction if a seventh is ever added.
         #
         # F-153: pipeline_has_fail joins on identical terms — FAIL-only, aggregated
         # across the pipeline phases. A phase that was skipped (--fast), never reached

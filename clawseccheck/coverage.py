@@ -226,7 +226,7 @@ def subject_coverage(findings: list[Finding]) -> dict:
     return result
 
 
-def _sweep_coverage(sweep) -> dict:
+def _sweep_coverage(sweep, *, skip_reason: str | None = None) -> dict:
     """(total, scanned, not_scanned) for a skill/plugin sweep, in the shape
     `build_coverage_page` wants — or the honest "never swept this run" entry when
     `sweep` is None (a plain audit without ``--full``, or ``--fast``).
@@ -241,8 +241,12 @@ def _sweep_coverage(sweep) -> dict:
     excludes BOTH SKIPPED and TRUNCATED (``sweep.not_scanned()`` names both) — a
     partially scanned target is not claimed fully covered."""
     if sweep is None:
+        # B-473: the note must name the reason THIS run skipped the sweep. "needs --full"
+        # was printed verbatim on `--full --fast` runs — telling the operator to pass the
+        # flag they had just passed, when --fast was what dropped the phase. The caller
+        # knows which it was; this function does not, so it is told rather than guessing.
         return {"total": None, "scanned": None, "not_scanned": [],
-                "note": "not scanned this run (needs --full)"}
+                "note": skip_reason or "not scanned this run (needs --full)"}
     if sweep.no_roots or sweep.no_targets:
         return {"total": 0, "scanned": 0, "not_scanned": [], "note": "none installed"}
     c = sweep.counts()
@@ -253,7 +257,7 @@ def _sweep_coverage(sweep) -> dict:
 
 
 def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
-                        plugin_sweep=None) -> dict:
+                        plugin_sweep=None, sweep_skip_reason: str | None = None) -> dict:
     """The full 8-subject (F-163 taxonomy) "was everything looked at" page: answers a
     different question than the Inventory-by-subject block (`report.build_inventory`,
     "what did we FIND") — this states scanned-vs-total, with every skip named, never
@@ -286,7 +290,7 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
     page: dict[str, dict] = dict(subject_coverage(findings))
 
     for subject, sweep in (("skills", skill_sweep), ("plugins", plugin_sweep)):
-        page[subject] = _sweep_coverage(sweep)
+        page[subject] = _sweep_coverage(sweep, skip_reason=sweep_skip_reason)
 
     n_mcp = len(_mcp_inventory(ctx))
     page["mcp"] = {"total": n_mcp, "scanned": n_mcp, "not_scanned": [],

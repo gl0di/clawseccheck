@@ -60,6 +60,10 @@ _EXPECTED_STAGED_SOURCES = [
     "SKILL.md",
     "README.md",
     "LICENSE",
+    # Ships beside LICENSE: MIT covers the code, not the name, and an installed copy
+    # should carry that notice. CLA.md deliberately does NOT ship — it is contributor-
+    # only and meaningless in an installed skill, so README links it by absolute URL.
+    "TRADEMARK.md",
     "SECURITY.md",
     "SECURITY_MODEL.md",
     "SUPPORT.md",

@@ -1,26 +1,45 @@
-🦞 ClawSecCheck - OpenClaw Security Audit
+🦞 ClawSecCheck · OpenClaw Security Audit
 ============================================
-Score: 49/100   Grade: [1mF[0m
-████████[90m░░░░░░░░[0m
-(capped from 61 - open CRITICAL finding)
-Tamper posture: F (2/100 — tamper-defense sub-grade over B20/B22/B42/B78/B85/B86/C5 + monitor state)
-Why 61/100: weighted pass-rate over 31 scored checks — 14 pass, 10 warn (half weight), 7 fail. UNKNOWN/advisory checks are excluded.
-(7 FAIL, 10 WARN — incl. 3 CRITICAL, 6 HIGH, 5 MEDIUM, 3 LOW)
-[2m        ⋯[0m
-20 issue(s), grouped by area — most urgent first within each:
+Score: 49/100   Grade: [31;1mF[0m
+[31m████████[0m[90m░░░░░░░░[0m
+(capped from 70 - open CRITICAL finding)
+Tamper posture: F (31/100 — tamper-defense sub-grade over B20/B22/B42/B78/B85/B86/C5 + monitor state)
+Why 70/100: weighted pass-rate over 49 scored checks — 27 pass, 14 warn (half weight), 8 fail. UNKNOWN/advisory checks are excluded.
+(8 FAIL, 14 WARN — incl. 3 CRITICAL, 8 HIGH, 5 MEDIUM, 6 LOW)
+        …
+== INVENTORY BY SUBJECT ════════════════════════════════════════════
+ OpenClaw core — ⛔ 13 issue(s)
+   ⛔ B1  Secrets in plaintext config / bootstrap files
+   ⛔ B2  Gateway exposure & channel authentication
+   ⛔ B3  Least privilege (elevated tools / allowlists)
+   ⛔ B55  Filesystem-write tool exposure (broad fs-write without scoping)
+        …
+ Host machine — ⚠️ 5 issue(s)
+   ⚠️ B50  Host network monitoring / IDS
+   ⚠️ B51  Host audit / syscall logging
+        …
+ Agents (1 agent - roster not attested) — ⛔ 6 issue(s)
+   ⛔ A1  Lethal Trifecta (untrusted input × sensitive data × outbound)
+   ⛔ B4  Execution sandbox
+   ⛔ B6  Bootstrap-file injection surface (SOUL.md/AGENTS.md/TOOLS.md)
+        …
+ Skills (none installed)
+ MCP servers (none configured)
+ Plugins (not scanned — run --full to include)
+ Channels (1) — ⚠️ 1 issue(s)
+   ⚠️ B26  Untrusted-context exposure (channels.contextVisibility)
+   roster: telegram
+ Logs & trajectories — ❔ not assessed
+════════════════════════════════════════════════════════════════════
+ (details by subject below)
+
+26 issue(s), grouped by subject — most urgent first within each:
 
 ┌──────────────────────────────
-│ [1mExposure & Network[0m — 4 issue(s)
+│ [1mOpenClaw core[0m — 13 issue(s)
 └──────────────────────────────
+🔴 [31;1mCRITICAL[0m  Secrets in plaintext config / bootstrap files
+    why: gateway.auth.password set in config; hooks.token set in config
+        …
 🔴 [31;1mCRITICAL[0m  Gateway exposure & channel authentication
     why: gateway.bind=0.0.0.0 exposed with auth.mode=none; gateway.tailscale.mode=funnel exposes the gateway publicly; channel 'telegram' has an open dm/group policy (anyone can command it)
-
-🟠 [31;1mHIGH[0m  Control-plane mutation reachability via gateway
-    why: Gateway is network-exposed (bind=0.0.0.0, auth.mode='none') and control-plane tools are not explicitly in gateway.tools.deny — an authenticated caller could reach mutation endpoints
-[2m        ⋯[0m
-
-┌──────────────────────────────
-│ [1mPrivilege & Execution[0m — 5 issue(s)
-└──────────────────────────────
-🔴 [31;1mCRITICAL[0m  Lethal Trifecta (untrusted input × sensitive data × outbound)
-    why: Active legs 3/3: untrusted input, sensitive data, outbound actions. Rule: keep ≤2 of 3. All three legs are active — your agent takes outside input, can reach sensitive data, and can act outbound; one injected prompt is enough to exfiltrate everything.

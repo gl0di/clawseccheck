@@ -1,7 +1,18 @@
 # ClawSecCheck — User guide
 
-This is the full user guide: every install path, flag, recipe, and trust
-detail. The short version lives in the [README](../README.md).
+This is the full user guide: install paths, the main flags, recipes, and trust
+detail. Not every flag from `--help` is walked through here individually — some
+live in [`SKILL.md`](../SKILL.md), [`docs/FLOW_CHOICES.md`](FLOW_CHOICES.md),
+[`docs/OUTPUT_SCHEMA.md`](OUTPUT_SCHEMA.md), [`docs/FAQ.md`](FAQ.md), or
+[`references/cli-flags.md`](../references/cli-flags.md) instead; `clawseccheck --help`
+is always the exhaustive list. The short version lives in the [README](../README.md).
+
+**`--emit-manifest`** prints a proposed permission manifest (YAML-shaped), derived from
+static effect analysis, for a single skill vetted via `--vet`/`--vet-skill`:
+
+```bash
+clawseccheck --vet ./some-skill --emit-manifest
+```
 
 Everything below is **local against your OpenClaw setup**, and the scanner
 itself makes no network calls. Reading goes beyond just the config file — see
@@ -73,9 +84,10 @@ When you run the skill inside OpenClaw, the agent executes `audit.py`, captures 
 and shows it to you **right there in the chat** — no terminal, no setup. You see:
 
 1. your **Score / Grade**,
-2. **findings grouped by area** (network, privilege, supply chain, secrets, …), most urgent
-   first within each — the Lethal Trifecta shows up here too, as a Privilege & Execution
-   finding, not a separate headline, and
+2. an **Inventory by subject** summary (OpenClaw core, host, agents, skills, MCP, channels,
+   logs) — each with a rolled-up verdict — followed by **findings grouped by that same
+   subject**, most urgent first within each; the Lethal Trifecta shows up here too, as an
+   Agents finding, not a separate headline, and
 3. a **shareable card** — grade + score + Lethal Trifecta ratio, safe to post (the findings stay
    private; `--badge` writes the same grade + score as an SVG).
 
@@ -136,21 +148,21 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 
 | You say | What happens | Under the hood |
 |---|---|---|
-| "Audit my setup, what's my grade?" | Runs the full audit, shows Score + Grade (A–F) and findings grouped by area, most urgent first. | `clawseccheck` (no flags) |
+| "Audit my setup, what's my grade?" | Runs the full audit, shows Score + Grade (A–F), an inventory-by-subject summary, and findings grouped by subject, most urgent first. | `clawseccheck` (no flags) |
 | "Is this skill safe to install?" / "Vet this before I install it" | Scans the skill's content for malware patterns, injection directives, and supply-chain risk *before* you enable it — type is autodetected. | `--vet <path>` (or `--vet-skill <path>` / `--vet-plugin <path>` to force an engine) |
 | "Is this safe to even download?" | Checks the *source*'s identity (typosquat, known-bad, unpinned ref) with zero network before anything is fetched. | `--vet-source <slug\|url\|pkg>` |
 | "Are my MCP servers trustworthy?" | Vets every connected MCP server for supply-chain risk (unpinned installs, plaintext transports, broad OAuth scopes) *and* scans each server's declared tool descriptions for the same malware/injection patterns `--vet` checks a skill for. | `--vet-mcp` |
 | "What's the single most important thing to fix?" | Prints a prioritised "what you can do next" list based on your actual findings — still just further checks, never auto-fixes. | `--next` |
 | "Fix this for me" | It won't — ClawSecCheck reports problems and risks, never fixes. Each finding states what's wrong and why; `--json`/SARIF carry structured `fix`/`remediation` data for your own tooling, and the [check catalog](CHECKS.md) documents remediation guidance per check. Nothing is ever applied for you. | `clawseccheck` (read the report) / `--json` |
-| "Am I vulnerable to prompt injection?" | Runs live self-tests: a benign injection canary, a broader dry-run harness, or both plus red-team payloads together. | `--canary` · `--dryrun` · `--self-test` |
+| "Am I vulnerable to prompt injection?" | Runs live self-tests: a benign injection canary, a broader dry-run harness, or all four harnesses together (canary + red-team + dry-run + multi-turn). | `--canary` · `--dryrun` · `--self-test` |
 | "What dangerous actions can my agent actually take?" | Emits a self-report template for your agent to fill in with its real tool/verb inventory, then scores the blast radius (EXEC, DESTRUCTIVE, EGRESS, …) once you feed it back. | `--ask` then `--attest <file>` |
 | "Watch for changes over time" | Re-audits and alerts on what changed since last time (new skill, config drift, a memory-file edit, a check leaving PASS). **Note:** this is the one opt-in exception to read-only — it writes a small local snapshot (`~/.clawseccheck/state.json`) so it has something to diff against next run. | `--monitor` |
 | "Am I improving? How do I rank?" | Shows your score history over time, or how your current score compares to an offline reference profile — no network either way. | `--trend` · `--percentile` |
 | "Share my grade without leaking my findings" | Produces just the grade + score (+ Lethal Trifecta ratio) — safe to post; your actual findings never appear. | `--card` (prints it) · `--badge grade.svg` (writes an SVG) |
-| "What's actually installed — skills, MCP servers, versions?" | Exports a local bill-of-materials (skills, MCP servers, hashes, declared/unpinned dependencies) as JSON. | `--sbom` |
+| "What's actually installed — skills, MCP servers, versions?" | Exports a local bill-of-materials (skills, MCP servers, hashes, declared/unpinned dependencies) as JSON. The export records the `scanned_home` it read and a `config_found`/`complete` pair, so an empty BOM for a path that holds no OpenClaw setup is distinguishable from a real setup with no components — a typo'd `--home` must not read as "everything was uninstalled". | `--sbom` |
 | "I think I've been compromised — help me preserve evidence" | Bundles a findings snapshot, skill/MCP hashes, trajectory-log hashes, and a credential rotation list into one local JSON file — a preservation aid, never rotates or deletes anything itself. | `--incident` |
 | "Did a suspicious skill's instruction actually run?" | Post-hoc correlation: checks whether the credential/exfil/secret-path indicators an installed skill names show up in real `tool.call` arguments in your OpenClaw trajectory sidecars — "acted on" vs "present but not acted on". Reads args in memory only; never echoes them. | `--analyze-trajectory` |
-| "What did my agent actually DO, not just what it could do?" | Reconstructs observed tool-call sequences from your OpenClaw trajectory sidecars and flags a proven-by-log ingress→sensitive→egress verb order, or a repeated-failure-then-success pattern on a sensitive-data call. Also reads OpenClaw's OWN runtime `audit_events` trail (a separate, metadata-only record: `tool_name` alone, no argv/command/path/host) for a runtime tool-block, an evasive/malformed tool name, or a session your trajectory sidecar no longer has (it was disabled or rotated out while `audit_events` still retained it). Metadata-only throughout — verb identity and sequencing, never call/return payloads. WARN-only, never scored. | `--behavioral` |
+| "What did my agent actually DO, not just what it could do?" | Reconstructs observed tool-call sequences from your OpenClaw trajectory sidecars and flags a proven-by-log ingress→sensitive→egress verb order, or a repeated-failure-then-success pattern on a sensitive-data call. Also reads OpenClaw's OWN runtime `audit_events` trail (a separate, metadata-only record: `tool_name` alone, no argv/command/path/host) for a runtime tool-block, an evasive/malformed tool name, or a session your trajectory sidecar no longer has (it was disabled or rotated out while `audit_events` still retained it). Metadata-only throughout — verb identity and sequencing, never call/return payloads. WARN-only, never scored. When every detector returns UNKNOWN (no trajectory sidecar, no `audit_events`), the run reports **no verdict** rather than a clean tick — nothing was assessed. An explicit `PATH` that does not resolve is named and exits non-zero, instead of being reported as "this host has no trajectories". | `--behavioral` |
 | "Gate my CI on this" | Machine-readable output plus a non-zero exit when the score drops below a bar or an unsuppressed FAIL exists — wire straight into a pipeline. | `--json` · `--sarif results.sarif` · `--fail-under 70` · `--exit-code` |
 | "Don't skip anything — scan everything" | Raises the trajectory-file / log-sink / per-line scan caps a normal run keeps small for speed: every trajectory file (not just the most recent 60), every log/transcript sink (not cut off by the time budget), and the full byte range of an over-length log line (not just its head and tail). Slower — a normal run already discloses exactly what it skipped, so this is for closing that specific gap, not a default. | `--exhaustive` (composes with `--full`; has effect on its own too) |
 
@@ -272,7 +284,9 @@ HTML/SARIF/PDF (`--html`/`--sarif`/`--pdf`), a log (`--log`), a small freshness 
 last ran an active self-test (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`), and —
 the one write that lands inside the audited OpenClaw home rather than under
 `~/.clawseccheck/` — `--apply-ignore-proposals`, opt-in and confirmation-gated, appending
-previously-proposed entries to `<home>/.clawseccheckignore` (never inventing one).
+previously-proposed entries to `<home>/.clawseccheckignore` (never inventing one). It is
+idempotent and says so: re-applying the same proposals reports which entries were already
+present instead of asking you to confirm writes it is not going to make.
 
 The **only** external command it can run is your own, fixed and read-only:
 
@@ -386,7 +400,10 @@ config; if none is found it warns you and tells you how to add one.
 
 **`--monitor` — Agent Watch.** One way to *get* monitoring: re-audit on a schedule and alert,
 **by severity**, on what **changed** — a new or modified installed skill, `SOUL.md` drift, **any
-change to a file under `<workspace>/memory/`**, a dropped score, **a check leaving PASS (for FAIL,
+file appearing, changing or disappearing under `<workspace>/memory/`** (a new file there is
+reported even when nothing in it looks hostile — that subtree is where OpenClaw's own
+pre-compaction flush writes, so its appearance is INFO, not an accusation), a dropped
+score, **a check leaving PASS (for FAIL,
 WARN or UNKNOWN)**, **a newly connected MCP server, a new channel, the gateway becoming
 network-exposed, or a host monitor disappearing**. Each run appends the changes to a private local
 journal (`~/.clawseccheck/events.jsonl`, owner-only, never uploaded); view the timeline with
@@ -547,7 +564,7 @@ The `--risk-paths` output is also appended to the default report when any chain 
 ```bash
 python3 audit.py --sarif results.sarif      # write SARIF 2.1.0 locally (for GitHub Code Scanning upload step)
 python3 audit.py --fail-under 70            # exit 1 if score < 70 (use in CI pipelines)
-python3 audit.py --exit-code                # exit 1 on any FAIL verdict (four sources — see below)
+python3 audit.py --exit-code                # exit 1 on any FAIL verdict (six sources — see below)
 ```
 
 The SARIF file is written to the path you choose — ClawSecCheck never uploads it anywhere.
@@ -597,7 +614,7 @@ ask, noted below):
 | Reputation gate before download | `clawseccheck --vet-source clawhub:some-skill` |
 | Active injection self-test | `clawseccheck --canary` · `clawseccheck --redteam` · `clawseccheck --dryrun` |
 | All-in-one (audit + self-test + vet-mcp + skill sweep + plugin sweep + behavioral replay + judge packet) | `clawseccheck --full` · add `--quiet` to collapse the appended sections to one-line summaries (lighter for CI logs) · add `--fast` to drop the deep phases entirely (CI) · `--judged-bundle PATH` to feed back verdicts |
-| Combined pipeline chat card (grade + findings + the SAME sections `--full` runs, one fixed-order render) | `clawseccheck --dashboard --full` · add `--compact` for a ~4096-char Telegram-safe layout (headline counts only + a `--save`/`--html` pointer) · plain `--dashboard` (no `--full`) stays the lighter grade+findings(+Skills) card it always was |
+| Combined pipeline chat card (grade + findings + the SAME sections `--full` runs, one fixed-order render) | `clawseccheck --dashboard --full` · add `--compact` for a ~4096-char Telegram-safe layout (headline counts only + a `--save`/`--html` pointer) · plain `--dashboard` (no `--full`) is the chat-sized card: grade + inventory-by-subject + most-urgent only, hard-capped under ~4096 chars; pair with `--pdf <path>` to also emit the attachable full report |
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
 | Attestation template / feed it back | `clawseccheck --ask` · `clawseccheck --attest attest.json` |
 | Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
@@ -651,8 +668,17 @@ python3 audit.py --log audit.log            # also write log to a local file
   DANGEROUS verdict. Add `--json` for the machine-readable dossier (grade + per-axis breakdown +
   findings), or `--sarif PATH` to drop a SARIF file for CI / code scanning; exit code is `1` on
   SUSPICIOUS/DANGEROUS so `--vet … || fail` gates an install pipeline.
-  If the scan hits its own per-target budget, or a collector size/file cap, before it has
-  read everything, that is **never** reported as a clean result. The gap lands on the
+  A target that is **not a skill package at all** — no `SKILL.md`, no executable files, and
+  contents that read as an HTML document (the shape you get by saving a ClawHub *web page*
+  instead of the skill) — is refused with `UNKNOWN` and **no grade**: the tool will not
+  recommend for or against installing something it never saw. Anything executable, or any
+  manifest, is scanned regardless, so deleting `SKILL.md` is not a way to switch the
+  scanner off.
+  If the scan hits its own per-target budget, or a collector size/file cap, or a file that
+  is present but cannot be **opened** (permissions, a dangling link, an I/O error), before
+  it has read everything, that is **never** reported as a clean result. An unreadable file
+  is not an absent one: it is named, and the danger axis degrades to `UNKNOWN` rather than
+  claiming no malware signature was found in content nothing ever read. The gap lands on the
   `danger` axis — as a synthetic `VET-COVERAGE` finding when the content-ring budget runs
   out, and as a `"coverage is incomplete"` detail otherwise — which caps the grade at
   `C`/79 and makes the overall verdict `SUSPICIOUS`, so a partially-scanned target *does*
@@ -678,7 +704,10 @@ python3 audit.py --log audit.log            # also write log to a local file
     sweep — keeping just the audit, self-test, vet-mcp, and the (free) adjudication packet —
     for CI runs where the deep phases are too slow. This is today's pre-F-150 `--full` shape.
   - **`--judged-bundle PATH`** (only with `--full`, `-` for stdin) feeds back one file holding
-    a host-agent judge's answers to a prior `--full --json` packet: an `attestation` object,
+    a host-agent judge's answers to a prior `--full --json` packet: an `attestation` object
+    (the same shape `--ask` emits and `--attest` reads, so the judge can answer the packet
+    and self-report B43/B44's facts in one file — an explicit `--attest` wins if you pass
+    both, and says so on stderr),
     a `judged` verdicts object for your own config (advisory — never changes the score or
     grade), a `vetJudged` array of per-target verdicts for the swept skills/plugins
     (escalate-only — can never downgrade a finding on untrusted content), and a `liveTest`
@@ -701,9 +730,8 @@ python3 audit.py --log audit.log            # also write log to a local file
   genuinely nothing to show (no skills/plugins/MCP servers installed, no RISK chain
   detected) — Behavioural and Second opinion are always shown once computed, even to say
   "nothing fired", per the same never-guess-a-PASS rule the rest of the audit follows.
-  Plain `--dashboard` (no `--full`) is **byte-identical** to before this existed — grade,
-  findings, and the optional Skills block (B-356), nothing else — so anything already
-  parsing that output is unaffected. `--fast` and `--judged-bundle PATH` are honored the
+  Plain `--dashboard` (no `--full`) is a **different, chat-sized card** since C-373 — see
+  the entry below. `--fast` and `--judged-bundle PATH` are honored the
   same way they are under plain `--full` (drop the deep phases; feed back a judge's
   verdicts) — `--quiet` is not, since `--compact` (below) is the dashboard's own
   channel-limit lever. This does not add a second engine: every block reuses the exact
@@ -713,6 +741,36 @@ python3 audit.py --log audit.log            # also write log to a local file
   the card can never disagree with what a plain `--full` run of the same config would
   say — including the F-154/F-155 cap-only grade adjustments (see "Threat monitoring"
   and `docs/OUTPUT_SCHEMA.md`).
+- **`--dashboard`** (no `--full`) is the **chat-sized card** (C-373): the grade card, an
+  **Inventory by subject** overview (one line per subject, rolled-up verdict), the **most
+  urgent** findings by name only (no `why:`, no evidence), an explicit count of the
+  findings it did not name, and a pointer to where the rest is. It is hard-capped under
+  ~4096 characters on any input — the previous shape pasted the whole grouped findings
+  block and measured 7225 characters on `fixtures/home_vuln`, well past what a Telegram
+  message holds. Pair it with `--pdf`:
+
+  ```bash
+  clawseccheck --dashboard --pdf report.pdf
+  ```
+
+  One run then produces both — the card to paste and a complete PDF carrying every
+  finding with its why and evidence — and the card names that file. The PDF is a **local
+  file to attach**, never a link (there is no URL: ClawSecCheck is local-only). Use
+  `--dashboard-findings` if you want the full grouped findings block inline instead.
+
+  Add `--full` to the pair and the PDF also carries the whole pipeline — Skills, Plugins,
+  MCP, RISK chains, Behavioural, Second opinion and Coverage:
+
+  ```bash
+  clawseccheck --dashboard --full --pdf report.pdf
+  ```
+
+  The card then collapses to the same chat-sized overview and points at the report,
+  instead of pasting ~11.5 KB of blocks into the message. **Without `--pdf`,
+  `--dashboard --full` still renders every block inline** — nothing becomes unreachable
+  just because you didn't ask for a file. (`--full` on a bare `--pdf`, with no
+  `--dashboard`, has no effect: that path never runs the pipeline phases, and the CLI
+  says so.)
   - **`--compact`** (only with `--dashboard --full`) is the ~4096-character Telegram-safe
     layout: Plugins/MCP/RISK-chain blocks collapse to headline counts only; the Findings
     and "Worth a glance" blocks keep every finding (nothing dropped) but trim each one's
@@ -726,23 +784,24 @@ python3 audit.py --log audit.log            # also write log to a local file
     Chains/Behavioural/Second opinion/Coverage/Worth a glance, in that fixed order):
 
     ```text
-    🦞 OpenClaw Security Audit — Grade F · 49/100
-    ████████░░░░░░░░  ·  3 issues
+    🦞 ClawSecCheck · OpenClaw Security Audit · Grade F · 49/100
+    ████████░░░░░░░░  ·  26 issues
+    ⚠️ capped from 70/100 — open CRITICAL finding
 
-    — Findings —
+    · Findings ·
     ┌──────────────────────────────
-    │ 🌐 Exposure & Network — 1 issue(s)
+    │ ⚙️ OpenClaw core — 13 issue(s)
     └──────────────────────────────
-    🔴 CRITICAL  insecure control-UI auth
-        why: anyone on your local network can send commands to your agent right now — no pairing or auth required
+    🔴 CRITICAL  Gateway exposure & channel authentication
+        why: gateway.bind=0.0.0.0 exposed with auth.mode=none; gateway.tailscale.mode=funnel exposes the gateway publicly
 
     ┌──────────────────────────────
-    │ 🔑 Privilege & Execution — 2 issue(s)
+    │ 🤖 Agents — 4 issue(s)
     └──────────────────────────────
     🔴 CRITICAL  Lethal Trifecta (untrusted input × sensitive data × outbound)
-        why: all three legs are active — outside input, sensitive data, and outbound actions; one injected prompt is enough to exfiltrate everything
-    🟠 HIGH  tool profile broader than minimal
-        why: the "coding" profile gives the agent filesystem write, shell, and package-install access — a hijacked agent can run arbitrary code
+        why: Active legs 3/3: untrusted input, sensitive data, outbound actions. All three legs are active — one injected prompt is enough to exfiltrate everything.
+    🟠 HIGH  Execution sandbox
+        why: agents.defaults.sandbox.mode is off (exec runs on the host)
     ```
 
     This is a **sample for illustration only** — the guided flow ([`SKILL.md`](../SKILL.md)
@@ -799,6 +858,12 @@ python3 audit.py --log audit.log            # also write log to a local file
 - **`--canary`** emits a benign injection hidden in untrusted-looking content; feed it to your
   agent — if the agent echoes the token, it obeyed an injection (**VULNERABLE**), otherwise
   **RESISTANT**. This is the live "battle-tested" complement to the passive checks.
+- **`--seed VALUE`** fixes the tokens every self-test harness generates — `--canary`,
+  `--redteam`, `--dryrun`, `--multiturn`, and the `--self-test`/`--full` sections that
+  render them. Same seed ⇒ byte-identical output, which is what makes a CI run diffable
+  and what a `--judged-bundle` `liveTest` verdict needs in order to be eligible for
+  history/trend. Without it each harness rolls a fresh random token every run, so the
+  agent under test cannot be pre-trained on it — that stays the default deliberately.
 - **`--badge PATH`** writes a shields-style SVG (grade + score only) for your README / posts.
 - **`--pdf PATH`** writes the complete audit (every FAIL/WARN finding, paginated, base-14 fonts
   only — no font embedding, no JavaScript, no forms) as a PDF. This is the deliverable-into-chat
@@ -813,7 +878,14 @@ python3 audit.py --log audit.log            # also write log to a local file
 - **`--percentile`** compares your score against a bundled offline reference profile — no network,
   no telemetry.
 - **`--verbose` / `--debug` / `--log PATH`** activate structured local logging. Config values
-  that may hold secrets are redacted before being written.
+  that may hold secrets are redacted before being written. `--verbose`/`--debug` set what
+  reaches the **console** (stderr); `--log PATH` writes to a **file** and raises the file's
+  level to INFO on its own, so you never get an empty log for asking for one — it does not
+  make the console chattier. Nothing is written anywhere without `--log`.
+- **`--yes`** skips the confirmation prompt for `--purge` and `--apply-ignore-proposals`, the
+  only two commands that have one. Pass it with anything else and the run says so on stderr
+  rather than accepting it silently — a script that thinks it disabled a gate it never
+  reached is exactly the failure that note exists to prevent.
 - **`--exhaustive`** raises the trajectory-file / log-sink / per-line scan caps a normal run
   keeps small for speed: every trajectory file instead of the most recent 60, a much larger
   log/transcript-sink time budget (raised, not removed — a sink still skipped for time is

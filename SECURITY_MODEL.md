@@ -419,8 +419,13 @@ OpenClaw's skill schema ships such a field, at which point `SKILL.md` should gai
   MCP servers — it can only flag known risky patterns.
 - **UNKNOWN is not PASS.** When the tool cannot determine a configuration state
   (unreadable file, unparseable config, unsupported OpenClaw version), it reports
-  `UNKNOWN`. An `UNKNOWN` result is excluded from the score and never treated as a
-  safe outcome.
+  `UNKNOWN`, and never treats it as a safe outcome. An ordinary `UNKNOWN` — the surface
+  simply is not there to assess — is excluded from the score. An `UNKNOWN` that exists
+  because the **engine itself was degraded** (an input it expected to read was unreadable
+  or malformed, or a check crashed or hit its budget) is stronger than that: it **caps the
+  grade**, on the reasoning that a check which could not look cannot rule out a CRITICAL.
+  So a run that failed to read things does not score like a run that read them and found
+  nothing.
 
 ## Release validation protocol
 

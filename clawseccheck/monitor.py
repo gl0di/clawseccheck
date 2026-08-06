@@ -538,6 +538,12 @@ def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
     # also absent from that snapshot's frontier.
     prev_capped = _frontier(prev, "memory_capped")
     curr_capped = _frontier(curr, "memory_capped")
+    # B-477: a NEW file the bootstrap dimension already announces ("New bootstrap file
+    # appeared: X") must not also get the bare appearance line below — the two would say
+    # the same thing twice. Same B-275 rule the change/removal branches already apply,
+    # with the new-file variant of the set. The *suspicious-content* line is deliberately
+    # still emitted for those, as it says something the bootstrap line does not.
+    bootstrap_new_owned = set(_dim(curr, "bootstrap")) - set(_dim(prev, "bootstrap"))
     for path in sorted(cm.keys() - pm.keys()):
         if path in prev_capped:
             # It did not "appear" — it was already on disk last run, merely beyond the cap.
@@ -551,6 +557,41 @@ def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
                 "MEDIUM",
                 f"New persistent memory file '{path}' appears with suspicious content.",
             ))
+        elif path not in bootstrap_new_owned:
+            # B-477: the appearance branch had no backstop, so a memory file that did not
+            # trip a regex and carried no URL appeared entirely silently — while the state
+            # file dutifully recorded it one line above. Reproduced end-to-end: a first
+            # benign file under <workspace>/memory/ surfaced only as an unexplained
+            # "Security score dropped 97 -> 96", and a SECOND one produced the unhedged
+            # "No new threats since last check ✅" — an all-clear for a run that had just
+            # watched a new standing-instruction file appear. This is the exact FN twin of
+            # the one B-272(1) closed for CHANGED files; appearance simply never got the
+            # same treatment.
+            #
+            # A new file is not evidence of an attack, and this is worded accordingly: the
+            # severity split follows the same 2026-07-20 owner ruling the change backstop
+            # records — an identity file (_has_memory_name) is human-authored, so its
+            # appearance is worth confirming; anything else reaches this dimension only via
+            # the <workspace>/memory/ subtree scan, where OpenClaw's own pre-compaction
+            # flush writes autonomously, so a new file there is ordinary background
+            # activity and gets INFO with no authorship claim.
+            if _has_memory_name(path):
+                alerts.append((
+                    "MEDIUM",
+                    f"New persistent memory file '{path}' appeared since last check — no "
+                    "override phrase or endpoint in it. Standing instructions the agent "
+                    "re-reads every session live here, so confirm you created it.",
+                ))
+            else:
+                alerts.append((
+                    "INFO",
+                    f"New persistent memory file '{path}' appeared since last check — no "
+                    "override phrase or endpoint in it. This file sits in the workspace "
+                    "memory-flush subtree, where OpenClaw's own pre-compaction flush can "
+                    "write autonomously, so a new file here is expected background "
+                    "activity and not necessarily one you created. Review it if "
+                    "unexpected.",
+                ))
 
     # B-275/B-272: SOUL/AGENTS/TOOLS/MEMORY/memory.md are BOTH bootstrap files and memory
     # files. The bootstrap dimension already alerts HIGH on any content change to those

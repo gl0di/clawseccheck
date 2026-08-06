@@ -21,7 +21,12 @@ from . import brand
 # function list. The "⚡" in item 1's hint discloses the live-agent test up front,
 # so picking it is informed consent (read-only-by-default stays honest).
 _ITEMS = (
-    ("1", "🔍", "Check everything", "config + live agent test ⚡"),
+    # B-469: this said "config + live agent test ⚡", which is wrong twice over. Item 1 is
+    # `--dashboard --full` — entirely read-only; it never touches the running agent. And
+    # SKILL.md is explicit that "the live injection test (⚡) stays a separate, opt-in step
+    # — not part of item 1", so the menu was also advertising an opt-in action as included.
+    # Wording matches SKILL.md's own rendering of this screen.
+    ("1", "🔍", "Check everything", "config + capability audit"),
     ("2", "📦", "Check before install", "skill · plugin · MCP"),
     ("3", "📄", "Report & history", "show · save · trend · badge"),
     ("4", "📋", "Menu", "everything else: verify · version · HTML · SARIF…"),

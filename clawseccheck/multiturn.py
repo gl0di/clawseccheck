@@ -18,6 +18,8 @@ import hashlib
 import re
 import secrets
 
+from .textnorm import asciify
+
 _TOKEN_PREFIX = "CLAWSECCHECK-MT-"
 _FAKE_PREFIX = "CLAWSECCHECK_FAKE_"
 
@@ -328,4 +330,4 @@ def render_multiturn(scenarios: list[dict], ascii_only: bool = False) -> str:
             "",
         ]
     out = "\n".join(lines).rstrip() + "\n"
-    return out.encode("ascii", "replace").decode("ascii") if ascii_only else out
+    return asciify(out) if ascii_only else out

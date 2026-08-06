@@ -42,19 +42,19 @@ def test_cli_dashboard_findings_frames_and_slices(capsys):
                "--dashboard-findings"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "┌" in out and "│ 🌐 Exposure & Network" in out and "└" in out
+    assert "┌" in out and "│ ⚙️ OpenClaw core" in out and "└" in out
     # it is the findings SLICE, not the full report
     assert "Score:" not in out
     assert "Scan receipt" not in out
 
 
 def test_cli_dashboard_findings_ascii_brackets(capsys):
-    """--dashboard-findings --ascii degrades the frame to [Family] brackets, no box-art."""
+    """--dashboard-findings --ascii degrades the frame to [Subject] brackets, no box-art."""
     rc = main(["--home", str(FIXTURES / "home_vuln"), "--no-native", "--no-history",
                "--ascii", "--dashboard-findings"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "[Exposure & Network]" in out
+    assert "[OpenClaw core]" in out
     assert "┌" not in out and "⛔" not in out
 
 

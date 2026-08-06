@@ -42,13 +42,26 @@ calls this out explicitly: *"`UNKNOWN` ≠ `PASS`"*.
   `UNKNOWN`. Use `clawseccheck --ask` to generate the attestation template, fill it with
   your running agent, and then pass `--attest attest.json` to unlock these checks.
 
-**Effect on the score.** `UNKNOWN` findings are **excluded** from the score calculation
-entirely — they neither help nor hurt it. If most checks are `UNKNOWN`, the score covers
-only the checks that *could* be assessed.
+**Effect on the score.** An `UNKNOWN` finding never adds or subtracts a scored point — the
+weighted pass-rate arithmetic simply excludes it. It is not always fully inert, though: a
+check that reports `UNKNOWN` because *its own input* was unreadable/corrupt
+(`engine_degraded`) can trip `DEGRADED_CHECK_CAP` and hard-cap the grade at F regardless of
+what did pass — see ["Why is my grade F?"](#why-is-my-grade-f). If most checks are
+`UNKNOWN`, the score covers only the checks that *could* be assessed.
 
 **What to do.** Confirm that `~/.openclaw/openclaw.json` exists and is readable by the
 current user, that `--home` points at the right directory, and — if you want the full
 picture — that you have run `--attest` with your agent's self-report.
+
+**Blind states in the Inventory-by-subject view.** `--dashboard` groups findings by
+subject rather than by individual check, so a blind subject reads as a short phrase
+instead of a bare `UNKNOWN`. From `clawseccheck --dashboard --home fixtures/home_vuln`:
+
+- `📦 Plugins — not scanned — run --full` — the plugin sweep only runs under `--full`; a
+  plain audit never looks at plugins at all.
+- `📝 Logs & trajectories — not assessed` — no verdict for that subject this run.
+- `🧩 Skills — none installed` — **not** a blind state: the subject was checked and
+  confirmed empty, shown with the same icon as a clean PASS.
 
 ---
 
@@ -68,28 +81,37 @@ A single CRITICAL FAIL (for example B1 — plaintext secrets, or B2 — open gat
 no auth) locks the score at or below 49, which is always an F, regardless of how well
 everything else scores.
 
-**Three more caps fire with no FAIL finding at all.** If you are hunting the report for a
+**Five more caps fire with no FAIL finding at all.** If you are hunting the report for a
 CRITICAL that explains your F and cannot find one, it is one of these. They are caps only:
-they never add or remove a scored point, they just lower the ceiling.
+they never add or remove a scored point, they just lower the ceiling. (`report.py`'s
+`_cap_signal_active` tracks six cap signals in total; the severity-FAIL cap above is the
+only one of the six that needs an actual FAIL finding.)
 
 | Signal | Score capped at | Grade ceiling | What the report says |
 |---|---|---|---|
 | A check **crashed, timed out, or hit an unreadable/corrupted input it needed** | 49 | F | `N check(s) could not reach a reliable verdict this run: cannot rule out a CRITICAL condition`, plus an `N checks could not reach a reliable verdict this run` banner above the score |
-| `openclaw.json` is present but **unreadable / unparseable** | 49 | F | `openclaw.json unreadable/unparseable this run: cannot rule out a CRITICAL condition` |
+| `openclaw.json` is present but **unreadable / unparseable**, or **wholly absent** (no config file found at all) | 49 | F | `openclaw.json unreadable/unparseable this run: cannot rule out a CRITICAL condition` — or, when no config was found at all, `no OpenClaw config found[ at <path>]: cannot rule out a CRITICAL condition` |
 | A **corroborated runtime signal** in your own trajectory log | 79 | C | `corroborated runtime signal: …` |
+| A **live injection-test harness** (`--canary`/`--dryrun`/`--redteam`/`--multiturn`) reported a **VULNERABLE** verdict, submitted via `--judged-bundle`'s `liveTest` bucket | 49 | F | `a live injection-test scenario reported VULNERABLE (…)` |
+| A **behavioral detector** (T1/T2/T3/B191) fired — only when `--full` ran without `--fast` | 89 | B | `a behavioral detector fired (…)` |
 
 The first row covers two shapes: the engine itself gave up on a check (a crash or a
 timeout — B-313), or a check ran fine but honestly couldn't tell you its own answer
 because something it needed to read was unreadable, corrupt, or malformed (B-399) — as
 opposed to a check finding nothing to look at, which never triggers this cap. "There was
 nothing to check" and "something broke while we tried to check" are different facts, and
-only the second one caps the grade.
+only the second one caps the grade. The second row treats a wholly absent config as
+strictly LESS evidence than an unreadable one, so it is capped the same way, never scored
+better.
 
-The reasoning is the same in all three cases, and it is deliberate: the audit lost
+The first three rows share the same reasoning, and it is deliberate: the audit lost
 visibility into something, and the honest assumption about an unexamined check is
 worst-case, not average-case. Otherwise "make the scanner blind" would be the cheapest way
 to improve a grade. Fix the underlying visibility problem — a quieter machine or `--debug`
-for a timeout, valid JSON for an unparseable config — and the cap lifts on the next run.
+for a timeout, valid JSON (or any config file at all) for the config — and the cap lifts on
+the next run. The last two rows are different: they are *positive* evidence (a self-tested
+injection actually succeeded, or a proven-by-log behavioral pattern actually fired), not
+lost visibility — the cap lifts only by fixing what the test/detector found.
 
 **What to look at first:**
 
@@ -126,12 +148,47 @@ report.
 
 **Step 1 — identify the finding you want to suppress.**
 
-Run with `--show-suppressed` to list what is currently suppressed, or look at the check
-ID (e.g. `B14`) and optionally its fingerprint in the normal report output:
+For a **bare check ID** (e.g. `B14`), just read it off the report — no further work
+needed, see below.
+
+For a **fingerprint** (to suppress one specific finding rather than the whole check),
+be aware that `--show-suppressed` only prints the fingerprint of a finding that is
+**already** suppressed — it cannot show you the fingerprint of one you haven't
+suppressed yet:
 
 ```bash
 clawseccheck --show-suppressed
 ```
+
+There are two real ways to get a fingerprint for a finding you haven't suppressed:
+
+1. **`--propose-ignore`** (recommended) computes and prints ready-to-use
+   `<id>:<fingerprint>` entries for you — but only for findings already offered to a
+   host-agent judge panel via `--judge-packet` (unsuppressed `UNKNOWN`s, or the
+   documented false-negative-prone `WARN` ids) that the panel verdicted `SAFE`, and
+   only when the finding has a single evidence entry. See
+   [`docs/OUTPUT_SCHEMA.md`](OUTPUT_SCHEMA.md) §14. This does not cover an ordinary
+   `FAIL`/`WARN` finding outside that judged flow.
+2. **Compute it yourself.** The fingerprint is `<id>:` followed by the first 8 hex
+   characters of the SHA-1 hash of the finding's exact `detail` string — the same
+   `detail` `clawseccheck --json` already prints for every finding. This works for
+   any finding, verified end to end:
+
+   ```bash
+   clawseccheck --json | python3 -c '
+   import json, hashlib, sys
+   d = json.load(sys.stdin)
+   for f in d["findings"]:
+       if f["id"] == "B14":          # the check id you want to target
+           print(f["id"] + ":" + hashlib.sha1(f["detail"].encode()).hexdigest()[:8],
+                 "--", f["detail"])
+   '
+   ```
+
+   This is the same algorithm `baseline.fingerprint()` uses internally — not a
+   documented/frozen API, so if the finding's `detail` text changes in a later
+   release the fingerprint changes with it (same caveat `--show-suppressed`'s "dead
+   entry" note already gives for any fingerprint entry).
 
 **Step 2 — add an entry to `.clawseccheckignore`.**
 
@@ -161,6 +218,13 @@ Lines beginning with `#` are comments. The fingerprint for any finding is shown 
 
 Re-run `clawseccheck`. Suppressed findings no longer appear in the report or affect the
 score. To confirm what is suppressed, use `--show-suppressed` again.
+
+`--show-suppressed` reports two things, and the difference matters: the entries that are
+currently suppressing a finding, and — separately — any entry that **matches nothing in
+this run**. A dead entry means either the finding is gone (you fixed it, and the line can
+be deleted) or the finding's detail text changed, so its fingerprint no longer matches and
+the suppression has quietly stopped working. Bare check ids (`B14`) never drift this way;
+fingerprints (`B14:ab12cd34`) can.
 
 > **Note on false positives.** If you believe a finding is wrong about your config,
 > please also open an issue at <https://github.com/gl0di/clawseccheck/issues> with the

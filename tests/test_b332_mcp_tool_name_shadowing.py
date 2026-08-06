@@ -229,6 +229,117 @@ def test_b332_fail_zero_width_homoglyph_on_a_generic_name():
     assert f.status == FAIL
 
 
+# --------------------------------------------------------------------------- B-488: _B332_ZERO_WIDTH_RE stays at the original six
+def test_b332_fail_zero_width_original_six_all_fail_one_sided_insertion():
+    """B-488: pin that ALL SIX of `_B332_ZERO_WIDTH_RE`'s members -- not just the
+    single U+200B case above -- FAIL when inserted one-sided into an otherwise
+    fold-equal pair. This is the shape the class exists to catch, and the
+    stays-at-six decision (see the comment above `_B332_ZERO_WIDTH_RE`; do not
+    widen it) rests on it staying sound for exactly these six.
+
+    U+200D (ZWJ) is included here even though `_has_suspicious_zero_width` carries
+    an emoji-ZWJ exemption (textnorm._is_zwj_between_emoji) -- empirically, a ZWJ
+    sandwiched between plain ASCII letters ("sea" / "rch") is NOT a legitimate
+    emoji sequence, so the exemption does not apply and it FAILs like the other
+    five (verified empirically, not assumed).
+    """
+    original_six = {
+        "U+00AD": "­",  # soft hyphen
+        "U+200B": "​",  # zero-width space
+        "U+200C": "‌",  # zero-width non-joiner
+        "U+200D": "‍",  # zero-width joiner -- not emoji-flanked here, see docstring
+        "U+2060": "⁠",  # word joiner
+        "U+FEFF": "﻿",  # BOM / zero-width no-break space
+    }
+    for label, ch in original_six.items():
+        shadow_name = "sea" + ch + "rch"
+        f = _b332_finding_from_surfaces(
+            [_surface("alpha", ["search"]), _surface("beta", [shadow_name])]
+        )
+        assert f.status == FAIL, f"{label} ({hex(ord(ch))}) expected FAIL, got {f.status}"
+
+
+def test_b332_no_fail_tier1_zero_width_one_sided_insertion_accepted_gap():
+    """B-488: pin the ACCEPTED gap -- none of the 14 Tier-1 code points B-450
+    added to `textnorm.obfuscation_signals`'s own wider class (U+180E,
+    U+2061-2064, U+206A-206F, U+FFF9-FFFB) FAIL here, even inserted one-sided
+    into an otherwise fold-equal pair exactly like the original six above.
+
+    This is a knowingly-missed detection, not an oversight, and since B-490 it
+    is no longer a free one: `normalize_for_scan` now strips Tier-1 too, so
+    these pairs ARE fold-equal and the only thing holding the verdict at PASS is
+    `_B332_ZERO_WIDTH_RE` staying at six. Widening it would catch this shadowing
+    -- and would equally flip Japanese ruby annotation and Mongolian pairs from
+    PASS to false FAIL (the two tests below), with no rule separating the
+    populations. Golden Rule #5 makes the false FAIL decisive. See the comment
+    above `_B332_ZERO_WIDTH_RE` for the full trade.
+    """
+    tier1 = {
+        "U+180E": "᠎",
+        "U+2061": "⁡",
+        "U+2062": "⁢",
+        "U+2063": "⁣",
+        "U+2064": "⁤",
+        "U+206A": "⁪",
+        "U+206B": "⁫",
+        "U+206C": "⁬",
+        "U+206D": "⁭",
+        "U+206E": "⁮",
+        "U+206F": "⁯",
+        "U+FFF9": "￹",
+        "U+FFFA": "￺",
+        "U+FFFB": "￻",
+    }
+    assert len(tier1) == 14
+    for label, ch in tier1.items():
+        shadow_name = "sea" + ch + "rch"
+        f = _b332_finding_from_surfaces(
+            [_surface("alpha", ["search"]), _surface("beta", [shadow_name])]
+        )
+        assert f.status != FAIL, f"{label} ({hex(ord(ch))}) unexpectedly FAILed"
+
+
+def test_b332_pass_japanese_ruby_annotation_not_a_false_fail():
+    """B-488, finding 2: the false-FAIL case that rules out widening
+    `_B332_ZERO_WIDTH_RE`. U+FFF9/FFFA/FFFB are the actual Unicode
+    interlinear-annotation (ruby) mechanism -- ANNOTATION ANCHOR / SEPARATOR /
+    TERMINATOR wrapping a base/reading pair, e.g. the base text 検索
+    ("kensaku", "search") annotated with its own reading in either fullwidth or
+    halfwidth katakana. Both names below carry the SAME three Tier-1 marker
+    characters and differ only in halfwidth vs fullwidth katakana, which NFKC
+    folds to the identical string -- if `_B332_ZERO_WIDTH_RE` were widened to
+    Tier 1, this legitimate pair would flip from PASS to a false FAIL (verified
+    empirically while diagnosing this decision). Must stay PASS: widening this
+    class would break real Japanese ruby-annotated tool descriptions/names.
+    """
+    fullwidth_ruby = "￹検索￺ケンサク￻"  # 検索/ケンサク
+    halfwidth_ruby = "￹検索￺ｹﾝｻｸ￻"  # 検索/ｹﾝｻｸ
+    assert fullwidth_ruby != halfwidth_ruby
+    f = _b332_finding_from_surfaces(
+        [_surface("alpha", [fullwidth_ruby]), _surface("beta", [halfwidth_ruby])]
+    )
+    assert f.status == PASS
+
+
+def test_b332_pass_mongolian_vowel_separator_not_a_false_fail():
+    """B-488, finding 2's second case: U+180E MONGOLIAN VOWEL SEPARATOR is real
+    Mongolian orthography (it sits between the consonant and the following
+    vowel), not an injection channel. Both names below carry the SAME U+180E
+    and differ only in an ideographic (U+3000) vs an ASCII space, which NFKC
+    folds to the identical string -- if `_B332_ZERO_WIDTH_RE` were widened to
+    Tier 1, this legitimate pair would flip from PASS to a false FAIL (verified
+    empirically). Must stay PASS: widening this class would break real
+    Mongolian-script tool names/descriptions.
+    """
+    ideographic_space_variant = "ᠡ᠎ᠷ　a"
+    ascii_space_variant = "ᠡ᠎ᠷ a"
+    assert ideographic_space_variant != ascii_space_variant
+    f = _b332_finding_from_surfaces(
+        [_surface("alpha", [ideographic_space_variant]), _surface("beta", [ascii_space_variant])]
+    )
+    assert f.status == PASS
+
+
 # --------------------------------------------------------------------------- FAIL (exact, rare name)
 def test_b332_fail_exact_collision_on_distinctive_name():
     f = check_mcp_tool_name_shadowing(collect(FIXTURES / "bad_b332_mcp_exact_collision"))

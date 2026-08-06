@@ -120,17 +120,16 @@ class TestRenderDashboard:
         # ALL issues; Section 3 below filters to high-confidence only).
         assert "3 issues" in bar_line
 
-    def test_glance_only_findings_disclosed_not_silently_dropped(self):
-        # B-444 bug A: under full=False (plain --dashboard), the header count included
-        # B3 (WARN, confidence=MEDIUM) but render_dashboard_findings excludes MEDIUM/
-        # ATTESTED-confidence findings from its body, and full=False never reaches
-        # _worth_a_glance_lines either — so B3 used to be counted but rendered nowhere.
-        # Real repro on Dave's fleet dropped 12 findings this way, one of them HIGH.
+    def test_unnamed_findings_disclosed_not_silently_dropped(self):
+        # B-444 bug A, carried forward to the C-373 card: the header counts EVERY
+        # non-suppressed FAIL/WARN (incl. B3, WARN/confidence=MEDIUM), while the card
+        # names only the most urgent few. The gap must be stated out loud — a real repro
+        # on Dave's fleet dropped 12 findings silently this way, one of them HIGH.
         out, findings = self._out()
         assert "3 issues" in out  # header still counts B3
         glance_n = len(_glance_qualifying_findings(findings))
         assert glance_n == 1  # exactly B3
-        assert f"(+{glance_n} more — run --full for the rest)" in out
+        assert "more findings not named above" in out or "more finding not named above" in out
 
     def test_full_true_shows_the_glance_finding_instead_of_disclosing(self):
         # --full already reaches _worth_a_glance_lines, so B3 is actually rendered —
@@ -153,11 +152,80 @@ class TestRenderDashboard:
         assert "fix:" not in out
         assert "Projected" not in out
 
-    def test_findings_header_and_family_emoji(self):
-        out, _ = self._out()
+    def test_card_is_overview_plus_most_urgent(self):
+        # C-373: the default card is an overview — the per-subject inventory plus the
+        # most urgent findings by name. The full grouped findings block moved out of it
+        # (it blew the ~4096-char chat budget); --dashboard-findings still prints it.
+        out, _ = self._out(ctx=_skill_ctx({}))
+        assert "· Inventory by subject ·" in out
+        assert "⚙️ OpenClaw core" in out
+        assert "· Most urgent ·" in out
+        assert "title B2" in out          # the CRITICAL is named
+        assert "why: detail B2" not in out  # ...but without its why/evidence
+
+    def test_card_fits_the_chat_budget(self):
+        # The regression this redesign exists to prevent: 7225 chars measured on
+        # fixtures/home_vuln before C-373, against the ~4096 a Telegram message holds.
+        from clawseccheck import audit as _audit
+        from clawseccheck.report import _COMPACT_CHAR_BUDGET
+        for home in ("home_safe", "home_vuln"):
+            ctx, findings, score = _audit(str(FIXTURES / home), include_native=False)
+            out = render_dashboard(findings, score, ctx=ctx, pdf_path="/tmp/r.pdf")
+            assert len(out) <= _COMPACT_CHAR_BUDGET, f"{home}: {len(out)} chars"
+
+    def test_card_fits_the_budget_on_a_pathological_config(self):
+        # Fixtures are not an upper bound (the B-405 lesson: per-item trims tuned against
+        # two fixtures still busted the budget on a real fleet config). Hammer it with far
+        # more CRITICALs than any real config, each with an absurdly long title.
+        from clawseccheck.report import _COMPACT_CHAR_BUDGET
+        findings = [
+            _f(f"B{i}", FAIL, CRITICAL) for i in range(200)
+        ]
+        for f in findings:
+            f.title = "extremely long finding title " * 12
+        out = render_dashboard(findings, compute(findings), pdf_path="/tmp/r.pdf")
+        assert len(out) <= _COMPACT_CHAR_BUDGET, f"{len(out)} chars"
+        # ...and it still says where the rest is, rather than being cut off mid-sentence.
+        # B-468: the path must NOT be in the pasted card (it goes to stderr instead).
+        assert "/tmp/r.pdf" not in out
+        assert "attached PDF report" in out
+
+    def test_full_card_collapses_to_the_overview_when_a_pdf_was_written(self):
+        # C-374: --dashboard --full pastes 11535 bytes inline. With --pdf the PDF now
+        # carries the whole pipeline, so the card collapses to the same chat-sized
+        # overview — nothing is lost, it moved into the attachment.
+        from clawseccheck.report import _COMPACT_CHAR_BUDGET
+        out, _ = self._out(full=True, ctx=_skill_ctx({}), pdf_path="/tmp/r.pdf")
+        assert len(out) <= _COMPACT_CHAR_BUDGET
+        assert "· Inventory by subject ·" in out
+        assert "· Most urgent ·" in out
+        # ...and it says the attachment holds the pipeline blocks too, not just findings.
+        assert "RISK-chain" in out
+        assert "/tmp/r.pdf" not in out  # B-468: path lives on stderr, not in the paste
+        assert "attached PDF report" in out
+
+    def test_full_card_without_a_pdf_still_renders_everything_inline(self):
+        # The flip side: no --pdf means no attachment to point at, so nothing may be
+        # collapsed away — --dashboard --full keeps rendering every block.
+        out, _ = self._out(full=True)
         assert "· Findings ·" in out
-        assert "│ 🌐 Exposure & Network" in out
-        assert "│ 🔑 Privilege & Execution" in out
+        assert "Worth a glance" in out
+
+    def test_pdf_pointer_never_carries_a_url_a_path_or_an_agent_instruction(self):
+        # Golden Rule #1 (local-only): there is no URL to link to. B-468: and the card is
+        # pasted VERBATIM, so it may carry neither the path nor an instruction addressed to
+        # the agent — both now go to stderr (cli.py `_emit_attach_instruction`).
+        out, _ = self._out(pdf_path="/home/u/report.pdf")
+        assert "/home/u/report.pdf" not in out
+        assert "attached PDF report" in out
+        assert "Attach that PDF file itself" not in out
+        assert "do not paste" not in out.lower()
+        assert "http://" not in out and "https://" not in out
+
+    def test_without_pdf_the_card_says_how_to_get_one(self):
+        out, _ = self._out()
+        assert "--pdf <path>" in out
+        assert "Attach that PDF file itself" not in out
 
     def test_severity_dots_used(self):
         out, _ = self._out()
@@ -171,9 +239,10 @@ class TestRenderDashboard:
         assert "1 issues" not in out
 
     def test_ascii_is_pure_ascii(self):
-        out, _ = self._out(ascii_only=True)
+        out, _ = self._out(ascii_only=True, ctx=_skill_ctx({}))
         assert out.isascii()
-        assert "[Exposure & Network]" in out
+        assert "- Inventory by subject -" in out
+        assert "OpenClaw core" in out
 
     def test_no_score_line_or_receipt(self):
         # It is the chat card, not the full report.
@@ -191,7 +260,8 @@ class TestCliDashboard:
         assert rc == 0
         out = capsys.readouterr().out
         assert out.startswith("🦞 ClawSecCheck · OpenClaw Security Audit")
-        assert "│ 🌐 Exposure & Network" in out
+        assert "⚙️ OpenClaw core" in out
+        assert "· Most urgent ·" in out
         assert "Scan receipt" not in out
 
     def test_dashboard_ascii(self, capsys):
@@ -200,7 +270,22 @@ class TestCliDashboard:
         assert rc == 0
         out = capsys.readouterr().out
         assert out.isascii()
-        assert "[Exposure & Network]" in out
+        assert "OpenClaw core" in out
+
+    def test_dashboard_with_pdf_writes_the_file_and_points_the_card_at_it(self, tmp_path, capsys):
+        # C-373: --dashboard --pdf is the chat delivery pair — one run produces the card
+        # (the message) AND the report (the attachment it names). Before this, --pdf won
+        # the mode-precedence race and the card was never printed at all.
+        pdf = tmp_path / "report.pdf"
+        rc = main(["--home", str(FIXTURES / "home_vuln"), "--no-native", "--no-history",
+                   "--dashboard", "--pdf", str(pdf)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert pdf.exists() and pdf.read_bytes().startswith(b"%PDF-")
+        assert out.startswith("🦞 ClawSecCheck · OpenClaw Security Audit")
+        assert str(pdf) not in out  # B-468: the paste carries no path
+        assert "attached PDF report" in out
+        assert "ignored (running --pdf)" not in out
 
 
 # ─── Section 3: Skills (B-356) ───────────────────────────────────────────────
@@ -219,7 +304,11 @@ class TestDashboardSkillsSection:
         findings = self._findings()
         ctx = _skill_ctx({})
         out = render_dashboard(findings, compute(findings), ctx=ctx)
-        assert "Skills" not in out
+        # The dedicated Skills block is omitted. The per-subject inventory (C-373) still
+        # names the subject with an honest "none installed" — that is the overview's job,
+        # not a Skills section.
+        assert "· Skills ·" not in out
+        assert "none installed" in out
 
     def test_clean_skill_shows_clear_verdict(self):
         findings = self._findings()
@@ -254,13 +343,17 @@ class TestDashboardSkillsSection:
         assert out.isascii()
         assert "- Skills -" in out
 
-    def test_skills_section_does_not_change_section_1_2(self):
-        # The score/grade/findings contract is untouched by the additive section.
+    def test_skills_section_does_not_change_the_grade_header(self):
+        # The score/grade contract is untouched by the ctx-gated sections. (Pre-C-373
+        # this asserted a full-prefix match; ctx now also adds the per-subject inventory
+        # block above Skills, so the invariant is stated on the header itself.)
         findings = self._findings()
         score = compute(findings)
         without = render_dashboard(findings, score)
         with_skills = render_dashboard(findings, score, ctx=_skill_ctx({"good-skill": _CLEAN_SKILL_TEXT}))
-        assert with_skills.startswith(without.rstrip("\n"))
+        # First two lines are the grade card + score bar: identical either way.
+        assert with_skills.splitlines()[:2] == without.splitlines()[:2]
+        assert "good-skill" in with_skills and "good-skill" not in without
 
 
 # ─── B-381 #1/#2: Plugins headline never lies about an all-unscanned sweep ────

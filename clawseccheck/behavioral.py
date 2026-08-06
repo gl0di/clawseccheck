@@ -926,6 +926,28 @@ def audit_trail_divergence(ctx, events: list[dict]) -> "frozenset[str]":
     return frozenset(audit_sessions - traj_sessions)
 
 
+def explicit_path_problem(explicit_path: str | None) -> str | None:
+    """Why an explicitly-named --behavioral PATH cannot be read, or None if it is fine.
+
+    B-462: when the user names a file, a bad path is THEIR fact, not the host's. A typo
+    used to fall through to the generic "no trajectory sidecars found ... run on a host
+    where an OpenClaw agent has produced session trajectories" — blaming the machine,
+    never echoing the path, and exiting 0 under a green tick.
+
+    Shared by `analyze` and the CLI's exit-code decision so the two cannot disagree, and
+    so deciding the exit code costs a stat rather than a second full `analyze()` pass over
+    every trajectory file.
+    """
+    if not explicit_path:
+        return None
+    p = Path(explicit_path).expanduser()
+    if not p.exists():
+        return f"{explicit_path}: no such file or directory"
+    if p.is_dir():
+        return f"{explicit_path}: is a directory, not a trajectory file"
+    return None
+
+
 def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     """Run the v1 behavioral detectors (T1, T2, T3) plus the B191 audit-trail signal, and
     return a result dict.
@@ -940,6 +962,12 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     """
     home = getattr(ctx, "home", None)
     lim = limits_for(ctx)
+    # B-462: when the user names a file explicitly, a bad path is THEIR fact, not the
+    # host's. Previously a typo'd --behavioral PATH fell through to the generic "no
+    # trajectory sidecars found ... run on a host where an OpenClaw agent has produced
+    # session trajectories" — blaming the machine for a typo, never echoing the path, and
+    # exiting 0 with a green tick.
+    explicit_path_error = explicit_path_problem(explicit_path)
     events, meta = read_events(home, explicit_path=explicit_path,
                                 max_files=lim.traj_max_files,
                                 max_bytes_per_file=lim.traj_max_bytes_per_file)
@@ -953,6 +981,7 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "event_count": len(events),
         "thread_count": 0,
         "findings": [],
+        "explicit_path_error": explicit_path_error,
     }
     b191 = check_audit_trail_signals(
         ctx,
@@ -1054,6 +1083,11 @@ def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_o
     q = "[?]" if ascii_only else "?"
     lines = ["Behavioral trajectory audit (post-hoc, read-only, metadata-only)"]
 
+    # B-462: a path the user typed that does not resolve is reported as such, before any
+    # note about the host — otherwise a typo reads as "your machine has no trajectories".
+    if r.get("explicit_path_error"):
+        lines.append(f"  {warn} {r['explicit_path_error']}")
+
     if not r["present"]:
         # B191 (F-134) still runs below even here — it reads a SEPARATE store
         # (audit_events) and this is exactly the scenario it exists to catch (trajectory
@@ -1106,5 +1140,17 @@ def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_o
             lines.append(f"  {ok} {f.id} — {f.detail}")
 
     if not any_warn:
-        lines.append(f"  {ok} No behavioral anomalies found.")
+        # B-462: the rule is already stated ten lines up for an individual finding —
+        # "mark it as UNKNOWN, never a ✓, so it doesn't read as a clean pass" — and the
+        # summary used to break it, printing a green all-clear for a run in which every
+        # detector returned UNKNOWN and zero bytes of trajectory were read.
+        unknowns = [f for f in r["findings"] if f.status == UNKNOWN]
+        if r["findings"] and len(unknowns) == len(r["findings"]):
+            lines.append(f"  {q} No behavioural verdict — every detector returned UNKNOWN "
+                         "(reasons above). Nothing was assessed, which is not a clean result.")
+        elif unknowns:
+            lines.append(f"  {ok} No behavioral anomalies found in what could be assessed "
+                         f"({len(unknowns)} detector(s) returned UNKNOWN — see above).")
+        else:
+            lines.append(f"  {ok} No behavioral anomalies found.")
     return "\n".join(lines)

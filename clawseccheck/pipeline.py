@@ -1170,5 +1170,9 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
     # module already imports report.py at top level, so a top-level import here would
     # risk a cycle at import time; deferred keeps it safe.
     result.coverage_page = build_coverage_page(
-        ctx, findings, skill_sweep=skill_sweep, plugin_sweep=plugin_sweep_obj)
+        ctx, findings, skill_sweep=skill_sweep, plugin_sweep=plugin_sweep_obj,
+        # B-473: `fast` is the only reason a --full run reaches here with no sweep, so
+        # name it — "needs --full" was being printed to an operator who had passed --full.
+        sweep_skip_reason=("not scanned this run (--fast drops the sweep phases)"
+                           if fast else None))
     return result

@@ -216,3 +216,26 @@ def test_exhaustive_consumed_by_show_suppressed_no_note(capsys):
     rc = main(["--home", VULN, *COMMON, "--show-suppressed", "--exhaustive"])
     assert rc == 0
     assert "--exhaustive has no effect" not in capsys.readouterr().err
+
+
+# ── C-374: --pdf and --dashboard compose; --full is honored only when they do ────────
+
+def test_dashboard_is_not_reported_ignored_under_pdf(tmp_path, capsys):
+    """--pdf wins the mode race (it is earlier in _PRIMARY_MODES), but the two now
+    COMPOSE: one run writes the report and prints the card that points at it. Saying
+    "--dashboard ignored" was true of the old early-return dispatch, not this one."""
+    rc = main(["--home", VULN, *COMMON, "--dashboard",
+               "--pdf", str(tmp_path / "r.pdf")])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "--dashboard ignored" not in err
+
+
+def test_bare_pdf_still_says_full_has_no_effect(tmp_path, capsys):
+    """The flip side, and the reason the honor is conditional: without --dashboard the
+    --pdf path never computes the pipeline phases, so --full really is ignored there and
+    must keep saying so. Silencing it for every --pdf run would trade one lie for another."""
+    rc = main(["--home", VULN, *COMMON, "--full",
+               "--pdf", str(tmp_path / "r.pdf")])
+    assert rc == 0
+    assert "--full has no effect with --pdf" in capsys.readouterr().err

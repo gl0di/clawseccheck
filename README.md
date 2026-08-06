@@ -61,7 +61,7 @@ can append entries to its own suppression file — see
 <summary>See a longer excerpt of the same report</summary>
 
 <p align="center">
-  <img src="docs/assets/report.png" alt="A longer excerpt: score header, counts, and findings grouped by area, most urgent first" width="740">
+  <img src="docs/assets/report.png" alt="A longer excerpt: score header, counts, an inventory-by-subject summary, and findings grouped by subject, most urgent first" width="740">
 </p>
 
 </details>
@@ -72,7 +72,7 @@ No flags, no commands. Everything works as a conversation:
 
 | You say | You get |
 |---|---|
-| *"Audit my OpenClaw setup"* | One combined report, in your chat: your A–F grade, the urgent problems most dangerous first, plus every installed skill/plugin/MCP server vetted, the riskiest capability chains, a behavioral replay, and a second opinion on any borderline call — not just the top-line grade |
+| *"Audit my OpenClaw setup"* | A chat-sized card — your A–F grade, an inventory by subject, and the urgent problems most dangerous first — with a **PDF companion** carrying the rest: every installed skill/plugin/MCP server vetted, the riskiest capability chains, a behavioral replay, and a second opinion on any borderline call |
 | *"Is this skill safe to install?"* | A pre-install risk verdict with the reasons — flags **suspicious** and **dangerous** skills before you enable them |
 | *"Am I vulnerable to prompt injection?"* | An optional canary self-test you run against your own agent, alongside the static audit |
 | *"Watch my setup for changes"* | Alerts when something changes — a new skill, config drift, a dropped score |
@@ -242,4 +242,7 @@ complete flag list.
   [Start a discussion](https://github.com/gl0di/clawseccheck/discussions) — see
   [SUPPORT.md](SUPPORT.md) for where each kind of report goes.
 - **Found a vulnerability?** Report privately via [SECURITY.md](SECURITY.md).
-- **License:** [MIT](LICENSE). Maintained by [gl0di](https://github.com/gl0di).
+- **License:** [MIT](LICENSE) for the code. The ClawSecCheck name and logo are not covered by
+  it — see [TRADEMARK.md](TRADEMARK.md). Contributors sign a short
+  [CLA](https://github.com/gl0di/clawseccheck/blob/main/CLA.md).
+  Maintained by [gl0di](https://github.com/gl0di).

@@ -1,9 +1,9 @@
 ---
 name: clawseccheck
-version: 3.60.0
-description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Scores your setup (A–F) and reports the most urgent holes — it never changes your OpenClaw setup. No API key; the scanner itself makes no network calls. Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score.
+version: 3.61.0
+description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Scores your setup (A–F) and reports the most urgent holes. It changes nothing in your OpenClaw setup except through one opt-in, confirmation-gated command (--apply-ignore-proposals, which appends only suppressions you approved to .clawseccheckignore). No API key; the scanner itself makes no network calls, and the single external command it can run is your own read-only openclaw security audit (skip it with --no-native). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score.
 license: MIT
-metadata: {"openclaw":{"emoji":"🦞","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Scores your setup (A–F) and reports the most urgent holes — it never changes your OpenClaw setup. No API key; the scanner itself makes no network calls. Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
+metadata: {"openclaw":{"emoji":"🦞","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Scores your setup (A–F) and reports the most urgent holes. It changes nothing in your OpenClaw setup except through one opt-in, confirmation-gated command (--apply-ignore-proposals, which appends only suppressions you approved to .clawseccheckignore). No API key; the scanner itself makes no network calls, and the single external command it can run is your own read-only openclaw security audit (skip it with --no-native). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
 ---
 
 <!-- markdownlint-disable MD040 MD032 -->
@@ -374,7 +374,7 @@ rest on demand. The number, the phrase, or a tap all select an item; free phrasi
 | 1 Check everything ("check" / "go") | `--dashboard --full` (+ auto capability self-report AND a mandatory judge panel, see Step 2) | Full pipeline in one go: audit **+** capability self-report (B43/B44 resolved inline instead of UNKNOWN — F-043) **+** MCP vet **+** per-skill/per-plugin sweeps (`Skills`/`Plugins`, one merged verdict per item, F-150) **+** the highest-risk chains (`RISK Chains`) **+** a behavioral/trajectory replay (`Behavioural`, F-151) **+** a MANDATORY judge-panel second opinion (`Second opinion (advisory)` — see Step 2's "Judge-panel fan-out" protocol above). Everything here is **visibility/advisory-only** — it never moves the score or grade — except two disclosed, cap-only exceptions: a fired behavioral detector (F-154) and a VULNERABLE live-test verdict (F-155, Section 6). All rendered as ONE fixed-order Dashboard card by the merged Step 2+3 command (F-153) — see Step 2/3 below for the exact protocol, and [`docs/USAGE.md`](docs/USAGE.md) for the full flag-by-flag composition. The live injection test (⚡, Section 6 item a) stays a separate, opt-in step — not part of item 1. |
 | 2 Check before install | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug\|url>` (before anything is even downloaded) | Supply-chain check on something you're about to trust. See the vet flow in Step 5 → [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md). |
 | 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
-| 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) |
+| 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) **It is ~6 KB — longer than a single Telegram/Slack message.** Send it as its own message, split on the blank line between categories if the channel still truncates, and say which categories you left out. Never let the host silently cut it. |
 | "private" modifier | Add `--no-history` to any mode | "1 private" = Check everything + `--no-history`. Nothing written to `~/.clawseccheck/` for the audit/vet/self-test modes — but `--monitor` and `--trend` always write their own state regardless of `--no-history`; it is not a suppressor for those two. |
 | "update" | Offline notice + agent check | ClawSecCheck never phones home. On "update" the **host agent** checks ClawHub for a newer version and, if there is one, offers `openclaw skills update clawseccheck` — the tool itself stays offline. |
 
@@ -457,8 +457,21 @@ in Step 2's internal pull — each invocation is its own fresh process, so `--at
 passed again) and folds in the mandatory judge panel's verdicts:
 
 ```
-python3 {baseDir}/audit.py --dashboard --full --attest <path-or- -> --judged-bundle <verdicts-path-or- ->
+python3 {baseDir}/audit.py --dashboard --full --attest <path-or- -> --judged-bundle <verdicts-path-or- -> --pdf ~/.clawseccheck/report.pdf
 ```
+
+**`--pdf` is what makes this fit a chat message (C-374).** With it, the run writes a
+complete PDF — every finding with its why and evidence, *plus* the Skills/Plugins/MCP,
+RISK-chain, Behavioural, Second-opinion and Coverage blocks — and the card collapses to a
+chat-sized overview that points at that file. Without `--pdf` the same command pastes the
+whole pipeline inline (~11.5 KB), which a channel like Telegram will truncate or reject.
+
+So: **paste the card, then attach `~/.clawseccheck/report.pdf` as a file.** Never paste
+its path at the user as if it were the deliverable, and never present it as a link —
+ClawSecCheck is local-only, so no URL exists. If your channel cannot attach files, say so
+plainly and offer `--dashboard --full` (everything inline, split across messages) instead
+— the card names the most urgent findings either way, so the user is never left with only
+a grade.
 
 `<verdicts-path-or- ->` is the file (or `-` for stdin) holding `{"judged": {...}}` — the
 verdicts map Step 2's mandatory judge panel just built. Omit `--judged-bundle` entirely only
@@ -482,7 +495,10 @@ prints it (see below) because its frame relies on monospace alignment.
 **Channel-aware delivery:** the combined card can exceed a chat channel's message limit (e.g.
 Telegram's ~4096-character cap — Sections 1-2 alone can already run to ≈6,482 characters,
 before the pipeline blocks below add more). If the destination channel truncates long
-messages, add `--compact` to the command above instead — it condenses Plugins/MCP/RISK
+messages, drop `--pdf` and add `--compact` instead — `--compact` has no effect while
+`--pdf` is present (with an attachment the card is already collapsed to an overview;
+the CLI says so on stderr). So the truncation remedy is `--dashboard --full --compact`.
+It condenses Plugins/MCP/RISK
 Chains to headline counts, trims each Findings/"Worth a glance" finding's "why" text and
 drops its evidence bullets (kept, not dropped — just condensed, since Findings is what
 actually scales with a bad config's FAIL/WARN count), and appends a `--save`/`--html`
@@ -492,15 +508,17 @@ and offer to save the full report via `--save <path>` / `--html <path>`.
 **Do not compose the card — paste it.**
 
 Live testing showed that when the model composes the grade card / findings sections
-itself, the 🦞 header and the family frame silently vanish. So the WHOLE card above is one
+itself, the 🦞 header and the per-subject frames silently vanish. So the WHOLE card above is one
 deterministic render — paste its **entire stdout here, verbatim**. It emits, in this fixed
 order (F-153):
 
-- **Section 1 — Grade card:** `🦞 OpenClaw Security Audit — Grade {grade} · {score}/100`,
-  a 16-cell score-bar, and the count of non-suppressed FAIL/WARN findings.
-  **No standalone Lethal Trifecta chip (F-044)** — trifecta state is one Privilege &
-  Execution finding among others in Section 2.
-- **Section 2 — Findings, grouped by area** (details below).
+- **Section 1 — Grade card:** `🦞 ClawSecCheck · OpenClaw Security Audit · Grade {grade} ·
+  {score}/100`, a 16-cell score-bar carrying the count of non-suppressed FAIL/WARN findings,
+  and — whenever the score was capped — a disclosure line naming the reason
+  (`⚠️ capped from 70/100 — open CRITICAL finding`).
+  **No standalone Lethal Trifecta chip (F-044)** — trifecta state is one **Agents** finding
+  among others in Section 2.
+- **Section 2 — Findings, grouped by subject** (details below).
 - **Skills** (B-356, when skills are installed): a compact per-skill vet verdict — install
   count, a `clean:` list, and a `verdict - reason` line for anything flagged. Reuses the
   same scoring path `--vet-skill` uses.
@@ -530,33 +548,49 @@ plain-language rule.
 
 (`--dashboard-findings` still prints Section 2 alone, if you ever need just the findings block.)
 
+**Plain `--dashboard` (no `--full`) is the chat-sized card (C-373).** It is a different
+shape from the full render above, built for a single chat message: the grade card, an
+**Inventory by subject** overview (one line per subject with its rolled-up verdict), the
+**most urgent** findings by name only (no `why:`, no evidence), a disclosure of how many
+findings it did not name, and a pointer to where the rest is. It is hard-capped under
+~4096 characters on any input, so it always fits.
+
+Pair it with `--pdf` — `--dashboard --pdf <path>` — and one run produces both: the card
+(the message you paste) and a complete PDF report (every finding with its why and
+evidence). The card then names that file. **Attach the PDF file itself; never paste its
+path at the user and never present it as a link** — ClawSecCheck is local-only, so there
+is no URL, and a path is not a deliverable. Without `--pdf`, the card says how to get one.
+
 **Section 2 — what the pasted findings block contains**
 
-The pasted card's findings block holds the FAIL/WARN findings already grouped into the
-7 OpenClaw surface families, each under an **open 3-sided frame**
-(`┌─ / │ {icon} {family} — {N} issue(s) / └─`, no right border), most-severe-first within
-a family, a `🔴/🟠/🟡/⚪` severity dot on every issue line, and the `why:` explanation on
-every finding. **No remediation appears anywhere — ClawSecCheck reports; it does not fix
-(F-074).**
+The pasted card's findings block holds the FAIL/WARN findings already grouped by their
+8 Inventory subjects, each under an **open 3-sided frame**
+(`┌─ / │ {icon} {subject} — {N} issue(s) / └─`, no right border), most-severe-first within
+a subject, a `🔴/🟠/🟡/⚪` severity dot on every issue line, and the `why:` explanation on
+every finding. **ClawSecCheck reports; it never changes anything (F-074).** The `why:`
+text and a finding's `fix:` line may name the corrective action — that is description, not
+action — so paste them as they are. What the tool never does, and what you must not do on
+its behalf, is *apply* a change: no edits to the config, no commands run to "fix" a finding.
 
 The renderer already guarantees the findings contract, so **you filter nothing yourself**:
 - **PASS/UNKNOWN are dropped** — coverage is Section 3's job, not here;
 - **`MEDIUM`/`ATTESTED`-confidence findings are dropped** — they surface in Section 4 ("Worth a glance");
-- families with nothing to fix are **omitted** (no empty "— clear" headers);
-- the Lethal Trifecta (A1) is folded into **Privilege & Execution** as one finding (no standalone
+- subjects with nothing to fix are **omitted** (no empty "— clear" headers);
+- the Lethal Trifecta (A1) is folded into **Agents** as one finding (no standalone
   headline, F-044), with its active legs named in the finding's own `why:` line.
 
-The 7 families, in the fixed order the command renders them:
+The 8 subjects, in the fixed order the command renders them:
 
-| Icon | Family | Surfaces |
-|------|--------|---------|
-| 🌐 | Exposure & Network | gateway · channels · sessions |
-| 🔑 | Privilege & Execution | tools · agents (**+ A1, the Lethal Trifecta**) |
-| 📦 | Supply Chain | skills · mcp |
-| 📝 | Content & Memory Integrity | bootstrap |
-| 🔒 | Secrets & Data | secrets |
-| 🛰️ | Detection & Host | monitoring · host |
-| 🔧 | Automation & Maintenance | hooks · update |
+| Icon | Subject | Surfaces |
+|------|---------|---------|
+| ⚙️ | OpenClaw core | gateway · tools · secrets · monitoring · hooks · update · sessions |
+| 🖥️ | Host machine | host |
+| 🤖 | Agents | agents · bootstrap (**+ A1, the Lethal Trifecta**) |
+| 🧩 | Skills | skills |
+| 🔌 | MCP servers | mcp |
+| 📦 | Plugins | installed plugins (populated by the `--full` sweep) |
+| 📡 | Channels | channels |
+| 📝 | Logs & trajectories | logs |
 
 Plain-language still governs **your own prose** around the pasted block (any framing
 sentence) — never raw codes like "B2 FAIL". The block's `why:` lines are the tool's own
@@ -588,7 +622,7 @@ that bucket is non-empty):
 Since the pasted Section 2 no longer tallies UNKNOWN, this coverage line is the single place
 unassessed surfaces are surfaced.
 
-For each partial surface (all findings returned UNKNOWN): if it's Privilege & Execution (B43/B44)
+For each partial surface (all findings returned UNKNOWN): if it's OpenClaw core (B43/B44)
 and item 1 already ran the capability self-report in Step 2, it's likely already resolved — don't
 tell the user to run something that just ran. For any other still-partial surface, note that
 answering `--ask` then `--attest` ([`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md) →

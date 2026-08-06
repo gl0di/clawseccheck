@@ -39,7 +39,8 @@ glob, which explicitly excludes that suffix).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .collector import Context, WORKSPACE_DIRS, dig
@@ -66,6 +67,21 @@ class LogSink:
     path: Path
     kind: str  # trajectory|config_log|cache_trace|transcript|config_audit|memory|backup
     source: str  # config|convention|env
+    # B-484: cheap stat() metadata, so a consumer that cannot afford to read every sink
+    # can choose WHICH ones to read from (size, mtime) alone — deterministically, before
+    # opening anything. Measured on a real 132-sink corpus: stat()ing all of them costs
+    # 0.27 ms, 0.006% of B164's 4.5s budget, because discovery already stat()s every
+    # candidate in `_is_regular_readable_file` and the inodes are page-cache hot.
+    #
+    # DEFAULTED, and deliberately so: every existing 3-argument LogSink(...) construction
+    # — including the ones in tests/test_b314_check_perf.py — keeps working and reads
+    # size 0 / mtime 0.0. `_plan_log_hunt_sinks` treats size 0 as "unknown, admit it and
+    # let the clock govern", so a hand-built sink is never planned out.
+    #
+    # NEVER put these values in a Finding.detail: they are environment-derived, and
+    # baseline.fingerprint() hashes detail (the B-348/B-349 defect).
+    size: int = 0
+    mtime: float = 0.0
 
 
 def _is_regular_readable_file(path: Path) -> bool:
@@ -244,7 +260,24 @@ def discover_log_sinks(ctx: Context) -> list[LogSink]:
             if key in seen:
                 continue
             seen.add(key)
+            # B-484: stamp size/mtime here, once per admitted sink, so downstream
+            # planning needs no second walk. A stat() failure is not an error — the
+            # sink stays in the list with the 0/0.0 defaults and is treated as
+            # unknown-cost by any planner.
+            try:
+                st = os.stat(sink.path)
+                sink = replace(sink, size=st.st_size, mtime=st.st_mtime)
+            except OSError:
+                pass
             sinks.append(sink)
+
+    # NOTE (B-484): this function deliberately does NOT sort. `check_memory_injection`
+    # (B180, checks/_lifecycle.py) consumes the same list filtered to kind="memory" and
+    # renders `list(corroborated.items())[:5]` straight into its Finding.detail, which
+    # baseline.fingerprint() hashes — so reordering here would move B180's fingerprint
+    # and orphan users' .clawseccheckignore entries, for no benefit to B180 (it has no
+    # cumulative budget and reads every memory sink anyway). Ordering is the consumer's
+    # job: see `_plan_log_hunt_sinks` in checks/_egress.py.
 
     config_log = _config_path_sink(ctx, "logging.file", "config_log")
     if config_log is not None:

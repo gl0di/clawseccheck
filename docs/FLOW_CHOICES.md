@@ -32,6 +32,9 @@ A–F grade + NO KNOWN ISSUE/SUSPICIOUS/DANGEROUS verdict over five axes — **d
 stages for later), **connections** (whom it reaches out to). Lead with the grade + verdict, then
 name any axis that is WARN/FAIL and why; note that N/A axes weren't assessable (e.g. a doc-only
 skill with no code). Report the verdict in plain language:
+- **No grade at all** (`Grade: N/A (UNKNOWN)`, "This target is not a skill package … no verdict
+  is given") -> the tool refused to grade what it was pointed at. Say so plainly and ask for a
+  skill directory or `SKILL.md`; do not present the absence of findings as a clean result.
 - NO KNOWN ISSUE -> "Grade looks clean — no suspicious patterns on any axis."
 - SUSPICIOUS -> "A couple of axes are worth a closer look (I'll name them). I'd be cautious."
 - DANGEROUS -> "This skill contains patterns used by malware (the danger axis fails). Do not
@@ -74,7 +77,10 @@ X" end to end: (1) `--vet-source <target>` — the identity gate above; stop her
 steps + a consent line), then prints the exact fetch+isolate+cleanup commands for *you* (the
 agent) to run — a temp quarantine dir outside every OpenClaw auto-load path, the right fetch verb
 for the target's ecosystem (npm/pypi/git/url), never executed by the tool itself. (3) Run those
-commands yourself. (4) `--advise <quarantine-path>` — reframes the same risk dossier as an
+commands yourself — **unless the tool refused to build a plan**: for a target it cannot quote
+safely (shell metacharacters, control characters) it prints `I will not build a fetch plan for
+this target.` and no commands at all. There is nothing to run; ask the user for a plain target
+rather than improvising a fetch of your own. (4) `--advise <quarantine-path>` — reframes the same risk dossier as an
 install decision: **INSTALL** / **CAUTION** / **DO-NOT-INSTALL**, each with a plain-words
 restatement ("In plain words: …"), a "how I decided" line, the reasons, and a cleanup command.
 Relay it directly:

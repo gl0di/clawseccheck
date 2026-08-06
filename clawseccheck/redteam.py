@@ -38,6 +38,7 @@ import hashlib
 import secrets
 
 from . import brand
+from .textnorm import asciify
 
 TOKEN_PREFIX = "CLAWSECCHECK-RT-"
 
@@ -528,4 +529,4 @@ def render_suite(suite: list[dict], ascii_only: bool = False,
     ]
 
     out = "\n".join(lines)
-    return out.encode("ascii", "replace").decode("ascii") if ascii_only else out
+    return asciify(out) if ascii_only else out

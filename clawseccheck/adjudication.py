@@ -296,10 +296,19 @@ def _evidence_locations(f) -> str:
     paths = _config_field_paths(f)
     if paths:
         return redact("; ".join(paths))
-    n = len(f.evidence) if f.evidence else (1 if f.detail else 0)
-    if n == 0:
-        return ""
-    return f"{n} evidence entr{'y' if n == 1 else 'ies'} in the full report (not reproduced here)"
+    if f.evidence:
+        n = len(f.evidence)
+        return (f"{n} evidence entr{'y' if n == 1 else 'ies'} in the full report "
+                "(not reproduced here)")
+    # B-481: this used to fall through to `1 if f.detail else 0` and report "1 evidence
+    # entry in the full report" for a finding that has NO evidence entries at all — a
+    # count of something that does not exist, told to the one reader (the adjudicating
+    # judge) whose entire job is to weigh how much evidence there is. Measured on a real
+    # packet: 86 of 87 items carried the claim while carrying zero evidence. A detail
+    # string is not an evidence entry; say which one the judge will actually find.
+    if f.detail:
+        return "no evidence entries — this finding's basis is its detail in the full report"
+    return ""
 
 
 _URL_IN_EVIDENCE_RE = re.compile(r"https?://[^\s)>\]\"']+", re.I)
