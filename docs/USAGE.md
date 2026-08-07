@@ -618,7 +618,7 @@ adjudication phase (the judge packet, and any `--judged-bundle` "second opinion"
 trips this either — it is advisory-only by design, same as everywhere else in this tool.
 
 Note that `--vet`'s exit code is a **separate** contract: it returns 1 on a
-`SUSPICIOUS`/`DANGEROUS` verdict (see `--vet TARGET` below), where a WARN *does* count.
+`CAUTION`/`DO-NOT-INSTALL` verdict (see `--vet TARGET` below), where a WARN *does* count.
 
 ## More tools
 
@@ -654,7 +654,7 @@ python3 audit.py --next                    # print the "What you can do next" gu
 python3 audit.py --vet ./some-target       # vet a skill / plugin / MCP spec BEFORE installing it (type autodetected)
 python3 audit.py --vet-skill ./some-skill  # force the skill engine (dir or SKILL.md)
 python3 audit.py --vet-plugin ./some-plugin # force the plugin engine (root dir or openclaw.plugin.json)
-python3 audit.py --vet ./some-skill --json # same, machine-readable risk dossier (grade + axes + findings); --sarif PATH for CI
+python3 audit.py --vet ./some-skill --json # same, machine-readable risk dossier (verdict + axes + findings); --sarif PATH for CI
 python3 audit.py --vet-mcp                 # vet connected MCP servers for supply-chain risk BEFORE trusting them
 python3 audit.py --vet-source npm:some-pkg # reputation gate on a slug/URL/package spec BEFORE anything is fetched
 python3 audit.py --canary                   # active prompt-injection self-test (battle-tested)
@@ -685,28 +685,34 @@ python3 audit.py --log audit.log            # also write log to a local file
   snooping, silent-instruction / jailbreak / forged-provenance directives) the full audit runs on
   installed skills (point it at a
   downloaded folder or `SKILL.md`; for a URL, clone it first, then vet the local copy). The output
-  is a **risk dossier** — one A–F grade over five axes: **danger** (how dangerous to use), **build**
+  is a **risk dossier** over five axes: **danger** (how dangerous to use), **build**
   (how it's built), **behavior** (how it thinks / behaves), **persistence** (what it stages for
-  later), and **connections** (whom it reaches out to) — with an overall NO KNOWN ISSUE / SUSPICIOUS /
-  DANGEROUS verdict. Add `--json` for the machine-readable dossier (grade + per-axis breakdown +
+  later), and **connections** (whom it reaches out to) — with an overall **INSTALL / CAUTION /
+  DO-NOT-INSTALL** verdict, the same install-recommendation word `--advise` speaks. This is
+  never a letter grade: a per-package "should I install this" question is a different scale from
+  the full system audit's own A–F grade (`clawseccheck` with no flags), which additionally
+  certifies that every layer of the audit ran — a claim a single `--vet` never makes about one
+  package. Add `--json` for the machine-readable dossier (verdict + per-axis breakdown +
   findings), or `--sarif PATH` to drop a SARIF file for CI / code scanning; exit code is `1` on
-  SUSPICIOUS/DANGEROUS so `--vet … || fail` gates an install pipeline.
+  CAUTION/DO-NOT-INSTALL so `--vet … || fail` gates an install pipeline.
   A target that is **not a skill package at all** — no `SKILL.md`, no executable files, and
   contents that read as an HTML document (the shape you get by saving a ClawHub *web page*
-  instead of the skill) — is refused with `UNKNOWN` and **no grade**: the tool will not
-  recommend for or against installing something it never saw. Anything executable, or any
-  manifest, is scanned regardless, so deleting `SKILL.md` is not a way to switch the
-  scanner off.
+  instead of the skill) — is refused with `CAUTION` and **no INSTALL recommendation**: the tool
+  will not recommend for or against installing something it never saw (this specific refusal
+  case exits `0` — the target itself was read fine, there is simply nothing in it to assess;
+  see the exit-code rule above for the general FAIL/WARN/CAUTION-on-a-missing-target cases).
+  Anything executable, or any manifest, is scanned regardless, so deleting `SKILL.md` is not a
+  way to switch the scanner off.
   If the scan hits its own per-target budget, or a collector size/file cap, or a file that
   is present but cannot be **opened** (permissions, a dangling link, an I/O error), before
   it has read everything, that is **never** reported as a clean result. An unreadable file
   is not an absent one: it is named, and the danger axis degrades to `UNKNOWN` rather than
   claiming no malware signature was found in content nothing ever read. The gap lands on the
   `danger` axis — as a synthetic `VET-COVERAGE` finding when the content-ring budget runs
-  out, and as a `"coverage is incomplete"` detail otherwise — which caps the grade at
-  `C`/79 and makes the overall verdict `SUSPICIOUS`, so a partially-scanned target *does*
-  exit `1` here. (The `--full` skill sweep treats truncation the opposite way — see
-  `--full` below.)
+  out, and as a `"coverage is incomplete"` detail otherwise — which keeps the internal score
+  capped (never a confident "clean") and makes the overall verdict `CAUTION`, so a
+  partially-scanned target *does* exit `1` here. (The `--full` skill sweep treats truncation the
+  opposite way — see `--full` below.)
 - **`--full`** runs the audit and then appends: self-test scenario generation, the MCP vet,
   a **skill sweep**, a **plugin sweep** (F-150), a **behavioral/trajectory replay**, and an
   **adjudication phase** (the same borderline-band judge packet `--judge-packet` produces,
@@ -838,15 +844,16 @@ python3 audit.py --log audit.log            # also write log to a local file
 - **`--vet-source SLUG|URL|PKG`** is the pre-download reputation gate: it judges a source's
   *identity* — `clawhub:<slug>`, `npm:<pkg>`, `pypi:<pkg>`, `git:host/owner/repo[@ref]`, or a
   URL — with zero network and nothing fetched. Exact match in the bundled known-compromised
-  catalog → KNOWN-BAD (do not fetch, exit 1); typosquat of a well-known name / raw paste or
-  bare-IP host / plaintext http / unpinned git ref → SUSPICIOUS (fetch only into an isolated
-  quarantine, exit 1); otherwise the honest answer is *no known-bad record* (exit 0) — an
+  catalog → `DO-NOT-INSTALL` (do not fetch, exit 1); typosquat of a well-known name / raw paste
+  or bare-IP host / plaintext http / unpinned git ref → `CAUTION` (fetch only into an isolated
+  quarantine, exit 1); otherwise the honest answer is *no known-bad record* → `INSTALL` (exit 0) — an
   identity check can never prove unseen code safe, so proceed via quarantine and run `--vet`
   on the fetched copy before installing.
 - **`--vet-mcp`** vets every MCP server listed under `mcp.servers.*` for supply-chain risk
   *before* you trust it. Flags unpinned installs (`npx @latest`, unversioned packages), `curl|sh`
   bootstrap, plaintext-HTTP remote transports, env-variable secret passthrough, and overly broad
-  OAuth scopes. Verdict per server: NO KNOWN ISSUE / SUSPICIOUS / DANGEROUS. Local and read-only — no
+  OAuth scopes. Verdict per server: `INSTALL` / `CAUTION` / `DO-NOT-INSTALL` — no letter grade (see
+  `--vet TARGET` above for why). Local and read-only — no
   network calls; it writes only a one-line coverage-freshness entry under `~/.clawseccheck/`
   (suppressed by `--no-history`). Targets the #1 agent supply-chain gap: most tools audit your
   skills but not the MCP servers wired into your agent.

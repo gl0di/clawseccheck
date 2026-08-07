@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from . import brand
 from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding, remediation_for
-from .dossier import VERDICT_WORD, axis_for
+from .dossier import axis_for
 from .report import _sanitize, _sanitize_tree, finding_counts_by_severity, surfaced_despite_suppression
 from .scoring import ScoreResult
 
@@ -275,15 +275,19 @@ def render_sarif(
 
     # Risk-dossier summary (additive, non-breaking — an extension property outside the
     # frozen SARIF contract). Per-finding results stay finding-oriented; this carries the
-    # axis roll-up + overall grade so a viewer can show the dossier alongside the results.
+    # axis roll-up + Mode C's install-recommendation verdict so a viewer can show the
+    # dossier alongside the results.
+    #
+    # C427: no letter grade / numeric score here — "verdict" is `profile.verdict`
+    # (dossier.verdict_for(profile.overall_status), computed once in build_profile), the
+    # exact same value the text dossier / --json / --advise render, so SARIF cannot
+    # disagree with them.
     if profile is not None:
         run = sarif_log["runs"][0]
         run.setdefault("properties", {})
         run["properties"]["vetProfile"] = {
             "targetType": profile.target_type,
-            "grade": profile.overall_grade,
-            "verdict": VERDICT_WORD.get(profile.overall_status, "UNKNOWN"),
-            "score": profile.score,
+            "verdict": profile.verdict,
             "axes": [
                 {
                     "axis": a.axis,
