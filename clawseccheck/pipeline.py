@@ -62,6 +62,13 @@ from .catalog import UNKNOWN
 from .layers import (            # noqa: F401 — re-exported for existing importers
     STATUS_ERROR, STATUS_NOT_REACHED, STATUS_RAN, STATUS_SKIPPED, STATUS_UNAVAILABLE,
 )
+# C-425: the five-layer ledger names/types themselves — NOT re-exported above (that
+# comment is about the pre-existing STATUS_* vocabulary pipeline.py already used before
+# layers.py existed), only consumed by PipelineResult.to_ledger() below.
+from .layers import (
+    LAYER_INSTALLED_SWEEP, LAYER_LIVE_BEHAVIOUR, LAYER_LOGS_TRAJECTORIES,
+    LAYER_SELF_REPORT, LAYER_STATIC, LayerLedger, LayerState,
+)
 from .report import _sanitize
 from .scanbudget import (
     DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, budget_deadline, budget_exceeded,
@@ -960,6 +967,44 @@ def live_test_cap_signal(bucket) -> LiveTestSignal:
     return LiveTestSignal(hit=True, reason=reason, reproducible=_live_test_reproducible(bucket))
 
 
+# ── C-425: projecting the pipeline onto the five-layer ledger (layers.py) ──────
+#
+# "Take the worse of the two statuses" — installed_sweep's own merge rule, and the
+# logs_trajectories/behavioral merge below it — needs a total order over the non-`ran`
+# statuses. `ran` is always best (rank 0); among the rest, `error` (broke while trying)
+# outranks a deliberate/structural non-run, which outranks an operator-narrowed
+# `skipped` — so one phase erroring can never hide behind its sibling merely having
+# been skipped.
+_STATUS_BADNESS = {
+    STATUS_RAN: 0,
+    STATUS_SKIPPED: 1,
+    STATUS_UNAVAILABLE: 2,
+    STATUS_NOT_REACHED: 3,
+    STATUS_ERROR: 4,
+}
+
+
+def _worse_status(a: str, b: str) -> str:
+    return a if _STATUS_BADNESS.get(a, 99) >= _STATUS_BADNESS.get(b, 99) else b
+
+
+# B164's own disclosure text (checks/_egress.py's check_log_threat_hunt) is the ONLY
+# place a per-sink "not scanned" count exists today — coverage.py's own V1 scope note
+# says as much ("that data exists today only as prose inside B164/trajaudit/
+# behavioral's own Finding text, not as structured counts"). Parsed here rather than
+# re-derived as a fresh count, so the ledger's not_reached line and B164's own sentence
+# can never disagree.
+_B164_NOT_SCANNED_RE = re.compile(r"(\d+) log/transcript sinks? not scanned")
+
+
+def _b164_not_reached(findings) -> tuple:
+    b164 = next((f for f in findings if getattr(f, "id", None) == "B164"), None)
+    if b164 is None or not getattr(b164, "detail", None):
+        return ()
+    m = _B164_NOT_SCANNED_RE.search(b164.detail)
+    return (f"{m.group(1)} log/transcript sink(s) not scanned",) if m else ()
+
+
 # ── the pipeline roll-up (P10) ───────────────────────────────────────────────
 
 @dataclass
@@ -1038,6 +1083,100 @@ class PipelineResult:
             payload["pluginSweep"] = plugins.data
         from .report import _sanitize_tree  # noqa: PLC0415 — see the docstring
         return _sanitize_tree(payload)
+
+    def to_ledger(self, findings, *, degraded_count: int = 0,
+                 attestation: dict | None = None, live_test_bucket=None) -> LayerLedger:
+        """C-425: project this pipeline's phases onto the five-layer ledger (layers.py).
+
+        The mapping (decided; implemented as specified, not redesigned):
+
+        * ``static`` — always ``ran`` on an audit path (the checks engine itself
+          already ran to produce *findings*). ``not_reached`` names *degraded_count*
+          — the SAME figure ``scoring.compute``'s own DEGRADED_CHECK_CAP already
+          discloses (``score.degraded_count``) — passed in by the caller rather than
+          re-derived here, so the ledger's line and the score's own cap can never
+          disagree.
+        * ``installed_sweep`` — ``ran`` only when BOTH :data:`PHASE_SKILL_SWEEP` and
+          :data:`PHASE_PLUGIN_SWEEP` are present in ``self.phases`` and each is
+          itself ``ran``; otherwise the WORSE of the two (:func:`_worse_status`) — a
+          phase that errored can never hide behind a sibling that was merely
+          skipped. A phase absent from ``self.phases`` entirely reads as
+          ``not_reached`` (it never got a turn). ``not_reached`` is the union of
+          both phases' own ``not_scanned`` lists — never a fresh count.
+        * ``logs_trajectories`` — the log/trajectory content scan (B164) runs inside
+          the base audit unconditionally, so this STARTS ``ran``; :data:`PHASE_BEHAVIORAL`
+          (when present in ``self.phases``) can only make it WORSE, never better —
+          same :func:`_worse_status` merge. ``not_reached`` is B164's own "N
+          log/transcript sink(s) not scanned" figure (:func:`_b164_not_reached`),
+          parsed from that Finding's own disclosure rather than re-derived.
+        * ``self_report`` — ``ran`` iff *attestation* is a non-empty, truthy dict (a
+          genuinely-supplied, schema-valid attestation reached ``audit()`` — an
+          absent or malformed one parses to ``{}``, see
+          ``attest.parse_attestation``), else ``unavailable`` (nothing to ask, by
+          construction — matches ``layers.STATUS_UNAVAILABLE``'s own meaning).
+          There is NO freshness concept in the attestation schema (no timestamp
+          field), so ``ran`` can only ever mean "one was supplied", never "recently"
+          — disclosed via ``not_reached`` rather than silently implied.
+        * ``live_behaviour`` — **the trap this task exists to close.** ``ran`` iff
+          *live_test_bucket* (the raw ``--judged-bundle`` ``"liveTest"`` object)
+          carries at least one structurally-valid entry
+          (:func:`_valid_live_test_entries`) — REGARDLESS of that entry's verdict.
+          This is deliberately NOT ``live_test_cap_signal(bucket).hit``, which is
+          True ONLY for a VULNERABLE entry (the self-attestation guard — see that
+          function's own docstring, and ``scoring.LIVE_INJECTION_CAP``'s): reading
+          ``.hit`` here would make a user whose live test came back RESISTANT read
+          as ``not_reached`` and lose their grade for PASSING it. Presence +
+          well-formedness only, never the verdict's value — that asymmetry stays
+          exactly where it already lives, in the score's cap-only signal, not here.
+        """
+        skill = self.by_name(PHASE_SKILL_SWEEP)
+        plugin = self.by_name(PHASE_PLUGIN_SWEEP)
+        skill_status = skill.status if skill is not None else STATUS_NOT_REACHED
+        plugin_status = plugin.status if plugin is not None else STATUS_NOT_REACHED
+        if skill_status == STATUS_RAN and plugin_status == STATUS_RAN:
+            sweep_status = STATUS_RAN
+        else:
+            sweep_status = _worse_status(skill_status, plugin_status)
+        sweep_not_reached = tuple(skill.not_scanned if skill is not None else []) + tuple(
+            plugin.not_scanned if plugin is not None else [])
+
+        behavioral = self.by_name(PHASE_BEHAVIORAL)
+        logs_status = (
+            _worse_status(STATUS_RAN, behavioral.status) if behavioral is not None
+            else STATUS_RAN
+        )
+
+        static_not_reached: tuple = ()
+        if degraded_count > 0:
+            plural = "check" if degraded_count == 1 else "checks"
+            static_not_reached = (
+                f"{degraded_count} {plural} could not reach a verdict this run",
+            )
+
+        if attestation:
+            self_report_status = STATUS_RAN
+            self_report_not_reached = (
+                "attestation freshness not verified — the schema carries no "
+                "timestamp, so this can only mean one was supplied, never that it "
+                "is recent",
+            )
+        else:
+            self_report_status = STATUS_UNAVAILABLE
+            self_report_not_reached = ()
+
+        live_status = (
+            STATUS_RAN if _valid_live_test_entries(live_test_bucket) else STATUS_UNAVAILABLE
+        )
+
+        return LayerLedger(states={
+            LAYER_STATIC: LayerState(status=STATUS_RAN, not_reached=static_not_reached),
+            LAYER_INSTALLED_SWEEP: LayerState(status=sweep_status, not_reached=sweep_not_reached),
+            LAYER_LOGS_TRAJECTORIES: LayerState(
+                status=logs_status, not_reached=_b164_not_reached(findings)),
+            LAYER_SELF_REPORT: LayerState(
+                status=self_report_status, not_reached=self_report_not_reached),
+            LAYER_LIVE_BEHAVIOUR: LayerState(status=live_status),
+        })
 
 
 def _banner(title: str) -> list[str]:

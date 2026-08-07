@@ -786,7 +786,7 @@ def vet_all(
     return 0 if sweep.worst in ("PASS", "UNKNOWN") else 1
 
 
-def _resolve_runtime_caps(ctx, findings, score, args):
+def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     """F-153: shared by `--full`'s own cap computation and `--dashboard --full`'s —
     the exact same two cap-only signals (F-154 behavioral, F-155 live-injection),
     computed identically, so the two output surfaces can never show a different
@@ -811,6 +811,29 @@ def _resolve_runtime_caps(ctx, findings, score, args):
     render one) — there is no cheap way to thread the result through without
     widening `run_pipeline`/`run_behavioral`'s signatures, and P8's own budget
     check runs at a different point in the pipeline than this early call can see.
+
+    C-425: also the ONE shared choke point that builds the five-layer ledger
+    (`layers.py`) and threads it into `compute()` — deliberately here, not as three
+    separate blocks at `--full`'s own report/--json call site and `--dashboard
+    --full`'s, so the two surfaces cannot drift apart on what "ran" means, the same
+    guarantee this function already gives the two cap signals above. `attestation`
+    is the already-parsed attestation dict (or `None`/`{}`) the caller resolved
+    before `audit()` ran — passed in rather than re-read so this function does not
+    have to know `--attest`/`--judged-bundle`'s own parsing rules.
+
+    The installed-sweep layer cannot be read off REAL phase results here — P6/P7
+    (skill/plugin sweep) run later, in the caller's own report/--json or
+    --dashboard branch, and re-running them here just to know their outcome would
+    scan the fleet a second time (the exact cost this function's own behavioral
+    duplication above already accepts is worth avoiding for a cheaper check, not a
+    second full sweep). So under `--full` (not `--fast`) they are optimistically
+    marked `ran` — this invocation has committed to running them later in the SAME
+    call, barring a rare later error/budget-exceeded. The behavioral layer input
+    does NOT need that optimism: it reuses the REAL outcome of the
+    `behavioral.analyze(ctx)` call just above (already paid for here) — `ran` if it
+    completed, `error` if it raised. A later real P6/P7 failure still prints its own
+    honest section (P10) even though it cannot retroactively ungrade a score already
+    shown — a documented gap, not a silent one.
     """
     # F-153: the pipeline's wall-clock window opens HERE, before the first appended
     # phase, so the time the earlier phases spend is charged against the same window
@@ -850,15 +873,57 @@ def _resolve_runtime_caps(ctx, findings, score, args):
     # behavioural cap is simply not resolved (treated as "nothing fired"), exactly as
     # it already is for every non---full / --fast invocation above.
     behavioral_fired_ids: "frozenset[str]" = frozenset()
+    _behavioral_ran = False
     if args.full and not args.fast:
         try:
             behavioral_fired_ids = _behavioral_grade_cap_signal(_behavioral_analyze(ctx))
+            _behavioral_ran = True
         except Exception:  # noqa: BLE001 — see run_behavioral's identical containment
             behavioral_fired_ids = frozenset()
-    if live_signal.hit or behavioral_fired_ids:
+
+    # C-425: build the five-layer ledger — see this function's own docstring for why
+    # this is the ONE place it happens. `None` under a non---full invocation, exactly
+    # like `full_deadline`/`judged_bundle` above, so scoring.compute()'s own
+    # "ledger=None means graded" rule (C-422) leaves every non---full call site
+    # byte-identical to before this feature existed.
+    ledger = None
+    if args.full:
+        prelim = _pipeline.PipelineResult(fast=args.fast)
+        if args.fast:
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_SKILL_SWEEP, status=_pipeline.STATUS_SKIPPED,
+                complete=False, detail="skipped — --fast was given."))
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_PLUGIN_SWEEP, status=_pipeline.STATUS_SKIPPED,
+                complete=False, detail="skipped — --fast was given."))
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_BEHAVIORAL, status=_pipeline.STATUS_SKIPPED,
+                complete=False, detail="skipped — --fast was given."))
+        else:
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_SKILL_SWEEP, status=_pipeline.STATUS_RAN,
+                detail="scheduled this invocation (installed-skill sweep)."))
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_PLUGIN_SWEEP, status=_pipeline.STATUS_RAN,
+                detail="scheduled this invocation (installed-plugin sweep)."))
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_BEHAVIORAL,
+                status=_pipeline.STATUS_RAN if _behavioral_ran else _pipeline.STATUS_ERROR,
+                detail=("behavioral replay completed." if _behavioral_ran
+                        else "behavioral replay raised — see run_behavioral's own section.")))
+        ledger = prelim.to_ledger(findings, degraded_count=score.degraded_count,
+                                  attestation=attestation, live_test_bucket=live_test_bucket)
+
+    if args.full:
+        # C-425: recompute unconditionally under --full, not only when a cap-only
+        # signal fired above — an INCOMPLETE ledger must change `graded`/
+        # `missing_layers`/`not_checked` on its own, with nothing else scored
+        # differently (see compute()'s own `ledger` docstring paragraph). A COMPLETE
+        # ledger produces a byte-identical ScoreResult to omitting it (C-422), so
+        # this is never a behaviour change for a run where every layer ran.
         score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
                         live_test_reason=live_signal.reason,
-                        behavioral_fired_ids=behavioral_fired_ids)
+                        behavioral_fired_ids=behavioral_fired_ids, ledger=ledger)
     return score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids
 
 
@@ -2450,9 +2515,10 @@ def _main(argv=None) -> int:
         #
         # _resolve_runtime_caps also applies here (not just to --full's own report/
         # --json branch below) so --dashboard --full shows the IDENTICAL F-154/F-155
-        # capped grade a plain --full run of the same config would.
+        # capped grade a plain --full run of the same config would — and, C-425, the
+        # IDENTICAL five-layer ledger / graded state too.
         score, full_deadline, judged_bundle, _live_signal, _behavioral_fired_ids = (
-            _resolve_runtime_caps(ctx, findings, score, args)
+            _resolve_runtime_caps(ctx, findings, score, args, attestation=attestation)
         )
         sweep_home = Path(args.home).expanduser()
         plugin_sweep = None
@@ -2694,7 +2760,7 @@ def _main(argv=None) -> int:
     # (see the `render_json` call below) so `payload["projection"]["current"]` can
     # never disagree with `payload["score"]`/`payload["grade"]` for the same run.
     score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids = (
-        _resolve_runtime_caps(ctx, findings, score, args)
+        _resolve_runtime_caps(ctx, findings, score, args, attestation=attestation)
     )
     if args.json:
         # F-149 JSON gap: --full's printed SKILL SWEEP section had no machine-readable
