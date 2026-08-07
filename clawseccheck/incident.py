@@ -110,7 +110,31 @@ def build_incident(ctx, findings, score, *, when: str | None = None,
             "rotate, delete, or remediate anything."
         ),
         "generated_at": when,
-        "score": {"score": score.score, "grade": score.grade},
+        # C-423: an evidence pack must never imply a verdict the run was not entitled to
+        # make. "graded" is always present; when False (ScoreResult.graded — see its own
+        # docstring, Rule 1), "score"/"grade" are explicitly null rather than dropped, so
+        # a consumer reading pack["score"]["score"] gets None, never a KeyError. "layer"
+        # and "status" here are the same raw ids `layers.LAYER_ORDER`/`LAYER_STATUSES`
+        # define -- structured data for a machine reader, not prose, so this pack never
+        # grows its own copy of `layers.describe_layer`'s wording. `not_checked` and
+        # `missing_layers` are passed through verbatim from the ScoreResult that already
+        # computed them (scoring.compute -> layers.LayerLedger) -- always present, empty
+        # when there is nothing to say, recording what the run could not see.
+        #
+        # `missing_layers` is a list of NAMED objects, not positional pairs, and matches
+        # `--json`'s key for key: a reader who has learned one machine surface must not
+        # have to learn a second shape for the same fact. A bare [layer, status] array
+        # would also silently survive an argument swap; {"layer":…, "status":…} cannot.
+        "score": {
+            "score": score.score if score.graded else None,
+            "grade": score.grade if score.graded else None,
+            "graded": score.graded,
+            "not_checked": list(score.not_checked),
+            "missing_layers": [
+                {"layer": layer, "status": status}
+                for layer, status in score.missing_layers
+            ],
+        },
         "findings": [_finding_to_dict(f) for f in findings],
         "sbom": build_sbom(ctx),
         "trajectory_hashes": _trajectory_hash_entries(
