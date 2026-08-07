@@ -386,6 +386,57 @@ class ScoreResult:
     # paths above (`total == 0`, nothing scored) where there is no weight to report.
     earned: float = 0.0
     total: float = 0.0
+    # C-422: whether this run is "graded" — i.e. every layer in the five-layer ledger
+    # (layers.py's LAYER_ORDER) actually ran, so a consumer may show a letter/number at
+    # all for this run. Defaults to True because the load-bearing rule (see
+    # `compute()`'s `ledger` argument docstring) is "`ledger=None` means graded": the
+    # overwhelming majority of call sites (including `clawseccheck.__init__.audit()`)
+    # never pass a ledger and must see byte-identical behaviour to before this field
+    # existed. Only an explicitly-supplied, INCOMPLETE `layers.LayerLedger` — at least
+    # one of the five layers not `"ran"` — ever sets this False. Appended at the tail,
+    # like `earned`/`total` immediately above and for the identical reason: several call
+    # sites (`tamperscore.py`, ~17 tests) construct `ScoreResult` positionally, and
+    # inserting a field among the existing ones would silently shift every one of those
+    # positional arguments into the wrong field.
+    #
+    # Rule 1 (the whole reason this field exists): `graded=False` MUST mean no consumer
+    # may ever print a letter or a number for this run. That invariant is enforced HERE,
+    # at the single producer (`compute()`), not in report.py/cli.py/sarif.py — a
+    # downstream renderer trusts this flag rather than re-deriving completeness from a
+    # ledger of its own.
+    #
+    # Rule 3 (do not conflate with `assessable`): `graded=False` does NOT mean
+    # `assessable=False`. `assessable` keeps its pre-existing meaning ("nothing was
+    # scorable at all", B-014). A run can be fully `assessable=True` (plenty of checks
+    # ran and scored) and still `graded=False` because, say, the live-behaviour layer
+    # was declined by the user — the layers that DID run produced a perfectly real
+    # score, it's just not a COMPLETE one. Conversely a run can be `assessable=False`
+    # (nothing scorable) and still `graded=True` (ledger omitted, or complete). The two
+    # fields are independently reachable in both directions.
+    graded: bool = True
+    # C-422: the union of every ledger layer's `not_reached` entries
+    # (`layers.LayerLedger.not_checked`), in LAYER_ORDER, de-duplicated — passed through
+    # verbatim from the ledger (ordering/de-duplication is `LayerLedger`'s job, not this
+    # module's). `()` whenever `ledger is None`.
+    #
+    # Rule 2 (answers a DIFFERENT question than `missing_layers` below):
+    # `missing_layers` = "this layer never ran at all". `not_checked` = "this layer DID
+    # run, and here is what it honestly says it still did not reach" (e.g. "79 of 132
+    # log sinks not read"). A layer that ran to completion but named real limits on its
+    # own coverage leaves `graded` True (it ran) while still contributing entries here —
+    # a run can have an EMPTY `missing_layers` and a NON-EMPTY `not_checked` at the same
+    # time. The report's mandatory "what was not checked" line renders directly from
+    # this field instead of re-deriving it from a ledger of its own.
+    not_checked: tuple[str, ...] = ()
+    # C-422: `(layer_name, status)` pairs, in LAYER_ORDER, for every layer whose status
+    # is not `"ran"` — `ledger.missing` paired with `ledger.status(layer)` for each.
+    # Carries the STATUS, not just the name, because the report line must read
+    # differently for each one: "refused" (the user declined it), "unavailable" (no
+    # live agent exists to ask), "skipped" (a narrowed run, e.g. --fast), "error" (the
+    # layer tried and blew up), "not_reached" (never got its turn). Collapsing this to
+    # bare layer names would throw away the only thing that makes that sentence honest.
+    # `()` whenever `ledger is None`.
+    missing_layers: tuple[tuple[str, str], ...] = ()
 
 
 def _degraded_signal(findings: list[Finding]) -> tuple[bool, int]:
@@ -566,7 +617,8 @@ def _behavioral_cap_signal(behavioral_fired_ids) -> tuple[bool, str | None, int]
 def compute(findings: list[Finding], ctx=None, *,
            live_test_vulnerable: bool = False,
            live_test_reason: str | None = None,
-           behavioral_fired_ids=frozenset()) -> ScoreResult:
+           behavioral_fired_ids=frozenset(),
+           ledger=None) -> ScoreResult:
     """Weighted pass-rate + severity FAIL caps (module docstring), plus I-025/B-309's
     cap-only runtime signal and B-306's cap-only config-blind signal.
 
@@ -612,6 +664,31 @@ def compute(findings: list[Finding], ctx=None, *,
     it (or pass the empty-frozenset default) — there is no path here that computes the
     analysis itself, unlike `_runtime_cap_signal`'s ctx-only trajaudit half; see
     `BEHAVIORAL_SIGNAL_CAP`'s docstring for why this cap is gated on actual execution.
+
+    C-422: *ledger* is optional too, exactly like the arguments above — but its DEFAULT
+    carries a DIFFERENT, load-bearing meaning than theirs. Every other optional argument
+    above defaults to "this signal is absent", so omitting it means "nothing happened".
+    `ledger=None` instead means GRADED: the overwhelming majority of call sites
+    (including `clawseccheck.__init__.audit()`, which well over a hundred test files
+    exercise) never pass a ledger at all, and none of them may see `graded` flip to
+    False just because they never opted in to the five-layer ledger (`layers.py`). Only
+    an explicitly-supplied, INCOMPLETE `layers.LayerLedger` (`ledger.complete` False —
+    at least one of the five layers is not `"ran"`) ever sets `graded=False`:
+
+        graded = ledger is None or ledger.complete
+        not_checked = () if ledger is None else ledger.not_checked
+
+    `missing_layers` is populated from `ledger.missing` (already `LAYER_ORDER`-sorted)
+    paired with `ledger.status(layer)` for each, and is `()` whenever `ledger is None`.
+
+    A COMPLETE ledger (`ledger.complete` True — every layer `"ran"`) must therefore
+    produce a `ScoreResult` equal to calling `compute()` with no ledger at all — see
+    `ScoreResult.graded`'s own docstring for the "graded=False must suppress every
+    letter/number downstream" invariant this enforces, and
+    `tests/test_c422_ledger_scoring.py` for the regression that pins it. Note
+    `graded`/`not_checked`/`missing_layers` are set on EVERY return path below,
+    including the `total == 0` early return — an ungraded run that also has nothing
+    scorable is still ungraded.
     """
     # Suppression is a reporting/triage decision, not proof that a real FAIL stopped
     # existing. Keep suppressed FAILs in the score so an ignore entry cannot turn a
@@ -657,12 +734,31 @@ def compute(findings: list[Finding], ctx=None, *,
     behavioral_hit, behavioral_reason, behavioral_cap_value = _behavioral_cap_signal(
         behavioral_fired_ids)
 
+    # C-422: read once, alongside the cap-only signals above and before the
+    # `total == 0` short-circuit, so every return path below (both `total == 0`
+    # branches and the ordinary path) sees identical values instead of each
+    # construction site re-deriving them and risking disagreement. See this
+    # function's own `ledger` docstring paragraph for the "`ledger=None` means graded"
+    # rule these three lines encode.
+    graded = ledger is None or ledger.complete
+    not_checked = () if ledger is None else ledger.not_checked
+    missing_layers = (
+        () if ledger is None
+        else tuple((layer, ledger.status(layer)) for layer in ledger.missing)
+    )
+
     if total == 0:
         if (not config_blind and not runtime_hit and not degraded_hit and not live_hit
                 and not behavioral_hit):
             # Nothing measurable and no cap signal fired either — the honest "not
             # assessable" result (B-014), completely unchanged from before B-306.
-            return ScoreResult(0, "N/A", False, 0, 0, 0, assessable=False)
+            # C-422: still tag graded/not_checked/missing_layers — an ungraded run
+            # that also has nothing scorable is still ungraded (do not let this path
+            # silently return graded=True).
+            return ScoreResult(
+                0, "N/A", False, 0, 0, 0, assessable=False,
+                graded=graded, not_checked=not_checked, missing_layers=missing_layers,
+            )
         # B-306 (C-135 follow-up #2) / B-313 / F-155 / F-154: nothing else scored this
         # run, BUT a blind config (ctx.config_parse_error), a corroborated runtime
         # signal (trajaudit), a degraded check (crash/timeout), a submitted VULNERABLE
@@ -698,6 +794,9 @@ def compute(findings: list[Finding], ctx=None, *,
             live_injection_cap_reason=live_reason if live_hit else None,
             behavioral_capped=behavioral_hit,
             behavioral_cap_reason=behavioral_reason if behavioral_hit else None,
+            graded=graded,
+            not_checked=not_checked,
+            missing_layers=missing_layers,
         )
 
     earned = 0.0
@@ -812,6 +911,9 @@ def compute(findings: list[Finding], ctx=None, *,
         behavioral_cap_reason=behavioral_reason if behavioral_capped else None,
         earned=earned,
         total=total,
+        graded=graded,
+        not_checked=not_checked,
+        missing_layers=missing_layers,
     )
 
 
@@ -905,7 +1007,8 @@ def assessment_coverage(findings: list[Finding]) -> dict:
 
 
 def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = False,
-            live_test_reason: str | None = None, behavioral_fired_ids=frozenset()) -> dict:
+            live_test_reason: str | None = None, behavioral_fired_ids=frozenset(),
+            ledger=None) -> dict:
     """What-if projection: estimate the score impact of fixing FAIL findings.
 
     *ctx* is optional (default ``None``, unchanged behaviour) and, when supplied, is
@@ -923,8 +1026,26 @@ def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = F
     function's "current" figure could silently disagree with a capped top-level
     score/grade for the same run — the caller MUST pass the identical values it used
     for its own `compute()` call, or this projection will not reflect that cap.
+    C-422 extends this exact same discipline to *ledger*: it is the SAME
+    ``layers.LayerLedger`` `compute()` otherwise accepts, also not derivable from
+    ``(findings, ctx)`` alone (it comes from a ledger the caller already built), and
+    also carries `compute()`'s own "``ledger=None`` means graded" default — a caller
+    that never built a ledger sees byte-identical projections to before this argument
+    existed. Left unthreaded, ``--next`` could tell a user "fixing B55 would make this
+    a B" on a run that is not allowed a letter at all.
 
-    Returns a dict with three keys:
+    C-422: when the "current" run is ungraded (an incomplete ``ledger`` was supplied),
+    the projection SUPPRESSES every letter it would otherwise show. This is a decision,
+    not fallout: projecting a specific target grade on a run that cannot itself show a
+    grade would assert something the run cannot back up. The returned dict therefore
+    always carries a ``"graded": bool`` key, and when it is False, ``"current"``'s
+    ``"grade"``, ``"top1"``'s ``"projected_grade"`` (when ``"top1"`` is not ``None``),
+    and ``"cumulative"``'s ``"projected_grade"`` are all set to ``None``. The numeric
+    ``score``/``projected_score``/``delta`` values are left exactly as computed — they
+    stay internal data; a later renderer (not this function) decides what, if anything,
+    to show alongside a suppressed letter.
+
+    Returns a dict with three keys (plus the C-422 ``"graded"`` key described above):
 
     - ``"current"``:    ``{"score": int, "grade": str}``
     - ``"top1"``:       ``{"finding_id": str, "projected_score": int,
@@ -947,15 +1068,20 @@ def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = F
     ``dataclasses.replace``.  Projection is *estimated* — labeling is the
     renderer's responsibility.
     """
-    # B-379: the same F-154/F-155 inputs for every compute() call below, so a cap
-    # active in "current" cannot silently vanish from top1/cumulative.
+    # B-379 / C-422: the same F-154/F-155/C-422 inputs for every compute() call below,
+    # so a cap (or an ungraded run) active in "current" cannot silently vanish from
+    # top1/cumulative.
     _cap_kwargs = dict(
         live_test_vulnerable=live_test_vulnerable, live_test_reason=live_test_reason,
-        behavioral_fired_ids=behavioral_fired_ids,
+        behavioral_fired_ids=behavioral_fired_ids, ledger=ledger,
     )
     current_result = compute(findings, ctx, **_cap_kwargs)
     current_score = current_result.score
     current_grade = current_result.grade
+    # C-422: derived once from "current" — identical on every compute() call below
+    # since `ledger` never changes across them, and `graded` is purely a function of
+    # `ledger` (never of the findings being scored).
+    graded = current_result.graded
 
     fixable = [
         f for f in findings
@@ -990,7 +1116,9 @@ def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = F
         top1 = {
             "finding_id": best_f.id,
             "projected_score": best_score,
-            "projected_grade": best_grade,
+            # C-422: suppressed (None) on an ungraded run — see this function's own
+            # docstring paragraph above ("a decision, not fallout").
+            "projected_grade": best_grade if graded else None,
             "delta": best_score - current_score,
         }
 
@@ -1005,18 +1133,21 @@ def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = F
         cum_result = compute(modified_all, ctx, **_cap_kwargs)
         cumulative = {
             "projected_score": cum_result.score,
-            "projected_grade": cum_result.grade,
+            # C-422: suppressed (None) on an ungraded run, same discipline as top1.
+            "projected_grade": cum_result.grade if graded else None,
             "delta": cum_result.score - current_score,
         }
     else:
         cumulative = {
             "projected_score": current_score,
-            "projected_grade": current_grade,
+            "projected_grade": current_grade if graded else None,
             "delta": 0,
         }
 
     return {
-        "current": {"score": current_score, "grade": current_grade},
+        # C-422: suppressed (None) on an ungraded run, same discipline as top1/cumulative.
+        "current": {"score": current_score, "grade": current_grade if graded else None},
         "top1": top1,
         "cumulative": cumulative,
+        "graded": graded,
     }

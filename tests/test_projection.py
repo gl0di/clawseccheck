@@ -245,7 +245,10 @@ def test_cumulative_delta_zero_when_only_medium_low_fail():
 def test_return_shape_with_fails():
     findings = [_f("h1", HIGH, FAIL), _f("m1", MEDIUM, PASS)]
     result = project(findings)
-    assert set(result.keys()) == {"current", "top1", "cumulative"}
+    # C-422: "graded" joined the top level. A projection has to say whether the run it
+    # projects from was entitled to a letter at all — otherwise --next would offer
+    # "this would make it a B" on a run whose grade is withheld.
+    assert set(result.keys()) == {"current", "top1", "cumulative", "graded"}
     assert set(result["current"].keys()) == {"score", "grade"}
     assert set(result["top1"].keys()) == {"finding_id", "projected_score", "projected_grade", "delta"}
     assert set(result["cumulative"].keys()) == {"projected_score", "projected_grade", "delta"}
