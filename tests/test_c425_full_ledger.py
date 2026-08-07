@@ -15,12 +15,12 @@ self-attestation guard scoring.py's LIVE_INJECTION_CAP already enforces), and if
 `to_ledger()` read that instead, a user whose live test came back RESISTANT would
 read as `not_reached` and lose their grade for PASSING it.
 
-The renderer changes that teach `report.py` about `graded=False` land on a separate
-branch — see this repo's C-425 brief. So every assertion here is against
-`ScoreResult.graded` / `ScoreResult.missing_layers` / the raw `LayerLedger`
-`to_ledger()` produces, NEVER against rendered report/JSON text (which will still
-print a letter grade here regardless of `graded`, for a reason that has nothing to
-do with this change).
+Section A and B assert against `ScoreResult.graded` / `.missing_layers` / the raw
+`LayerLedger` rather than rendered text — the mapping is what this file pins, and a
+rendering assertion would couple it to wording it does not own. The one end-to-end
+smoke test that DOES read `--full --json` was written before the renderer changes
+merged (they landed on a parallel branch) and now asserts the real, merged result:
+no letter, no score, and the two layers that could not run named.
 
 Offline, deterministic, no network. Uses the shipped fixtures only.
 """
@@ -346,9 +346,16 @@ class TestCliEndToEndSmoke:
         rc = cli.main(["--home", SAFE] + self.BASE + ["--full", "--json"])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
-        # The renderer changes (report.py) are a separate branch -- this run must
-        # still print A LETTER today, unaffected by `graded` (see module docstring).
-        assert payload["grade"] in ("A", "B", "C", "D", "F")
+        # Written on a branch without the renderer changes, where this still printed a
+        # letter. Merged with them, it is the end-to-end proof of what I4 is FOR: a
+        # --full run with no attestation and no live-test bundle cannot reach layers 4-5,
+        # so it withholds the letter and says which layers it could not run. Exit code
+        # is unchanged -- a CI script that only checks status keeps working.
+        assert payload["graded"] is False
+        assert payload["grade"] is None
+        assert payload["score"] is None
+        missing = {m["layer"] for m in payload["missing_layers"]}
+        assert missing == {"self_report", "live_behaviour"}
 
     def test_full_human_report_runs_without_crashing(self, capsys):
         rc = cli.main(["--home", SAFE] + self.BASE + ["--full", "--quiet"])

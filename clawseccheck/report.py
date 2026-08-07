@@ -1878,18 +1878,33 @@ def render_report(findings: list[Finding], score: ScoreResult,
         pct = round(cov["assessable_frac"] * 100)
         lines.append(
             f"{warn_icon} Low coverage: only {pct}% of scored checks could be evaluated"
-            f" ({cov['assessable']}/{cov['scored_total']}). Treat this grade with caution —"
-            " it reflects a small slice of your setup."
+            f" ({cov['assessable']}/{cov['scored_total']})."
+            + (" Treat this grade with caution — it reflects a small slice of your setup."
+               if getattr(score, "graded", True)
+               else " These findings reflect a small slice of your setup.")
         )
 
     # Tamper Score sub-grade — human-report-only addition (like update_notice below).
     # Presentation-layer only: never alters score/grade above; None (default) renders
     # nothing so the main Score/Grade line stays byte-identical to before this existed.
     if tamper is not None:
-        lines.append(
-            f"Tamper posture: {tamper.grade} ({tamper.score}/100 — tamper-defense"
-            " sub-grade over B20/B22/B42/B78/B85/B86/C5 + monitor state)"
-        )
+        if getattr(score, "graded", True):
+            lines.append(
+                f"Tamper posture: {tamper.grade} ({tamper.score}/100 — tamper-defense"
+                " sub-grade over B20/B22/B42/B78/B85/B86/C5 + monitor state)"
+            )
+        else:
+            # C-423/C-425: found by reading a real `--full` run. This line printed
+            # "Tamper posture: D (50/100 …)" directly under "No grade yet", which is a
+            # second letter-and-number scale in the position a reader takes for the
+            # verdict — the exact confusion withholding the grade exists to prevent.
+            # The measurement is real and worth keeping, so it stays; the LETTER goes,
+            # and the line says outright that it is not this run's verdict.
+            lines.append(
+                f"Tamper posture: {tamper.score}/100 over"
+                " B20/B22/B42/B78/B85/B86/C5 + monitor state — a sub-score of one"
+                " defence, not this run's verdict (this run has none)."
+            )
 
     # --- "Why this score" breakdown ---
     scored_findings = [f for f in findings if getattr(f, "scored", True)
@@ -1995,13 +2010,23 @@ def render_report(findings: list[Finding], score: ScoreResult,
             " cannot move the grade at all; the behavioral verb-sequence/audit-trail layer"
             " below has a separate exception of its own."
         )
-    # C-423: gated on `graded` too — "this run's grade WAS capped" needs a grade to
-    # have been issued, and "that exception" needs the paragraph above to have printed.
-    if getattr(score, "graded", True) and score.runtime_capped:
-        lines.append(
-            f"  This run's grade WAS capped by that exception: "
-            f"{_runtime_cap_phrase(score.runtime_cap_reason)}."
-        )
+    # C-423: REWORDED on an ungraded run, never suppressed. Suppressing this would
+    # swallow a real runtime observation to satisfy a presentation rule — backwards for
+    # a security tool. Only the "your grade was capped" framing is wrong when there is
+    # no grade, and "that exception" needs a self-contained replacement because the
+    # paragraph it referred to is skipped above.
+    if score.runtime_capped:
+        if getattr(score, "graded", True):
+            lines.append(
+                f"  This run's grade WAS capped by that exception: "
+                f"{_runtime_cap_phrase(score.runtime_cap_reason)}."
+            )
+        else:
+            lines.append(
+                "Runtime signal (I-025): a trajectory-indicator match fired — "
+                f"{_runtime_cap_phrase(score.runtime_cap_reason)}. It would have capped"
+                " the grade; this run has none."
+            )
     # F-155: a SECOND exception to "this grade never reflects runtime behaviour" — a
     # submitted VULNERABLE verdict from a live injection-test harness (canary/dryrun/
     # redteam/multiturn) MAY CAP this grade, never raise it, and only when actually
@@ -2014,12 +2039,21 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # which is unconditional) — this task's own test plan requires a run with nothing
     # submitted to render byte-identically to before this feature existed, so no new line
     # may appear here unless a VULNERABLE verdict actually capped this run.
-    if getattr(score, "graded", True) and getattr(score, "live_injection_capped", False):
-        lines.append(
-            "Live-test exception (F-155): this run's grade WAS capped by a submitted "
-            f"VULNERABLE verdict — {_live_injection_cap_phrase(score.live_injection_cap_reason)}."
-            " RESISTANT or no submission would have changed nothing."
-        )
+    if getattr(score, "live_injection_capped", False):
+        _live_phrase = _live_injection_cap_phrase(score.live_injection_cap_reason)
+        if getattr(score, "graded", True):
+            lines.append(
+                "Live-test exception (F-155): this run's grade WAS capped by a submitted "
+                f"VULNERABLE verdict — {_live_phrase}."
+                " RESISTANT or no submission would have changed nothing."
+            )
+        else:
+            # C-423: a submitted VULNERABLE verdict is the single most serious thing this
+            # report can carry. It is stated whether or not a grade was issued.
+            lines.append(
+                "Live-test result (F-155): a submitted VULNERABLE verdict — "
+                f"{_live_phrase}. It would have capped the grade; this run has none."
+            )
     # F-154: a THIRD exception to "this grade never reflects runtime behaviour" — a
     # fired T1/T2/T3/B191 behavioral detector (--behavioral or --full) MAY CAP this
     # grade, never raise it, never earn/cost an ordinary scored point. Distinct from
@@ -2030,18 +2064,31 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # Deliberately gated on `behavioral_capped` (same discipline as the F-155 paragraph
     # above, unlike the I-025 one) — a run that never executed --behavioral/--full sees
     # no new line here, byte-identical to before this task existed.
-    if getattr(score, "graded", True) and getattr(score, "behavioral_capped", False):
-        lines.append(
-            "Behavioral exception (F-154): this run's grade WAS capped by a fired "
-            f"behavioral detector — {_behavioral_cap_phrase(score.behavioral_cap_reason)}."
-            " A clean --behavioral/--full replay would have changed nothing."
-        )
+    if getattr(score, "behavioral_capped", False):
+        _beh_phrase = _behavioral_cap_phrase(score.behavioral_cap_reason)
+        if getattr(score, "graded", True):
+            lines.append(
+                "Behavioral exception (F-154): this run's grade WAS capped by a fired "
+                f"behavioral detector — {_beh_phrase}."
+                " A clean --behavioral/--full replay would have changed nothing."
+            )
+        else:
+            lines.append(
+                "Behavioral result (F-154): a behavioral detector fired — "
+                f"{_beh_phrase}. It would have capped the grade; this run has none."
+            )
     # B-306 (C-135 follow-up): openclaw.json itself went dark this run (present but
     # unparseable, or unreadable) — every config-derived check (A1/B41/B1/B11/...)
     # correctly degraded to UNKNOWN rather than a fabricated verdict, but that alone lets
     # the grade RISE (fewer FAILs to cap it) even though the audit saw strictly less, not
     # more. This line only ever appears alongside the cap already applied above.
-    if getattr(score, "graded", True) and score.config_blind_capped:
+    if score.config_blind_capped and not getattr(score, "graded", True):
+        lines.append(
+            "Config visibility (B-306): openclaw.json could not be read/parsed this run, so"
+            " config-derived checks degraded to UNKNOWN. Fix openclaw.json (valid JSON,"
+            " owner-readable) and re-run."
+        )
+    elif score.config_blind_capped:
         lines.append(
             "Config visibility (B-306): openclaw.json could not be read/parsed this run, so"
             " this grade was hard-capped rather than let a config-derived check's honest"

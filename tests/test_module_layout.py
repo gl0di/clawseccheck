@@ -167,6 +167,12 @@ _EXEMPT = {
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet); a finer split (e.g. flag registration -> its own module) is "
               "a later cycle.",
+    "pipeline.py": "~1,315 lines — the --full P7-P10 orchestration. Crossed the budget with "
+                   "C-425's PipelineResult.to_ledger(), which projects the run's phases onto "
+                   "the five-layer ledger (layers.py). It belongs here and nowhere else: it "
+                   "reads PhaseResult state, and layers.py must stay a leaf that scoring.py "
+                   "can import, so the projection cannot live down there. A finer split "
+                   "(phase runners vs. roll-up) is a later cycle.",
     "adjudication.py": "~1,238 lines — the judge-packet builder. Crossed the budget with the "
                        "ESET H1 2026 gap-closure pass (C-361: config field-path extraction so "
                        "the audit-path majority of findings, which cite a dig() path rather "
