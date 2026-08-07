@@ -2898,6 +2898,18 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             f"{_mark} capped from {score.raw_score}/100 — "
             f"{_cap_primary_reason_text(_cap_primary, score)}{_cap_also_clause(_cap_extras)}"
         )
+    elif _cap_primary is not None:
+        # C-423: the card is the one artifact SKILL.md tells the agent to paste into
+        # chat, so a cap it cannot name is a cap the reader never learns about. Without
+        # this branch an ungraded --dashboard --full run disclosed NOTHING about a
+        # submitted VULNERABLE live-test verdict — the most serious thing this tool can
+        # report — purely because there was no number to say it had been capped from.
+        # Same fix render_report already carries; the card was missed. Golden Rule #4.
+        grade_lines.append(
+            f"{_mark} {_cap_primary_reason_text(_cap_primary, score)}"
+            f"{_cap_also_clause(_cap_extras)} — it would have capped the grade;"
+            " this run has none."
+        )
     if getattr(score, "config_blind_capped", False):
         grade_lines.append(
             "   This grade reflects what could NOT be checked, not a verdict on your "

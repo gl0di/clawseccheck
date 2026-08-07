@@ -53,8 +53,13 @@ def _live_bundle(tmp_path: Path) -> str:
 def test_live_test_cap_is_disclosed_in_the_card(tmp_path, capsys):
     _, out, _ = _run(capsys, "--dashboard", "--full", "--judged-bundle",
                      _live_bundle(tmp_path), "--home", SAFE, "--no-color")
-    assert "capped from" in out
+    # C-423: a --full run with no attestation cannot reach layer 4, so it carries no
+    # grade and there is no number to have been "capped from". The disclosure is what
+    # this test protects, not the phrasing: without the ungraded branch the card said
+    # NOTHING about a submitted VULNERABLE verdict -- the most serious thing this tool
+    # can report -- purely because the sentence around it needed a number.
     assert "VULNERABLE" in out
+    assert "it would have capped the grade; this run has none." in out
 
 
 def test_uncapped_card_carries_no_cap_line(capsys):
