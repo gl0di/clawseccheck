@@ -223,10 +223,17 @@ def test_project_ungraded_suppresses_every_grade_value() -> None:
     assert result["top1"] is not None
     assert result["top1"]["projected_grade"] is None
     assert result["cumulative"]["projected_grade"] is None
-    # numeric values stay real, untouched data — only letters are suppressed
-    assert isinstance(result["current"]["score"], int)
-    assert isinstance(result["top1"]["projected_score"], int)
-    assert isinstance(result["cumulative"]["projected_score"], int)
+    # C-423/C-425: the numbers are withheld too, not just the letters. Keeping them was
+    # the original call ("internal data, the renderer decides") and it leaked: --full
+    # --json published `"score": null` at the top level while
+    # `projection.current.score` still carried 49, so the withheld number was one key
+    # away. Caught by test_full_json_projection_current_matches_top_level_score.
+    assert result["current"]["score"] is None
+    assert result["top1"]["projected_score"] is None
+    assert result["cumulative"]["projected_score"] is None
+    # `delta` stays real either way: a difference between two withheld numbers reveals
+    # no verdict, and "fixing this one is the biggest win" is the actionable part.
+    assert isinstance(result["top1"]["delta"], int)
 
 
 def test_project_graded_run_unchanged_from_today() -> None:

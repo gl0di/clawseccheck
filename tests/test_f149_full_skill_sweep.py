@@ -383,7 +383,17 @@ def test_suspicious_fixture_exits_zero_end_to_end(capsys):
 # ---------------------------------------------------------------------------
 
 def test_sweep_does_not_change_score_or_grade(capsys):
-    """--full must produce the same audit verdict as a plain run on the same home."""
+    """--full must not let the skill/plugin sweep move the underlying verdict.
+
+    C-425: a plain run is always graded (ledger=None); `--full` on this fixture is
+    ungraded (self_report/live_behaviour never ran — no --attest/--judged-bundle), so
+    `score`/`grade`/`raw_score` legitimately go to `None` and that difference is
+    asserted explicitly below. The property this test exists to pin — that scanning
+    installed skills/plugins does not itself perturb the severity-weighted verdict —
+    is checked on the fields the sweep could actually have touched and that stay
+    visible on an ungraded run: `earned`/`total` (the raw numerator/denominator
+    `raw_score` is computed from), `cap_severity`, and the per-severity FAIL counts.
+    """
     rc_plain = main(["--home", DANGEROUS, "--no-native", "--no-host", "--no-history",
                      "--json"])
     plain = json.loads(capsys.readouterr().out)
@@ -391,7 +401,16 @@ def test_sweep_does_not_change_score_or_grade(capsys):
                     "--full", "--json"])
     full = json.loads(capsys.readouterr().out)
     assert rc_plain == rc_full
-    assert (plain["score"], plain["grade"]) == (full["score"], full["grade"])
+    assert (plain["earned"], plain["total"]) == (full["earned"], full["total"])
+    assert plain["cap_severity"] == full["cap_severity"]
+    assert plain["fail_counts_by_severity"] == full["fail_counts_by_severity"]
+    # The two runs legitimately disagree on gradedness — a plain run always carries a
+    # letter; this --full run does not because two layers this fixture never supplied
+    # (self_report, live_behaviour) leave it incomplete.
+    assert plain["graded"] is True
+    assert plain["score"] is not None and plain["grade"] is not None
+    assert full["graded"] is False
+    assert full["score"] is None and full["grade"] is None
 
 
 # ---------------------------------------------------------------------------

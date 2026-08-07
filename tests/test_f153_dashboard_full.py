@@ -458,17 +458,28 @@ class TestCapParity:
         }), encoding="utf-8")
         return str(bundle)
 
-    def test_dashboard_full_grade_matches_full_json_grade(self, tmp_path, capsys):
+    def test_dashboard_full_graded_state_matches_full_json_graded_state(self, tmp_path, capsys):
+        """--dashboard --full must reach the exact same graded/ungraded verdict as
+        --full --json for the identical judged-bundle input (C-425's single ledger
+        choke point). This bundle only supplies a live-test verdict — self_report
+        still has no --attest — so BOTH surfaces are ungraded; parity now means they
+        agree there is no letter and name the same missing layer, not that they print
+        an identical letter (there isn't one to print)."""
         bundle_path = self._bundle(tmp_path)
         main(["--home", SAFE, *BASE, "--full", "--json", "--judged-bundle", bundle_path])
         payload = json.loads(capsys.readouterr().out)
-        json_grade = payload["grade"]
+        assert payload["graded"] is False
+        assert payload["grade"] is None
+        assert payload["missing_layers"] == [{"layer": "self_report", "status": "unavailable"}]
 
         main(["--home", SAFE, *BASE, "--dashboard", "--full",
               "--judged-bundle", bundle_path])
         dash_out = capsys.readouterr().out
-        first_line = dash_out.splitlines()[0]
-        assert f"Grade {json_grade}" in first_line
+        first_line, second_line = dash_out.splitlines()[0], dash_out.splitlines()[1]
+        assert "Grade" not in first_line
+        assert "No grade yet" in second_line
+        assert "1 of 5 layers did not run" in second_line
+        assert "agent self-report (not available here)" in second_line
 
 
 # ─────────────────────────── flag coherence: --compact / --quiet ───────────────────────────

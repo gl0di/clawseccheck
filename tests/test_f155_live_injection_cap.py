@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from clawseccheck import audit
 from clawseccheck.catalog import CRITICAL, FAIL, LOW, PASS, Finding
 from clawseccheck.cli import main
 from clawseccheck.history import load as history_load
@@ -343,10 +344,15 @@ class TestCliEndToEnd:
         rc = main(["--home", SAFE] + BASE + ["--full", "--json", "--judged-bundle", bundle])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
+        # The cap-only signal itself is unconditional (never nulled by gradedness) --
+        # this is the fact the test exists to pin, and it is still observable here.
         assert payload["live_injection_capped"] is True
         assert payload["live_injection_cap_reason"] == "redteam:PI-01"
-        assert payload["score"] <= LIVE_INJECTION_CAP
-        assert payload["grade"] == "F"
+        # This run is ungraded (self_report never ran -- no --attest), so C-422/C-423
+        # withhold score/grade rather than let the cap alone print a letter.
+        assert payload["graded"] is False
+        assert payload["score"] is None
+        assert payload["grade"] is None
 
     def test_reason_surfaces_in_the_printed_report(self, tmp_path, capsys):
         bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
@@ -355,16 +361,45 @@ class TestCliEndToEnd:
         assert rc == 0
         out = capsys.readouterr().out
         assert "canary:canary" in out
-        assert "Live-test exception (F-155)" in out
+        # This run is ungraded (self_report never ran -- no --attest), so the "grade
+        # WAS capped" framing is reworded rather than suppressed (C-423): the fact
+        # that a VULNERABLE verdict was submitted is stated whether or not a grade
+        # was issued.
+        assert "Live-test exception (F-155)" not in out
+        assert "Live-test result (F-155): a submitted VULNERABLE verdict" in out
+        assert "It would have capped the grade; this run has none." in out
 
-    def test_resistant_verdict_byte_identical_to_nothing_submitted(self, tmp_path, capsys):
+    def test_resistant_verdict_scores_the_same_but_ledger_shows_it_ran(self, tmp_path, capsys):
+        # C-425: no longer byte-identical, ON PURPOSE. A submitted RESISTANT verdict
+        # still never moves the SCORE (self-attestation guard: only VULNERABLE can),
+        # but it DOES make live_behaviour read "ran" in the five-layer ledger --
+        # submitting nothing at all leaves that layer "unavailable". "Ran" and "moved
+        # the score" are different facts; a user who passes their live test must get
+        # credit for completeness without it being able to raise their score.
         bundle = _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
             {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}})
         main(["--home", SAFE] + BASE + ["--full", "--json", "--judged-bundle", bundle])
         with_resistant = json.loads(capsys.readouterr().out)
         main(["--home", SAFE] + BASE + ["--full", "--json"])
         without_bundle = json.loads(capsys.readouterr().out)
-        assert _drop_elapsed(with_resistant) == _drop_elapsed(without_bundle)
+
+        # Same score either way (both ungraded here -- self_report never ran).
+        with_resistant_no_layers = dict(_drop_elapsed(with_resistant))
+        without_bundle_no_layers = dict(_drop_elapsed(without_bundle))
+        del with_resistant_no_layers["missing_layers"]
+        del without_bundle_no_layers["missing_layers"]
+        assert with_resistant_no_layers == without_bundle_no_layers
+        assert with_resistant["graded"] is False
+        assert without_bundle["graded"] is False
+
+        # Different ledger: RESISTANT means live_behaviour ran; nothing submitted
+        # means it never got asked.
+        assert with_resistant["missing_layers"] == [
+            {"layer": "self_report", "status": "unavailable"}]
+        assert without_bundle["missing_layers"] == [
+            {"layer": "self_report", "status": "unavailable"},
+            {"layer": "live_behaviour", "status": "unavailable"},
+        ]
 
     def test_nothing_submitted_byte_identical_across_runs(self, capsys):
         main(["--home", SAFE] + BASE + ["--full", "--json"])
@@ -376,17 +411,26 @@ class TestCliEndToEnd:
         assert a["live_injection_cap_reason"] is None
 
     def test_tighter_cap_already_applied_on_home_vuln(self, tmp_path, capsys):
-        # home_vuln already caps to F/49 via a real CRITICAL FAIL -- a VULNERABLE
+        # home_vuln already caps to F via a real CRITICAL FAIL -- a VULNERABLE
         # verdict is real but non-binding (mirrors the scoring.py unit test above,
-        # now proven end-to-end through the real CLI/fixture path).
+        # now proven end-to-end through the real CLI/fixture path). This run is
+        # ungraded here (self_report never ran -- no --attest), so score/grade go to
+        # None; `cap_severity` stays unconditional and is what actually proves a
+        # CRITICAL FAIL -- not the live-test verdict -- is what's binding.
         bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
             {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
         rc = main(["--home", VULN] + BASE + ["--full", "--json", "--judged-bundle", bundle])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
-        assert payload["score"] == 49
-        assert payload["grade"] == "F"
+        assert payload["graded"] is False
+        assert payload["score"] is None
+        assert payload["grade"] is None
+        assert payload["cap_severity"] == "CRITICAL"
         assert payload["live_injection_capped"] is False
+        # The live-test layer itself DID run (a VULNERABLE verdict was submitted)
+        # even though it never became the binding cap -- only self_report is
+        # still missing.
+        assert payload["missing_layers"] == [{"layer": "self_report", "status": "unavailable"}]
 
     def test_forged_malformed_payload_rejected_without_moving_grade(self, tmp_path, capsys):
         main(["--home", SAFE] + BASE + ["--full", "--json"])
@@ -506,20 +550,39 @@ class TestTrendMonitorReachC135:
         # this host, so the exact uncapped score is only deterministic with sockets
         # scanning disabled. Only the actual VALUE (79 -> 98, C -> A) changed; the
         # test's own point -- this is a real, non-49 baseline -- is unaffected.
+        #
+        # C-425: this CLI run is itself ungraded (no --attest/--judged-bundle -- two
+        # of five layers never ran), so --json's own score/grade are None here --
+        # asserted below. The 98/A anchor is taken from a plain library `audit()`
+        # call over the SAME fixture/flags: `audit()` never builds a ledger, so it
+        # scores exactly as `compute()` always has (C-422's "ledger=None means
+        # graded" rule) -- the identical severity-weighted verdict this CLI run's own
+        # (withheld) grade would show if every layer had run.
         rc = main(["--home", SAFE, "--no-native", "--full", "--json", "--no-sockets"])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
-        assert payload["score"] == 98
-        assert payload["grade"] == "A"
+        assert payload["graded"] is False
+        assert payload["score"] is None
+        assert payload["grade"] is None
+
+        _, _, graded_reference = audit(SAFE, include_native=False, include_sockets=False)
+        assert graded_reference.score == 98
+        assert graded_reference.grade == "A"
 
     def test_json_reference_is_capped_49_f(self, tmp_path, capsys):
+        # This run is ungraded (self_report never ran -- no --attest), so --json's
+        # score/grade are None; the cap-only signal itself is unconditional and is
+        # what actually proves LIVE_INJECTION_CAP (49) bound here.
         bundle = self._seeded_bundle(tmp_path)
         rc = main(["--home", SAFE, "--no-native", "--full", "--json",
                    "--judged-bundle", bundle])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
-        assert payload["score"] == LIVE_INJECTION_CAP == 49
-        assert payload["grade"] == "F"
+        assert payload["graded"] is False
+        assert payload["score"] is None
+        assert payload["grade"] is None
+        assert payload["live_injection_capped"] is True
+        assert LIVE_INJECTION_CAP == 49
 
     def test_trend_shows_and_records_the_capped_score(self, tmp_path, capsys):
         bundle = self._seeded_bundle(tmp_path)
