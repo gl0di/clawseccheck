@@ -45,7 +45,12 @@ def test_build_incident_has_expected_top_level_keys(tmp_path):
     }
     assert payload["tool"] == "clawseccheck"
     assert payload["generated_at"] == "2026-07-04T00:00:00"
-    assert payload["score"] == {"score": 80, "grade": "B"}
+    # CLAWSECCHECK-C-423: "score" grew "graded"/"not_checked"/"missing_layers" alongside
+    # the pre-existing "score"/"grade" -- an ungraded run must null the latter two
+    # rather than drop them (see tests/test_c423_ungraded_pdf_incident.py for that path).
+    assert payload["score"] == {
+        "score": 80, "grade": "B", "graded": True, "not_checked": [], "missing_layers": [],
+    }
 
 
 def test_build_incident_purpose_frames_it_as_preservation_not_remediation(tmp_path):

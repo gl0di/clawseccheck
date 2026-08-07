@@ -41,6 +41,7 @@ import zlib
 
 from .brand import BRAND_RED, GRADE_HEX, SEVERITY, WORDMARK, grade_hex
 from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
+from .layers import LAYER_ORDER, describe_layer
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
     _coverage_lines, _group_issues_by_subject, _mcp_inventory_lines,
@@ -540,27 +541,56 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
 
     # ── Branded header band (page 1) + grade badge ───────────────────────────────
     _draw_header(flow, _pkg_version)
-    grade_color = grade_hex(score.grade)
     badge_top = flow.y
-    badge_s = 54.0
-    flow.rect(_MARGIN, badge_top - badge_s, badge_s, badge_s, grade_color)
-    # Centre the grade LETTER inside the badge — the old layout drew it a size above the
-    # box (baseline maths put a white glyph on the white page: invisible). Cap height is
-    # ~0.70 of the point size for Helvetica, so this centres it vertically in the square.
-    g_size = 30.0
-    g_w = _text_width(score.grade, g_size, bold=True)
-    flow.text_abs(_MARGIN + (badge_s - g_w) / 2.0, badge_top - badge_s + (badge_s - g_size * 0.70) / 2.0,
-                  score.grade, g_size, bold=True, rgb=(1.0, 1.0, 1.0))
-    tx = _MARGIN + badge_s + 16.0
-    flow.text_abs(tx, badge_top - 15.0, f"Security score {score.score}/100", 13, bold=True)
-    bar_y = badge_top - 27.0
-    flow.rect(tx, bar_y - 7.0, 210.0, 7.0, "#e6e6e6")
-    pct = max(0, min(100, int(score.score)))
-    if pct:
-        flow.rect(tx, bar_y - 7.0, 210.0 * pct / 100.0, 7.0, grade_color)
-    flow.text_abs(tx, badge_top - 46.0, f"Lethal Trifecta {_trifecta_ratio(findings)}",
-                  9.5, rgb=(0.40, 0.40, 0.40))
-    flow.y = badge_top - badge_s - 12.0
+    if score.graded:
+        grade_color = grade_hex(score.grade)
+        badge_s = 54.0
+        flow.rect(_MARGIN, badge_top - badge_s, badge_s, badge_s, grade_color)
+        # Centre the grade LETTER inside the badge — the old layout drew it a size above the
+        # box (baseline maths put a white glyph on the white page: invisible). Cap height is
+        # ~0.70 of the point size for Helvetica, so this centres it vertically in the square.
+        g_size = 30.0
+        g_w = _text_width(score.grade, g_size, bold=True)
+        flow.text_abs(_MARGIN + (badge_s - g_w) / 2.0, badge_top - badge_s + (badge_s - g_size * 0.70) / 2.0,
+                      score.grade, g_size, bold=True, rgb=(1.0, 1.0, 1.0))
+        tx = _MARGIN + badge_s + 16.0
+        flow.text_abs(tx, badge_top - 15.0, f"Security score {score.score}/100", 13, bold=True)
+        bar_y = badge_top - 27.0
+        flow.rect(tx, bar_y - 7.0, 210.0, 7.0, "#e6e6e6")
+        pct = max(0, min(100, int(score.score)))
+        if pct:
+            flow.rect(tx, bar_y - 7.0, 210.0 * pct / 100.0, 7.0, grade_color)
+        flow.text_abs(tx, badge_top - 46.0, f"Lethal Trifecta {_trifecta_ratio(findings)}",
+                      9.5, rgb=(0.40, 0.40, 0.40))
+        flow.y = badge_top - badge_s - 12.0
+    else:
+        # C-423: `graded is False` means no consumer of this ScoreResult may ever print a
+        # letter or a number for this run (see ScoreResult.graded's own docstring, Rule
+        # 1) — so the badge is replaced with the missing-layers sentence instead of a
+        # grade square. Layer/status wording comes ONLY from layers.describe_layer, never
+        # a phrase written here (the one sentence that must not vary by surface).
+        n_missing = len(score.missing_layers)
+        flow.line(
+            f"No grade yet - {n_missing} of {len(LAYER_ORDER)} layers did not run",
+            size=13, bold=True,
+        )
+        missing_text = ", ".join(
+            describe_layer(layer, status) for layer, status in score.missing_layers
+        )
+        if missing_text:
+            flow.wrapped(missing_text, size=9.5, color="#666666")
+        flow.spacer(4.0)
+
+    # C-423: the honesty invariant applies even on a graded run — a layer that ran
+    # without exhausting its subject says so regardless of whether the run earned a
+    # letter. `not_checked` is already plain-English, ledger-ordered, de-duplicated
+    # prose (layers.LayerLedger.not_checked, via scoring.compute) — joined here, not
+    # reworded.
+    if score.not_checked:
+        flow.wrapped(
+            f"Not fully covered: {'; '.join(score.not_checked)}",
+            size=9.5, color="#b94a48",
+        )
 
     degraded_n = getattr(score, "degraded_count", 0)
     if degraded_n:
