@@ -43,7 +43,7 @@ calls this out explicitly: *"`UNKNOWN` ≠ `PASS`"*.
   your running agent, and then pass `--attest attest.json` to unlock these checks.
 
 **Effect on the score.** An `UNKNOWN` finding never adds or subtracts a scored point — the
-weighted pass-rate arithmetic simply excludes it. It is not always fully inert, though: a
+severity-weighted pass-rate arithmetic simply excludes it. It is not always fully inert, though: a
 check that reports `UNKNOWN` because *its own input* was unreadable/corrupt
 (`engine_degraded`) can trip `DEGRADED_CHECK_CAP` and hard-cap the grade at F regardless of
 what did pass — see ["Why is my grade F?"](#why-is-my-grade-f). If most checks are
@@ -67,7 +67,7 @@ instead of a bare `UNKNOWN`. From `clawseccheck --dashboard --home fixtures/home
 
 ## Why is my grade F?
 
-The grading uses a **weighted pass-rate with hard caps** that prevent a single serious
+The grading uses a **severity-weighted pass rate with hard caps** that prevent a single serious
 failure from being diluted by many passes:
 
 | Severity of any FAIL | Score capped at | Grade ceiling |

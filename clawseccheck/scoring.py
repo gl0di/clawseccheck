@@ -376,6 +376,16 @@ class ScoreResult:
     # whenever `behavioral_capped` is False. Never rendered as-is — report.py owns the
     # owner-facing sentence, same discipline as the other `*_cap_reason` fields.
     behavioral_cap_reason: str | None = None
+    # B-505: the raw severity-weighted numerator/denominator behind `raw_score` —
+    # `raw_score == round(earned / total * 100)` whenever `total > 0`. Exposed so the
+    # "Why N/100" report line (report.py) and the `--json` payload can print the exact
+    # figures a reader can recompute the score from, instead of a formula that doesn't
+    # reproduce the number (the bug this field exists to fix). Appended at the tail,
+    # not inserted among the existing fields, because several call sites and tests
+    # construct `ScoreResult` positionally. Both default to 0.0 for the two early-return
+    # paths above (`total == 0`, nothing scored) where there is no weight to report.
+    earned: float = 0.0
+    total: float = 0.0
 
 
 def _degraded_signal(findings: list[Finding]) -> tuple[bool, int]:
@@ -800,6 +810,8 @@ def compute(findings: list[Finding], ctx=None, *,
         live_injection_cap_reason=live_reason if live_injection_capped else None,
         behavioral_capped=behavioral_capped,
         behavioral_cap_reason=behavioral_reason if behavioral_capped else None,
+        earned=earned,
+        total=total,
     )
 
 

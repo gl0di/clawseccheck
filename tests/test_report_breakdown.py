@@ -4,8 +4,11 @@ All tests are offline and deterministic — no network calls, no file writes.
 """
 from __future__ import annotations
 
+import json
+import re
+
 from clawseccheck.catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
-from clawseccheck.report import render_report
+from clawseccheck.report import render_json, render_report
 from clawseccheck.scoring import ScoreResult, compute
 
 
@@ -320,3 +323,78 @@ class TestTamperPostureLine:
         out = render_report(findings, score, tamper=tamper)
         assert "Tamper posture: F (49/100" in out
         assert "B20/B22/B42/B78/B85/B86/C5" in out
+
+
+# ---------------------------------------------------------------------------
+# B-505 — the sentence must reproduce the score it explains
+# ---------------------------------------------------------------------------
+
+_WHY_RE = re.compile(
+    r"Why (?P<raw>\d+)/100:.*?"
+    r"(?P<earned>[\d.]+) of (?P<total>[\d.]+) weight points",
+    re.DOTALL,
+)
+
+
+def _recompute_from_sentence(out: str) -> "tuple[int, int]":
+    """Return (printed_raw_score, score recomputed from the sentence's own figures).
+
+    The whole point of the "Why N/100" line is that a reader can check the headline
+    number with it. Before B-505 they could not: the line offered only the pass/warn/
+    fail counts, from which the only computable answer was (52 + 21*0.5)/75 = 83.3 for
+    a score of 87, because the severity weighting was never mentioned. This helper is
+    the reader, mechanised.
+    """
+    m = _WHY_RE.search(out)
+    assert m, f"no parsable 'Why N/100' line in report:\n{out[:400]}"
+    earned = float(m.group("earned"))
+    total = float(m.group("total"))
+    assert total > 0, "sentence claimed a zero denominator"
+    return int(m.group("raw")), round(earned / total * 100)
+
+
+class TestWhyLineReproducesTheScore:
+    """B-505: the one line that makes the score checkable must actually check out."""
+
+    def test_sentence_figures_reproduce_the_printed_score(self):
+        findings = _mixed_findings()
+        score = compute(findings)
+        printed, recomputed = _recompute_from_sentence(render_report(findings, score))
+        assert printed == score.raw_score
+        assert recomputed == printed
+
+    def test_sentence_names_the_severity_weights(self):
+        """The weighting is what the old wording omitted — pin it, not just the numbers."""
+        findings = _mixed_findings()
+        out = render_report(findings, compute(findings))
+        for token in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "weight points"):
+            assert token in out
+
+    def test_holds_on_an_all_pass_corpus(self):
+        findings = [_finding("P1", PASS, CRITICAL), _finding("P2", PASS, LOW)]
+        score = compute(findings)
+        printed, recomputed = _recompute_from_sentence(render_report(findings, score))
+        assert printed == recomputed == 100
+
+    def test_holds_on_a_thin_corpus(self):
+        """The degraded path prints the same sentence shape over very few checks."""
+        findings = [_finding("D1", PASS, CRITICAL), _finding("D2", WARN, LOW)]
+        score = compute(findings)
+        printed, recomputed = _recompute_from_sentence(render_report(findings, score))
+        assert printed == recomputed
+
+    def test_earned_and_total_match_the_scoreresult(self):
+        findings = _mixed_findings()
+        score = compute(findings)
+        m = _WHY_RE.search(render_report(findings, score))
+        assert float(m.group("earned")) == float(score.earned)
+        assert float(m.group("total")) == float(score.total)
+
+    def test_json_carries_the_same_figures_as_the_text(self):
+        findings = _mixed_findings()
+        score = compute(findings)
+        payload = json.loads(render_json(findings, score))
+        m = _WHY_RE.search(render_report(findings, score))
+        assert float(payload["earned"]) == float(m.group("earned"))
+        assert float(payload["total"]) == float(m.group("total"))
+        assert round(payload["earned"] / payload["total"] * 100) == payload["raw_score"]

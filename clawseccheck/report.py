@@ -22,7 +22,8 @@ from . import brand
 from .catalog import (
     BY_ID,
     SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER,
-    ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding, ast_for, owasp_for, remediation_for,
+    ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, WEIGHT, Finding, ast_for, owasp_for,
+    remediation_for,
 )
 from .ansi import paint
 from .brand import BRAND_RED, FAVICON_DATA_URI, LOGO_SVG, SEVERITY, WORDMARK, grade_ansi, grade_hex
@@ -375,6 +376,16 @@ def _color_icons(icon: dict, color: bool) -> dict:
     if not color:
         return icon
     return {k: paint(v, _STATUS_COLOR.get(k, "grey"), enabled=True) for k, v in icon.items()}
+
+
+def _fmt_weight(n: float) -> str:
+    """Render a `ScoreResult.earned`/`.total` weight figure without a spurious `.0`.
+
+    Both fields are sums of `WEIGHT` (all ints) with PASS/WARN credit added at full/half
+    value (B-505), so they land on a whole or half number — show `357` but `357.5`, never
+    `357.0`.
+    """
+    return str(int(n)) if float(n).is_integer() else f"{n:.1f}"
 
 
 def _score_bar(score: int, grade: str, *, ascii_only: bool = False, color: bool = False) -> str:
@@ -1796,9 +1807,20 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # reconciles with the pass/warn/fail counts. When a cap fired, the separate
     # `report.capped` line above already discloses raw -> capped, so showing the
     # raw value here is internally consistent instead of self-contradicting (B-013).
+    #
+    # B-505: the score is SEVERITY-weighted (`WEIGHT`, catalog.py), not a flat
+    # pass-rate — "weighted pass-rate ... N pass, N warn (half weight), N fail" let a
+    # reader recompute `(pass + warn*0.5) / n_scored * 100`, which does NOT reproduce
+    # `raw_score` (severity weighting was silently doing the rest of the work). Name
+    # the real formula and print the actual numerator/total (`score.earned`/
+    # `score.total`, scoring.py) so `round(earned / total * 100) == raw_score` holds
+    # for real — the whole point of a "why" line.
     lines.append(
-        f"Why {score.raw_score}/100: weighted pass-rate over {n_scored} scored checks"
-        f" — {n_pass} pass, {n_warn} warn (half weight), {n_fail} fail."
+        f"Why {score.raw_score}/100: severity-weighted pass rate over {n_scored} scored"
+        f" checks (CRITICAL×{WEIGHT[CRITICAL]}, HIGH×{WEIGHT[HIGH]},"
+        f" MEDIUM×{WEIGHT[MEDIUM]}, LOW×{WEIGHT[LOW]}; PASS full credit, WARN"
+        f" half, FAIL none) — {_fmt_weight(score.earned)} of {_fmt_weight(score.total)}"
+        f" weight points, from {n_pass} pass, {n_warn} warn, {n_fail} fail."
         " UNKNOWN/advisory checks are excluded."
     )
     # B-464: because UNKNOWNs are excluded, switching a subsystem OFF removes its checks
@@ -3558,6 +3580,13 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         "grade": score.grade,
         "capped": score.capped,
         "raw_score": score.raw_score,
+        # B-505: the severity-weighted numerator/denominator behind `raw_score` —
+        # `raw_score == round(earned / total * 100)` whenever `total > 0`. Lets a JSON
+        # consumer reproduce the score the same way the human report's "Why N/100" line
+        # now does, instead of having to trust the number. getattr/default tolerates
+        # older duck-typed ScoreResult stand-ins (same tolerance already used below).
+        "earned": getattr(score, "earned", 0.0),
+        "total": getattr(score, "total", 0.0),
         "cap_severity": score.cap_severity,
         # I-025/B-309: whether a corroborated runtime signal (never a config-static
         # finding) drove this cap, and which — see scoring.RUNTIME_SIGNAL_CAP.

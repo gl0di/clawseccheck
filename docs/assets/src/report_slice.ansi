@@ -4,7 +4,7 @@ Score: 49/100   Grade: [31;1mF[0m
 [31m████████[0m[90m░░░░░░░░[0m
 (capped from 70 - open CRITICAL finding)
 Tamper posture: F (31/100 — tamper-defense sub-grade over B20/B22/B42/B78/B85/B86/C5 + monitor state)
-Why 70/100: weighted pass-rate over 49 scored checks — 27 pass, 14 warn (half weight), 8 fail. UNKNOWN/advisory checks are excluded.
+Why 70/100: severity-weighted pass rate over 49 scored checks (CRITICAL×10, HIGH×6, MEDIUM×3, LOW×1; PASS full credit, WARN half, FAIL none) — 180 of 257 weight points, from 27 pass, 14 warn, 8 fail. UNKNOWN/advisory checks are excluded.
 (8 FAIL, 14 WARN — incl. 3 CRITICAL, 8 HIGH, 5 MEDIUM, 6 LOW)
         …
 == INVENTORY BY SUBJECT ════════════════════════════════════════════
