@@ -30,6 +30,7 @@ from .brand import BRAND_RED, FAVICON_DATA_URI, LOGO_SVG, SEVERITY, WORDMARK, gr
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
+from .layers import LAYER_ORDER, describe_layer
 from .scoring import ScoreResult, assessment_coverage
 from .textnorm import ASCII_MAP, asciify
 
@@ -394,6 +395,62 @@ LOW_COVERAGE_FRAC = 0.35  # below this fraction assessable -> loud caution line 
 DRIFT_UNKNOWN_FRAC = 0.85  # at/above this fraction UNKNOWN -> hedged staleness nudge (C-165)
 DRIFT_MIN_SCORED = 20  # minimum scored_total before the staleness nudge is even considered
 
+
+# ── C-423: rendering a run that carries no grade ─────────────────────────────
+# `score.graded is False` means no renderer may print a letter or a number for this
+# run (layers.py / scoring.ScoreResult docstrings). These three helpers are the ONLY
+# place that builds the replacement text, so every surface below stays byte-identical
+# to every other one instead of six near-copies drifting apart.
+
+def _missing_layers_sentence(score: ScoreResult) -> str:
+    """``"No grade yet — N of 5 layers did not run: <layer> (<why>), ..."`` — see
+    `layers.describe_layer` for the exact per-layer wording.
+
+    Layer/status wording comes from `layers.describe_layer` ONLY — this function
+    counts and joins, it never phrases a layer or a status itself (a second, competing
+    wording table anywhere in this module is exactly what this docstring stays vague
+    about, on purpose).
+    """
+    missing = getattr(score, "missing_layers", ())
+    described = ", ".join(describe_layer(layer, status) for layer, status in missing)
+    return (
+        f"No grade yet — {len(missing)} of {len(LAYER_ORDER)} layers did not run: "
+        f"{described}."
+    )
+
+
+def _urgent_headline(findings: list[Finding]) -> str:
+    """``"Most urgent: CRITICAL — Lethal trifecta reachable  [B1]"``, or the all-clear
+    variant when there is no unsuppressed FAIL.
+
+    An ungraded run has still told the reader the most important thing it knows, so
+    this leads every ungraded surface — it must read as a result, never as an error.
+    Selection mirrors `render_report`'s own `issues` sort (severity first), narrowed to
+    FAIL only (a WARN is not "urgent" in the sense this headline means), with the
+    finding id as the tie-break for determinism.
+    """
+    candidates = [
+        f for f in findings
+        if f.status == FAIL and not getattr(f, "suppressed", False)
+    ]
+    if not candidates:
+        return "Nothing urgent found in what was checked."
+    top = sorted(candidates, key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.id))[0]
+    return f"Most urgent: {top.severity} — {_sanitize(top.title)}  [{top.id}]"
+
+
+def _not_fully_covered_line(score: ScoreResult) -> str:
+    """``"Not fully covered: 79 of 132 log sinks not read; 3 plugin manifests
+    unscanned."``, or ``""`` when `score.not_checked` is empty.
+
+    Appears next to the grade on BOTH graded and ungraded runs — the honesty
+    invariant that a layer which ran without exhausting its subject must say so even
+    when the run still earns a letter.
+    """
+    not_checked = getattr(score, "not_checked", ())
+    if not not_checked:
+        return ""
+    return "Not fully covered: " + "; ".join(not_checked)
 
 
 def _color_icons(icon: dict, color: bool) -> dict:
@@ -1703,7 +1760,6 @@ def render_report(findings: list[Finding], score: ScoreResult,
     issues = [f for f in findings
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
-    grade_disp = paint(score.grade, grade_ansi(score.grade), "bold", enabled=True) if color else score.grade
     # Assurance honesty (R11): single source-of-truth coverage tally, computed once and
     # reused by both the C-166 low-coverage line (below) and the C-165 staleness nudge
     # (advisory band, further down) — never a second independent tally.
@@ -1731,8 +1787,21 @@ def render_report(findings: list[Finding], score: ScoreResult,
             " incomplete. Re-run with --debug for a crash/timeout traceback, or review the"
             " affected finding(s) below for an unreadable-input detail."
         )
-    lines.append(f"Score: {score.score}/100   Grade: {grade_disp}")
-    lines.append(_score_bar(score.score, score.grade, ascii_only=ascii_only, color=color))
+    # C-423: `score.graded is False` means no letter/number for this run, anywhere —
+    # the "Most urgent" finding leads (a result, never an error), followed by which
+    # layers never ran. No score bar, no /100, no letter, in either branch below.
+    if getattr(score, "graded", True):
+        grade_disp = paint(score.grade, grade_ansi(score.grade), "bold", enabled=True) if color else score.grade
+        lines.append(f"Score: {score.score}/100   Grade: {grade_disp}")
+        lines.append(_score_bar(score.score, score.grade, ascii_only=ascii_only, color=color))
+    else:
+        lines.append(_urgent_headline(findings))
+        lines.append(_missing_layers_sentence(score))
+    # C-423: the mandatory "not fully covered" line — appears on GRADED runs too,
+    # whenever a layer that DID run still didn't exhaust its subject.
+    _covered_line = _not_fully_covered_line(score)
+    if _covered_line:
+        lines.append(_covered_line)
     # B-306 (C-135 follow-up #3, 2026-07-21): gate on the GRANULAR cap signals, not
     # `score.capped` alone. `score.capped` means "score != raw_score" — deliberately FALSE
     # in scoring.py's `total == 0` branch (raw_score and score are both hardcoded 0 there;
@@ -1763,8 +1832,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # text (`_cap_primary_reason_text`) already covers an engine-side-degraded UNKNOWN
     # generically ("could not reach a reliable verdict") alongside crashed/timed-out --
     # no renderer-side change needed for the new cause, only scoring.py's cap trigger.
+    # C-423: a cap explanation for a number that is not printed is noise — skip it
+    # entirely on an ungraded run.
     _primary, _extras = _cap_cascade(score)
-    if _primary is not None:
+    if getattr(score, "graded", True) and _primary is not None:
         _reason_text = _cap_primary_reason_text(_primary, score, audited_path=_audited_path)
         lines.append(
             f"(capped from {score.raw_score} - {_reason_text}{_cap_also_clause(_extras)})"
@@ -1840,14 +1911,17 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # the real formula and print the actual numerator/total (`score.earned`/
     # `score.total`, scoring.py) so `round(earned / total * 100) == raw_score` holds
     # for real — the whole point of a "why" line.
-    lines.append(
-        f"Why {score.raw_score}/100: severity-weighted pass rate over {n_scored} scored"
-        f" checks (CRITICAL×{WEIGHT[CRITICAL]}, HIGH×{WEIGHT[HIGH]},"
-        f" MEDIUM×{WEIGHT[MEDIUM]}, LOW×{WEIGHT[LOW]}; PASS full credit, WARN"
-        f" half, FAIL none) — {_fmt_weight(score.earned)} of {_fmt_weight(score.total)}"
-        f" weight points, from {n_pass} pass, {n_warn} warn, {n_fail} fail."
-        " UNKNOWN/advisory checks are excluded."
-    )
+    # C-423: skip entirely when ungraded — a "why N/100" explanation for a number
+    # this run is not allowed to print is noise, not honesty.
+    if getattr(score, "graded", True):
+        lines.append(
+            f"Why {score.raw_score}/100: severity-weighted pass rate over {n_scored} scored"
+            f" checks (CRITICAL×{WEIGHT[CRITICAL]}, HIGH×{WEIGHT[HIGH]},"
+            f" MEDIUM×{WEIGHT[MEDIUM]}, LOW×{WEIGHT[LOW]}; PASS full credit, WARN"
+            f" half, FAIL none) — {_fmt_weight(score.earned)} of {_fmt_weight(score.total)}"
+            f" weight points, from {n_pass} pass, {n_warn} warn, {n_fail} fail."
+            " UNKNOWN/advisory checks are excluded."
+        )
     # B-464: because UNKNOWNs are excluded, switching a subsystem OFF removes its checks
     # from the denominator — and if any of them were WARNing, the score goes UP (measured:
     # 97 -> 98 with --no-host). Nothing in the number itself reveals that, so a
@@ -1874,8 +1948,13 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 sev_parts.append(f"{_sev_counts[sev]} {sev}")
         sev_summary = ", ".join(sev_parts)
         lines.append(f"({n_fail} FAIL, {n_warn} WARN — incl. {sev_summary})")
+    # C-423: found by reading a real ungraded run, not by a test — the tests assert that
+    # no letter appears, which they cannot do for the coherence of the paragraph under
+    # it. "This score" on a run that has no score is the same lie in smaller type.
     lines.append(
-        "This score reflects your configuration. It does not test live"
+        ("This score reflects your configuration." if getattr(score, "graded", True)
+         else "This audit reflects your configuration.") +
+        " It does not test live"
         " prompt-injection resistance or do a deep MCP supply-chain vet —"
         " run `--canary` / `--redteam` / `--dryrun` (live injection) and"
         " `--vet-mcp` (deep MCP) for those. It also doesn't mine what your agent has"
@@ -1906,13 +1985,19 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # audience — see logscan.py's retraction note.) F-154: T1/T2/T3/B191 are NO LONGER
     # in the "cannot move it at all" set — see the behavioral exception further below —
     # so this paragraph's own claim is narrowed to name only what it still covers.
-    lines.append(
-        "Runtime exception (I-025): a trajectory-indicator match MAY CAP this grade"
-        " (never raise it) — every other capability-vs-runtime corroboration still"
-        " cannot move the grade at all; the behavioral verb-sequence/audit-trail layer"
-        " below has a separate exception of its own."
-    )
-    if score.runtime_capped:
+    # C-423: this whole paragraph explains how a grade can be capped. On an ungraded run
+    # there is no grade to cap, so it is skipped rather than reworded — the same
+    # treatment the cap sentence and the "Why N/100" line already get above.
+    if getattr(score, "graded", True):
+        lines.append(
+            "Runtime exception (I-025): a trajectory-indicator match MAY CAP this grade"
+            " (never raise it) — every other capability-vs-runtime corroboration still"
+            " cannot move the grade at all; the behavioral verb-sequence/audit-trail layer"
+            " below has a separate exception of its own."
+        )
+    # C-423: gated on `graded` too — "this run's grade WAS capped" needs a grade to
+    # have been issued, and "that exception" needs the paragraph above to have printed.
+    if getattr(score, "graded", True) and score.runtime_capped:
         lines.append(
             f"  This run's grade WAS capped by that exception: "
             f"{_runtime_cap_phrase(score.runtime_cap_reason)}."
@@ -1929,7 +2014,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # which is unconditional) — this task's own test plan requires a run with nothing
     # submitted to render byte-identically to before this feature existed, so no new line
     # may appear here unless a VULNERABLE verdict actually capped this run.
-    if getattr(score, "live_injection_capped", False):
+    if getattr(score, "graded", True) and getattr(score, "live_injection_capped", False):
         lines.append(
             "Live-test exception (F-155): this run's grade WAS capped by a submitted "
             f"VULNERABLE verdict — {_live_injection_cap_phrase(score.live_injection_cap_reason)}."
@@ -1945,7 +2030,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # Deliberately gated on `behavioral_capped` (same discipline as the F-155 paragraph
     # above, unlike the I-025 one) — a run that never executed --behavioral/--full sees
     # no new line here, byte-identical to before this task existed.
-    if getattr(score, "behavioral_capped", False):
+    if getattr(score, "graded", True) and getattr(score, "behavioral_capped", False):
         lines.append(
             "Behavioral exception (F-154): this run's grade WAS capped by a fired "
             f"behavioral detector — {_behavioral_cap_phrase(score.behavioral_cap_reason)}."
@@ -1956,7 +2041,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # correctly degraded to UNKNOWN rather than a fabricated verdict, but that alone lets
     # the grade RISE (fewer FAILs to cap it) even though the audit saw strictly less, not
     # more. This line only ever appears alongside the cap already applied above.
-    if score.config_blind_capped:
+    if getattr(score, "graded", True) and score.config_blind_capped:
         lines.append(
             "Config visibility (B-306): openclaw.json could not be read/parsed this run, so"
             " this grade was hard-capped rather than let a config-derived check's honest"
@@ -2730,11 +2815,22 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # the wordmark still lands on the ascii path (mascot alone used to become empty
     # there with nothing to replace it).
     head = brand.header(subtitle="OpenClaw Security Audit", ascii_only=ascii_only)
-    grade_lines = [
-        f"{head} {sep} Grade {score.grade} {sep} {score.score}/100",
-        f"{_score_bar(score.score, score.grade, ascii_only=ascii_only)}"
-        f"  {sep}  {n_issues} {issues_word}",
-    ]
+    # C-423: no letter, no /100, nowhere, when this run carries no grade — the
+    # "Most urgent" finding leads, followed by which layers never ran.
+    if getattr(score, "graded", True):
+        grade_lines = [
+            f"{head} {sep} Grade {score.grade} {sep} {score.score}/100",
+            f"{_score_bar(score.score, score.grade, ascii_only=ascii_only)}"
+            f"  {sep}  {n_issues} {issues_word}",
+        ]
+    else:
+        grade_lines = [
+            f"{head} {sep} {_urgent_headline(findings)}",
+            f"{_missing_layers_sentence(score)}  {sep}  {n_issues} {issues_word}",
+        ]
+    _covered_line = _not_fully_covered_line(score)
+    if _covered_line:
+        grade_lines.append(_covered_line)
     # B-465 / B-467: the card is the ONLY artifact SKILL.md tells the agent to paste, and it
     # was the one renderer that dropped WHY the grade is what it is. Two measured shapes:
     # a directory with no OpenClaw in it produced a confident `Grade F · 49/100 · 4 issues`
@@ -2745,7 +2841,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # simply never called it. Golden Rule #4.
     _mark = "!" if ascii_only else "⚠️"
     _cap_primary, _cap_extras = _cap_cascade(score)
-    if _cap_primary is not None:
+    if getattr(score, "graded", True) and _cap_primary is not None:
         grade_lines.append(
             f"{_mark} capped from {score.raw_score}/100 — "
             f"{_cap_primary_reason_text(_cap_primary, score)}{_cap_also_clause(_cap_extras)}"
@@ -2886,7 +2982,16 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
 
 def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = False) -> str:
     """Shareable badge — grade + score + trifecta ONLY. No findings, ever."""
-    l1 = f"  OpenClaw Security: {score.grade:<2} ({score.score:>3}/100)"
+    # C-423: no letter, no /100 when this run carries no grade. This card never names
+    # findings (tiered disclosure — see the docstring above), so the replacement stays
+    # a bare layer count rather than the "Most urgent" headline other surfaces show.
+    if getattr(score, "graded", True):
+        l1 = f"  OpenClaw Security: {score.grade:<2} ({score.score:>3}/100)"
+    else:
+        l1 = (
+            f"  OpenClaw Security: no grade yet "
+            f"({len(getattr(score, 'missing_layers', ()))}/{len(LAYER_ORDER)} layers)"
+        )
     l2 = f"  Lethal Trifecta: {_trifecta_ratio(findings)}"
     l3 = "  audited by ClawSecCheck" + ("" if ascii_only else f" {brand.MASCOT}")
     width = 39
@@ -2965,8 +3070,17 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
     ok = "[OK]" if ascii_only else "✅"
     head = brand.header(subtitle="Threat Monitor", ascii_only=ascii_only)
-    lines = [head, "=" * _header_rule_width(head, ascii_only),
-             f"Current: {score.score}/100  Grade: {score.grade}"]
+    lines = [head, "=" * _header_rule_width(head, ascii_only)]
+    # C-423: no letter, no /100 when this run carries no grade — `alerts` carry no
+    # Finding objects, so there is no "Most urgent" finding to name here; the missing-
+    # layers sentence already opens with "No grade yet".
+    if getattr(score, "graded", True):
+        lines.append(f"Current: {score.score}/100  Grade: {score.grade}")
+    else:
+        lines.append(_missing_layers_sentence(score))
+    _covered_line = _not_fully_covered_line(score)
+    if _covered_line:
+        lines.append(_covered_line)
     def _alert_lines() -> list:
         out = ["", f"{len(alerts)} change(s) detected since last check:", ""]
         for level, msg in sorted(alerts, key=lambda a: order.get(a[0], 9)):
@@ -3057,14 +3171,21 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
     (HTML/badge-only) per brand.py's reach split: a graphical mark cannot reach a chat
     channel, only this static file."""
     label = "OpenClaw Security"
-    value = f"{score.grade} {score.score}/100"
+    # C-423: no letter, no /100 when this run carries no grade — a bare, neutral
+    # "no grade yet" label instead. `grade_hex("")` already falls back to the same
+    # neutral grey `grade_hex` uses for any unrecognized letter, so the badge's
+    # colour can't be reverse-engineered from `score.grade` on an ungraded run.
+    if getattr(score, "graded", True):
+        value = f"{score.grade} {score.score}/100"
+    else:
+        value = "no grade yet"
     # B-163: if a score-capping CRITICAL/HIGH FAIL (or sensitive id) was hidden via
     # .clawseccheckignore, the badge must not read as a clean grade — mark it so a shared
     # badge can't misrepresent the real posture. Count only (never finding details).
     n_hidden = sum(1 for f in findings if surfaced_despite_suppression(f))
     if n_hidden:
         value += f" *{n_hidden} suppressed"
-    color = grade_hex(score.grade)
+    color = grade_hex(score.grade) if getattr(score, "graded", True) else grade_hex("")
     icon_w = _LOGO_SIZE + 8 if _LOGO_INNER else 0  # icon + left/right padding; 0 if unavailable
     lw = 8 + len(label) * 6 + icon_w  # rough text widths
     vw = 8 + len(value) * 7
@@ -3600,11 +3721,16 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
             d["blast_radius"] = compute_blast_radius(_json_cfg, f.id)
         return d
 
+    # C-423: `graded is False` means no consumer may read a real letter/number for
+    # this run — "score"/"grade"/"raw_score" go to `None` (the keys stay present, so
+    # `payload["score"]` reads `None` rather than raising `KeyError`). getattr/default
+    # tolerates older duck-typed ScoreResult stand-ins, same as `earned`/`total` below.
+    _graded = getattr(score, "graded", True)
     payload: dict = {
-        "score": score.score,
-        "grade": score.grade,
+        "score": score.score if _graded else None,
+        "grade": score.grade if _graded else None,
         "capped": score.capped,
-        "raw_score": score.raw_score,
+        "raw_score": score.raw_score if _graded else None,
         # B-505: the severity-weighted numerator/denominator behind `raw_score` —
         # `raw_score == round(earned / total * 100)` whenever `total > 0`. Lets a JSON
         # consumer reproduce the score the same way the human report's "Why N/100" line
@@ -3613,6 +3739,15 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         "earned": getattr(score, "earned", 0.0),
         "total": getattr(score, "total", 0.0),
         "cap_severity": score.cap_severity,
+        # C-423: always present, even when graded — `not_checked`/`missing_layers`
+        # answer two different questions (see ScoreResult's own docstring): a layer
+        # that ran but didn't exhaust its subject, vs. a layer that never ran at all.
+        "graded": _graded,
+        "not_checked": list(getattr(score, "not_checked", ())),
+        "missing_layers": [
+            {"layer": layer, "status": status}
+            for layer, status in getattr(score, "missing_layers", ())
+        ],
         # I3: per-severity unsuppressed-FAIL counts — the same numbers `--fail-on
         # SEVERITY` (cli.py) gates on, so a CI consumer can assert on findings without
         # a grade. See finding_counts_by_severity()'s docstring for the exact predicate.
@@ -3740,7 +3875,9 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
               if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
 
-    badge_color = grade_hex(score.grade)
+    # C-423: no letter when this run carries no grade — `grade_hex("")` already falls
+    # back to the same neutral grey `grade_hex` uses for any unrecognized letter.
+    badge_color = grade_hex(score.grade) if getattr(score, "graded", True) else grade_hex("")
     trifecta = _trifecta_ratio(findings)
 
     label_trifecta = "Lethal Trifecta:"
@@ -3873,8 +4010,10 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     # runtime cap (item 2). Both are structurally impossible now: the primary/extras
     # decision lives in exactly one place. B-399's engine-side-degraded UNKNOWN cause
     # needs no change here either, for the same reason noted in render_report.
+    # C-423: a cap explanation for a number that is not printed is noise — skip it
+    # entirely on an ungraded run, same as render_report's text banner.
     _primary, _extras = _cap_cascade(score)
-    if _primary is not None:
+    if getattr(score, "graded", True) and _primary is not None:
         _reason_html = esc(_cap_primary_reason_text(_primary, score))
         _also_html = _cap_also_clause([esc(p) for p in _extras])
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
@@ -3883,7 +4022,35 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         capped_html = ""
     capped_html = degraded_html + capped_html
 
+    # C-423: mandatory "not fully covered" line — appears on GRADED runs too,
+    # whenever a layer that DID run still didn't exhaust its subject.
+    _covered_line = _not_fully_covered_line(score)
+    not_checked_html = (
+        f'<p class="meta">{esc(_covered_line)}</p>' if _covered_line else ""
+    )
+
     pct = max(0, min(100, int(score.score)))
+    # C-423: no letter, no /100, no score bar when this run carries no grade — the
+    # "Most urgent" finding and which layers never ran replace them.
+    if getattr(score, "graded", True):
+        grade_badge_html = (
+            f'<div class="grade-badge" aria-label="Grade {esc(score.grade)}">'
+            f'{esc(score.grade)}</div>'
+        )
+        score_block_html = (
+            '<div class="scorewrap">'
+            f'<div class="scoreline"><span>Security score</span>'
+            f'<strong>{score.score}/100</strong></div>'
+            f'<div class="scorebar" role="img" aria-label="Score {score.score} of 100">'
+            '<i></i></div></div>'
+        )
+    else:
+        grade_badge_html = '<div class="grade-badge" aria-label="No grade yet">?</div>'
+        score_block_html = (
+            '<div class="scorewrap">'
+            f'<p class="meta">{esc(_urgent_headline(findings))}</p>'
+            f'<p class="meta">{esc(_missing_layers_sentence(score))}</p></div>'
+        )
 
     html_body = f'''<!doctype html>
 <html lang="en">
@@ -4034,11 +4201,9 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     <main class="container">
         <header class="header">
             <h1>{h1_html}</h1>
-            <div class="grade-badge" aria-label="Grade {esc(score.grade)}">{esc(score.grade)}</div>
-            <div class="scorewrap">
-                <div class="scoreline"><span>Security score</span><strong>{score.score}/100</strong></div>
-                <div class="scorebar" role="img" aria-label="Score {score.score} of 100"><i></i></div>
-            </div>
+            {grade_badge_html}
+            {score_block_html}
+            {not_checked_html}
             <p class="meta"><strong>{esc(label_trifecta)}</strong> {esc(trifecta)}</p>
             {capped_html}
             {summary_html}
