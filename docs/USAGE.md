@@ -1095,7 +1095,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 492 test files and 14,100
+A security tool should be heavily tested — so it is: 510 test files and 14,400
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit
