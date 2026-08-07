@@ -1047,7 +1047,13 @@ def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = F
 
     Returns a dict with three keys (plus the C-422 ``"graded"`` key described above):
 
-    - ``"current"``:    ``{"score": int, "grade": str}``
+    - ``"current"``:    ``{"score": int, "grade": str}`` — both ``None`` when the run is
+                        ungraded (C-423). ``"delta"`` values below stay real either way:
+                        a difference between two withheld numbers reveals no verdict, and
+                        "fixing this one is the biggest win" is the actionable part a
+                        reader still needs. Found by the `--full --json` parity test,
+                        which caught `payload["score"] is None` sitting beside a
+                        projection that still published 49.
     - ``"top1"``:       ``{"finding_id": str, "projected_score": int,
                            "projected_grade": str, "delta": int}`` or ``None``
                         if there are no fixable (scored, non-suppressed) FAILs.
@@ -1115,7 +1121,8 @@ def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = F
         best_f, best_score, best_grade = sorted(candidates, key=_rank)[0]
         top1 = {
             "finding_id": best_f.id,
-            "projected_score": best_score,
+            # C-423/C-425: withheld on an ungraded run, same as the grade beside it.
+            "projected_score": best_score if graded else None,
             # C-422: suppressed (None) on an ungraded run — see this function's own
             # docstring paragraph above ("a decision, not fallout").
             "projected_grade": best_grade if graded else None,
@@ -1132,21 +1139,22 @@ def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = F
         ]
         cum_result = compute(modified_all, ctx, **_cap_kwargs)
         cumulative = {
-            "projected_score": cum_result.score,
+            "projected_score": cum_result.score if graded else None,
             # C-422: suppressed (None) on an ungraded run, same discipline as top1.
             "projected_grade": cum_result.grade if graded else None,
             "delta": cum_result.score - current_score,
         }
     else:
         cumulative = {
-            "projected_score": current_score,
+            "projected_score": current_score if graded else None,
             "projected_grade": current_grade if graded else None,
             "delta": 0,
         }
 
     return {
         # C-422: suppressed (None) on an ungraded run, same discipline as top1/cumulative.
-        "current": {"score": current_score, "grade": current_grade if graded else None},
+        "current": {"score": current_score if graded else None,
+                    "grade": current_grade if graded else None},
         "top1": top1,
         "cumulative": cumulative,
         "graded": graded,

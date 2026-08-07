@@ -107,6 +107,30 @@ def _drop_elapsed(payload: dict) -> dict:
     return out
 
 
+def _graded_reference(home) -> ScoreResult:
+    """The graded ``ScoreResult`` ``--full`` would show for *home* if every layer had
+    run.
+
+    C-425 (I4): none of this file's CLI end-to-end tests pass ``--attest``/
+    ``--judged-bundle``, so their ``--full`` runs are ungraded (self_report and
+    live_behaviour never ran) and the JSON payload's own ``score``/``grade`` go to
+    ``None`` (C-422/C-423 -- asserted directly at each call site). This helper
+    reproduces the IDENTICAL cap input ``cli.py``'s own ``_resolve_runtime_caps``
+    threads into its ``compute()`` call (``behavioral.analyze(ctx)`` ->
+    ``grade_cap_signal()`` -> ``compute(..., behavioral_fired_ids=...)``), via the
+    library entry points directly and with no ledger -- ``compute()``'s own
+    "``ledger=None`` means graded" default (C-422) makes this the exact number/letter
+    the CLI run would show were it graded, so the precise-ceiling assertions these
+    tests exist for stay checked rather than dropped.
+    """
+    from clawseccheck import audit  # noqa: PLC0415
+
+    ctx, findings, _ = audit(str(home), include_native=False, include_host=False,
+                             include_sockets=False)
+    fired = grade_cap_signal(analyze(ctx))
+    return compute(findings, ctx, behavioral_fired_ids=fired)
+
+
 # ── scoring.py: compute() unit tests ─────────────────────────────────────────
 
 class TestBehavioralCapScoring:
@@ -314,9 +338,16 @@ class TestB416BenignTrifectaNoLongerHardCapsAtHigh:
         full = json.loads(capsys.readouterr().out)
         assert full["behavioral_capped"] is True
         assert full["behavioral_cap_reason"] == "T1 behavioral trifecta"
-        assert full["score"] < plain["score"], "T1 must still lower the grade under --full"
-        assert full["score"] == 89, "must cap at the MEDIUM ceiling (89/B), not HIGH (79/C)"
-        assert full["grade"] == "B"
+        # This --full run is ungraded (no --attest/--judged-bundle), so score/grade
+        # go to None on the payload; the cap-only flags above are unconditional and
+        # already prove T1 fired and bound. The exact ceiling (89/B, not 79/C) is
+        # checked against the graded reference the CLI would show were it graded.
+        assert full["graded"] is False
+        assert full["score"] is None and full["grade"] is None
+        reference = _graded_reference(home)
+        assert reference.score < plain["score"], "T1 must still lower the grade under --full"
+        assert reference.score == 89, "must cap at the MEDIUM ceiling (89/B), not HIGH (79/C)"
+        assert reference.grade == "B"
 
 
 # ── F-154 round 2 (C-135 review, both findings) ──────────────────────────────
@@ -569,16 +600,21 @@ class TestReportRendering:
 # ── CLI end-to-end: the task's own test plan, verified against real fixtures ──
 
 class TestCliEndToEnd:
-    def test_home_safe_full_grade_byte_identical_to_plain(self, capsys):
+    def test_home_safe_full_underlying_verdict_matches_plain_though_ungraded(self, capsys):
         """home_safe carries no trajectory sidecar — no behavioral signal fires, so
-        --full's grade must be byte-identical to a plain audit (regression on the
-        existing contract)."""
+        --full must not perturb the underlying verdict a plain audit already
+        produced. --full is itself ungraded here (no --attest/--judged-bundle -- two
+        layers this fixture never supplies), so score/grade legitimately differ from
+        the plain (always-graded) run; the parity that still matters -- the severity-
+        weighted numerator/denominator behind the verdict -- is checked directly."""
         main(["--home", SAFE] + BASE + ["--json"])
         plain = json.loads(capsys.readouterr().out)
         main(["--home", SAFE] + BASE + ["--full", "--json"])
         full = json.loads(capsys.readouterr().out)
-        assert plain["score"] == full["score"]
-        assert plain["grade"] == full["grade"]
+        assert plain["graded"] is True
+        assert full["graded"] is False
+        assert full["score"] is None and full["grade"] is None
+        assert (plain["earned"], plain["total"]) == (full["earned"], full["total"])
         assert full["behavioral_capped"] is False
         assert full["behavioral_cap_reason"] is None
 
@@ -590,8 +626,14 @@ class TestCliEndToEnd:
         full = json.loads(capsys.readouterr().out)
         assert full["behavioral_capped"] is True
         assert full["behavioral_cap_reason"] == "T1 behavioral trifecta"
-        assert full["score"] <= BEHAVIORAL_SIGNAL_CAP
-        assert full["score"] < plain["score"], "T1 must actually lower the grade under --full"
+        # Ungraded (no --attest/--judged-bundle) -- the cap-only flags above already
+        # prove T1 fired and bound; the graded reference confirms it actually lowers
+        # the score under --full.
+        assert full["graded"] is False
+        assert full["score"] is None
+        reference = _graded_reference(home)
+        assert reference.score <= BEHAVIORAL_SIGNAL_CAP
+        assert reference.score < plain["score"], "T1 must actually lower the grade under --full"
 
     def test_plain_audit_never_caps_even_though_t1_would_fire(self, tmp_path, capsys):
         """The cap is gated on the analysis having ACTUALLY run — a plain (non---full,
@@ -622,7 +664,12 @@ class TestCliEndToEnd:
         main(["--home", str(home)] + BASE + ["--full", "--json"])
         full = json.loads(capsys.readouterr().out)
         assert full["behavioral_capped"] is False
-        assert full["score"] == plain["score"], (
+        # Ungraded (no --attest/--judged-bundle) -- score/grade go to None; the
+        # underlying severity-weighted numerator/denominator is what actually proves
+        # a clean behavioral replay never moves the verdict, in either direction.
+        assert full["graded"] is False
+        assert full["score"] is None
+        assert (plain["earned"], plain["total"]) == (full["earned"], full["total"]), (
             "a clean behavioral replay must never move the score, in either direction"
         )
 
@@ -635,7 +682,12 @@ class TestCliEndToEnd:
         main(["--home", NO_SIDECAR] + BASE + ["--full", "--json"])
         full = json.loads(capsys.readouterr().out)
         assert full["behavioral_capped"] is False
-        assert full["score"] == plain["score"]
+        # Ungraded (no --attest/--judged-bundle) -- score/grade go to None; the
+        # underlying numerator/denominator is what proves a missing sidecar costs
+        # nothing.
+        assert full["graded"] is False
+        assert full["score"] is None
+        assert (plain["earned"], plain["total"]) == (full["earned"], full["total"])
 
     def test_direction_a_clean_behavioral_run_can_never_raise_the_score(self, tmp_path, capsys):
         """Cap-only, both directions: --full's behavioral replay can only ever LOWER
@@ -647,7 +699,12 @@ class TestCliEndToEnd:
             plain = json.loads(capsys.readouterr().out)
             main(["--home", str(home)] + BASE + ["--full", "--json"])
             full = json.loads(capsys.readouterr().out)
-            assert full["score"] <= plain["score"], traj_fixture.name
+            # Ungraded (no --attest/--judged-bundle) -- score/grade go to None; the
+            # graded reference is what this direction assertion actually needs.
+            assert full["graded"] is False
+            assert full["score"] is None
+            reference = _graded_reference(home)
+            assert reference.score <= plain["score"], traj_fixture.name
 
     def test_replayed_run_produces_the_same_capped_result_each_time(self, tmp_path, capsys):
         home = _combined_home(tmp_path, TRIFECTA)
@@ -661,7 +718,12 @@ class TestCliEndToEnd:
         home = _combined_home(tmp_path, TRIFECTA)
         main(["--home", str(home)] + BASE + ["--full"])
         out = capsys.readouterr().out
-        assert "Behavioral exception (F-154)" in out
+        # This run is ungraded (no --attest/--judged-bundle), so the "grade WAS
+        # capped" framing is reworded rather than suppressed (C-423): the fact that a
+        # behavioral detector fired is stated whether or not a grade was issued.
+        assert "Behavioral exception (F-154)" not in out
+        assert "Behavioral result (F-154): a behavioral detector fired" in out
+        assert "It would have capped the grade; this run has none." in out
         assert "T1 behavioral trifecta" in out
 
     # ── F-154 round 2 (C-135 review) — Finding 1, real CLI end-to-end repro ──────
@@ -715,7 +777,12 @@ class TestCliEndToEnd:
         full = json.loads(capsys.readouterr().out)
         assert full["behavioral_capped"] is False
         assert full["behavioral_cap_reason"] is None
-        assert full["score"] == plain["score"]
+        # Ungraded (no --attest/--judged-bundle) -- score/grade go to None; the
+        # underlying numerator/denominator is what proves this owner-only shape
+        # never moved the verdict.
+        assert full["graded"] is False
+        assert full["score"] is None
+        assert (plain["earned"], plain["total"]) == (full["earned"], full["total"])
 
     def test_genuinely_open_group_chat_repro_full_still_caps(self, tmp_path, capsys):
         """Counterpart: the SAME sequence, but this channel's group surface really is
@@ -731,8 +798,13 @@ class TestCliEndToEnd:
         full = json.loads(capsys.readouterr().out)
         assert full["behavioral_capped"] is True
         assert full["behavioral_cap_reason"] == "T1 behavioral trifecta"
-        assert full["score"] <= BEHAVIORAL_SIGNAL_CAP
-        assert full["score"] < plain["score"]
+        # Ungraded (no --attest/--judged-bundle) -- the graded reference is what
+        # proves T1's real detection target still caps and lowers the score.
+        assert full["graded"] is False
+        assert full["score"] is None
+        reference = _graded_reference(home)
+        assert reference.score <= BEHAVIORAL_SIGNAL_CAP
+        assert reference.score < plain["score"]
 
     # ── F-154 round 2 (C-135 review) — Finding 2, real CLI end-to-end repro ──────
 
@@ -789,7 +861,12 @@ class TestCliEndToEnd:
         full = json.loads(capsys.readouterr().out)
         assert full["behavioral_capped"] is False
         assert full["behavioral_cap_reason"] is None
-        assert full["score"] == plain["score"]
+        # Ungraded (no --attest/--judged-bundle) -- score/grade go to None; the
+        # underlying numerator/denominator is what proves bare divergence never
+        # moved the verdict.
+        assert full["graded"] is False
+        assert full["score"] is None
+        assert (plain["earned"], plain["total"]) == (full["earned"], full["total"])
 
     def test_b191_strong_signal_repro_full_still_caps(self, tmp_path, capsys):
         """Counterpart: a genuine runtime policy denial (blocked/tool_blocked) —
@@ -803,11 +880,16 @@ class TestCliEndToEnd:
         full = json.loads(capsys.readouterr().out)
         assert full["behavioral_capped"] is True
         assert full["behavioral_cap_reason"] == "B191 audit-trail divergence"
+        # Ungraded (no --attest/--judged-bundle) -- score/grade go to None; the
+        # graded reference is what proves the actual ceiling.
+        assert full["graded"] is False
+        assert full["score"] is None
+        reference = _graded_reference(home)
         # B191 shares T2/T3's looser MEDIUM ceiling (89), not T1's tighter HIGH one
         # (BEHAVIORAL_SIGNAL_CAP=79) — see TestBehavioralCapScoring.
         # test_t2_and_b191_share_t3s_medium_ceiling.
-        assert full["score"] <= 89
-        assert full["score"] < plain["score"]
+        assert reference.score <= 89
+        assert reference.score < plain["score"]
 
 
 # ── the exact ids, still permanently unscored (Golden Rule #5) ───────────────
