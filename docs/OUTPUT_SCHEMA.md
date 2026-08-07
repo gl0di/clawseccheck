@@ -24,12 +24,15 @@ before assuming a nested key is part of the contract; notably, the subject keys 
 
 | Field | Type | Always present | Description |
 |---|---|---|---|
-| `score` | `int` | yes | Overall security score, 0–100. |
-| `grade` | `str` | yes | Letter grade: `"A"`, `"B"`, `"C"`, `"D"`, or `"F"`. |
+| `score` | `int \| null` | yes | Overall security score, 0–100. C-423: `null` when `graded` is `false` — no consumer may show a number for a run where a five-layer-ledger layer never ran at all. The key is always present; only its value goes `null`. |
+| `grade` | `str \| null` | yes | Letter grade: `"A"`, `"B"`, `"C"`, `"D"`, or `"F"`. C-423: `null` when `graded` is `false`, same rule as `score`. |
 | `capped` | `bool` | yes | `true` if the score was capped below `raw_score` (e.g. Lethal Trifecta triggered). |
-| `raw_score` | `int` | yes | Score before any cap is applied. Equals `score` when `capped` is `false`. |
-| `earned` | `number` | yes | B-505: the severity-weighted numerator behind `raw_score` — `WEIGHT` points (`CRITICAL`=10, `HIGH`=6, `MEDIUM`=3, `LOW`=1) actually credited: full weight per scored PASS, half weight per scored WARN, zero per scored FAIL. `raw_score == round(earned / total * 100)` whenever `total > 0`; both are `0` in the same edge cases `raw_score` is `0` for (nothing scorable this run). Lets a consumer reproduce `raw_score` instead of trusting it — see the human report's "Why N/100" line, which now prints the same two numbers. |
+| `raw_score` | `int \| null` | yes | Score before any cap is applied. Equals `score` when `capped` is `false`. C-423: `null` when `graded` is `false`, same rule as `score`. |
+| `earned` | `number` | yes | B-505: the severity-weighted numerator behind `raw_score` — `WEIGHT` points (`CRITICAL`=10, `HIGH`=6, `MEDIUM`=3, `LOW`=1) actually credited: full weight per scored PASS, half weight per scored WARN, zero per scored FAIL. `raw_score == round(earned / total * 100)` whenever `total > 0`; both are `0` in the same edge cases `raw_score` is `0` for (nothing scorable this run). Lets a consumer reproduce `raw_score` instead of trusting it — see the human report's "Why N/100" line, which now prints the same two numbers. Unaffected by `graded` — this is real underlying data, not a letter/number the report is choosing to withhold. |
 | `total` | `number` | yes | B-505: the severity-weighted denominator behind `raw_score` — the sum of `WEIGHT` points across every scored (non-`UNKNOWN`, non-advisory) finding this run, regardless of PASS/WARN/FAIL. `0` only when nothing was scorable this run (mirrors `raw_score: 0` in that state). |
+| `graded` | `bool` | yes | C-423: `true` unless a caller explicitly supplied an INCOMPLETE five-layer ledger (`layers.py`) — at least one of `static`/`installed_sweep`/`logs_trajectories`/`self_report`/`live_behaviour` did not run. `false` means `score`/`grade`/`raw_score` above are `null`: no consumer may print a letter or a number for this run. No production caller supplies a ledger yet, so this is always `true` today. |
+| `not_checked` | `array[str]` | yes | C-423: plain-English limits named by layers that DID run but did not exhaust their subject (e.g. `"79 of 132 log sinks not read"`) — the union of every ledger layer's own `not_reached`, de-duplicated. Can be non-empty even when `graded` is `true` — a layer that ran honestly disclosing a coverage gap does not by itself make the run ungraded. Empty array when nothing to disclose (always, today — see `graded`). |
+| `missing_layers` | `array[{"layer": str, "status": str}]` | yes | C-423: one entry per five-layer-ledger layer whose status is not `"ran"` — `layer` is one of `static`/`installed_sweep`/`logs_trajectories`/`self_report`/`live_behaviour`; `status` is one of `ran`/`skipped`/`refused`/`unavailable`/`error`/`not_reached` (`layers.py`). Empty array whenever `graded` is `true`. Always empty today (see `graded`). |
 | `cap_severity` | `str \| null` | yes | Severity that drove the score cap (`"CRITICAL"`, `"HIGH"`, …), or `null` when no *scored* FAIL capped the score. `null` alongside `capped: true` means a runtime signal (see `runtime_capped`) drove the cap instead, not a scored FAIL. |
 | `runtime_capped` | `bool` | yes | `true` when a corroborated *runtime* signal — never a config-static finding — capped the score (I-025). The one eligible signal is a trajaudit-style skill/bootstrap indicator match (`--analyze-trajectory`). It never earns or costs an ordinary scored point — this is a hard cap only, applied after any severity-driven cap above. `B83`, `B84`, `B85`, `B164` and `B180` can never move the grade any other way, and this stays `false` for all of them. (`B164`'s `exfil_evidence` class was briefly cap-eligible on its same-line arm under an earlier ruling; retracted after four independent adversarial reviews found no sound host/verb gate exists for this tool's own audience — `exfil_evidence` is WARN-only, permanently, same-line or cross-line.) F-154: the `--behavioral`-only `T1`/`T2`/`T3` (plus `B191`) can also never set THIS field `true` — but they gained a SEPARATE cap channel of their own, see `behavioral_capped` below. Same "`true` alongside `capped: false`" nuance as `config_blind_capped` applies when nothing else was scorable this run either — see that row. |
 | `runtime_cap_reason` | `str \| null` | yes | Stable label for the eligible runtime signal that fired, e.g. `"trajaudit indicator match"`. `null` when `runtime_capped` is `false`. |
@@ -81,6 +84,9 @@ before assuming a nested key is part of the contract; notably, the subject keys 
   "raw_score": 74,
   "earned": 303.5,
   "total": 410,
+  "graded": true,
+  "not_checked": [],
+  "missing_layers": [],
   "cap_severity": null,
   "runtime_capped": false,
   "runtime_cap_reason": null,
