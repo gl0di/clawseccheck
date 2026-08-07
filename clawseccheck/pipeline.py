@@ -59,6 +59,9 @@ from pathlib import Path
 from .attest import template as attest_template
 from .behavioral import render_behavioral_analysis
 from .catalog import UNKNOWN
+from .layers import (            # noqa: F401 — re-exported for existing importers
+    STATUS_ERROR, STATUS_NOT_REACHED, STATUS_RAN, STATUS_SKIPPED, STATUS_UNAVAILABLE,
+)
 from .report import _sanitize
 from .scanbudget import (
     DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, budget_deadline, budget_exceeded,
@@ -79,12 +82,6 @@ PHASE_ORDER = (
     PHASE_BEHAVIORAL,
     PHASE_ADJUDICATION,
 )
-
-STATUS_RAN = "ran"
-STATUS_SKIPPED = "skipped"
-STATUS_NOT_REACHED = "not_reached"
-STATUS_UNAVAILABLE = "unavailable"
-STATUS_ERROR = "error"
 
 #: Statuses that mean "this phase cannot vouch for anything" — they make the run
 #: incomplete. ``ran`` is the only status that does not, and even then the phase's own
