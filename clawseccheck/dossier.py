@@ -46,13 +46,50 @@ AXIS_LABEL: dict[str, str] = {
     "connections": "Connections",
 }
 
-# Overall verdict word, keyed by overall_status (mirrors report._VET_VERDICT).
+# Overall verdict word, keyed by overall_status (mirrors report._VET_VERDICT). Used ONLY
+# by the --full pipeline's own analyst-facing surfaces (the Inventory subject block, the
+# plugin sweep) -- those are a different feature from Mode C ("before you install") and
+# are unaffected by C427; kept for that reason.
 VERDICT_WORD: dict[str, str] = {
     FAIL: "DANGEROUS",
     WARN: "SUSPICIOUS",
     PASS: "NO KNOWN ISSUE",
     UNKNOWN: "UNKNOWN",
 }
+
+# C427: Mode C's own vocabulary -- unifies what --vet/--vet-plugin/--vet-mcp/--vet-source/
+# --vet-all/--advise all say. --advise shipped this vocabulary first (F-067); Mode C's
+# text dossier previously spoke VERDICT_WORD above PLUS an A-F letter -- both are retired
+# from every Mode C rendered surface in favor of this one.
+_MODE_C_VERDICT: dict[str, str] = {
+    FAIL: "DO-NOT-INSTALL",
+    WARN: "CAUTION",
+    PASS: "INSTALL",
+    UNKNOWN: "CAUTION",
+}
+
+
+def verdict_for(overall_status: str) -> str:
+    """Map a VetProfile's `overall_status` to Mode C's install-recommendation word.
+
+    `overall_status` is itself the categorical rollup `_grade_profile` derives from the
+    same axis pass that produces the (now internal-only) numeric score/grade -- a Danger
+    FAIL floors score to 0/F, a non-danger FAIL or a Danger-axis coverage gap caps score
+    at 79/C, any remaining WARN caps at 89/B, and an all-clean profile scores 100/A -- so
+    this only has to translate the category, not re-derive a threshold on the raw number:
+
+        FAIL    -> DO-NOT-INSTALL  (a real known-bad or floored/capped failure)
+        WARN    -> CAUTION         (a real caveat somewhere -- never "A"-equivalent)
+        PASS    -> INSTALL         (nothing found across every assessable axis)
+        UNKNOWN -> CAUTION         (not assessable -- never presented as a green light)
+
+    This is the ONE place that mapping is made: the text dossier, --json, --advise, and
+    SARIF's vetProfile all read `VetProfile.verdict` (computed once, in `build_profile`,
+    via this function) rather than keeping their own copy -- so they cannot disagree.
+    Any status this dict doesn't recognize (defensive only -- `_grade_profile` never
+    returns one) also reads CAUTION, the conservative default.
+    """
+    return _MODE_C_VERDICT.get(overall_status, "CAUTION")
 
 # ── Finding → axis bucketing ──────────────────────────────────────────────────
 # Step 1: explicit id overrides — for findings whose AST class is ambiguous across
@@ -170,8 +207,19 @@ class VetProfile:
     target: str
     target_type: str  # skill | plugin | mcp | source
     overall_status: str  # FAIL | WARN | PASS | UNKNOWN
-    overall_grade: str  # A..F, or "N/A" when nothing is assessable
-    score: int  # 0..100 (0 when not assessable)
+    # C427: the ONE Mode C verdict word -- "INSTALL" | "CAUTION" | "DO-NOT-INSTALL",
+    # computed once here (via `verdict_for`) and read by every renderer (text dossier,
+    # --json, --advise, SARIF's vetProfile) instead of each recomputing its own mapping.
+    verdict: str
+    # C427: `overall_grade` and `score` are INTERNAL ONLY from here down -- Mode C (the
+    # --vet/--advise family) no longer renders an A-F letter or the raw number on any
+    # surface (text dossier, --json, --advise, SARIF's vetProfile); they collided with
+    # Mode A's own system-audit grade, a different scale about a different question. The
+    # fields stay because _grade_profile's coverage-gap cap machinery (well-tested,
+    # untouched by C427) and existing unit tests key off them directly. No renderer may
+    # print either field -- call `verdict_for(overall_status)` instead.
+    overall_grade: str  # A..F, or "N/A" when nothing is assessable -- NEVER rendered
+    score: int  # 0..100 (0 when not assessable) -- NEVER rendered
     axes: list  # AxisResult, in AXES order
     findings: list  # flat pool (for JSON detail / SARIF results)
     unmapped: list = field(default_factory=list)  # finding ids that resolved to no axis
@@ -339,7 +387,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
                        else "nothing to assess")
             for a in AXES
         ]
-        return VetProfile(target, target_type, UNKNOWN, "N/A", 0, axes, [], [])
+        return VetProfile(target, target_type, UNKNOWN, verdict_for(UNKNOWN), "N/A", 0, axes, [], [])
 
     # Bucket every finding into an axis (or unmapped / decomposed-container).
     buckets: dict[str, list] = {a: [] for a in AXES}
@@ -418,6 +466,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
         target=target,
         target_type=target_type,
         overall_status=overall_status,
+        verdict=verdict_for(overall_status),
         overall_grade=grade,
         score=score,
         axes=axes,
@@ -428,6 +477,16 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
 
 def _grade_profile(axes: list, *, danger_coverage_gap: bool = False) -> tuple[str, int, str]:
     """Roll axis results up to (overall_status, score, grade). Reuses scoring.grade_for.
+
+    C427: the returned ``grade`` (and ``score``) are an INTERNAL quantity from here on --
+    no renderer may print either. They still exist because the coverage-gap cap below is
+    well-tested and expressed as a number (``min(score, _COVERAGE_GAP_DANGER_CAP)``), and
+    rewriting that as verdict-tier logic for a presentation-only change would touch
+    working logic for no reason. Every rendered surface instead calls
+    ``verdict_for(overall_status)`` (defined above `VetProfile`), which derives the
+    install-recommendation word directly from ``overall_status`` -- do not re-expose
+    ``grade``/``score`` to a renderer; that is exactly the "two different A's on two
+    different scales" bug C427 removed.
 
     ``danger_coverage_gap`` (B-092): the Danger axis reads UNKNOWN not because there was
     nothing to scan, but because scanning hit a size/file cap — a payload padded past the

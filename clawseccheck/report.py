@@ -1208,11 +1208,16 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
 # channels-surface finding ids, mirroring "system"'s shape. Precise per-channel routing is
 # exactly what Phase 2's `subject` field is for.
 
-# Skill verdict words reuse the SAME vet-verdict vocabulary `--vet` already ships
-# (module-level `_VET_VERDICT`, defined further down next to render_vet_json/
-# render_advise) -- referenced lazily inside the functions below (not at class/module
-# scope) purely because of file position; it is the exact same table, not a copy, so a
-# skill flagged here reads identically to running `--vet <skill>` directly.
+# Skill verdict words here use `_VET_VERDICT` (DANGEROUS / SUSPICIOUS / CLEAN / UNKNOWN),
+# defined further down next to render_vet_json/render_advise -- referenced lazily inside
+# the functions below (not at class/module scope) purely because of file position.
+#
+# C-427: this is deliberately NOT the same vocabulary `--vet` prints any more. Mode C
+# ("before you install") now answers INSTALL / CAUTION / DO-NOT-INSTALL, because it is
+# answering a decision. This block is the audit's own inventory narration -- it describes
+# what a skill IS, not whether to install it -- so it keeps the descriptive words. The
+# older comment here claimed the two read identically; that stopped being true with
+# C-427 and would have been a quiet lie about a surface a reader compares by eye.
 
 
 def _worst_of_statuses(statuses) -> str:
@@ -3297,7 +3302,14 @@ def render_vet_json(profile, *, mode: str, version: str) -> str:
 
     `mode` is the sub-command ("vet" / "vet-plugin" / "vet-mcp" / "vet-source"); the target
     and everything else come from the ``VetProfile``. The envelope keeps the frozen
-    per-finding shape (`_finding_to_dict`) and adds the axis breakdown + overall grade.
+    per-finding shape (`_finding_to_dict`) and adds the axis breakdown + Mode C's
+    install-recommendation verdict.
+
+    C427: NO letter grade / numeric score here. ``profile.verdict`` is
+    ``dossier.verdict_for(profile.overall_status)``, computed once in `build_profile` --
+    the same value the text dossier, --advise, and SARIF's vetProfile all read, so none of
+    them can drift out of agreement. ``profile.overall_grade`` / ``profile.score`` stay
+    internal to the dossier's own cap machinery; do not add them back to this payload.
     """
     payload = {
         "tool": "clawseccheck",
@@ -3305,9 +3317,7 @@ def render_vet_json(profile, *, mode: str, version: str) -> str:
         "mode": mode,
         "target": profile.target,
         "target_type": profile.target_type,
-        "verdict": _VET_VERDICT.get(profile.overall_status, "UNKNOWN"),
-        "grade": profile.overall_grade,
-        "score": profile.score,
+        "verdict": profile.verdict,
         "axes": [
             {
                 "axis": a.axis,
@@ -3333,19 +3343,24 @@ def _dossier_top_fix(profile) -> str:
 
 
 def render_vet_dossier(profile, ascii_only: bool = False) -> str:
-    """Human-readable risk dossier: the overall grade + a line per axis.
+    """Human-readable risk dossier: the Mode C verdict + a line per axis.
 
-    Reframes the vet verdict into how *dangerous* / how *built* / how it *behaves* / what
+    Reframes the vet signal into how *dangerous* / how *built* / how it *behaves* / what
     it *stores* / whom it *connects with*. N/A axes are shown (dimmed by icon) with their
     reason, so the reader sees exactly what could not be assessed and why.
+
+    C427: no "Grade: A-F" here — `profile.verdict` (INSTALL/CAUTION/DO-NOT-INSTALL) is the
+    ONLY headline. A letter here collided with Mode A's own system-audit grade (two
+    different A's on two different scales about two different things); this is Mode C
+    ("before you install"), which never claims "all five layers ran".
     """
     icons = _AXIS_ICON_ASCII if ascii_only else _AXIS_ICON_UNI
-    verdict = _VET_VERDICT.get(profile.overall_status, "UNKNOWN")
+    verdict = profile.verdict
     header_icon = icons.get(profile.overall_status, icons["UNKNOWN"])
     name = _sanitize(Path(profile.target).name or profile.target)
     lines = [
         f"{header_icon}  RISK DOSSIER — {profile.target_type} '{name}'"
-        f"    Grade: {profile.overall_grade}  ({verdict})",
+        f"    {verdict}",
         "",
     ]
     for a in profile.axes:
@@ -3525,12 +3540,18 @@ def render_advise(profile, ascii_only: bool = False) -> str:
 
 def render_advise_json(profile, *, version: str) -> str:
     """Machine-readable install recommendation — same envelope as render_vet_json plus
-    the advise-specific verdict, reasons, and cleanup command."""
+    the advise-specific verdict, reasons, and cleanup command.
+
+    C427: `render_vet_json`'s own "verdict" key already carries
+    `dossier.verdict_for(profile.overall_status)` (no letter grade, no raw score);
+    "advise_verdict" reads the exact same `profile.verdict` rather than its own copy of
+    the mapping, so the two keys can never disagree.
+    """
     from .coverage import coverage as _coverage  # noqa: PLC0415
 
     is_quarantine = _looks_like_quarantine(profile.target)
     payload = json.loads(render_vet_json(profile, mode="advise", version=version))
-    payload["advise_verdict"] = _ADVISE_VERDICT.get(profile.overall_status, "CAUTION")
+    payload["advise_verdict"] = profile.verdict
     payload["reasons"] = _advise_reasons(profile)
     payload["is_quarantine_path"] = is_quarantine
     if _CONTROL_CHAR_RE.search(str(profile.target)):

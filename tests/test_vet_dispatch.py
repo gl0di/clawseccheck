@@ -118,8 +118,9 @@ def test_cli_vet_routes_mcp_spec_file(tmp_path, capsys):
     rc = main(["--vet", str(spec)])
     captured = capsys.readouterr()
     assert "detected type: mcp" in captured.err
-    assert rc == 1                                       # pipe-to-run → DANGEROUS
-    assert "DANGEROUS" in captured.out
+    assert rc == 1                                       # pipe-to-run → DO-NOT-INSTALL
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not DANGEROUS -- no letter grade.
+    assert "DO-NOT-INSTALL" in captured.out
 
 
 def test_cli_explicit_vet_plugin_on_non_plugin_unknown(tmp_path, capsys):
@@ -144,5 +145,6 @@ def test_cli_vet_plugin_json_stdout_is_pure(tmp_path, capsys):
     assert rc == 0
     payload = json.loads(captured.out)                   # stdout must parse as JSON
     assert payload["mode"] == "vet-plugin"
-    assert payload["verdict"] == "NO KNOWN ISSUE"
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not NO KNOWN ISSUE -- no grade.
+    assert payload["verdict"] == "INSTALL"
     assert "detected type: plugin" in captured.err       # note went to stderr

@@ -56,7 +56,8 @@ def test_vet_json_dangerous_is_valid_json(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["tool"] == "clawseccheck"
     assert data["mode"] == "vet"
-    assert data["verdict"] == "DANGEROUS"
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not DANGEROUS -- no letter grade.
+    assert data["verdict"] == "DO-NOT-INSTALL"
     assert data["findings"] and data["findings"][0]["status"] == "FAIL"
     # evidence is carried through to the machine-readable shape
     assert data["findings"][0]["evidence"]
@@ -66,21 +67,25 @@ def test_vet_json_clean_is_safe(tmp_path, capsys):
     rc = main(["--vet", str(_clean_skill(tmp_path)), "--json"])
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
-    assert data["verdict"] == "NO KNOWN ISSUE"
-    # the dossier reports the target type, an overall grade, and a per-axis breakdown
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not NO KNOWN ISSUE -- no grade.
+    assert data["verdict"] == "INSTALL"
+    # the dossier reports the target type and a per-axis breakdown -- no letter grade or
+    # raw score on this surface (both are internal-only now, see dossier.verdict_for).
     assert data["target_type"] == "skill"
-    assert data["grade"] == "A"
+    assert "grade" not in data
+    assert "score" not in data
     assert {a["axis"] for a in data["axes"]} == {
         "danger", "build", "behavior", "persistence", "connections"}
 
 
-def test_vet_json_dossier_grade_floors_dangerous_to_F(tmp_path, capsys):
-    # The dossier carries an honest overall grade; a malware verdict floors it to F.
+def test_vet_json_dossier_verdict_floors_to_do_not_install(tmp_path, capsys):
+    # C427: the dossier carries an honest overall verdict; a malware finding floors it to
+    # DO-NOT-INSTALL (the old "grade F") -- no letter grade or raw score on this surface.
     main(["--vet", str(_dirty_skill(tmp_path)), "--json"])
     data = json.loads(capsys.readouterr().out)
-    assert data["grade"] == "F"
-    assert data["verdict"] == "DANGEROUS"
-    assert isinstance(data["score"], int)
+    assert data["verdict"] == "DO-NOT-INSTALL"
+    assert "grade" not in data
+    assert "score" not in data
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +107,8 @@ def test_vet_sarif_writes_valid_file(tmp_path, capsys):
     assert results[0]["ruleId"] == "B13"
     assert "B64" in rule_ids
     # text report still printed alongside the SARIF side output
-    assert "DANGEROUS" in capsys.readouterr().out
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not DANGEROUS -- no letter grade.
+    assert "DO-NOT-INSTALL" in capsys.readouterr().out
 
 
 def test_vet_sarif_carries_dossier_profile(tmp_path):
@@ -112,7 +118,10 @@ def test_vet_sarif_carries_dossier_profile(tmp_path):
     main(["--vet", str(_dirty_skill(tmp_path)), "--sarif", str(out)])
     run = json.loads(out.read_text())["runs"][0]
     vp = run["properties"]["vetProfile"]
-    assert vp["grade"] == "F"
+    # C427: SARIF's vetProfile carries the verdict, not a grade -- no "grade"/"score" key.
+    assert vp["verdict"] == "DO-NOT-INSTALL"
+    assert "grade" not in vp
+    assert "score" not in vp
     assert vp["targetType"] == "skill"
     assert {a["axis"] for a in vp["axes"]} == {
         "danger", "build", "behavior", "persistence", "connections"}
@@ -136,7 +145,8 @@ def test_vet_sarif_unwritable_path_degrades_gracefully(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "could not write SARIF" in out
     # the primary text report still completes and the exit code is unchanged
-    assert "DANGEROUS" in out
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not DANGEROUS -- no letter grade.
+    assert "DO-NOT-INSTALL" in out
     assert rc == 1
     assert not bad.exists()
 
@@ -152,7 +162,8 @@ def test_vet_mcp_json_dangerous(tmp_path, capsys):
     assert rc == 1
     data = json.loads(capsys.readouterr().out)
     assert data["mode"] == "vet-mcp"
-    assert data["verdict"] == "DANGEROUS"
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not DANGEROUS -- no letter grade.
+    assert data["verdict"] == "DO-NOT-INSTALL"
     assert data["findings"][0]["status"] == "FAIL"
 
 
@@ -160,7 +171,9 @@ def test_vet_mcp_json_no_servers_is_unknown(tmp_path, capsys):
     rc = main(["--vet-mcp", "--home", str(tmp_path), "--json"])
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
-    assert data["verdict"] == "UNKNOWN"
+    # C427: an inconclusive (not-assessable) target reads CAUTION -- never a green light --
+    # the same conservative default --advise already used for UNKNOWN before this change.
+    assert data["verdict"] == "CAUTION"
 
 
 def test_vet_mcp_sarif_rule_is_self_consistent(tmp_path):
@@ -184,17 +197,24 @@ def _mk(status, fid="B13", sev="CRITICAL"):
 
 
 def test_render_vet_json_verdict_is_worst_status():
+    # The rollup is driven by the worst axis status (a FAIL on the danger axis floors
+    # everything) -- C427 only changed the WORD that rollup renders as, not the rollup
+    # itself: `profile.overall_grade` (internal-only, never rendered) still floors to F,
+    # and the rendered `verdict` is that same floor's C427 vocabulary.
     profile = build_profile([_mk("PASS"), _mk("FAIL"), _mk("WARN")], "x", "skill")
+    assert profile.overall_grade == "F"
     out = json.loads(render_vet_json(profile, mode="vet", version="9.9.9"))
-    assert out["verdict"] == "DANGEROUS"
+    assert out["verdict"] == "DO-NOT-INSTALL"
     assert out["version"] == "9.9.9"
-    assert out["grade"] == "F"  # a FAIL on the danger axis floors the grade
+    assert "grade" not in out
 
 
 def test_render_vet_json_empty_is_unknown():
     profile = build_profile([], "x", "skill")
+    assert profile.overall_status == "UNKNOWN"
     out = json.loads(render_vet_json(profile, mode="vet", version="1.1.0"))
-    assert out["verdict"] == "UNKNOWN"
+    # C427: not assessable reads CAUTION -- never a green light -- for an UNKNOWN status.
+    assert out["verdict"] == "CAUTION"
     assert out["findings"] == []
 
 
@@ -242,12 +262,13 @@ def _clean_plugin(tmp_path: Path) -> Path:
 
 def test_vet_plugin_text_dossier_surfaces_lifecycle_script_warn(tmp_path, capsys):
     """B-149: an npm postinstall/lifecycle script fires WARN on the raw PLUGIN-VET
-    finding, but that WARN must also reach the human-facing TEXT dossier (grade,
-    verdict word, and the Build axis line) — not just show a silent Grade A / SAFE."""
+    finding, but that WARN must also reach the human-facing TEXT dossier (verdict word
+    and the Build axis line) — not just show a silent INSTALL / clean."""
     rc = main(["--vet-plugin", str(_plugin_with_lifecycle_script(tmp_path))])
     out = capsys.readouterr().out
     assert rc == 1
-    assert "SUSPICIOUS" in out
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not SUSPICIOUS -- no letter grade.
+    assert "CAUTION" in out
     assert "Grade: A" not in out
     # the lifecycle-script signal is cited on an axis line, not just buried in evidence
     lines = [ln for ln in out.splitlines() if "Build" in ln]
@@ -255,14 +276,15 @@ def test_vet_plugin_text_dossier_surfaces_lifecycle_script_warn(tmp_path, capsys
     assert "postinstall" in lines[0]
 
 
-def test_vet_plugin_text_dossier_clean_stays_grade_a(tmp_path, capsys):
+def test_vet_plugin_text_dossier_clean_stays_install(tmp_path, capsys):
     """Regression guard for the B-149 fix: a plugin with no lifecycle scripts / clean
-    manifest / no packaging signals still grades A / SAFE — no false-WARN introduced."""
+    manifest / no packaging signals still reads INSTALL / clean — no false-WARN
+    introduced. C427: no letter grade renders here at all."""
     rc = main(["--vet-plugin", str(_clean_plugin(tmp_path))])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "NO KNOWN ISSUE" in out
-    assert "Grade: A" in out
+    assert "INSTALL" in out
+    assert "Grade" not in out
 
 
 def test_vet_dossier_ascii_flag_leaks_no_non_ascii_chars(tmp_path, capsys):

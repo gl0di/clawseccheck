@@ -44,7 +44,8 @@ def test_two_real_modes_note_the_ignored_one(tmp_path, capsys):
     rc = main(["--vet", sk, "--redteam"])
     err = capsys.readouterr()
     assert rc == 1                                  # --vet ran, verdict unchanged
-    assert "DANGEROUS" in err.out
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not DANGEROUS -- no letter grade.
+    assert "DO-NOT-INSTALL" in err.out
     assert "--redteam ignored (running --vet)" in err.err
 
 

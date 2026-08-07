@@ -236,7 +236,8 @@ def test_cli_vet_source_suspicious_rc1(capsys):
     rc = main(["--vet-source", "npm:reqeusts"])
     captured = capsys.readouterr()
     assert rc == 1
-    assert "SUSPICIOUS" in captured.out
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not SUSPICIOUS -- no letter grade.
+    assert "CAUTION" in captured.out
 
 
 def test_cli_vet_source_json_purity(capsys):
@@ -245,7 +246,11 @@ def test_cli_vet_source_json_purity(capsys):
     assert rc == 1
     payload = json.loads(captured.out)
     assert payload["mode"] == "vet-source"
-    assert payload["verdict"] == "SUSPICIOUS"
+    # C427: "verdict" carries the Mode C install word; the old A-F "grade"/numeric "score"
+    # keys are gone from every Mode C surface (internal-only now, see dossier.verdict_for).
+    assert payload["verdict"] == "CAUTION"
+    assert "grade" not in payload
+    assert "score" not in payload
 
 
 # --------------------------------------------------------------------------- #
