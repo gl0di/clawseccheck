@@ -116,6 +116,31 @@ def surfaced_despite_suppression(f: Finding) -> bool:
         or f.id in SENSITIVE_SUPPRESSED_IDS
     )
 
+
+# I3: per-severity FAIL counts a CI consumer can assert on without a grade — the
+# numbers `--fail-on SEVERITY` (cli.py) gates against. "Unsuppressed" is the IDENTICAL
+# predicate cli.py's --exit-code / --fail-on already use, via surfaced_despite_suppression
+# above — a suppressed finding counts only when it must still be surfaced (a score-capping
+# CRITICAL/HIGH FAIL, or a SENSITIVE_SUPPRESSED_IDS check). One function, shared by
+# render_json below and sarif.py's run-level properties, so the two machine surfaces —
+# and a human re-deriving the same tally from the printed findings list — can never disagree.
+# Lowercase keys match this codebase's existing status/severity JSON casing convention
+# (see coverage.py's `{"pass": N, "warn": N, "fail": N, "unknown": N}`). All four keys are
+# always present, zero-filled, so a consumer never has to guess a missing key means zero.
+def finding_counts_by_severity(findings: list[Finding]) -> dict[str, int]:
+    """Counts of unsuppressed FAIL findings by severity (critical/high/medium/low)."""
+    counts = {CRITICAL.lower(): 0, HIGH.lower(): 0, MEDIUM.lower(): 0, LOW.lower(): 0}
+    for f in findings:
+        if f.status != FAIL:
+            continue
+        if getattr(f, "suppressed", False) and not surfaced_despite_suppression(f):
+            continue
+        key = f.severity.lower()
+        if key in counts:
+            counts[key] += 1
+    return counts
+
+
 def _runtime_cap_phrase(reason: str | None) -> str:
     """Plain-English rendering of scoring's stable ``runtime_cap_reason`` label.
 
@@ -3588,6 +3613,10 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         "earned": getattr(score, "earned", 0.0),
         "total": getattr(score, "total", 0.0),
         "cap_severity": score.cap_severity,
+        # I3: per-severity unsuppressed-FAIL counts — the same numbers `--fail-on
+        # SEVERITY` (cli.py) gates on, so a CI consumer can assert on findings without
+        # a grade. See finding_counts_by_severity()'s docstring for the exact predicate.
+        "fail_counts_by_severity": finding_counts_by_severity(findings),
         # I-025/B-309: whether a corroborated runtime signal (never a config-static
         # finding) drove this cap, and which — see scoring.RUNTIME_SIGNAL_CAP.
         "runtime_capped": score.runtime_capped,

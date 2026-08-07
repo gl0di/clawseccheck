@@ -200,7 +200,8 @@ clawseccheck --sarif results.sarif   # SARIF 2.1.0 for GitHub Code Scanning
 clawseccheck --html report.html      # standalone HTML report (private)
 clawseccheck --pdf report.pdf        # complete audit as a paginated PDF (attach into chat)
 clawseccheck --exhaustive            # raise the scan caps: slower, maximum coverage
-clawseccheck --fail-under 70         # CI gate: exit 1 if score < 70
+clawseccheck --fail-on high          # CI gate: exit 1 if an unsuppressed FAIL at/above HIGH exists
+clawseccheck --fail-under 70         # deprecated CI gate (score-based): exit 1 if score < 70
 ```
 
 The **[User guide](docs/USAGE.md)** covers the modes and recipes — vetting engines,
