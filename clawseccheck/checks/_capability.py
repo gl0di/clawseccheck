@@ -812,6 +812,45 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     return sorted(granted - view.denied), True
 
 
+def _b55_write_tools_granted(
+    cfg: dict,
+) -> "tuple[list[str], bool, _ToolPolicyView, frozenset]":
+    """B55's exact write-tool grant model (write/edit/apply_patch), factored out of
+    `check_fs_write_exposure` (B-503) so a non-check consumer -- report.py's
+    capability graph -- can ask "does config grant a write-capable tool" without
+    re-deriving the model and silently drifting from it, the same bug class B-503
+    fixed for `_enabled_tools` vs. `_b68_fs_tools_granted`: two resolvers answering
+    the same question that disagree.
+
+    Delegates to `_b68_fs_tools_granted` (the canonical write/edit/apply_patch/
+    group:fs/profile/widening resolution B55/B68/B84 already share) and unions in
+    B55's OWN legacy-alias fallback -- `_FS_WRITE_TOOL_HINTS` ("fs_write",
+    "write_file", "writefile", "apply_patch") matched against the raw allow/
+    alsoAllow tokens, because these are not real OpenClaw tool ids and
+    `_b68_fs_tools_granted` only recognizes the canonical `_B68_FS_TOOLS` names (see
+    check_fs_write_exposure's B-395 docstring section for why that union exists --
+    real fixtures, e.g. bad_b55_fs_write_broad, still use the legacy alias).
+
+    Returns ``(write_tools, enumerable, view, legacy_write)``: `write_tools` is the
+    sorted write-capable subset (`_B55_FS_WRITE_TOOLS`) actually granted;
+    `enumerable` mirrors `_b68_fs_tools_granted`'s own; `view` and `legacy_write` are
+    returned too so `check_fs_write_exposure` can reuse them for its own
+    `explicit_write_grant` computation (the EXPLICIT/WIDENED/IMPLICIT-WILDCARD
+    distinction, which only matters for B55's internal FAIL/WARN split, not for a
+    coarse "is a write tool granted at all" consumer) without a second
+    `_tool_policy_view` call computing the identical thing.
+    """
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    view = _tool_policy_view(cfg)
+    legacy_write = {
+        canon
+        for canon, raw in zip(view.named, view.raw_named)
+        if _hint([raw], _FS_WRITE_TOOL_HINTS)
+    } - view.denied
+    write_tools = sorted((set(granted) & _B55_FS_WRITE_TOOLS) | legacy_write)
+    return write_tools, enumerable, view, legacy_write
+
+
 def check_exec_applypatch_workspace(ctx: Context) -> Finding:
     """B68 — filesystem workspace-only confinement (apply_patch + the fs tool family).
 
@@ -1162,7 +1201,12 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     open-group config.
     """
     cfg = ctx.config
-    granted, enumerable = _b68_fs_tools_granted(cfg)
+    # B-503: grant resolution delegated to `_b55_write_tools_granted`, the same
+    # write/edit/apply_patch model report.py's capability graph now also calls, so
+    # the two can no longer disagree the way `_enabled_tools` vs.
+    # `_b68_fs_tools_granted` did. `view`/`legacy_write` are still needed below for
+    # `explicit_write_grant`'s EXPLICIT/WIDENED/IMPLICIT-WILDCARD distinction.
+    write_tools, enumerable, view, legacy_write = _b55_write_tools_granted(cfg)
     widenings = _agent_profile_widenings(cfg)
 
     if not enumerable:
@@ -1176,20 +1220,6 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
             "auditable, and scope any write/edit/apply_patch grant with an approval "
             "gate (tools.exec.mode='ask').",
         )
-
-    # Legacy aliases matched independently against the raw allow/alsoAllow tokens
-    # (_tool_policy_view.raw_named), since _b68_fs_tools_granted only recognizes the
-    # canonical _B68_FS_TOOLS names — an additive union, deny-filtered against the same
-    # alias-folded denied set _tool_policy_view already resolved, so an explicitly
-    # denied legacy token doesn't count.
-    view = _tool_policy_view(cfg)
-    legacy_write = {
-        canon
-        for canon, raw in zip(view.named, view.raw_named)
-        if _hint([raw], _FS_WRITE_TOOL_HINTS)
-    } - view.denied
-
-    write_tools = sorted((set(granted) & _B55_FS_WRITE_TOOLS) | legacy_write)
 
     if not write_tools:
         return _finding(

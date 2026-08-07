@@ -495,7 +495,10 @@ def _capability_graph(ctx) -> dict:
         INPUT_TOOL_HINTS,
         OUTBOUND_TOOL_HINTS,
         SENSITIVE_TOOL_HINTS,
+        _B55_FS_WRITE_TOOLS,
         _agent_legs,
+        _b55_write_tools_granted,
+        _canon_tool,
         _enabled_tools,
         _external_input_channels,
         _hint,
@@ -523,7 +526,18 @@ def _capability_graph(ctx) -> dict:
         *[t for t in _enabled_tools(cfg) if _hint([t], INPUT_TOOL_HINTS)],
         *(["web.fetch"] if _web_fetch_enabled(cfg) else []),
     })
-    main_tools = sorted({t for t in _enabled_tools(cfg)})
+    # B-503: `_enabled_tools` collapses a powerful `tools.profile` down to the single
+    # synthetic "exec" token and never sees a write/edit/apply_patch grant it implies
+    # (it only widens from explicitly-listed tools.allow/gateway.tools.allow names) --
+    # exactly the divergence from B55 (check_fs_write_exposure) that let this graph
+    # print `can_write_memory=no` right next to a B55 FAIL on the same run. Union in
+    # `_b55_write_tools_granted`'s resolution -- the same profile-aware
+    # write/edit/apply_patch model B55/B68/B84 already share, including B55's own
+    # legacy-alias fallback -- rather than re-deriving a second, divergent model here.
+    # `_enabled_tools` itself is untouched: every OTHER caller (exec/input/egress
+    # hints) keeps reading exactly what it read before.
+    write_tools, _write_enumerable, _view, _legacy_write = _b55_write_tools_granted(cfg)
+    main_tools = sorted({t for t in _enabled_tools(cfg)} | set(write_tools))
     main_secrets = bool(
         dig(cfg, "gateway.auth.password")
         or dig(cfg, "gateway.token")
@@ -531,7 +545,7 @@ def _capability_graph(ctx) -> dict:
         or any(_hint([t], SENSITIVE_TOOL_HINTS) for t in main_tools)
     )
     main_write = bool(
-        any(_hint([t], ("fs_write", "write", "apply_patch")) for t in main_tools)
+        write_tools
         or dig(cfg, "agents.defaults.sandbox.workspaceAccess") == "rw"
     )
     main_egress = bool(
@@ -573,7 +587,13 @@ def _capability_graph(ctx) -> dict:
             "kind": "subagent",
             "tools": tools,
             "secrets_visible": bool(legs.get("sensitive data")),
-            "can_write_memory": any(_hint([t], ("fs_write", "write", "apply_patch")) for t in tools),
+            # B-503: canonicalize + exact-match against B55's own write-tool set
+            # (write/edit/apply_patch) instead of the old ad-hoc _hint substring
+            # tuple, which both missed "edit" entirely and could substring-false-
+            # positive on an unrelated tool name (e.g. "underwriter_lookup" contains
+            # "write") -- the same _hint pitfall risk.py's own B-395 fix (test_b55.py
+            # test_risk_hint_does_not_substring_match_bare_write_or_edit) had to guard.
+            "can_write_memory": bool({_canon_tool(t) for t in tools} & _B55_FS_WRITE_TOOLS),
             "can_egress": bool(legs.get("outbound actions")),
         })
         edges.append(("main", node_id))
