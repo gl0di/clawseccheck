@@ -1358,6 +1358,7 @@ def _empty_inventory() -> dict:
         "agents": {"status": PASS, "findings": [], "unassessed": 0,
                    "roster": [], "attested": False},
         "skills": [],
+        "self_excluded": [],
         "mcp": [],
         "plugins": {"scanned": False, "rows": []},
         "channels": {"status": PASS, "findings": [], "unassessed": 0, "roster": []},
@@ -1441,6 +1442,12 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
         "host": host,
         "agents": agents,
         "skills": _skill_inventory(ctx),
+        # B-507: skill names excluded from the "skills" roster above because they are
+        # ClawSecCheck's OWN content-verified install (B-265) -- disclosed so a machine
+        # reader can see the count was reduced deliberately, not silently. `[]` (never
+        # omitted) when nothing was excluded, matching every other additive-but-always-
+        # present inventory field in this dict.
+        "self_excluded": list(getattr(ctx, "self_excluded_skills", None) or []),
         "mcp": _mcp_inventory(ctx),
         "plugins": _plugin_inventory(plugin_sweep),
         "channels": channels,
@@ -1471,18 +1478,43 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     icon = _ICON_ASCII if ascii_only else _ICON
     skills = inv["skills"]
     n_skills = len(skills)
+    # B-507: self-excluded names (ClawSecCheck's own content-verified install, B-265) and
+    # the bundled-vs-user-installed split -- see the Context field docstrings in
+    # collector.py for what each signal means and why it is scoped the way it is.
+    self_excluded = [_sanitize(n) for n in (getattr(ctx, "self_excluded_skills", None) or [])]
+    bundled_names = getattr(ctx, "installed_skill_bundled", None) or set()
+    n_bundled = sum(1 for s in skills if s.get("name") in bundled_names)
+    note_icon = "[i]" if ascii_only else "ℹ️ "
     if n_skills == 0:
-        return [f" {SUBJECT_LABEL['skills']} (none installed)"]
+        label = f" {SUBJECT_LABEL['skills']} (none installed)"
+        lines = [label]
+        if self_excluded:
+            lines.append(
+                f"   {note_icon}{', '.join(self_excluded)} not graded -- "
+                "ClawSecCheck's own installed copy is excluded from its own audit")
+        return lines
     # B-268: `inv["skills"]` is built from ctx.installed_skills, which the collector caps at
     # _MAX_SKILLS. Printing its length as "(N installed)" reported the CAP as the inventory
     # total — a home with 311 skills on disk rendered "Skills (300 installed)", and the 11
     # unexamined ones were invisible in the very block whose job is to enumerate what is
     # installed. Disclose the truncation instead of presenting a capped view as a census.
     n_skipped = int(getattr(ctx, "skills_capped_count", 0) or 0)
-    installed_text = (
-        f"{n_skills} inspected, {n_skipped} NOT inspected — inspection cap reached"
-        if n_skipped else f"{n_skills} installed"
-    )
+    if n_skipped:
+        installed_text = f"{n_skills} inspected, {n_skipped} NOT inspected — inspection cap reached"
+    elif n_bundled and n_bundled < n_skills:
+        # B-507: mixed roster -- state both counts so neither figure reads as the whole
+        # story (a plain total would imply the user chose all of them; a plain "bundled"
+        # count would hide the genuinely user-installed ones).
+        installed_text = f"{n_skills - n_bundled} installed, {n_bundled} bundled with a plugin"
+    elif n_bundled and n_bundled == n_skills:
+        # B-507: EVERY discovered skill came from the plugin-skills bundled-dir root --
+        # "(N installed)" here would flatly claim the user installed something they did
+        # not; "bundled" is the whole and only truth for this roster.
+        installed_text = f"{n_bundled} bundled with a plugin"
+    else:
+        installed_text = f"{n_skills} installed"
+    if self_excluded:
+        installed_text += f" · {len(self_excluded)} self-excluded"
     flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
     flagged_names = {s["name"] for s in flagged}
     sk_marker = icon.get(_worst_of_statuses(s["status"] for s in flagged), "?")
@@ -1492,6 +1524,10 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
         lines.append(
             f"   {icon.get(UNKNOWN, '?')} {n_skipped} skill(s) beyond the inspection "
             "cap were not scanned; their verdict is unknown, not clean")
+    if self_excluded:
+        lines.append(
+            f"   {note_icon}{', '.join(self_excluded)} not graded -- "
+            "ClawSecCheck's own installed copy is excluded from its own audit")
     # Skill names are untrusted (directory names) -- _sanitize() every one before it
     # reaches a line, same as finding title/detail elsewhere in this file (B164: no raw
     # ANSI/control chars may reach the terminal).

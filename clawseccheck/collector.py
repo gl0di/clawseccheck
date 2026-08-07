@@ -636,6 +636,20 @@ class Context:
     # the static SKILL_DIRS silently missed every grouped/config-declared root and then
     # still reported the sweep complete).
     installed_skill_roots: list = field(default_factory=list)
+    # B-507: names excluded from installed_skills because _is_own_source() content-
+    # verified them as ClawSecCheck's own install (B-265) -- a tool must not grade its
+    # own package, but the exclusion used to be completely silent, so "Skills (N
+    # installed)" undercounted by exactly this many with no trace anywhere in the
+    # output. report.py discloses this list instead of a silently shrunk count.
+    self_excluded_skills: list = field(default_factory=list)
+    # B-507: names discovered via the `plugin-skills` symlink root specifically (see the
+    # B-161 comment in _read_installed_skills) -- that root is DELIBERATELY made of
+    # symlinks into a plugin's own bundled skills/ dir (e.g. an OpenClaw core
+    # extension's skill living inside OpenClaw's own npm package), not something the
+    # user separately installed or can remove independently of the plugin. report.py
+    # labels these "bundled" rather than folding them into a plain "(N installed)" count
+    # that implies the user chose each one.
+    installed_skill_bundled: set = field(default_factory=set)
     attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py
     _collected_skill_files: dict[str, list[dict]] = field(default_factory=dict)
 
@@ -2161,6 +2175,12 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
             # must be judged by what it points at. A malicious skill renamed to an own-skill
             # name now enters the inventory and is audited like any other.
             if _is_own_source(target):
+                # B-507: excluded, but no longer SILENTLY excluded -- record the name so
+                # report.py can disclose it instead of the inventory count just quietly
+                # shrinking by one with no trace anywhere in the output. Deduped: the
+                # same own-skill dir could in principle be reachable from two roots.
+                if sd.name not in ctx.self_excluded_skills:
+                    ctx.self_excluded_skills.append(sd.name)
                 continue
             key = sd.name
             if key in seen:
@@ -2175,6 +2195,20 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                     key = f"{original}#{suffix}"
                     suffix += 1
             seen.add(key)
+            if base == plugin_skills:
+                # B-507: this root is DELIBERATELY symlinks into a plugin's own bundled
+                # skills/ dir (see the B-161 comment above `plugin_skills = ...`) -- e.g.
+                # an OpenClaw core extension's browser-automation/canvas skill living
+                # inside OpenClaw's own npm package, not something the user separately
+                # installed or can remove independently of the plugin. report.py labels
+                # these "bundled" rather than folding them into a plain "(N installed)"
+                # count that implies the user chose each one, same as a marketplace
+                # skill. Scoped to exactly this root: it is the only skill root this
+                # codebase already documents as symlink-into-bundled-dir; other roots
+                # (plugins.load.paths, a bundled_root_overrides relocation) are not
+                # labeled bundled here because that would be a new, unverified claim
+                # about their provenance rather than one already established in-code.
+                ctx.installed_skill_bundled.add(key)
             try:
                 ctx.installed_skills[key] = _read_skill_text(target, ctx)
                 ctx.installed_skill_py[key] = read_skill_python(target, ctx)

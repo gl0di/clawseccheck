@@ -364,6 +364,7 @@ def test_build_inventory_ctx_none_returns_neutral_shape():
         "agents": {"status": PASS, "findings": [], "unassessed": 0,
                    "roster": [], "attested": False},
         "skills": [],
+        "self_excluded": [],
         "mcp": [],
         "plugins": {"scanned": False, "rows": []},
         "channels": {"status": PASS, "findings": [], "unassessed": 0, "roster": []},
@@ -393,7 +394,8 @@ def test_json_inventory_key_present_with_expected_subjects():
     payload = json.loads(render_json(findings, score, ctx=ctx))
     inv = payload["inventory"]
     assert set(inv.keys()) == {
-        "openclaw", "host", "agents", "skills", "mcp", "plugins", "channels", "logs",
+        "openclaw", "host", "agents", "skills", "self_excluded", "mcp", "plugins",
+        "channels", "logs",
     }
     assert "roster" in inv["agents"]
     assert "attested" in inv["agents"]
