@@ -924,7 +924,12 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
         score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
                         live_test_reason=live_signal.reason,
                         behavioral_fired_ids=behavioral_fired_ids, ledger=ledger)
-    return score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids
+    # C-423: the ledger is returned, not just consumed, for the same reason
+    # `behavioral_fired_ids` is (B-379): render_json's projection block runs its own
+    # compute() calls, and without the ledger `projection.current.score` published the
+    # very number the top-level `score` key was withholding -- one key apart in the
+    # same document. Caught by test_full_json_projection_current_matches_top_level_score.
+    return score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids, ledger
 
 
 def _apply_live_test_cap(ctx, findings, score, args):
@@ -2517,7 +2522,7 @@ def _main(argv=None) -> int:
         # --json branch below) so --dashboard --full shows the IDENTICAL F-154/F-155
         # capped grade a plain --full run of the same config would — and, C-425, the
         # IDENTICAL five-layer ledger / graded state too.
-        score, full_deadline, judged_bundle, _live_signal, _behavioral_fired_ids = (
+        score, full_deadline, judged_bundle, _live_signal, _behavioral_fired_ids, _ledger = (
             _resolve_runtime_caps(ctx, findings, score, args, attestation=attestation)
         )
         sweep_home = Path(args.home).expanduser()
@@ -2759,7 +2764,7 @@ def _main(argv=None) -> int:
     # need the external input resolved right here. Now threaded through explicitly
     # (see the `render_json` call below) so `payload["projection"]["current"]` can
     # never disagree with `payload["score"]`/`payload["grade"]` for the same run.
-    score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids = (
+    score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids, layer_ledger = (
         _resolve_runtime_caps(ctx, findings, score, args, attestation=attestation)
     )
     if args.json:
@@ -2807,7 +2812,8 @@ def _main(argv=None) -> int:
         body = render_json(findings, score, risk=paths, ctx=ctx, skill_sweep=full_sweep_json,
                            live_test_vulnerable=live_signal.hit,
                            live_test_reason=live_signal.reason,
-                           behavioral_fired_ids=behavioral_fired_ids)
+                           behavioral_fired_ids=behavioral_fired_ids,
+                           ledger=layer_ledger)
         if full_pipeline is not None:
             # Additive merge, done here rather than by widening render_json's signature:
             # these keys belong to the pipeline, not to the audit payload, and every

@@ -3779,7 +3779,7 @@ def render_permission_manifest(ctx, target: str) -> str:
 def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
                 ctx=None, skill_sweep: dict | None = None, plugin_sweep=None,
                 live_test_vulnerable: bool = False, live_test_reason: str | None = None,
-                behavioral_fired_ids=frozenset()) -> str:
+                behavioral_fired_ids=frozenset(), ledger=None) -> str:
     actions = suggest_actions(findings, score)
     _json_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if ctx is not None else None
 
@@ -3892,10 +3892,12 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     # B-379: thread the SAME cap inputs `score` (above) was computed with, so
     # projection.current can never disagree with the top-level score/grade for a
     # capped run — see this function's `behavioral_fired_ids`/`live_test_*` params.
+    # C-423: the ledger is threaded on exactly the same terms -- otherwise this block
+    # republishes the score the payload above deliberately set to null.
     payload["projection"] = _project(
         findings, ctx,
         live_test_vulnerable=live_test_vulnerable, live_test_reason=live_test_reason,
-        behavioral_fired_ids=behavioral_fired_ids,
+        behavioral_fired_ids=behavioral_fired_ids, ledger=ledger,
     )
     # B-166: config read/parse state is machine-visible. A broken openclaw.json must not
     # read as a silent all-clear — config_parse_error is a clean gating boolean and errors
