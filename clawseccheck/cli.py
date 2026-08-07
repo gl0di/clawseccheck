@@ -73,7 +73,7 @@ from .scanbudget import (
 )
 from . import pipeline as _pipeline
 from .baseline import append_entries, is_fingerprint
-from .catalog import Finding
+from .catalog import CRITICAL, HIGH, LOW, MEDIUM, Finding
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE, verify_chain
@@ -939,6 +939,13 @@ def _run_vet_mcp(target, args, ascii_only: bool) -> int:
 # silently. We never change a mode's behavior — we only surface, on stderr (so
 # machine-readable stdout stays clean), what is being ignored. Warn-and-continue.
 
+# I3: rank for --fail-on's "at or above SEVERITY" comparison. catalog.py deliberately
+# carries no ordered severity tuple (WEIGHT is a magnitude, not a rank a CLI flag should
+# lean on) — this is the local, single-purpose ordering: higher rank = more severe, so
+# "SEVERITY and everything ranked >= it" is exactly `{s: r for s, r in _SEVERITY_RANK.items()
+# if r >= _SEVERITY_RANK[threshold]}`.
+_SEVERITY_RANK = {CRITICAL: 3, HIGH: 2, MEDIUM: 1, LOW: 0}
+
 # Primary modes in the EXACT precedence order main() resolves them below.
 # kind "opt" → active when the value is not None; "bool" → active when truthy.
 #
@@ -1060,6 +1067,17 @@ def _flag_coherence_notes(args) -> list[str]:
     """Notes for ignored modes / no-effect global modifiers. Never mutates args."""
     active = [(a, f) for a, f, k in _PRIMARY_MODES if _mode_active(args, a, k)]
     notes: list[str] = []
+    # I3: --fail-on supersedes --fail-under when both are given — the exit-decision
+    # below (`elif args.fail_under is not None`) never even evaluates --fail-under's
+    # score check once --fail-on is set, regardless of which path (default report or
+    # a winning primary mode) reaches that decision. Said once, unconditionally, so a
+    # CI script mid-migration from --fail-under to --fail-on is never silently
+    # ambiguous about which one governs — this is the ONE place that note is emitted;
+    # the exit-decision code itself stays a plain elif, no second note there.
+    if (getattr(args, "fail_on", None) is not None
+            and getattr(args, "fail_under", None) is not None):
+        notes.append("note: --fail-under is deprecated and ignored — --fail-on decides "
+                     "when both are given")
     if not active:
         # No primary mode: the default path resolves output as --json > --card > text.
         # If both format flags are set, --json wins and --card is silently dropped.
@@ -1122,6 +1140,8 @@ def _flag_coherence_notes(args) -> list[str]:
         no_effect.append("--exit-code")
     if getattr(args, "fail_under", None) is not None and "fail_under" not in honored:
         no_effect.append("--fail-under")
+    if getattr(args, "fail_on", None) is not None and "fail_on" not in honored:
+        no_effect.append("--fail-on")
     # --full / --attest are enrichment modifiers a winning primary mode can silently
     # defeat (B-068). --full is consumed only on the default report path, so ANY
     # winning mode drops it. --attest feeds audit(), so modes that run AFTER the
@@ -1681,7 +1701,19 @@ def _main(argv=None) -> int:
                         "file itself into chat (a mobile client opens it inline; do not "
                         "paste the path or re-render its contents)")
     p.add_argument("--fail-under", metavar="N", type=int, default=None,
-                   help="exit 1 if score is below N")
+                   help="DEPRECATED (score-based; the grade requires a live agent under "
+                        "the layered product model) — exit 1 if score is below N. Prefer "
+                        "--fail-on, which gates on findings, not a score. Ignored (with a "
+                        "note) when --fail-on is also given")
+    p.add_argument("--fail-on", metavar="SEVERITY", choices=["critical", "high", "medium", "low"],
+                   default=None,
+                   help="exit 1 if any unsuppressed FAIL finding at or above SEVERITY exists "
+                        "(critical/high/medium/low, ranked highest-first; 'high' also trips on "
+                        "a critical). Suppressed findings are excluded the same way --exit-code "
+                        "excludes them (a suppressed score-capping CRITICAL/HIGH or sensitive-id "
+                        "finding still counts). A CI-friendly replacement for --fail-under: it "
+                        "gates on findings the way --exit-code does, at a chosen severity floor "
+                        "instead of any FAIL")
     p.add_argument("--exit-code", action="store_true",
                    help="exit 1 if any unsuppressed FAIL finding exists")
     p.add_argument("--trend", action="store_true",
@@ -2190,15 +2222,22 @@ def _main(argv=None) -> int:
     # First-run onboarding (Screen 13): when there is genuinely nothing to audit —
     # ~/.openclaw missing, or an empty directory — don't render a wall of UNKNOWNs;
     # show a friendly "point me at your config" screen. BARE human runs only: any
-    # machine/CI/artifact/work flag (--json/--card, --fail-under/--exit-code, --save,
-    # --full, --badge/--html/--sarif, --attest, or any primary mode) takes the normal
-    # audit path so nothing is silently dropped and CI gates keep failing loud (B-075).
-    # Checked BEFORE audit() so a missing home never burns a scan or the native-audit
-    # subprocess just to print a welcome.
+    # machine/CI/artifact/work flag (--json/--card, --fail-under/--fail-on/--exit-code,
+    # --save, --full, --badge/--html/--sarif, --attest, or any primary mode) takes the
+    # normal audit path so nothing is silently dropped and CI gates keep failing loud
+    # (B-075). Checked BEFORE audit() so a missing home never burns a scan or the
+    # native-audit subprocess just to print a welcome.
+    #
+    # I3: --fail-on joins --fail-under here on identical terms — a run with only
+    # --fail-on set (no --fail-under) is a machine gate too, and without this a lone
+    # `--fail-on critical` against a genuinely-empty home would silently print the
+    # friendly onboarding screen and exit 0 instead of taking the audit path a CI
+    # script asked for.
     _bare_run = (
         not any(_mode_active(args, a, k) for a, _f, k in _PRIMARY_MODES)
         and not args.json and not args.card and not args.save and not args.full
-        and args.fail_under is None and not args.exit_code and not args.attest
+        and args.fail_under is None and args.fail_on is None
+        and not args.exit_code and not args.attest
     )
     if _bare_run:
         first_run = _onboarding_reason(Path(args.home).expanduser())
@@ -2968,7 +3007,34 @@ def _main(argv=None) -> int:
     if _save_failed:
         return 1
 
-    if args.fail_under is not None and score.score < args.fail_under:
+    # I3: --fail-on gates on findings (like --exit-code) instead of the score
+    # (--fail-under). When both are given --fail-on decides — --fail-under's own
+    # check is skipped entirely (not just overridden by a later `return 1`), matching
+    # the deprecation note _flag_coherence_notes emits once, unconditionally, above.
+    #
+    # "Unsuppressed" reuses --exit-code's own predicate verbatim (not a parallel one):
+    # a suppressed finding counts only when surfaced_despite_suppression() says a
+    # .clawseccheckignore line must not be able to silently flip the gate for a
+    # score-capping CRITICAL/HIGH FAIL or a SENSITIVE_SUPPRESSED_IDS check.
+    #
+    # Scope: severity is only available per-finding on `findings` (the main audit
+    # list) — vm_findings/sweep/pipeline below contribute to --exit-code's FAIL-only
+    # disjunction as bare booleans (vm_has_fail/sweep_has_fail/pipeline_has_fail) with
+    # no severity attached, so --fail-on (a severity-gated flag) does not join that
+    # disjunction; it reads `findings` only, same as --exit-code's own `has_fail` term.
+    if args.fail_on is not None:
+        _fail_on_rank = _SEVERITY_RANK[args.fail_on.upper()]
+        if any(
+            f.status == "FAIL"
+            and _SEVERITY_RANK.get(f.severity, -1) >= _fail_on_rank
+            and (
+                not getattr(f, "suppressed", False)
+                or surfaced_despite_suppression(f)
+            )
+            for f in findings
+        ):
+            return 1
+    elif args.fail_under is not None and score.score < args.fail_under:
         return 1
 
     if args.exit_code:

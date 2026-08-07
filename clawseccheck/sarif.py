@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from . import brand
 from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding, remediation_for
 from .dossier import VERDICT_WORD, axis_for
-from .report import _sanitize, _sanitize_tree, surfaced_despite_suppression
+from .report import _sanitize, _sanitize_tree, finding_counts_by_severity, surfaced_despite_suppression
 from .scoring import ScoreResult
 
 if TYPE_CHECKING:
@@ -64,6 +64,15 @@ def _build_analysis_completeness(
         "warnCount": sum(1 for f in findings if f.status == WARN),
         "failCount": sum(1 for f in findings if f.status == FAIL),
         "suppressedCount": sum(1 for f in findings if f.suppressed),
+        # I3: per-severity counts of UNSUPPRESSED FAIL findings — the same numbers
+        # `--fail-on SEVERITY` (cli.py) gates on and report.py's --json carries as
+        # `fail_counts_by_severity`. Deliberately distinct from `failCount` two lines
+        # above: that one is an unconditional total (suppressed FAILs included, no
+        # severity split); this one is the CI-assertable, suppression-aware figure —
+        # see finding_counts_by_severity()'s docstring (report.py) for the exact
+        # predicate. camelCase key to match this block's existing convention
+        # (checksRun/failCount/…); lowercase severity sub-keys to match report.py's.
+        "failCountsBySeverity": finding_counts_by_severity(findings),
         "limitations": [
             "host-posture checks require --host",
             "attestation checks require --attest",
