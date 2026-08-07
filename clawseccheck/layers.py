@@ -59,6 +59,52 @@ LAYER_STATUSES = frozenset({
 #: Every status except STATUS_RAN — a layer in one of these cannot vouch for its subject.
 INCOMPLETE_LAYER_STATUSES = frozenset(LAYER_STATUSES - {STATUS_RAN})
 
+# ── how a layer is named to a reader ──────────────────────────────────────────
+#
+# ONE table, here in the leaf, for the same reason `textnorm.ASCII_MAP` is one table:
+# the moment a second renderer writes its own wording, the terminal report, the JSON,
+# the HTML and the PDF start disagreeing about what the tool did or did not do -- and
+# "what was not checked" is precisely the sentence that must never vary by surface.
+# Every renderer formats missing layers through `describe_layer` below; a test asserts
+# no renderer carries a competing table.
+
+#: Layer -> the noun a reader sees. Plain English, no jargon, no flag names.
+LAYER_LABEL = {
+    LAYER_STATIC: "static config audit",
+    LAYER_INSTALLED_SWEEP: "installed skills and plugins",
+    LAYER_LOGS_TRAJECTORIES: "logs and trajectories",
+    LAYER_SELF_REPORT: "agent self-report",
+    LAYER_LIVE_BEHAVIOUR: "live behaviour test",
+}
+
+#: Status -> the parenthetical that says WHY, in the reader's terms rather than the
+#: implementation's. The four not-ran statuses read differently on purpose: an operator
+#: narrowing the run, a user declining, a capability that does not exist here, and a
+#: layer that broke are four different facts about how much the report is worth.
+STATUS_PHRASE = {
+    STATUS_RAN: "ran",
+    STATUS_SKIPPED: "skipped by this run's flags",
+    STATUS_REFUSED: "declined",
+    STATUS_UNAVAILABLE: "not available here",
+    STATUS_ERROR: "failed",
+    STATUS_NOT_REACHED: "not reached",
+}
+
+
+def describe_layer(layer: str, status: str) -> str:
+    """One layer as a reader sees it, e.g. ``agent self-report (not available here)``.
+
+    The single formatting site for layer wording. Renderers join these; they never
+    build the phrase themselves.
+    """
+    if layer not in LAYER_LABEL:
+        raise ValueError(f"unknown layer {layer!r}; expected one of {LAYER_ORDER}")
+    if status not in STATUS_PHRASE:
+        raise ValueError(
+            f"unknown layer status {status!r}; must be one of {sorted(LAYER_STATUSES)}"
+        )
+    return f"{LAYER_LABEL[layer]} ({STATUS_PHRASE[status]})"
+
 
 @dataclass(frozen=True)
 class LayerState:

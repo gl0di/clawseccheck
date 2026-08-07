@@ -154,3 +154,41 @@ def test_pipeline_reexports_the_same_status_objects() -> None:
     assert pipeline.STATUS_NOT_REACHED is layers.STATUS_NOT_REACHED
     assert pipeline.STATUS_UNAVAILABLE is layers.STATUS_UNAVAILABLE
     assert pipeline.STATUS_ERROR is layers.STATUS_ERROR
+
+
+# ── the one wording table (B-483 discipline: one table, in the leaf) ─────────
+
+
+def test_every_layer_and_status_has_wording() -> None:
+    """A layer or status with no entry would render as a KeyError or, worse, silently
+    as nothing — in the one sentence whose whole job is to say what was not checked."""
+    assert set(layers.LAYER_LABEL) == set(LAYER_ORDER)
+    assert set(layers.STATUS_PHRASE) == set(LAYER_STATUSES)
+
+
+def test_describe_layer_reads_as_a_sentence_fragment() -> None:
+    assert layers.describe_layer(
+        layers.LAYER_SELF_REPORT, layers.STATUS_UNAVAILABLE
+    ) == "agent self-report (not available here)"
+    assert layers.describe_layer(
+        layers.LAYER_LIVE_BEHAVIOUR, layers.STATUS_REFUSED
+    ) == "live behaviour test (declined)"
+
+
+def test_describe_layer_rejects_what_it_cannot_describe() -> None:
+    with pytest.raises(ValueError):
+        layers.describe_layer("no_such_layer", layers.STATUS_RAN)
+    with pytest.raises(ValueError):
+        layers.describe_layer(layers.LAYER_STATIC, "no_such_status")
+
+
+def test_the_four_not_ran_statuses_read_differently() -> None:
+    """An operator narrowing the run, a user declining, a capability that does not exist
+    here, and a layer that broke are four different facts about how much the report is
+    worth. Collapsing them to one phrase would be the lie this table exists to prevent."""
+    phrases = {
+        layers.STATUS_PHRASE[s]
+        for s in (layers.STATUS_SKIPPED, layers.STATUS_REFUSED,
+                  layers.STATUS_UNAVAILABLE, layers.STATUS_ERROR)
+    }
+    assert len(phrases) == 4
