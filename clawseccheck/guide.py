@@ -123,9 +123,14 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
                else "Share your result (safe — findings stay private)"),
         command="clawseccheck --badge grade.svg",
         why=(
+            # C-428 follow-up: the second sentence used to be carried over verbatim from
+            # the graded branch — "Only the grade + score is ever shared" two words after
+            # "this run has no grade". The privacy promise is load-bearing, so it is
+            # reworded to what the badge actually contains (measured: its only text nodes
+            # are "OpenClaw Security" and "no grade yet"), never dropped.
             ("Only the grade + score is shared, never your findings. " if graded else
-             "This run has no grade, so the badge reads \"no grade yet\". Only the "
-             "grade + score is ever shared, never your findings. ")
+             "This run has no grade, so the badge reads \"no grade yet\" — that phrase "
+             "is the whole of what it carries. Your findings are never in it. ")
             + "This writes a real SVG file — attach grade.svg itself, do not redraw "
               "or regenerate the badge image yourself."
         ),

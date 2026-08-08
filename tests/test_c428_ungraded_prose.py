@@ -124,6 +124,27 @@ def test_ungraded_next_steps_do_not_promise_a_grade():
     assert "Only graded runs plot on the trend" in actions["track_trend"].why
 
 
+def test_ungraded_share_advice_does_not_then_promise_to_share_a_grade():
+    """The sentence AFTER the reworded one was carried over from the graded branch.
+
+    Found by reading a real `--next` run: "This run has no grade, so the badge reads
+    'no grade yet'. Only the grade + score is ever shared, never your findings." — the
+    second sentence promises to share the thing the first says does not exist.
+
+    `test_ungraded_next_steps_do_not_promise_a_grade` above could not catch it: it
+    asserts the new wording is PRESENT, which says nothing about the sentence next to it.
+    That gap is the whole shape of this defect family (B-518, B-520).
+    """
+    why = {a.id: a for a in suggest_actions(FINDINGS, _ungraded())}["share_grade"].why
+    assert 'badge reads "no grade yet"' in why, "the fact itself must stay"
+    assert "grade + score" not in why, (
+        "the ungraded branch still claims a grade and score get shared, two words after "
+        f"saying there is no grade: {why!r}")
+    # The privacy assurance is load-bearing — reword it, never drop it.
+    assert "never" in why and "findings" in why, (
+        "the 'your findings are not in the badge' promise must survive the rewording")
+
+
 def test_graded_next_steps_are_unchanged():
     actions = {a.id: a for a in suggest_actions(FINDINGS, _graded())}
     assert actions["share_grade"].title == "Share your grade (safe — findings stay private)"
