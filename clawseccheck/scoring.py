@@ -1008,7 +1008,7 @@ def assessment_coverage(findings: list[Finding]) -> dict:
 
 def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = False,
             live_test_reason: str | None = None, behavioral_fired_ids=frozenset(),
-            ledger=None) -> dict:
+            ledger=None, known_ungraded: bool = False) -> dict:
     """What-if projection: estimate the score impact of fixing FAIL findings.
 
     *ctx* is optional (default ``None``, unchanged behaviour) and, when supplied, is
@@ -1087,7 +1087,17 @@ def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = F
     # C-422: derived once from "current" — identical on every compute() call below
     # since `ledger` never changes across them, and `graded` is purely a function of
     # `ledger` (never of the findings being scored).
-    graded = current_result.graded
+    #
+    # B-512: deriving it from a RE-COMPUTATION made the guarantee conditional on the
+    # caller remembering to thread `ledger` here as well. A library caller doing
+    # `render_json(findings, compute(findings, ledger=incomplete))` threaded a score
+    # that was ungraded and a projection that was not, and `projection.current`
+    # republished the exact number the payload above had set to null. `known_ungraded`
+    # lets a caller that already holds the answer state it. It is deliberately
+    # one-directional — it can only ever WITHHOLD, never grant — so a caller passing it
+    # wrongly cannot manufacture a grade, and it can never disagree with the ledger in
+    # the dangerous direction.
+    graded = current_result.graded and not known_ungraded
 
     fixable = [
         f for f in findings

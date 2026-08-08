@@ -3957,10 +3957,16 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     # capped run — see this function's `behavioral_fired_ids`/`live_test_*` params.
     # C-423: the ledger is threaded on exactly the same terms -- otherwise this block
     # republishes the score the payload above deliberately set to null.
+    # B-512: `ledger=` alone made the guarantee above conditional on the caller
+    # threading it. `render_json(findings, score)` — the public library shape — does not,
+    # so the projection re-computed itself as graded and republished the number the
+    # payload had just nulled. The score being rendered is the authority on whether this
+    # run has one; say so directly rather than hoping the ledger arrived by another route.
     payload["projection"] = _project(
         findings, ctx,
         live_test_vulnerable=live_test_vulnerable, live_test_reason=live_test_reason,
         behavioral_fired_ids=behavioral_fired_ids, ledger=ledger,
+        known_ungraded=not getattr(score, "graded", True),
     )
     # B-166: config read/parse state is machine-visible. A broken openclaw.json must not
     # read as a silent all-clear — config_parse_error is a clean gating boolean and errors
@@ -4162,7 +4168,13 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         f'<p class="meta">{esc(_covered_line)}</p>' if _covered_line else ""
     )
 
-    pct = max(0, min(100, int(score.score)))
+    # B-512: `pct` is interpolated into the stylesheet below, and the stylesheet is
+    # emitted on BOTH branches — so computing it unconditionally baked the withheld
+    # number into the page as `width: 97%`. The bar element is not rendered on an
+    # ungraded run, but the CSS rule is, and anyone reading the source or opening
+    # devtools recovers the exact score the report withheld. Withholding has to cover
+    # what the page *contains*, not only what it displays.
+    pct = max(0, min(100, int(score.score))) if getattr(score, "graded", True) else 0
     # C-423: no letter, no /100, no score bar when this run carries no grade — the
     # "Most urgent" finding and which layers never ran replace them.
     if getattr(score, "graded", True):

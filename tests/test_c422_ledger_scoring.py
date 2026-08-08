@@ -193,9 +193,21 @@ def test_project_forwards_every_compute_kwonly_argument(monkeypatch) -> None:
         assert kwargs == compute_kwonly
 
 
+# B-512: `known_ungraded` is project()'s alone and deliberately has no compute()
+# counterpart. Every other keyword here is an INPUT to scoring — a cap signal, or the
+# ledger — and the guard below exists so a new one cannot be added to compute() and
+# forgotten on this path. `known_ungraded` is not an input to scoring at all: it lets a
+# caller that already holds the answer ("the ScoreResult I am rendering says ungraded")
+# suppress the projection's figures without re-deriving them, and it is one-directional
+# — it can only withhold, never grant. Adding it to compute() would be meaningless,
+# since compute() is where `graded` is decided in the first place.
+_PROJECT_ONLY_KWONLY = {"known_ungraded"}
+
+
 def test_project_signature_still_matches_compute_kwonly_set() -> None:
     """project()'s own optional keyword-only surface mirrors compute()'s (minus
-    `ctx`, which project() takes positionally, same as compute() does)."""
+    `ctx`, which project() takes positionally, same as compute() does, and minus the
+    documented project-only names above)."""
     compute_kwonly = {
         name
         for name, param in inspect.signature(compute).parameters.items()
@@ -206,7 +218,9 @@ def test_project_signature_still_matches_compute_kwonly_set() -> None:
         for name, param in inspect.signature(project).parameters.items()
         if param.kind is inspect.Parameter.KEYWORD_ONLY
     }
-    assert project_kwonly == compute_kwonly
+    assert project_kwonly - _PROJECT_ONLY_KWONLY == compute_kwonly
+    # The exemption must stay honest: every name in it has to really be on project().
+    assert _PROJECT_ONLY_KWONLY <= project_kwonly
     assert "ledger" in compute_kwonly  # sanity: would be vacuous if C-422 regressed
 
 

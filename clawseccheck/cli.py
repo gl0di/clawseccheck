@@ -98,6 +98,7 @@ from .logsafe import get_logger
 from .safeio import secure_write_bytes, secure_write_text
 from .textnorm import asciify
 from .incident import render_incident
+from .layers import LAYER_ORDER
 from .trajaudit import render_trajectory_analysis
 from .behavioral import analyze as _behavioral_analyze
 from .behavioral import explicit_path_problem as _behavioral_path_problem
@@ -2440,7 +2441,15 @@ def _main(argv=None) -> int:
     )
     score = compute(findings, ctx, ledger=_bare_ledger)
     logger.debug("ran %d checks", len(findings))
-    logger.info("score=%s grade=%s", score.score, score.grade)
+    # A `ScoreResult` keeps its computed number when `graded` is False — only the
+    # renderers withhold it — so every writer has to opt in, and this one had not.
+    # `--log` is where an operator looks once the terminal has scrolled, and what
+    # they paste into an issue; it stated a grade the report on screen refused to give.
+    if getattr(score, "graded", True):
+        logger.info("score=%s grade=%s", score.score, score.grade)
+    else:
+        logger.info("no grade: %d of %d layers did not run",
+                    len(getattr(score, "missing_layers", ())), len(LAYER_ORDER))
 
     # B-154: RISK-* chains must honor .clawseccheckignore too — pass the same
     # ignore set findings were suppressed with, then drop suppressed chains
