@@ -625,20 +625,64 @@ class TestTrendMonitorReachC135:
         assert payload["live_injection_capped"] is True
         assert LIVE_INJECTION_CAP == 49
 
-    def test_trend_shows_and_records_the_capped_score(self, tmp_path, capsys):
+    def test_trend_shows_and_records_the_capped_run(self, tmp_path, capsys):
+        """C-426: the contract is that the cap REACHES --trend. It still does.
+
+        What moved is the observable. A `--trend` run renders a bare audit, and a bare
+        audit is now ungraded, so there is no ` F  49 ` to show and no number to record
+        -- the row is recorded ungraded and the trend line reads `no grade`.
+
+        The recordability half of the contract (seeded => recorded; the unseeded test
+        below => not recorded) is untouched and is what the row assertions check. The
+        numeric half moves to `compute()`, which is still graded, so the cap value
+        itself stays directly pinned rather than merely implied.
+        """
         bundle = self._seeded_bundle(tmp_path)
         hist = tmp_path / "history.jsonl"
         rc = main(["--home", SAFE, "--no-native", "--full", "--trend", "--ascii",
                    "--judged-bundle", bundle, "--history", str(hist)])
         assert rc == 0
         out = capsys.readouterr().out
-        assert " F  49 " in out
-        rows = history_load(str(hist))
-        assert len(rows) == 1
-        assert rows[0]["score"] == LIVE_INJECTION_CAP == 49
-        assert rows[0]["grade"] == "F"
+        assert "no grade" in out
+        assert " F  49 " not in out
 
-    def test_monitor_shows_and_records_the_capped_score(self, tmp_path, capsys):
+        rows = history_load(str(hist))
+        assert len(rows) == 1                      # seeded => recorded
+        assert rows[0]["graded"] is False
+        assert rows[0]["score"] is None
+
+        # ...and the cap value itself, where a number still exists.
+        ctx, findings, _ = audit(SAFE, include_native=False)
+        capped = compute(findings, ctx, live_test_vulnerable=True,
+                         live_test_reason="canary:canary reported VULNERABLE")
+        assert capped.graded is True
+        assert capped.score == LIVE_INJECTION_CAP == 49
+        assert capped.grade == "F"
+
+    def test_monitor_shows_and_records_the_capped_run(self, tmp_path, capsys):
+        """C-426: --monitor's DISPLAY stops publishing a grade. Its SNAPSHOT does not.
+
+        The display is correct: `--monitor` renders a bare audit, which is ungraded, so
+        it prints "No grade yet - N of 5 layers did not run" instead of
+        `Current: 49/100  Grade: F`.
+
+        The snapshot (`state.json`) still persists `score`/`grade` -- the very numbers
+        the display withheld. That is the same defect C-426 removed from history.jsonl,
+        surviving in `monitor.snapshot()` (`monitor.py`), and it is **deliberately not
+        fixed here**: that file belongs to the --monitor epic (CLAWSECCHECK-E-076), and
+        the naive fix is actively worse -- `monitor._num()` defaults an absent or
+        non-numeric score to `0`, so writing null would make the next run's drift
+        comparison fabricate a catastrophic "score dropped to 0" on a config where
+        nothing moved (the B-269 fabrication shape that epic already warns about).
+
+        It is inert TODAY -- every run writes the same shape, so no drop is fabricated
+        and the number is never shown -- but it is a published verdict one run delayed,
+        because the drop alert reads these snapshots back to the user.
+
+        Pinned rather than assumed, so the gap stays visible. When E-076 gives the
+        snapshot its own `graded` field and guards the comparison, these two assertions
+        are the ones to flip.
+        """
         bundle = self._seeded_bundle(tmp_path)
         state = tmp_path / "state.json"
         events = tmp_path / "events.jsonl"
@@ -648,15 +692,19 @@ class TestTrendMonitorReachC135:
                    "--events", str(events), "--history", str(hist)])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "Current: 49/100  Grade: F" in out
+        assert "No grade yet" in out
+        assert "Current: 49/100  Grade: F" not in out
+
+        # KNOWN GAP, owned by E-076 -- see this test's docstring.
         baseline = load_state(str(state))
         assert baseline is not None
         assert baseline["score"] == LIVE_INJECTION_CAP == 49
         assert baseline["grade"] == "F"
+
         rows = history_load(str(hist))
-        assert len(rows) == 1
-        assert rows[0]["score"] == LIVE_INJECTION_CAP == 49
-        assert rows[0]["grade"] == "F"
+        assert len(rows) == 1                      # seeded => recorded
+        assert rows[0]["graded"] is False
+        assert rows[0]["score"] is None
 
     # ── --judged-bundle now genuinely affects --trend/--monitor (flag-coherence) ──
 
@@ -711,7 +759,13 @@ class TestTrendMonitorReachC135:
                    "--events", str(events), "--history", str(hist)])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "Current: 49/100  Grade: F" in out
+        # C-426: the display no longer carries a grade (the run is ungraded), so the
+        # observable for "this run's own score was still capped" is the cap signal
+        # itself, asserted below. The contract this test exists for -- an UNSEEDED
+        # verdict is never PERSISTED -- is unchanged and is what the file assertions
+        # check.
+        assert "No grade yet" in out
+        assert "Current: 49/100  Grade: F" not in out
         assert "Baseline saved." not in out
         assert not state.exists()
         assert not hist.exists()
@@ -731,8 +785,26 @@ class TestTrendMonitorReachC135:
         assert rc == 0
         rows = history_load(str(hist))
         assert len(rows) == 1
-        assert rows[0]["score"] == 98
-        assert rows[0]["grade"] == "A"
+
+        # C-426: the run is ungraded, so "uncapped" can no longer be read off a
+        # recorded number. The property is asserted the way it is actually meant --
+        # BYTE-IDENTICAL to submitting nothing at all -- by running the same command
+        # without a bundle and comparing the rows. That is a stronger statement than
+        # `score == 98` ever was: it catches any divergence, not just a score one.
+        hist2 = tmp_path / "history2.jsonl"
+        rc2 = main(["--home", SAFE, "--no-native", "--full", "--trend", "--ascii",
+                    "--history", str(hist2), "--no-sockets"])
+        assert rc2 == 0
+        rows2 = history_load(str(hist2))
+        assert len(rows2) == 1
+        assert {k: v for k, v in rows[0].items() if k != "ts"} == \
+               {k: v for k, v in rows2[0].items() if k != "ts"}
+
+        # ...and RESISTANT genuinely did not cap the underlying verdict either.
+        ctx, findings, uncapped = audit(SAFE, include_native=False, include_sockets=False)
+        assert uncapped.graded is True
+        assert uncapped.score == 98
+        assert uncapped.grade == "A"
 
 
 class TestB379CapReachesRemainingDispatchPaths:
@@ -758,6 +830,14 @@ class TestB379CapReachesRemainingDispatchPaths:
         # to require args.full — so --trend WITHOUT --full silently dropped the bundle
         # and recorded an uncapped score, even though _MODE_HONORS["trend"] already
         # declared judged_bundle honored regardless of --full.
+        #
+        # C-426: the bundle is still read on this path -- that is the defect being
+        # pinned -- but the run is ungraded, so the recorded row has no grade to
+        # inspect. The observable moves to `state.json`'s persisted score, which is
+        # what --monitor's own test below uses, and to the fact that a row is written
+        # at all (seeded => recorded). A run that had silently DROPPED the bundle would
+        # be indistinguishable here, so the sibling --monitor test below carries the
+        # discriminating assertion.
         bundle = self._seeded_bundle(tmp_path)
         hist = tmp_path / "history.jsonl"
         rc = main(["--home", SAFE, "--no-native", "--no-sockets", "--trend", "--ascii",
@@ -765,9 +845,21 @@ class TestB379CapReachesRemainingDispatchPaths:
         assert rc == 0
         rows = history_load(str(hist))
         assert len(rows) == 1
-        assert rows[0]["grade"] == "F"
+        assert rows[0]["graded"] is False
 
     def test_monitor_without_full_still_honors_judged_bundle(self, tmp_path, capsys):
+        """C-426: the display has no grade, so the persisted score is the observable.
+
+        This is the test that actually discriminates "bundle read" from "bundle
+        silently dropped": `state.json` records the CAPPED underlying score (49), not
+        the uncapped 98, proving `_apply_live_test_cap` ran on a path that does not
+        pass `--full`.
+
+        That the snapshot still persists a number the display withholds is a separate,
+        known gap owned by CLAWSECCHECK-E-076 -- see
+        `TestTrendMonitorReachC135::test_monitor_shows_and_records_the_capped_run`.
+        Here it is what makes the B-379 contract observable at all.
+        """
         bundle = self._seeded_bundle(tmp_path)
         state = tmp_path / "state.json"
         events = tmp_path / "events.jsonl"
@@ -776,7 +868,11 @@ class TestB379CapReachesRemainingDispatchPaths:
                    "--events", str(events)])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "Grade: F" in out
+        assert "No grade yet" in out
+        assert "Grade: F" not in out
+        baseline = load_state(str(state))
+        assert baseline["score"] == LIVE_INJECTION_CAP == 49, (
+            "the liveTest bundle was dropped on the --monitor path (B-379)")
 
     def test_percentile_reflects_the_capped_score(self, tmp_path, capsys):
         bundle = self._seeded_bundle(tmp_path)
@@ -798,10 +894,29 @@ class TestB379CapReachesRemainingDispatchPaths:
         assert rc2 == 0
         uncapped_out = capsys.readouterr().out
 
-        # The capped (F-grade) run must not be reported as ranking the same as the
-        # uncapped (A-grade) run — this is the real regression B-379 item 2 guards:
-        # --percentile used to return before any cap resolution ran at all.
-        assert capped_out != uncapped_out
+        # C-426 changed what this can assert, and the change is worth stating plainly.
+        #
+        # B-379 item 2's defect was that --percentile returned before any cap
+        # resolution ran, so a run the tool would have graded F was ranked as though it
+        # were an uncapped A -- flattering the reader with a rank they had not earned.
+        # That defect is now STRUCTURALLY impossible rather than merely fixed:
+        # --percentile renders a bare run, a bare run is ungraded, and an ungraded run
+        # publishes no rank at all. Both invocations correctly print the same refusal.
+        #
+        # So the two outputs being IDENTICAL is now the correct result, and the old
+        # `capped_out != uncapped_out` assertion would fail for the right reason. What
+        # replaces it: neither output ranks anything, and the cap still binds where a
+        # number exists.
+        assert "No rank yet" in capped_out
+        assert "No rank yet" in uncapped_out
+        assert "%" not in capped_out and "%" not in uncapped_out
+        assert capped_out == uncapped_out
+
+        ctx, findings, uncapped = audit(SAFE, include_native=False, include_sockets=False)
+        capped = compute(findings, ctx, live_test_vulnerable=True,
+                         live_test_reason="canary:canary reported VULNERABLE")
+        assert capped.score < uncapped.score
+        assert capped.score == LIVE_INJECTION_CAP == 49
 
     def test_next_actions_reflects_the_capped_score(self, tmp_path, capsys):
         bundle = self._seeded_bundle(tmp_path)

@@ -385,14 +385,20 @@ def test_suspicious_fixture_exits_zero_end_to_end(capsys):
 def test_sweep_does_not_change_score_or_grade(capsys):
     """--full must not let the skill/plugin sweep move the underlying verdict.
 
-    C-425: a plain run is always graded (ledger=None); `--full` on this fixture is
-    ungraded (self_report/live_behaviour never ran — no --attest/--judged-bundle), so
-    `score`/`grade`/`raw_score` legitimately go to `None` and that difference is
-    asserted explicitly below. The property this test exists to pin — that scanning
-    installed skills/plugins does not itself perturb the severity-weighted verdict —
-    is checked on the fields the sweep could actually have touched and that stay
-    visible on an ungraded run: `earned`/`total` (the raw numerator/denominator
-    `raw_score` is computed from), `cap_severity`, and the per-severity FAIL counts.
+    C-426: BOTH runs are now ungraded, and for different reasons — the plain run
+    reaches only three layers, `--full` on this fixture reaches four (no --attest,
+    no --judged-bundle). Under C-425 only the `--full` side was, and the asymmetry was
+    asserted here; now the agreement is, which is the stronger statement of the same
+    property: the sweep changes nothing about the verdict, including whether there is
+    one.
+
+    The property this test exists to pin — that scanning installed skills/plugins does
+    not itself perturb the severity-weighted verdict — is checked on the fields the
+    sweep could actually have touched and that stay visible on an ungraded run:
+    `earned`/`total` (the raw numerator/denominator `raw_score` is computed from),
+    `cap_severity`, and the per-severity FAIL counts. Those are asserted equal above;
+    the gradedness assertions below are deliberately kept rather than dropped, because
+    "neither run has a grade" is itself a fact the sweep must not change.
     """
     rc_plain = main(["--home", DANGEROUS, "--no-native", "--no-host", "--no-history",
                      "--json"])
@@ -404,13 +410,16 @@ def test_sweep_does_not_change_score_or_grade(capsys):
     assert (plain["earned"], plain["total"]) == (full["earned"], full["total"])
     assert plain["cap_severity"] == full["cap_severity"]
     assert plain["fail_counts_by_severity"] == full["fail_counts_by_severity"]
-    # The two runs legitimately disagree on gradedness — a plain run always carries a
-    # letter; this --full run does not because two layers this fixture never supplied
-    # (self_report, live_behaviour) leave it incomplete.
-    assert plain["graded"] is True
-    assert plain["score"] is not None and plain["grade"] is not None
+    # Neither run carries a letter, and the sweep is not what decides that: the plain
+    # run never reaches the installed-sweep/self-report/live-behaviour layers, and this
+    # --full run still lacks the two this fixture supplies no input for.
+    assert plain["graded"] is False
     assert full["graded"] is False
+    assert plain["score"] is None and plain["grade"] is None
     assert full["score"] is None and full["grade"] is None
+    # ...and they disagree about WHY, which is the honest part: --full genuinely
+    # reached one layer more than the plain run did.
+    assert len(full["missing_layers"]) < len(plain["missing_layers"])
 
 
 # ---------------------------------------------------------------------------

@@ -3,8 +3,9 @@
 CI has no live agent, so a CI run can never carry a letter grade under the layered product
 model — it needs a binary gate over FINDINGS, not the score. ``--exit-code`` already
 thresholds on any unsuppressed FAIL; ``--fail-on`` adds a severity floor to that same idea
-(at-or-above, inclusive), and ``--fail-under`` (score-based) is deprecated in its favor —
-still working, but --fail-on wins and a note says so when both are given.
+(at-or-above, inclusive). ``--fail-under`` (score-based) was deprecated in its favor and
+then removed outright by C-426, once the five-layer rule meant an ordinary run carries no
+score for it to threshold.
 
 Findings are injected via a thin wrapper around the REAL ``audit()`` (real ``ctx``, real
 collector-derived findings, real score) rather than a hand-built duck-typed context, so the
@@ -16,6 +17,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+import pytest
 
 from clawseccheck import cli
 from clawseccheck.catalog import Finding
@@ -148,39 +151,39 @@ def test_fail_on_suppressed_critical_still_trips(tmp_path, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# (e): --fail-on + --fail-under together — --fail-on decides, note emitted
+# (e): --fail-under is gone; --fail-on is the sole score-free CI gate
 # ---------------------------------------------------------------------------
-
-def test_fail_on_decides_over_fail_under_when_both_given(tmp_path, monkeypatch, capsys):
-    """No CRITICAL injected -> --fail-on critical alone gives rc=0. --fail-under 100
-    alone would give rc=1 (score is well under 100). If --fail-on decides, the final rc
-    must be 0 -- proving --fail-under's own check was skipped, not merely outvoted."""
-    injected = [_make_finding("HIGH")]
-    rc = _run(tmp_path, monkeypatch, injected,
-              ["--fail-on", "critical", "--fail-under", "100"])
-    err = capsys.readouterr().err
-    assert rc == 0
-    assert "--fail-under is deprecated" in err
-    assert "--fail-on decides" in err
+#
+# Three tests lived here pinning the supersedes-relationship between the two flags
+# (--fail-on decides when both are given, and --fail-under still worked alone). C-426
+# removed --fail-under outright -- the five-layer rule means an ordinary run carries no
+# score for it to threshold -- so that relationship no longer exists to be pinned. What
+# replaces them is the property that actually matters going forward: --fail-on decides
+# on its own, in both directions, with no score anywhere in the decision.
 
 
-def test_fail_on_decides_and_can_still_trip_with_fail_under(tmp_path, monkeypatch, capsys):
-    """Symmetric case: --fail-under 0 alone would never trip (score can't go below 0),
-    but --fail-on critical does -- proving --fail-on governs in both directions."""
-    injected = [_make_finding("CRITICAL")]
-    rc = _run(tmp_path, monkeypatch, injected,
-              ["--fail-on", "critical", "--fail-under", "0"])
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "--fail-under is deprecated" in err
+def test_fail_under_no_longer_parses(tmp_path, monkeypatch, capsys):
+    with pytest.raises(SystemExit) as exc:
+        _run(tmp_path, monkeypatch, [], ["--fail-on", "critical", "--fail-under", "100"])
+    assert exc.value.code != 0
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
-def test_fail_under_alone_still_works(tmp_path, monkeypatch, capsys):
-    """--fail-under keeps working unchanged when --fail-on is absent (deprecated, not
-    removed)."""
-    rc = _run(tmp_path, monkeypatch, [], ["--fail-under", "101"])
+def test_fail_on_decides_in_both_directions_without_any_score(tmp_path, monkeypatch, capsys):
+    """The contract the removed pair used to demonstrate, stated directly.
+
+    A HIGH finding does not trip `--fail-on critical`; a CRITICAL one does. Neither
+    outcome consults a score -- which is exactly why this gate survives the rule change
+    that killed --fail-under.
+    """
+    rc_pass = _run(tmp_path, monkeypatch, [_make_finding("HIGH")], ["--fail-on", "critical"])
+    out = capsys.readouterr().out
+    assert rc_pass == 0
+    assert "No grade yet" in out, "the run under test must genuinely carry no score"
+
+    rc_trip = _run(tmp_path, monkeypatch, [_make_finding("CRITICAL")], ["--fail-on", "critical"])
     capsys.readouterr()
-    assert rc == 1
+    assert rc_trip == 1
 
 
 # ---------------------------------------------------------------------------
@@ -197,13 +200,24 @@ def test_bare_run_without_fail_on_shows_onboarding(tmp_path, capsys):
 
 
 def test_fail_on_alone_is_not_treated_as_bare_run(tmp_path, capsys):
+    """The contract: --fail-on takes the AUDIT path, not the friendly onboarding screen.
+
+    C-426 changed the exit code here, and the change is the point rather than a
+    casualty. This home holds no openclaw.json, so the run read nothing — and a gate
+    that reddens only on FAIL findings would stay GREEN on it, because a config the
+    tool could not read produces UNKNOWN and WARN, never FAIL. `--exit-code` has
+    tripped on exactly this since B-166/B-363; `--fail-on` now does too, or removing
+    the score-based `--fail-under` (which caught it via CONFIG_BLIND_CAP) would have
+    left the replacement gate weaker in precisely the "hide the evidence, get a green
+    build" case B-363 exists to prevent.
+    """
     home = tmp_path / "empty_home_fail_on"
     home.mkdir()
     rc = main(["--home", str(home)] + BASE + ["--fail-on", "critical"])
     out = capsys.readouterr().out
-    assert rc == 0
     assert "is here, but it's empty" not in out
     assert "OpenClaw Security Audit" in out
+    assert rc == 1, "a CI gate went green on a run that read no config at all"
 
 
 # ---------------------------------------------------------------------------

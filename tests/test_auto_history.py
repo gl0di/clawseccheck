@@ -94,10 +94,25 @@ def test_trend_second_run_gives_two_entries(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 def test_recorded_entry_is_valid_json(tmp_path, capsys):
+    """C-426: a bare run is ungraded, so its row records no score and no grade.
+
+    The row shape is now one of two, and both are asserted rather than the check being
+    loosened to whichever one happens to appear: a graded row carries `score`/`grade`,
+    an ungraded one omits BOTH and carries `"graded": false`. Omission is deliberate —
+    it is what makes an older build's `except KeyError: continue` skip the row instead
+    of crashing on it (see history.record's own docstring).
+
+    The timeline itself is unconditional: every run records a row with `date`/`ts`, so
+    liveness never has a hole in it.
+    """
     hist = tmp_path / "history.jsonl"
     main(["--home", SAFE, "--no-native", "--history", str(hist)])
     line = hist.read_text(encoding="utf-8").strip()
     obj = json.loads(line)
-    assert set(obj.keys()) >= {"date", "score", "grade"}
-    assert isinstance(obj["score"], int)
-    assert isinstance(obj["grade"], str)
+    assert set(obj.keys()) >= {"date", "ts"}
+    if obj.get("graded") is False:
+        assert "score" not in obj and "grade" not in obj
+    else:
+        assert set(obj.keys()) >= {"date", "score", "grade"}
+        assert isinstance(obj["score"], int)
+        assert isinstance(obj["grade"], str)

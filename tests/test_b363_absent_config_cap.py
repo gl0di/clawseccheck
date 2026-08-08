@@ -112,10 +112,16 @@ class TestThreeWayContract:
         rc = main(["--home", str(missing), "--exit-code", "--no-native", "--no-history"])
         out = capsys.readouterr().out
         assert rc == 1
-        assert "no OpenClaw config found" in out
+        # C-426: the run is now ungraded, so the "(capped from N - no OpenClaw config
+        # found)" phrasing -- which existed to explain a NUMBER -- is gone with the
+        # number. The disclosure it carried is not: the B-306 line below states the
+        # cause and the remedy, and now distinguishes "absent" from "unreadable"
+        # instead of claiming a missing file could not be parsed.
+        assert "no OpenClaw config found in this home" in out
+        assert "Point --home at the directory" in out
         assert "Audited config:" not in out
 
-        # No --exit-code at all: still 0 (only --exit-code/--fail-under/--save force a
+        # No --exit-code at all: still 0 (only --exit-code/--fail-on/--save force a
         # nonzero return; the ordinary text-report path never does on its own).
         rc_plain = main(["--home", str(missing), "--no-native", "--no-history"])
         assert rc_plain == 0
@@ -134,7 +140,11 @@ class TestThreeWayContract:
         rc = main(["--home", str(home), "--exit-code", "--no-native", "--no-history"])
         out = capsys.readouterr().out
         assert rc == 1
-        assert "openclaw.json unreadable/unparseable this run" in out
+        # C-426: same as the absent case above -- the "(capped from N - ...)" wrapper
+        # went with the number, the disclosure did not. This branch keeps the
+        # unreadable-file wording and its own distinct remedy.
+        assert "openclaw.json could not be read/parsed this run" in out
+        assert "Fix openclaw.json (valid JSON, owner-readable)" in out
         # The file WAS found (just unparseable) -- unlike the absent case, naming it is
         # still honest and still prints.
         assert "Audited config:" in out
@@ -194,7 +204,7 @@ class TestAbsentNeverScoresBetterThanClean:
 
 class TestBareOnboardingRegression:
     """The bug fix must NOT touch _bare_run (cli.py ~line 1660): a BARE interactive run
-    (no --json/--card/--save/--full/--fail-under/--exit-code/--attest/primary-mode flag)
+    (no --json/--card/--save/--full/--fail-on/--exit-code/--attest/primary-mode flag)
     against a missing home shows the onboarding screen and returns 0, unconditionally."""
 
     def test_bare_run_missing_home_still_exits_zero(self, tmp_path, capsys):

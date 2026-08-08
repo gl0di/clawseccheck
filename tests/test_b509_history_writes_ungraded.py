@@ -75,27 +75,35 @@ def test_the_recorded_ungraded_run_renders_as_no_grade_in_trend(tmp_path):
 
 # ---- I5 boundary: --trend/--percentile/--next still grade, and that is correct today ----
 
-def test_full_trend_still_records_a_graded_row(tmp_path, capsys):
-    """PINNED, and it flips in I5 (CLAWSECCHECK-C-426) -- not an oversight.
+def test_trend_records_an_ungraded_row(tmp_path, capsys):
+    """FLIPPED by I5 (C-426), which is what the previous version of this test predicted.
 
-    `--trend` renders a BARE run: the CLI itself prints "note: --full has no effect
-    with --trend", and a bare run is legitimately graded until I5 makes it otherwise.
-    `--trend` reaches `_apply_live_test_cap` (cli.py), which has no `ledger` parameter,
-    and returns before `_resolve_runtime_caps` -- the one place a ledger is built -- is
-    ever called. So the writer fix above is a deliberate no-op here.
+    Until I5, `--trend` rendered a BARE run -- the CLI still prints "note: --full has
+    no effect with --trend" -- and a bare run was legitimately graded, so the writer
+    fix was a deliberate no-op here. `--trend` reaches `_apply_live_test_cap`, which
+    had no `ledger` parameter, and returns before `_resolve_runtime_caps`, the only
+    place a ledger was built.
 
-    This test exists so that hole stays visible instead of being silently assumed.
-    When I5 teaches the bare path to build a ledger, this is the assertion to flip.
+    C-426 moved ledger construction into a shared producer called from `_main` right
+    after `audit()`, so `--trend` now inherits the bare run's incomplete ledger like
+    every other mode. The row it records carries no grade, and the trend line shows
+    it as `no grade`.
+
+    Kept as an assertion on the WHOLE pair rather than deleted: `--trend` recording a
+    row at all -- even under `--no-history` -- is a separate documented contract, and
+    that is still true.
     """
     hist = tmp_path / "h.jsonl"
     code = main(["--full", "--trend", "--home", SAFE, "--history", str(hist), "--no-color"])
-    err = capsys.readouterr().err
+    cap = capsys.readouterr()
 
     assert code == 0
-    assert "--full has no effect with --trend" in err
+    assert "--full has no effect with --trend" in cap.err
     row = _lines(hist)[-1]
-    assert "score" in row and "grade" in row
-    assert "graded" not in row
+    assert "score" not in row
+    assert "grade" not in row
+    assert row["graded"] is False
+    assert "no grade" in cap.out
 
 
 # ---- row shape ----

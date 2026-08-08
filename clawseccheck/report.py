@@ -429,14 +429,31 @@ def _urgent_headline(findings: list[Finding]) -> str:
     FAIL only (a WARN is not "urgent" in the sense this headline means), with the
     finding id as the tie-break for determinism.
     """
-    candidates = [
-        f for f in findings
-        if f.status == FAIL and not getattr(f, "suppressed", False)
-    ]
-    if not candidates:
-        return "Nothing urgent found in what was checked."
-    top = sorted(candidates, key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.id))[0]
-    return f"Most urgent: {top.severity} — {_sanitize(top.title)}  [{top.id}]"
+    def _rank(f):
+        return (_SEV_ORDER.get(f.severity, 9), f.id)
+
+    live = [f for f in findings if not getattr(f, "suppressed", False)]
+    candidates = [f for f in live if f.status == FAIL]
+    if candidates:
+        top = sorted(candidates, key=_rank)[0]
+        return f"Most urgent: {top.severity} — {_sanitize(top.title)}  [{top.id}]"
+
+    # C-426: the all-clear must not out-run the evidence. This headline leads every
+    # ungraded surface, including the card, whose own "Most urgent" section lists
+    # WARN findings by severity — so on a config-blind run "Nothing urgent found"
+    # printed directly above a listed CRITICAL WARN, one contradicting the other.
+    # Before C-426 the contradiction could not appear: the grade occupied this slot
+    # and the headline was never rendered.
+    #
+    # FAIL-only remains the right bar for the word "urgent" (a WARN is not urgent in
+    # the sense a reader acts on within the hour), so the fix is not to widen the bar
+    # but to stop claiming more than "no FAIL" when something is still open.
+    warns = [f for f in live if f.status == WARN]
+    if warns:
+        top = sorted(warns, key=_rank)[0]
+        return (f"Nothing failed outright — most serious open item: {top.severity} — "
+                f"{_sanitize(top.title)}  [{top.id}]")
+    return "Nothing urgent found in what was checked."
 
 
 def _not_fully_covered_line(score: ScoreResult) -> str:
@@ -2088,11 +2105,23 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # the grade RISE (fewer FAILs to cap it) even though the audit saw strictly less, not
     # more. This line only ever appears alongside the cap already applied above.
     if score.config_blind_capped and not getattr(score, "graded", True):
-        lines.append(
-            "Config visibility (B-306): openclaw.json could not be read/parsed this run, so"
-            " config-derived checks degraded to UNKNOWN. Fix openclaw.json (valid JSON,"
-            " owner-readable) and re-run."
-        )
+        # C-426: distinguish the two blind causes. "could not be read/parsed" is simply
+        # untrue when no OpenClaw config was found at all, and the remedies differ --
+        # one is "fix the file", the other is "you are pointing at the wrong directory".
+        # The graded branch below gets this from `_cap_primary_reason_text`; the ungraded
+        # branch was written flat and said the unreadable thing in both cases.
+        if getattr(score, "config_blind_reason", None) == "absent":
+            lines.append(
+                "Config visibility (B-306): no OpenClaw config found in this home, so"
+                " config-derived checks degraded to UNKNOWN. Point --home at the"
+                " directory that holds your openclaw.json and re-run."
+            )
+        else:
+            lines.append(
+                "Config visibility (B-306): openclaw.json could not be read/parsed this run,"
+                " so config-derived checks degraded to UNKNOWN. Fix openclaw.json (valid"
+                " JSON, owner-readable) and re-run."
+            )
     elif score.config_blind_capped:
         lines.append(
             "Config visibility (B-306): openclaw.json could not be read/parsed this run, so"
@@ -2911,8 +2940,15 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             " this run has none."
         )
     if getattr(score, "config_blind_capped", False):
+        # C-426: "This grade reflects…" is incoherent on a run that has no grade — and
+        # after C-426 the config-blind case is USUALLY ungraded, because a bare run is.
+        # The fact this line carries (what you are looking at is the shape of the gap,
+        # not a judgement of your setup) is exactly as true either way, so the sentence
+        # is rephrased rather than dropped: the reader needs it most precisely when
+        # there is no grade to explain it away.
+        _subject = "This grade" if getattr(score, "graded", True) else "This result"
         grade_lines.append(
-            "   This grade reflects what could NOT be checked, not a verdict on your "
+            f"   {_subject} reflects what could NOT be checked, not a verdict on your "
             "setup — point --home at the directory that holds your OpenClaw config."
         )
     # `--full` keeps its existing header (grade card + the "· Findings ·" section label

@@ -33,7 +33,7 @@ NON_MODE_ATTRS = frozenset({
     "json", "card", "save", "full", "attest",          # output / enrichment modifiers
     "emit_manifest",                                   # --vet-skill side output (B98/F-083)
     "vet_judge_packet",                                # --vet-skill side output (C-254)
-    "fail_under", "exit_code", "no_history",           # CI gates / history plumbing
+    "fail_on", "exit_code", "no_history",              # CI gates / history plumbing
     "trend", "monitor",                                # also modes, kept for cascade logic
     "home", "history", "state", "events", "seed",      # value plumbing read in branches
     "ascii", "no_native", "no_host", "verbose", "debug", "log",
