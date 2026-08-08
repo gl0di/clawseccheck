@@ -110,6 +110,14 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
     C-162: each entry also carries '_schema' INSIDE the hashed payload, so a
     planted/edited _schema value is itself tamper-evident (see verify_chain).
 
+    B-509: a run whose five-layer check was incomplete has no grade, and its row
+    OMITS 'score'/'grade' and carries "graded": false instead. A graded row is
+    unchanged, key order included. '_schema' is deliberately NOT bumped for this:
+    the constant is shared with the events journal and the coverage ledger, so a
+    bump would make an older build skip every new EVENT too. The cost of leaving
+    it is that an older build silently drops ungraded rows from --trend rather
+    than disclosing them — the same trade C-250's retention marker already made.
+
     B-108: the read-last-hash→append critical section runs under an advisory
     ``journal_lock`` so two concurrent audits can't both read the same prev
     chain_hash and each append, which would otherwise leave a spurious
@@ -128,14 +136,48 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
         ts = when if "T" in when else f"{when}T00:00:00"
 
     p = Path(path).expanduser()
+    # B-509: a run whose five-layer check was incomplete carries no grade, and this is
+    # the last writer that used to republish one anyway — the report withheld the letter
+    # while the journal recorded it, so --trend read the phantom back as a real point.
+    #
+    # The ungraded row OMITS 'score'/'grade' rather than writing them as null, because
+    # that choice decides how an OLDER shipped build behaves when it meets one: an absent
+    # key hits load()'s existing `except KeyError: continue`, the same already-in-production
+    # path the C-250 retention marker takes, so the row is skipped. An explicit null passes
+    # the key check, flows through as score=None, and the old render_trend's `curr > prev`
+    # raises TypeError. Omission degrades; null crashes.
+    #
+    # A GRADED row's payload stays byte-identical to before this change — no 'graded' key
+    # on the hot path. A row that has a score IS a graded row, exactly as it always was;
+    # stamping "graded": true would churn every future row's shape for zero information.
+    # 'graded' sits INSIDE the hashed payload, so it is tamper-evident like '_schema': it
+    # cannot be flipped without breaking the chain.
+    #
+    # getattr, not score.graded: tests/test_c250_journal_honesty.py records through a
+    # duck-typed score object that carries only .score/.grade, and so does any caller
+    # predating ScoreResult.graded. Absent means graded, matching scoring.compute()'s own
+    # "ledger=None means graded" default.
+    graded = bool(getattr(score, "graded", True))
+    # int()/str() are evaluated only on the graded branch: on an ungraded run score.score
+    # is None, and int(None) raises a TypeError the `except OSError` below does NOT catch
+    # — an uncaught crash on every default audit, not a quiet degrade.
+    #
+    # The key ORDER of a graded row is preserved exactly (date, score, grade, ts, …): the
+    # chain hash is order-independent (_chain_hash canonicalizes with sort_keys=True), but
+    # the line written to disk is json.dumps(row) without it, so reordering here would
+    # change the on-disk bytes of every future graded row for no reason.
+    graded_fields = (
+        {"score": int(score.score), "grade": str(score.grade)} if graded
+        else {}
+    )
     base = {
         "date": date,
-        "score": int(score.score),
-        "grade": str(score.grade),
+        **graded_fields,
         "ts": ts,
         "home": _sanitize_home(home),
         "source": _run_source(source),
         "_schema": SCHEMA_VERSION,
+        **({} if graded else {"graded": False}),
     }
     # Symlink-safe: dir 0700 and an O_NOFOLLOW append, so a planted symlink at
     # history.jsonl can never redirect this default-path write to another file.
