@@ -538,6 +538,34 @@ def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
         f"{_g('partial')} partial/unknown {summary['partial']}  "
         f"(of {total} config surfaces)"
     )
+    # B-504: the line above counts SURFACES, and a surface counts as "checked" once ONE
+    # of its checks returns a verdict — so on the maintainer's own config it printed
+    # "partial/unknown 0" while 25 of 100 scored checks, 18 of them HIGH, had reached no
+    # verdict at all. That is not a rounding difference: `scoring.compute` drops UNKNOWN
+    # from the denominator, so an undetermined HIGH check is indistinguishable from a
+    # PASS in the final number. The count that decides the grade is the one the reader
+    # needs, and it is stated on EVERY run — the pre-existing loud caution below only
+    # fires under 35%, which is precisely how a quarter of the catalog stayed invisible.
+    _scored = [f for f in findings if getattr(f, "scored", True)]
+    _undetermined = [f for f in _scored if f.status == UNKNOWN]
+    if _scored:
+        if _undetermined:
+            _severe = sum(1 for f in _undetermined if f.severity in (CRITICAL, HIGH))
+            _tail = f" ({_severe} HIGH or worse)" if _severe else ""
+            lines.append(
+                f"{_g('partial')} checks {len(_scored) - len(_undetermined)} of "
+                f"{len(_scored)} scored checks reached a verdict {dot} "
+                # Plain ASCII punctuation on purpose: this block is ASCII-folded by
+                # `--ascii` and an em-dash here breaks that (caught by the terminal
+                # dashboard's own purity test, which is doing its job).
+                f"{len(_undetermined)} did not{_tail}; an undetermined check "
+                f"neither earns nor costs a point"
+            )
+        else:
+            lines.append(
+                f"{_g('checked')} checks all {len(_scored)} scored checks "
+                f"reached a verdict"
+            )
     not_checkable = cov["gaps"]["not_checkable"]
     if not_checkable:
         names = ", ".join(_sanitize(n) for n in not_checkable)
