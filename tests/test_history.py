@@ -37,11 +37,14 @@ def test_record_and_load_three_entries(tmp_path):
 
     rows = load(path)
     assert len(rows) == 3
-    assert rows[0] == {"date": "2026-06-15", "score": 72, "grade": "C",
+    # B-509: 'graded' is an additive key, the same shape 'ts'/'home'/'source' arrived in
+    # under F-128 — load() materializes the graded/ungraded decision once, at the boundary
+    # where it reads the row, so no consumer re-derives it from `score is None`.
+    assert rows[0] == {"date": "2026-06-15", "score": 72, "grade": "C", "graded": True,
                         "ts": "2026-06-15T00:00:00", "home": None, "source": "audit"}
-    assert rows[1] == {"date": "2026-06-17", "score": 81, "grade": "B",
+    assert rows[1] == {"date": "2026-06-17", "score": 81, "grade": "B", "graded": True,
                         "ts": "2026-06-17T00:00:00", "home": None, "source": "audit"}
-    assert rows[2] == {"date": "2026-06-19", "score": 90, "grade": "A",
+    assert rows[2] == {"date": "2026-06-19", "score": 90, "grade": "A", "graded": True,
                         "ts": "2026-06-19T00:00:00", "home": None, "source": "audit"}
 
 
