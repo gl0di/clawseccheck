@@ -277,7 +277,10 @@ register no collector domain of their own.)
 
 The only thing it writes by default is a one-line
 entry to a **private, owner-only** local score history (`~/.clawseccheck/history.jsonl`) so you can
-track your grade over time — opt out with `--no-history`. Everything else is written only when you
+track your grade over time — opt out with `--no-history`. A run that earned no grade (its check
+did not complete all five layers) still records its line, so the timeline stays unbroken, but that
+line carries no score and no letter rather than a number the report itself withheld. Everything
+else is written only when you
 ask: a report file (`--save`), the `--monitor` snapshot and change journal
 (`~/.clawseccheck/state.json`, `events.jsonl`), a badge (`--badge`),
 HTML/SARIF/PDF (`--html`/`--sarif`/`--pdf`), a log (`--log`), a small freshness ledger (`~/.clawseccheck/coverage.json`) recording when you
@@ -905,6 +908,14 @@ python3 audit.py --log audit.log            # also write log to a local file
   run that produced it (`[audit]`, or `[test]`/`[dev]` for a development/CI run picked up via
   `CLAWSECCHECK_RUN_SOURCE`, or `[legacy]` for a pre-existing entry with no source recorded) —
   nothing is ever hidden. History stays on your machine only.
+
+  A run whose check did not complete all five layers has **no grade**, so its row records no
+  score and no letter — it appears in the table as `no grade`, and carries no arrow, because a
+  flat arrow would claim the score was unchanged when there is no score to compare. Those rows
+  are still shown in order, and a line under the table says how many of the runs have none.
+  Arrows on graded rows compare each run to the previous *graded* run, skipping over the gaps.
+  A version of this tool older than 4.0 silently omits such rows from its own `--trend` rather
+  than showing them; the rows themselves are intact and re-appear on a current build.
 - **`--percentile`** compares your score against a bundled offline reference profile — no network,
   no telemetry.
 - **`--verbose` / `--debug` / `--log PATH`** activate structured local logging. Config values
