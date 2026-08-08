@@ -25,6 +25,63 @@ introduced. (When you run it through OpenClaw chat, the report text becomes
 part of your conversation and is handled by the model provider your agent
 already uses.)
 
+## The three modes
+
+ClawSecCheck is three tools around one honesty rule, told apart by how often you reach
+for them:
+
+| Mode | Question it answers | Cadence | Produces |
+| --- | --- | --- | --- |
+| **A · Full check** | How safe is this setup? | once, deliberately | findings — and a grade **only when all five layers ran** |
+| **B · Watch** | What changed since last time? | repeatedly | events, **never a number** |
+| **C · Before you install** | Is this thing safe to add? | on the event | INSTALL / CAUTION / DO-NOT-INSTALL — **not a letter** |
+
+Everything else in this guide — CI flags, the risk engine, the trust model, uninstall —
+is an instrument *inside* one of these modes, or works with all three. `--menu` shows
+the same three, plus a fourth catch-all for everything else:
+
+```text
+🦞 ClawSecCheck · v{version}
+
+  1  🔍 Full check            how safe is this setup?
+  2  👀 Watch                 what changed since last time?
+  3  📦 Before you install    is this thing safe to add?
+  4  📋 Everything else       the full list of instruments
+
+  A grade only when all five layers ran — otherwise findings, and what's missing.
+```
+
+### The five layers of a full check (Mode A)
+
+A grade is not a property of a single run of the *tool* — it is a property of how much
+of the *audit* actually happened:
+
+| # | Layer | Automatic? | How you get it |
+| --- | --- | --- | --- |
+| 1 | Static: config, files, permissions | yes | the default run |
+| 2 | Sweep of what is installed: skills + plugins | yes | `--full` |
+| 3 | Logs and trajectories: what already happened | yes, budget-bounded | `--full` (also `--behavioral`, `--analyze-trajectory`) |
+| 4 | Agent self-report | **no** — the agent must answer | `--ask` → `--attest` |
+| 5 | Live behaviour test | **no** — pokes the running agent | `--canary` / `--dryrun` / `--redteam` / `--multiturn` |
+
+**A letter grade is issued only when all five ran.** Short of that there is no number at
+all: the report leads with the most urgent finding, in words, plus a mandatory line
+naming which layers did not run — e.g. a bare `clawseccheck` run (missing 3 of 5 —
+no installed-skill sweep, no self-report, no live test) prints:
+
+```text
+Nothing failed outright — most serious open item: HIGH — <finding title>  [Bxx]
+No grade yet — 3 of 5 layers did not run: installed skills and plugins (not reached),
+agent self-report (not available here), live behaviour test (not available here).
+```
+
+`--full` closes layers 2 and 3 (the installed-skill/plugin sweep and the log/trajectory
+scan) but still needs a self-report and a submitted live-test verdict — typically fed
+back via `--judged-bundle` — before a grade is possible; on its own it still reports
+"2 of 5 layers did not run" the same honest way. See [Scoring](#scoring) below for the
+full rule, including the distinction between a layer that never ran and one that ran
+but didn't cover everything.
+
 ## Install & run
 
 ```bash
@@ -47,7 +104,7 @@ Or run the bundled script directly (Linux/macOS):
 
 ```bash
 python3 audit.py                 # human report + shareable card
-python3 audit.py --menu          # the Welcome menu (four common modes)
+python3 audit.py --menu          # the Welcome menu (the three modes + a way into the rest)
 python3 audit.py --functions     # the full capability palette (everything it can do)
 python3 audit.py --json          # machine-readable
 python3 audit.py --card          # just the badge
@@ -83,13 +140,17 @@ themselves are unaffected.
 When you run the skill inside OpenClaw, the agent executes `audit.py`, captures its output,
 and shows it to you **right there in the chat** — no terminal, no setup. You see:
 
-1. your **Score / Grade**,
+1. your **Score / Grade** — but only once all five audit layers have run (see
+   [The three modes](#the-three-modes)); short of that there is no number, and this slot
+   instead carries the most urgent finding in words plus a line naming which layers
+   didn't run,
 2. an **Inventory by subject** summary (OpenClaw core, host, agents, skills, MCP, channels,
    logs) — each with a rolled-up verdict — followed by **findings grouped by that same
    subject**, most urgent first within each; the Lethal Trifecta shows up here too, as an
    Agents finding, not a separate headline, and
-3. a **shareable card** — grade + score + Lethal Trifecta ratio, safe to post (the findings stay
-   private; `--badge` writes the same grade + score as an SVG).
+3. a **shareable card** — grade + score + Lethal Trifecta ratio when graded, or the same
+   honest "no grade yet (N/5 layers ran)" substitute otherwise, safe to post either way
+   (the findings stay private; `--badge` writes the same to an SVG).
 
 To keep a copy, add `--save report.txt` and ClawSecCheck writes the full report to that file
 (written only when you ask). For automation, `--json` gives a machine-readable result.
@@ -105,11 +166,14 @@ HTML attachment over as a download, while a PDF opens inline in the client's own
 
 When you run ClawSecCheck inside OpenClaw, the agent walks you through the entire audit
 conversationally — you never need to know a flag. Asking for a full check now gets you the
-combined pipeline report in one turn: your grade and findings, plus every installed skill/
-plugin/MCP server vetted, the riskiest capability chains, a behavioral replay, and a mandatory
+combined pipeline report in one turn: your findings, every installed skill/plugin/MCP
+server vetted, the riskiest capability chains, a behavioral replay, and a mandatory
 second-opinion review of any borderline call — all in the ONE `--dashboard --full` chat card
 (F-153), not a separate follow-up step (see [`SKILL.md`](../SKILL.md) Steps 2-3 for the exact
-protocol). After every default run, ClawSecCheck also prints a short **"What you can do next"**
+protocol). `--dashboard --full` on its own still leaves 2 of the 5 audit layers unrun (agent
+self-report, live behaviour test), so this one turn reports findings and names that gap
+rather than a grade — see [Scoring](#scoring) for what closes it. After every default run,
+ClawSecCheck also prints a short **"What you can do next"**
 block: a prioritised list of the most relevant follow-up steps for *your* findings, with the
 exact command to run each one.
 
@@ -148,7 +212,7 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 
 | You say | What happens | Under the hood |
 |---|---|---|
-| "Audit my setup, what's my grade?" | Runs the full audit, shows Score + Grade (A–F), an inventory-by-subject summary, and findings grouped by subject, most urgent first. | `clawseccheck` (no flags) |
+| "Audit my setup, is it safe?" | Runs the default check: an inventory-by-subject summary and findings grouped by subject, most urgent first. A bare run alone never earns a letter grade — it's missing 3 of the 5 audit layers — so it leads with the most urgent finding and names what it didn't check instead of a Score/Grade; see [Scoring](#scoring). | `clawseccheck` (no flags) |
 | "Is this skill safe to install?" / "Vet this before I install it" | Scans the skill's content for malware patterns, injection directives, and supply-chain risk *before* you enable it — type is autodetected. | `--vet <path>` (or `--vet-skill <path>` / `--vet-plugin <path>` to force an engine) |
 | "Is this safe to even download?" | Checks the *source*'s identity (typosquat, known-bad, unpinned ref) with zero network before anything is fetched. | `--vet-source <slug\|url\|pkg>` |
 | "Are my MCP servers trustworthy?" | Vets every connected MCP server for supply-chain risk (unpinned installs, plaintext transports, broad OAuth scopes) *and* scans each server's declared tool descriptions for the same malware/injection patterns `--vet` checks a skill for. | `--vet-mcp` |
@@ -157,8 +221,8 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 | "Am I vulnerable to prompt injection?" | Runs live self-tests: a benign injection canary, a broader dry-run harness, or all four harnesses together (canary + red-team + dry-run + multi-turn). | `--canary` · `--dryrun` · `--self-test` |
 | "What dangerous actions can my agent actually take?" | Emits a self-report template for your agent to fill in with its real tool/verb inventory, then scores the blast radius (EXEC, DESTRUCTIVE, EGRESS, …) once you feed it back. | `--ask` then `--attest <file>` |
 | "Watch for changes over time" | Re-audits and alerts on what changed since last time (new skill, config drift, a memory-file edit, a check leaving PASS). **Note:** this is the one opt-in exception to read-only — it writes a small local snapshot (`~/.clawseccheck/state.json`) so it has something to diff against next run. | `--monitor` |
-| "Am I improving? How do I rank?" | Shows your score history over time, or how your current score compares to an offline reference profile — no network either way. | `--trend` · `--percentile` |
-| "Share my grade without leaking my findings" | Produces just the grade + score (+ Lethal Trifecta ratio) — safe to post; your actual findings never appear. | `--card` (prints it) · `--badge grade.svg` (writes an SVG) |
+| "Am I improving? How do I rank?" | Shows your score history over time, or how your current score compares to an offline reference profile — no network either way. Both need a score: `--trend` plots only the graded runs (ungraded ones are recorded but carry no point), and `--percentile` answers "no rank yet" rather than estimating one. | `--trend` · `--percentile` |
+| "Share my result without leaking my findings" | Produces just the grade + score (+ Lethal Trifecta ratio) — safe to post; your actual findings never appear. On an ungraded run it reads `no grade yet` and names how many layers ran, which is the correct artifact, not an error. | `--card` (prints it) · `--badge grade.svg` (writes an SVG) |
 | "What's actually installed — skills, MCP servers, versions?" | Exports a local bill-of-materials (skills, MCP servers, hashes, declared/unpinned dependencies) as JSON. The export records the `scanned_home` it read and a `config_found`/`complete` pair, so an empty BOM for a path that holds no OpenClaw setup is distinguishable from a real setup with no components — a typo'd `--home` must not read as "everything was uninstalled". | `--sbom` |
 | "I think I've been compromised — help me preserve evidence" | Bundles a findings snapshot, skill/MCP hashes, trajectory-log hashes, and a credential rotation list into one local JSON file — a preservation aid, never rotates or deletes anything itself. | `--incident` |
 | "Did a suspicious skill's instruction actually run?" | Post-hoc correlation: checks whether the credential/exfil/secret-path indicators an installed skill names show up in real `tool.call` arguments in your OpenClaw trajectory sidecars — "acted on" vs "present but not acted on". Reads args in memory only; never echoes them. | `--analyze-trajectory` |
@@ -227,8 +291,10 @@ The built-in `openclaw security audit` and tools like Trent/ClawSec are good —
   directives.
 - ClawSecCheck's scanning engine is **fully local** — no API key, nothing transmitted (Trent uploads your config;
   the native one is CLI-only).
-- It leads with a **shareable Score + Grade + Lethal Trifecta ratio** you can post to the
-  community — without ever exposing your actual findings.
+- It leads with a **shareable card** you can post to the community without ever exposing
+  your actual findings — a Score + Grade + Lethal Trifecta ratio once all five audit
+  layers ran, or the same honest "no grade yet" substitute short of that (see
+  [Scoring](#scoring)).
 
 ## Built-in native audit, included for you
 
@@ -406,7 +472,9 @@ config; if none is found it warns you and tells you how to add one.
 file appearing, changing or disappearing under `<workspace>/memory/`** (a new file there is
 reported even when nothing in it looks hostile — that subtree is where OpenClaw's own
 pre-compaction flush writes, so its appearance is INFO, not an accusation), a dropped
-score, **a check leaving PASS (for FAIL,
+score (on the pair of runs being compared, when both carry a grade — see
+[Scoring](#scoring); the file/config/MCP/channel signals here don't depend on either
+run having one), **a check leaving PASS (for FAIL,
 WARN or UNKNOWN)**, **a newly connected MCP server, a new channel, the gateway becoming
 network-exposed, or a host monitor disappearing**. Each run appends the changes to a private local
 journal (`~/.clawseccheck/events.jsonl`, owner-only, never uploaded); view the timeline with
@@ -435,10 +503,12 @@ Two things worth knowing about how the comparison behaves:
   *both* the stored and the current snapshot, so an older snapshot never produces spurious "new
   connection", "new memory file", or rug-pull alerts after an upgrade — such a dimension is
   skipped for exactly one run, then compares normally.
-- **An unchanged grade is not evidence that nothing got worse.** The displayed score is capped by
-  the most severe open FAIL (a CRITICAL FAIL pins it at 49), so on a config that already holds one
-  it cannot fall further. `--monitor` therefore also tracks the uncapped pass-rate underneath and
-  reports degradation even while the grade sits still.
+- **An unchanged grade is not evidence that nothing got worse — and most `--monitor` runs carry no
+  grade at all** (the same five-layer rule applies here; see [Scoring](#scoring)). On the runs that
+  ARE graded, the displayed score is capped by the most severe open FAIL (a CRITICAL FAIL pins it at
+  49), so a config that already holds one can't fall further — `--monitor` therefore also tracks the
+  uncapped pass-rate underneath and reports degradation even while the grade sits still. On an
+  ungraded pair, the file/config/MCP/channel/host drift signals above are what carries the alert.
 
 ```bash
 python3 audit.py --monitor                 # first run = baseline, then alerts on changes
@@ -627,28 +697,58 @@ Note that `--vet`'s exit code is a **separate** contract: it returns 1 on a
 change your OpenClaw config; some write their own local output files when you
 ask, noted below):
 
+**Nothing was removed.** The three modes are how the tool is *presented*; every flag below still
+exists and still works, and the CI/power surface is unchanged. The grouping just matches
+`--functions`, so the deep list and the front door tell one story.
+
+**Mode A · Full check** — how safe is this setup?
+
 | Need | Command |
 |---|---|
 | Human report | `clawseccheck` |
 | JSON / SARIF output | `clawseccheck --json` · `clawseccheck --sarif results.sarif` |
 | Highest-risk chains | `clawseccheck --risk-paths` |
+| Active injection self-test (layer 5) | `clawseccheck --canary` · `clawseccheck --redteam` · `clawseccheck --dryrun` · `clawseccheck --multiturn` |
+| Attestation template / feed it back (layer 4) | `clawseccheck --ask` · `clawseccheck --attest attest.json` |
+| All-in-one (audit + self-test + vet-mcp + skill sweep + plugin sweep + behavioral replay + judge packet) | `clawseccheck --full` · add `--quiet` to collapse the appended sections to one-line summaries (lighter for CI logs) · add `--fast` to drop the deep phases entirely (CI) · `--judged-bundle PATH` to feed back verdicts |
+| Combined pipeline chat card (the headline + findings + the SAME sections `--full` runs, one fixed-order render) | `clawseccheck --dashboard --full` · add `--compact` for a ~4096-char Telegram-safe layout (headline counts only + a `--save`/`--html` pointer) · plain `--dashboard` (no `--full`) is the chat-sized card: headline + inventory-by-subject + most-urgent only, hard-capped under ~4096 chars; pair with `--pdf <path>` to also emit the attachable full report |
+| What already happened, from your own logs | `clawseccheck --behavioral` · `clawseccheck --analyze-trajectory` |
+| Evidence & inventory | `clawseccheck --sbom` · `clawseccheck --incident` |
+| Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
+| Attachable-into-chat report (mobile-friendly, unlike HTML) | `clawseccheck --pdf report.pdf` |
+| Accept a finding (show suppressed) | edit `.clawseccheckignore` · `clawseccheck --show-suppressed` |
+| Second opinion on borderline calls | `clawseccheck --judge-packet` · `clawseccheck --propose-ignore` |
+| Where you stand vs. a reference profile | `clawseccheck --percentile` (needs a score — an ungraded run answers "no rank yet") |
+
+**Mode B · Watch** — what changed since last time? Never produces a number.
+
+| Need | Command |
+|---|---|
+| Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
+| Score trend across past scans | `clawseccheck --trend` (plots the **graded** runs only; ungraded ones are recorded but carry no point) |
+| Verify the local stores weren't tampered with | `clawseccheck --verify-history` · `clawseccheck --verify-events` |
+
+**Mode C · Before you install** — is this thing safe to add? Verdict, never a letter.
+
+| Need | Command |
+|---|---|
 | Vet anything before install (type autodetected) | `clawseccheck --vet ./target` |
 | Vet a skill / a plugin explicitly | `clawseccheck --vet-skill ./skill` · `clawseccheck --vet-plugin ./plugin` |
 | Vet connected MCP servers | `clawseccheck --vet-mcp` |
 | Reputation gate before download | `clawseccheck --vet-source clawhub:some-skill` |
-| Active injection self-test | `clawseccheck --canary` · `clawseccheck --redteam` · `clawseccheck --dryrun` |
-| All-in-one (audit + self-test + vet-mcp + skill sweep + plugin sweep + behavioral replay + judge packet) | `clawseccheck --full` · add `--quiet` to collapse the appended sections to one-line summaries (lighter for CI logs) · add `--fast` to drop the deep phases entirely (CI) · `--judged-bundle PATH` to feed back verdicts |
-| Combined pipeline chat card (grade + findings + the SAME sections `--full` runs, one fixed-order render) | `clawseccheck --dashboard --full` · add `--compact` for a ~4096-char Telegram-safe layout (headline counts only + a `--save`/`--html` pointer) · plain `--dashboard` (no `--full`) is the chat-sized card: grade + inventory-by-subject + most-urgent only, hard-capped under ~4096 chars; pair with `--pdf <path>` to also emit the attachable full report |
-| Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
-| Attestation template / feed it back | `clawseccheck --ask` · `clawseccheck --attest attest.json` |
-| Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
-| Attachable-into-chat report (mobile-friendly, unlike HTML) | `clawseccheck --pdf report.pdf` |
-| Trend & percentile | `clawseccheck --trend` · `clawseccheck --percentile` |
-| Accept a finding (show suppressed) | edit `.clawseccheckignore` · `clawseccheck --show-suppressed` |
+| Vet every installed skill at once | `clawseccheck --vet-all` |
+| Plan a zero-network vet / get an install call | `clawseccheck --vet-plan clawhub:some-skill` · `clawseccheck --advise ./quarantined` |
+
+**Works with any mode**
+
+| Need | Command |
+|---|---|
 | Skip native audit / host posture / socket scan / dependency-tree walk | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` · `clawseccheck --no-deptree` |
 | Disable local history / age notice | `clawseccheck --no-history` · `clawseccheck --no-update-notice` |
-| CI gate | `clawseccheck --fail-on high` · `clawseccheck --exit-code` |
+| CI gate (needs no score) | `clawseccheck --fail-on high` · `clawseccheck --exit-code` |
 | Verify the engine itself | `clawseccheck --verify-self` |
+| The two capability screens | `clawseccheck --menu` · `clawseccheck --functions` |
+| Delete ClawSecCheck's own local store | `clawseccheck --purge` |
 
 ```bash
 python3 audit.py --next                    # print the "What you can do next" guidance block only
@@ -915,7 +1015,8 @@ python3 audit.py --log audit.log            # also write log to a local file
   A version of this tool older than 4.0 silently omits such rows from its own `--trend` rather
   than showing them; the rows themselves are intact and re-appear on a current build.
 - **`--percentile`** compares your score against a bundled offline reference profile — no network,
-  no telemetry.
+  no telemetry. A run with no score has nothing to rank, so it prints "No rank yet" and points at
+  the layers still to close instead of estimating a position.
 - **`--verbose` / `--debug` / `--log PATH`** activate structured local logging. Config values
   that may hold secrets are redacted before being written. `--verbose`/`--debug` set what
   reaches the **console** (stderr); `--log PATH` writes to a **file** and raises the file's
@@ -982,14 +1083,44 @@ B12:1a2b3c4d   # accept one specific local-model finding
 
 ## Scoring
 
-Weighted pass-rate (CRITICAL=10, HIGH=6, MEDIUM=3, LOW=1). **Honesty hard-caps:** an open FAIL
-caps the score by its severity — CRITICAL at 49, HIGH at 79, MEDIUM at 89, LOW at 94 — so you
-can never show an "A" with a critical hole. Grades: A 90+ · B 80–89 · C 70–79 · D 50–69 · F <50.
-Three further caps fire with **no FAIL finding at all** (a crashed or timed-out check, an
-unreadable config, or a corroborated runtime signal) — see
-[FAQ.md — "Why is my grade F?"](FAQ.md#why-is-my-grade-f) for the complete table.
-The shareable card shows **only the grade + score + trifecta ratio — never the findings**
-(sharing must not hand attackers your map).
+**A letter grade is issued only when all five audit layers ran** — static config, the
+installed-skill/plugin sweep, the log/trajectory scan, the agent's own self-report, and a
+live behaviour test (see [The three modes](#the-three-modes) above). Short of that there
+is no number at all: the report leads with the most urgent finding, in words, followed by
+a mandatory line naming which layers did not run, e.g. `No grade yet — 3 of 5 layers did
+not run: installed skills and plugins (not reached), agent self-report (not available
+here), live behaviour test (not available here).` A bare `clawseccheck` run is always in
+this state; `--full` closes the installed-sweep and log-scan gaps (down to "2 of 5") but
+still needs `--ask`/`--attest` and a submitted live-test verdict — typically fed back via
+`--judged-bundle` — before a grade is possible. `--full --fast` widens the gap back out to
+"4 of 5" (it also skips the plugin/skill sweep and the log scan); a layer the run's own
+flags turned off reports `skipped by this run's flags`, a layer that cannot exist on this
+box (no live agent to ask) reports `not available here` — different facts about how much
+the report is worth, worded differently on purpose.
+
+Two different lines can appear near the grade, and they answer different questions:
+
+- **`missing_layers`** (the "N of 5 layers did not run" line above) means a layer never
+  ran at all this invocation.
+- **A `Not fully covered: …` line** means a layer DID run and is disclosing, honestly,
+  what it still didn't reach within its own budget (e.g. `Not fully covered: 79 of 132
+  log sinks not read`) — a log scan is budget-bounded by construction. A **graded** run
+  (all five ran) can still carry a `Not fully covered:` line: "all five ran" means all
+  five were attempted and each declared its own gaps, not that each one read everything
+  that exists.
+
+When a grade IS issued, it is a weighted pass-rate (CRITICAL=10, HIGH=6, MEDIUM=3, LOW=1).
+**Honesty hard-caps:** an open FAIL caps the score by its severity — CRITICAL at 49, HIGH
+at 79, MEDIUM at 89, LOW at 94 — so you can never show an "A" with a critical hole. Grades:
+A 90+ · B 80–89 · C 70–79 · D 50–69 · F <50. Three further caps fire with **no FAIL
+finding at all** (a crashed or timed-out check, an unreadable config, or a corroborated
+runtime signal) — see [FAQ.md — "Why is my grade F?"](FAQ.md#why-is-my-grade-f) for the
+complete table.
+
+The shareable card follows the same rule: on a graded run it shows **only the grade +
+score + trifecta ratio — never the findings** (sharing must not hand attackers your map);
+short of a grade it shows the same honest substitute instead — e.g. `OpenClaw Security: no
+grade yet (2/5 layers ran)` — still with the trifecta ratio, still never the findings.
 
 ## Public API & stability
 
@@ -1005,7 +1136,8 @@ hard false positives on real configs.
   `--fail-on`, `--exit-code`, …).
 - **`--json` schema:** top-level `score`, `grade`, `capped`, `raw_score`, `trifecta`,
   `findings[]`, `next_actions[]`; each finding's `id`, `title`, `severity`, `status`, `detail`,
-  `fix`, `framework`, `confidence`, `evidence`.
+  `fix`, `framework`, `confidence`, `evidence`. `score`/`grade`/`raw_score`/`capped` are `null`
+  on an ungraded run — see [Scoring](#scoring).
 - **SARIF 2.1.0 output** shape (rule ids = check ids; `properties.confidence` + `.evidence`).
 - **Public Python API:** `clawseccheck.audit(...) -> (ctx, findings, ScoreResult)` and the
   `Finding` field names.

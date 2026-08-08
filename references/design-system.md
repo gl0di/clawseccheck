@@ -179,7 +179,7 @@ staleness).
 **`text` profile (baseline — Telegram / web / terminal — anywhere):**
 
 ```text
-🦞 ClawSecCheck · v3.61.0
+🦞 ClawSecCheck · v{version}
 
   1  🔍 Full check            how safe is this setup?
   2  👀 Watch                 what changed since last time?
