@@ -429,7 +429,7 @@ Capture the output. The script is read-only and safe to run without any flags.
 short first-run **welcome** screen (Screen 13) instead of a Dashboard — "I looked for an OpenClaw
 setup at … but there's nothing there", with how to point it at the config (`--home <path>`). Relay
 that as-is and stop; there's nothing to score. Any CI/artifact/work flag (`--json`, `--save`,
-`--full`, `--fail-under`, `--badge`, …) skips the welcome and runs the real audit, so those flags
+`--full`, `--fail-on`, `--badge`, …) skips the welcome and runs the real audit, so those flags
 are always honored. (A home that *exists* but can't be read is a different case — a plain
 "Cannot read the OpenClaw home" error, exit code 1.)
 

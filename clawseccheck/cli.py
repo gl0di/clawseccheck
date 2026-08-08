@@ -786,6 +786,86 @@ def vet_all(
     return 0 if sweep.worst in ("PASS", "UNKNOWN") else 1
 
 
+def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
+                        attestation: dict | None = None, live_test_bucket=None,
+                        behavioral_ran: bool = False,
+                        commit_full_phases: bool = False):
+    """C-425/C-426: the ONE producer of the five-layer ledger (``layers.py`` via
+    ``pipeline.PipelineResult.to_ledger``) — extracted from ``_resolve_runtime_caps``
+    (C-425) so the bare (non-`--full`) audit path (C-426) can call the SAME code
+    instead of a second, competing builder. Every call site funnels through here;
+    the mapping itself still lives in ``PipelineResult.to_ledger`` and is never
+    re-derived by hand anywhere else.
+
+    ``commit_full_phases`` — deliberately NOT just ``bool(args.full)`` read
+    internally — is True only from a call site that has actually committed to
+    running the installed-skill/plugin sweep and the behavioral replay LATER in
+    THIS SAME invocation (today: only ``_resolve_runtime_caps``, itself gated on
+    ``args.full``, for the default `--full` report/`--json` path and
+    `--dashboard --full`). Marking those phases "ran" is a promise the caller must
+    be able to keep: a `--full --badge`/`--html`/`--sarif`/`--risk-paths` run (or
+    any of `--trend`/`--monitor`/`--percentile`/`--next`) never runs the sweep or
+    the behavioral replay at all — `--full` is a documented no-op for every one of
+    them — so a call from `_main`'s early, pre-dispatch path (C-426) always leaves
+    this False and gets exactly the "no phases added" bare-run ledger
+    ``to_ledger()`` already produces correctly (static ran, everything else
+    not_reached/unavailable per its own docstring). Reading ``args.full`` directly
+    here instead would fabricate a completed sweep for those runs — the one thing
+    Golden Rule #4 forbids.
+
+    Returns a ``layers.LayerLedger`` — never ``None``. A bare/incomplete ledger is
+    exactly what a bare run's own ``to_ledger()`` mapping already produces; there is
+    no "no ledger" state left to represent once this is the shared entry point.
+    """
+    prelim = _pipeline.PipelineResult(fast=args.fast)
+    if commit_full_phases:
+        if args.fast:
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_SKILL_SWEEP, status=_pipeline.STATUS_SKIPPED,
+                complete=False, detail="skipped — --fast was given."))
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_PLUGIN_SWEEP, status=_pipeline.STATUS_SKIPPED,
+                complete=False, detail="skipped — --fast was given."))
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_BEHAVIORAL, status=_pipeline.STATUS_SKIPPED,
+                complete=False, detail="skipped — --fast was given."))
+        else:
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_SKILL_SWEEP, status=_pipeline.STATUS_RAN,
+                detail="scheduled this invocation (installed-skill sweep)."))
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_PLUGIN_SWEEP, status=_pipeline.STATUS_RAN,
+                detail="scheduled this invocation (installed-plugin sweep)."))
+            prelim.add(_pipeline.PhaseResult(
+                name=_pipeline.PHASE_BEHAVIORAL,
+                status=_pipeline.STATUS_RAN if behavioral_ran else _pipeline.STATUS_ERROR,
+                detail=("behavioral replay completed." if behavioral_ran
+                        else "behavioral replay raised — see run_behavioral's own section.")))
+    return prelim.to_ledger(findings, degraded_count=degraded_count,
+                            attestation=attestation, live_test_bucket=live_test_bucket)
+
+
+def _percentile_line(score, ascii_only: bool) -> str:
+    """C-426: rank the score, or say plainly why there is nothing to rank.
+
+    `render_percentile` takes a bare int and would happily rank the number a
+    `graded=False` ScoreResult still carries internally — publishing, through a
+    different command, exactly the figure the report withheld. That is the same leak
+    C-423 already had to close in `render_json`'s projection block, arriving through
+    `--percentile`/`--trend` instead.
+
+    A percentile is a comparison against a reference distribution of *complete*
+    audits, so an incomplete run has no honest place in it: withholding the rank is
+    the correct answer, not a degraded one. Both call sites route through here so the
+    two cannot drift.
+    """
+    if not getattr(score, "graded", True):
+        return ("No rank yet — ranking compares your score against a reference "
+                "profile, and this run has no score. Complete the remaining layers "
+                "to get one.")
+    return render_percentile(score.score, ascii_only)
+
+
 def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     """F-153: shared by `--full`'s own cap computation and `--dashboard --full`'s —
     the exact same two cap-only signals (F-154 behavioral, F-155 live-injection),
@@ -812,14 +892,25 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     widening `run_pipeline`/`run_behavioral`'s signatures, and P8's own budget
     check runs at a different point in the pipeline than this early call can see.
 
-    C-425: also the ONE shared choke point that builds the five-layer ledger
-    (`layers.py`) and threads it into `compute()` — deliberately here, not as three
-    separate blocks at `--full`'s own report/--json call site and `--dashboard
-    --full`'s, so the two surfaces cannot drift apart on what "ran" means, the same
-    guarantee this function already gives the two cap signals above. `attestation`
-    is the already-parsed attestation dict (or `None`/`{}`) the caller resolved
-    before `audit()` ran — passed in rather than re-read so this function does not
-    have to know `--attest`/`--judged-bundle`'s own parsing rules.
+    C-425: also a choke point (via the shared `_build_layer_ledger`, C-426) that
+    builds the five-layer ledger (`layers.py`) and threads it into `compute()` —
+    deliberately not as three separate blocks at `--full`'s own report/--json call
+    site and `--dashboard --full`'s, so the two surfaces cannot drift apart on what
+    "ran" means, the same guarantee this function already gives the two cap signals
+    above. `attestation` is the already-parsed attestation dict (or `None`/`{}`) the
+    caller resolved before `audit()` ran — passed in rather than re-read so this
+    function does not have to know `--attest`/`--judged-bundle`'s own parsing rules.
+
+    C-426: the returned `ledger` is never `None` — even when `args.full` is False
+    this now builds the SAME bare (no-phases-committed) ledger `_main`'s own
+    pre-dispatch call already built for `score` above, via the identical
+    `_build_layer_ledger` helper (the one producer both call sites share), so a
+    plain (non-`--full`) `--json` run's `render_json` projection block sees the
+    IDENTICAL ledger the top-level `score` was already computed against — never a
+    stale `None` that would silently re-grade the projection's own `compute()`
+    calls. `score` itself is only recomputed `if args.full:` below, exactly as
+    before: a non-`--full` call returns the SAME `score` object the caller passed
+    in, already ungraded by `_main`'s own bare-path recompute.
 
     The installed-sweep layer cannot be read off REAL phase results here — P6/P7
     (skill/plugin sweep) run later, in the caller's own report/--json or
@@ -881,38 +972,17 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
         except Exception:  # noqa: BLE001 — see run_behavioral's identical containment
             behavioral_fired_ids = frozenset()
 
-    # C-425: build the five-layer ledger — see this function's own docstring for why
-    # this is the ONE place it happens. `None` under a non---full invocation, exactly
-    # like `full_deadline`/`judged_bundle` above, so scoring.compute()'s own
-    # "ledger=None means graded" rule (C-422) leaves every non---full call site
-    # byte-identical to before this feature existed.
-    ledger = None
-    if args.full:
-        prelim = _pipeline.PipelineResult(fast=args.fast)
-        if args.fast:
-            prelim.add(_pipeline.PhaseResult(
-                name=_pipeline.PHASE_SKILL_SWEEP, status=_pipeline.STATUS_SKIPPED,
-                complete=False, detail="skipped — --fast was given."))
-            prelim.add(_pipeline.PhaseResult(
-                name=_pipeline.PHASE_PLUGIN_SWEEP, status=_pipeline.STATUS_SKIPPED,
-                complete=False, detail="skipped — --fast was given."))
-            prelim.add(_pipeline.PhaseResult(
-                name=_pipeline.PHASE_BEHAVIORAL, status=_pipeline.STATUS_SKIPPED,
-                complete=False, detail="skipped — --fast was given."))
-        else:
-            prelim.add(_pipeline.PhaseResult(
-                name=_pipeline.PHASE_SKILL_SWEEP, status=_pipeline.STATUS_RAN,
-                detail="scheduled this invocation (installed-skill sweep)."))
-            prelim.add(_pipeline.PhaseResult(
-                name=_pipeline.PHASE_PLUGIN_SWEEP, status=_pipeline.STATUS_RAN,
-                detail="scheduled this invocation (installed-plugin sweep)."))
-            prelim.add(_pipeline.PhaseResult(
-                name=_pipeline.PHASE_BEHAVIORAL,
-                status=_pipeline.STATUS_RAN if _behavioral_ran else _pipeline.STATUS_ERROR,
-                detail=("behavioral replay completed." if _behavioral_ran
-                        else "behavioral replay raised — see run_behavioral's own section.")))
-        ledger = prelim.to_ledger(findings, degraded_count=score.degraded_count,
-                                  attestation=attestation, live_test_bucket=live_test_bucket)
+    # C-425/C-426: build the five-layer ledger via the ONE shared producer
+    # (`_build_layer_ledger`) — see that function's own docstring for why
+    # `commit_full_phases` (not a bare `args.full` read) is what decides whether the
+    # installed-sweep/behavioral phases are marked "ran": THIS call site is exactly
+    # the one that has committed to running them later in the same invocation, so it
+    # opts in on the same `args.full` gate the pre-extraction code used.
+    ledger = _build_layer_ledger(
+        args, findings, degraded_count=score.degraded_count, attestation=attestation,
+        live_test_bucket=live_test_bucket, behavioral_ran=_behavioral_ran,
+        commit_full_phases=args.full,
+    )
 
     if args.full:
         # C-425: recompute unconditionally under --full, not only when a cap-only
@@ -972,8 +1042,22 @@ def _apply_live_test_cap(ctx, findings, score, args):
     live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
     live_signal = _pipeline.live_test_cap_signal(live_test_bucket)
     if live_signal.hit:
+        # C-426: the ledger MUST be threaded through this recompute. `_main` already
+        # built a bare one and computed `score` against it, so the run reaching here
+        # is ungraded; a bare `compute(findings, ctx, live_test_vulnerable=True)` would
+        # silently hand the grade BACK — and it would do so on exactly the runs that
+        # submitted a VULNERABLE live-test verdict, i.e. the most alarming ones. The
+        # bucket is known here (it was not at `_main`'s early call), so layer 5 now
+        # reads `ran` rather than `unavailable`: a submitted verdict IS the live-
+        # behaviour layer having run, regardless of its value — see `to_ledger`'s own
+        # docstring for why presence, not verdict, is what that layer observes.
+        ledger = _build_layer_ledger(
+            args, findings, degraded_count=score.degraded_count,
+            attestation=getattr(ctx, "attestation", None),
+            live_test_bucket=live_test_bucket,
+        )
         score = compute(findings, ctx, live_test_vulnerable=True,
-                        live_test_reason=live_signal.reason)
+                        live_test_reason=live_signal.reason, ledger=ledger)
     return score, live_signal
 
 
@@ -1137,17 +1221,9 @@ def _flag_coherence_notes(args) -> list[str]:
     """Notes for ignored modes / no-effect global modifiers. Never mutates args."""
     active = [(a, f) for a, f, k in _PRIMARY_MODES if _mode_active(args, a, k)]
     notes: list[str] = []
-    # I3: --fail-on supersedes --fail-under when both are given — the exit-decision
-    # below (`elif args.fail_under is not None`) never even evaluates --fail-under's
-    # score check once --fail-on is set, regardless of which path (default report or
-    # a winning primary mode) reaches that decision. Said once, unconditionally, so a
-    # CI script mid-migration from --fail-under to --fail-on is never silently
-    # ambiguous about which one governs — this is the ONE place that note is emitted;
-    # the exit-decision code itself stays a plain elif, no second note there.
-    if (getattr(args, "fail_on", None) is not None
-            and getattr(args, "fail_under", None) is not None):
-        notes.append("note: --fail-under is deprecated and ignored — --fail-on decides "
-                     "when both are given")
+    # C-426: the "--fail-under is deprecated and ignored" note lived here. The flag is
+    # gone now, so argparse itself reports it (`unrecognized arguments`) and a note
+    # about a flag that cannot be parsed would be unreachable code.
     if not active:
         # No primary mode: the default path resolves output as --json > --card > text.
         # If both format flags are set, --json wins and --card is silently dropped.
@@ -1208,8 +1284,6 @@ def _flag_coherence_notes(args) -> list[str]:
         no_effect.append("--save")
     if bool(getattr(args, "exit_code", False)) and "exit_code" not in honored:
         no_effect.append("--exit-code")
-    if getattr(args, "fail_under", None) is not None and "fail_under" not in honored:
-        no_effect.append("--fail-under")
     if getattr(args, "fail_on", None) is not None and "fail_on" not in honored:
         no_effect.append("--fail-on")
     # --full / --attest are enrichment modifiers a winning primary mode can silently
@@ -1770,20 +1844,22 @@ def _main(argv=None) -> int:
                    help="write the complete audit as a paginated PDF to PATH — attach the "
                         "file itself into chat (a mobile client opens it inline; do not "
                         "paste the path or re-render its contents)")
-    p.add_argument("--fail-under", metavar="N", type=int, default=None,
-                   help="DEPRECATED (score-based; the grade requires a live agent under "
-                        "the layered product model) — exit 1 if score is below N. Prefer "
-                        "--fail-on, which gates on findings, not a score. Ignored (with a "
-                        "note) when --fail-on is also given")
+    # C-426: `--fail-under N` was REMOVED here, not deprecated-in-place. It thresholded
+    # the audit SCORE, and under the five-layer rule a run only carries one when all
+    # five layers ran — so for the ordinary invocation there was nothing left for it to
+    # compare. The two honest alternatives were both worse than removal: silently
+    # gating on the internal number the report withholds (a CI verdict the tool refuses
+    # to publish), or always failing closed (identical practical breakage to removal,
+    # while leaving a flag in `--help` that can never pass). `--fail-on` below is the
+    # replacement and needs no score at all.
     p.add_argument("--fail-on", metavar="SEVERITY", choices=["critical", "high", "medium", "low"],
                    default=None,
                    help="exit 1 if any unsuppressed FAIL finding at or above SEVERITY exists "
                         "(critical/high/medium/low, ranked highest-first; 'high' also trips on "
                         "a critical). Suppressed findings are excluded the same way --exit-code "
                         "excludes them (a suppressed score-capping CRITICAL/HIGH or sensitive-id "
-                        "finding still counts). A CI-friendly replacement for --fail-under: it "
-                        "gates on findings the way --exit-code does, at a chosen severity floor "
-                        "instead of any FAIL")
+                        "finding still counts). Gates on findings the way --exit-code does, at a "
+                        "chosen severity floor instead of any FAIL")
     p.add_argument("--exit-code", action="store_true",
                    help="exit 1 if any unsuppressed FAIL finding exists")
     p.add_argument("--trend", action="store_true",
@@ -2292,21 +2368,21 @@ def _main(argv=None) -> int:
     # First-run onboarding (Screen 13): when there is genuinely nothing to audit —
     # ~/.openclaw missing, or an empty directory — don't render a wall of UNKNOWNs;
     # show a friendly "point me at your config" screen. BARE human runs only: any
-    # machine/CI/artifact/work flag (--json/--card, --fail-under/--fail-on/--exit-code,
+    # machine/CI/artifact/work flag (--json/--card, --fail-on/--exit-code,
     # --save, --full, --badge/--html/--sarif, --attest, or any primary mode) takes the
     # normal audit path so nothing is silently dropped and CI gates keep failing loud
     # (B-075). Checked BEFORE audit() so a missing home never burns a scan or the
     # native-audit subprocess just to print a welcome.
     #
-    # I3: --fail-on joins --fail-under here on identical terms — a run with only
-    # --fail-on set (no --fail-under) is a machine gate too, and without this a lone
-    # `--fail-on critical` against a genuinely-empty home would silently print the
-    # friendly onboarding screen and exit 0 instead of taking the audit path a CI
-    # script asked for.
+    # I3/C-426: `--fail-on` is a machine gate and belongs in this guard for the same
+    # reason `--exit-code` does — without it a lone `--fail-on critical` against a
+    # genuinely-empty home would print the friendly onboarding screen and exit 0
+    # instead of taking the audit path a CI script asked for. (`--fail-under` was here
+    # on identical terms until C-426 removed the flag.)
     _bare_run = (
         not any(_mode_active(args, a, k) for a, _f, k in _PRIMARY_MODES)
         and not args.json and not args.card and not args.save and not args.full
-        and args.fail_under is None and args.fail_on is None
+        and args.fail_on is None
         and not args.exit_code and not args.attest
     )
     if _bare_run:
@@ -2343,6 +2419,26 @@ def _main(argv=None) -> int:
             ("--no-deptree", args.no_deptree),
         ) if passed
     )
+    # C-426: every downstream mode below (`--badge`, `--html`, `--sarif`, `--pdf`,
+    # `--risk-paths`, `--dashboard` without `--full`, the default report/--json, and
+    # — via `_apply_live_test_cap`'s own matching change — `--trend`/`--monitor`/
+    # `--percentile`/`--next`) takes its `score` from THIS `audit()` call, so
+    # building the bare five-layer ledger here, once, means every one of them
+    # inherits the correct "graded" answer with no per-mode plumbing. No phases are
+    # committed at this point (`commit_full_phases` stays False — see
+    # `_build_layer_ledger`'s own docstring for why a bare/early call must never
+    # optimistically claim the sweep or behavioral replay ran): under `--full`,
+    # `_resolve_runtime_caps` below builds the richer, phase-aware ledger later and
+    # recomputes `score` again — that recompute wins (C-422: a COMPLETE ledger is
+    # byte-identical to omitting one, so this is a no-op there once every layer
+    # genuinely ran). No live-test bucket is known yet this early (`--judged-bundle`
+    # is read by `_resolve_runtime_caps`/`_apply_live_test_cap`, further down), so
+    # layer 5 starts `unavailable` here — exactly right for a run that has not yet
+    # resolved one.
+    _bare_ledger = _build_layer_ledger(
+        args, findings, degraded_count=score.degraded_count, attestation=attestation,
+    )
+    score = compute(findings, ctx, ledger=_bare_ledger)
     logger.debug("ran %d checks", len(findings))
     logger.info("score=%s grade=%s", score.score, score.grade)
 
@@ -2472,7 +2568,7 @@ def _main(argv=None) -> int:
             history_record(score, args.history)
         rows = history_load(args.history)
         _emit(render_trend(rows, ascii_only))
-        _emit(render_percentile(score.score, ascii_only))
+        _emit(_percentile_line(score, ascii_only))
         return 0
 
     if args.percentile:
@@ -2480,7 +2576,7 @@ def _main(argv=None) -> int:
         # before any cap resolution ran at all, so a run --full would grade F was
         # ranked against the recorded distribution as though it were an uncapped A.
         score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
-        _emit(render_percentile(score.score, ascii_only))
+        _emit(_percentile_line(score, ascii_only))
         return 0
 
     if args.next:
@@ -3079,10 +3175,10 @@ def _main(argv=None) -> int:
     if _save_failed:
         return 1
 
-    # I3: --fail-on gates on findings (like --exit-code) instead of the score
-    # (--fail-under). When both are given --fail-on decides — --fail-under's own
-    # check is skipped entirely (not just overridden by a later `return 1`), matching
-    # the deprecation note _flag_coherence_notes emits once, unconditionally, above.
+    # I3/C-426: --fail-on gates on FINDINGS (like --exit-code), never on a score. It
+    # replaced `--fail-under N`, which thresholded the audit score and was removed once
+    # the five-layer rule meant an ordinary run does not produce one — see the argparse
+    # block for why removal beat both alternatives.
     #
     # "Unsuppressed" reuses --exit-code's own predicate verbatim (not a parallel one):
     # a suppressed finding counts only when surfaced_despite_suppression() says a
@@ -3106,8 +3202,22 @@ def _main(argv=None) -> int:
             for f in findings
         ):
             return 1
-    elif args.fail_under is not None and score.score < args.fail_under:
-        return 1
+        # C-426/B-166/B-363: a config the tool could not read produces only UNKNOWN and
+        # WARN, never a FAIL — so a purely FAIL-driven gate stays GREEN on a run that
+        # audited nothing. `--exit-code` has tripped on this explicitly since B-166
+        # (unreadable) and B-363 (absent); `--fail-on` did not, because until C-426 the
+        # score-based `--fail-under` covered the case for anyone who used it: an
+        # unreadable config caps the score to CONFIG_BLIND_CAP, so any sane threshold
+        # tripped. Removing `--fail-under` without this would have left the replacement
+        # gate strictly weaker than the flag it replaces, in precisely the case B-363
+        # exists to prevent — hiding the evidence turning a gate green.
+        #
+        # Deliberately NOT severity-ranked: "I could not read your config" has no
+        # severity, and gating it on the operator's chosen floor would let
+        # `--fail-on critical` pass a run that read nothing at all.
+        if (getattr(ctx, "config_parse_error", False)
+                or not getattr(ctx, "config_found", True)):
+            return 1
 
     if args.exit_code:
         has_fail = any(

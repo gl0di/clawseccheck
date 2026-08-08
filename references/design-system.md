@@ -645,7 +645,7 @@ Add to any:
   "ascii"     plain ASCII, no emoji/box                  (--ascii)
   "update"    ask your agent to check ClawHub for a newer version   (agent-driven, Screen 14)
 
-Power / CI flags (--json, --fail-under, --exit-code, --home, --seed, --no-host…): say "help".
+Power / CI flags (--json, --fail-on, --exit-code, --home, --seed, --no-host…): say "help".
 ```
 
 **`mono` profile (terminal / TUI):** same list under box section-headers, columns aligned
@@ -673,9 +673,9 @@ and drops emoji.
 
 The friendly landing when there is **nothing to audit** — don't render a wall of UNKNOWNs or a
 scary F. Shown on a **bare human run only**: any machine, CI, artifact, or work flag
-(`--json`/`--card`, `--fail-under`/`--exit-code`, `--save`, `--full`, `--badge`/`--html`/`--sarif`,
+(`--json`/`--card`, `--fail-on`/`--exit-code`, `--save`, `--full`, `--badge`/`--html`/`--sarif`,
 `--attest`, or any primary mode) takes the normal audit path instead — so nothing is ever silently
-dropped and a CI `--fail-under` gate still fails loud on a missing home (B-075). Read-only;
+dropped and a CI `--fail-on` gate still fails loud on a missing home (B-075). Read-only;
 fabricates no findings. Checked **before** the scan runs, so a missing home never burns an audit
 or the native-audit subprocess just to print a welcome.
 

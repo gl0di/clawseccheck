@@ -157,7 +157,7 @@ _MODIFIERS: tuple[tuple[str, str | None, str], ...] = (
 
 # Power / CI flags deliberately NOT expanded into the palette — pointed at `help`
 # so the palette stays readable. Listed in the footer line.
-_POWER_FLAGS = "--json, --fail-under, --exit-code, --home, --seed, --no-host"
+_POWER_FLAGS = "--json, --fail-on, --exit-code, --home, --seed, --no-host"
 
 # cli._PRIMARY_MODES flags that legitimately have no palette row:
 #   --menu / --functions  → the container screens themselves (Welcome / this palette)

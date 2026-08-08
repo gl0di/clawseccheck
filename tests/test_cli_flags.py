@@ -1,6 +1,7 @@
 """Tests for the new CLI flags added in Phase 1 wiring:
---sarif, --fail-under, --exit-code, --trend, --percentile, --history,
---verbose, --debug, --log.
+--sarif, --fail-on, --exit-code, --trend, --percentile, --history,
+--verbose, --debug, --log. (--fail-under was here until C-426 removed it;
+its removal is itself pinned below.)
 
 All tests use --home fixtures/home_vuln or fixtures/home_safe with
 --no-native to stay offline and deterministic.
@@ -31,27 +32,33 @@ def test_default_run_returns_zero(capsys):
 
 
 # ---------------------------------------------------------------------------
-# --fail-under
+# --fail-under (REMOVED in C-426) and its replacement --fail-on
 # ---------------------------------------------------------------------------
 
-def test_fail_under_high_threshold_returns_one(capsys):
-    """home_vuln has a low score, so --fail-under 100 must exit 1."""
-    rc = main(["--home", VULN] + BASE + ["--fail-under", "100"])
+def test_fail_under_is_gone(capsys):
+    """C-426 removed the flag rather than deprecating it in place.
+
+    It thresholded the audit SCORE, and under the five-layer rule an ordinary run does
+    not produce one -- so for the common invocation there was nothing left to compare
+    against. Both alternatives were worse: silently gating on the internal number the
+    report withholds (a CI verdict the tool refuses to publish), or keeping a flag in
+    --help that can never pass.
+
+    argparse rejects it now, which is a louder and more debuggable failure for a CI
+    script than either.
+    """
+    with pytest.raises(SystemExit) as exc:
+        main(["--home", VULN] + BASE + ["--fail-under", "100"])
+    assert exc.value.code != 0
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
+def test_fail_on_is_the_replacement_and_needs_no_score(capsys):
+    """The migration target: gates on findings, so an ungraded run decides fine."""
+    rc = main(["--home", VULN] + BASE + ["--fail-on", "critical"])
     assert rc == 1
-
-
-def test_fail_under_zero_threshold_returns_zero(capsys):
-    """Score is always >= 0, so --fail-under 0 must exit 0."""
-    rc = main(["--home", VULN] + BASE + ["--fail-under", "0"])
-    assert rc == 0
-
-
-def test_fail_under_exact_pass(capsys):
-    """--fail-under N exits 0 when score == N (strictly less-than check)."""
-    # We use home_safe which should score reasonably high.
-    # Use threshold 1 to ensure we're above it.
-    rc = main(["--home", SAFE] + BASE + ["--fail-under", "1"])
-    assert rc == 0
+    out = capsys.readouterr().out
+    assert "No grade yet" in out, "the run under test must genuinely have no score"
 
 
 # ---------------------------------------------------------------------------

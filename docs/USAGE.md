@@ -163,7 +163,7 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 | "I think I've been compromised — help me preserve evidence" | Bundles a findings snapshot, skill/MCP hashes, trajectory-log hashes, and a credential rotation list into one local JSON file — a preservation aid, never rotates or deletes anything itself. | `--incident` |
 | "Did a suspicious skill's instruction actually run?" | Post-hoc correlation: checks whether the credential/exfil/secret-path indicators an installed skill names show up in real `tool.call` arguments in your OpenClaw trajectory sidecars — "acted on" vs "present but not acted on". Reads args in memory only; never echoes them. | `--analyze-trajectory` |
 | "What did my agent actually DO, not just what it could do?" | Reconstructs observed tool-call sequences from your OpenClaw trajectory sidecars and flags a proven-by-log ingress→sensitive→egress verb order, or a repeated-failure-then-success pattern on a sensitive-data call. Also reads OpenClaw's OWN runtime `audit_events` trail (a separate, metadata-only record: `tool_name` alone, no argv/command/path/host) for a runtime tool-block, an evasive/malformed tool name, or a session your trajectory sidecar no longer has (it was disabled or rotated out while `audit_events` still retained it). Metadata-only throughout — verb identity and sequencing, never call/return payloads. WARN-only, never scored. When every detector returns UNKNOWN (no trajectory sidecar, no `audit_events`), the run reports **no verdict** rather than a clean tick — nothing was assessed. An explicit `PATH` that does not resolve is named and exits non-zero, instead of being reported as "this host has no trajectories". | `--behavioral` |
-| "Gate my CI on this" | Machine-readable output plus a non-zero exit when an unsuppressed finding at or above a chosen severity exists, or when any unsuppressed FAIL exists — wire straight into a pipeline. `--fail-under` (score-based) still works but is deprecated; prefer `--fail-on`, which needs no live agent. | `--json` · `--sarif results.sarif` · `--fail-on high` · `--exit-code` · `--fail-under 70` (deprecated) |
+| "Gate my CI on this" | Machine-readable output plus a non-zero exit when an unsuppressed finding at or above a chosen severity exists, or when any unsuppressed FAIL exists — wire straight into a pipeline. Needs no score, so it works on a default (ungraded) run too. | `--json` · `--sarif results.sarif` · `--fail-on high` · `--exit-code` |
 | "Don't skip anything — scan everything" | Raises the trajectory-file / log-sink / per-line scan caps a normal run keeps small for speed: every trajectory file (not just the most recent 60), every log/transcript sink (not cut off by the time budget), and the full byte range of an over-length log line (not just its head and tail). Slower — a normal run already discloses exactly what it skipped, so this is for closing that specific gap, not a default. | `--exhaustive` (composes with `--full`; has effect on its own too) |
 
 ## What it checks
@@ -568,12 +568,11 @@ The `--risk-paths` output is also appended to the default report when any chain 
 python3 audit.py --sarif results.sarif      # write SARIF 2.1.0 locally (for GitHub Code Scanning upload step)
 python3 audit.py --fail-on high             # exit 1 if any unsuppressed FAIL at or above HIGH exists
 python3 audit.py --exit-code                # exit 1 on any FAIL verdict (six sources — see below)
-python3 audit.py --fail-under 70            # DEPRECATED — exit 1 if score < 70; prefer --fail-on
 ```
 
 The SARIF file is written to the path you choose — ClawSecCheck never uploads it anywhere.
-`--fail-on`, `--fail-under`, and `--exit-code` do not change the default exit code (0) when
-omitted, preserving backward compatibility.
+`--fail-on` and `--exit-code` do not change the default exit code (0) when omitted, preserving
+backward compatibility.
 
 **`--fail-on SEVERITY` (`critical` / `high` / `medium` / `low`).** Exits 1 when any
 **unsuppressed FAIL finding at or above SEVERITY** exists — inclusive, so `--fail-on high`
@@ -584,12 +583,11 @@ gate green. This is a **findings-only** gate; it never reads the score, so it ne
 agent — the reason it exists: under the layered product model a bare CI run has no live
 agent to grade, and `--fail-on` (like `--exit-code`) never needed one.
 
-**`--fail-under N` is deprecated** in favor of `--fail-on`: it thresholds the *score*, and
-the score itself requires a live-agent layer CI does not have. It keeps working for now —
-existing pipelines are not broken — but if both are given in the same run, **`--fail-on`
-decides** and `--fail-under`'s own check is skipped entirely (a stderr note says so). Migrate
-a `--fail-under N` gate to the `--fail-on` severity that matches your risk tolerance
-(`critical` is the closest like-for-like replacement for a strict gate).
+**Migrating from `--fail-under`:** it was removed — a default run no longer carries a score
+(a grade now requires all five layers to have run), so a score-based gate had nothing honest
+to threshold. Use `--fail-on <severity>` instead (`critical` is the closest like-for-like
+replacement for a strict `--fail-under` gate), or `--exit-code` to trip on any FAIL regardless
+of severity.
 
 **Per-severity counters, for asserting on numbers without a grade.** `--json` carries
 `fail_counts_by_severity` (`{"critical": N, "high": N, "medium": N, "low": N}`) and `--sarif`
@@ -649,7 +647,7 @@ ask, noted below):
 | Accept a finding (show suppressed) | edit `.clawseccheckignore` · `clawseccheck --show-suppressed` |
 | Skip native audit / host posture / socket scan / dependency-tree walk | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` · `clawseccheck --no-deptree` |
 | Disable local history / age notice | `clawseccheck --no-history` · `clawseccheck --no-update-notice` |
-| CI gate | `clawseccheck --fail-on high` · `clawseccheck --exit-code` · `clawseccheck --fail-under 70` (deprecated) |
+| CI gate | `clawseccheck --fail-on high` · `clawseccheck --exit-code` |
 | Verify the engine itself | `clawseccheck --verify-self` |
 
 ```bash
@@ -1004,8 +1002,7 @@ hard false positives on real configs.
 **Frozen contract (breaking these → major bump):**
 
 - **CLI flags** and their documented meaning (`--json`, `--sarif`, `--card`, `--monitor`,
-  `--fail-on`, `--exit-code`, …). `--fail-under` is deprecated and slated for removal, which
-  is itself a breaking change and will land in a major bump.
+  `--fail-on`, `--exit-code`, …).
 - **`--json` schema:** top-level `score`, `grade`, `capped`, `raw_score`, `trifecta`,
   `findings[]`, `next_actions[]`; each finding's `id`, `title`, `severity`, `status`, `detail`,
   `fix`, `framework`, `confidence`, `evidence`.

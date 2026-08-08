@@ -19,7 +19,9 @@ kept here so the always-loaded playbook stays lean.
   `target_type`, `verdict`, `grade`, `score`, `axes[]`, `findings[]`): the five risk axes
   (danger / build / behavior / persistence / connections) plus an A–F grade. Exit code is 1 on
   SUSPICIOUS/DANGEROUS. See `docs/OUTPUT_SCHEMA.md` §11.
-- `--fail-under N` — exit with code 1 if score is below N (useful for CI pipelines).
+- `--fail-on SEVERITY` (`critical`/`high`/`medium`/`low`) — exit with code 1 if an unsuppressed
+  FAIL at or above SEVERITY exists (useful for CI pipelines; needs no score, so it works on a
+  bare/default run too).
 - `--exit-code` — exit 1 on a FAIL verdict from any of six sources: (1) an unsuppressed
   `FAIL` audit finding; (2) under `--full`, a `FAIL` MCP server; (3) under `--full`, a
   `DANGEROUS` installed skill from the skill sweep; (4) under `--full` (and not `--fast`), a
