@@ -1557,6 +1557,15 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
         "host": host,
         "agents": agents,
         "skills": _skill_inventory(ctx),
+        # B-506: `skills`/`mcp` are per-ITEM rosters — a list of installed skills, a list
+        # of configured servers — so a finding filed against the SUBJECT rather than
+        # against one item had nowhere to land, and the renderer read "no flagged items"
+        # as "clear". On the maintainer's own config that printed `Skills — clear` above
+        # `Skills — 3 issue(s)`, one of them HIGH, in the same report. The five subjects
+        # that go through `_bucket()` never had the defect; these two bypassed it.
+        # Additive sibling keys, not a shape change: `skills`/`mcp` stay lists, so every
+        # existing consumer (the dashboard card, --json, the schema) is untouched.
+        "skills_subject": _bucket("skills"),
         # B-507: skill names excluded from the "skills" roster above because they are
         # ClawSecCheck's OWN content-verified install (B-265) -- disclosed so a machine
         # reader can see the count was reduced deliberately, not silently. `[]` (never
@@ -1564,6 +1573,7 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
         # present inventory field in this dict.
         "self_excluded": list(getattr(ctx, "self_excluded_skills", None) or []),
         "mcp": _mcp_inventory(ctx),
+        "mcp_subject": _bucket("mcp"),   # B-506, see "skills_subject" above
         "plugins": _plugin_inventory(plugin_sweep),
         "channels": channels,
         "logs": logs,
@@ -1585,8 +1595,36 @@ def _inventory_bucket_lines(label: str, bucket: dict, by_id: dict, *, ascii_only
     return out
 
 
+def _roster_and_subject_count_text(n_flagged: int, n_subject: int) -> str:
+    """B-506: one status phrase covering a per-item roster AND its subject findings.
+
+    They are genuinely different populations — "two of your installed skills look
+    wrong" is not the same fact as "the skill subsystem is misconfigured" — so they
+    are named separately rather than summed into one misleading total. "clear" is
+    reachable only when both are empty, which is the whole point.
+    """
+    parts = []
+    if n_flagged:
+        parts.append(f"{n_flagged} flagged")
+    if n_subject:
+        parts.append(f"{n_subject} issue(s)")
+    return " · ".join(parts) if parts else "clear"
+
+
+def _subject_finding_lines(fids, by_id: dict, icon: dict) -> list[str]:
+    """B-506: render subject-level findings the same way `_inventory_bucket_lines` does,
+    so the two halves of the inventory block read identically."""
+    out = []
+    for fid in fids:
+        f = (by_id or {}).get(fid)
+        if f is None:
+            continue
+        out.append(f"   {icon.get(f.status, '?')} {f.id}  {_sanitize(f.title)}")
+    return out
+
+
 def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
-                            clean_roster_limit=None) -> list[str]:
+                            clean_roster_limit=None, by_id: dict | None = None) -> list[str]:
     """Per-skill verdict lines (design §4.4) -- single source of truth shared by
     render_subject_inventory (full report's "Inventory by subject" block) and
     render_dashboard (B-356: the same verdicts, compact, in the chat-pasted card)."""
@@ -1601,8 +1639,15 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     n_bundled = sum(1 for s in skills if s.get("name") in bundled_names)
     note_icon = "[i]" if ascii_only else "ℹ️ "
     if n_skills == 0:
+        # B-506: an empty roster is not the same as a clean subject — findings can be
+        # filed against the skill subsystem with nothing installed at all.
+        subj0 = inv.get("skills_subject") or {}
+        fids0 = list(subj0.get("findings") or [])
         label = f" {SUBJECT_LABEL['skills']} (none installed)"
+        if fids0:
+            label += f" — {icon.get(subj0.get('status'), '?')} {len(fids0)} issue(s)"
         lines = [label]
+        lines.extend(_subject_finding_lines(fids0, by_id, icon))
         if self_excluded:
             lines.append(
                 f"   {note_icon}{', '.join(self_excluded)} not graded -- "
@@ -1632,9 +1677,18 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
         installed_text += f" · {len(self_excluded)} self-excluded"
     flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
     flagged_names = {s["name"] for s in flagged}
-    sk_marker = icon.get(_worst_of_statuses(s["status"] for s in flagged), "?")
-    count_text = f"{len(flagged)} flagged" if flagged else "clear"
+    # B-506: fold in findings filed against the SUBJECT rather than against one skill.
+    # Without this the marker and the count are derived from the per-item roster alone,
+    # so a subject carrying a HIGH finding and no unclean item renders "clear" directly
+    # above its own detail section saying otherwise.
+    subj = inv.get("skills_subject") or {}
+    subj_fids = list(subj.get("findings") or [])
+    sk_marker = icon.get(
+        _worst_of_statuses([s["status"] for s in flagged]
+                           + ([subj.get("status")] if subj_fids else [])), "?")
+    count_text = _roster_and_subject_count_text(len(flagged), len(subj_fids))
     lines = [f" {SUBJECT_LABEL['skills']} ({installed_text}) — {sk_marker} {count_text}"]
+    lines.extend(_subject_finding_lines(subj_fids, by_id, icon))
     if n_skipped:
         lines.append(
             f"   {icon.get(UNKNOWN, '?')} {n_skipped} skill(s) beyond the inspection "
@@ -1667,7 +1721,8 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     return lines
 
 
-def _mcp_inventory_lines(inv: dict, *, ascii_only: bool = False, compact: bool = False) -> list[str]:
+def _mcp_inventory_lines(inv: dict, *, ascii_only: bool = False, compact: bool = False,
+                         by_id: dict | None = None) -> list[str]:
     """Per-server verdict lines (design §4.5) -- the MCP counterpart to
     _skills_inventory_lines: single source of truth shared by render_subject_inventory
     (full report's "Inventory by subject" block, always `compact=False`) and
@@ -1676,15 +1731,30 @@ def _mcp_inventory_lines(inv: dict, *, ascii_only: bool = False, compact: bool =
     icon = _ICON_ASCII if ascii_only else _ICON
     mcp = inv["mcp"]
     n_mcp = len(mcp)
+    # B-506: "none configured" described the ROSTER and was read as a verdict. The real
+    # config has no `mcp.servers` block at all and still carried two MCP findings (shell
+    # hooks in a plugin's doc-cache, an orphaned plugin cache), so the inventory said
+    # "none configured" directly above "MCP servers — 2 issue(s)".
+    subj = inv.get("mcp_subject") or {}
+    subj_fids = list(subj.get("findings") or [])
     if n_mcp == 0:
-        return [f" {SUBJECT_LABEL['mcp']} (none configured)"]
+        label = f" {SUBJECT_LABEL['mcp']} (none configured)"
+        if subj_fids:
+            label += f" — {icon.get(subj.get('status'), '?')} {len(subj_fids)} issue(s)"
+        lines = [label]
+        if compact:
+            return lines
+        return lines + _subject_finding_lines(subj_fids, by_id, icon)
     mcp_ok = [_sanitize(m["name"]) for m in mcp if m["verdict"] == "ok"]
     mcp_bad = [m for m in mcp if m["verdict"] != "ok"]
-    mcp_marker = icon.get(_worst_of_statuses(m["verdict"] for m in mcp_bad), "?")
-    count_text = f"{len(mcp_bad)} flagged" if mcp_bad else "clear"
+    mcp_marker = icon.get(
+        _worst_of_statuses([m["verdict"] for m in mcp_bad]
+                           + ([subj.get("status")] if subj_fids else [])), "?")
+    count_text = _roster_and_subject_count_text(len(mcp_bad), len(subj_fids))
     lines = [f" {SUBJECT_LABEL['mcp']} ({n_mcp}) — {mcp_marker} {count_text}"]
     if compact:
         return lines
+    lines.extend(_subject_finding_lines(subj_fids, by_id, icon))
     if mcp_ok:
         lines.append(f"   {icon.get(PASS, '?')} " + " | ".join(mcp_ok))
     for m in mcp_bad:
@@ -1728,9 +1798,13 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
     if not ag.get("attested"):
         lines.append("   note  attest (--attest) for per-agent separation (B45/B47)")
 
-    lines.extend(_skills_inventory_lines(inv, ctx, ascii_only=ascii_only))
+    # B-506: `by_id` is threaded so subject-level findings render by id and title here,
+    # the same way every other subject's do. The chat card deliberately does NOT get it:
+    # its own Findings section already names them, and the card is budget-bound — but it
+    # still gets the corrected marker and count, which is what the invariant is about.
+    lines.extend(_skills_inventory_lines(inv, ctx, ascii_only=ascii_only, by_id=by_id))
 
-    lines.extend(_mcp_inventory_lines(inv, ascii_only=ascii_only))
+    lines.extend(_mcp_inventory_lines(inv, ascii_only=ascii_only, by_id=by_id))
 
     if inv["plugins"]["scanned"]:
         lines.extend(_plugins_inventory_lines(plugin_sweep, ascii_only=ascii_only))

@@ -396,7 +396,15 @@ def test_json_inventory_key_present_with_expected_subjects():
     assert set(inv.keys()) == {
         "openclaw", "host", "agents", "skills", "self_excluded", "mcp", "plugins",
         "channels", "logs",
+        # B-506: `skills`/`mcp` are per-ITEM rosters and had nowhere to put a finding
+        # filed against the SUBJECT, so the renderer read an empty roster as "clear"
+        # over a detail section saying otherwise. These carry the subject bucket the
+        # other five subjects always had. Deliberately sibling keys rather than a
+        # shape change, so `skills`/`mcp` stay lists for every existing consumer.
+        "skills_subject", "mcp_subject",
     }
+    for key in ("skills_subject", "mcp_subject"):
+        assert set(inv[key]) >= {"status", "findings", "unassessed"}, inv[key]
     assert "roster" in inv["agents"]
     assert "attested" in inv["agents"]
     assert "roster" in inv["channels"]
