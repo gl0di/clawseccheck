@@ -4459,6 +4459,36 @@ def _run_content_ring(
                 )
                 break
             except Exception:  # noqa: BLE001 — a ring check must never break --vet
+                # B-485: this handler is SILENT on purpose as of 2026-08-08, and the
+                # obvious fix was built and RETRACTED. Read this before rebuilding it.
+                #
+                # The known gap is real: a raising check returns no verdict, so nothing
+                # sets `ctx.limit_hits`, `dossier._danger_coverage_gap` never fires, and
+                # `--vet` can answer INSTALL about a package whose Danger scan could not
+                # read a bundled file — two lines above its own "not scanned by the
+                # AST/taint layer". The two handlers above already record their gaps, so
+                # routing this one the same way is a five-line change and it works.
+                #
+                # It also introduces a worse defect. The commonest cause here is
+                # `skillast.ScriptProseCoverageIncomplete` from `ast.parse`, and whether
+                # a file parses depends on the interpreter WE run under. Measured on an
+                # ordinary skill whose only script uses a `match` statement (Python 3.10+,
+                # standard since 2021): INSTALL / rc=0 on 3.12, CAUTION / rc=1 on the 3.9
+                # CI floor. Same bytes, opposite verdict, and rc=1 trips the `--vet … ||
+                # fail` install gate `docs/USAGE.md` documents. That is a false non-clean
+                # verdict on a benign package — Golden Rule #5 — and it would hit a large
+                # share of modern skills.
+                #
+                # No sound narrowing exists with the current machinery: `_danger_coverage_gap`
+                # matches on `coverage_gap_finding`'s own "coverage is incomplete" wording,
+                # so emitting the disclosure IS what moves the verdict; there is no
+                # disclose-without-capping variant to reach for. Separating "unparseable
+                # because hostile" from "unparseable because newer than us" is not
+                # decidable from 3.9's view of the file.
+                #
+                # Closing this properly means making the scanner version-tolerant rather
+                # than patching this handler. Pinned in tests/test_b485_vet_coverage_gap.py,
+                # both the gap and the false positive, so neither can be forgotten.
                 continue
             if fx.status not in (FAIL, WARN):
                 continue
