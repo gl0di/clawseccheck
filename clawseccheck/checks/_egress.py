@@ -2978,8 +2978,15 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         # out reports "none were readable", blaming permissions for what was actually a
         # scan-budget decision, and discloses no truncation at all (Golden Rule #4).
         unread = (
+            # B-486: this said "to include them", which promises completeness --exhaustive
+            # does not deliver. Measured on the real 135-sink corpus, two consecutive
+            # --exhaustive runs scanned all of it and then 130 of it: the flag raises the
+            # budget a lot but still lands near its own ceiling, so whether it finishes is
+            # load-dependent. It remains the right remedy; the wording now says what it
+            # actually buys, and points at its own disclosure rather than at a guarantee.
             f" {skipped_for_time} of them were not offered to the scan (scan budget "
-            "reached) — re-run with --exhaustive to include them."
+            "reached) — re-run with --exhaustive for a much larger budget; it states "
+            "its own coverage either way."
             if skipped_for_time
             else ""
         )
@@ -3006,9 +3013,12 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         # oldest-first phrasing tells the reader WHICH sinks they are missing — the point
         # of ordering them in the first place.
         note += (
+            # B-486: "to include them" overclaimed — see the note on the sibling sentence
+            # above. --exhaustive raises the budget substantially but can still run short,
+            # and it discloses that when it does; say that instead of promising coverage.
             f" {skipped_for_time} log/transcript {plural} not scanned (scan budget "
-            "reached; the oldest are left out first) — re-run with --exhaustive to "
-            "include them."
+            "reached; the oldest are left out first) — re-run with --exhaustive for a "
+            "much larger budget; it states its own coverage either way."
         )
     elif lim.exhaustive:
         # F-164 SC-5: under --exhaustive, completeness must be stated affirmatively —
