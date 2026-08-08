@@ -15,10 +15,12 @@ kept here so the always-loaded playbook stays lean.
   the user is talking from a phone/chat client, attach the PDF file itself into the reply — never
   paste its path or re-render its contents into the chat text (same doctrine as the `--badge`
   SVG: attach the artifact, don't redraw it).
-- `--json` with `--vet`/`--vet-mcp` — emits the risk-dossier JSON object (`mode`, `target`,
-  `target_type`, `verdict`, `grade`, `score`, `axes[]`, `findings[]`): the five risk axes
-  (danger / build / behavior / persistence / connections) plus an A–F grade. Exit code is 1 on
-  SUSPICIOUS/DANGEROUS. See `docs/OUTPUT_SCHEMA.md` §11.
+- `--json` with `--vet`/`--vet-mcp` — emits the risk-dossier JSON object (`tool`, `version`,
+  `mode`, `target`, `target_type`, `verdict`, `axes[]`, `findings[]`, `unmapped`): the five risk
+  axes (danger / build / behavior / persistence / connections) plus a **verdict**. There is no
+  `grade` or `score` key — a "before you install" answer is INSTALL / CAUTION / DO-NOT-INSTALL,
+  never a letter, because a letter here would collide with the audit's own A–F on a different
+  scale. Exit code is 1 on SUSPICIOUS/DANGEROUS. See `docs/OUTPUT_SCHEMA.md` §11.
 - `--fail-on SEVERITY` (`critical`/`high`/`medium`/`low`) — exit with code 1 if an unsuppressed
   FAIL at or above SEVERITY exists (useful for CI pipelines; needs no score, so it works on a
   bare/default run too).

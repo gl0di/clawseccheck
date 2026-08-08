@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <b>Is your OpenClaw agent safe? Ask it — and get an honest A–F grade, right in the chat.</b><br>
+  <b>Is your OpenClaw agent safe? Ask it — a full check earns an honest A–F grade; every other mode gives you a straight answer in words, right in the chat.</b><br>
   <sub><i>The claw that checks your claws.</i></sub>
 </p>
 
@@ -29,13 +29,16 @@ your keys, and acts on your behalf. That power is exactly what attackers want
 to borrow: **one poisoned message or one malicious skill can quietly turn your
 agent against you.**
 
-ClawSecCheck is a **security check-up for your agent**. It examines your setup,
-grades it **A–F**, and explains — in plain language, right in your chat — what
-is risky and why. It reports, it doesn't remediate: it never touches your OpenClaw
-config, needs no API key, and the scanner itself makes **no network calls** — no
-telemetry, no uploads, ever. (One narrow, opt-in exception: `--apply-ignore-proposals`
-can append entries to its own suppression file — see
-[Safe to run](#-safe-to-run) below.)
+ClawSecCheck is a **security check-up for your agent**. It runs in three modes —
+a deliberate full check, an ongoing watch for change, and a before-you-install
+gate — and explains, in plain language, right in your chat, what is risky and
+why. A full check earns an **A–F grade**, but only once all five of its audit
+layers have run; short of that it leads with the most urgent finding in words
+and names what didn't run, never a guessed number. It reports, it doesn't
+remediate: it never touches your OpenClaw config, needs no API key, and the
+scanner itself makes **no network calls** — no telemetry, no uploads, ever.
+(One narrow, opt-in exception: `--apply-ignore-proposals` can append entries to
+its own suppression file — see [Safe to run](#-safe-to-run) below.)
 
 ## 🚀 Start in one minute — no terminal needed
 
@@ -49,7 +52,9 @@ can append entries to its own suppression file — see
 
 > Audit my OpenClaw setup with clawseccheck.
 
-**3.** Your grade and the most urgent problems appear right in the chat. Done.
+**3.** The most urgent problems appear right in the chat, with an A–F grade if
+that run covered all five audit layers — and a plain-language note on what it
+didn't get to if it didn't. Done.
 
 *What you'll see — a real report against a deliberately vulnerable test setup:*
 
@@ -68,19 +73,67 @@ can append entries to its own suppression file — see
 
 ## 💬 You talk — it audits
 
-No flags, no commands. Everything works as a conversation:
+No flags, no commands. Everything works as a conversation, across three modes —
+pick one by what you're actually asking:
+
+### A · Full check — *how safe is this setup?*
+
+Run it once, deliberately. Gives you findings — and a grade only when all five
+audit layers behind it ran (see [Five layers, one grade](#-five-layers-one-grade) below).
 
 | You say | You get |
 |---|---|
-| *"Audit my OpenClaw setup"* | A chat-sized card — your A–F grade, an inventory by subject, and the urgent problems most dangerous first — with a **PDF companion** carrying the rest: every installed skill/plugin/MCP server vetted, the riskiest capability chains, a behavioral replay, and a second opinion on any borderline call |
-| *"Is this skill safe to install?"* | A pre-install risk verdict with the reasons — flags **suspicious** and **dangerous** skills before you enable them |
+| *"Audit my OpenClaw setup"* | A chat-sized card — findings, an inventory by subject, and the urgent problems most dangerous first, with an A–F grade when the run covered all five layers — plus a **PDF companion** carrying the rest: every installed skill/plugin/MCP server vetted, the riskiest capability chains, a behavioral replay, and a second opinion on any borderline call |
 | *"Am I vulnerable to prompt injection?"* | An optional canary self-test you run against your own agent, alongside the static audit |
-| *"Watch my setup for changes"* | Alerts when something changes — a new skill, config drift, a dropped score |
 | *"What's the most important thing to look at?"* | A prioritised next-steps list based on **your** findings |
-| *"Share my grade"* | A badge with the grade only — your findings stay private |
+| *"Share my grade"* | A badge with the grade — only if one was issued; your findings stay private |
 | *"I think I've been hacked"* | An evidence-preservation bundle for investigation |
 
+### B · Watch — *what changed since last time?*
+
+Run it repeatedly. Gives you events, never a number.
+
+| You say | You get |
+|---|---|
+| *"Watch my setup for changes"* | Alerts when something changes — a new skill, config drift, a finding that appeared or cleared |
+
+### C · Before you install — *is this thing safe to add?*
+
+Run it on the event. Gives you INSTALL / CAUTION / DO-NOT-INSTALL — not a
+letter grade.
+
+| You say | You get |
+|---|---|
+| *"Is this skill safe to install?"* | A pre-install risk verdict with the reasons — flags **suspicious** and **dangerous** skills before you enable them |
+
+Everything else — verifying its own integrity, purging its local data, and
+every flag below — works the same way regardless of which mode you're in.
+
+## 🧬 Five layers, one grade
+
+A full check (Mode A) is built from five layers. The first three run on their
+own; the last two only run if you ask, because one needs your agent to answer
+and the other pokes your running agent live:
+
+| # | Layer | Runs on its own? | How you get it |
+|---|---|---|---|
+| 1 | Static: config, files, permissions | yes — the default run | (default) |
+| 2 | Sweep of what's installed: skills + plugins | yes | `--full` |
+| 3 | Logs and trajectories: what already happened | yes, budget-bounded | `--full` |
+| 4 | Agent self-report | **no** — the agent has to answer | `--ask` → `--attest` |
+| 5 | Live behaviour test | **no** — pokes the running agent | `--canary` / `--dryrun` / `--redteam` / `--multiturn` |
+
+**A grade is issued only when all five ran.** Short of that there is no number
+at all — you get findings, led by the most urgent one in words, plus a line
+naming which layers didn't run. Concretely: a bare run leaves 3 of 5 untouched
+(the installed sweep, the self-report, the live test); `--full` closes two of
+those and leaves 2 of 5 (self-report, live test); `--full --fast` gives up the
+deep phases again for speed and leaves 4 of 5. Stack the opt-in flags above to
+close the remaining two and earn a grade.
+
 ## 🔍 What it checks
+
+These are the areas a full check covers across its five layers:
 
 | Area | The question it answers |
 |---|---|
@@ -109,9 +162,13 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
   [ClawHavoc wave](https://unit42.paloaltonetworks.com/openclaw-ai-supply-chain-risk/)
   of credential-stealing skills, "check before install" matters: ask it to vet
   any skill, plugin, or MCP server **before** you enable it.
-- **Honest by design.** What it can't determine is reported as `UNKNOWN` —
-  never quietly counted as safe. An open CRITICAL finding hard-caps your score:
-  you can never get a pretty "A" with a real hole in it.
+- **Honest by design.** A grade is issued only when all five audit layers ran —
+  short of that, no number at all, just findings and a line naming what
+  didn't run. What it can't determine is reported as `UNKNOWN`, never quietly
+  counted as safe, and every mode ends by naming what it did not check: no
+  mode ever prints "clear" about a subject it never looked at. An open
+  CRITICAL finding also hard-caps a grade when one is issued: you can never
+  get a pretty "A" with a real hole in it.
 - **Not a rebadged lookup.** No network calls means no verdict borrowed from
   someone else's reputation database and presented as ours. Every finding
   traces to a real check with its own fixture and test, an AST layer that
@@ -189,7 +246,10 @@ release workflow and hasn't been altered since.
 <details>
 <summary><b>⚙️ For terminal users: CLI, JSON, SARIF, CI gates</b></summary>
 
-ClawSecCheck is also a full standalone CLI (zero dependencies, Python 3.9+):
+ClawSecCheck is also a full standalone CLI (zero dependencies, Python 3.9+).
+Nothing above replaced this: every flag still exists and still works — the
+three conversational modes sit on top of the same CI/power surface, they
+didn't shrink it.
 
 ```bash
 pipx install "git+https://github.com/gl0di/clawseccheck@vX.Y.Z"   # pin a release tag (recommended)
@@ -215,7 +275,9 @@ complete flag list.
 > do, not how it behaves under a live attack. The optional self-tests exercise
 > selected live paths but are graded by your own agent, so they can't prove
 > safety against arbitrary attacks either. `UNKNOWN` is always shown as
-> `UNKNOWN`, never hidden. The full, unvarnished list of limitations is in the
+> `UNKNOWN`, never hidden. Hold it to this contract: every mode ends by naming
+> what it did not check, and no mode prints "clear" about a subject it never
+> looked at. The full, unvarnished list of limitations is in the
 > [User guide](docs/USAGE.md#honest-limitations).
 
 ## 📚 Documentation
