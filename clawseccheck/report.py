@@ -2076,17 +2076,32 @@ def render_report(findings: list[Finding], score: ScoreResult,
             "denominator, so this score is NOT comparable to a full audit — opting a "
             "subsystem out can raise the number without changing your setup."
         )
-    if n_fail > 0 or n_warn > 0:
+    # B-518: count `issues` — the exact list the body renders — NOT `scored_findings`.
+    # Measured on the real config: the tally said "2 FAIL, 21 WARN" five lines above a
+    # body reading "38 issue(s)", because 15 displayed WARNs are advisory (`scored=False`)
+    # and dropped out here. `scored=False` means "does not move the score", never "is not
+    # an issue" — the dropped set included C015 (secrets at rest), B14 (egress surface),
+    # B164 (threats in agent logs) and B68 (fs confinement).
+    #
+    # The counting is old and was defensible while the "Why N/100" line sat right under it
+    # naming the narrower denominator ("UNKNOWN/advisory checks are excluded"). That line
+    # is C-423-gated on `graded`, so on an ungraded run it is not emitted and the tally was
+    # left unqualified — the nearest "scored" was 369 lines below. Same family as B-506.
+    #
+    # The "Why" line above deliberately keeps `n_pass`/`n_warn`/`n_fail`: its arithmetic
+    # has to reconcile with `raw_score`, and it discloses its own denominator in its text.
+    _issue_fail = sum(1 for f in issues if f.status == FAIL)
+    _issue_warn = sum(1 for f in issues if f.status == WARN)
+    if _issue_fail > 0 or _issue_warn > 0:
         _sev_counts: dict[str, int] = {}
-        for f in scored_findings:
-            if f.status in (FAIL, WARN):
-                _sev_counts[f.severity] = _sev_counts.get(f.severity, 0) + 1
+        for f in issues:
+            _sev_counts[f.severity] = _sev_counts.get(f.severity, 0) + 1
         sev_parts = []
         for sev in (CRITICAL, HIGH, MEDIUM, LOW):
             if sev in _sev_counts:
                 sev_parts.append(f"{_sev_counts[sev]} {sev}")
         sev_summary = ", ".join(sev_parts)
-        lines.append(f"({n_fail} FAIL, {n_warn} WARN — incl. {sev_summary})")
+        lines.append(f"({_issue_fail} FAIL, {_issue_warn} WARN — incl. {sev_summary})")
     # C-423: found by reading a real ungraded run, not by a test — the tests assert that
     # no letter appears, which they cannot do for the coherence of the paragraph under
     # it. "This score" on a run that has no score is the same lie in smaller type.
