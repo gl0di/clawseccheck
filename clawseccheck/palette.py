@@ -89,10 +89,16 @@ _PALETTE: tuple[PaletteCategory, ...] = (
     PaletteCategory("Scan", READONLY, MODE_A, (
         PaletteEntry("Quick scan", None,
                      "{n} checks over config, files and permissions"),
-        PaletteEntry("Fast pass", "--fast",
-                     "the quickest possible look — static config only"),
         PaletteEntry("Full check", "--full",
                      "adds installed skills, plugins and logged behaviour"),
+        # B-518 follow-up: --fast is a MODIFIER of --full, not a third scan depth.
+        # `cli.py` says so itself at runtime ("note: --fast has no effect without
+        # --full"), and a measured bare `--fast` returns a byte-identical verdict set to
+        # the default — same 184 findings, same statuses, same missing layers. Listing it
+        # between "Quick scan" and "Full check" read as a rung on a depth ladder; it sits
+        # under --full now, and the blurb names the requirement instead of promising speed.
+        PaletteEntry("Fast pass", "--fast",
+                     "only with --full: skips its skill/plugin/log sweeps"),
         PaletteEntry("Capability re-check", "--ask",
                      "re-run the agent's own capability self-report"),
     )),
