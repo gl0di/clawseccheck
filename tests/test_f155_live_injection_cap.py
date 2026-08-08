@@ -487,15 +487,56 @@ class TestCliEndToEnd:
         assert not hist.exists()
 
     def test_seeded_vulnerable_verdict_is_recorded_into_history(self, tmp_path, capsys):
+        """B-509 re-expressed this, and the contract it protects is unchanged.
+
+        F-155's rule is about RECORDABILITY, and it is a pair: an unseeded verdict
+        writes no row at all (the test above), a seeded one does. That distinction is
+        what this asserts, and it still holds exactly.
+
+        What changed is the row's contents. This run supplies no attestation, so the
+        self-report layer never ran and the run carries no grade -- the report says so
+        in its own header -- and B-509 stopped history recording a number the report
+        withheld. So the row is present and ungraded rather than present and capped.
+
+        The cap itself still binds; it is simply no longer observable as a recorded
+        number. `live_injection_capped` in the same run's JSON is the surviving
+        observable, asserted below, so this test still fails if the cap stops firing.
+
+        The deliberate cost: `--trend` shows "no grade" for this run rather than a drop
+        to <= LIVE_INJECTION_CAP. Recording the 49 instead would be precisely the
+        phantom grade this increment exists to remove -- and the VULNERABLE verdict is
+        still reported, loudly, in the run's own output and JSON.
+        """
         hist = tmp_path / "history.jsonl"
         bundle = _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
             {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
         rc = main(["--home", SAFE, "--no-native", "--full", "--json",
                   "--judged-bundle", bundle, "--history", str(hist)])
         assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+
         rows = history_load(str(hist))
-        assert len(rows) == 1
-        assert rows[0]["score"] <= LIVE_INJECTION_CAP
+        assert len(rows) == 1                      # seeded => recorded (the F-155 rule)
+        assert rows[0]["graded"] is False
+        assert rows[0]["score"] is None
+        assert rows[0]["grade"] is None
+
+        # ...and the cap did fire, even though no number was written down.
+        assert payload["live_injection_capped"] is True
+        assert payload["graded"] is False
+
+    def test_a_seeded_vulnerable_verdict_still_caps_the_number_when_a_grade_exists(self):
+        """The other half of the assertion above, kept where a number survives.
+
+        `scoring.compute` with no ledger is graded (C-422's default), so the cap is
+        still directly checkable as a number here -- the CLI path just has nothing to
+        record it into until all five layers run.
+        """
+        ctx, findings, _ = audit(SAFE)
+        capped = compute(findings, ctx, live_test_vulnerable=True,
+                         live_test_reason="a live injection-test scenario reported VULNERABLE")
+        assert capped.graded is True
+        assert capped.score <= LIVE_INJECTION_CAP
 
     def test_resistant_verdict_still_records_normally(self, tmp_path, capsys):
         # RESISTANT never hits, so the reproducibility gate never even applies --
