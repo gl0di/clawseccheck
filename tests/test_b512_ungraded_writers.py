@@ -30,6 +30,7 @@ Stdlib-only, offline, writes nothing outside pytest's `tmp_path`.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -120,7 +121,7 @@ def _surfaces(score):
         # The incident pack is a writer too, and it is the artifact most likely to be
         # handed to someone else during a real incident — so it is in the sweep, not
         # trusted because it happens to gate correctly today.
-        ("render_incident", render_incident(Context(home="/nonexistent"), FINDINGS, score)),
+        ("render_incident", render_incident(Context(home=Path("/nonexistent")), FINDINGS, score)),
     ]
 
 
