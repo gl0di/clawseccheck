@@ -2004,11 +2004,17 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # not what it DOES at runtime. OpenClaw core ships no runtime egress/taint gate, so a
     # clean Lethal Trifecta here is not a runtime guarantee — a high grade means "not
     # statically lethal-capable", never "protected against the trifecta at runtime".
+    # C-428: this paragraph used to say "a high grade means …" unconditionally, on a run
+    # that may have no grade at all. Tests assert the absence of a letter; they cannot
+    # assert the surrounding prose stayed coherent, which is exactly how this survived
+    # the increment that removed the number — so name the run's own artifact instead.
+    _clean_subject = ("a high grade" if getattr(score, "graded", True)
+                      else "a clean static result")
     lines.append(
         "Static audit — this bounds what your agent *can* do, not how it *behaves* under a"
         " live attack. OpenClaw core has no runtime egress/taint gate, so even a clean"
-        " Lethal Trifecta here can still be chained by prompt-injection at runtime: a high"
-        " grade means \"not statically lethal-capable\", not \"runtime-proof\". Use the live"
+        f" Lethal Trifecta here can still be chained by prompt-injection at runtime: {_clean_subject}"
+        " means \"not statically lethal-capable\", not \"runtime-proof\". Use the live"
         " tests above to probe actual resistance."
     )
     # I-025/B-309: an exception to "this grade never reflects runtime behaviour" above —
@@ -2140,8 +2146,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # categories that eval identified (privilege-escalation, data-exfiltration, social-
     # engineering prose) have since had dedicated detectors added (B159/B160/B163) but the
     # fix has not yet been re-measured against the same benchmark.
+    # C-428: "/high-grade" is dropped on an ungraded run — there is no grade to qualify.
+    _pass_subject = ("A clean/high-grade result" if getattr(score, "graded", True)
+                     else "A clean result")
     lines.append(
-        "A clean/high-grade result means \"no known attack pattern matched\" — not \"this"
+        f"{_pass_subject} means \"no known attack pattern matched\" — not \"this"
         " setup is safe.\" External benchmarks (SkillTrustBench, OASB) found detection"
         " precision very high (few false alarms) but malicious-sample recall measured"
         " between 0.09 and 0.41 depending on benchmark/artifact type — most misses were"
@@ -3088,13 +3097,19 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     if getattr(score, "graded", True):
         l1 = f"  OpenClaw Security: {score.grade:<2} ({score.score:>3}/100)"
     else:
-        l1 = (
-            f"  OpenClaw Security: no grade yet "
-            f"({len(getattr(score, 'missing_layers', ()))}/{len(LAYER_ORDER)} layers)"
-        )
+        # C-428: this read "(3/5 layers)", which a reader takes as "3 of 5 ran" when it
+        # counted the ones that did NOT — the ratio meant the opposite of how it scans.
+        # State the positive fact instead; it is the same number said unambiguously.
+        _total = len(LAYER_ORDER)
+        _ran = _total - len(getattr(score, "missing_layers", ()))
+        l1 = f"  OpenClaw Security: no grade yet ({_ran}/{_total} layers ran)"
     l2 = f"  Lethal Trifecta: {_trifecta_ratio(findings)}"
     l3 = "  audited by ClawSecCheck" + ("" if ascii_only else f" {brand.MASCOT}")
-    width = 39
+    # C-428: the width was a hardcoded 39, sized for "A ( 95/100)". The ungraded line is
+    # longer than that, and `:<39` pads but never truncates — so the box art broke open
+    # on exactly the runs the ungraded work introduced. Grow to fit; never shrink below
+    # the established 39 so a graded card renders byte-identically to before.
+    width = max(39, len(l1), len(l2))
     # Mascot header line, once (design-system Foundations); --ascii drops it to
     # stay pure-ASCII, matching render_dashboard's convention.
     header = "" if ascii_only else f"{brand.header()}\n"

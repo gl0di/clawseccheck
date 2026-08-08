@@ -98,24 +98,36 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
             priority=5,
         ))
 
+    # C-428: both of these always-on actions promised a grade. On an ungraded run
+    # (fewer than five layers ran) `--trend` plots nothing for it and the badge
+    # renders "no grade yet" — so the promise was one the tool could not keep.
+    # Same fact, wording that matches what the user will actually get.
+    graded = bool(getattr(score, "graded", True))
+
     # track_trend: ALWAYS
     actions.append(Action(
         id="track_trend",
-        title="Track your security score over time",
+        title=("Track your security score over time" if graded
+               else "Track your posture over time"),
         command="clawseccheck --trend",
-        why="See if you're getting safer or drifting.",
+        why=("See if you're getting safer or drifting." if graded else
+             "Only graded runs plot on the trend — this run is recorded, not plotted. "
+             "Complete all five layers to put a point on the line."),
         priority=8,
     ))
 
     # share_grade: ALWAYS
     actions.append(Action(
         id="share_grade",
-        title="Share your grade (safe — findings stay private)",
+        title=("Share your grade (safe — findings stay private)" if graded
+               else "Share your result (safe — findings stay private)"),
         command="clawseccheck --badge grade.svg",
         why=(
-            "Only the grade + score is shared, never your findings. This writes a real "
-            "SVG file — attach grade.svg itself, do not redraw or regenerate the badge "
-            "image yourself."
+            ("Only the grade + score is shared, never your findings. " if graded else
+             "This run has no grade, so the badge reads \"no grade yet\". Only the "
+             "grade + score is ever shared, never your findings. ")
+            + "This writes a real SVG file — attach grade.svg itself, do not redraw "
+              "or regenerate the badge image yourself."
         ),
         priority=9,
     ))

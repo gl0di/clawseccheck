@@ -111,18 +111,21 @@ def test_no_pdf_means_no_stray_note(capsys):
 # ---- B-469: the menu must not advertise a live test in a read-only mode ----
 
 def test_menu_item_one_does_not_claim_to_touch_the_live_agent():
+    # C-428 renamed item 1 to the mode ("Full check") and made the hint the question
+    # the mode answers. The B-469 contract is unchanged and is what is asserted here:
+    # the read-only audit must not advertise a live-agent test in its label.
     labels = [row for row in menu._ITEMS if row[0] == "1"]
     assert labels, "expected a menu item 1"
     assert "live" not in labels[0][3].lower()
-    assert labels[0][3] == "config + capability audit"
+    assert "Full check" == labels[0][2]
 
 
 def test_rendered_menu_carries_no_live_claim_on_item_one(capsys):
     _, out, _ = _run(capsys, "--menu", "--home", SAFE, "--no-color")
-    line = [ln for ln in out.splitlines() if "Check everything" in ln]
+    line = [ln for ln in out.splitlines() if "Full check" in ln]
     assert line, "menu item 1 not rendered"
     assert "live agent test" not in line[0]
-    assert "capability audit" in line[0]
+    assert "live" not in line[0].lower()
 
 
 # ---- B-470: the judge panel's per-item verdicts must be rendered somewhere ----

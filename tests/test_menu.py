@@ -14,10 +14,13 @@ from clawseccheck.menu import compute_ages, render_menu
 
 # ── pure render ───────────────────────────────────────────────────────────────
 
-def test_render_menu_lists_the_four_items():
+def test_render_menu_lists_the_three_modes_and_a_way_into_the_rest():
     out = render_menu(version="9.9.9")
     assert "🦞 ClawSecCheck · v9.9.9" in out
-    for title in ("Check everything", "Check before install", "Report & history", "Menu"):
+    # C-428: the screen is the three product modes (frequency is the primary axis),
+    # plus one entry into the full palette. Item 3 used to be "Report & history",
+    # which was an output format sitting on the same level as a mode.
+    for title in ("Full check", "Watch", "Before you install", "Everything else"):
         assert title in out
     # numbered, so "say the number" works
     for n in ("1", "2", "3", "4"):
@@ -27,7 +30,13 @@ def test_render_menu_lists_the_four_items():
     # contradicted SKILL.md's own statement that the live injection test is a separate,
     # opt-in step. The ⚡ marker must not appear against item 1.
     assert "⚡" not in out
-    assert "config + capability audit" in out
+
+
+def test_render_menu_states_the_grade_rule_up_front():
+    """C-428: the user is told what earns a letter BEFORE choosing, not after."""
+    out = render_menu(version="9.9.9")
+    assert "all five layers ran" in out
+    assert "findings, and what's missing" in out
 
 
 def test_render_menu_ascii_is_pure_ascii():
@@ -83,7 +92,7 @@ def test_cli_menu_returns_zero_and_prints(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "ClawSecCheck" in out
-    assert "Check everything" in out
+    assert "Full check" in out
     # no prior history in the tmp file → the never-checked nudge
     assert "not checked yet" in out
 
