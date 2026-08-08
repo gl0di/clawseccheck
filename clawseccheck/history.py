@@ -110,6 +110,14 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
     C-162: each entry also carries '_schema' INSIDE the hashed payload, so a
     planted/edited _schema value is itself tamper-evident (see verify_chain).
 
+    B-509: a run whose five-layer check was incomplete has no grade, and its row
+    OMITS 'score'/'grade' and carries "graded": false instead. A graded row is
+    unchanged, key order included. '_schema' is deliberately NOT bumped for this:
+    the constant is shared with the events journal and the coverage ledger, so a
+    bump would make an older build skip every new EVENT too. The cost of leaving
+    it is that an older build silently drops ungraded rows from --trend rather
+    than disclosing them — the same trade C-250's retention marker already made.
+
     B-108: the read-last-hash→append critical section runs under an advisory
     ``journal_lock`` so two concurrent audits can't both read the same prev
     chain_hash and each append, which would otherwise leave a spurious
@@ -128,14 +136,48 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
         ts = when if "T" in when else f"{when}T00:00:00"
 
     p = Path(path).expanduser()
+    # B-509: a run whose five-layer check was incomplete carries no grade, and this is
+    # the last writer that used to republish one anyway — the report withheld the letter
+    # while the journal recorded it, so --trend read the phantom back as a real point.
+    #
+    # The ungraded row OMITS 'score'/'grade' rather than writing them as null, because
+    # that choice decides how an OLDER shipped build behaves when it meets one: an absent
+    # key hits load()'s existing `except KeyError: continue`, the same already-in-production
+    # path the C-250 retention marker takes, so the row is skipped. An explicit null passes
+    # the key check, flows through as score=None, and the old render_trend's `curr > prev`
+    # raises TypeError. Omission degrades; null crashes.
+    #
+    # A GRADED row's payload stays byte-identical to before this change — no 'graded' key
+    # on the hot path. A row that has a score IS a graded row, exactly as it always was;
+    # stamping "graded": true would churn every future row's shape for zero information.
+    # 'graded' sits INSIDE the hashed payload, so it is tamper-evident like '_schema': it
+    # cannot be flipped without breaking the chain.
+    #
+    # getattr, not score.graded: tests/test_c250_journal_honesty.py records through a
+    # duck-typed score object that carries only .score/.grade, and so does any caller
+    # predating ScoreResult.graded. Absent means graded, matching scoring.compute()'s own
+    # "ledger=None means graded" default.
+    graded = bool(getattr(score, "graded", True))
+    # int()/str() are evaluated only on the graded branch: on an ungraded run score.score
+    # is None, and int(None) raises a TypeError the `except OSError` below does NOT catch
+    # — an uncaught crash on every default audit, not a quiet degrade.
+    #
+    # The key ORDER of a graded row is preserved exactly (date, score, grade, ts, …): the
+    # chain hash is order-independent (_chain_hash canonicalizes with sort_keys=True), but
+    # the line written to disk is json.dumps(row) without it, so reordering here would
+    # change the on-disk bytes of every future graded row for no reason.
+    graded_fields = (
+        {"score": int(score.score), "grade": str(score.grade)} if graded
+        else {}
+    )
     base = {
         "date": date,
-        "score": int(score.score),
-        "grade": str(score.grade),
+        **graded_fields,
         "ts": ts,
         "home": _sanitize_home(home),
         "source": _run_source(source),
         "_schema": SCHEMA_VERSION,
+        **({} if graded else {"graded": False}),
     }
     # Symlink-safe: dir 0700 and an O_NOFOLLOW append, so a planted symlink at
     # history.jsonl can never redirect this default-path write to another file.
@@ -164,12 +206,29 @@ def verify(path: str = DEFAULT_HISTORY) -> "tuple[bool, str]":
 
 def load(path: str = DEFAULT_HISTORY) -> list[dict]:
     """Read the JSONL history file and return a list of
-    {date, score, grade, ts, home, source} dicts.
+    {date, score, grade, ts, home, source, graded} dicts.
 
     Blank lines and malformed JSON lines are skipped gracefully. A line whose
     '_schema' (C-162) is a newer major than this build understands is skipped too
     (no crash, no misparse) — absent/legacy or current '_schema' loads normally.
     Returns an empty list if the file does not exist.
+
+    Each surviving line is classified rather than KeyError-skipped outright:
+
+      - no 'date' at all -> not a history row (e.g. the C-250 retention marker
+        _rotate_journal prepends when it backs history.jsonl) -> skipped.
+      - 'score' present without 'grade', or vice versa -> a partial/malformed
+        row -> skipped.
+      - both present, and 'graded' is absent or not explicitly False -> a
+        normal GRADED row: 'score'/'grade' load as written.
+      - 'graded' explicitly False -> an UNGRADED row (the five-layer check did
+        not complete for that run): 'score'/'grade' load as None even if a
+        (contradictory) score/grade value is present on disk — an explicit
+        "graded": false wins and withholds rather than publishes.
+
+    The returned 'graded' key is always a bool. 'score'/'grade' are always
+    present on the row (None for an ungraded one) so `"score" in row` stays
+    true for every returned row, same as before.
 
     F-128: 'ts'/'home'/'source' are additive fields a pre-F-128 entry never
     wrote. Rather than guess, a missing 'ts'/'home' loads as None and a
@@ -189,11 +248,19 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
         for obj in _iter_jsonl(p):
             if not _schema_ok(obj):
                 continue
-            try:
-                # Validate expected keys exist
-                row = {"date": obj["date"], "score": obj["score"], "grade": obj["grade"]}
-            except KeyError:
-                continue  # skip incomplete lines
+            if "date" not in obj:
+                continue                      # retention marker / non-history entry
+            has_score = obj.get("score") is not None
+            has_grade = obj.get("grade") is not None
+            if has_score != has_grade:
+                continue                      # partial/malformed row
+            graded = has_score and obj.get("graded", True) is not False
+            row = {
+                "date": obj["date"],
+                "score": obj["score"] if graded else None,
+                "grade": obj["grade"] if graded else None,
+                "graded": graded,
+            }
             row["ts"] = obj.get("ts")
             row["home"] = obj.get("home")
             row["source"] = obj.get("source", "legacy")
@@ -207,17 +274,24 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
 def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
     """Return a compact human-readable trend string.
 
-    Every row is shown, always, in the order recorded — each line carries a
-    timestamp, GRADE, SCORE, an arrow (▲▼· or ^v=) relative to the *previous*
-    row's score, and a ``[source]`` tag (plus the audited home path, when
-    known).
+    Every row is shown, always, in the order recorded — each GRADED line
+    carries a timestamp, GRADE, SCORE, an arrow (▲▼· or ^v=) relative to the
+    *previous GRADED* row's score, and a ``[source]`` tag (plus the audited
+    home path, when known). An UNGRADED row (the five-layer check did not
+    complete for that run — see ``graded`` below) carries no GRADE, no SCORE,
+    and no arrow; it renders its timestamp, the words "no grade", and its
+    ``[source]``/home the same way a graded row does.
 
     Parameters
     ----------
     rows:
-        List of {date, score, grade, ts, home, source} dicts (as returned by
-        load()), in chronological order. A plain {date, score, grade} dict
-        (no ts/home/source keys) works too — it renders with a "legacy" tag.
+        List of {date, score, grade, ts, home, source, graded} dicts (as
+        returned by load()), in chronological order. A plain
+        {date, score, grade} dict (no ts/home/source/graded keys) works too —
+        it renders with a "legacy" tag and is treated as graded. A row is
+        UNGRADED only when it explicitly carries ``"graded": False`` (or, as
+        load() always sets it now, has ``score is None``); its own
+        ``score``/``grade`` values, if any, are never rendered.
     ascii_only:
         Use ASCII arrows (^, v, =) instead of unicode (▲, ▼, ·).
 
@@ -235,6 +309,16 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
     renders, unconditionally, with its source visible inline so a "test" or
     "dev" run is legible as exactly that instead of being dropped or
     disguised as a real "audit".
+
+    C-426: an UNGRADED row (five-layer check incomplete — see ``ScoreResult.
+    graded``) is rendered the same unconditional way, never hidden and never
+    given a flat arrow — a flat arrow is a positive claim of "same score" and
+    would misrepresent a run that has none. Its arrow is skipped entirely and
+    the comparison for the *next* graded row skips over the hole (tracked via
+    ``last_graded_score``, not ``rows[i - 1]``, which would otherwise compare
+    against a ``None`` and crash). A one-line disclosure is appended whenever
+    at least one hole exists, naming the count so an ungraded run is legible
+    as "incomplete", not silently absent or silently averaged over.
     """
     if not rows:
         return "No history yet. Run --trend again later to see your trend."
@@ -249,24 +333,39 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
     # ("🦞 ClawSecCheck" then "ClawSecCheck - Score Trend"), repeating the
     # wordmark — collapsed to the one brand header line.
     lines = [brand.header(subtitle="Score Trend", ascii_only=ascii_only), ""]
-    for i, row in enumerate(rows):
-        if i == 0:
-            arrow = arrow_flat
+    last_graded_score = None
+    holes = 0
+    for row in rows:
+        is_graded = row.get("graded", True) is not False and row.get("score") is not None
+        label = row.get("ts") or row["date"]
+
+        if not is_graded:
+            holes += 1
+            line = f"{label}  no grade  [{row.get('source', 'legacy')}]"
         else:
-            prev_score = rows[i - 1]["score"]
-            curr_score = row["score"]
-            if curr_score > prev_score:
+            if last_graded_score is None:
+                arrow = arrow_flat
+            elif row["score"] > last_graded_score:
                 arrow = arrow_up
-            elif curr_score < prev_score:
+            elif row["score"] < last_graded_score:
                 arrow = arrow_down
             else:
                 arrow = arrow_flat
+            last_graded_score = row["score"]
+            line = f"{label}  {row['grade']}  {row['score']}  {arrow}  [{row.get('source', 'legacy')}]"
 
-        label = row.get("ts") or row["date"]
-        line = f"{label}  {row['grade']}  {row['score']}  {arrow}  [{row.get('source', 'legacy')}]"
         home = row.get("home")
         if home:
             line += f"  {home}"
         lines.append(line)
+
+    if holes:
+        lines.append("")
+        lines.append(
+            f"{holes} of {len(rows)} runs have no grade: the five-layer check did not "
+            "complete for them, so no letter or score was recorded. They are shown "
+            "above in order; the arrows compare each graded run to the previous "
+            "GRADED run."
+        )
 
     return "\n".join(lines)
