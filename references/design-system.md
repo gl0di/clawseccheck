@@ -166,30 +166,41 @@ One component → up to three renderings. **`text` is the contract every screen 
 
 ### 1. Welcome — entry menu · guided Step 1   *(v3 — shipped as `--menu`)*
 
-The single front door. **Minimalist:** four items, not a wall of flags. Shipped as a real
-command — `clawseccheck --menu` renders this exact screen (`clawseccheck/menu.py`,
-`render_menu()`), so the guided agent and the CLI share one grounded source instead of
-hand-kept prose. Version from `__version__`; "last check" age from local score history;
-the staleness line from the offline `update_notice()` (no network).
+The single front door. **One question each:** the three modes plus a way into everything
+else — not a wall of flags. Shipped as a real command — `clawseccheck --menu` renders this
+exact screen (`clawseccheck/menu.py`, `render_menu()`), so the guided agent and the CLI
+share one grounded source instead of hand-kept prose. Version from `__version__`; "last
+check" age from local score history; the staleness line from the offline `update_notice()`
+(no network).
 
-**Slots:** Title=brand line · Choices=4 items · Status=two nudges (last-check + staleness).
+**Slots:** Title=brand line · Choices=4 items · Status=grade rule + two nudges (last-check +
+staleness).
 
 **`text` profile (baseline — Telegram / web / terminal — anywhere):**
 
 ```text
-🦞 ClawSecCheck · v{version}
+🦞 ClawSecCheck · v3.61.0
 
-  1  🔍 Check everything        config + live agent test ⚡
-  2  📦 Check before install    skill · plugin · MCP
-  3  📄 Report & history        show · save · trend · badge
-  4  📋 Menu                    everything else: verify · version · HTML · SARIF…
+  1  🔍 Full check            how safe is this setup?
+  2  👀 Watch                 what changed since last time?
+  3  📦 Before you install    is this thing safe to add?
+  4  📋 Everything else       the full list of instruments
 
-  🕒 Last check: {N} days ago        (omitted when there's no history yet)
-  🆙 Build is {N} days old — a newer one may exist · say "update"   (only when stale)
+  A grade only when all five layers ran — otherwise findings, and what's missing.
+
+  🕒 Last check: today
+  🆙 say "update" to check for a newer version
 ```
 
-**`mono` / `--ascii` profile:** emoji fold to ASCII (🦞 dropped, ⚡→`(live)`, `·`→`-`,
-`…`→`...`); `_ascii()` in `menu.py` owns the mapping. Verified by `tests/test_menu.py`.
+Captured from a real `--menu` run — same-day check, nothing stale. The two status lines
+vary: 🕒 is never omitted — with no history at all it reads `Last check: not checked yet`;
+🆙 stays quiet by default and only names a day count once the offline `update_notice()`
+staleness check fires (`build is {N} days old — a newer one may exist · say "update"`).
+
+**`mono` / `--ascii` profile:** emoji fold to ASCII (🦞 dropped, `·`→`-`, `…`→`...`);
+`_ascii()` in `menu.py` owns the mapping and also folds a defensive `⚡`→`(live)`, though no
+item on this screen carries that glyph any more (B-469 — see below). Verified by
+`tests/test_menu.py`.
 
 **`interactive` profile (Telegram & friends):** the four items → a `buttons` block; the
 numbered/`text` list is the fallback when `capabilities.inlineButtons` is off. A tapped
@@ -197,22 +208,28 @@ button returns its label as the spoken choice (`callback_data`).
 
 **Decisions baked in:**
 
-- **One comprehensive check is the hero.** Item 1 = `--full` (read-only audit **+** live
-  self-test **+** MCP vet). The ⚡ in the label **discloses** the live-agent test up front,
-  so selecting item 1 **is** the consent — no separate "are you sure?" prompt (the user's
-  call: *picking it = consenting*). Read-only-by-default stays honest because the active
-  part is named before the choice; guided flow still runs the read-only audit first, shows
-  the Dashboard, then the live test.
+- **One deliberate check is the hero, entirely read-only.** Item 1 = "Full check" (`--full`
+  and its instruments) — the once-in-a-while, thorough pass. B-469 retired the old label
+  ("config + live agent test ⚡"), which was wrong twice over: the audit itself never
+  touches the running agent, and the live-behaviour tests are a separate, opt-in step. Those
+  tests now live inside mode A on Screen 12, where their ⚡ tag and confirm-gate are stated
+  right next to them — not folded silently into the hero item.
 - **🦞 mascot** in the header, once; consistent with the Dashboard.
 - **No fabricated runtime.** No "~1s" claim — we don't assert an unmeasured speed (law #4).
+- **The grade rule sits on the front door itself.** "A grade only when all five layers ran —
+  otherwise findings, and what's missing" prints between the choices and the nudges, so the
+  honesty invariant is visible before the user picks anything, not only at the end of a
+  report.
 - **Two grounded nudges:** 🕒 last-check age from local history ("not checked yet" when
   empty); 🆙 the update affordance is **always shown** so "update" is discoverable — quiet
   by default (`say "update" to check for a newer version`) and **louder when the offline
   `update_notice()` fires** (names the build age). Never a network call; on "update" the
   **host agent** checks ClawHub and offers `openclaw skills update clawseccheck`.
-- **Discoverability via item 4.** Everything else (verify, monitor/"what changed", deeper
-  `--ask`/`--attest`, html, sarif, percentile, risk-paths, prompts, the `private` modifier)
-  lives behind **"Menu"** — reachable, but off the minimal front door.
+- **Discoverability via item 4 ("Everything else").** Item 2 ("Watch") and item 3 ("Before
+  you install") are now front-door picks of their own — they used to be buried behind a
+  single catch-all "Menu" item. What still lives behind item 4 is the long tail: verify,
+  deeper `--ask`/`--attest`, html, sarif, percentile, risk-paths, the `private` modifier —
+  reachable, but off the minimal front door.
 
 ### 2. Next-actions — post-result menu · guided Step 4   *(v2 — F-043/C-132)*
 
@@ -226,7 +243,7 @@ consent, same principle as Welcome item 1).
 ```text
 Next — ✅ read-only · ⚡ touches live agent (asks)
   a ✅ Copy-paste fixes     b ⚡ Live injection test
-  c ✅ Turn on monitoring   d ✅ Save full report   e ✅ Menu   Start with a?
+  c ✅ Turn on monitoring   d ✅ Save full report   e ✅ Everything else   Start with a?
 ```
 
 **Decisions baked in:**
@@ -239,8 +256,8 @@ Next — ✅ read-only · ⚡ touches live agent (asks)
   routing table); "save full report" and "back to menu" are always useful regardless of
   grade, so they're unconditional — this is what "в конце дать файл/отчёт/меню" (the design
   session's closing-menu ask) resolved to.
-- **d maps to `--save`**, not `--html`/`--sarif` — those stay Menu-only (item 4 → Screen 12)
-  since they're export formats, not the default "give me the report" ask.
+- **d maps to `--save`**, not `--html`/`--sarif` — those stay behind item 4 ("Everything
+  else" → Screen 12) since they're export formats, not the default "give me the report" ask.
 
 ### 3. Dashboard — audit result · guided Step 3   *(v2 — F-044)*
 
@@ -280,7 +297,7 @@ instead of a standalone headline. Source: `audit.py --json` (guided) / `audit.py
 
 Next — ✅ read-only · ⚡ touches live agent (asks)
   a ✅ Copy-paste fixes     b ⚡ Live injection test
-  c ✅ Turn on monitoring   d ✅ Save full report   e ✅ Menu   Start with a?
+  c ✅ Turn on monitoring   d ✅ Save full report   e ✅ Everything else   Start with a?
 ```
 
 **Decisions baked in:**
@@ -593,81 +610,130 @@ summary strip (Critical/High/Medium/Low counts) · Findings **grouped by the 7 f
 
 ### 12. Menu / All functions — capability palette · "menu" / `?` / `[More…]` · `--functions`
 
-The discoverability backstop for Welcome. Welcome shows only 4 common modes; **this is the
-complete list** of what the skill can do, grouped by intent, so the user never has to know a
-flag in advance. ✅ = read-only; ⚡ = exercises the live agent (the tool only *emits* the test
-material — running it is the live part, and it's always confirm-gated). Every verb ties to its
-grounding flag (in parens) so this palette and `cli.py` can't silently drift — it covers the
-`_PRIMARY_MODES` set (40 and growing) plus the audit defaults and modifiers.
+The discoverability backstop for Welcome. Welcome's four items are just the front door;
+**this is the complete list** of what the skill can do — organised by the same three modes
+as Welcome (A · Full check / B · Watch / C · Before you install), plus a cross-cutting
+"works with any mode" bucket, so the user never has to know a flag in advance (C-428). ✅ =
+read-only; ⚡ = exercises the live agent (the tool only *emits* the test material — running
+it is the live part, and it's always confirm-gated); ⚠ = deletes local files (also
+confirm-gated). Every row's flag (in parens) grounds it to `cli.py` so this palette can't
+silently drift — it covers the `_PRIMARY_MODES` set (41 and growing) plus the audit defaults
+and modifiers.
 
 **`text` profile (baseline):**
 
 ```text
 🦞 ClawSecCheck · everything it can do
 
-Scan  ✅ read-only
-  Quick scan        "go" / "1"        {N} checks across your OpenClaw setup        (default)
-  Capability re-check "deeper"       standalone self-report re-run (Check everything already does this once, automatically — F-043) (--ask→--attest)
-  Full check        "full" / "3"      Quick + self-test + a vet of your MCP servers (--full)
-  What changed      "what changed"    diff vs your last scan                        (--monitor)
-  Next steps        "next"            recommended actions from the result           (--next)
-  Attack paths      "risk paths"      the highest-risk capability chains            (--risk-paths)
-  Show suppressed   "suppressed"      findings you've muted, by id                  (--show-suppressed)
+A · Full check — how safe is this setup?
+  gives you: findings — and a grade only when all five layers ran
 
-Live tests  ⚡ exercises your running agent — I confirm first
-  Canary            "canary"          plant a marker, see if an injection leaks it  (--canary)
-  Red-team          "red-team"        a payload suite to run against the agent      (--redteam)
-  Dry-run           "dry-run"         trace what an injection would reach           (--dryrun)
-  Multi-turn        "multi-turn"      plant a poisoned rule, trigger it a turn later (--multiturn)
-  Self-test         "self-test"       all live injection tests at once              (--self-test)
+  Scan  ✅ read-only
+    Quick scan                184 checks over config, files and permissions        (default)
+    Fast pass                 the quickest possible look — static config only      (--fast)
+    Full check                adds installed skills, plugins and logged behaviour  (--full)
+    Capability re-check       re-run the agent's own capability self-report        (--ask)
 
-Vet before you trust  ✅ read-only
-  Vet a skill       "vet <path>"      malware/supply-chain check before you install (--vet)
-  Vet an MCP server "vet-mcp <name>"  same for a configured MCP server              (--vet-mcp)
-  Vet everything    "vet all"         every installed skill, one verdict each       (--vet-all)
+  Dig deeper  ✅ read-only
+    Next steps                recommended actions from the result                  (--next)
+    Attack paths              the highest-risk capability chains                   (--risk-paths)
+    Percentile                where you stand vs typical setups (offline)          (--percentile)
+    Show suppressed           findings you've muted, by id                         (--show-suppressed)
+    Behavioral audit          mine your own logs for a proven-by-log trifecta      (--behavioral)
+    Trajectory analysis       was a skill's instruction acted on at runtime?       (--analyze-trajectory)
+    Bill of materials         skills, MCP servers, hashes and pin state as JSON    (--sbom)
+    Incident pack             findings + hashes + a rotation list, to preserve     (--incident)
+    Judge packet              borderline findings, for a host-agent 2nd opinion    (--judge-packet)
+    Propose ignores           a judge panel's SAFE verdicts as proposed entries    (--propose-ignore)
 
-Track over time  ✅ read-only
-  Trend             "trend"           how your score moved across past scans        (--trend)
-  Percentile        "percentile"      where you stand vs typical setups (offline)   (--percentile)
-  Watch log         "watch log"       timeline of what changed (Agent Watch journal)(--watch-log)
+  Live behaviour tests  ⚡ exercises your running agent — I confirm first
+    Canary                    plant a marker, see if an injection leaks it         (--canary)
+    Red-team                  a payload suite to run against the agent             (--redteam)
+    Dry-run                   trace what an injection would reach                  (--dryrun)
+    Multi-turn                plant a poisoned rule, trigger it a turn later       (--multiturn)
+    Self-test                 all live injection tests at once                     (--self-test)
 
-Share & export  ✅ read-only
-  Badge             "badge"           shareable grade badge — SVG or text           (--badge / --card)
-  HTML report       "html"            standalone HTML report                        (--html)
-  SARIF             "sarif"           findings as SARIF 2.1.0 (CI / code scanning)  (--sarif)
-  Save              "save <path>"     also write the report to a file               (--save)
+  Report & export  ✅ read-only
+    Badge                     shareable badge — SVG or text                        (--badge / --card)
+    HTML report               a standalone HTML report                             (--html)
+    SARIF                     findings as SARIF 2.1.0 (CI / code scanning)         (--sarif)
+    PDF report                the audit as a paginated PDF — attach, don't paste   (--pdf)
+    Save to a file            also write the report to a path you give             (--save)
 
-Integrity  ✅ read-only
-  Verify self       "verify"          SHA-256 of the engine source — tamper check   (--verify-self)
+B · Watch — what changed since last time?  ✅ read-only
+  gives you: events, never a number
+    What changed              diff against your last scan                          (--monitor)
+    Trend                     how your graded scans moved over time                (--trend)
+    Watch log                 timeline of what changed (Agent Watch journal)       (--watch-log)
+    Verify history            the score history's hash-chain is untampered         (--verify-history)
+    Verify events             the same check, on the Agent Watch journal           (--verify-events)
+
+C · Before you install — is this thing safe to add?  ✅ read-only
+  gives you: INSTALL / CAUTION / DO-NOT-INSTALL — not a letter grade
+    Vet anything <target>     malware / supply-chain check, type autodetected      (--vet)
+    Vet a skill <path>        force the skill engine (dir or SKILL.md)             (--vet-skill)
+    Vet a plugin <path>       force the plugin engine (dir or manifest)            (--vet-plugin)
+    Vet an MCP server <name>  the same, for a configured MCP server                (--vet-mcp)
+    Vet a source <slug|url>   reputation gate before anything is fetched           (--vet-source)
+    Vet everything            every installed skill, one verdict each              (--vet-all)
+    Plan a vet <slug|url>     the fetch+isolate+cleanup commands, to review        (--vet-plan)
+    Install advice <path>     INSTALL / CAUTION / DO-NOT-INSTALL, with reasons     (--advise)
+
+Works with any mode
+
+  Integrity  ✅ read-only
+    Verify self               SHA-256 of the engine source — a tamper check        (--verify-self)
+
+  Maintenance  ⚠ deletes local files — I confirm first
+    Purge local data          delete ClawSecCheck's own store — confirms first     (--purge / --yes)
 
 Add to any:
-  "private"   don't record this run to history          (--no-history)
-  "ascii"     plain ASCII, no emoji/box                  (--ascii)
-  "update"    ask your agent to check ClawHub for a newer version   (agent-driven, Screen 14)
+  "private"  don't record this run to history  (--no-history)
+  "ascii"    plain ASCII, no emoji or box  (--ascii)
+  "update"   ask your agent to check ClawHub for a newer version (agent-driven)
 
+Say the name on the left, or pass the flag — nothing here was removed.
 Power / CI flags (--json, --fail-on, --exit-code, --home, --seed, --no-host…): say "help".
 ```
 
-**`mono` profile (terminal / TUI):** same list under box section-headers, columns aligned
-(verb · words · flag). ASCII mode drops emoji/box.
+(the sample count above — "184 checks" — is `len(CHECKS)` at capture time; it is filled in
+live by `render_palette(n_checks=...)`, not hard-coded in `palette.py`.)
+
+**`mono` profile (terminal / TUI):** identical to `text` — the palette has no separate mono
+enhancement (no ANSI color, no box-drawing beyond the plain section headings above). The
+only variant is `--ascii`, which drops emoji and folds ⚡→`(live)`.
 
 **`interactive` profile (Telegram & friends):** too many items for a flat button grid —
-render the list as **text** and offer **category buttons** that re-emit a filtered slice:
-`[Scan] [Live tests ⚡] [Vet] [Track] [Share]`. Modifiers stay text. Degrades to the plain
-text list when `capabilities.inlineButtons` is off.
+render the list as **text** and offer **mode buttons** that re-emit a filtered slice:
+`[A · Full check] [B · Watch] [C · Before you install]`. Modifiers stay text. Degrades to
+the plain text list when `capabilities.inlineButtons` is off.
+
+**Row shape is fixed and bounded (B-471).** Each row is `title  blurb  (flag)`: the title
+column is padded to the widest title in the palette, the blurb column is capped at 54
+characters (`palette._MAX_BLURB_COL`), and `tests/test_palette.py` bounds the whole rendered
+row at 108 characters regardless. A single long blurb used to pad every row in the palette
+out to 273 characters — it broke the layout for all ~60 rows in a wrapping chat client to
+align just one. The fix was two changes, not a tighter cap alone: the old separate
+"say it" prompt column was folded into the title (they said the same thing twice), and
+blurbs were rewritten to fit.
 
 **Decisions baked in:** *complete by construction* — the palette is the `_PRIMARY_MODES` set +
 defaults, nothing hidden; every verb is grounded to a real flag in parens (drift-guard, same
-spirit as `test_schema_grounding`); ⚡ vs ✅ reuses the Dashboard "Next" legend; niche CI/power
-flags are pointed to `help` rather than dumped, to keep the palette readable.
+spirit as `test_schema_grounding`); ✅/⚡/⚠ reuse the Dashboard-style legend (read-only / live
+/ destructive); niche CI/power flags are pointed to `help` rather than dumped, to keep the
+palette readable. **Grouped by the three modes, not a flat list (C-428).** Rows sit under
+A · Full check / B · Watch / C · Before you install / a cross-cutting "works with any mode"
+bucket — the same axis as Welcome (Component 1), so the deep list and the front door tell
+one story instead of two.
 
-**Implemented (F-045):** `clawseccheck/palette.py` holds the grounded registry (the single
-source of truth) and `render_palette()`; the CLI emits it with **`--functions`** (Screen 12,
-one level deeper than `--menu`'s Welcome). `tests/test_palette.py` enforces the drift-guard —
-every `_PRIMARY_MODES` flag is either present in the palette or listed in
-`palette.EXEMPT_FROM_PALETTE` (the container/internal flags `--menu`, `--functions`,
-`--dashboard-findings`) — so the palette can't fall behind `cli.py`. `--ascii` folds ⚡→`(live)`
-and drops emoji.
+**Implemented (F-045; regrouped by mode in C-428):** `clawseccheck/palette.py` holds the
+grounded registry (the single source of truth) and `render_palette()`; the CLI emits it with
+**`--functions`** (Screen 12, one level deeper than `--menu`'s Welcome). `tests/test_palette.py`
+enforces the drift-guard — every `_PRIMARY_MODES` flag is either present in the palette or
+listed in `palette.EXEMPT_FROM_PALETTE` (the container/internal flags `--menu`, `--functions`,
+`--dashboard`, `--dashboard-findings`, plus the internal continuation flags `--judged` and
+`--apply-ignore-proposals`) — so the palette can't fall behind `cli.py`. `--ascii` folds
+⚡→`(live)` and drops emoji.
 
 ### 13. No-config / first-run onboarding — `~/.openclaw` missing or empty
 
