@@ -117,6 +117,8 @@ from pathlib import Path
 
 import pytest
 
+from _realhome import REAL_HOME
+
 # The skill repo root is the parent of tests/ — in BOTH layouts (locally it is
 # <workspace>/skill/, in CI the checkout root itself). Resolve the source dir and manifest
 # relative to it so the guard works in CI, where the repo root IS the skill tree. Only the
@@ -152,7 +154,10 @@ MANIFEST_FILE = Path(__file__).resolve().parent / "grounded_schema_paths.txt"
 
 # C-249 third authority: the INSTALLED OpenClaw package. Local-only, like the recon —
 # absent in CI and on a machine without OpenClaw, where the layer skips. Read-only.
-OPENCLAW_DIST = Path.home() / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
+# B-519: REAL_HOME, not Path.home(). This line happens to run at import, before the
+# suite's $HOME redirect takes effect, so Path.home() would still be correct today --
+# by accident of collection order. Stating the intent removes that dependency.
+OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
 # The zod object the whole openclaw.json is parsed against. Anchoring the walk here is what
 # makes a ROOT-namespace manifest entry a checkable claim ("this is a real top-level key").
 DIST_ROOT_SCHEMA = "OpenClawSchema"

@@ -472,7 +472,11 @@ def test_no_finding_detail_leaks_a_machine_specific_path():
     path outside this repo. Such a path could not be pinned at all -- the manifest would
     only ever match the machine that generated it, and CI (or a ``git worktree``, which
     is what surfaced this) would fail on every fixture."""
-    outside_repo = str(Path.home())
+    # B-519: REAL_HOME, not Path.home(). Under the suite's $HOME redirect the latter is a
+    # pytest tmp dir that no finding could ever quote, which would make this assertion
+    # vacuous -- it exists to catch a detail that leaks the maintainer's actual home.
+    from _realhome import REAL_HOME
+    outside_repo = str(REAL_HOME)
     leaked: dict[str, str] = {}
     for home in CORPUS:
         _, findings, _ = audit(home)

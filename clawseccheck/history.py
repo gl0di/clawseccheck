@@ -24,9 +24,15 @@ from .safeio import secure_append_text, secure_dir
 DEFAULT_HISTORY = "~/.clawseccheck/history.jsonl"
 
 # F-128: run-source tags. "audit" is a real invocation; "test"/"dev" (or any other
-# value an env override supplies) mark development/CI noise so --trend can filter
-# it out by default. "legacy" is not assignable here — it is load()'s own label
-# for a pre-F-128 entry that predates the source concept entirely (see load()).
+# value an env override supplies) mark development/CI noise. The tag makes such a row
+# LEGIBLE — render_trend prints it inline as "[test]" — it does NOT hide the row. This
+# comment used to say the tag existed "so --trend can filter it out by default"; that
+# filter was deleted, and render_trend's own design note (below) explains at length why
+# a hidden row silently rewrote the trend. Two readings of the same field, 270 lines
+# apart, is how B-519 stayed invisible: a tag that reads like containment is not
+# containment, and the suite went on appending thousands of rows to the real store.
+# "legacy" is not assignable here — it is load()'s own label for a pre-F-128 entry that
+# predates the source concept entirely (see load()).
 _SOURCE_ENV = "CLAWSECCHECK_RUN_SOURCE"
 
 

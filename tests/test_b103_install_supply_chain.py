@@ -26,9 +26,13 @@ from clawseccheck.checks import (
     dig,
 )
 from clawseccheck.collector import Context, collect
+from _realhome import REAL_HOME
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
-_FLEET = os.path.expanduser("~/.npm-global/lib/node_modules/openclaw/skills/*/SKILL.md")
+# B-519: REAL_HOME, not expanduser(). This runs at import, before the suite's $HOME
+# redirect, so expanduser() still resolves correctly today -- by accident of collection
+# order. Stating the intent removes that dependency.
+_FLEET = str(REAL_HOME / ".npm-global/lib/node_modules/openclaw/skills/*/SKILL.md")
 
 
 # ── integration: fixtures through the real check ──────────────────────────────

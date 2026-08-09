@@ -784,7 +784,11 @@ def _fleet_home_dirs() -> list[str]:
         str(FIXTURES / "home_safe"),
         str(FIXTURES / "home_vuln"),
     ]
-    real = Path.home() / ".openclaw"
+    # B-519: REAL_HOME, not Path.home(). This runs at parametrize (import) time, before
+    # the suite's $HOME redirect, so Path.home() is still correct today -- by accident of
+    # collection order. Stating the intent removes that dependency.
+    from _realhome import REAL_HOME
+    real = REAL_HOME / ".openclaw"
     if real.is_dir():
         dirs.append(str(real))
     return dirs

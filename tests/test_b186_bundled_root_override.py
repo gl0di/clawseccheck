@@ -354,7 +354,10 @@ def test_tilde_override_is_reported_literally_not_expanded(tmp_path):
     assert "~/foo" in joined
     # The auditor's own expanded home directory must NOT appear — that would be reporting
     # a path OpenClaw itself never resolves to.
-    assert str(Path.home()) not in joined
+    # B-519: REAL_HOME, not Path.home() — under the suite's $HOME redirect the latter is a
+    # tmp dir nothing would ever emit, and the assertion would stop testing anything.
+    from _realhome import REAL_HOME
+    assert str(REAL_HOME) not in joined
 
 
 def test_absolute_path_override_is_unaffected_by_the_b311_fix(tmp_path):

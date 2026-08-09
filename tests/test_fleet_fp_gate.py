@@ -31,6 +31,7 @@ import pytest
 
 import clawseccheck
 from clawseccheck.catalog import CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding
+from _realhome import REAL_HOME, real_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GATE_PATH = REPO_ROOT / "scripts" / "fleet_fp_gate.py"
@@ -238,7 +239,10 @@ def test_a_snapshot_never_embeds_the_fleet_path(tmp_path):
 # ------------------------------------------------------- layer 2: local, real baseline
 
 def _recorded_baseline():
-    path = Path(gate.DEFAULT_BASELINE).expanduser()
+    # B-519: the suite runs with $HOME redirected to a tmp dir, so this must resolve
+    # against the REAL home -- otherwise layer 2 skips everywhere and the release gate
+    # that makes a stale baseline un-forgettable becomes a no-op.
+    path = real_path(gate.DEFAULT_BASELINE)
     if not path.is_file():
         return None
     try:
@@ -275,7 +279,7 @@ def test_recorded_baseline_is_well_formed():
     assert isinstance(baseline.get("fails"), list)
     # The REAL artifact, not a synthetic one: it must name no local path. Home is read
     # dynamically so this file never carries a machine path of its own.
-    assert str(Path.home()) not in json.dumps(baseline)
+    assert str(REAL_HOME) not in json.dumps(baseline)
     assert not baseline.get("degraded_checks"), (
         "the recorded baseline was captured on a machine where a check produced no "
         "verdict, so it under-reports FAILs — re-record it on a quiet machine."

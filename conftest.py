@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -5,8 +6,17 @@ import pytest
 
 # make the skill package importable when running pytest from anywhere
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# ...and the test-support modules (tests/_realhome.py). Explicit rather than relying on
+# pytest's own basedir insertion, so `conftest` itself can import it below.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "tests"))
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+# B-519: the maintainer's ACTUAL home, captured before ``_isolate_local_store`` below
+# redirects $HOME. Defined in tests/_realhome.py -- NOT here -- because this tree has two
+# conftest files and the bare name ``conftest`` resolves to fixtures/conftest.py on a
+# full-suite run. Re-exported for readability at the fixture's use site.
+from _realhome import REAL_HOME  # noqa: E402  (must follow the sys.path insert above)
 
 
 # ==========================================================================================
@@ -177,3 +187,51 @@ def _stub_host_detect(monkeypatch):
         clawseccheck, "_host_detect",
         lambda root="/", **_: {"system": "test", "supported": False, "classes": {}},
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_local_store(tmp_path_factory):
+    """B-519: point $HOME at a throwaway directory so the suite cannot write into the
+    maintainer's real ``~/.clawseccheck/`` store.
+
+    It had been writing there since the store existed. Measured before this fixture:
+    4,414 of the 4,547 rows in the real ``history.jsonl`` -- 97%, and 937 KB -- came from
+    test runs, leaving 132 genuine audits buried in suite noise. ``--trend`` reads that
+    file, so the user's own security history was mostly our exhaust.
+
+    F-128's ``source="test"`` tag (history.py ``_run_source``) is what made this survive
+    so long: it marks the rows filterable, which reads like containment but is not. The
+    row is still appended, still hashed into the chain, still there for anything that
+    does not filter.
+
+    WHY $HOME AND NOT THE SIX ``DEFAULT_*`` CONSTANTS. Six modules name a store path
+    (history/ledger/monitor x2/prescan/update), but ``record(score, path=DEFAULT_HISTORY)``
+    binds its default AT DEF TIME, so ``monkeypatch.setattr(history, "DEFAULT_HISTORY", ...)``
+    never reaches the already-bound value. The bound value is the *string*
+    ``"~/.clawseccheck/history.jsonl"``, expanded by ``expanduser()`` at write time -- so
+    redirecting $HOME does catch it, and catches every store path at once, including any
+    added later. Same reasoning as the corpus-wide permission pin above: this class of
+    defect regrows when patched one path at a time.
+
+    WHY THIS IS NOT A BLANKET SANDBOX. Eight tests deliberately read this machine
+    (real-fleet SKILL.md globs, the recorded fleet-FP baseline, the installed OpenClaw
+    dist, the real ``~/.openclaw``, and two "no machine-specific path may leak" assertions).
+    A naive redirect makes four of them skip and two of them assert against a /tmp path --
+    i.e. it would fix the writes by silently disabling the guards, which is the exact
+    failure this project keeps finding elsewhere. Those tests use ``REAL_HOME`` above.
+    """
+    fake_home = tmp_path_factory.mktemp("isolated-home")
+    # REAL_HOME is captured at import, before this runs; if they ever coincide the
+    # redirect is not redirecting and every write below lands in the user's store.
+    assert fake_home != REAL_HOME, f"isolation is a no-op: {fake_home}"
+    saved = {name: os.environ.get(name) for name in ("HOME", "USERPROFILE")}
+    for name in saved:
+        os.environ[name] = str(fake_home)
+    try:
+        yield fake_home
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
