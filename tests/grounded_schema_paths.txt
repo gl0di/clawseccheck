@@ -32,6 +32,7 @@ agents.defaults.subagents.maxSpawnDepth
 agents.defaults.workspace
 agents.list
 agents.subagents
+audit.enabled
 auth.profiles
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
 channels

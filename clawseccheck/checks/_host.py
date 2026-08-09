@@ -251,28 +251,82 @@ def _host_finding(cid: str, cls: str, ctx: Context) -> Finding:
 
 
 def check_audit_log(ctx: Context) -> Finding:
+    # B-514: this used to assert in-source that "audit.enabled does NOT exist in the
+    # OpenClaw config schema" and told the user so. It does exist, and it is a kill
+    # switch, not a preference. From the installed dist:
+    #
+    #   types.base-DD09OBJd.d.ts:252  type AuditConfig = { enabled?: boolean }
+    #     "Record metadata-only audit events (agent runs and tool actions) into the
+    #      shared state database. ... Default: true. Disabling stops new writes;
+    #      existing records stay readable until they expire."
+    #   types.openclaw-CXjMEWAQ.d.ts:1658  audit?: AuditConfig
+    #
+    # So `audit.enabled: false` silently stops the agent-activity ledger — an
+    # anti-forensics switch this check was declining to look at. `logging.audit` IS a
+    # phantom; that half of the old note stood.
+    #
+    # ABSENT is the DOCUMENTED DEFAULT (true), i.e. the safe state — warning on it would
+    # be a false positive on every stock config. The default lives in the .d.ts, not in
+    # the zod schema, which is why a first pass at this fix grounded on zod alone and
+    # wrongly reported the default as unreadable.
     cfg = ctx.config
-    # logging.audit and audit.enabled do NOT exist in the OpenClaw config schema.
-    # Audit is a CLI command only: `openclaw security audit`
-    # There is no config toggle to enable/disable audit logging.
-    # We check what IS observable: log redaction (separate from audit).
+    audit_enabled = dig(cfg, "audit.enabled")
     redact = dig(cfg, "logging.redactSensitive")
+    redact_note = (
+        ' logging.redactSensitive is also "off", so what is written may expose '
+        "secrets/PII (Israel Amendment 13)." if redact == "off" else ""
+    )
+
+    if audit_enabled is False:
+        return _finding(
+            "B10",
+            WARN,
+            "audit.enabled is false — the metadata audit ledger is switched OFF, so agent "
+            "runs and tool actions stop being recorded to the shared state database. "
+            "Existing records stay readable until they expire; nothing new is written, so "
+            f"an incident from here on leaves no ledger to reconstruct.{redact_note}",
+            "Remove audit.enabled (its default is true) or set it back to true in "
+            "openclaw.json. If something else set it to false, treat that as the finding.",
+        )
     if redact == "off":
         return _finding(
             "B10",
             WARN,
             'logging.redactSensitive is "off" — logs may expose secrets/PII '
-            "(Israel Amendment 13). OpenClaw audit is a CLI command "
-            "(`openclaw security audit`), not a config toggle.",
-            'Set logging.redactSensitive to "tools" and run `openclaw security audit` periodically.',
+            "(Israel Amendment 13). Note `logging.audit` is not a real field; the audit "
+            "toggle is the top-level `audit.enabled`.",
+            'Set logging.redactSensitive to "tools" and run `openclaw security audit` '
+            "periodically.",
+        )
+    if audit_enabled is True:
+        return _finding(
+            "B10",
+            PASS,
+            "audit.enabled is true — the metadata audit ledger is switched on. This is "
+            "the config toggle only; that records are actually being written, retained "
+            "and reachable by you is not observable from config.",
+            "Confirm the ledger is really being produced and is retained somewhere you "
+            "can reach after an incident.",
+        )
+    if audit_enabled is None:
+        return _finding(
+            "B10",
+            PASS,
+            "audit.enabled is not set, and its documented default is true — the metadata "
+            "audit ledger records agent runs and tool actions unless something turns it "
+            "off. Nothing here turns it off.",
+            "Nothing to change. If you want the setting to be explicit rather than "
+            "inherited, set audit.enabled to true.",
+            pass_confidence="no_signal",
         )
     return _finding(
         "B10",
         UNKNOWN,
-        "OpenClaw exposes no audit-log config field (audit is a CLI command: "
-        "`openclaw security audit`) — cannot assess from config alone. "
-        "Run `openclaw security audit` periodically to detect issues.",
-        "Schedule `openclaw security audit` and wire its output to an alert channel.",
+        f"audit.enabled is set to {audit_enabled!r}, which is not a boolean — OpenClaw's "
+        "schema expects true or false, so what the runtime does with this value cannot "
+        "be read from the config.",
+        "Set audit.enabled to a real boolean (true), or remove it to inherit the "
+        "documented default of true.",
     )
 
 

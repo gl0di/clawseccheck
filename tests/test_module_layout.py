@@ -49,6 +49,16 @@ _EXEMPT = {
                       "detect_vet_type/check_installed_skills + SKILL_CONTENT_RING + the "
                       "shared effect/sink analysis); consumes the content ring. Over budget "
                       "by design; a finer split is a later cycle.",
+    "checks/_host.py": "~1,235 lines — the host-monitor / incident-readiness topic "
+                       "(B10/B16/B50-B54 + the attestation helpers). Sat at EXACTLY 1,200 "
+                       "for a while, i.e. one line under a tripwire, and crossed it with "
+                       "B-514: check_audit_log went from a 2-branch stub that returned "
+                       "UNKNOWN on the false premise that audit.enabled does not exist, to "
+                       "the four verdicts the real field actually supports (explicit "
+                       "false / redaction off / explicit true / unset-with-no-schema-"
+                       "default). The extra lines are user-facing verdict text, not "
+                       "machinery; squeezing them to hold a line count would trade the "
+                       "report's clarity for a number. A finer split is a later cycle.",
     "checks/_mcp.py": "~1,400 lines — the MCP / plugin checks + vet_mcp / vet_plugin (40 "
                       "symbols); topic-faithful and over budget by design. A finer split is "
                       "a later cycle.",
