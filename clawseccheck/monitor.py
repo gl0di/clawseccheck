@@ -19,6 +19,9 @@ from pathlib import Path
 
 from .catalog import BY_ID, FAIL, PASS, UNKNOWN, WARN
 from .locking import journal_lock
+from .configjournal import find_by_hash as _journal_find_by_hash
+from .configjournal import newest_hash as _journal_newest_hash
+from .configjournal import read_writes as _journal_read
 from .logsafe import redact_urls_in_text, sanitize_url_host_only
 from .safeio import secure_append_text, secure_dir, secure_write_text
 
@@ -41,7 +44,7 @@ def _ignore_hash(home: Path) -> str:
 # against a new-format one simply skips the new comparison for one run rather than
 # misreading "key absent" as "new X appeared". SNAPSHOT_VERSION itself is a stamp for
 # humans/tests, not something diff() branches on.
-SNAPSHOT_VERSION = 5
+SNAPSHOT_VERSION = 6
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
@@ -1550,7 +1553,10 @@ WATCHED_DIMENSIONS = (
     "checks_not_applicable",
     "config_baseline",
     "config_ever_seen",
+    "config_file_sha256",
+    "config_journal_head",
     "config_parse_error",
+    "config_written_by",
     "gateway_bind",
     "grade",
     "host",
@@ -1909,6 +1915,42 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
         digest = _config_file_digest(ctx)
         if digest:
             snap["config_file_sha256"] = digest
+        # F-170: OpenClaw's own config-write journal, captured HERE rather than compared
+        # live in diff(), for two reasons. It keeps `diff` a pure function of two stored
+        # snapshots — everything it concludes stays reproducible from the state file
+        # alone. And it lets the comparison run on HASHES instead of clocks: our `ts` is
+        # local time while the journal's is UTC with a `Z`, so a string compare between
+        # them is a silent timezone bug waiting for a user east of Greenwich.
+        # Scoped to the config file THIS audit read — see configjournal._same_config.
+        _journal = _journal_read(ctx.home, config_path=getattr(ctx, "config_path", None))
+        if _journal.present:
+            # The newest journaled write, as a cursor. `prev.head != curr.head` means the
+            # journal advanced between runs, which is what makes "changed and reverted"
+            # expressible at all.
+            # Only a REAL hash. `newest_hash` returns "" when the window holds no usable
+            # record — an empty journal, a `copytruncate` rotation, every record filtered
+            # out as belonging to another config — and "" is still a str, so storing it
+            # made a VANISHED cursor indistinguishable from an ADVANCED one. That fired a
+            # false "changed and changed back" on a byte-identical config, which is the
+            # exact thing this module's own docstring says rotation must never produce.
+            # Absent means "no cursor", and the arm that needs one stands down.
+            _head = _journal_newest_hash(_journal.writes)
+            if _head:
+                snap["config_journal_head"] = _head
+            _by = _journal_find_by_hash(_journal.writes, digest) if digest else None
+            if _by is not None:
+                # Attribution for THIS run's config bytes. Only the three fields that are
+                # safe to render — see configjournal.ConfigWrite on why the path and cwd
+                # are never carried at all.
+                snap["config_written_by"] = {
+                    "ts": _by.ts, "pid": _by.pid, "argv0": _by.argv0,
+                    # What this write STARTED from. Without it, attribution names the
+                    # newest write regardless of how many happened in between — so a hand
+                    # edit followed by any OpenClaw write handed the resulting CRITICAL
+                    # alert OpenClaw's own provenance, exonerating whoever really did it,
+                    # in a record that reaches the tamper-evident journal.
+                    "previous_hash": _by.previous_hash,
+                }
     return snap
 
 
@@ -2630,6 +2672,15 @@ def diff_with_notes(prev: dict | None, curr: dict
 
     # --- Agent Watch: connection / trust-surface drift (guarded so an old snapshot
     #     without these keys never produces spurious 'new X' alerts after upgrade) ---
+    # F-170: the config-derived alerts start here and end just before the host block.
+    # Marked by index so a journaled write can be attributed to exactly those and not to
+    # skill, memory or host drift, which the same config edit did not cause.
+    _config_alerts_from = len(alerts)
+    # Indices inside that span whose evidence is NOT the config file — see the RP6/RP7
+    # block below. Kept as an exclusion set rather than by narrowing the span, because the
+    # trajectory-derived alerts are interleaved with config-derived ones inside the same
+    # per-server loop.
+    _trajectory_alerts: set = set()
     _mcp_pair = pair_or_note("mcp", "Connected tool servers")
     if compare_config and _mcp_pair is not None:
         pm, cm = _mcp_pair
@@ -2778,6 +2829,11 @@ def diff_with_notes(prev: dict | None, curr: dict
             c_surf = cs.get("surface_tool_sigs")
             if not (isinstance(p_surf, dict) and isinstance(c_surf, dict)):
                 _mcp_surface_unknown.add(name)
+            # F-170: these three loops read the tool surface OBSERVED IN TRAJECTORY
+            # SIDECARS, not in the config file — so a config write did not cause them and
+            # must not be stamped with its provenance. They sit inside the config-derived
+            # index span, so their indices are excluded explicitly.
+            _traj_from = len(alerts)
             if isinstance(p_surf, dict) and isinstance(c_surf, dict):
                 for tool in sorted(set(c_surf) - set(p_surf)):
                     alerts.append(("HIGH",
@@ -2797,6 +2853,7 @@ def diff_with_notes(prev: dict | None, curr: dict
                     alerts.append(("INFO",
                                    f"MCP server '{name}' tool '{tool}' no longer appears "
                                    "in the observed tool surface (source: trajectory)."))
+            _trajectory_alerts.update(range(_traj_from, len(alerts)))
 
     _chan_pair = pair_or_note("channels", "The ways your agent can be contacted")
     if compare_config and _chan_pair is not None:
@@ -2848,6 +2905,8 @@ def diff_with_notes(prev: dict | None, curr: dict
         alerts.append(("CRITICAL" if exposed else "HIGH",
                        f"Gateway bind changed: '{_pgb}' -> '{cb}'"
                        + (" (now exposed to the network!)" if exposed else "")))
+
+    _config_alerts_to = len(alerts)
 
     _host_pair = pair_or_note("host", "Security tools running on this machine")
     if _host_pair is not None:
@@ -2961,6 +3020,89 @@ def diff_with_notes(prev: dict | None, curr: dict
         note(NOTE_UNDETERMINED,
              f"{len(_newly_visible)} check(s) began reporting a problem they could not "
              f"determine last time — it may be new, or it may have been there unseen.")
+
+    # ---- F-170: OpenClaw's own config-write journal, as a second witness ---------------
+    #
+    # Everything here is derived from the two STORED snapshots, so it stays reproducible
+    # from the state file alone, and every comparison is over hashes rather than clocks
+    # (our `ts` is local, the journal's is UTC — a string compare between them is a
+    # timezone bug waiting for a user east of Greenwich).
+    _p_digest, _c_digest = prev.get("config_file_sha256"), curr.get("config_file_sha256")
+    _p_head, _c_head = prev.get("config_journal_head"), curr.get("config_journal_head")
+    _journal_seen = isinstance(_c_head, str)
+
+    if _p_digest and _c_digest and _journal_seen:
+        _by = curr.get("config_written_by")
+        # Attribution requires evidence that THIS write produced the change we are about to
+        # blame it for: the journaled write must have STARTED from the bytes the previous
+        # snapshot recorded. Without that check the stamp names the newest write regardless
+        # of how many happened in between, so a hand edit followed by any OpenClaw write
+        # handed the resulting CRITICAL alert OpenClaw's own provenance — a false
+        # exoneration, written into a tamper-evident journal. An older snapshot with no
+        # `previous_hash` recorded simply does not qualify, and stays unattributed.
+        _single_write = (isinstance(_by, dict)
+                         and _by.get("previous_hash")
+                         and _by.get("previous_hash") == _p_digest)
+        if _c_digest != _p_digest and _single_write:
+            # ARM 1 — attribution, not a new alert. The drift alerts above already say
+            # WHAT changed; a separate "your config changed" line would be the same edit
+            # reported twice, which `diff()` already avoids in three other places (the
+            # bootstrap/memory overlap, the new-file overlap, the args_pkg/args0 collapse).
+            # Appended to every config-derived alert rather than just the first: each one
+            # reaches the tamper-evident journal as its own entry and is sorted away from
+            # its neighbours in the report, so each has to carry its own provenance.
+            _parts = ["written"]
+            if _by.get("ts"):
+                _parts.append(str(_by["ts"]))
+            if _by.get("pid") is not None:
+                _parts.append(f"by pid {_by['pid']}")
+            _parts.append(f"({_by.get('argv0') or 'unknown program'})")
+            _who = "[" + " ".join(_parts) + "]"
+            for _i in range(_config_alerts_from, min(_config_alerts_to, len(alerts))):
+                if _i in _trajectory_alerts:
+                    continue
+                _lvl, _msg = alerts[_i]
+                alerts[_i] = (_lvl, f"{_msg} {_who}")
+        elif _c_digest != _p_digest and _c_head and _c_digest != _c_head:
+            # ARM 2 — the config changed and OpenClaw's writer did not produce the bytes
+            # that are there now.
+            #
+            # MEDIUM is a ceiling, not a judgement call. The benign causes are ordinary and
+            # numerous — `vim`, `jq ... > tmp && mv`, a dotfile manager swapping a symlink,
+            # a backup restore — and they are the same benign-atomic-replace family already
+            # documented in _degrade_snapshot. Worded as an observation asking for
+            # confirmation, because that is all the evidence supports.
+            #
+            # Gated on the digest having CHANGED, so it is news exactly once. Firing it
+            # whenever the live bytes merely disagree with the journal head would nag on
+            # every run forever after one hand edit, and a warning that cannot be cleared
+            # is one the reader learns to skip.
+            alerts.append((
+                "MEDIUM",
+                "Your settings file changed, and no completed record of that write was "
+                "found in OpenClaw's own config log. That is normal for a hand edit, an "
+                "editor that replaces the file, a restored backup, or a write OpenClaw has "
+                "not finished logging yet — but it is also what an edit made behind your "
+                "back looks like. Confirm you made this change.",
+            ))
+
+    if (_p_digest and _c_digest and _p_digest == _c_digest
+            and _p_head and _c_head and _p_head != _c_head):
+        # ARM 3 — the signal no snapshot diff can produce, and the reason this task exists.
+        # The config reads identical to last time, but OpenClaw journaled at least one write
+        # in between: it was changed and put back. Comparing the journal HEAD rather than
+        # timestamps makes this exact and self-limiting — the head advances once, so this
+        # fires once.
+        #
+        # INFO: a revert is usually a person trying something and undoing it. What makes it
+        # worth a line at all is that the snapshot diff is structurally blind to it, so
+        # silence here is not "nothing happened" but "we could never have known".
+        alerts.append((
+            "INFO",
+            "Your settings were changed and changed back between these two checks — the "
+            "file matches last time's, but OpenClaw recorded a write in between. A "
+            "snapshot comparison alone cannot see this.",
+        ))
 
     return alerts, notes
 

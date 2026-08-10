@@ -533,6 +533,26 @@ These are inherent boundaries of a **local, file-based, scheduled** drift detect
 be fixed, and not a substitute for host-level file-integrity monitoring or a real-time runtime
 IDS. Disclosed here so they are a known trade-off, not a surprise:
 
+- **Changes are attributed, and a change that was undone is still reported.** OpenClaw keeps its
+  own record of every config write it makes (`~/.openclaw/logs/config-audit.jsonl`), including a
+  hash chain over the file's bytes. `--monitor` reads it, so a config drift alert carries who wrote
+  the file and when — `[written 2026-08-03T08:39:10.769Z by pid 149054 (node)]` — rather than only
+  what changed. Only the program's **name** is ever shown; the full command line and working
+  directory the journal also stores are never read into the report.
+
+  Two things this makes visible that comparing snapshots alone cannot:
+
+  - **A change nobody journaled.** If the file differs from what OpenClaw last wrote, you get one
+    MEDIUM observation asking you to confirm it. This is deliberately not an accusation — a hand
+    edit, an editor that replaces the file, or a restored backup all look exactly the same from
+    here — and it appears once per change, not on every run afterwards.
+  - **A change that was made and put back between two checks.** The file matches last time's, so
+    no comparison could ever see it, but the journal recorded a write in between. Reported as INFO.
+
+  Absent journal, or an install that keeps none, means none of this runs — never a guess. A broken
+  link in OpenClaw's own chain is reported as *unknown provenance* and never as tampering: on a
+  healthy machine some links are already broken, because an edit made outside OpenClaw's writer
+  leaves no record at all and log rotation looks the same.
 - **A clean run does not mean everything was compared** — and now says so. Some comparisons are
   skipped rather than made: an unreadable settings file makes every disappearance untrustworthy,
   a truncated collection cannot tell "removed" from "never inspected", and a baseline written by

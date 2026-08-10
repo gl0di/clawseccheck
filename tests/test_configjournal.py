@@ -227,3 +227,32 @@ def test_the_dataclass_defaults_are_inert():
     w = ConfigWrite()
     assert w.previous_hash == "" and w.next_hash == "" and w.argv0 == ""
     assert w.changed_path_count is None and w.suspicious == ()
+
+
+# ---------------------------------------------------------------- scoping to one file
+
+def test_writes_to_another_config_file_are_dropped(tmp_path):
+    """The journal carries a `configPath` per record, and OpenClaw would not carry it if
+    one install could only ever have one. A write to a DIFFERENT config moves the head with
+    no change to the file we watch — which is exactly the shape the "changed and reverted"
+    arm keys on, so it would fire on someone else's edit."""
+    mine, theirs = tmp_path / "openclaw.json", tmp_path / "project" / "openclaw.json"
+    _write_journal(tmp_path, [
+        _record(nxt="1" * 64, configPath=str(mine)),
+        _record(nxt="2" * 64, configPath=str(theirs)),
+    ])
+    writes = read_writes(tmp_path, config_path=mine).writes
+    assert [w.next_hash for w in writes] == ["1" * 64]
+    assert newest_hash(writes) == "1" * 64, "the head must not follow another file's write"
+
+
+def test_a_record_with_no_config_path_is_kept(tmp_path):
+    """An older journal format saying nothing about which file it wrote is not evidence
+    that it wrote a different one. The only fail-open here, and bounded to that case."""
+    _write_journal(tmp_path, [_record(nxt="1" * 64, configPath=None)])
+    assert len(read_writes(tmp_path, config_path=tmp_path / "openclaw.json").writes) == 1
+
+
+def test_scoping_is_off_when_no_path_is_supplied(tmp_path):
+    _write_journal(tmp_path, [_record(configPath="/somewhere/else.json")])
+    assert len(read_writes(tmp_path).writes) == 1

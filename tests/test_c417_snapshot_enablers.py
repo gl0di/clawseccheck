@@ -56,7 +56,7 @@ def _write_config(home: Path, body: str) -> Path:
 
 def test_the_snapshot_carries_all_three_new_fields():
     snap = _snap(FIXTURES / "home_safe")
-    assert snap["version"] == SNAPSHOT_VERSION == 5
+    assert snap["version"] == SNAPSHOT_VERSION == 6
     for key in _NEW_KEYS:
         assert key in snap, f"{key} missing from a clean-run snapshot: {sorted(snap)}"
 
@@ -419,6 +419,12 @@ _CONDITIONAL = {
     "host": "only on a supported host",
     "config_baseline": "only on a blind run (_degrade_snapshot)",
     "config_parse_error": "only on a blind run (_degrade_snapshot)",
+    # F-170. Each absent for a DIFFERENT reason, which is why they are named separately:
+    # no readable config at all; no config-audit journal on this install; a journal that
+    # exists but recorded no write producing the bytes that are there now (a hand edit).
+    "config_file_sha256": "absent when the config could not be read",
+    "config_journal_head": "absent when OpenClaw keeps no config-audit journal",
+    "config_written_by": "absent when no journaled write produced the current bytes",
 }
 
 

@@ -28,7 +28,6 @@ Layer 1 leaf: stdlib plus ``logsafe`` only. Read-only, offline, bounded.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -89,7 +88,13 @@ def _basename(argv) -> str:
     first = argv[0]
     if not isinstance(first, str):
         return ""
-    return redact(os.path.basename(first))[:64]
+    # Split on BOTH separators. `os.path.basename` is `posixpath` on a POSIX host and does
+    # not treat "\\" as a separator, so a Windows-style argv[0] — reachable from WSL, or a
+    # home copied from Windows — survived whole: "C:\\Users\\dave\\secret\\x.exe" came out
+    # unchanged and reached the alert string and the event journal with the user's
+    # directory layout in it.
+    tail = first.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    return redact(tail)[:64]
 
 
 def _str(value) -> str:
@@ -116,9 +121,36 @@ def _write_from(record: dict) -> ConfigWrite:
     )
 
 
+def _same_config(record_path, wanted) -> bool:
+    """Does this record describe the config file the audit actually read?
+
+    The journal carries a ``configPath`` per record and OpenClaw would not carry it if one
+    install could only ever have one. A write to a DIFFERENT config would otherwise move
+    the journal head with no change to the file we are watching — which is exactly the
+    shape the "changed and reverted" arm keys on, so it would fire on someone else's edit.
+
+    A record with no ``configPath`` at all is KEPT: an older journal format saying nothing
+    about which file it wrote is not evidence that it wrote a different one. That is the
+    only fail-open here, and it is bounded to journals that predate the field.
+    """
+    if wanted is None or not isinstance(record_path, str) or not record_path:
+        return True
+    if record_path == str(wanted):
+        return True
+    try:
+        return Path(record_path).resolve() == Path(wanted).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def read_writes(home, since: "str | None" = None,
-                cap: int = JOURNAL_SCAN_CAP) -> Journal:
+                cap: int = JOURNAL_SCAN_CAP,
+                config_path=None) -> Journal:
     """Bounded, read-only tail of the config-write journal, oldest record first.
+
+    *config_path* — when given, records describing a different config file are dropped.
+    See ``_same_config``: without it, a write to an unrelated config moves the journal head
+    and the "changed and reverted" arm fires on someone else's edit.
 
     *since* — an ISO timestamp; records at or before it are dropped. The comparison is a
     plain string compare, which is correct for the fixed-width ISO-8601 UTC form OpenClaw
@@ -159,6 +191,8 @@ def read_writes(home, since: "str | None" = None,
             continue
         if not isinstance(record, dict):
             out.unparsable_lines += 1
+            continue
+        if not _same_config(record.get("configPath"), config_path):
             continue
         write = _write_from(record)
         if since and write.ts and write.ts <= since:
