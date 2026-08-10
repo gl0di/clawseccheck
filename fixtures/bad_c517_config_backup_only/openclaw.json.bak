@@ -1,0 +1,7 @@
+{
+  "gateway": {
+    "auth": {
+      "token": "__RUNTIME_SECRET__"
+    }
+  }
+}

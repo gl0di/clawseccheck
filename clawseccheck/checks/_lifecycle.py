@@ -710,12 +710,144 @@ def check_autonomy(ctx: Context) -> Finding:
 
 
 # ---------- C3: backups of SOUL.md / memory (advisory) ----------
+# B-517: the credit rule below is deliberately narrow. Before this fix ANY file ending
+# `.bak`/`.backup`, or any file whose parent dir *name* merely contained "backup", credited
+# the check — so a plain config backup (openclaw.json.bak) PASSed a question that is
+# actually about SOUL.md/MEMORY.md/AGENTS.md. That was a lying PASS.
+#
+# STEMS: identity-file name stems this check cares about.
+_C3_IDENTITY_STEMS = {"soul", "memory", "agents"}
+
+# COPY signal #1: filenames ending in one of these are backup/archive/snapshot-shaped.
+_C3_COPY_SUFFIXES = (
+    ".bak", ".backup", ".old", ".orig", ".save", ".copy",
+    ".gz", ".tgz", ".tar", ".zip", ".zst",
+)
+# The subset of the above that are opaque containers — never opened, see OPAQUE below.
+_C3_ARCHIVE_SUFFIXES = (".gz", ".tgz", ".tar", ".zip", ".zst")
+# COPY signal #2: a trailing ".<digits>" (e.g. "SOUL.md.1").
+_C3_TRAILING_DIGITS_RE = re.compile(r"\.\d+$")
+# COPY signal #3: one of the filename's tokens is a backup/archive word.
+_C3_COPY_TOKENS = {"bak", "backup", "backups", "old", "orig", "archive", "snapshot", "copy"}
+# COPY signal #4: an 8-digit run (e.g. 20260801) or an ISO date (YYYY-MM-DD) anywhere in the
+# filename. Checked against the raw (lowercased) name, not the split tokens — tokenizing
+# on non-alphanumeric characters would break a hyphenated ISO date into three tokens.
+_C3_EIGHT_DIGIT_RUN_RE = re.compile(r"(?<!\d)\d{8}(?!\d)")
+_C3_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# COPY signal #5: ANY ancestor directory component (not just the immediate parent) is one
+# of these — e.g. "backups/2026-08-01/SOUL.md".
+_C3_COPY_DIR_NAMES = {"backup", "backups", ".backups", "snapshot", "archive"}
+_C3_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+# Bound the walk (B-517): the tighter identity-tied credit rule short-circuits far less
+# often than the old "5 matches total" cutoff, so an unbounded rglob() over ctx.home could
+# do a lot of stat() work on a huge home directory. 2000 regular files per search root is
+# generous for any real agent home (config + a handful of workspaces + backups) while
+# still bounding a pathological/huge tree — same order of magnitude as the walk itself
+# (os.walk) rather than a tiny convention-sized cap like the 100-file state-dir walks
+# elsewhere, because here the file we care about could be genuinely anywhere in the tree.
+_C3_MAX_WALK_FILES = 2000
+
+
+def _c3_tokens(name_lower: str) -> set:
+    return {t for t in _C3_TOKEN_SPLIT_RE.split(name_lower) if t}
+
+
+def _c3_is_identity(path: Path) -> bool:
+    """True if the filename tokenizes to include soul/memory/agents."""
+    return bool(_c3_tokens(path.name.lower()) & _C3_IDENTITY_STEMS)
+
+
+def _c3_is_copy(path: Path) -> bool:
+    """True if the filename or its ancestry looks like a backup/archive/snapshot copy."""
+    name = path.name.lower()
+    if name.endswith(_C3_COPY_SUFFIXES):
+        return True
+    if _C3_TRAILING_DIGITS_RE.search(name):
+        return True
+    if _c3_tokens(name) & _C3_COPY_TOKENS:
+        return True
+    if _C3_EIGHT_DIGIT_RUN_RE.search(name) or _C3_ISO_DATE_RE.search(name):
+        return True
+    for ancestor in path.parents:
+        if ancestor.name.lower() in _C3_COPY_DIR_NAMES:
+            return True
+    return False
+
+
+def _c3_is_backup_archive(path: Path) -> bool:
+    """An opaque container that is plausibly a BACKUP, not merely a file that is zipped.
+
+    The OPAQUE arm grants a (reduced-confidence) PASS without opening the container, so
+    its trigger has to be narrow. Keying on the archive suffix alone reintroduced exactly
+    the defect this task removes: measured, a stray `holiday-photos.zip` or a
+    `node_modules/leftpad-1.0.0.tgz` sitting anywhere under the home flipped C3 from WARN
+    to PASS — a lying PASS with a quieter voice. An archive now has to *say* it is a
+    backup: a backup word or a date in its name, or a backup-ish directory above it.
+    """
+    if not path.name.lower().endswith(_C3_ARCHIVE_SUFFIXES):
+        return False
+    name = path.name.lower()
+    if _c3_tokens(name) & _C3_COPY_TOKENS:
+        return True
+    if _C3_EIGHT_DIGIT_RUN_RE.search(name) or _C3_ISO_DATE_RE.search(name):
+        return True
+    return any(a.name.lower() in _C3_COPY_DIR_NAMES for a in path.parents)
+
+
+def _c3_git_covers(directory: Path, boundary: Path) -> bool:
+    """True if `directory`, or an ancestor of it, holds a `.git` dir — the identity file
+    living there is version-controlled, which is its own recovery mechanism.
+
+    The climb is bounded at `boundary` (``ctx.home``, resolved): without a bound, this
+    walk up `directory.parents` doesn't stop at the filesystem root, so a simulated agent
+    home that happens to sit *inside* some unrelated OUTER git checkout (this very skill
+    repo's own fixtures/ tree is exactly that case — every fixture home lives under
+    clawseccheck's own `.git`) gets spuriously credited for a repo it has nothing to do
+    with. Real OpenClaw homes (``~/.openclaw``) are not normally nested inside another
+    project's checkout, but nothing should depend on that being true.
+    """
+    if not directory.is_relative_to(boundary):
+        candidates = [directory]  # not under the simulated home at all — no climb
+    else:
+        candidates = [directory, *(p for p in directory.parents if p.is_relative_to(boundary))]
+    for candidate in candidates:
+        try:
+            if (candidate / ".git").is_dir():
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def check_backups(ctx: Context) -> Finding:
     """Are the agent's identity/memory files backed up (recoverable after drift/poisoning)?"""
     has_bootstrap = any(n.endswith(("SOUL.md", "MEMORY.md", "AGENTS.md")) for n in ctx.bootstrap)
     if not has_bootstrap:
         return _finding("C3", UNKNOWN, "No bootstrap/memory files found to back up.", "—")
-    found = []
+
+    # Which collected bootstrap files are the identity triple, and where they live — used
+    # both to exclude an identity file from crediting as its own backup, and to grant VCS
+    # credit when its directory is version-controlled.
+    _identity_keys = [k for k in ctx.bootstrap if k.endswith(("SOUL.md", "MEMORY.md", "AGENTS.md"))]
+    _identity_paths = []
+    for _key in _identity_keys:
+        _p = ctx.home / _key
+        try:
+            _identity_paths.append(_p.resolve())
+        except OSError:
+            _identity_paths.append(_p)
+    _identity_path_set = set(_identity_paths)
+
+    try:
+        _home_resolved = ctx.home.resolve()
+    except OSError:
+        _home_resolved = ctx.home
+
+    vcs_names: list = []
+    for _p in _identity_paths:
+        if _c3_git_covers(_p.parent, _home_resolved) and _p.name not in vcs_names:
+            vcs_names.append(_p.name)
+
     _backup_search_roots = [ctx.home]
     for _candidate in (
         ctx.home.parent / "backups",
@@ -724,27 +856,75 @@ def check_backups(ctx: Context) -> Finding:
     ):
         if _candidate != ctx.home and _candidate not in _backup_search_roots:
             _backup_search_roots.append(_candidate)
+
+    credited: list = []      # IDENTITY & COPY, name-tied to SOUL/MEMORY/AGENTS
+    backup_like_count = 0    # COPY but not identity-tied (or excluded as the file itself)
+    archive_seen = False     # any archive-suffixed file — OPAQUE fallback, never opened
+
     for _root in _backup_search_roots:
         try:
-            for entry in _root.rglob("*"):
-                n = entry.name.lower()
-                if entry.is_file() and (
-                    n.endswith((".bak", ".backup")) or "backup" in entry.parent.name.lower()
-                ):
-                    found.append(entry.name)
-                    if len(found) >= 5:
-                        break
+            entries = walk_dir_safely(_root, exclude_vcs=True, max_files=_C3_MAX_WALK_FILES)
         except OSError:
-            pass
-        if len(found) >= 5:
-            break
-    if found:
+            continue
+        for entry in entries:
+            if _c3_is_backup_archive(entry):
+                archive_seen = True
+            is_identity = _c3_is_identity(entry)
+            is_copy = _c3_is_copy(entry)
+            if is_identity and is_copy:
+                try:
+                    resolved = entry.resolve()
+                except OSError:
+                    resolved = entry
+                if resolved in _identity_path_set:
+                    continue  # the identity file itself, not a backup of it
+                if entry.name not in credited:
+                    credited.append(entry.name)
+            elif is_copy:
+                backup_like_count += 1
+
+    if credited or vcs_names:
+        if credited:
+            detail = (
+                "Backup(s) tied to the agent's identity files present "
+                f"({', '.join(credited[:3])}{'…' if len(credited) > 3 else ''})."
+            )
+        else:
+            detail = (
+                "Identity file(s) live in a git-tracked directory "
+                f"({', '.join(vcs_names[:3])}{'…' if len(vcs_names) > 3 else ''}) — "
+                "version history provides recovery."
+            )
         return _finding(
             "C3",
             PASS,
-            f"Backups present ({', '.join(found[:3])}{'…' if len(found) > 3 else ''}).",
+            detail,
             "Keep backups owner-only and outside the agent's writable workspace.",
+            pass_confidence="verified",
         )
+
+    if archive_seen:
+        return _finding(
+            "C3",
+            PASS,
+            "An archive file was found in the backup search paths but was not opened "
+            "(archives are never inspected) — verify by hand that it actually holds "
+            "SOUL.md/MEMORY.md.",
+            "Keep backups owner-only and outside the agent's writable workspace.",
+            pass_confidence="no_signal",
+        )
+
+    if backup_like_count:
+        return _finding(
+            "C3",
+            WARN,
+            f"Found {backup_like_count} backup-like file(s), none corresponding to "
+            "SOUL.md/MEMORY.md/AGENTS.md — the agent's identity/memory files still have "
+            "nothing to restore from.",
+            "Keep versioned, owner-only backups of SOUL.md/AGENTS.md/MEMORY.md outside the "
+            "agent's writable workspace.",
+        )
+
     return _finding(
         "C3",
         WARN,
