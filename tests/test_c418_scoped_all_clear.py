@@ -53,6 +53,7 @@ def _complete(**over) -> dict:
         "watched": list(WATCHED_DIMENSIONS),
         "score": 90, "raw_score": 90, "raw_score_scope": "abc", "grade": "A",
         "checks": {"B1": PASS},
+        "checks_not_applicable": [], "checks_degraded": [],
         "skills": {"helper": {"hash": "h", "tree": "t", "caps": ["fs"], "version": "1.0"}},
         "bootstrap": {"SOUL.md": "b"},
         "memory": {"memory/note.md": {"hash": "m"}},

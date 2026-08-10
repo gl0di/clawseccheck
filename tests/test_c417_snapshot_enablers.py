@@ -56,7 +56,7 @@ def _write_config(home: Path, body: str) -> Path:
 
 def test_the_snapshot_carries_all_three_new_fields():
     snap = _snap(FIXTURES / "home_safe")
-    assert snap["version"] == SNAPSHOT_VERSION == 4
+    assert snap["version"] == SNAPSHOT_VERSION == 5
     for key in _NEW_KEYS:
         assert key in snap, f"{key} missing from a clean-run snapshot: {sorted(snap)}"
 

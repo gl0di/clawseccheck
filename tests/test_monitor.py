@@ -15,7 +15,7 @@ def _levels(alerts):
 def test_snapshot_has_expected_shape():
     ctx, findings, score = audit(FIXTURES / "home_safe")
     snap = snapshot(ctx, findings, score)
-    assert snap["version"] == 4 and snap["grade"] in "ABCDF"
+    assert snap["version"] == 5 and snap["grade"] in "ABCDF"
     assert "checks" in snap and "skills" in snap and "bootstrap" in snap
     assert snap["bootstrap"]  # home_safe has a SOUL.md
 

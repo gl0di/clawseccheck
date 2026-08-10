@@ -41,7 +41,7 @@ def _ignore_hash(home: Path) -> str:
 # against a new-format one simply skips the new comparison for one run rather than
 # misreading "key absent" as "new X appeared". SNAPSHOT_VERSION itself is a stamp for
 # humans/tests, not something diff() branches on.
-SNAPSHOT_VERSION = 4
+SNAPSHOT_VERSION = 5
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
@@ -1546,6 +1546,8 @@ WATCHED_DIMENSIONS = (
     "bootstrap",
     "channels",
     "checks",
+    "checks_degraded",
+    "checks_not_applicable",
     "config_baseline",
     "config_ever_seen",
     "config_parse_error",
@@ -1560,6 +1562,7 @@ WATCHED_DIMENSIONS = (
     "native_count",
     "raw_score",
     "raw_score_scope",
+    "scope",
     "score",
     "skills",
     "skills_capped",
@@ -1811,6 +1814,36 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
         "grade": score.grade,
         "checks": {f.id: f.status for f in findings
                    if not getattr(f, "suppressed", False)},
+        # B-500: WHY a check is UNKNOWN, recorded because the status alone cannot say.
+        # "The surface is confirmed absent" (no MCP server configured yet) and "the check
+        # lost its footing" are the same string in `checks`, and they call for opposite
+        # treatment: the first walking to WARN is a user configuring a feature for the
+        # first time — announcing that as a regression is the false alarm this dimension
+        # is most likely to produce — while the second is a real loss of coverage.
+        # Two sorted id lists rather than a dict per check: only a minority of ids are ever
+        # in either, so this costs a fraction of what widening `checks` itself would, and
+        # it leaves the `checks` shape every existing consumer reads untouched.
+        "checks_not_applicable": sorted(
+            f.id for f in findings
+            if not getattr(f, "suppressed", False) and getattr(f, "not_applicable", False)),
+        # B-500: which optional subsystems actually RAN. Two runs taken under different
+        # scopes are not comparable — `--no-host` alone turns five checks from WARN to
+        # UNKNOWN on a machine where nothing changed — and without this the drift engine
+        # reads the operator's own choice as a regression.
+        #
+        # The EFFECTIVE flags off `ctx`, not the CLI's `cli_opt_outs` string list: the
+        # latter is populated only on the CLI path, so a library caller passing
+        # `include_host=False` produced the identical false alerts with an empty opt-out
+        # list. What matters is what ran, not how it was asked for.
+        "scope": sorted(name for name, on in (
+            ("host", getattr(ctx, "include_host", False)),
+            ("sockets", getattr(ctx, "include_sockets", False)),
+            ("deptree", getattr(ctx, "include_deptree", False)),
+            ("native", getattr(ctx, "native", None) is not None),
+        ) if on),
+        "checks_degraded": sorted(
+            f.id for f in findings
+            if not getattr(f, "suppressed", False) and getattr(f, "engine_degraded", False)),
         "skills": _skill_sig(ctx),
         "bootstrap": {n: _h(t) for n, t in ctx.bootstrap.items()},
         "memory": _snapshot_memory_files(ctx, capped=_mem_capped),
@@ -1974,6 +2007,19 @@ def diff_with_notes(prev: dict | None, curr: dict
     # guard is kept independent of it so a caller that builds a snapshot without passing
     # *prev* still cannot fabricate a removal.
     trust_removals = not curr_blind
+
+    # Two runs taken under different --no-* flags describe different subjects. The whole
+    # transition family stands down rather than reporting the operator's own choice as
+    # drift; an independent pass reproduced 5 false alerts in each direction from
+    # --no-host/--no-sockets alone, on a machine where nothing had changed.
+    _p_opt, _c_opt = prev.get("scope"), curr.get("scope")
+    _same_scope_flags = (_p_opt is None or _c_opt is None
+                         or sorted(_p_opt) == sorted(_c_opt))
+    if not _same_scope_flags:
+        note(NOTE_UNDETERMINED,
+             "Check results were not compared: this run and the last were taken with "
+             "different options, so they do not cover the same ground.")
+
 
     # C-418: the blind-config family. Each of these is a comparison declined, and each used
     # to vanish into the all-clear. The HIGH alert below explains the CAUSE; these say what
@@ -2278,7 +2324,9 @@ def diff_with_notes(prev: dict | None, curr: dict
     # — a blind run's score is inflated by UNKNOWN-exclusion, so the run after it would
     # report a fabricated "score dropped" as the real checks come back. The coverage
     # alert above says so explicitly instead.
-    if not (prev_blind or curr_blind):
+    # `_same_scope_flags`: a score taken with --no-host is not the same measurement as
+    # one taken without it, so a fall between them is arithmetic, not drift.
+    if not (prev_blind or curr_blind) and _same_scope_flags:
         if _num(curr, "score") < _num(prev, "score"):
             alerts.append(("HIGH", f"Security score dropped: {prev.get('grade')} {prev.get('score')} "
                                    f"-> {curr.get('grade')} {curr.get('score')}."))
@@ -2352,6 +2400,51 @@ def diff_with_notes(prev: dict | None, curr: dict
     # including CRITICAL ones, as "Now FAILING" against a config that never changed).
     _checks_pair = pair_or_note("checks", "Individual check results")
     pc, cc = _checks_pair if _checks_pair is not None else ({}, {})
+    # B-500 — the transition matrix, and why each silent cell is silent.
+    #
+    #   prev \ curr |  PASS  |  WARN  |  FAIL  | UNKNOWN | gone
+    #   PASS        | silent | ALERT  | ALERT  | ALERT   | ALERT/note
+    #   WARN        | silent | silent | ALERT  | ALERT*  | ALERT/note
+    #   FAIL        | silent | silent | silent | ALERT*  | ALERT/note
+    #   UNKNOWN     | silent | ALERT* | ALERT  | silent  | ALERT/note
+    #   absent      | silent | silent | ALERT  | silent  |   —
+    #
+    #   * gated on the reason, not the status — see `_na` below.
+    #
+    # Silent cells, each for a reason and not by omission: anything INTO PASS is an
+    # improvement; WARN->WARN and FAIL->FAIL are the same verdict restated; UNKNOWN->UNKNOWN
+    # is unchanged blindness (the C-418 coverage note carries that, an alert per run would
+    # be a standing false alarm); `absent -> WARN/UNKNOWN` is a check this version added, so
+    # there is no earlier verdict to have regressed from.
+    #
+    # Before this, only two of the twenty-five cells alerted. On the real machine 78 of 184
+    # checks sit in WARN or UNKNOWN, so for 42% of the subject nothing short of a full FAIL
+    # was ever announced — and going grey is both cheaper for an attacker than going red and
+    # RAISES the displayed score, since UNKNOWN leaves the score's denominator entirely.
+    #
+    # `_na` / `_deg`: which UNKNOWNs are a confirmed-absent surface and which are a broken
+    # check. The status alone cannot tell them apart, and treating them alike is the false
+    # alarm this arm is most likely to produce — a user configuring their first MCP server
+    # walks UNKNOWN->WARN benignly. An older baseline carries neither list, so the arms that
+    # need them stand down for one run rather than guess.
+    _p_na, _c_na = prev.get("checks_not_applicable"), curr.get("checks_not_applicable")
+    _reasons_known = isinstance(_p_na, list) and isinstance(_c_na, list)
+    _na_prev, _na_curr = set(_p_na or ()), set(_c_na or ())
+    _deg_curr = set(curr.get("checks_degraded") or ())
+    if pc and cc and not _reasons_known:
+        note(NOTE_NO_PRIOR_RECORD,
+             "Checks that stopped being determinable were not compared — your saved record "
+             "does not say which of them were simply not applicable.")
+
+    # B-500: comparisons whose OUTCOME is real but whose CAUSE we cannot evidence. They
+    # become coverage notes rather than alerts — see the arms below for why.
+    _went_dark: list = []
+    _newly_visible: list = []
+    def _check_sev(cid: str, fallback: str = "MEDIUM") -> str:
+        return getattr(BY_ID[cid], "severity", fallback) if cid in BY_ID else fallback
+
+    def _check_title(cid: str) -> str:
+        return BY_ID[cid].title if cid in BY_ID else cid
     for cid, status in cc.items():
         if status == FAIL and pc.get(cid) != FAIL:
             # B-269: a check that read UNKNOWN only because the PREVIOUS run could not
@@ -2449,8 +2542,12 @@ def diff_with_notes(prev: dict | None, curr: dict
         #   * MEDIUM — below the FAIL alert, which now carries the check's true catalog
         #     severity (B-280). PASS->WARN is a real regression but a weaker claim than a
         #     FAIL, and this is an advisory alert, not a scored finding.
-        elif (not (prev_blind or curr_blind) and pc.get(cid) == PASS
-              and status in (WARN, UNKNOWN)):
+        # `_same_scope_flags` added by B-500: this arm predates the scope record and fired
+        # "No longer determinable: Host firewall active" simply because the operator passed
+        # --no-host. Pre-existing, and the same unsoundness the new arms are gated against —
+        # comparing two runs that examined different subjects.
+        elif (not (prev_blind or curr_blind) and _same_scope_flags
+              and pc.get(cid) == PASS and status in (WARN, UNKNOWN)):
             title = BY_ID[cid].title if cid in BY_ID else cid
             if status == WARN:
                 alerts.append((
@@ -2471,6 +2568,54 @@ def diff_with_notes(prev: dict | None, curr: dict
                     "the grade reflecting it. Confirm the state it inspects is still "
                     "readable.",
                 ))
+
+        # B-500: a check that already carried a verdict and has now gone dark. Strictly
+        # worse than the verdict staying put — an open FAIL that becomes UNKNOWN stops
+        # counting against the score at all, so the grade can RISE on the strength of a
+        # check ceasing to work. `curr not applicable` is excluded because that is the
+        # benign shape: the surface it inspects is confirmed gone (the user removed their
+        # MCP config), not the check losing its footing.
+        elif (_reasons_known and _same_scope_flags and not (prev_blind or curr_blind)
+              and status == UNKNOWN and pc.get(cid) in (WARN, FAIL)
+              and cid not in _na_curr):
+            title, was = _check_title(cid), pc[cid]
+            if cid in _deg_curr:
+                alerts.append((
+                    _check_sev(cid, "HIGH"),
+                    f"Stopped working: {title} — this check crashed or timed out, so its "
+                    f"previous {was} verdict is now unverified rather than resolved.",
+                ))
+            else:
+                # NOT an alert without positive evidence that the check broke. `cid not in
+                # _na_curr` is the ABSENCE of a marker, and absence is not evidence: only
+                # 15 of the 48 UNKNOWN findings on the maintainer's own machine carry
+                # `not_applicable` at all, so "unmarked" means "nobody set the flag", not
+                # "this check lost its footing". Asserting a regression on that would fire
+                # whenever a surface goes away without its check having been migrated to
+                # the flag. Stated as a coverage note instead — true either way, and it
+                # still ends the silence this task exists to end.
+                _went_dark.append((cid, was))
+
+        # B-500: a check that could not determine its state last time and now reports a
+        # problem. NOT framed as a regression — it may always have been true and merely
+        # unseeable — but it is news, and it was silent before.
+        #
+        # This is the arm with the real false-alarm risk, and it is gated on the REASON,
+        # never the status: a surface confirmed absent last run and present now is a user
+        # configuring a feature for the first time. On the maintainer's own machine that is
+        # a live case, not a hypothetical — four MCP checks and six browser checks all sit
+        # at "not configured". Announcing those as findings the moment someone connects a
+        # server is precisely the noise that teaches people to stop reading the monitor.
+        elif (_reasons_known and _same_scope_flags and not (prev_blind or curr_blind)
+              and status == WARN and pc.get(cid) == UNKNOWN and cid not in _na_prev):
+            # A NOTE, never an alert. Reproduced: connecting a first MCP server made this
+            # arm announce a finding for an entirely ordinary action, because `not
+            # applicable` is set by only a subset of emitters — B331/B332/B333 report the
+            # literal string "No MCP servers configured." WITHOUT it, while B15/B24/B166
+            # report the SAME string WITH it. The split is per-emitter, not per-surface, so
+            # the flag cannot carry the weight of an alert. Toggling --no-host produced
+            # five more of these on an unchanged machine.
+            _newly_visible.append(cid)
 
     if _num(curr, "native_count") > _num(prev, "native_count"):
         delta = _num(curr, "native_count") - _num(prev, "native_count")
@@ -2758,14 +2903,64 @@ def diff_with_notes(prev: dict | None, curr: dict
         note(NOTE_NO_PRIOR_RECORD,
              f"Some settings of {len(_chan_partial)} contact channel(s) had nothing to "
              f"compare against — they are recorded on only one of the two runs.")
-    # A check that ran last time and not this time is never visited: the comparison loop
-    # walks the CURRENT set only, so an archived check, or one newly silenced by an ignore
-    # rule, leaves no trace at all.
+    # B-500: a check that ran last time and not this time. The comparison loop walks the
+    # CURRENT set only, so before this these ids were never visited at all.
+    #
+    # Two very different causes, told apart rather than merged. `run_all` isolates each
+    # check and, on a crash or timeout, replaces the catalog id with an `ERR:<funcname>`
+    # key — so a check that blows up does not go UNKNOWN, it VANISHES and a stranger
+    # appears beside it. A CRITICAL FAIL that becomes a crash therefore disappeared in
+    # complete silence. The scoring layer normally catches this via DEGRADED_CHECK_CAP,
+    # but that cap is 49 and the real machine already scores 49, so on the host this was
+    # measured on the cap could not move anything.
+    #
+    # No `ERR:` key means the id simply no longer exists in this build — a catalog change
+    # across an upgrade. That is not an event and must not alert; it gets a note, and it
+    # self-heals on the next run.
     _vanished = set(pc) - set(cc)
-    if _vanished:
+    # An id can also vanish because a new ignore rule suppressed it — suppressed findings
+    # are excluded from the snapshot entirely. The ignore-hash change is already alerted
+    # separately; attributing the disappearance to a crash on top of it would be a second,
+    # false explanation for something the user just did deliberately.
+    _ignore_moved = prev.get("ignore_hash", "") != curr.get("ignore_hash", "")
+    if _vanished and _same_scope_flags and not _ignore_moved:
+        _n_crashed = sum(1 for k in cc if str(k).startswith("ERR:"))
+        _lost_verdicts = sorted(c for c in _vanished if pc.get(c) in (FAIL, WARN))
+        if _n_crashed and _lost_verdicts and not (prev_blind or curr_blind):
+            # ONE run-level alert, not one per id. The crash marker is `ERR:<funcname>`,
+            # which cannot be mapped back to the catalog id that produced it, so claiming
+            # per-id that THIS check crashed is a guess — and a wrong one whenever an
+            # upgrade removed other checks in the same release, which reproduced as three
+            # false "Stopped reporting" lines from a single unrelated crash. What IS
+            # evidenced: this run had crashes, and these ids carried unresolved verdicts
+            # and returned nothing. Both facts, no invented link between them.
+            _names = ", ".join(_check_title(c) for c in _lost_verdicts[:3])
+            _sev = max((_check_sev(c) for c in _lost_verdicts),
+                       key=lambda v: ("LOW", "MEDIUM", "HIGH", "CRITICAL").index(v)
+                       if v in ("LOW", "MEDIUM", "HIGH", "CRITICAL") else 0)
+            alerts.append((
+                _sev,
+                f"{_n_crashed} check(s) crashed or timed out this run, and "
+                f"{len(_lost_verdicts)} check(s) that previously reported a problem "
+                f"produced no result at all (e.g. {_names}). Their verdicts are "
+                f"unverified rather than resolved.",
+            ))
+        else:
+            note(NOTE_UNDETERMINED,
+                 f"{len(_vanished)} check(s) that ran last time did not run this time — "
+                 f"most likely removed or renamed by an update.")
+
+    # B-500: the two outcome-real / cause-unevidenced families, disclosed rather than
+    # asserted. This is the C-418 mechanism doing exactly what it was built for: the
+    # silence is ended without a claim the evidence does not support.
+    if _went_dark:
         note(NOTE_UNDETERMINED,
-             f"{len(_vanished)} check(s) that ran last time did not run this time, and "
-             f"are not reported as missing.")
+             f"{len(_went_dark)} check(s) that previously reported a problem can no longer "
+             f"determine their state, so the score no longer counts them against you.")
+    if _newly_visible:
+        note(NOTE_UNDETERMINED,
+             f"{len(_newly_visible)} check(s) began reporting a problem they could not "
+             f"determine last time — it may be new, or it may have been there unseen.")
 
     return alerts, notes
 
