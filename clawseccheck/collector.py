@@ -451,6 +451,14 @@ class Context:
     # only this file, so it is reported verbatim rather than left implicit behind a bare
     # `config_found` bool. May be a legacy `clawdbot.json` — see resolve_config_in_home.
     config_path: "Path | None" = None
+    # C-417: sha256 hex of the config file's bytes AS THIS AUDIT READ THEM, captured by
+    # the loader on its own read rather than by a second one later. --monitor persists it
+    # in the drift baseline, so it must describe the same bytes every other field in that
+    # snapshot describes; a re-read at snapshot time would silently pair one file's digest
+    # with another file's parsed values whenever anything wrote in between. None when the
+    # config was absent or did not load. Covers the ROOT file only — see
+    # configloader.load_openclaw_config's `root_digest`.
+    config_sha256: "str | None" = None
     # B-282 (ENV-2/ENV-6): keys parsed from the two GLOBAL runtime dotenv files, with
     # first-wins precedence already applied. `dotenv_sources` maps key -> the file it came
     # from, for evidence. NEVER includes the workspace .env, whose OPENCLAW_* keys the
@@ -4186,10 +4194,15 @@ def _recover_escaped_config_symlink(
     # satisfied and $include resolution roots at the dotfiles repo (the correct trust root
     # for a dotfiles-managed config). Any failure here == genuinely unreadable -> None ->
     # genuine-blind cap preserved.
+    _digest: list = []
     try:
-        parsed = _load_openclaw_config(target, root_byte_limit=_MAX_CONFIG_BYTES)
+        parsed = _load_openclaw_config(target, root_byte_limit=_MAX_CONFIG_BYTES,
+                                       root_digest=_digest)
     except (OSError, _ConfigLoadError, RecursionError):
         return None
+    # C-417: the recovered symlink target IS the file this audit read, so its bytes are
+    # what the digest must describe — not the link.
+    ctx.config_sha256 = _digest[0] if _digest else None
     try:
         mode = target.stat().st_mode & 0o777
     except OSError:
@@ -4251,8 +4264,10 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     ctx.config_found = cfg_found
     parsed_ok = False
     if cfg_found:
+        _cfg_digest: list = []
         try:
-            parsed = _load_openclaw_config(cfg_path, root_byte_limit=_MAX_CONFIG_BYTES)
+            parsed = _load_openclaw_config(cfg_path, root_byte_limit=_MAX_CONFIG_BYTES,
+                                           root_digest=_cfg_digest)
         except (OSError, _ConfigLoadError, RecursionError) as exc:
             message = str(exc)
             # B-306 safe-symlink recovery: a dotfiles-style openclaw.json symlink whose
@@ -4275,6 +4290,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                     )
         else:
             ctx.config = parsed
+            ctx.config_sha256 = _cfg_digest[0] if _cfg_digest else None
             try:
                 ctx.config_mode = cfg_path.stat().st_mode & 0o777
             except OSError as exc:

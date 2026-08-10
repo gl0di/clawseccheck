@@ -41,7 +41,7 @@ def _ignore_hash(home: Path) -> str:
 # against a new-format one simply skips the new comparison for one run rather than
 # misreading "key absent" as "new X appeared". SNAPSHOT_VERSION itself is a stamp for
 # humans/tests, not something diff() branches on.
-SNAPSHOT_VERSION = 3
+SNAPSHOT_VERSION = 4
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
@@ -85,6 +85,19 @@ _JOURNAL_KEEP = 4000
 
 def _h(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _now_iso() -> str:
+    """The one clock the drift baseline and the event journal share.
+
+    The snapshot's ``ts`` and a journal entry's ``ts`` are read against each other to
+    answer "what happened since the last run", so they must come from a single producer
+    rather than two copies of the same expression that a later edit could drift apart.
+    Local time at second resolution — what the journal has always written; this helper
+    changes where that string is produced, not what it says.
+    """
+    from datetime import datetime  # noqa: PLC0415 (local — see record_events)
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def _chain_hash(prev_hash: str, entry: dict) -> str:
@@ -269,8 +282,7 @@ def _rotate_journal(p: Path, max_lines: int = _JOURNAL_MAX_LINES,
 
         pruned = len(entries) - keep
         survivors = entries[-keep:]
-        from datetime import datetime  # noqa: PLC0415 (local — see record_events)
-        when = datetime.now().isoformat(timespec="seconds")
+        when = _now_iso()
         noun = "entry" if pruned == 1 else "entries"
         marker = {
             "ts": when,
@@ -1459,6 +1471,71 @@ _CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind")
 # so ctx.config == {} yields a subset, never a superset.
 _SHRINKABLE_DIMENSIONS = ("skills", "bootstrap", "memory")
 
+# C-417 — every snapshot key THIS build reads out of a stored baseline, persisted with
+# the snapshot itself.
+#
+# The graceful-degradation rule documented at SNAPSHOT_VERSION has a blind spot: a
+# baseline written by an older build simply lacks the newer key, the presence guard
+# (`_both_dims`, `_frontier`, a bare `.get`) turns that into a skip, and the screen is
+# byte-identical to a genuine all-clear. The user is told nothing changed about something
+# that was never examined. Persisting this manifest lets a later run say "your baseline
+# predates this" instead — the difference between "we looked and it is fine" and "we
+# could not look", which is the distinction this whole epic exists to restore.
+#
+# **Membership is the whole point, and the first version of this list got it exactly
+# backwards.** It held only the thirteen always-present dimensions — the ones that never
+# suffer the blind spot — and omitted every optional key, which is the entire population
+# the field is for: `skills_frontier_partial` (its absence downgrades a CRITICAL to a
+# HIGH), `raw_score_scope` (its absence suppresses the score-drop alert outright),
+# `skills_capped` / `memory_capped` / `skills_capped_count` (truncation frontiers),
+# `config_baseline` / `config_parse_error` / `config_ever_seen` (the blind-run state), and
+# `grade` (alert text). An independent adversarial pass found this; the guard that was
+# supposed to prevent it was checking only `_both_dims` literals, all of which were
+# already present, so it was vacuously green.
+#
+# Nothing READS this field yet, on purpose: Phase 0 of the monitor epic is store-only, so
+# it cannot emit an alert by construction. The consumer arrives with the phase that needs it.
+#
+# **Absence does not mean the same thing for all 22, and the consumer must not assume it
+# does.** Nineteen of these are written on every run, so their absence from a stored
+# baseline can only mean that baseline predates them — the "your baseline predates this"
+# message is sound. The other three are written conditionally, so absence is a real,
+# current state and that message would be a fabrication: `host` (absent = no supported
+# host detected), `config_parse_error` and `config_baseline` (both absent = this was NOT a
+# blind run — see `_degrade_snapshot`, the only writer of either). A consumer that treats
+# a missing `config_parse_error` as "we don't know whether that run was blind" would
+# invert the meaning of a key that says "it wasn't". The split is pinned in
+# tests/test_c417_snapshot_enablers.py's `_CONDITIONAL`.
+#
+# Kept honest mechanically: tests/test_c417_snapshot_enablers.py derives the keys this
+# module reads off a stored snapshot straight from the AST and asserts EXACT equality with
+# this tuple — subset in either direction is how the first version passed while being
+# wrong. Sorted, so the persisted list is stable across runs.
+WATCHED_DIMENSIONS = (
+    "bootstrap",
+    "channels",
+    "checks",
+    "config_baseline",
+    "config_ever_seen",
+    "config_parse_error",
+    "gateway_bind",
+    "grade",
+    "host",
+    "ignore_hash",
+    "mcp",
+    "mcp_detail",
+    "memory",
+    "memory_capped",
+    "native_count",
+    "raw_score",
+    "raw_score_scope",
+    "score",
+    "skills",
+    "skills_capped",
+    "skills_capped_count",
+    "skills_frontier_partial",
+)
+
 
 def _dim(snap: dict, key: str) -> dict:
     """B-270: a snapshot dimension as a dict — ``{}`` when absent OR the wrong type.
@@ -1608,6 +1685,30 @@ def _degrade_snapshot(snap: dict, prev: "dict | None") -> None:
             snap[key] = {**prev_dim, **curr_dim}
 
 
+def _config_file_digest(ctx) -> str:
+    """sha256 of the config file's bytes as the AUDIT read them, or ``""`` if there is none.
+
+    Reads ``ctx.config_sha256``, which the loader recorded on its own read (see
+    ``configloader.load_openclaw_config``'s ``root_digest``). It deliberately does NOT
+    re-read the file: a second read is a second file whenever anything writes in between,
+    and a snapshot that pairs one file's digest with another file's ``gateway_bind`` is a
+    record true of no single moment. That was a real defect in this function's first
+    version — a config edited between the audit and the snapshot produced a baseline whose
+    digest already matched the *new* bytes, so the very next run saw an unchanged digest
+    across the change ``diff()`` was firing CRITICAL on.
+
+    The bytes, deliberately, not the parsed dict: parsing normalizes away comments and
+    key order, so a byte-level edit can leave the parsed view identical and vanish. The
+    trade runs the other way for ``$include`` — a fragment edit changes the parsed dict
+    and leaves these bytes untouched. So this digest covers the ROOT file and nothing
+    else: an unchanged value means "the root file is unchanged", never "the config is
+    unchanged", and a consumer that reads it as the latter would be wrong silently, which
+    is the failure mode this epic exists to remove. Widening it needs the loader to report
+    the fragment paths it read — filed separately rather than assumed here.
+    """
+    return getattr(ctx, "config_sha256", None) or ""
+
+
 def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
     """Build the drift snapshot for this run.
 
@@ -1625,6 +1726,13 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
     _mem_capped: list[str] = []
     snap = {
         "version": SNAPSHOT_VERSION,
+        # C-417: when this baseline was taken, from the same producer the event journal
+        # uses (_now_iso), so "what happened since the last run" is answerable by
+        # comparing the two directly instead of inferring it from file mtimes.
+        "ts": _now_iso(),
+        # C-417: which dimensions this build can compare — see WATCHED_DIMENSIONS. A
+        # list, not the tuple, because that is what survives a JSON round-trip.
+        "watched": list(WATCHED_DIMENSIONS),
         "score": score.score,
         # B-273: the UNCAPPED weighted pass-rate, recorded alongside the displayed score.
         # `score` is `min(raw, FAIL_CAPS[worst_failing_severity])` (scoring.py:80-87), so on
@@ -1693,6 +1801,17 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
     config_missing_blind = (not getattr(ctx, "config_found", False)) and prev_had_config
     if parse_error or config_missing_blind:
         _degrade_snapshot(snap, prev)
+    else:
+        # C-417: the digest describes the bytes THIS run read, so a run that could not
+        # read the file stores no digest at all. Deliberately not carried forward from
+        # `prev` the way _degrade_snapshot carries the config dimensions: a stale digest
+        # sitting beside a fresh `ts` would assert we read the config at a time we did
+        # not — the same clean-verdict-about-an-unread-surface shape B-269 exists to
+        # prevent. An absent key reads as "no digest for this run"; a carried one reads
+        # as a fact.
+        digest = _config_file_digest(ctx)
+        if digest:
+            snap["config_file_sha256"] = digest
     return snap
 
 
@@ -2497,8 +2616,7 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS,
     if not alerts:
         return None
     if when is None:
-        from datetime import datetime  # noqa: PLC0415
-        when = datetime.now().isoformat(timespec="seconds")
+        when = _now_iso()
     p = Path(path).expanduser()
     try:  # symlink-safe append; never RAISE from the event journal — report instead
         secure_dir(p.parent)

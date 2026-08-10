@@ -8,6 +8,7 @@ Pure stdlib; never executes input or writes files.
 from __future__ import annotations
 
 import ast
+import hashlib
 import io
 import json
 import os
@@ -158,13 +159,21 @@ def _read_with_limit(file_obj: io.BufferedIOBase, byte_limit: int) -> tuple[byte
             return bytes(out[:byte_limit]), True
 
 
-def _read_fragment(path: Path, byte_limit: int) -> object:
+def _read_fragment(path: Path, byte_limit: int,
+                   digest_out: "list | None" = None) -> object:
     with path.open("rb") as fp:
         raw, truncated = _read_with_limit(fp, byte_limit)
     if truncated:
         raise ConfigLoadError(
             f"{path.name} exceeded the {byte_limit // 1_000_000}MB cap"
         )
+    # C-417: hand back a digest of the bytes THIS read saw, for a caller that needs to
+    # record what it audited. Taken here rather than by a second read at the call site:
+    # two reads are two different files whenever anything writes in between, and a
+    # snapshot pairing one file's digest with another file's parsed values is a record
+    # that cannot be true of any single moment.
+    if digest_out is not None:
+        digest_out.append(hashlib.sha256(raw).hexdigest())
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -285,8 +294,19 @@ def _resolve(
     return _deep_merge(merged, siblings)
 
 
-def load_openclaw_config(path: Path, *, root_byte_limit: int) -> dict:
-    """Load and flatten one OpenClaw config without crossing its trust boundary."""
+def load_openclaw_config(path: Path, *, root_byte_limit: int,
+                         root_digest: "list | None" = None) -> dict:
+    """Load and flatten one OpenClaw config without crossing its trust boundary.
+
+    *root_digest* — C-417: pass a **fresh** list to receive the sha256 hex of the ROOT
+    file's bytes as this load read them. It is appended to, not assigned, so a list reused
+    across two loads holds both digests and ``[0]`` is the older one; every caller here
+    builds a new list per load. The list stays empty when the load raises.
+
+    Root only: ``$include`` fragments are merged into the returned dict but are not covered
+    by this digest, so an unchanged digest means "the root file is unchanged", never "the
+    config is unchanged". Widening it to cover the fragments is tracked separately.
+    """
     config_dir = path.parent.resolve()
     try:
         resolved = path.resolve(strict=True)
@@ -295,7 +315,7 @@ def load_openclaw_config(path: Path, *, root_byte_limit: int) -> dict:
     if not _within_roots(resolved, (config_dir,)):
         raise ConfigLoadError("openclaw.json symlink escapes its config directory")
     parsed = _resolve(
-        _read_fragment(resolved, root_byte_limit),
+        _read_fragment(resolved, root_byte_limit, digest_out=root_digest),
         current_file=resolved,
         roots=_allowed_roots(config_dir),
         stack=(resolved,),

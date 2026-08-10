@@ -13,14 +13,19 @@ Three guards:
   (c) placement lint: a checks/_shared.py leaf (created by the I-022 R2 split) may
       hold only shared helpers/constants — no check_*/vet_* entry point.
 
-The line budget deliberately records the over-budget checks/ topic modules
-(_content / _vet / _mcp / _config / _lifecycle) in _EXEMPT as *tracked debt*, not a
-free pass — each carries a reason and the companion test fails if an exemption goes
-stale, so the guard tightens on its own as any finer split lands.
+The line budget deliberately records the over-budget checks/ topic modules (today:
+_content, _vet, _mcp, _config, _lifecycle, _egress, _shared, _capability, _agents,
+_host and the __init__ aggregator) in _EXEMPT as *tracked debt*, not a free pass —
+each carries a reason and two companion tests keep it honest: one fails when an
+exemption goes stale (the file dropped under budget or vanished), so the guard tightens
+on its own as any finer split lands; the other fails when the reason's stated size stops
+describing the file, which is how every count in here silently rotted by up to 400%
+before C-417 measured them.
 """
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import clawseccheck.checks as checks_mod
@@ -35,21 +40,21 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
-    "checks/_config.py": "~1,300 lines — the config-hardening topic (15 checks + helpers); "
+    "checks/_config.py": "~3,995 lines — the config-hardening topic (15 checks + helpers); "
                          "topic-faithful and over budget by design. A finer split is a "
                          "later cycle (I-022 secondary target).",
-    "checks/_lifecycle.py": "~1,340 lines — the approval / update-pinning / self-modification "
+    "checks/_lifecycle.py": "~5,662 lines — the approval / update-pinning / self-modification "
                             "/ supply-chain topic (17 checks + helpers); topic-faithful and "
                             "over budget by design. A finer split is a later cycle.",
-    "checks/_content.py": "~4,800 lines — the content-security ring (30 skill-malware / "
+    "checks/_content.py": "~14,300 lines — the content-security ring (30 skill-malware / "
                           "prompt-injection checks + the fence/decode/typosquat machinery). "
                           "Kept as ONE unit on purpose (SKILL_CONTENT_RING is the single "
                           "source consumed by both the full audit and --vet); do not split.",
-    "checks/_vet.py": "~2,000 lines — the --vet entry engine (vet_skill/vet_source/"
+    "checks/_vet.py": "~5,346 lines — the --vet entry engine (vet_skill/vet_source/"
                       "detect_vet_type/check_installed_skills + SKILL_CONTENT_RING + the "
                       "shared effect/sink analysis); consumes the content ring. Over budget "
                       "by design; a finer split is a later cycle.",
-    "checks/_host.py": "~1,235 lines — the host-monitor / incident-readiness topic "
+    "checks/_host.py": "~1,324 lines — the host-monitor / incident-readiness topic "
                        "(B10/B16/B50-B54 + the attestation helpers). Sat at EXACTLY 1,200 "
                        "for a while, i.e. one line under a tripwire, and crossed it with "
                        "B-514: check_audit_log went from a 2-branch stub that returned "
@@ -59,17 +64,17 @@ _EXEMPT = {
                        "default). The extra lines are user-facing verdict text, not "
                        "machinery; squeezing them to hold a line count would trade the "
                        "report's clarity for a number. A finer split is a later cycle.",
-    "checks/_mcp.py": "~1,400 lines — the MCP / plugin checks + vet_mcp / vet_plugin (40 "
+    "checks/_mcp.py": "~7,049 lines — the MCP / plugin checks + vet_mcp / vet_plugin (40 "
                       "symbols); topic-faithful and over budget by design. A finer split is "
                       "a later cycle.",
-    "checks/_egress.py": "~1,230 lines — the egress-hardening topic (proxy/TLS/SSRF/"
+    "checks/_egress.py": "~4,077 lines — the egress-hardening topic (proxy/TLS/SSRF/"
                          "data-at-rest + web-fetch/log checks). Crossed the budget with "
                          "B178's check_provider_baseurl (models.providers.<id>.baseUrl "
                          "cleartext http:// leak) — kept adjacent to B155's "
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "
                          "posture across two topic files. A finer split is a later cycle.",
-    "checks/_shared.py": "~1,250 lines — the leaf every checks/_<topic> module (and "
+    "checks/_shared.py": "~2,702 lines — the leaf every checks/_<topic> module (and "
                          "risk.py) imports from: tool-hint constants, MCP-server helpers, "
                          "and _trifecta_legs, the single shared leg definition A1 and B46 "
                          "both read. Crossed the exact 1,200-line ceiling with B-247's MCP "
@@ -78,7 +83,7 @@ _EXEMPT = {
                          "_shared.py can host without a checks/_<topic> -> _shared import "
                          "cycle (CLAUDE.md §3 dependency flow). A finer split is a later "
                          "cycle.",
-    "checks/_capability.py": "~1,775 lines — the declared-vs-effective capability / "
+    "checks/_capability.py": "~1,960 lines — the declared-vs-effective capability / "
                              "manifest topic (B44/B55/B68/B84/B326 + helpers). Crossed the "
                              "budget with CLAWSECCHECK-B-376/B-369's B55 WARN->FAIL "
                              "escalation: an independent C-135 adversarial pass found and "
@@ -98,7 +103,7 @@ _EXEMPT = {
                              "why it's WARN-only and correcting a prior false "
                              "\"per-agent layers can only narrow\" claim in two docstrings. "
                              "A finer split is a later cycle.",
-    "checks/_agents.py": "~1,270 lines — the multi-agent / subagent-exposure topic "
+    "checks/_agents.py": "~1,358 lines — the multi-agent / subagent-exposure topic "
                         "(check_agent_separation, check_untrusted_context, "
                         "check_subagents_allow_agents, etc.). Crossed the budget with "
                         "E-060's check_embedded_agent_project_settings_policy (B327) — "
@@ -106,7 +111,7 @@ _EXEMPT = {
                         "(an embedded sub-agent trusting untrusted WORKSPACE content) "
                         "matches this module's existing threat model, not a capability/"
                         "blast-radius one. A finer split is a later cycle.",
-    "checks/__init__.py": "~1,200 lines — the aggregator (every check import + the CHECKS "
+    "checks/__init__.py": "~1,490 lines — the aggregator (every check import + the CHECKS "
                           "list + run_all). Its length is driven directly by the NUMBER OF "
                           "CHECKS (one import line per check, by design — see §3.1-a: no "
                           "narrow __all__, every name must stay importable), so it grows by "
@@ -114,7 +119,7 @@ _EXEMPT = {
                           "budget with C-207's check_self_privesc_directive (B159); there is "
                           "no topic to split imports/registration into without breaking the "
                           "aggregator pattern itself. A finer split is a later cycle.",
-    "monitor.py": "~1,540 lines — the drift-snapshot/diff engine (snapshot() builds every "
+    "monitor.py": "~2,677 lines — the drift-snapshot/diff engine (snapshot() builds every "
                   "dimension, diff() compares them, plus the hash-chained journal). Crossed "
                   "the budget with B-267/B-268: the skill signature gained a full-directory "
                   "fingerprint independent of the malware-scan budget, and every capped "
@@ -137,7 +142,7 @@ _EXEMPT = {
                   "first post-upgrade run. Same shape as the guards above: most of the bulk "
                   "is the grounding each field read has to carry (dist file:line for every "
                   "schema key) plus the reasoning for the upgrade-safety gate.",
-    "risk.py": "~2,429 lines — the combinational attack-chain engine (one _rule_* per chain "
+    "risk.py": "~2,421 lines — the combinational attack-chain engine (one _rule_* per chain "
                "plus the shared leg predicates they compose). Crossed the 1,200-line ceiling "
                "with B-283 (c), which taught _channels_with_visibility_all the account -> "
                "channel -> default precedence the dist resolver uses; that helper MUST stay "
@@ -159,31 +164,31 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "2,139 lines — the python/shell/js parser families; its own split is "
+    "skillast.py": "~6,628 lines — the python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target).",
-    "report.py": "~2,260 lines — the output renderers; grew further with F-131's "
+    "report.py": "~4,538 lines — the output renderers; grew further with F-131's "
                  "Inventory-by-subject block (its own additive presentation layer, not "
                  "branching check logic). Its own split is deferred to a later cycle "
                  "(I-022 secondary target).",
-    "catalog.py": "~2,290 lines — the CheckMeta CATALOG (one entry per check) + BY_ID + "
+    "catalog.py": "~3,404 lines — the CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~1,240 lines — the read-only collection layer (config / bootstrap / skill "
+    "collector.py": "~4,415 lines — the read-only collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
                     "+ .pyc/.wasm sniffing); a finer split (byte-format sniffing -> a leaf "
                     "module) is a later cycle.",
-    "cli.py": "~1,200 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
+    "cli.py": "~3,275 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet); a finer split (e.g. flag registration -> its own module) is "
               "a later cycle.",
-    "pipeline.py": "~1,315 lines — the --full P7-P10 orchestration. Crossed the budget with "
+    "pipeline.py": "~1,314 lines — the --full P7-P10 orchestration. Crossed the budget with "
                    "C-425's PipelineResult.to_ledger(), which projects the run's phases onto "
                    "the five-layer ledger (layers.py). It belongs here and nowhere else: it "
                    "reads PhaseResult state, and layers.py must stay a leaf that scoring.py "
                    "can import, so the projection cannot live down there. A finer split "
                    "(phase runners vs. roll-up) is a later cycle.",
-    "adjudication.py": "~1,238 lines — the judge-packet builder. Crossed the budget with the "
+    "adjudication.py": "~1,247 lines — the judge-packet builder. Crossed the budget with the "
                        "ESET H1 2026 gap-closure pass (C-361: config field-path extraction so "
                        "the audit-path majority of findings, which cite a dig() path rather "
                        "than a file:line, stop always hitting the contentless evidence "
@@ -249,6 +254,72 @@ def test_exempt_entries_are_not_stale() -> None:
             n = max(_line_count(f) for f in matches)
             stale.append(f"{key}: now {n} lines (<= {_MAX_LINES}) — drop the exemption")
     assert not stale, "Stale _EXEMPT entries (tighten the guard):\n" + "\n".join(stale)
+
+
+_CLAIM_RE = re.compile(r"~([\d,]+) lines")
+# How far a stated size may lag reality before it must be restated. Not equality: that
+# would redden CI on any commit that adds a line to an exempt module, which is most of
+# them. Not open-ended either — that is precisely what rotted. Same reasoning as the
+# doc-facts test-count band (CLAUDE.md §6.2), a slack wide enough to absorb ordinary
+# growth and narrow enough that a number cannot become fiction.
+#
+# Proportional AND absolute, because a purely proportional band lets the largest debts rot
+# fastest: 25% of checks/_content.py's 14,300 lines is 3,575 lines of undetected growth —
+# longer than 16 of the 20 exempt files are in total. The absolute arm makes the guard
+# tighten as a file gets worse, which is the direction that matters.
+_CLAIM_SLACK = 0.25
+_CLAIM_SLACK_MAX_LINES = 500
+
+
+def test_exempt_line_claims_match_reality() -> None:
+    """Every _EXEMPT reason states a size. Until this guard existed, nothing checked it.
+
+    The result, measured when the guard was written: 13 of 20 claims were stale, and
+    ``checks/_content.py`` — whose reason argues it is a coherent unit worth keeping
+    whole — claimed ~4,800 lines while holding 14,300. The budget test above passed green
+    throughout, because it only asks whether a file is over 1,200 lines, never whether the
+    exemption still describes the file it excuses. An exemption is a debt record; a debt
+    record that understates the debt by 200% is worse than none, because it is read and
+    believed.
+    """
+    # Resolve keys exactly the way the budget and staleness tests do. `_exempt_key`
+    # deliberately accepts a BARE BASENAME as well as a package-relative path, so a naive
+    # `PKG / key` misses every basename-keyed entry — and skipping it there meant a
+    # `"_content.py": "~1 lines"` entry passed this guard silently while passing the
+    # staleness guard too. Both guards green over a claim understating the file by 14,299
+    # lines.
+    present: dict = {}
+    for f in _package_py_files():
+        key = _exempt_key(f)
+        if key is not None:
+            present.setdefault(key, []).append(f)
+
+    wrong = []
+    for key, reason in _EXEMPT.items():
+        matches = present.get(key)
+        if not matches:
+            continue  # the staleness test above owns "exempt but no such file"
+        m = _CLAIM_RE.match(reason)
+        if m is None:
+            wrong.append(f"{key}: reason must open with '~N lines — ', got: {reason[:40]!r}")
+            continue
+        claimed = int(m.group(1).replace(",", ""))
+        if claimed <= 0:
+            # Would divide by zero building the message below; fail with a sentence.
+            wrong.append(f"{key}: reason claims ~{claimed} lines, which cannot be a size")
+            continue
+        actual = max(_line_count(f) for f in matches)
+        tolerance = min(claimed * _CLAIM_SLACK, _CLAIM_SLACK_MAX_LINES)
+        if abs(actual - claimed) > tolerance:
+            wrong.append(
+                f"{key}: reason claims ~{claimed:,} lines, file is {actual:,} "
+                f"({(actual - claimed) / claimed:+.0%}) — restate it"
+            )
+    assert not wrong, (
+        "_EXEMPT reasons no longer describe their files:\n" + "\n".join(wrong)
+        + "\n\nUpdate the stated count. If a module grew this much, that is the signal "
+        "the exemption was tracking — reconsider the split, do not just bump the number."
+    )
 
 
 def _load_manifest() -> list[str]:
