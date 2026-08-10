@@ -197,13 +197,16 @@ def check_browser_ssrf(ctx: Context) -> Finding:
               OR noSandbox == true). Either flag is a CRITICAL-class primitive:
               private-network access enables cloud-metadata credential theft;
               no-sandbox means the headless browser can escape OS isolation.
-    WARN    — browser is configured but ssrfPolicy.hostnameAllowlist is absent
-              (open egress surface — the browser can reach any external host);
-              OR the hostnameAllowlist is present but contains a wildcard entry or a
-              known user-content/anonymous-paste/webhook host — a weak mitigation an
-              attacker could stage payloads on despite the host being "trusted".
+    WARN    — browser is configured but ssrfPolicy.allowedHostnames /
+              ssrfPolicy.hostnameAllowlist (the runtime merges both into one combined
+              allowlist -- B-515) are both absent/empty (open egress surface — the
+              browser can reach any external host); OR the combined allowlist is
+              present but contains a wildcard entry or a known user-content/
+              anonymous-paste/webhook host — a weak mitigation an attacker could stage
+              payloads on despite the host being "trusted".
     PASS    — browser is configured AND sandboxed AND private network is blocked
-              AND a hostnameAllowlist is present with no weak entries.
+              AND the combined allowlist (allowedHostnames + hostnameAllowlist) is
+              non-empty with no weak entries.
     UNKNOWN — no browser config (not applicable).
     """
     cfg = ctx.config
@@ -220,7 +223,15 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     ssrf_policy = browser.get("ssrfPolicy") if isinstance(browser.get("ssrfPolicy"), dict) else {}
     allow_private = ssrf_policy.get("dangerouslyAllowPrivateNetwork")
     no_sandbox = browser.get("noSandbox")
-    allowlist = ssrf_policy.get("hostnameAllowlist")
+    # B-515: the installed dist honours TWO sibling allowlist keys and merges them at
+    # runtime -- allowedHostnames (current) and hostnameAllowlist (legacy/alternate).
+    # An operator who only sets the current field must not get an "empty allowlist"
+    # WARN, so both are read and combined before any presence/weak-entry check below.
+    allowed_hostnames = ssrf_policy.get("allowedHostnames")
+    legacy_allowlist = ssrf_policy.get("hostnameAllowlist")
+    allowlist = (allowed_hostnames if isinstance(allowed_hostnames, list) else []) + (
+        legacy_allowlist if isinstance(legacy_allowlist, list) else []
+    )
 
     fail_ev: list[str] = []
     if allow_private is True:
@@ -241,20 +252,24 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             "; ".join(fail_ev),
             "Set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false to block "
             "cloud-metadata IP access; set browser.noSandbox to false (or omit it) to "
-            "keep the OS sandbox active. Also add browser.ssrfPolicy.hostnameAllowlist "
-            "to restrict which hosts the browser may reach.",
+            "keep the OS sandbox active. Also add browser.ssrfPolicy.allowedHostnames "
+            "(or the legacy browser.ssrfPolicy.hostnameAllowlist) to restrict which "
+            "hosts the browser may reach.",
             evidence=fail_ev,
         )
 
-    # WARN: browser is configured but no hostnameAllowlist — open egress surface
-    has_allowlist = isinstance(allowlist, list) and len(allowlist) > 0
+    # WARN: browser is configured but no allowedHostnames/hostnameAllowlist entries in
+    # either sibling key — open egress surface
+    has_allowlist = len(allowlist) > 0
     if not has_allowlist:
         return _finding(
             "B38",
             WARN,
-            "Browser is configured with no ssrfPolicy.hostnameAllowlist — the agent "
-            "browser can fetch any external URL (open egress / SSRF surface).",
-            "Add browser.ssrfPolicy.hostnameAllowlist listing only the domains the "
+            "Browser is configured with no ssrfPolicy.allowedHostnames / "
+            "ssrfPolicy.hostnameAllowlist — the agent browser can fetch any external "
+            "URL (open egress / SSRF surface).",
+            "Add browser.ssrfPolicy.allowedHostnames (or the legacy "
+            "browser.ssrfPolicy.hostnameAllowlist) listing only the domains the "
             "browser legitimately needs to reach; set "
             "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false.",
         )
@@ -267,7 +282,7 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         return _finding(
             "B38",
             WARN,
-            "Browser hostnameAllowlist is present but contains weak entries "
+            "Browser allowedHostnames/hostnameAllowlist is present but contains weak entries "
             "(wildcard, known user-content/paste/webhook host, and/or URL-rewriting "
             f"image/CDN proxy): {', '.join(weak_entries)} — an attacker could stage a "
             "payload on a wildcard match, an anonymous content host, or relay "
@@ -285,9 +300,10 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         "B38",
         PASS,
         "Browser is configured: sandboxed, private-network access blocked, "
-        "and hostnameAllowlist is present.",
+        "and allowedHostnames/hostnameAllowlist is present.",
         "Keep browser.noSandbox unset/false, "
-        "dangerouslyAllowPrivateNetwork=false, and maintain a tight hostnameAllowlist.",
+        "dangerouslyAllowPrivateNetwork=false, and maintain a tight "
+        "browser.ssrfPolicy.allowedHostnames allowlist.",
     )
 
 
