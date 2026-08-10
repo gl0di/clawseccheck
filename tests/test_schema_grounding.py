@@ -162,6 +162,20 @@ OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" 
 # makes a ROOT-namespace manifest entry a checkable claim ("this is a real top-level key").
 DIST_ROOT_SCHEMA = "OpenClawSchema"
 
+# B-516: the dist layer's verdict, VENDORED so it survives into CI.
+#
+# The three authorities rank: installed dist (OpenClaw itself) > recon (hand notes) >
+# manifest (our own claim). The wiring inverted that — the manifest was unconditional, the
+# recon was a hard veto, and the dist layer skipped whenever OpenClaw was not installed,
+# i.e. always in CI. What remained running there compared our source to our own manifest
+# and consulted OpenClaw nowhere, so a phantom present in BOTH merged green. That is
+# precisely how `logging.cacheTrace.filePath` survived a re-baseline (B-262).
+#
+# This file records which manifest paths a real dist accepted, so the strongest authority
+# still has a voice where it cannot be present. It is generated, never hand-edited:
+#     PYTHONPATH=tests:. python3 tests/test_schema_grounding.py --write-dist-snapshot
+DIST_SNAPSHOT_FILE = Path(__file__).resolve().parent / "dist_verified_paths.txt"
+
 # Allowlist for configuration paths that are allowed even if not parsed from markdown
 ALLOWLISTED_PATHS: set[str] = set()
 
@@ -827,24 +841,71 @@ def test_dig_paths_match_shipped_manifest():
     )
 
 
+def _dist_accepts(path: str, root_expr: str, consts: dict) -> bool:
+    """Does the installed dist vouch for this manifest path?
+
+    Two questions, deliberately different in strength. A ROOT path is anchored: it must be
+    a real chain of keys under OpenClawSchema. A `relative:` path is read off some nested
+    object the guard cannot identify — that is what the namespace means — so the strongest
+    honest question is whether the chain exists ANYWHERE in the schema. Read a relative
+    green as "this shape exists in OpenClaw", never as "this field is real at the object
+    we read it from".
+    """
+    if path.startswith(RELATIVE_PREFIX):
+        leaf = path[len(RELATIVE_PREFIX):]
+        return any(_resolves_in_dist(leaf, expr, consts) for expr in consts.values())
+    return _resolves_in_dist(path, root_expr, consts)
+
+
+def _parse_dist_snapshot() -> set:
+    """Manifest paths a real installed dist accepted. See DIST_SNAPSHOT_FILE."""
+    if not DIST_SNAPSHOT_FILE.exists():
+        return set()
+    out = set()
+    for raw in DIST_SNAPSHOT_FILE.read_text(encoding="utf-8").splitlines():
+        # Strip FIRST. Testing `raw.startswith("#")` while storing `raw.strip()` let an
+        # indented comment enter the verified set as a path — a leading space smuggled a
+        # line past a file that says comments are ignored.
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            out.add(line)
+    return out
+
+
 def test_manifest_is_grounded_in_recon():
-    """Local guard: every vendored manifest path is documented in the recon doc.
+    """Local guard: every vendored manifest path is documented in the recon doc, UNLESS
+    OpenClaw itself already vouched for it.
 
     Skips when the recon doc is absent (e.g. CI, or a fresh clone without the sibling
     research dir) — the manifest-vs-source equality above is what runs there. This keeps
-    the manifest from silently vendoring a fabricated path."""
+    the manifest from silently vendoring a fabricated path.
+
+    B-516: the recon used to hold an unconditional veto, which inverted the authorities.
+    The recon was itself built from the flat descriptions map `schema-DRyO1XBt.js`, and
+    that map omits seven real top-level namespaces — `accessGroups`, `bindings` and
+    `crestodian` have ZERO hits in it. So a legitimate `dig("accessGroups.…")` failed the
+    local build while the strongest authority, the installed dist, would have accepted it:
+    hand notes vetoing OpenClaw. Grounding is now a disjunction — recon OR dist — which
+    is a weakening only against a path no authority accepts, and that path still fails.
+    """
     if not RECON_FILE.exists():
         pytest.skip(f"Recon doc not present at {RECON_FILE} — manifest-vs-recon check is local-only")
 
     recon_paths = _parse_recon_paths()
+    dist_verified = _parse_dist_snapshot()
     manifest_paths = _parse_manifest_paths() - ALLOWLISTED_PATHS
 
-    missing = sorted(p for p in manifest_paths if not _is_grounded(p, recon_paths))
+    missing = sorted(
+        p for p in manifest_paths
+        if p not in dist_verified and not _is_grounded(p, recon_paths)
+    )
 
     assert not missing, (
-        f"Found {len(missing)} manifest path(s) NOT grounded in the recon doc:\n"
+        f"Found {len(missing)} manifest path(s) grounded in NEITHER the recon doc nor the\n"
+        "installed OpenClaw schema:\n"
         + "\n".join(f"  - {p}" for p in missing)
         + f"\n\nEvery entry in {MANIFEST_FILE.name} must be documented in:\n  {RECON_FILE}"
+        f"\nor verified against a real dist and recorded in {DIST_SNAPSHOT_FILE.name}."
     )
 
 
@@ -1805,3 +1866,273 @@ def test_dist_layer_skips_cleanly_when_openclaw_is_not_installed(monkeypatch):
     with pytest.raises(pytest.skip.Exception) as excinfo:
         _require_dist()
     assert "local-only" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------------
+# B-516: the dist layer, vendored so it still speaks in CI.
+# ---------------------------------------------------------------------------------
+
+def test_every_manifest_path_is_dist_verified_or_a_registered_absence():
+    """ALWAYS ON — including CI, which is the point.
+
+    Before this, the only unconditional guard compared our source against our own
+    manifest. Both are ours, so a fabricated path added to both merged green; that is
+    exactly how `logging.cacheTrace.filePath` survived a re-baseline (B-262). This asserts
+    against a record of what OpenClaw ITSELF accepted, so adding a path now requires
+    either a real dist to verify it or an explicit, reasoned entry in
+    `_NOT_IN_CURRENT_SCHEMA`.
+    """
+    verified = _parse_dist_snapshot()
+    # EVERY manifest path, root and `relative:` alike. An earlier draft used
+    # `_manifest_root_paths()`, which filters the relative namespace out — so a test named
+    # "every manifest path" covered 117 of 136, and `relative:made.up.path` sailed through
+    # on two file edits. The only relative-namespace check needs an installed dist and
+    # therefore skips in CI, which is the exact hole this layer exists to close.
+    unvouched = sorted(
+        p for p in _parse_manifest_paths()
+        if p not in verified and p not in _NOT_IN_CURRENT_SCHEMA
+    )
+    assert not unvouched, (
+        f"{len(unvouched)} manifest path(s) have never been checked against a real "
+        "OpenClaw schema:\n"
+        + "\n".join(f"  - {p}" for p in unvouched)
+        + f"\n\nOn a machine with OpenClaw installed, regenerate {DIST_SNAPSHOT_FILE.name}:\n"
+        "  PYTHONPATH=tests:. python3 tests/test_schema_grounding.py --write-dist-snapshot\n"
+        "If the path genuinely is not in the current schema (a legacy or alternate shape), "
+        "register it in _NOT_IN_CURRENT_SCHEMA with its disproof instead. Do NOT hand-add "
+        "a line to the snapshot — that is the guard writing its own evidence."
+    )
+
+
+def test_the_dist_snapshot_is_not_vacuous():
+    """Anti-vacuity for the vendored layer itself.
+
+    The test above is a negative check, and a negative check passes just as happily
+    against an empty file. An emptied or truncated snapshot would silently restore the
+    hole it exists to close — this project has hit that shape repeatedly, so the positive
+    side is pinned explicitly.
+    """
+    verified = _parse_dist_snapshot()
+    manifest = _parse_manifest_paths()
+    assert len(verified) >= 100, (
+        f"{DIST_SNAPSHOT_FILE.name} holds only {len(verified)} path(s); it has been "
+        "truncated or generated against an empty schema."
+    )
+    # A size floor alone is decoration: 120 junk lines satisfy it. The snapshot records a
+    # verdict ABOUT the manifest, so anything in it that is not a manifest path is not a
+    # verdict — it is padding, and padding is how a fabricated snapshot would clear a
+    # floor.
+    stray = sorted(verified - manifest)
+    assert not stray, (
+        f"{len(stray)} snapshot entr(ies) are not manifest paths at all:\n"
+        + "\n".join(f"  - {x}" for x in stray[:10])
+        + f"\n\n{DIST_SNAPSHOT_FILE.name} records which MANIFEST paths a real dist "
+        "accepted; an entry outside the manifest is padding, not evidence."
+    )
+    for expected in ("gateway.bind", "tools.exec.mode", "logging.redactSensitive"):
+        assert expected in verified, f"{expected!r} missing — the snapshot is not a real one"
+
+    header = DIST_SNAPSHOT_FILE.read_text(encoding="utf-8")
+    assert "openclaw-version:" in header, "the snapshot must record which OpenClaw vouched"
+    assert "GENERATED" in header, "the snapshot must say it is generated, not hand-edited"
+
+
+def test_a_fabricated_path_is_rejected_with_no_dist_installed(monkeypatch, tmp_path):
+    """The B-262 shape, reproduced against the new guard.
+
+    A phantom is added to BOTH our source and our manifest — the state that used to merge
+    green — and no dist is available to catch it. The vendored snapshot must reject it,
+    because a machine without OpenClaw is exactly where the old guard went quiet.
+    """
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text("# GENERATED\n# openclaw-version: 0.0.0\ngateway.bind\n", encoding="utf-8")
+    manifest = tmp_path / "grounded_schema_paths.txt"
+    manifest.write_text("gateway.bind\nlogging.cacheTrace.filePath\n", encoding="utf-8")
+
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST_FILE", manifest)
+    monkeypatch.setattr(
+        sys.modules[__name__], "OPENCLAW_DIST", Path("/nonexistent/openclaw/dist")
+    )
+
+    verified = _parse_dist_snapshot()
+    unvouched = sorted(
+        p for p in _manifest_root_paths()
+        if p not in verified and p not in _NOT_IN_CURRENT_SCHEMA
+    )
+    assert "logging.cacheTrace.filePath" in unvouched, (
+        "the phantom passed the vendored layer — the vacuous-pass hole is still open"
+    )
+
+
+def test_the_snapshot_still_matches_the_installed_dist():
+    """Local-only: catches a snapshot left stale by an OpenClaw upgrade.
+
+    Skipping here is safe in a way skipping the OLD dist layer was not: the vendored
+    check above still runs everywhere. This one only asks whether the vendored verdict is
+    current.
+    """
+    consts = _require_dist()
+    root = consts[DIST_ROOT_SCHEMA]
+    # The header was inert: rewriting `openclaw-version:` to 1999.1.1 left every test
+    # green, so a regeneration run against an OLD dist could write a lying provenance line
+    # and nothing would say so.
+    import json as _json
+
+    installed = _json.loads(
+        (OPENCLAW_DIST.parent / "package.json").read_text(encoding="utf-8")
+    )["version"]
+    header = DIST_SNAPSHOT_FILE.read_text(encoding="utf-8")
+    stamped = re.search(r"^#\s*openclaw-version:\s*(\S+)", header, re.M)
+    assert stamped and stamped.group(1) == installed, (
+        f"{DIST_SNAPSHOT_FILE.name} claims openclaw-version "
+        f"{stamped.group(1) if stamped else '<missing>'} but the installed OpenClaw is "
+        f"{installed}. Regenerate it — the re-baseline step was half-done."
+    )
+
+    live = {p for p in _parse_manifest_paths() if _dist_accepts(p, root, consts)}
+    recorded = _parse_dist_snapshot()
+    assert live == recorded, (
+        "the vendored snapshot disagrees with the installed OpenClaw:\n"
+        f"  only in the dist:     {sorted(live - recorded)}\n"
+        f"  only in the snapshot: {sorted(recorded - live)}\n"
+        "Regenerate it: PYTHONPATH=tests:. python3 tests/test_schema_grounding.py "
+        "--write-dist-snapshot"
+    )
+
+
+def _write_dist_snapshot() -> int:
+    """Regenerate DIST_SNAPSHOT_FILE from the installed dist. Returns the path count."""
+    import json
+
+    consts = _dist_schema_consts()
+    root = consts[DIST_ROOT_SCHEMA]
+    verified = sorted(p for p in _parse_manifest_paths() if _dist_accepts(p, root, consts))
+    pkg = OPENCLAW_DIST.parent / "package.json"
+    version = json.loads(pkg.read_text(encoding="utf-8"))["version"]
+    DIST_SNAPSHOT_FILE.write_text(
+        "# GENERATED by tests/test_schema_grounding.py --write-dist-snapshot. "
+        "Do not hand-edit.\n"
+        "#\n"
+        "# Every path below was resolved, component by component, against the ACTUAL "
+        "OpenClaw\n"
+        "# config schema (OpenClawSchema in the installed dist's zod-schema*.js) on a "
+        "machine\n"
+        "# where OpenClaw was installed. It ships so the dist-grounding layer has "
+        "something to\n"
+        "# assert in CI, which never has a dist and therefore always skipped that layer.\n"
+        "#\n"
+        "# Why this file exists: the always-on guard compared our source against our own\n"
+        "# manifest and consulted OpenClaw nowhere, so a phantom path present in BOTH "
+        "merged\n"
+        "# green. That is how logging.cacheTrace.filePath survived a re-baseline (B-262).\n"
+        "#\n"
+        "# Regenerate ONLY on a machine with the matching OpenClaw installed, as part of "
+        "the\n"
+        "# upgrade protocol's re-baseline step. Hand-adding a line here defeats the "
+        "guard.\n"
+        f"#\n# openclaw-version: {version}\n#\n" + "\n".join(verified) + "\n",
+        encoding="utf-8",
+    )
+    return len(verified)
+
+
+def test_a_dist_verified_path_absent_from_the_recon_is_accepted(monkeypatch, tmp_path):
+    """The rejection half of B-516, pinned.
+
+    The recon was built from the flat descriptions map, which omits seven real top-level
+    namespaces — `accessGroups`, `bindings` and `crestodian` have zero hits in it. A
+    legitimate read in one of those failed the local build purely because hand notes had
+    not caught up with OpenClaw. Now the dist's verdict is enough on its own.
+    """
+    recon = tmp_path / "recon.md"
+    recon.write_text("Only gateway.bind is documented here.\n", encoding="utf-8")
+    manifest = tmp_path / "grounded_schema_paths.txt"
+    manifest.write_text("gateway.bind\naccessGroups.definitions\n", encoding="utf-8")
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text(
+        "# GENERATED\n# openclaw-version: 0.0.0\ngateway.bind\naccessGroups.definitions\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(sys.modules[__name__], "RECON_FILE", recon)
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST_FILE", manifest)
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+
+    test_manifest_is_grounded_in_recon()  # must not raise
+
+
+def test_a_path_in_neither_authority_is_still_rejected(monkeypatch, tmp_path):
+    """The disjunction must weaken the guard only where a real authority vouches.
+    A path no one accepts still fails — otherwise B-516 would have traded one hole
+    for another."""
+    recon = tmp_path / "recon.md"
+    recon.write_text("Only gateway.bind is documented here.\n", encoding="utf-8")
+    manifest = tmp_path / "grounded_schema_paths.txt"
+    manifest.write_text("gateway.bind\nmade.up.path\n", encoding="utf-8")
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text("# GENERATED\n# openclaw-version: 0.0.0\ngateway.bind\n", encoding="utf-8")
+
+    monkeypatch.setattr(sys.modules[__name__], "RECON_FILE", recon)
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST_FILE", manifest)
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+
+    with pytest.raises(AssertionError) as exc:
+        test_manifest_is_grounded_in_recon()
+    assert "made.up.path" in str(exc.value)
+
+
+def test_a_fabricated_relative_path_is_also_caught(monkeypatch, tmp_path):
+    """C-135 round 1 on this guard found the hole: an earlier draft used
+    `_manifest_root_paths()`, which filters the `relative:` namespace out, so a test named
+    "every manifest path" covered 117 of 136 and `relative:made.up.path` passed on two
+    file edits. The only relative-namespace check needs an installed dist and skips in CI
+    — precisely the configuration this layer exists for."""
+    manifest = tmp_path / "grounded_schema_paths.txt"
+    manifest.write_text("gateway.bind\nrelative:made.up.path\n", encoding="utf-8")
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text("# GENERATED\n# openclaw-version: 0.0.0\ngateway.bind\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST_FILE", manifest)
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+
+    with pytest.raises(AssertionError) as exc:
+        test_every_manifest_path_is_dist_verified_or_a_registered_absence()
+    assert "relative:made.up.path" in str(exc.value)
+
+
+def test_an_indented_comment_does_not_become_a_verified_path(monkeypatch, tmp_path):
+    """The parser tested `raw.startswith('#')` while storing `raw.strip()`, so one leading
+    space smuggled a comment into the verified set — in a file whose header says comments
+    are ignored."""
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text(
+        "# GENERATED\n  # openclaw-version: 1.0\n\tgateway.port\ngateway.bind\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+    parsed = _parse_dist_snapshot()
+    assert parsed == {"gateway.port", "gateway.bind"}, parsed
+
+
+def test_padding_does_not_satisfy_the_size_floor(monkeypatch, tmp_path):
+    """A bare `>= 100` floor is decoration: 120 junk lines clear it. The snapshot records
+    a verdict ABOUT the manifest, so an entry outside the manifest is padding."""
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text(
+        "# GENERATED\n# openclaw-version: 0.0.0\ngateway.bind\ntools.exec.mode\n"
+        "logging.redactSensitive\n"
+        + "\n".join(f"junk.path.{i}" for i in range(120)) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+    with pytest.raises(AssertionError) as exc:
+        test_the_dist_snapshot_is_not_vacuous()
+    assert "not manifest paths" in str(exc.value)
+
+
+if __name__ == "__main__":
+    if "--write-dist-snapshot" in sys.argv:
+        n = _write_dist_snapshot()
+        print(f"wrote {DIST_SNAPSHOT_FILE} — {n} dist-verified paths")
+    else:
+        print("usage: python3 tests/test_schema_grounding.py --write-dist-snapshot")
