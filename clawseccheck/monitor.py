@@ -732,23 +732,31 @@ def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
                     "activity and not necessarily a user edit. Review it if unexpected.",
                 ))
 
-    if not trust_removals:
-        # B-269: this run could not read openclaw.json, so a memory file that lived under a
-        # config-declared workspace has simply dropped out of the collected view. Its
-        # "disappearance" is a collection artifact, not an event.
-        return
-
-    # B-275: SOUL/AGENTS/TOOLS/MEMORY/memory.md are BOTH bootstrap files and memory files,
-    # so from here on their removal is already reported once by the bootstrap dimension.
-    # Skip them here so a single deletion is not alerted twice at two different severities.
-    bootstrap_owned = set(_dim(prev, "bootstrap"))
-    for path in sorted(pm.keys() - cm.keys()):
-        if path in bootstrap_owned:
-            continue
-        if path in curr_capped:
-            # B-268: still on disk this run, just cap-evicted. Not a removal.
-            continue
-        alerts.append(("INFO", f"Persistent memory file removed since last check: '{path}'."))
+    # B-269: on a run that could not read openclaw.json, a memory file that lived under a
+    # config-declared workspace has simply dropped out of the collected view. Its
+    # "disappearance" is a collection artifact, not an event, so the removal loop is
+    # skipped.
+    #
+    # This was a bare `return`, which also skipped the cap disclosure BELOW it — directly
+    # contradicting this function's own comment above, which states that disclosure "is
+    # deliberately NOT gated" because it describes THIS run's coverage rather than a
+    # comparison. So a run that was both blind AND over the inspection cap said nothing
+    # about either: the one combination where the user most needs to hear that their memory
+    # notes are not being watched. Guarding the loop instead of returning restores it, and
+    # leaves the alert order on every non-blind run byte-identical.
+    if trust_removals:
+        # B-275: SOUL/AGENTS/TOOLS/MEMORY/memory.md are BOTH bootstrap files and memory
+        # files, so from here on their removal is already reported once by the bootstrap
+        # dimension. Skip them here so one deletion is not alerted twice at two severities.
+        bootstrap_owned = set(_dim(prev, "bootstrap"))
+        for path in sorted(pm.keys() - cm.keys()):
+            if path in bootstrap_owned:
+                continue
+            if path in curr_capped:
+                # B-268: still on disk this run, just cap-evicted. Not a removal.
+                continue
+            alerts.append((
+                "INFO", f"Persistent memory file removed since last check: '{path}'."))
 
     # B-268 disclosure: a bare all-clear over a truncated view is the lie the FN twin
     # exploits — past the cap the region is never read, so a live injection/exfil payload
