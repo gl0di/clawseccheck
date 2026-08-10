@@ -142,6 +142,48 @@ def finding_counts_by_severity(findings: list[Finding]) -> dict[str, int]:
     return counts
 
 
+def undetermined_summary(findings: list[Finding]) -> dict:
+    """How much of the scored catalog reached no verdict, split by WHY.
+
+    C-429. `scoring.compute` drops UNKNOWN from the denominator, so an undetermined check
+    neither earns nor costs a point — on a real config that was 31 of 101 scored checks,
+    19 of them HIGH. The filed proposal was to cap the grade on that density. Measured
+    first, and it is the wrong instrument:
+
+    * a real run has no grade to cap. Through the CLI, the default run reports "no grade
+      yet — 3 of 5 layers did not run" and `--full` still misses 2 of 5, so E-077 already
+      withholds the letter, which says more than any cap would;
+    * 12 of those 31 are `not_applicable` — a surface positively confirmed ABSENT, not one
+      we failed to see. Capping on the raw count would charge a user for not enabling a
+      feature;
+    * none were `engine_degraded`; that case already has `DEGRADED_CHECK_CAP`.
+
+    So this reports rather than penalises, and reports the distinction the cap would have
+    needed: `no_signal` is the honest "blind" population — undetermined, not confirmed
+    absent, not a broken check — and it is the only one worth gating on.
+    """
+    scored = [f for f in findings if getattr(f, "scored", True)]
+    unknown = [f for f in scored if f.status == UNKNOWN]
+    confirmed_absent = [f for f in unknown if getattr(f, "not_applicable", False)]
+    degraded = [f for f in unknown if getattr(f, "engine_degraded", False)]
+    no_signal = [f for f in unknown if f not in confirmed_absent and f not in degraded]
+
+    by_severity = {CRITICAL.lower(): 0, HIGH.lower(): 0, MEDIUM.lower(): 0, LOW.lower(): 0}
+    for f in no_signal:
+        key = f.severity.lower()
+        if key in by_severity:
+            by_severity[key] += 1
+
+    return {
+        "scored_checks": len(scored),
+        "undetermined": len(unknown),
+        "confirmed_absent": len(confirmed_absent),
+        "engine_degraded": len(degraded),
+        "no_signal": len(no_signal),
+        "no_signal_by_severity": by_severity,
+    }
+
+
 def _runtime_cap_phrase(reason: str | None) -> str:
     """Plain-English rendering of scoring's stable ``runtime_cap_reason`` label.
 
@@ -4000,6 +4042,12 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         # SEVERITY` (cli.py) gates on, so a CI consumer can assert on findings without
         # a grade. See finding_counts_by_severity()'s docstring for the exact predicate.
         "fail_counts_by_severity": finding_counts_by_severity(findings),
+        # C-429: the undetermined population, split by why. Reported, never used to
+        # penalise — see undetermined_summary() for the measurement that ruled a grade
+        # cap out. `no_signal` is the number a CI consumer should gate on; the other
+        # buckets are checks that looked and found nothing, or that already cap the
+        # grade through DEGRADED_CHECK_CAP.
+        "undetermined": undetermined_summary(findings),
         # I-025/B-309: whether a corroborated runtime signal (never a config-static
         # finding) drove this cap, and which — see scoring.RUNTIME_SIGNAL_CAP.
         "runtime_capped": score.runtime_capped,
