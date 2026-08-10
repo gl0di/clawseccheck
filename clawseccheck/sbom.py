@@ -80,12 +80,27 @@ def build_sbom(ctx) -> dict:
     # zero components for a path the tool never found. Golden Rule #4.
     home = getattr(ctx, "home", None)
     config_found = bool(getattr(ctx, "config_found", False))
+
+    # B-521: `complete` used to be an alias for `config_found`, which made it claim more
+    # than it knew. The collector deliberately drops clawseccheck's own skill from the
+    # inventory (collector.py `_OWN_SKILL_NAMES` / `self_excluded_skills`) -- a sound
+    # exclusion, since a tool auditing itself is noise, but it means the component list is
+    # SHORT BY ONE while the BOM asserted completeness. report.py has disclosed the
+    # exclusion since B-507; the BOM never did, so a diff/archive pipeline reading only
+    # this file could not tell a genuinely complete inventory from a pruned one.
+    #
+    # Same shape as B-463 one field over: two different facts must not serialise
+    # identically. `complete` now means what it says -- the config was found AND nothing
+    # was withheld -- and the withheld names ship alongside it so a consumer can tell
+    # WHICH component is missing rather than only that one is.
+    self_excluded = sorted(getattr(ctx, "self_excluded_skills", None) or [])
     return {
         "version": SBOM_VERSION,
         "generated_by": f"clawseccheck v{__version__}",
         "scanned_home": str(home) if home is not None else None,
         "config_found": config_found,
-        "complete": config_found,
+        "self_excluded_skills": self_excluded,
+        "complete": config_found and not self_excluded,
         "skills": skills,
         "mcp_servers": mcp_servers,
     }
