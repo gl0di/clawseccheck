@@ -513,6 +513,7 @@ Two things worth knowing about how the comparison behaves:
 ```bash
 python3 audit.py --monitor                 # first run = baseline, then alerts on changes
 python3 audit.py --monitor --state ~/.clawseccheck/state.json
+python3 audit.py --monitor --verbose       # also list what could not be compared
 ```
 
 Schedule it via OpenClaw's heartbeat or cron; when an alert fires, have your agent message you.
@@ -532,6 +533,14 @@ These are inherent boundaries of a **local, file-based, scheduled** drift detect
 be fixed, and not a substitute for host-level file-integrity monitoring or a real-time runtime
 IDS. Disclosed here so they are a known trade-off, not a surprise:
 
+- **A clean run does not mean everything was compared** — and now says so. Some comparisons are
+  skipped rather than made: an unreadable settings file makes every disappearance untrustworthy,
+  a truncated collection cannot tell "removed" from "never inspected", and a baseline written by
+  an older release lacks the key a newer comparison needs. A run that skipped any of these prints
+  `No new threats among what was compared.` plus a counted line, instead of the unqualified
+  `No new threats since last check. ✅`; `--verbose` lists them, grouped by cause. The tick is
+  reserved for a run that compared everything it knows how to compare, so its absence is
+  information. This does not make the skipped comparisons happen — it stops them being invisible.
 - **`state.json` is unauthenticated.** Unlike `history.jsonl`/`events.jsonl` (hash-chained — see
   "Audit trail" in [SECURITY_MODEL.md](../SECURITY_MODEL.md)), the drift baseline
   (`~/.clawseccheck/state.json`) carries no chain and no signature. Anyone with write access to

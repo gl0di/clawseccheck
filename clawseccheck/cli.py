@@ -26,7 +26,7 @@ from datetime import date
 from pathlib import Path
 
 from . import (
-    audit, diff, fingerprint, load_events, load_ignore, make_canary, record_events,
+    audit, fingerprint, load_events, load_ignore, make_canary, record_events,
     render_canary, render_card, render_dashboard, render_dashboard_findings, render_events,
     render_json, render_monitor,
     render_report, render_svg, render_vet_json, save_state, snapshot,
@@ -41,7 +41,8 @@ from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
 from .monitor import (
-    BASELINE_ABSENT, BASELINE_CORRUPT, BASELINE_CORRUPT_ALERT, BASELINE_OK, read_baseline,
+    BASELINE_ABSENT, BASELINE_CORRUPT, BASELINE_CORRUPT_ALERT, BASELINE_OK,
+    diff_with_notes, read_baseline,
 )
 from .update import update_notice
 from .ledger import freshness_notice as _compute_freshness, load_ledger, record_run
@@ -1938,7 +1939,8 @@ def _main(argv=None) -> int:
                         "entries for findings verdicted SAFE — use '-' to read from stdin, "
                         "then --apply-ignore-proposals to actually write them")
     p.add_argument("--verbose", action="store_true",
-                   help="emit INFO-level log breadcrumbs to stderr")
+                   help="emit INFO-level log breadcrumbs to stderr; with --monitor, also "
+                        "list what could not be compared instead of only counting it")
     p.add_argument("--debug", action="store_true",
                    help="emit DEBUG-level log breadcrumbs to stderr")
     p.add_argument("--log", metavar="PATH", default=None,
@@ -2782,7 +2784,11 @@ def _main(argv=None) -> int:
         # openclaw.json preserves the last known-good config baseline instead of writing
         # the collapsed (empty) view over it — see monitor._degrade_snapshot.
         snap = snapshot(ctx, findings, score, prev=prev)
-        alerts = diff(prev, snap)
+        # C-418: `notes` records every comparison this run DECLINED to make. They are
+        # deliberately NOT passed to record_events below — a note is not an event, and a
+        # tamper-evident timeline of what changed must not fill with entries about what
+        # did not.
+        alerts, monitor_notes = diff_with_notes(prev, snap)
         if base_status == BASELINE_CORRUPT:
             # prev is None here, so diff() produced nothing to compare — the lost baseline
             # IS the event. Prepended (not rendered separately) so the identical string
@@ -2825,7 +2831,9 @@ def _main(argv=None) -> int:
                              baseline=base_status == BASELINE_ABSENT,
                              persisted=persisted,
                              baseline_corrupt=base_status == BASELINE_CORRUPT,
-                             live_test_skipped=_skip_live_test_persist))
+                             live_test_skipped=_skip_live_test_persist,
+                             notes=monitor_notes,
+                             verbose=bool(getattr(args, "verbose", False))))
         # --monitor records a score-history point as part of tracking drift, even under
         # --no-history; the conflict is surfaced as a stderr note (B-066), not silently
         # honored, to keep monitor's drift baseline intact. Recorded even on the failure

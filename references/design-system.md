@@ -376,9 +376,32 @@ Current: 74/100  Grade: C
 ⚠️ a new MCP server was added: "scratch-fs"
 ```
 
-On a clean run: `No new threats since last check. ✅`. On the very first run: `Baseline
-saved. Future runs will alert on what changes since now.` — never a false "nothing
-changed" when there was nothing to compare to.
+On a run that compared everything it knows how to compare: `No new threats since last
+check. ✅`. On the very first run: `Baseline saved. Future runs will alert on what changes
+since now.` — never a false "nothing changed" when there was nothing to compare to.
+
+**The tick is earned, not automatic.** A comparison can be skipped rather than made: an
+unreadable settings file makes every disappearance untrustworthy, a truncated collection
+cannot tell "removed" from "never inspected", and a baseline written by an older release
+simply lacks the key a newer comparison needs. Each such skip is recorded, and a run that
+skipped any of them says `No new threats among what was compared.` followed by a counted
+line — never the unqualified all-clear:
+
+```text
+No new threats among what was compared.
+
+ℹ️ 1 thing could not be compared this run — re-run with --verbose to see what.
+```
+
+`--verbose` replaces the count with the list, grouped by cause ("Because your settings file
+could not be read this run:", "Because part of the saved record is damaged:", …). The
+default collapses deliberately: a healthy setup can legitimately skip a comparison or two,
+and a screenful of "not compared" lines over a machine with nothing wrong reads as a
+malfunction — which teaches the reader to ignore the monitor, a worse outcome than the
+silence this replaces. The counted line is omitted entirely when nothing was skipped, so
+its absence is itself the statement that everything was compared. It appears alongside
+alerts too, for the same reason: a run that found three changes and skipped four
+comparisons is still a partial view.
 
 **`mono`/`--ascii`:** severity marks fold to `[X]`/`[!]`/`[~]`/`[i]`; same body otherwise.
 **`interactive`:** no buttons of its own — this is a status readout, typically followed by

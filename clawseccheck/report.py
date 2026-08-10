@@ -512,6 +512,53 @@ def _not_fully_covered_line(score: ScoreResult) -> str:
     return "Not fully covered: " + "; ".join(not_checked)
 
 
+# C-418: one heading per reason a comparison was skipped, in the order the monitor's
+# NOTE_CATEGORY_ORDER ranks them. Phrased as "because ..." so the enumerated lines read as
+# consequences of a single cause rather than as a list of unrelated malfunctions.
+_NOTE_HEADINGS = {
+    "config_blind": "Because your settings file could not be read this run:",
+    "record_damaged": "Because part of the saved record is damaged:",
+    "inspection_capped": "Because there was more installed than can be inspected:",
+    # A full record exists on both sides and it says "unknown" — a different fact from
+    # having no record, and filing it under "nothing to compare against yet" told the user
+    # their baseline was too old when it was complete.
+    "undetermined": "Because the state of something could not be determined:",
+    "no_prior_record": "Because there was nothing to compare against yet:",
+}
+
+
+def _not_compared_lines(notes, verbose: bool, ascii_only: bool) -> list:
+    """The scoped-coverage block for --monitor: what this run did NOT compare.
+
+    Collapsed to a single counted line by default and enumerated only under --verbose,
+    because the alternative was measured and rejected: a healthy run can legitimately
+    skip several comparisons, and a screen of "not compared" lines on a setup with
+    nothing wrong reads as a malfunction. Teaching a user to ignore the monitor would cost
+    more than the silence this replaces.
+
+    Returns [] when nothing was skipped — a run that compared everything says nothing
+    here, so the block's presence is itself information.
+    """
+    if not notes:
+        return []
+    marker = "[i]" if ascii_only else "ℹ️"
+    n = len(notes)
+    subject = "1 thing" if n == 1 else f"{n} things"
+    if not verbose:
+        return ["", f"{marker} {subject} could not be compared this run — "
+                    f"re-run with --verbose to see what."]
+    out = ["", f"{marker} {subject} could not be compared this run:"]
+    from .monitor import NOTE_CATEGORY_ORDER  # noqa: PLC0415 (renderer -> engine, one way)
+    bullet = "-" if ascii_only else "•"
+    for category in NOTE_CATEGORY_ORDER:
+        in_cat = [msg for cat, msg in notes if cat == category]
+        if not in_cat:
+            continue
+        out.append(f"  {_NOTE_HEADINGS.get(category, 'Not compared:')}")
+        out += [f"    {bullet} {_sanitize(msg)}" for msg in in_cat]
+    return out
+
+
 def _color_icons(icon: dict, color: bool) -> dict:
     """Return an icon map with each glyph pre-painted by status (or the map as-is)."""
     if not color:
@@ -3304,7 +3351,8 @@ def _header_rule_width(header_line: str, ascii_only: bool) -> int:
 
 def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
                    baseline: bool = False, persisted: bool = True,
-                   baseline_corrupt: bool = False, live_test_skipped: bool = False) -> str:
+                   baseline_corrupt: bool = False, live_test_skipped: bool = False,
+                   notes=None, verbose: bool = False) -> str:
     """Render the --monitor body.
 
     *baseline* — this was a genuine first run (no prior state file at all).
@@ -3378,10 +3426,30 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
         if alerts:
             lines += _alert_lines()
         else:
-            lines += ["", f"No new threats since last check. {ok}"]
+            # C-418: the all-clear is scoped to what was actually compared. It used to be
+            # printed unconditionally over a snapshot that watches a couple of dozen things
+            # out of a far larger subject, and every skipped comparison — a blind config, a
+            # truncated collection, a baseline predating the check — fell through into it
+            # silently. The ✅ is reserved for a run that genuinely compared everything it
+            # knows how to compare; anything less says so in the same breath.
+            if notes:
+                lines += ["", "No new threats among what was compared."]
+            else:
+                lines += ["", f"No new threats since last check. {ok}"]
         if baseline_corrupt:
             lines += ["", "A replacement baseline has been saved from this run; future "
                           "runs will alert on what changes since now."]
+    # C-418: appended on EVERY branch that made a comparison AND made a claim about it —
+    # a run that found three real changes and skipped four comparisons is still a partial
+    # view, and the alerts it did produce must not read as the complete answer.
+    #
+    # Suppressed on three branches. A first run and a corrupt-baseline run compared nothing
+    # at all and already say so in words, so a count would be a second, vaguer voice for a
+    # state that is already named precisely. The unpersisted branch is subtler: it
+    # deliberately makes NO affirmation about this run, so a qualifier there would scope a
+    # claim that was never made — the reader is handed a caveat with nothing to attach it to.
+    if not baseline and not baseline_corrupt and persisted:
+        lines += _not_compared_lines(notes, verbose, ascii_only)
     out = "\n".join(lines).rstrip() + "\n"
     return _asciify(out) if ascii_only else out
 

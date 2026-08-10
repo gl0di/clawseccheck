@@ -525,7 +525,11 @@ def _snapshot_memory_files(ctx, capped: "list | None" = None) -> dict:
 
 
 def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
-                          trust_removals: bool = True) -> None:
+                          trust_removals: bool = True,
+                          notes: "list[tuple[str, str]] | None" = None) -> None:
+    """*notes* — C-418: optional sink for comparisons this function declined to make.
+    Optional and defaulted so the existing three-argument callers (fifteen test modules
+    reach in here directly) keep working unchanged."""
     # B-272(2): presence guard. Every other dimension in diff() requires its key on BOTH
     # sides before comparing ("guarded so an old snapshot without these keys never produces
     # spurious 'new X' alerts after upgrade" — see the mcp / mcp_detail / channels /
@@ -545,9 +549,19 @@ def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
     # it describes THIS run's coverage, not a comparison.
     pm = _pm_raw if memory_comparable else {}
     cm = _cm_raw if memory_comparable else {}
+    if notes is not None and not memory_comparable:
+        notes.append((
+            NOTE_NO_PRIOR_RECORD if not isinstance(_pm_raw, dict) else NOTE_RECORD_DAMAGED,
+            "Your saved memory notes were not compared with last time — the previous "
+            "record does not contain them, or its entry for them is damaged.",
+        ))
     # B-268: the cap frontier on each side — paths that were on disk but not fingerprinted.
     # An entry absent from a snapshot's `memory` dict is only evidence of absence when it is
     # also absent from that snapshot's frontier.
+    # C-418: a note file that was over the cap last run and is inspected now is
+    # deliberately not announced as new — correctly, since that would misdate its
+    # appearance — but the user was then never told it appeared at all.
+    _prev_capped_seen: set = set()
     prev_capped = _frontier(prev, "memory_capped")
     curr_capped = _frontier(curr, "memory_capped")
     # B-477: a NEW file the bootstrap dimension already announces ("New bootstrap file
@@ -557,6 +571,8 @@ def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
     # still emitted for those, as it says something the bootstrap line does not.
     bootstrap_new_owned = set(_dim(curr, "bootstrap")) - set(_dim(prev, "bootstrap"))
     for path in sorted(cm.keys() - pm.keys()):
+        if path in prev_capped and notes is not None:
+            _prev_capped_seen.add(path)
         if path in prev_capped:
             # It did not "appear" — it was already on disk last run, merely beyond the cap.
             # Announcing it as new misdates the incident, which is exactly how a
@@ -757,6 +773,13 @@ def _append_memory_alerts(prev: dict, curr: dict, alerts: list[tuple[str, str]],
                 continue
             alerts.append((
                 "INFO", f"Persistent memory file removed since last check: '{path}'."))
+
+    if notes is not None and _prev_capped_seen:
+        notes.append((
+            NOTE_INSPECTION_CAPPED,
+            f"{len(_prev_capped_seen)} memory note(s) now being watched were beyond the "
+            f"inspection cap last run, so they are not announced as newly appeared.",
+        ))
 
     # B-268 disclosure: a bare all-clear over a truncated view is the lie the FN twin
     # exploits — past the cap the region is never read, so a live injection/exfil payload
@@ -1542,6 +1565,39 @@ WATCHED_DIMENSIONS = (
     "skills_capped",
     "skills_capped_count",
     "skills_frontier_partial",
+    # Self-referential on purpose: C-418 reads the stored manifest to tell a user their
+    # baseline predates a comparison this build makes, so the manifest is itself a key read
+    # off a stored baseline and belongs in its own list. Its absence from an older baseline
+    # is precisely what that note reports.
+    "watched",
+)
+
+
+# C-418 — the four reasons a comparison is DECLINED, as opposed to made and found equal.
+#
+# `diff()` is full of deliberate silences: a blind config makes every disappearance
+# untrustworthy, a truncated collection cannot tell "gone" from "never looked at", an older
+# baseline simply lacks the key a newer comparison needs. Each is individually correct, and
+# each used to fall through invisibly into an unconditional "No new threats since last
+# check" — a sentence about the whole setup, printed over the parts of it that were never
+# examined.
+#
+# Four categories rather than forty individual reasons, because the render collapses to a
+# count by default: an eight-line "not compared" list on a healthy run reads as a
+# malfunction, and teaching users to ignore the monitor is a worse outcome than the silence
+# this replaces. They are ordered by how much they should worry the reader.
+NOTE_CONFIG_BLIND = "config_blind"          # openclaw.json unreadable — the loudest
+NOTE_RECORD_DAMAGED = "record_damaged"      # the saved baseline is corrupt in part
+NOTE_INSPECTION_CAPPED = "inspection_capped"  # too much on disk to inspect it all
+NOTE_UNDETERMINED = "undetermined"          # a real record on both sides, but it says "unknown"
+NOTE_NO_PRIOR_RECORD = "no_prior_record"    # nothing to compare against yet — the quietest
+
+NOTE_CATEGORY_ORDER = (
+    NOTE_CONFIG_BLIND,
+    NOTE_RECORD_DAMAGED,
+    NOTE_INSPECTION_CAPPED,
+    NOTE_UNDETERMINED,
+    NOTE_NO_PRIOR_RECORD,
 )
 
 
@@ -1824,7 +1880,26 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
 
 
 def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
-    """Return (level, message) alerts. Empty on first run or no change."""
+    """Return (level, message) alerts. Empty on first run or no change.
+
+    A thin shim over ``diff_with_notes``, kept because ``diff`` is public API (it is in the
+    package ``__all__`` and fifteen test modules call it). Callers that need to know what
+    was NOT compared — the CLI does, so it can stop printing an unqualified all-clear over
+    unexamined ground — should call ``diff_with_notes`` instead.
+    """
+    return diff_with_notes(prev, curr)[0]
+
+
+def diff_with_notes(prev: dict | None, curr: dict
+                    ) -> "tuple[list[tuple[str, str]], list[tuple[str, str]]]":
+    """Return ``(alerts, notes)``.
+
+    *alerts* are drift events, unchanged. *notes* are ``(category, sentence)`` pairs
+    recording every comparison this run DECLINED to make — see the NOTE_* constants. A note
+    is never an alert: it does not describe a change, does not reach the tamper-evident
+    event journal, and cannot move a score. It exists so that "no new threats" can stop
+    meaning "no new threats in the parts we looked at, and silence about the rest".
+    """
     # B-270: a usable baseline is a NON-EMPTY DICT — the same predicate ``read_baseline``
     # applies, restated here because ``diff`` is public API and a caller can hand it
     # anything. The old bare truthiness check let a truthy non-dict (``[1,2,3]``, ``42``,
@@ -1834,8 +1909,57 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     # runs, state.json unchanged). An empty dict still returns no alerts, as before — but
     # the CLI no longer describes that as a clean comparison.
     if not isinstance(prev, dict) or not prev:
-        return []
+        # No note here: the CLI already tells absent from corrupt (BASELINE_ABSENT vs
+        # BASELINE_CORRUPT) and says so in words. A note would be a second, vaguer voice
+        # for a state that is already named precisely.
+        return [], []
     alerts: list[tuple[str, str]] = []
+    notes: list[tuple[str, str]] = []
+
+    def note(category: str, sentence: str) -> None:
+        notes.append((category, sentence))
+
+    # C-418: several comparisons are gated on a SUB-key inside a dimension rather than on
+    # the dimension itself, so the `watched` manifest above cannot see them — it lists
+    # top-level snapshot keys only. Each of these gates is individually correct and each
+    # was individually invisible: a tool server gaining `exfil` in its observed surface,
+    # a skill update expanding what it can do, a channel allowlist changing shape, all
+    # produced a bare all-clear. Counted per name and reported once per reason, so a home
+    # with twenty servers gets one line rather than twenty.
+    _skill_caps_unknown: set = set()
+    _skill_ver_unknown: set = set()
+    _mcp_pkg_unknown: set = set()
+    _mcp_tools_unknown: set = set()
+    _mcp_surface_unknown: set = set()
+    _chan_partial: set = set()
+
+    def pair_or_note(key: str, human: str) -> "tuple[dict, dict] | None":
+        """``_both_dims`` plus a note saying why the comparison was skipped.
+
+        Splits the one None into the two states it conflates, because they call for
+        opposite actions: a key ABSENT from the old baseline heals itself on the next run
+        and needs nothing from the user, while a key present but of the wrong type means
+        the state file is damaged and will stay damaged until it is deleted. Absent from
+        BOTH sides is neither — that surface was never recorded on this platform or in this
+        setup, so there is no gap to disclose and no note.
+        """
+        pair = _both_dims(prev, curr, key)
+        if pair is not None:
+            return pair
+        # ABSENT from both, not merely non-dict on both. The looser test swallowed
+        # prev-damaged + curr-absent — precisely the state whose note tells the user to
+        # delete the state file — and returned the bare all-clear over it.
+        if key not in prev and key not in curr:
+            return None
+        if key not in prev:
+            note(NOTE_NO_PRIOR_RECORD,
+                 f"{human} had nothing to compare against — your saved record predates "
+                 f"this, and will cover it from the next run onwards.")
+        else:
+            note(NOTE_RECORD_DAMAGED,
+                 f"{human} could not be compared — the saved record for them is damaged. "
+                 f"Delete the monitor state file to start a fresh baseline.")
+        return None
 
     # --- B-269: was either side collected while openclaw.json was unreadable? ---------
     prev_blind = bool(prev.get("config_parse_error"))
@@ -1850,6 +1974,54 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     # guard is kept independent of it so a caller that builds a snapshot without passing
     # *prev* still cannot fabricate a removal.
     trust_removals = not curr_blind
+
+    # C-418: the blind-config family. Each of these is a comparison declined, and each used
+    # to vanish into the all-clear. The HIGH alert below explains the CAUSE; these say what
+    # the cause cost.
+    if not trust_removals:
+        note(NOTE_CONFIG_BLIND,
+             "Anything that disappeared was not reported: this run could not read your "
+             "settings file, so an item missing from view may simply be hidden rather "
+             "than gone.")
+    if not compare_config:
+        note(NOTE_CONFIG_BLIND,
+             "Your connections — tool servers, chat channels and the gateway address — "
+             "were not compared with last time.")
+    if prev_blind or curr_blind:
+        note(NOTE_CONFIG_BLIND,
+             "The score and the individual check results were not compared: one of the "
+             "two runs saw less than the other, so the numbers do not describe the same "
+             "ground.")
+
+    # C-418 reading C-417's manifest: the GENERIC form of "your baseline predates this".
+    #
+    # A release that adds a comparison opens a presence gate on every existing baseline —
+    # the older snapshot simply lacks the key, the gate skips, and the screen is identical
+    # to a genuine all-clear. Instrumenting each gate individually would mean a new note
+    # site with every such release, and the one that got forgotten would be invisible again.
+    # Comparing the recorded manifest against what this build reads covers that family at
+    # once, including gates that do not exist yet.
+    #
+    # TOP-LEVEL keys only, though — `watched` lists snapshot keys, so it is blind to a gate
+    # sitting on a sub-key INSIDE a dimension (a server's `surface_tool_sigs`, a skill's
+    # `caps`). Those are instrumented individually further down. An earlier version of this
+    # comment claimed the manifest subsumed them; it does not, and believing it would have
+    # left a rug-pull sitting under a bare all-clear.
+    #
+    # Self-healing by construction: this run writes the current manifest, so the note
+    # appears exactly once after an upgrade and never again.
+    _prev_watched = prev.get("watched")
+    if not isinstance(_prev_watched, list):
+        note(NOTE_NO_PRIOR_RECORD,
+             "Your saved record predates coverage tracking, so this run cannot say which "
+             "comparisons it was able to make. The next run will.")
+    else:
+        _unknown_to_prev = [k for k in WATCHED_DIMENSIONS if k not in _prev_watched]
+        if _unknown_to_prev:
+            note(NOTE_NO_PRIOR_RECORD,
+                 f"{len(_unknown_to_prev)} thing(s) this version watches were not recorded "
+                 f"by the run that saved your baseline, so they had nothing to compare "
+                 f"against this once.")
 
     if curr_blind:
         unknown = sum(1 for s in (curr.get("checks") or {}).values() if s == UNKNOWN)
@@ -1908,7 +2080,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     # extends it to `skills` so a corrupted dimension costs one silent, self-healing run
     # (the next save_state() overwrites it with a real dict) rather than a false malware
     # alarm on every installed skill.
-    _skills_pair = _both_dims(prev, curr, "skills")
+    _skills_pair = pair_or_note("skills", "Installed skills")
     ps, cs = _skills_pair if _skills_pair is not None else ({}, {})
     # B-268: the skills truncation frontier on each side (see snapshot()). `ctx.installed_
     # skills` is capped at _MAX_SKILLS and its fill order is filename order — attacker-
@@ -1919,6 +2091,19 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     curr_sk_capped = _frontier(curr, "skills_capped")
     prev_sk_partial = bool(prev.get("skills_frontier_partial"))
     curr_sk_partial = bool(curr.get("skills_frontier_partial"))
+    # C-418: THIS run's truncation already gets a HIGH alert below (`_sk_capped_n`), so it
+    # is not repeated as a note. What has no voice at all is the PREVIOUS run's truncation:
+    # a skill that was over the cap last time and is inspected now is deliberately not
+    # announced as new — correctly, since calling it new would misdate the install — but
+    # the user is then never told it appeared.
+    if prev_sk_capped:
+        note(NOTE_INSPECTION_CAPPED,
+             f"{len(prev_sk_capped)} skill(s) now being inspected were beyond the "
+             f"inspection cap last run, so they are not announced as newly installed.")
+    if curr_sk_partial and not (curr.get("skills_capped_count") or curr_sk_capped):
+        note(NOTE_INSPECTION_CAPPED,
+             "Skills that disappeared were not reported: this run could not establish the "
+             "full list of what is installed, so removed cannot be told from not-looked-at.")
     for name in sorted(cs.keys() - ps.keys()):
         if name in prev_sk_capped:
             # Known to have been on disk last run, merely beyond the cap. Calling it NEW
@@ -1966,6 +2151,8 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
 
         # Capability diff — only when BOTH sides carry structured caps (new-format
         # snapshots); a legacy/UNKNOWN side skips silently rather than fabricating a diff.
+        if p_caps is None or c_caps is None:
+            _skill_caps_unknown.add(name)
         if p_caps is not None and c_caps is not None:
             added = set(c_caps) - set(p_caps)
             removed = set(p_caps) - set(c_caps)
@@ -1982,6 +2169,8 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
         # "replay an old *signed* manifest" semantics require verifying a signature
         # against a trust root, which is impossible read-only/offline; this merely
         # compares the declared frontmatter version string across snapshots.
+        if not (p_ver and c_ver):
+            _skill_ver_unknown.add(name)
         if p_ver and c_ver:
             try:
                 if _ver_tuple(c_ver) < _ver_tuple(p_ver):
@@ -2024,7 +2213,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     # as "New bootstrap file appeared". `_dim` on each side independently used to do
     # exactly that (measured: `"bootstrap": "a string"` on prev reported every current
     # bootstrap file as newly appeared).
-    _bootstrap_pair = _both_dims(prev, curr, "bootstrap")
+    _bootstrap_pair = pair_or_note("bootstrap", "Your agent's startup instruction files")
     pb, cb = _bootstrap_pair if _bootstrap_pair is not None else ({}, {})
     for name in sorted(pb.keys() & cb.keys()):
         if pb[name] != cb[name]:
@@ -2083,7 +2272,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                            f"Bootstrap file no longer being read: {name} (deleted, moved, "
                            "or no longer readable). Confirm you intended this."))
 
-    _append_memory_alerts(prev, curr, alerts, trust_removals=trust_removals)
+    _append_memory_alerts(prev, curr, alerts, trust_removals=trust_removals, notes=notes)
 
     # B-269: a partially-evaluated run is not comparable to a full one in EITHER direction
     # — a blind run's score is inflated by UNKNOWN-exclusion, so the run after it would
@@ -2124,6 +2313,28 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
             p_scope, c_scope = prev.get("raw_score_scope"), curr.get("raw_score_scope")
             same_scope = (isinstance(p_scope, str) and isinstance(c_scope, str)
                          and p_scope == c_scope)
+            # C-418: this backstop is the ONLY thing that catches posture worsening once an
+            # open FAIL has pinned the displayed score, so a run where it cannot fire is a
+            # run with a real hole in it — and the hole was previously invisible.
+            # Presence BEFORE equality: `same_scope` is also False when the key is simply
+            # absent, and reporting that as "this version checks a different set of things"
+            # states a specific fact the code has no evidence for — an older baseline
+            # carries no scope hash at all, which says nothing about whether the check set
+            # moved.
+            if not (isinstance(p_scope, str) and isinstance(c_scope, str)):
+                note(NOTE_NO_PRIOR_RECORD,
+                     "The underlying pass-rate was not compared — your saved record does "
+                     "not say which checks its figure covered, so the two numbers cannot "
+                     "be lined up.")
+            elif not same_scope:
+                note(NOTE_NO_PRIOR_RECORD,
+                     "The underlying pass-rate was not compared with last time: this "
+                     "version checks a different set of things than the run that saved "
+                     "your baseline did.")
+            elif not (isinstance(p_raw, int) and isinstance(c_raw, int)):
+                note(NOTE_NO_PRIOR_RECORD,
+                     "The underlying pass-rate was not compared — your saved record does "
+                     "not carry that figure.")
             if same_scope and isinstance(p_raw, int) and isinstance(c_raw, int) and c_raw < p_raw:
                 alerts.append((
                     "HIGH",
@@ -2139,7 +2350,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     # transition this run cannot actually see). `_dim` on each side independently used to
     # do exactly that (measured: `"checks": None` on prev reported every real FAIL,
     # including CRITICAL ones, as "Now FAILING" against a config that never changed).
-    _checks_pair = _both_dims(prev, curr, "checks")
+    _checks_pair = pair_or_note("checks", "Individual check results")
     pc, cc = _checks_pair if _checks_pair is not None else ({}, {})
     for cid, status in cc.items():
         if status == FAIL and pc.get(cid) != FAIL:
@@ -2274,7 +2485,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
 
     # --- Agent Watch: connection / trust-surface drift (guarded so an old snapshot
     #     without these keys never produces spurious 'new X' alerts after upgrade) ---
-    _mcp_pair = _both_dims(prev, curr, "mcp")
+    _mcp_pair = pair_or_note("mcp", "Connected tool servers")
     if compare_config and _mcp_pair is not None:
         pm, cm = _mcp_pair
         for name in sorted(cm.keys() - pm.keys()):
@@ -2290,7 +2501,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     # --- Rug-pull detection (RP1-RP3): fine-grained MCP server manifest drift ---
     # Only runs when BOTH snapshots carry the structured mcp_detail key (guarded so an
     # old snapshot without this key never produces spurious alerts after upgrade).
-    _detail_pair = _both_dims(prev, curr, "mcp_detail")
+    _detail_pair = pair_or_note("mcp_detail", "What each tool server launches and asks for")
     if compare_config and _detail_pair is not None:
         pd, cd = _detail_pair
         for name in sorted(set(pd) & set(cd)):
@@ -2336,6 +2547,8 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
             p_pkg = redact_urls_in_text(ps.get("args_pkg", ""))
             c_pkg = cs.get("args_pkg", "")
             pkg_comparable = "args_pkg" in ps and "args_pkg" in cs
+            if not pkg_comparable:
+                _mcp_pkg_unknown.add(name)
             pkg_changed = pkg_comparable and p_pkg != c_pkg
             transport_changed = p_transport != c_transport
             cmd_changed = p_cmd != c_cmd
@@ -2385,6 +2598,8 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
             # description changed under the same trusted server name.
             p_tools = ps.get("tool_sigs") or {}
             c_tools = cs.get("tool_sigs") or {}
+            if not (isinstance(p_tools, dict) and isinstance(c_tools, dict)):
+                _mcp_tools_unknown.add(name)
             if isinstance(p_tools, dict) and isinstance(c_tools, dict):
                 for tool in sorted(set(c_tools) - set(p_tools)):
                     alerts.append(("HIGH",
@@ -2416,6 +2631,8 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
             # first showed up, which is exactly the false alarm this task forbids.
             p_surf = ps.get("surface_tool_sigs")
             c_surf = cs.get("surface_tool_sigs")
+            if not (isinstance(p_surf, dict) and isinstance(c_surf, dict)):
+                _mcp_surface_unknown.add(name)
             if isinstance(p_surf, dict) and isinstance(c_surf, dict):
                 for tool in sorted(set(c_surf) - set(p_surf)):
                     alerts.append(("HIGH",
@@ -2436,7 +2653,7 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                                    f"MCP server '{name}' tool '{tool}' no longer appears "
                                    "in the observed tool surface (source: trajectory)."))
 
-    _chan_pair = _both_dims(prev, curr, "channels")
+    _chan_pair = pair_or_note("channels", "The ways your agent can be contacted")
     if compare_config and _chan_pair is not None:
         pch, cch = _chan_pair
         for name in sorted(cch.keys() - pch.keys()):
@@ -2452,6 +2669,8 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
             # legacy one-string shape, so `core` still compares across the boundary.
             pe, ce = _channel_entry(pch[name]), _channel_entry(cch[name])
             shared = pe.keys() & ce.keys()
+            if pe.keys() ^ ce.keys():
+                _chan_partial.add(name)
             if any(pe[k] != ce[k] for k in shared):
                 alerts.append(("MEDIUM", f"Channel '{name}' openness/auth changed — review it."))
         # B-275: the channels dimension had no removal branch either. INFO, not HIGH:
@@ -2467,6 +2686,15 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     # TypeError on an unhashable (list/dict) value from a corrupted snapshot, and a
     # non-string bind is not a bind address we can reason about anyway.
     _pgb, _cgb = prev.get("gateway_bind"), curr.get("gateway_bind")
+    # C-418: the gateway address is the single highest-consequence field this tool watches —
+    # 127.0.0.1 to 0.0.0.0 is the difference between a local agent and one on the network —
+    # so a run that could not compare it must say so rather than let the all-clear imply it
+    # did. Only when the config WAS readable: when it was not, the blind-config note above
+    # already covers the gateway and a second sentence would be noise.
+    if compare_config and not (isinstance(_pgb, str) and isinstance(_cgb, str)):
+        note(NOTE_NO_PRIOR_RECORD if "gateway_bind" not in prev else NOTE_RECORD_DAMAGED,
+             "The gateway's network address was not compared with last time — it is "
+             "missing or unreadable in one of the two records.")
     if (compare_config and isinstance(_pgb, str) and isinstance(_cgb, str)
             and _pgb != _cgb):
         from .checks import EXPOSED_BINDS  # noqa: PLC0415
@@ -2476,15 +2704,70 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
                        f"Gateway bind changed: '{_pgb}' -> '{cb}'"
                        + (" (now exposed to the network!)" if exposed else "")))
 
-    _host_pair = _both_dims(prev, curr, "host")
+    _host_pair = pair_or_note("host", "Security tools running on this machine")
     if _host_pair is not None:
         ph, ch = _host_pair
         for cls in sorted(set(ph) & set(ch)):
             if ph[cls] == "present" and ch[cls] != "present":
                 alerts.append(("HIGH", f"Host monitor '{cls}' is no longer detected — "
                                "a watcher on this machine was removed or disabled."))
+        # C-418: only a present -> absent transition alerts, so a watcher whose earlier
+        # state was `unknown` can stop without a word. Measured on a real machine: five of
+        # seven classes are `unknown`, i.e. most of this dimension is not in fact being
+        # watched for disappearance.
+        #
+        # `unknown` ONLY — not "anything other than present". The first version tested
+        # `!= "present"`, which swept in `absent -> absent`: a confident verdict on both
+        # sides, fully compared, with nothing that could have stopped. That is a false
+        # note, and a permanent one — a machine that simply has no EDR would report it on
+        # every run forever, which would put the tick this change introduced permanently
+        # out of reach there. A note that can never be cleared trains the reader to ignore
+        # the whole block.
+        _undetermined = sum(1 for cls in set(ph) & set(ch) if ph[cls] == "unknown")
+        if _undetermined:
+            note(NOTE_UNDETERMINED,
+                 f"{_undetermined} security tool(s) on this machine could not be confirmed "
+                 f"as running last time, so this run cannot tell you if they stopped.")
 
-    return alerts
+    # C-418: the sub-key gates, reported once per reason with a count. Ordered loudest
+    # first — a tool server's observed surface is the live rug-pull signature, a skill's
+    # capability set is what an update quietly widens.
+    if _mcp_surface_unknown:
+        note(NOTE_UNDETERMINED,
+             f"The tools actually offered to your model by {len(_mcp_surface_unknown)} "
+             f"server(s) were not compared — no session transcript was available for one "
+             f"of the two runs, so a server that started offering new tools would not show.")
+    if _mcp_tools_unknown:
+        note(NOTE_NO_PRIOR_RECORD,
+             f"The tool list declared by {len(_mcp_tools_unknown)} server(s) was not "
+             f"compared with last time.")
+    if _mcp_pkg_unknown:
+        note(NOTE_NO_PRIOR_RECORD,
+             f"Which package {len(_mcp_pkg_unknown)} server(s) launch was not compared — "
+             f"your saved record predates that detail, so a swap under a trusted name "
+             f"would not show.")
+    if _skill_caps_unknown:
+        note(NOTE_NO_PRIOR_RECORD,
+             f"What {len(_skill_caps_unknown)} skill(s) are able to do was not compared "
+             f"with last time, so an update that widened them would not show.")
+    if _skill_ver_unknown:
+        note(NOTE_NO_PRIOR_RECORD,
+             f"Version numbers were not compared for {len(_skill_ver_unknown)} skill(s) — "
+             f"they do not declare one on both sides.")
+    if _chan_partial:
+        note(NOTE_NO_PRIOR_RECORD,
+             f"Some settings of {len(_chan_partial)} contact channel(s) had nothing to "
+             f"compare against — they are recorded on only one of the two runs.")
+    # A check that ran last time and not this time is never visited: the comparison loop
+    # walks the CURRENT set only, so an archived check, or one newly silenced by an ignore
+    # rule, leaves no trace at all.
+    _vanished = set(pc) - set(cc)
+    if _vanished:
+        note(NOTE_UNDETERMINED,
+             f"{len(_vanished)} check(s) that ran last time did not run this time, and "
+             f"are not reported as missing.")
+
+    return alerts, notes
 
 
 def read_baseline(path: str | Path = DEFAULT_STATE) -> "tuple[str, dict | None]":

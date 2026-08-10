@@ -299,7 +299,14 @@ _SNAPSHOT_RECEIVERS = {"prev", "curr"}
 # it. And keyed to the key's POSITION rather than "any string in this call", because the
 # looser form swept prose into the manifest — `_emit(prev, curr, "MCP server appeared")`
 # made the guard demand that sentence be declared a watched dimension.
-_SNAPSHOT_KEY_HELPERS = {"_dim": 1, "_frontier": 1, "_num": 1, "_both_dims": 2}
+_SNAPSHOT_KEY_HELPERS = {"_dim": 1, "_frontier": 1, "_num": 1, "_both_dims": 2,
+                         # C-418 wrapped the seven `_both_dims` presence guards in a helper
+                         # that also records WHY a comparison was skipped. Its key is the
+                         # first argument. This entry is why the guard kept seeing `host`,
+                         # whose only read went through the new wrapper — it is the guard
+                         # doing its job across a refactor, which is the case it was built
+                         # for and the one a name-based scan would have missed.
+                         "pair_or_note": 0}
 
 
 def _keys_read_from_a_stored_snapshot() -> set:
