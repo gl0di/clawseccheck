@@ -330,22 +330,92 @@ def check_audit_log(ctx: Context) -> Finding:
     )
 
 
+_NAME_TOKEN_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _monitoring_candidate(name) -> bool:
+    """Does this skill/plugin NAME look like a monitor? A candidate, never a verdict.
+
+    B-501: matching used to be a bare substring test anywhere in the name, so `"ids"`
+    matched *asteroids*, *hybrids*, *pyramids*. A single-word hint must now START a token:
+    that keeps every intended match (`clawsec` -> *clawseccheck*, `monitor` ->
+    *monitoring*) while dropping the accidental ones, which all had the hint buried in the
+    middle of a word. Hints carrying a separator (`-ids`, `security-monitor`) keep
+    substring matching, which is what they were written for.
+    """
+    low = str(name).lower()
+    tokens = {t for t in _NAME_TOKEN_RE.split(low) if t}
+    for h in _MONITORING_HINTS:
+        if "-" in h or "_" in h:
+            if h in low:
+                return True
+        elif any(t.startswith(h) for t in tokens):
+            return True
+    return False
+
+
+def _attested_monitors_any(ctx: Context) -> list:
+    """Every self-reported host monitor, regardless of class.
+
+    `_attested_host_monitors` filters by class for B50-B54. B16 asks the broader
+    question — is anything watching at all — so it takes the list unfiltered rather
+    than borrowing another check's hint list.
+    """
+    att = getattr(ctx, "attestation", None) or {}
+    declared = att.get("host_monitors")
+    if not isinstance(declared, list):
+        return []
+    return [d for d in declared if isinstance(d, str) and d.strip()]
+
+
 def check_monitoring(ctx: Context) -> Finding:
     """Does the user actually have threat monitoring / detection in place?"""
     cfg = ctx.config
-    signals = []
-    for name in list(ctx.installed_skills) + list(_plugins(cfg)):
-        if any(h in str(name).lower() for h in _MONITORING_HINTS):
-            signals.append(f"'{name}'")
+    # B-501: a NAME used to be the whole gate — anything matching a hint returned PASS
+    # "Threat monitoring present". The name is attacker-controlled, and the corpus already
+    # held the exploit: fixtures/bad_ownname_clawseccheck_squat is a hostile skill calling
+    # itself `clawseccheck` and shipping vendor/sitecustomize.py, and B16 credited it as
+    # the user's threat monitoring. Only two fixtures in the whole corpus reached PASS,
+    # and that squat was one of them — the check's entire positive evidence was a string
+    # an attacker picks.
+    #
+    # A name is now a candidate. The PASS that remains is the attested one — B16's own fix
+    # text has pointed users at `--attest host_monitors` since it was written, and nothing
+    # ever read it.
+    #
+    # Deliberately NOT added: corroborating a candidate against an OpenClaw cron entry.
+    # Measured before designing — ctx.cron_jobs is empty on the real fleet box
+    # (cron_store_empty) and no fixture populates it, so it would be machinery that
+    # credits nobody while costing false negatives for externally-scheduled monitors.
+    #
     # monitoring, security.monitoring, alerts, security.alerts do NOT exist in the
-    # OpenClaw config schema — removed to eliminate dead-code false-signal arms.
-    # Detection relies on skill/plugin name hints above (confirmed reliable).
-    if signals:
+    # OpenClaw config schema — removed earlier to eliminate dead-code false-signal arms.
+    candidates = [
+        f"'{name}'"
+        for name in list(ctx.installed_skills) + list(_plugins(cfg))
+        if _monitoring_candidate(name)
+    ]
+    attested = _attested_monitors_any(ctx)
+    if attested:
         return _finding(
             "B16",
             PASS,
-            f"Threat monitoring present: {', '.join(signals[:5])}.",
-            "Keep it enabled and make sure its alerts actually reach you.",
+            "Threat monitoring is not confirmable from this config, but the agent "
+            f"attests it runs: {', '.join(attested[:5])} (self-reported).",
+            "Self-reported — confirm it is actually running and that its alerts reach you.",
+            evidence=list(attested[:5]),
+            confidence=ATTESTED,
+        )
+    if candidates:
+        return _finding(
+            "B16",
+            WARN,
+            f"Possible monitoring skill/plugin by name only: {', '.join(candidates[:5])}. "
+            "A name is not evidence — nothing here shows it watches anything, and the "
+            "name is chosen by whoever installed it. Treat monitoring as unconfirmed.",
+            "Confirm it really is a monitor and that its alerts reach you. If it is, "
+            "self-report it via `--attest` (host_monitors) so this check can credit it; "
+            "if you do not recognise it, vet it with `clawseccheck --vet <folder>`.",
         )
     return _finding(
         "B16",

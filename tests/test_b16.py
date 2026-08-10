@@ -1,7 +1,7 @@
 """B16: threat monitoring detection — PASS on ids-* and *-ids tool names."""
 from pathlib import Path
 
-from clawseccheck.catalog import PASS, WARN
+from clawseccheck.catalog import WARN
 from clawseccheck.checks import check_monitoring
 from clawseccheck.collector import Context
 
@@ -13,19 +13,27 @@ def _ctx(skills=()):
     return c
 
 
-def test_b16_pass_with_ids_prefix_skill():
+# B-501: these three used to assert PASS. A name was the sole gate, so any skill could
+# claim to be the user's threat monitoring by choosing one — and one already did, in
+# fixtures/bad_ownname_clawseccheck_squat. The names below are still RECOGNISED (that is
+# what each case is here to pin); recognition just no longer grants a verdict.
+
+def test_b16_ids_prefix_skill_is_a_candidate_not_a_pass():
     f = check_monitoring(_ctx(skills=["ids-engine"]))
-    assert f.status == PASS
+    assert f.status == WARN
+    assert "'ids-engine'" in f.detail
 
 
-def test_b16_pass_with_ids_detector_skill():
+def test_b16_ids_detector_skill_is_a_candidate_not_a_pass():
     f = check_monitoring(_ctx(skills=["ids-detector"]))
-    assert f.status == PASS
+    assert f.status == WARN
+    assert "'ids-detector'" in f.detail
 
 
-def test_b16_pass_with_dash_ids_suffix_skill():
+def test_b16_dash_ids_suffix_skill_is_a_candidate_not_a_pass():
     f = check_monitoring(_ctx(skills=["suricata-ids"]))
-    assert f.status == PASS
+    assert f.status == WARN
+    assert "'suricata-ids'" in f.detail
 
 
 def test_b16_warn_when_no_monitoring():

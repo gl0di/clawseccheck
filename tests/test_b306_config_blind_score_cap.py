@@ -271,9 +271,14 @@ class TestRegressionRealShapedFixturesUnaffected:
 class TestReproC_TotalZeroBypass:
     """C-135 follow-up #2 (2026-07-21): the reviewer's own real end-to-end repro — a
     minimal/fresh OpenClaw home (no skills, no MCP servers) with openclaw.json truncated
-    AND a `.clawseccheckignore` that happens to suppress the only two checks (B9, B16)
+    AND a `.clawseccheckignore` that happens to suppress the only checks (B9, B16, B10)
     that still score off a blind ``ctx.config == {}`` (every other config-derived check
-    was already guarded to UNKNOWN by this task's first half). Pre-fix this reached
+    was already guarded to UNKNOWN by this task's first half). B10 joined that list in
+    B-514: it used to return UNKNOWN on the false premise that `audit.enabled` does not
+    exist in the schema, and now PASSes on the field's documented default, which scores.
+    The assertion below is a deliberate guard on this setup — when it fires, the repro
+    shape has drifted and the ignore list needs the newly-scoring check, which is exactly
+    how this edit was found. Pre-fix this reached
     `scored == []`, `total == 0`, and fell through to `assessable=False`/grade="N/A" —
     a neutral grey badge, not the CRITICAL-ceiling F this project's own doctrine assigns
     everywhere else a config goes dark. Runs through the real `audit()` entry point
@@ -282,7 +287,7 @@ class TestReproC_TotalZeroBypass:
     def test_blind_run_with_nothing_else_scored_does_not_fall_back_to_na(self, tmp_path):
         (tmp_path / "openclaw.json").write_text('{"mcp": {"servers": ')  # truncated JSON
         os.chmod(tmp_path / "openclaw.json", 0o600)
-        (tmp_path / ".clawseccheckignore").write_text("B9\nB16\n")
+        (tmp_path / ".clawseccheckignore").write_text("B9\nB16\nB10\n")
 
         ctx, findings, score = audit(tmp_path)
 
