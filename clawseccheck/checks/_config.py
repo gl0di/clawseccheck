@@ -160,6 +160,9 @@ _C015_EXTRA_SECRET_PATTERNS = [
 
 
 _C015_MAX_BYTES = 200_000
+# B-513: how many matching files the finding lists before it says "+N more".
+# Named rather than inline so the disclosure below cannot drift from the slice.
+_C015_MAX_EVIDENCE = 12
 
 
 _C015_MAX_SCAN_FILES = 500
@@ -2639,12 +2642,23 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             f"Plaintext secret-shaped value(s) found in {len(hits)} home file(s) — see evidence."
             f"{cap_note}"
         )
+        # B-513: the detail states the true count while the evidence list was silently
+        # truncated to 12, so a home with 13 hits printed "13 home file(s)" over 12 rows
+        # and the reader had to notice the arithmetic themselves. Every other capped
+        # evidence list in the engine already discloses its overflow (`(+N more)` in
+        # _egress.py's B14, B164 and the loose-permission walk); this one did not follow
+        # the convention it sits beside. Truncating is right — a home can hold hundreds of
+        # matches and the report has to stay readable — but a silent truncation makes the
+        # count and the list disagree, which is the same defect class as B-518.
+        shown = hits[:_C015_MAX_EVIDENCE]
+        if len(hits) > _C015_MAX_EVIDENCE:
+            shown = shown + [f"(+{len(hits) - _C015_MAX_EVIDENCE} more file(s))"]
         return _finding(
             "C015",
             WARN,
             detail,
             "Move plaintext secrets into `openclaw secrets configure` or narrowly-scoped environment variables, and keep bootstrap/config files free of inline tokens.",
-            evidence=hits[:12],
+            evidence=shown,
         )
 
     if scan_capped:
