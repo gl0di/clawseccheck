@@ -22,7 +22,7 @@ import os
 import secrets
 import sys
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from . import (
@@ -1126,6 +1126,7 @@ _PRIMARY_MODES = [
     ("verify_events", "--verify-events", "bool"),
     ("vet_plan", "--vet-plan", "opt"),
     ("menu", "--menu", "bool"),
+    ("brief", "--brief", "bool"),
     ("cron_recipe", "--cron-recipe", "bool"),
     ("functions", "--functions", "bool"),
     ("vet", "--vet", "opt"),
@@ -1879,6 +1880,9 @@ def _main(argv=None) -> int:
     # of `--state`, and adding any second `--st*` flag turns it into a hard usage error for
     # someone who passed none of the new flags — the exact regression this task's DoD
     # forbids. No existing flag begins `--dat`, so no working abbreviation changes meaning.
+    p.add_argument("--brief", action="store_true",
+                   help="is the watch still running, and did it say anything while you "
+                        "were away — reads three local files, WRITES NOTHING")
     p.add_argument("--cron-recipe", action="store_true",
                    help="print an OpenClaw cron job that runs the drift check on a "
                         "schedule, for your agent to create — prints only, creates nothing")
@@ -2084,6 +2088,33 @@ def _main(argv=None) -> int:
         stale = bool(update_notice(__version__, released=__released__))
         _emit(render_menu(version=__version__, build_age_days=build_age,
                           last_check_days=last_days, stale=stale, ascii_only=ascii_only))
+        return 0
+
+    if args.brief:
+        # F-171: reads state.json, events.jsonl and history.jsonl — and writes NOTHING.
+        # No audit, no snapshot, no journal append. That constraint is what lets SKILL.md
+        # have the agent run this at session start with no consent prompt; the consent rule
+        # covers --monitor, which writes.
+        from .report import render_brief  # noqa: PLC0415
+        _state_path = Path(args.state).expanduser()
+        _state, _mtime = None, None
+        try:
+            if _state_path.is_file():
+                _mtime = datetime.fromtimestamp(
+                    _state_path.stat().st_mtime).isoformat(timespec="seconds")
+                _state = json.loads(_state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _state = None
+        try:
+            _events = load_events(args.events)
+        except OSError:
+            _events = []
+        try:
+            _hist = history_load(args.history)
+        except OSError:
+            _hist = []
+        _emit(render_brief(_state if isinstance(_state, dict) else None, _events, _hist,
+                           state_mtime_iso=_mtime, ascii_only=ascii_only))
         return 0
 
     if args.cron_recipe:

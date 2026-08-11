@@ -594,6 +594,40 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   outside the target file itself, with no message printed, from a tool that otherwise promises
   read-only.
 
+**Is the watch still running?** `--brief` answers that in one to five lines, and it is the one
+mode safe to run unprompted at the start of a session:
+
+```bash
+clawseccheck --brief
+```
+
+It reads the drift baseline, the event journal and the score history — and **writes nothing**.
+No audit, no snapshot, no journal append. That is what makes it safe to run without asking.
+
+It exists because of two gaps nothing else covers. The cheapest attack on a scheduled monitor is
+to **stop it running**: the attacker never touches `state.json` or the journal, so no file it
+watches changes and no alert ever fires. And an alert is written to the journal **once** — if
+nobody was reading at that moment, the signal effectively never existed, so `--brief` carries
+serious events forward until you have seen them.
+
+The staleness ladder, and where the numbers come from:
+
+| Silence since the last check | What it says |
+| --- | --- |
+| under 3 days | the age, plainly |
+| 3–14 days | longer than this setup's usual gap — confirm the schedule is still in place |
+| over 14 days | monitoring is effectively not running |
+
+Three days is not a guess. Measured on a real machine's history, the gap between consecutive
+checks has a median near zero, a 90th percentile of 0.07 days and a **maximum of 1.90 days** — so
+crossing three days means something stopped, not that checks are merely infrequent.
+
+**What a fresh `--brief` does NOT prove.** It reports that a check ran recently and what the
+journal holds. It says nothing about how much that check actually compared — a run can be recent
+and still have skipped comparisons it could not make (see the scoping note above). "Checked an
+hour ago" and "checked an hour ago and compared everything" are different claims, and only
+`--monitor` itself makes the second one.
+
 **Running it on a schedule.** If your agent is OpenClaw, ask it for the job rather than
 writing one:
 

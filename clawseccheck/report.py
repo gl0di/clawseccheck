@@ -4604,3 +4604,130 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
 </html>'''
 
     return html_body
+
+
+# ── F-171: the session-start brief ────────────────────────────────────────────────
+#
+# Two problems, one mode.
+#
+# The cheapest attack on a scheduled monitor is to stop it running: the attacker never
+# touches the baseline or the journal, they remove the schedule — and nothing anywhere
+# says so. And an alert is written to the journal once, so if nobody was looking at that
+# moment the signal effectively never existed.
+#
+# `--brief` answers "is this thing still watching, and did it say anything while I was
+# away". It reads three files and WRITES NOTHING — no audit, no snapshot, no journal
+# append. That is not an optimisation, it is the whole design constraint: because it
+# writes nothing, SKILL.md can have the agent run it at session start without a consent
+# prompt, which is what makes session-start comparison possible at all.
+#
+# THRESHOLDS ARE MEASURED, NOT CHOSEN. On the maintainer's real history the gap between
+# consecutive monitor-recorded runs has a median near zero, a p90 of 0.07 days and a
+# MAXIMUM of 1.90 days. Three days therefore sits above every real gap observed, so
+# crossing it means something stopped rather than that the schedule is merely sparse.
+_BRIEF_STALE_DAYS = 3.0
+_BRIEF_DEAD_DAYS = 14.0
+
+# Which history rows count as evidence that a real check ran. Measured on the same file:
+# 4,414 of 4,576 rows carry `source: "test"` — the pollution incident that motivated
+# `--data-dir`. Counting those would report a fixture run as a live one, which is the
+# reassuring lie this mode exists to remove.
+_BRIEF_REAL_SOURCES = ("audit",)
+
+
+def _brief_age_days(iso: str, now) -> "float | None":
+    """Age in days of an ISO local timestamp, or None if it cannot be read."""
+    from datetime import datetime  # noqa: PLC0415
+    try:
+        then = datetime.fromisoformat(str(iso).replace("Z", ""))
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, (now - then).total_seconds() / 86400.0)
+
+
+def _brief_age_words(days: float) -> str:
+    if days < 1 / 24:
+        return "minutes ago"
+    if days < 1:
+        return f"{int(days * 24)}h ago"
+    return f"{int(days)}d ago"
+
+
+def render_brief(state: "dict | None", events: "list | None",
+                 history: "list | None" = None, *, now=None,
+                 state_mtime_iso: "str | None" = None,
+                 ascii_only: bool = False) -> str:
+    """One to five lines: is the watch alive, and what did it say while you were away.
+
+    Pure: every input is passed in, nothing is read or written here. *state* is the parsed
+    drift baseline (or None when there is none), *events* the journal entries, *history*
+    the score-history rows. *state_mtime_iso* is a fallback for a baseline written before
+    timestamping existed — labelled as a file time rather than passed off as a run time.
+    """
+    from datetime import datetime  # noqa: PLC0415
+    now = now or datetime.now()
+    events = list(events or ())
+    lines = []
+
+    # ---- 1. is anything watching at all ----
+    if not isinstance(state, dict) or not state:
+        lines.append(
+            "Nothing is watching this setup: no drift baseline exists. Run "
+            "`clawseccheck --monitor` once to start, or `--cron-recipe` for a schedule.")
+    else:
+        ts = state.get("ts")
+        age = _brief_age_days(ts, now) if ts else None
+        if age is None and state_mtime_iso:
+            age = _brief_age_days(state_mtime_iso, now)
+            # Said plainly: a file's write time is not a record of a run. It is the best
+            # evidence available for a baseline saved before timestamping existed, and
+            # presenting it as anything more would be inventing precision.
+            if age is not None:
+                lines.append(
+                    f"Last drift baseline was written {_brief_age_words(age)} (file time — "
+                    "this baseline predates run timestamps, so the exact run is unknown).")
+        elif age is not None:
+            lines.append(f"Last drift check: {_brief_age_words(age)}.")
+        if age is None:
+            lines.append("A drift baseline exists but carries no timestamp, so how long "
+                         "ago it was taken cannot be determined.")
+        elif age >= _BRIEF_DEAD_DAYS:
+            lines.append(
+                f"Monitoring is effectively not running — nothing has checked this setup "
+                f"for {int(age)} days. Stopping the schedule is the cheapest way to "
+                "silence a monitor, and it leaves no trace in the files it watches.")
+        elif age >= _BRIEF_STALE_DAYS:
+            lines.append(
+                "That is longer than this setup's usual gap between checks. Confirm the "
+                "schedule is still in place.")
+
+    # ---- 2. what the journal recorded ----
+    ranked = [(e.get("level"), _brief_age_days(e.get("ts"), now)) for e in events
+              if isinstance(e, dict)]
+    order = {"CRITICAL": 3, "HIGH": 2, "MEDIUM": 1, "LOW": 0}
+    serious = [(lvl, d) for lvl, d in ranked if order.get(lvl, -1) >= order["HIGH"]]
+    if serious:
+        worst = max(serious, key=lambda x: order.get(x[0], -1))[0]
+        oldest = max((d for _lvl, d in serious if d is not None), default=None)
+        n = len(serious)
+        tail = f", oldest {int(oldest)}d ago" if oldest is not None and oldest >= 1 else ""
+        # "recorded", not "unacknowledged": whether anyone read them is not something this
+        # tool can observe, and claiming it would be a statement about the user's attention
+        # rather than about the evidence.
+        lines.append(f"{n} {worst}-or-worse event(s) recorded in the journal{tail}. "
+                     "Run `clawseccheck --watch-log` for the timeline.")
+    elif events:
+        lines.append(f"{len(events)} event(s) recorded, none above MEDIUM. "
+                     "Run `clawseccheck --watch-log` for the timeline.")
+
+    # ---- 3. has a real check ever run ----
+    real = [r for r in (history or ())
+            if isinstance(r, dict) and r.get("source") in _BRIEF_REAL_SOURCES]
+    if history and not real:
+        lines.append("The score history holds no rows from a real check — only test runs. "
+                     "Nothing here reflects this machine.")
+
+    if not lines:
+        lines.append("No baseline, no events, no history — nothing to report yet.")
+    out = "\n".join(lines).rstrip() + "\n"
+    return _asciify(out) if ascii_only else out
