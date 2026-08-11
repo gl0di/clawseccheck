@@ -176,3 +176,87 @@ def render_next_actions(
     if ascii_only:
         out = asciify(out)
     return out
+
+
+# ── F-172: a native OpenClaw cron job, printed for the agent to create ────────────
+#
+# "Watch continuously and tell me when something is wrong" needs periodicity and delivery.
+# This tool supplies neither and must not: a resident daemon breaks the skill shape, and
+# any delivery of our own would be a network call. OpenClaw already provides both.
+#
+# GROUNDED against the installed dist, because Golden Rule #4 forbids inventing a field's
+# contract. Job schema: cron-tool-C9qaFGtt.js:830-875. `schedule.kind` is one of
+# at|every|cron|on-exit; `payload.kind` is systemEvent|agentTurn; `delivery.mode` is
+# none|announce|webhook.
+#
+# WHY THERE IS NO `trigger` BLOCK, recorded so the next attempt starts from an answer:
+# `trigger.script` exists and would be the better design — it polls headlessly and wakes
+# the agent only when it returns {fire: true}, i.e. zero token cost while nothing is wrong.
+# Traced: the script is passed as `code` to `runCodeModeScriptHeadless`
+# (server-cron-Cwg2hJro.js:3714), which runs it in a **QuickJS/WASI sandbox**
+# (agents/code-mode.worker.js imports `quickjs-wasi`) — so it is JavaScript, not shell and
+# not Python. It must return a boolean `fire`, may return `message`/`state`, and is bounded
+# to 30s wall clock, 5 tool calls and 16KB of persisted state
+# (server-cron-Cwg2hJro.js:3461-3464).
+#
+# What is NOT established is whether that sandbox's tool catalog can execute an external
+# binary and read its exit status. Without that a trigger cannot consult
+# `clawseccheck --exit-code`, which is the whole point of using one. A full monitor run
+# measures 7.7-7.9s on a real machine, so the 30s ceiling is not the obstacle — the exec
+# route is. Until someone grounds it, this emits the plain `every` + `agentTurn` variant,
+# which is fully grounded today.
+
+_CRON_JOB_NAME = "clawseccheck-watch"
+_CRON_EVERY_MS = 21_600_000        # six hours
+
+
+def render_cron_recipe(ascii_only: bool = False,
+                       data_dir: str = "~/.clawseccheck") -> str:
+    """A copy-paste OpenClaw cron job that runs the drift check on a schedule.
+
+    Prints only. This never writes a file, never edits openclaw.json and never invokes
+    `openclaw cron` — creating the job is the agent's or the user's act, and a security
+    tool that installs a recurring job as a side effect of being asked how to install one
+    has helped itself to a decision that was not offered.
+
+    Deterministic: no clock, no randomness, so the same input always prints the same text.
+    """
+    job = (
+        '{\n'
+        f'  "name": "{_CRON_JOB_NAME}",\n'
+        f'  "schedule": {{ "kind": "every", "everyMs": {_CRON_EVERY_MS} }},\n'
+        '  "payload": {\n'
+        '    "kind": "agentTurn",\n'
+        '    "message": "Run: clawseccheck --monitor --exit-code --data-dir '
+        f'{data_dir}\\nExit 0 means nothing changed — say nothing and stop. Exit 3 means '
+        'drift was recorded: report what changed, quoting the tool\'s own output. Exit 1 '
+        'means monitoring is NOT established (the run could not write its state) — say so, '
+        'it is more urgent than drift. Exit 2 is a usage error in this job, not a finding."\n'
+        '  },\n'
+        '  "delivery": { "mode": "announce", "channel": "<your-channel>", "to": "<you>" },\n'
+        '  "sessionTarget": "isolated"\n'
+        '}'
+    )
+    lines = [
+        "Watch this setup on a schedule",
+        "",
+        "OpenClaw runs the schedule and delivers the message; this tool only checks. Ask",
+        "your agent to create this job with its own `cron` tool — nothing here is created",
+        "for you:",
+        "",
+        job,
+        "",
+        "Before you agree to it:",
+        "",
+        "  - It runs every 6 hours. Change everyMs if you want a different interval.",
+        f"  - It writes three local files under {data_dir} — the drift baseline, the event",
+        "    journal and the score history. Nothing leaves the machine.",
+        "  - Replace <your-channel> and <you>. Delivery is OpenClaw's, not this tool's; set",
+        '    "mode": "none" if you would rather read the result in the session.',
+        '  - "sessionTarget": "isolated" keeps the check out of your working conversation.',
+        "",
+        "The first run records a baseline and reports nothing. Every run after it compares",
+        "against that baseline.",
+    ]
+    out = "\n".join(lines).rstrip() + "\n"
+    return asciify(out) if ascii_only else out

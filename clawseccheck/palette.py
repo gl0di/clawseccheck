@@ -152,6 +152,8 @@ _PALETTE: tuple[PaletteCategory, ...] = (
     PaletteCategory("Watch", READONLY, MODE_B, (
         PaletteEntry("What changed", "--monitor",
                      "diff against your last scan"),
+        PaletteEntry("Watch on a schedule", "--cron-recipe",
+                     "print an OpenClaw cron job for your agent to create"),
         PaletteEntry("Trend", "--trend",
                      "how your graded scans moved over time"),
         PaletteEntry("Watch log", "--watch-log",

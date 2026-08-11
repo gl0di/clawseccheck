@@ -594,7 +594,21 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   outside the target file itself, with no message printed, from a tool that otherwise promises
   read-only.
 
-**A cron recipe.** Pass `--exit-code` and read the exit status:
+**Running it on a schedule.** If your agent is OpenClaw, ask it for the job rather than
+writing one:
+
+```bash
+clawseccheck --cron-recipe
+```
+
+That prints a native OpenClaw cron job — schedule, the command to run, and what each exit
+code means — for your agent to create with its own `cron` tool. It prints **only**: nothing
+is written, no config is edited, and `openclaw cron` is never invoked, because installing a
+recurring job as a side effect of being asked how to install one is not a decision this tool
+gets to make. OpenClaw supplies the periodicity and the delivery to your phone; this tool
+supplies neither and should not.
+
+**A cron recipe for any other scheduler.** Pass `--exit-code` and read the exit status:
 
 ```bash
 #!/bin/sh

@@ -1126,6 +1126,7 @@ _PRIMARY_MODES = [
     ("verify_events", "--verify-events", "bool"),
     ("vet_plan", "--vet-plan", "opt"),
     ("menu", "--menu", "bool"),
+    ("cron_recipe", "--cron-recipe", "bool"),
     ("functions", "--functions", "bool"),
     ("vet", "--vet", "opt"),
     ("vet_skill", "--vet-skill", "opt"),
@@ -1878,6 +1879,9 @@ def _main(argv=None) -> int:
     # of `--state`, and adding any second `--st*` flag turns it into a hard usage error for
     # someone who passed none of the new flags — the exact regression this task's DoD
     # forbids. No existing flag begins `--dat`, so no working abbreviation changes meaning.
+    p.add_argument("--cron-recipe", action="store_true",
+                   help="print an OpenClaw cron job that runs the drift check on a "
+                        "schedule, for your agent to create — prints only, creates nothing")
     p.add_argument("--data-dir", metavar="DIR", default=None,
                    help="put the monitor state, the event journal AND the score history "
                         "under DIR — the three move together, so a scratch run cannot "
@@ -2080,6 +2084,15 @@ def _main(argv=None) -> int:
         stale = bool(update_notice(__version__, released=__released__))
         _emit(render_menu(version=__version__, build_age_days=build_age,
                           last_check_days=last_days, stale=stale, ascii_only=ascii_only))
+        return 0
+
+    if args.cron_recipe:
+        # F-172: print-only by construction — no scan, no writes, and emphatically no
+        # `openclaw cron` call. A security tool that installs a recurring job as a side
+        # effect of being asked how to install one has taken a decision nobody offered it.
+        from .guide import render_cron_recipe  # noqa: PLC0415
+        _emit(render_cron_recipe(ascii_only=ascii_only,
+                                 data_dir=args.data_dir or "~/.clawseccheck"))
         return 0
 
     if args.functions:
