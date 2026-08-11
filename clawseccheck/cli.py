@@ -1188,7 +1188,11 @@ _MODE_HONORS = {
     # check below is given its own "judged_bundle" escape hatch rather than reusing
     # "full" (which would wrongly silence the still-true --full/--quiet/--fast notes).
     "trend": frozenset({"judged_bundle"}),
-    "monitor": frozenset({"judged_bundle"}),
+    # C-419: --exit-code / --fail-on were ALREADY flags; --monitor simply refused them and
+    # said so via the no-effect note. Honouring them here is what turns that honest refusal
+    # into a working machine channel, without inventing a second flag with different
+    # semantics in a different mode.
+    "monitor": frozenset({"judged_bundle", "exit_code", "fail_on"}),
     # B-379: --percentile/--next now resolve the liveTest cap the same way
     # --trend/--monitor already did (see _apply_live_test_cap's call sites below).
     "percentile": frozenset({"judged_bundle"}),
@@ -1694,9 +1698,9 @@ def _main(argv=None) -> int:
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")
     p.add_argument("--monitor", action="store_true",
                    help="monitor mode: alert on what changed since the last check")
-    p.add_argument("--state", default=DEFAULT_STATE, metavar="PATH",
+    p.add_argument("--state", default=None, metavar="PATH",
                    help=f"snapshot file for --monitor (default: {DEFAULT_STATE})")
-    p.add_argument("--events", default=DEFAULT_EVENTS, metavar="PATH",
+    p.add_argument("--events", default=None, metavar="PATH",
                    help=f"Agent Watch event journal, read by --watch-log/--incident and "
                         f"written by --monitor (default: {DEFAULT_EVENTS})")
     p.add_argument("--watch-log", action="store_true",
@@ -1868,8 +1872,17 @@ def _main(argv=None) -> int:
                    help="record this run to history, print trend + percentile, and exit")
     p.add_argument("--percentile", action="store_true",
                    help="print offline percentile rank for the current score and exit")
-    p.add_argument("--history", default=DEFAULT_HISTORY, metavar="PATH",
+    p.add_argument("--history", default=None, metavar="PATH",
                    help=f"path for trend history file (default: {DEFAULT_HISTORY})")
+    # NOT `--store`, however much better that reads. `--st` was an unambiguous abbreviation
+    # of `--state`, and adding any second `--st*` flag turns it into a hard usage error for
+    # someone who passed none of the new flags — the exact regression this task's DoD
+    # forbids. No existing flag begins `--dat`, so no working abbreviation changes meaning.
+    p.add_argument("--data-dir", metavar="DIR", default=None,
+                   help="put the monitor state, the event journal AND the score history "
+                        "under DIR — the three move together, so a scratch run cannot "
+                        "half-redirect and write into your real history. An explicitly "
+                        "given --state/--events/--history still wins.")
     p.add_argument("--no-history", action="store_true",
                    help="do not record this run to the local score history (default: record) "
                         "— has no effect under --trend/--monitor, which always record one "
@@ -1948,6 +1961,34 @@ def _main(argv=None) -> int:
                         "raises the FILE's level to INFO, never the console's — pass "
                         "--verbose/--debug for that)")
     args = p.parse_args(argv)
+    # C-419: --monitor writes THREE files and --history defaulted independently of the
+    # other two, so redirecting only --state/--events silently kept writing into the real
+    # history. That is not hypothetical: a test campaign did exactly this and put ~51
+    # fixture-score rows into the live history, where every row carries `home: null` and is
+    # therefore indistinguishable from a genuine one after the fact. Our own exit-code test
+    # already worked around it by redirecting all three by hand.
+    #
+    # An explicitly given path still wins — detected by "differs from the default", which
+    # is right whichever way a user who passes the default explicitly meant it, since both
+    # readings produce the same file.
+    # "Explicit" is `is not None`, not "differs from the default string". The string
+    # comparison looked equivalent and was not: a wrapper passing the UNEXPANDED literal
+    # `~/.clawseccheck/state.json` compares equal to the default and had its named path
+    # silently replaced, while `~` resolves against whatever HOME is set — so the two
+    # readings do NOT produce the same file, which is what an earlier comment here claimed.
+    if args.data_dir is not None:
+        if not str(args.data_dir).strip():
+            p.error("--data-dir needs a directory; an empty value would silently target "
+                    "the current working directory, which --purge would then empty")
+        _store = Path(args.data_dir).expanduser()
+        for _attr, _name in (("state", "state.json"), ("events", "events.jsonl"),
+                             ("history", "history.jsonl")):
+            if getattr(args, _attr) is None:
+                setattr(args, _attr, str(_store / _name))
+    for _attr, _default in (("state", DEFAULT_STATE), ("events", DEFAULT_EVENTS),
+                            ("history", DEFAULT_HISTORY)):
+        if getattr(args, _attr) is None:
+            setattr(args, _attr, _default)
 
     # Surface (on stderr) any second mode flag or global modifier the resolved mode
     # won't honor, so nothing is dropped silently (B-066 / B-067). Warn-and-continue:
@@ -2859,6 +2900,38 @@ def _main(argv=None) -> int:
                   "No baseline was saved, so this run cannot detect future changes. Fix "
                   "the state path's permissions and re-run.", file=sys.stderr)
             return 1
+        # C-419: opt-in machine channel. `rc=1` above is RESERVED for "monitoring is not
+        # established" — a cron job has to be able to tell "drift was found" from "the
+        # store is unwritable", and overloading one code would destroy that distinction.
+        # So drift exits 3 (see the return below for why not 2).
+        #
+        # Off unless asked for, because the previous behaviour is documented as deliberate
+        # and a published cron recipe is built on it: users running that recipe under
+        # `set -e` would break the day they upgraded.
+        #
+        # Threshold defaults to HIGH and above. On the audit path a bare --exit-code means
+        # "any FAIL" — the strongest verdict class only, WARN does not trip it. The monitor
+        # analogue of that is not "any alert": alerts run CRITICAL..INFO, and INFO carries
+        # routine advisories, so paging on those is the noise that gets a check switched
+        # off. --fail-on moves the line for anyone who disagrees, using the ranking that
+        # already ships.
+        if getattr(args, "exit_code", False) or args.fail_on is not None:
+            _rank = (_SEVERITY_RANK[args.fail_on.upper()] if args.fail_on is not None
+                     else _SEVERITY_RANK[HIGH])
+            # Gated on `persisted`, not on having got this far. The two `return 1` blocks
+            # above cover a FAILED write, but there is a third state: the F-155 seed gate
+            # deliberately skips persistence for an unseeded live-test verdict, and that
+            # path sets no error at all. Reaching here with `persisted` False means the
+            # alerts were computed and NOT recorded — so the next run will report them
+            # again, and an exit code claiming "drift was journaled" would be describing
+            # something that did not happen. An earlier version of this comment asserted
+            # these alerts were always journaled; it was wrong on exactly that path.
+            if persisted and any(_SEVERITY_RANK.get(lvl, -1) >= _rank for lvl, _ in alerts):
+                # 3, not 2. argparse exits 2 on ANY usage error, so a cron job reading the
+                # published recipe reported "drift detected" for a mistyped flag —
+                # reproduced with `--fail-on hgih`. A machine channel whose "something
+                # changed" code is also "you typed it wrong" is worse than no channel.
+                return 3
         return 0
 
     vm_has_fail = False

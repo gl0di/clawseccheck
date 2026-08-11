@@ -582,20 +582,58 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   directory you pointed ClawSecCheck at — by design (OpenClaw's own loader has no home-check, so
   rejecting it would be a false-negative skip, not a safety win). A test/staging `--home` can
   therefore still read your real workspace if the config says so.
-- **`--monitor` writes THREE files, and `--state`/`--events` alone do not isolate a run.**
-  `--history` defaults independently to `~/.clawseccheck/history.jsonl` even when `--state`/
-  `--events` are redirected elsewhere — redirect all three, or a sandboxed/test/CI run still
-  appends a real-looking row to your live history. Each history row's `home` field is currently
-  always `null` (no call site populates it with the audited path), so a foreign-home row is not
-  distinguishable from a genuine one after the fact.
+- **`--monitor` writes THREE files — use `--data-dir DIR` to isolate a run.** `--state` and
+  `--events` alone do not: `--history` defaults independently to
+  `~/.clawseccheck/history.jsonl`, so redirecting only the first two leaves a sandboxed or CI
+  run appending a real-looking row to your live history. Each history row's `home` field is
+  always `null` (no call site populates it with the audited path), so a foreign row is not
+  distinguishable from a genuine one afterwards. `--data-dir` moves all three together; the
+  individual flags still work and still win when given explicitly.
 - Also worth knowing: `--state`/`--events`/`--history`'s containing directory is created `0700`
   (owner-only) the first time any of them is written (`safeio.secure_dir`) — a silent side effect
   outside the target file itself, with no message printed, from a tool that otherwise promises
   read-only.
 
-**A cron recipe.** `--monitor` has no exit-code channel by design (severity is advisory, not
-pass/fail — a MEDIUM alert and a CRITICAL one both `return 0`), so wire your own gate off
-`events.jsonl` instead of the exit code:
+**A cron recipe.** Pass `--exit-code` and read the exit status:
+
+```bash
+#!/bin/sh
+clawseccheck --monitor --exit-code --data-dir ~/.clawseccheck
+case $? in
+  0) exit 0 ;;                         # nothing changed
+  3) echo "drift detected"; exit 1 ;;  # a HIGH-or-worse alert was recorded
+  2) echo "bad usage"; exit 1 ;;       # argparse: a mistyped flag, not a finding
+  *) echo "MONITORING NOT ESTABLISHED"; exit 1 ;;   # rc=1: the run could not record
+esac
+```
+
+Three things about that:
+
+- **`--exit-code` is off by default, and the default has not changed.** Severity stays advisory
+  unless you ask for it, because a published recipe was built on `--monitor` always returning 0
+  and upgrading should not break anyone running it under `set -e`.
+- **`rc=1` is reserved** for "monitoring is not established" — the run could not write its state
+  or journal, so nothing was recorded and the next run will not know this one happened. Drift
+  therefore exits **3**, so a cron job can tell "something changed" from "the check is not
+  actually running". Collapsing both onto one code would lose the more important of the two.
+  **`rc=3`, not 2, because argparse exits 2 on any usage error** — a mistyped flag would
+  otherwise read as a finding.
+- **`rc=3` means the alerts were recorded**, not merely computed. A run that deliberately skips
+  persistence (an unseeded live-test verdict) exits 0 even with alerts on screen, because the
+  next run will report them again.
+- **The threshold is HIGH and above**, and `--fail-on SEVERITY` moves it. HIGH+ covers every alert
+  that asserts a security regression while leaving out the INFO advisories, which are the ones
+  that would page you at 3am for a counter going up. **INFO alerts cannot be selected at any
+  threshold** — the ranking runs critical/high/medium/low only — so treat the exit code as a
+  gate on regressions, not as a complete summary of the run.
+
+`--data-dir DIR` is worth using in any scripted context. `--monitor` writes three files, and
+before this the score history defaulted independently of the other two — so redirecting
+`--state` and `--events` for a scratch run quietly kept appending to your real history.
+`--data-dir` moves all three together; an explicitly given `--state`/`--events`/`--history`
+still wins.
+
+Without `--exit-code`, the older gate off the journal still works:
 
 ```bash
 #!/bin/sh

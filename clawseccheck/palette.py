@@ -237,6 +237,7 @@ _UNLISTED_FLAG_MODES: dict[str, str] = {
     "--state": MODE_B,           # snapshot file for --monitor
     "--events": MODE_B,          # the Agent Watch event journal
     "--history": MODE_B,         # the score-history file --trend reads
+    "--data-dir": MODE_B,        # all three of the above, moved together
     # ── C · Before you install: vet-only modifiers ───────────────────────────
     "--recursive": MODE_C,       # alias of --vet-all
     "--vet-judge-packet": MODE_C,
