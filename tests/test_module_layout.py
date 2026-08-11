@@ -119,7 +119,7 @@ _EXEMPT = {
                           "budget with C-207's check_self_privesc_directive (B159); there is "
                           "no topic to split imports/registration into without breaking the "
                           "aggregator pattern itself. A finer split is a later cycle.",
-    "monitor.py": "~3,263 lines — the drift-snapshot/diff engine (snapshot() builds every "
+    "monitor.py": "~3,798 lines — the drift-snapshot/diff engine (snapshot() builds every "
                   "dimension, diff() compares them, plus the hash-chained journal). Crossed "
                   "the budget with B-267/B-268: the skill signature gained a full-directory "
                   "fingerprint independent of the malware-scan budget, and every capped "
@@ -148,7 +148,14 @@ _EXEMPT = {
                   "(configjournal.py) rather than adding it here; what remains is "
                   "snapshot()/diff() logic, which cannot move without separating a "
                   "dimension's snapshot half from its diff half. A per-dimension split is "
-                  "now the largest single piece of debt in this file.",
+                  "now the largest single piece of debt in this file. Grew ~535 lines more "
+                  "with F-173/F-174/F-175 (the behavioural arm, the two supply-chain "
+                  "dimensions and their diff arms, the baseline reference, changed_skills). "
+                  "Both new READERS went to their own leaf modules (openclawdist.py, "
+                  "skillprovenance.py) — this file gained only the comparisons. Restating "
+                  "the number here is not the answer and this guard says so: the split is "
+                  "tracked as its own task, because doing it inside a feature change would "
+                  "bury a 3,800-line refactor in a diff nobody could review.",
     "risk.py": "~2,421 lines — the combinational attack-chain engine (one _rule_* per chain "
                "plus the shared leg predicates they compose). Crossed the 1,200-line ceiling "
                "with B-283 (c), which taught _channels_with_visibility_all the account -> "

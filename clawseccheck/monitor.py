@@ -2048,6 +2048,48 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     return snap
 
 
+def changed_skills(prev: "dict | None", curr: "dict | None") -> "list[str]":
+    """F-175 tier 3: which skills' install records MOVED between two stored snapshots.
+
+    An update is the moment a vetted setup silently becomes an unvetted one, and this is
+    the only tier of the pre-update story that works with no cooperation from the user —
+    it needs nothing but the next scheduled run. The caller re-runs the vetting for each
+    name and reports the result, rather than merely saying "the version is different".
+
+    A pure function of two snapshots, like `diff`: everything it concludes stays
+    reproducible from the state file alone, and the expensive part (actually vetting) stays
+    in the shell where it can be contained and budgeted.
+
+    Three deliberate exclusions:
+
+    * **Ambiguous records.** When two workspaces disagree under one name we cannot tell
+      which the agent loads, so there is nothing to re-vet with confidence — see
+      `skillprovenance.SkillOrigin.ambiguous`.
+    * **A missing dimension on either side**, via `_both_dims`. A first run after this
+      release, or a run that found no install records, has nothing to compare and must not
+      re-vet the whole estate as though everything had just changed.
+    * **Removals.** A skill that is gone cannot be vetted, and its absence is already
+      reported by the diff.
+    """
+    pair = _both_dims(prev if isinstance(prev, dict) else {},
+                      curr if isinstance(curr, dict) else {}, "skill_provenance")
+    if pair is None:
+        return []
+    before, after = pair
+    out: list[str] = []
+    for name, rec in sorted(after.items()):
+        if not isinstance(rec, dict) or rec.get("ambiguous"):
+            continue
+        old = before.get(name)
+        if not isinstance(old, dict):
+            out.append(name)          # newly installed — exactly a thing to vet
+            continue
+        if (old.get("version"), old.get("artifact_sha256")) != (
+                rec.get("version"), rec.get("artifact_sha256")):
+            out.append(name)
+    return out
+
+
 def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     """Return (level, message) alerts. Empty on first run or no change.
 

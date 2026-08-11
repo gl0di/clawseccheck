@@ -535,6 +535,22 @@ Neither is ever reported as *appearing* or *vanishing*. The OpenClaw install is 
 environment cannot see the same install you can. So "not found this run" is disclosed as a
 comparison that did not happen, never as an uninstall.
 
+**When a skill changes, the watch re-checks that skill.** Detecting an update and reporting only
+"the version is different" leaves you to do the work; a scheduled run now re-runs the same vetting
+`--vet-skill` does on whatever moved, and reports the verdict beside the change. It costs about
+0.01 s per changed skill and nothing at all on a quiet run. A skill that updated and still looks
+clean gets no extra line — the change itself is already reported.
+
+> **This does not block an install, and cannot.** OpenClaw's real pre-install gate is the
+> `before_install` **plugin** hook, and occupying it would mean shipping JavaScript into your
+> agent's runtime — which this skill deliberately does not do (see [Trust &
+> provenance](#trust--provenance): it is Python, stdlib-only, and never executes what it reads).
+> So the honest posture is three tiers, and only the third works without you doing anything:
+> **warn early** (B25/B95/C4 tell you when updates will land unvetted), **check on demand**
+> (`--advise <target>` before you install — INSTALL / CAUTION / DO-NOT-INSTALL), and **catch
+> afterwards** (this). Anything claiming to stop an install from here would be describing a
+> capability the architecture does not have.
+
 And when two of your workspaces hold install records for the **same skill name** that disagree,
 the content comparison for that skill stands down and says so. Which of the two your agent
 actually loads is not something this check can determine, and picking one arbitrarily is how an

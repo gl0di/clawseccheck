@@ -111,6 +111,9 @@ from .behavioral import grade_cap_signal as _behavioral_grade_cap_signal
 from .behavioral import render_behavioral_analysis
 from .openclawdist import describe_install as _describe_install
 from .skillprovenance import read_provenance as _read_provenance
+from .skillprovenance import workspace_roots as _workspace_roots
+from .monitor import NOTE_INSPECTION_CAPPED, NOTE_UNDETERMINED
+from .monitor import changed_skills as _changed_skills
 from .sbom import render_sbom
 
 
@@ -1107,6 +1110,17 @@ def _run_vet_mcp(target, args, ascii_only: bool) -> int:
 # "SEVERITY and everything ranked >= it" is exactly `{s: r for s, r in _SEVERITY_RANK.items()
 # if r >= _SEVERITY_RANK[threshold]}`.
 _SEVERITY_RANK = {CRITICAL: 3, HIGH: 2, MEDIUM: 1, LOW: 0}
+
+# F-175 tier 3. A backstop against a pathological tree, not a budget: `vet_skill` averages
+# 0.010 s across the fixture corpus, so the cap is nowhere near binding in ordinary use.
+# When it does bite it is disclosed, because a silent top-N reads as "everything that
+# changed was checked".
+_REVET_CAP = 10
+
+# What a re-check verdict is worth as a drift alert. PASS is deliberately absent: a skill
+# that changed and still looks clean is not news — the CHANGE is already reported — and a
+# line per clean re-check would train the reader to skip the block that carries the FAILs.
+_REVET_SEVERITY = {"FAIL": HIGH, "WARN": MEDIUM, UNKNOWN: "INFO"}
 
 # Primary modes in the EXACT precedence order main() resolves them below.
 # kind "opt" → active when the value is not None; "bool" → active when truthy.
@@ -2995,6 +3009,63 @@ def _main(argv=None) -> int:
         # tamper-evident timeline of what changed must not fill with entries about what
         # did not.
         alerts, monitor_notes = diff_with_notes(prev, snap)
+        # F-175 tier 3: an update is the moment a vetted setup silently becomes an unvetted
+        # one. When the install records show a skill moved, re-run the vetting for THAT
+        # skill and report the verdict — not merely "the version is different". This is the
+        # only tier of the pre-update story that needs no cooperation from the user: it
+        # happens on the next scheduled run whether or not they remembered to ask.
+        #
+        # Affordable, measured rather than assumed: `vet_skill` averages 0.010 s across the
+        # fixture corpus, so even a bulk update costs less than the behavioural layer. The
+        # cap is a backstop against a pathological tree, not a budget, and it is DISCLOSED
+        # when it bites — a silent top-N would read as "everything that changed was
+        # checked".
+        #
+        # Gated on there being changes, so a quiet run does nothing at all. Contained the
+        # same way every other reader in this branch is: vetting reads third-party skill
+        # content, and a crash in it must not take down the watch that found the change.
+        _revet_names = _changed_skills(prev, snap)
+        if _revet_names:
+            _revet_roots = _workspace_roots(Path(args.home).expanduser(), ctx.config)
+            for _name in _revet_names[:_REVET_CAP]:
+                _target = next((r / "skills" / _name for r in _revet_roots
+                                if (r / "skills" / _name).is_dir()), None)
+                if _target is None:
+                    # The record moved but the directory is not where the records say. Not
+                    # an accusation: a workspace we cannot reach, or a removal mid-update.
+                    monitor_notes.append((NOTE_UNDETERMINED,
+                                          f"The skill '{_name}' changed, but its files "
+                                          f"could not be found to re-check."))
+                    continue
+                try:
+                    _finding = vet_skill(_target)
+                    # The PROFILE's verdict, not the bare Finding's status — the same
+                    # `build_profile` result `--vet-skill` and `--advise` render. Caught by
+                    # measurement rather than reasoning: on a real ClickFix fixture
+                    # `vet_skill(...).status` is PASS while the dossier says CAUTION,
+                    # because the content ring hangs off `ring_findings` and only the
+                    # profile folds it in. Reporting the bare status here would have made
+                    # the monitor and `--vet-skill` disagree about the same skill, which is
+                    # worse than not re-checking at all.
+                    _profile = build_profile(_finding, str(_target), "skill")
+                    _status = _profile.overall_status
+                except Exception:  # noqa: BLE001 — see the containment above
+                    monitor_notes.append((NOTE_UNDETERMINED,
+                                          f"The skill '{_name}' changed and could not be "
+                                          f"re-checked this run."))
+                    continue
+                _lvl = _REVET_SEVERITY.get(_status)
+                if _lvl is None:
+                    continue          # PASS after a change is not news; the change is
+                alerts.append((
+                    _lvl,
+                    f"Re-checked '{_name}' after it changed — {_profile.verdict}: "
+                    f"{_finding.detail}"))
+            if len(_revet_names) > _REVET_CAP:
+                monitor_notes.append((
+                    NOTE_INSPECTION_CAPPED,
+                    f"{len(_revet_names) - _REVET_CAP} more skill(s) changed than this run "
+                    f"re-checks. Run --vet-all to cover them."))
         if base_status == BASELINE_CORRUPT:
             # prev is None here, so diff() produced nothing to compare — the lost baseline
             # IS the event. Prepended (not rendered separately) so the identical string
