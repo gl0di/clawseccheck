@@ -3382,14 +3382,22 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     *baseline_ref* — F-173: the reference value of the baseline this run just wrote — a
     fingerprint of what it records, with the run clock excluded so an untouched setup keeps
     the same value — or "" when nothing was written or it could not be read back. Printed
-    so it reaches terminal
-    scrollback and, through the F-172 cron recipe's `announce` delivery, a message the user
-    already holds off the machine. That is the entire mechanism: `~/.clawseccheck/` is
-    already 0700, so a signature stored beside the baseline would only defend against an
-    attacker the filesystem has already excluded, while a value the user received elsewhere
-    has to be forged somewhere this tool cannot reach. Deliberately never worded as a
-    guarantee — SECURITY_MODEL.md's paragraph on the baseline carrying no chain and no
-    signature remains true and stays.
+    so a user running the check interactively can copy it somewhere this machine cannot
+    reach. `~/.clawseccheck/` is already 0700, so a signature stored beside the baseline
+    would only defend against an attacker the filesystem has already excluded, while a value
+    the user holds elsewhere has to be forged somewhere this tool cannot reach.
+
+    **Where it does NOT arrive by itself**, corrected after an independent pass caught the
+    claim: the F-172 cron recipe tells the agent to say nothing on exit 0, so a scheduled
+    run delivers this line only on the runs where the value already MOVED — precisely the
+    runs where keeping it is worth least. Getting it off the machine is the user's action,
+    not the schedule's, and every surface that describes it now says so.
+
+    Deliberately never worded as a guarantee — SECURITY_MODEL.md's paragraph on the baseline
+    carrying no chain and no signature remains true and stays. The value also moves when the
+    RUN SHAPE changes: `--no-host` / `--no-sockets` record less, so the same untouched
+    machine fingerprints differently. That is why the line names that condition too, and why
+    `--verify-baseline` prints what the stored baseline covered.
 
     All defaults reproduce the pre-B-270/B-271/B-379/F-173 behaviour, so existing callers
     are unchanged.
@@ -3472,7 +3480,8 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
         from .monitor import BASELINE_DIGEST_CHARS  # noqa: PLC0415
         lines += ["", f"Baseline reference: {baseline_ref[:BASELINE_DIGEST_CHARS]}",
                   "  Keep this somewhere off this machine. It stays the same while nothing "
-                  "the watch records changes; check it later with --verify-baseline."]
+                  "the watch records changes AND you run the check the same way; verify it "
+                  "later with --verify-baseline."]
     out = "\n".join(lines).rstrip() + "\n"
     return _asciify(out) if ascii_only else out
 

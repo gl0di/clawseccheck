@@ -294,27 +294,34 @@ would have to live in the same `$HOME` as the baseline, behind the same `0700`, 
 only defend against an attacker the filesystem has already excluded. The one thing that
 does help is an anchor **outside** the machine's reach, so every `--monitor` run prints
 `Baseline reference: <16 hex>` and — on the runs where that value actually moved — appends
-it to the (chained) event journal. Kept off-box (the cron recipe's `announce` delivery puts
-it in a message you already hold), it means rewriting the baseline also requires rewriting a
-record this tool cannot be used to reach. `--verify-baseline <reference>` re-reads the file
-and compares.
+it to the (chained) event journal. Kept off-box, it means rewriting the baseline also
+requires rewriting a record this tool cannot be used to reach. `--verify-baseline
+<reference>` re-reads the file and compares.
+
+**Getting it off the machine is your action, not the schedule's.** The cron recipe tells
+your agent to stay silent on exit 0, so a scheduled run delivers this line only when the
+value already moved — the runs where keeping it is worth least. The anchor is only an anchor
+if you copy it somewhere else yourself, from a run you did interactively.
 
 The reference fingerprints the baseline's **contents**, canonicalized, with the run
-timestamp excluded — so it stays constant while nothing the watch records changes. That
-exclusion is not cosmetic: an earlier version hashed the file's raw bytes, `state.json`
-carries a `ts`, and three runs against an untouched machine produced three different
-values, which would have made every scheduled run look like a modification.
+timestamp excluded — so it stays constant while nothing the watch records changes *and you
+run the check the same way*. That exclusion is not cosmetic: an earlier version hashed the
+file's raw bytes, `state.json` carries a `ts`, and three runs against an untouched machine
+produced three different values, which would have made every scheduled run look like a
+modification.
 
 This is a **detection aid, not authentication**, and the paragraphs above stay true beside
-it. Four specific things it does not do: it cannot tell a forged baseline from an ordinary
-change (both move the value, and the tool reports only that it moved); it moves on a
-ClawSecCheck upgrade that adds checks, with nothing on your machine having changed; it says
-nothing about *which* recorded thing differs (`--watch-log` does); and an attacker present
-when the run happens sees the reference too. `--verify-baseline` therefore has three
-outcomes, never two — match, mismatch, and *cannot check* — and *cannot check* further
-distinguishes an absent baseline from a present-but-unreadable one, because telling a user
-whose `state.json` is unreadable that none was ever saved sends them to re-run `--monitor`,
-which is the one action that overwrites it.
+it. Five specific things it does not do: it cannot tell a forged baseline from an ordinary
+change (both move the value, and the tool reports only that it moved); it moves when the run
+SHAPE changes — `--no-host` or `--no-sockets` record less ground, so an untouched machine
+fingerprints differently, which is why `--verify-baseline` prints what the stored baseline
+covered; it moves on a ClawSecCheck upgrade that adds checks, with nothing on your machine
+having changed; it says nothing about *which* recorded thing differs (`--watch-log` does);
+and an attacker present when the run happens sees the reference too. `--verify-baseline`
+therefore has three outcomes, never two — match, mismatch, and *cannot check* — and *cannot
+check* further distinguishes an absent baseline from a present-but-unreadable one, because
+telling a user whose `state.json` is unreadable that none was ever saved sends them to
+re-run `--monitor`, which is the one action that overwrites it.
 
 **Concurrency locking is POSIX-only.** The advisory lock (`locking.journal_lock`) that
 keeps two racing appends from both reading the same "last" `chain_hash` is a `flock`

@@ -544,8 +544,8 @@ clawseccheck --verify-events --events PATH         # or a specific journal
 ```
 
 Every run prints a short reference value for the baseline, and records it in that journal on the
-runs where it actually moved (a quiet machine adds no line). Keep it somewhere the machine cannot
-reach and check it later:
+runs where it actually moved (a quiet machine adds no line). Copy it somewhere the machine cannot
+reach — that part is yours to do, from a run you took interactively — and check it later:
 
 ```bash
 clawseccheck --verify-baseline 1f4b9c02ae77d310    # read-only; writes nothing
@@ -598,13 +598,16 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   defend against an attacker the filesystem has already excluded. What *does* help is an anchor
   the attacker cannot reach, so every `--monitor` run prints `Baseline reference: <16 hex>` — a
   fingerprint of what the baseline records, with the run clock excluded, so it **stays the same
-  while nothing the watch records changes**. Keep it off the machine (the cron recipe's
-  `announce` delivery puts it in a message you already hold) and check it later with
-  `--verify-baseline <reference>`. Three outcomes, never two: match, mismatch, and *cannot
-  check* — an absent or unreadable baseline is never reported as a mismatch. And a mismatch is
-  reported as a fact and nothing more: the value moves whenever any watched thing moves,
-  **including a ClawSecCheck upgrade that adds checks**, so a difference is worth investigating
-  only if you know nothing changed.
+  while nothing the watch records changes and you run the check the same way**. Copy it off the
+  machine yourself, from a run you did interactively: the cron recipe tells your agent to stay
+  silent on exit 0, so a scheduled run delivers this line only once the value has already moved.
+  Check it later with `--verify-baseline <reference>`. Three outcomes, never two: match,
+  mismatch, and *cannot check* — an absent or unreadable baseline is never reported as a
+  mismatch. And a mismatch is reported as a fact and nothing more: the value moves whenever
+  anything the last run recorded is different, **including the options you ran it with**
+  (`--no-host` and `--no-sockets` cover less ground and so fingerprint differently on an
+  untouched machine) and **a ClawSecCheck upgrade that adds checks**. `--verify-baseline` prints
+  what the stored baseline covered so you can tell that case apart.
 - **The events chain only catches naive edits.** A knowledgeable attacker who already has write
   access can recompute the whole chain forward after tampering, truncate the tail, or delete the
   file outright — all three verify "clean". See "What the chain does and does not defend" in

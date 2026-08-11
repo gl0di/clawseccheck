@@ -487,6 +487,26 @@ def test_a_witness_event_for_an_empty_reference_records_nothing():
     assert baseline_witness_event("") == []
 
 
+def test_no_surface_claims_the_cron_recipe_delivers_the_reference(tmp_path):
+    """D2. Three surfaces said the cron recipe's `announce` delivery "puts it in a message
+    you already hold". It does not: the recipe instructs the agent to say nothing on exit 0,
+    so a scheduled run carries this line only once the value has already MOVED — the runs
+    where keeping it is worth least. Getting it off the machine is the user's action.
+
+    Asserted against the recipe's own text rather than trusted, so the claim and the thing
+    it describes cannot drift apart again."""
+    from clawseccheck.guide import render_cron_recipe
+    recipe = render_cron_recipe()
+    assert "Exit 0" in recipe and "say nothing" in recipe.lower(), \
+        "precondition: the recipe really does tell the agent to stay silent on a quiet run"
+
+    root = Path(__file__).resolve().parent.parent
+    for rel in ("SECURITY_MODEL.md", "docs/USAGE.md", "clawseccheck/report.py"):
+        text = (root / rel).read_text(encoding="utf-8")
+        assert "puts it in a message you already hold" not in text, rel
+        assert "a message you already hold" not in text, rel
+
+
 # ================================================================ Part B — verification
 
 def test_verify_still_matches_after_a_later_run_changed_nothing(tmp_path, capsys):
@@ -516,9 +536,55 @@ def test_verify_reports_a_mismatch_as_a_fact_and_not_as_tampering(tmp_path, caps
     assert "tamper" not in out.lower(), \
         "an ordinary change produces this; naming it tampering sends the user hunting an " \
         "intruder who is not there"
-    assert "worth investigating only if none did" in out
+    assert "the options you ran it with" in out, \
+        "the run shape is the surprising cause and has to be named FIRST"
     assert "upgrade that adds checks" in out, \
         "our own release moves this value too, and the user has to be told so"
+    assert "worth investigating only if none did" not in out, (
+        "the first version's wording listed four causes as though they were exhaustive, "
+        "and an independent pass moved the reference on a completely untouched machine "
+        "with a flag none of the four covered — and THIS test pinned the false clause"
+    )
+
+
+def test_a_narrower_run_moves_the_reference_and_the_wording_covers_it(tmp_path, capsys):
+    """D1, reproduced. `--no-host` changes `scope`, `host`, `checks` and the scores, so the
+    same untouched machine fingerprints differently. That is correct — a narrower run
+    recorded less — but the first version's mismatch text listed four causes, none of which
+    was "you ran it with different options", so the honest answer looked unexplained.
+
+    This is the E-077 run-shape family: static prose that presupposed every run has the
+    same shape."""
+    home, store = _home(tmp_path), tmp_path / "store"
+    _run(home, store)
+    wide = baseline_reference(store / "state.json")[0]
+    _run(home, store, "--no-host")
+    narrow = baseline_reference(store / "state.json")[0]
+    capsys.readouterr()
+    assert narrow != wide, "precondition: a narrower run really does move the value"
+    rc = main(["--verify-baseline", wide[:BASELINE_DIGEST_CHARS],
+               "--data-dir", str(store), "--home", str(home)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "--no-host" in out, "the flag that caused this must be named"
+    assert "covering:" in out, "and the user must be able to see what the baseline covered"
+
+
+def test_the_covering_line_reports_what_the_baseline_actually_recorded(tmp_path, capsys):
+    """Without this the line above could print a constant and still satisfy the test."""
+    home, store = _home(tmp_path), tmp_path / "store"
+    _run(home, store)
+    capsys.readouterr()
+    ref = baseline_reference(store / "state.json")[0]
+    main(["--verify-baseline", ref, "--data-dir", str(store), "--home", str(home)])
+    wide_out = capsys.readouterr().out
+    _run(home, store, "--no-host", "--no-sockets")
+    capsys.readouterr()
+    ref2 = baseline_reference(store / "state.json")[0]
+    main(["--verify-baseline", ref2, "--data-dir", str(store), "--home", str(home)])
+    narrow_out = capsys.readouterr().out
+    assert "covering:" in wide_out and "covering:" in narrow_out
+    assert wide_out.split("covering:")[1] != narrow_out.split("covering:")[1]
 
 
 def test_verify_tells_could_not_check_apart_from_does_not_match(tmp_path, capsys):

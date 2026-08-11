@@ -2108,19 +2108,34 @@ def _main(argv=None) -> int:
                     f"anything; the current one is {_actual[:BASELINE_DIGEST_CHARS]}."),
             }.get(_why, "no comparison was possible."))
             return 1
+        # The recorded run shape, shown on both outcomes. An independent pass found the
+        # reference moving on a completely untouched machine simply because the run was
+        # taken with --no-host or --no-sockets: those change `scope`, `host`, `checks` and
+        # the scores, so a differently-shaped run of the SAME setup fingerprints
+        # differently. That is correct behaviour — a narrower run recorded less — but the
+        # first version's wording listed four causes, none of which was "you ran it with
+        # different options", so the honest answer looked like an unexplained mismatch.
+        # Printing the shape turns a dead end into something the user can act on.
+        _b_scope = (read_baseline(args.state)[1] or {}).get("scope")
+        _shape = (", ".join(_b_scope) if isinstance(_b_scope, list) and _b_scope
+                  else "config only" if isinstance(_b_scope, list) else "not recorded")
         if _ok:
             _emit(f"Baseline still matches your reference "
                   f"({_actual[:BASELINE_DIGEST_CHARS]}). Nothing it records has changed "
-                  f"since the run that gave you that value.")
+                  f"since the run that gave you that value.\n"
+                  f"  covering: {_shape}")
             return 0
         _emit(f"Baseline does NOT match your reference.\n"
               f"  you gave: {args.verify_baseline.strip().lower()}\n"
               f"  currently: {_actual[:BASELINE_DIGEST_CHARS]}\n"
-              f"This value moves whenever anything the watch records moves — a setting, an "
-              f"installed skill, a check result, or a ClawSecCheck upgrade that adds "
-              f"checks. So a difference is expected if any of those happened; it is worth "
-              f"investigating only if none did. Run --watch-log to see what was recorded "
-              f"in between.")
+              f"  covering: {_shape}\n"
+              f"This value moves whenever anything the last run recorded is different — "
+              f"which includes the options you ran it with. A run taken with --no-host or "
+              f"--no-sockets covers less ground and so fingerprints differently even though "
+              f"nothing on the machine changed; so do a settings edit, a skill update, a "
+              f"changed check result, and a ClawSecCheck upgrade that adds checks. Compare "
+              f"the covering line above against how you took your reference first, then run "
+              f"--watch-log to see what was recorded in between.")
         return 1
 
     if getattr(args, "vet_plan", None):
