@@ -23,6 +23,10 @@ from .configjournal import find_by_hash as _journal_find_by_hash
 from .configjournal import newest_hash as _journal_newest_hash
 from .configjournal import read_writes as _journal_read
 from .logsafe import redact_urls_in_text, sanitize_url_host_only
+# F-174: the ordering helper only — this module never LOCATES an install (that reads PATH
+# and belongs in the shell, like the behavioural layer), it only compares two recorded
+# versions. Same leaf-import shape as configjournal above.
+from .openclawdist import compare_versions as _version_order
 from .safeio import secure_append_text, secure_dir, secure_write_text
 
 
@@ -48,7 +52,13 @@ def _ignore_hash(home: Path) -> str:
 # F-173: bumped 6 -> 7 for the OPTIONAL `behavioral_fired` / `behavioral_undetermined` /
 # `behavioral_capped` keys. Same degradation rule as every bump before it — an older
 # baseline simply lacks them and the arm stands down for one run.
-SNAPSHOT_VERSION = 7
+#
+# F-174: 7 -> 8 for `openclaw_install` and `skill_provenance`. The task warned against
+# shipping many new dimensions at once, because upgrade safety is per-dimension and each new
+# one is skipped for exactly one post-upgrade run. That cost is real but bounded and, since
+# C-418, DISCLOSED: the `watched` manifest tells the user how many comparisons their
+# baseline predates, rather than letting them fall into a bare all-clear.
+SNAPSHOT_VERSION = 8
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
@@ -1507,7 +1517,30 @@ _CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind")
 # _config_extra_skill_dirs and _config_plugin_load_paths to `roots`, and the bootstrap scan
 # appends _config_workspace_dirs to `_ws_dirs`. No config key narrows or filters discovery,
 # so ctx.config == {} yields a subset, never a superset.
-_SHRINKABLE_DIMENSIONS = ("skills", "bootstrap", "memory")
+#
+# F-174 adds `skill_provenance` here rather than to _CONFIG_DIMENSIONS above, and the
+# distinction is the whole reason the two lists exist. Its records come off disk
+# (`<workspace>/.clawhub/lock.json`), but WHICH workspaces are searched is config-derived:
+# `agents.defaults.workspace` and `agents.list[].workspace` ADD roots and nothing in the
+# config can ever remove one. So a blind run sees a subset of the ROOTS, which is exactly
+# the shrinkable contract. `tests/test_f174_skill_provenance.py` pins that superset
+# invariant; if a config key could ever narrow the search, the treatment would be unsound
+# and the dimension would have to move up to _CONFIG_DIMENSIONS.
+#
+# **A subset of the roots is not automatically a subset of the RECORDS**, and an earlier
+# version of this comment claimed it was. Two workspaces can each hold a skill of the same
+# NAME, so which record wins is a merge decision, not a set operation — with last-wins,
+# merely adding a workspace to openclaw.json flipped the winner and the diff read the swap
+# as "the skill was replaced with different content", a false HIGH on an ordinary config
+# edit. `skillprovenance.read_provenance` now takes the FIRST root's record and the default
+# workspaces are searched before any config-declared one, so the winner does not depend on
+# the config at all. That is what makes this list the right one; the shrinkable machinery
+# never protected the record set and was never going to.
+#
+# `openclaw_install` is in NEITHER list, deliberately: it is resolved from PATH, so an
+# unreadable config cannot move it. Its own failure mode is different and is handled at the
+# diff instead — see the presence gate there.
+_SHRINKABLE_DIMENSIONS = ("skills", "bootstrap", "memory", "skill_provenance")
 
 # C-417 — every snapshot key THIS build reads out of a stored baseline, persisted with
 # the snapshot itself.
@@ -1578,10 +1611,15 @@ WATCHED_DIMENSIONS = (
     "memory",
     "memory_capped",
     "native_count",
+    # F-174. Both conditional: `openclaw_install` is absent when no OpenClaw package can be
+    # located on PATH (which a cron job's minimal PATH really does produce — verified),
+    # `skill_provenance` when no ClawHub lock file was found in any workspace.
+    "openclaw_install",
     "raw_score",
     "raw_score_scope",
     "scope",
     "score",
+    "skill_provenance",
     "skills",
     "skills_capped",
     "skills_capped_count",
@@ -1795,7 +1833,8 @@ def _config_file_digest(ctx) -> str:
 
 
 def snapshot(ctx, findings, score, prev: "dict | None" = None,
-             behavioral: "dict | None" = None) -> dict:
+             behavioral: "dict | None" = None, install: "dict | None" = None,
+             provenance: "dict | None" = None) -> dict:
     """Build the drift snapshot for this run.
 
     *prev* is the previously saved snapshot, used to preserve the baseline when this run
@@ -1918,6 +1957,15 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         snap["behavioral_fired"] = sorted(behavioral.get("fired") or ())
         snap["behavioral_undetermined"] = sorted(behavioral.get("undetermined") or ())
         snap["behavioral_capped"] = bool(behavioral.get("capped"))
+
+    # F-174: the two supply-chain subjects, both handed in by the caller for the same reason
+    # `behavioral` is — the shell owns discovery (one of them reads PATH) and this module
+    # stays a pure function of what it is given. Absent means "this run did not establish
+    # it", never "there is none", and the diff arms are gated on presence accordingly.
+    if isinstance(install, dict) and install:
+        snap["openclaw_install"] = install
+    if isinstance(provenance, dict):
+        snap["skill_provenance"] = provenance
 
     host = getattr(ctx, "host", None)
     if host and host.get("supported"):
@@ -3134,6 +3182,171 @@ def diff_with_notes(prev: dict | None, curr: dict
                         f"{', '.join(_check_title(c) for c in _b_new)}. That window only "
                         f"holds the most recent activity, so this may be newly seen rather "
                         f"than newly done. Run --behavioral for the detail."))
+
+    # ---- F-174: the OpenClaw installation itself --------------------------------------
+    #
+    # B33 and C4 read `meta.lastTouchedVersion` — a string the agent writes about itself.
+    # This compares the artifact on disk instead.
+    #
+    # **Wholesale appearance or disappearance is never an alert**, and this is not caution
+    # for its own sake: the install is located from PATH, and a cron job's PATH really is
+    # minimal. Verified — `env -i PATH=/usr/bin:/bin` cannot find the openclaw the same
+    # machine resolves interactively. So the very schedule this feature exists to serve
+    # would otherwise have reported "OpenClaw was uninstalled" on its first cron run and
+    # "OpenClaw appeared" the first time someone ran it by hand. It gets a note.
+    _p_inst, _c_inst = _both_dims(prev, curr, "openclaw_install") or (None, None)
+    if _p_inst is None:
+        if "openclaw_install" not in curr and "openclaw_install" in prev:
+            note(NOTE_UNDETERMINED,
+                 "Your OpenClaw installation was not compared: this run could not find it. "
+                 "That is normal for a scheduled run, whose search path is narrower than "
+                 "yours.")
+    else:
+        _p_ver, _c_ver = _p_inst.get("version", ""), _c_inst.get("version", "")
+        if _p_ver and _c_ver and _p_ver != _c_ver:
+            # Direction only when it is defensible — see openclawdist.compare_versions for
+            # why a wrong "rolled back" is worse than a bare "changed".
+            if _version_order(_p_ver, _c_ver) == "down":
+                alerts.append((
+                    "HIGH",
+                    f"Your OpenClaw installation went BACKWARDS, from {_p_ver} to {_c_ver}. "
+                    f"A downgrade re-opens whatever the newer build had fixed, and it is "
+                    f"not something a routine update does. Confirm you did this."))
+            else:
+                alerts.append((
+                    "INFO",
+                    f"Your OpenClaw installation changed from {_p_ver} to {_c_ver}."))
+        elif _p_ver and _c_ver and _p_ver == _c_ver \
+                and _p_inst.get("code_sha256") and _c_inst.get("code_sha256") \
+                and _p_inst["code_sha256"] != _c_inst["code_sha256"] \
+                and not _c_inst.get("code_capped") and not _p_inst.get("code_capped"):
+            # The attack the version number cannot show: same version, different build.
+            #
+            # Gated on both versions being RECORDED and EQUAL, not merely on the version
+            # branch above not having fired. The `elif` alone was reached when one side's
+            # version was never recorded at all (a manifest with no `version` string), and
+            # the sentence then asserted the version "stayed at" a value the other side did
+            # not have — claiming a same-version swap out of a missing field.
+            alerts.append((
+                "HIGH",
+                f"Your OpenClaw program files changed while the version number stayed at "
+                f"{_c_ver}. A normal update moves both. Re-install OpenClaw from a source "
+                f"you trust if you did not do this deliberately."))
+        elif (_p_ver and _c_ver and _p_ver == _c_ver
+                and not _p_inst.get("code_capped") and not _c_inst.get("code_capped")
+                and _p_inst.get("code_sha256") and _c_inst.get("code_sha256")
+                and _p_inst["code_sha256"] == _c_inst["code_sha256"]
+                and _p_inst.get("lock_sha256") and _c_inst.get("lock_sha256")
+                and _p_inst["lock_sha256"] != _c_inst["lock_sha256"]):
+            # Every clause of the sentence has to be EVIDENCED, not merely un-contradicted.
+            # Tightening the swapped-build branch above pushed three cases down into this
+            # one — a missing version on either side, and a capped code digest — and this
+            # line then asserted the version AND the program files were unchanged when one
+            # was unrecorded and the other demonstrably differed. An `elif` chain makes
+            # "the branch above did not fire" look like evidence; it never is.
+            alerts.append((
+                "INFO",
+                "The set of packages OpenClaw depends on changed, with its own version and "
+                "program files unchanged."))
+        if _c_inst.get("code_capped"):
+            note(NOTE_INSPECTION_CAPPED,
+                 "Your OpenClaw installation is larger than one run inspects, so only part "
+                 "of its program files were fingerprinted.")
+
+    # ---- F-174: where each installed skill came from -----------------------------------
+    #
+    # B181 already reads these digests for a point-in-time verdict; this watches them MOVE,
+    # which is how an update is detected with no cooperation from the user. Removals honour
+    # `trust_removals` for the same B-269 reason every other collected dimension does: the
+    # workspace roots are config-derived, so a blind run sees a subset.
+    # NOT `pair_or_note`. That helper's absent-from-curr branch says "the saved record for
+    # them is damaged. Delete the monitor state file to start a fresh baseline." — which is
+    # false here and whose remedy destroys the user's whole drift history. This key is
+    # absent whenever THIS run found no install records: no lock file in any workspace
+    # searched, an unreadable or oversized one, or a blind run whose only workspace came
+    # from the config. The saved record is fine; the current run is the one that came up
+    # empty. An independent pass found this by reading the two branches side by side —
+    # `openclaw_install` right above got bespoke, correct absence handling and its sibling
+    # was routed through a generic helper carrying the opposite meaning.
+    _prov = _both_dims(prev, curr, "skill_provenance")
+    if _prov is None:
+        _p_has, _c_has = "skill_provenance" in prev, "skill_provenance" in curr
+        if _p_has and not _c_has:
+            note(NOTE_UNDETERMINED,
+                 "Where your skills came from was not compared: this run found no install "
+                 "records. That happens when the records are missing, unreadable, or kept "
+                 "in a workspace this run could not locate.")
+        elif _c_has and not _p_has:
+            # The FIRST RUN AFTER THIS RELEASE, for every existing user. The first attempt
+            # at this block had no branch here, so it fell through to the damaged wording
+            # below and told every upgrading user to delete their drift history — a worse
+            # regression than the one it was written to fix, introduced while fixing it and
+            # caught only because an independent pass reproduced the upgrade path from a
+            # real baseline downgraded to the previous schema version. Silent on purpose:
+            # the generic `watched` arm above already says the baseline predates it.
+            pass
+        elif _p_has or _c_has:
+            # Present on a side but not a dict — a genuinely damaged record, and the one
+            # case the wording below IS true of.
+            note(NOTE_RECORD_DAMAGED,
+                 "Where your skills came from could not be compared — the saved record for "
+                 "them is damaged. Delete the monitor state file to start a fresh baseline.")
+    if _prov is not None:
+        _pp, _cp = _prov
+        for name in sorted(set(_cp) & set(_pp)):
+            _a, _b = _pp.get(name), _cp.get(name)
+            if not isinstance(_a, dict) or not isinstance(_b, dict):
+                continue
+            _av, _bv = _a.get("version", ""), _b.get("version", "")
+            _ad, _bd = _a.get("artifact_sha256", ""), _b.get("artifact_sha256", "")
+            if _av and _bv and _av != _bv:
+                alerts.append((
+                    "INFO",
+                    f"The skill '{name}' was updated, from {_av} to {_bv}. Run "
+                    f"--vet-skill on it if you did not expect that."))
+            elif (_av and _bv and _av == _bv and _ad and _bd and _ad != _bd
+                    and not _a.get("ambiguous") and not _b.get("ambiguous")):
+                # Same version, different artifact: the version is the publisher's to
+                # choose and the digest is not, so this is the stronger of the two signals
+                # even though it is the quieter-looking one.
+                #
+                # Both versions must be RECORDED and EQUAL — the same correction the
+                # OpenClaw arm above needed. Falling through on a missing version and then
+                # asserting the number "stayed at" something is a claim built out of a
+                # field that was never there.
+                alerts.append((
+                    "HIGH",
+                    f"The skill '{name}' was replaced with different content while its "
+                    f"version number stayed at {_bv}. A normal update moves both. Run "
+                    f"--vet-skill on it."))
+            # Corroboration is reported only on the TRANSITION into disagreement. A skill
+            # whose two records already disagreed when the baseline was taken would
+            # otherwise re-alert on every run forever, which is how a warning becomes
+            # something the reader learns to skip.
+            if _b.get("ambiguous") and not _a.get("ambiguous"):
+                note(NOTE_UNDETERMINED,
+                     f"More than one of your workspaces holds an install record for the "
+                     f"skill '{name}', and they disagree. Which one your agent loads is "
+                     f"not something this check can determine, so its content was not "
+                     f"compared.")
+            if _b.get("corroborated") is False and _a.get("corroborated") is not False:
+                alerts.append((
+                    "MEDIUM",
+                    f"The two install records for the skill '{name}' no longer agree with "
+                    f"each other. They are written together by the installer, so one "
+                    f"changing alone is not something an ordinary update produces."))
+        _new = sorted(set(_cp) - set(_pp))
+        if _new:
+            alerts.append((
+                "INFO",
+                f"{len(_new)} skill(s) were installed since the last check: "
+                f"{', '.join(_new[:5])}."))
+        _gone = sorted(set(_pp) - set(_cp))
+        if _gone and trust_removals:
+            alerts.append((
+                "INFO",
+                f"{len(_gone)} skill(s) are no longer in your install records: "
+                f"{', '.join(_gone[:5])}."))
 
     # ---- F-170: OpenClaw's own config-write journal, as a second witness ---------------
     #

@@ -512,6 +512,35 @@ seconds. Three deliberate limits:
   replay, or a pattern cannot be settled from what is there, that is disclosed as a skipped
   comparison rather than folded into the all-clear. Run `--behavioral` for the detail.
 
+**The top of the supply chain: OpenClaw itself, and where your skills came from.** Two subjects
+that had no drift dimension at all, even though both sit above everything else the audit reads.
+
+- **The installed OpenClaw package.** B33 and C4 read `meta.lastTouchedVersion` out of your
+  settings — a string the agent writes *about itself*. A scheduled run now also records the
+  artifact on disk: its version, its `package.json`, its lock file, and a content fingerprint of
+  the program files it actually runs. A **version going backwards** is reported loudly — a
+  downgrade re-opens whatever the newer build fixed — and so is the case a version number cannot
+  show: **the program files changing while the version stays put**. A dependency-set change alone
+  is informational. Costs about 0.34 s (7,717 files, 78 MB on a real install); `node_modules` is
+  deliberately not walked.
+- **Skill install provenance.** Each skill's install record (`version`, `installedAt`, the
+  artifact digest) is watched as a time series, so an update is *detected* even if you never told
+  ClawSecCheck about it. A skill whose content digest moved while its version stayed the same is
+  reported loudly and routed to `--vet-skill`. The workspace-wide lock file and each skill's own
+  origin record are cross-checked against each other; the two are written together by the
+  installer, so one moving alone is worth a line.
+
+Neither is ever reported as *appearing* or *vanishing*. The OpenClaw install is found on your
+`PATH`, and a scheduled job's `PATH` is narrower than yours — verified: a cron-shaped
+environment cannot see the same install you can. So "not found this run" is disclosed as a
+comparison that did not happen, never as an uninstall.
+
+And when two of your workspaces hold install records for the **same skill name** that disagree,
+the content comparison for that skill stands down and says so. Which of the two your agent
+actually loads is not something this check can determine, and picking one arbitrarily is how an
+ordinary config edit — adding an agent to `agents.list` — turned into a "this skill was replaced"
+alert during development.
+
 Two things worth knowing about how the comparison behaves:
 
 - **Drift detection is upgrade-safe for the dimensions a snapshot can predate.** The MCP,
@@ -1398,7 +1427,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 528 test files and 14,700
+A security tool should be heavily tested — so it is: 542 test files and 15,000
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

@@ -58,7 +58,7 @@ def test_the_snapshot_carries_all_three_new_fields():
     snap = _snap(FIXTURES / "home_safe")
     # The literal is deliberate: a schema bump should cost a conscious edit here, not slide
     # through because the assertion reads the constant it is meant to be pinning.
-    assert snap["version"] == SNAPSHOT_VERSION == 7
+    assert snap["version"] == SNAPSHOT_VERSION == 8
     for key in _NEW_KEYS:
         assert key in snap, f"{key} missing from a clean-run snapshot: {sorted(snap)}"
 
@@ -455,6 +455,12 @@ _CONDITIONAL = {
     "behavioral_fired": "absent when the caller did not run the behavioural layer",
     "behavioral_undetermined": "absent when the caller did not run the behavioural layer",
     "behavioral_capped": "absent when the caller did not run the behavioural layer",
+    # F-174. Both absent for a REAL reason a consumer must not read as a stale baseline:
+    # no OpenClaw package could be located on PATH (a cron job's PATH really does produce
+    # this — verified with `env -i PATH=/usr/bin:/bin`), and no ClawHub lock file was found
+    # in any workspace this run searched.
+    "openclaw_install": "absent when no OpenClaw install could be located",
+    "skill_provenance": "absent when no ClawHub install record was found",
 }
 
 

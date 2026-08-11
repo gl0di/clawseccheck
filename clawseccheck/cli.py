@@ -109,6 +109,8 @@ from .behavioral import analyze as _behavioral_analyze
 from .behavioral import explicit_path_problem as _behavioral_path_problem
 from .behavioral import grade_cap_signal as _behavioral_grade_cap_signal
 from .behavioral import render_behavioral_analysis
+from .openclawdist import describe_install as _describe_install
+from .skillprovenance import read_provenance as _read_provenance
 from .sbom import render_sbom
 
 
@@ -2957,10 +2959,37 @@ def _main(argv=None) -> int:
             }
         except Exception:  # noqa: BLE001 — see run_behavioral's identical containment
             _behavioral_snap = None
+        # F-174: the two supply-chain subjects. Resolved HERE for the same reason the
+        # behavioural layer above is — one of them reads PATH, which is a shell concern —
+        # and contained the same way, so a subject that cannot be read leaves its key
+        # absent instead of taking the run down or writing an empty view as fact.
+        #
+        # Cost measured on the real machine before either was written: describe_install
+        # 0.34 s (7,717 files / 77.8 MB, after an os.walk rewrite from 0.89 s),
+        # read_provenance 0.4 ms. Against a ~7.8 s monitor run.
+        _install_snap = None
+        try:
+            _found = _describe_install("openclaw")
+            _install_snap = _found.as_dimension() if _found is not None else None
+        except Exception:  # noqa: BLE001 — a supply-chain reader must not kill the watch
+            _install_snap = None
+        _provenance_snap = None
+        try:
+            _scan = _read_provenance(ctx.home, ctx.config)
+            # Gated on `present`, not on the scan succeeding. A scan that found no lock
+            # file returns an empty mapping, and so does one that found a lock file with
+            # nothing installed — recording the first as `{}` would state "you have no
+            # skills installed" about a setup we never looked at the right place for, and
+            # the next run that DID find the file would report every skill as newly
+            # installed. Absent means "not established"; `{}` means "established, empty".
+            _provenance_snap = _scan.as_dimension() if _scan.present else None
+        except Exception:  # noqa: BLE001 — same containment
+            _provenance_snap = None
         # B-269: snapshot() needs the previous state so that a run which could not read
         # openclaw.json preserves the last known-good config baseline instead of writing
         # the collapsed (empty) view over it — see monitor._degrade_snapshot.
-        snap = snapshot(ctx, findings, score, prev=prev, behavioral=_behavioral_snap)
+        snap = snapshot(ctx, findings, score, prev=prev, behavioral=_behavioral_snap,
+                        install=_install_snap, provenance=_provenance_snap)
         # C-418: `notes` records every comparison this run DECLINED to make. They are
         # deliberately NOT passed to record_events below — a note is not an event, and a
         # tamper-evident timeline of what changed must not fill with entries about what
