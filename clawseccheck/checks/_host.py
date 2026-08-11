@@ -29,6 +29,7 @@ from ..collector import (
 from . import _shared
 from ._shared import (
     _agent_is_powerful,
+    _config_unreadable,
     _custom,
     _dir_replaceable_by_others,
     _file_readable_by_others,
@@ -269,6 +270,16 @@ def check_audit_log(ctx: Context) -> Finding:
     # be a false positive on every stock config. The default lives in the .d.ts, not in
     # the zod schema, which is why a first pass at this fix grounded on zod alone and
     # wrongly reported the default as unreadable.
+    #
+    # B-524: but "absent" has two causes, and answering the default for both is a lying
+    # PASS. Every verdict below is read out of ctx.config alone, and on a config the
+    # collector found and failed to parse that dict is {} — so the default branch would
+    # tell the user "Nothing here turns it off" about a file nothing read. This check is
+    # purely config-content-derived (no bootstrap/host/trajectory signal of its own), so
+    # the guard belongs at the top: there is no independent evidence below that deserves
+    # a chance to fire first.
+    if (unreadable := _config_unreadable("B10", ctx)) is not None:
+        return unreadable
     cfg = ctx.config
     audit_enabled = dig(cfg, "audit.enabled")
     redact = dig(cfg, "logging.redactSensitive")

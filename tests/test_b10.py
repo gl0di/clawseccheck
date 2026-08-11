@@ -180,6 +180,68 @@ def test_b10_never_fails():
         assert check_audit_log(_ctx(cfg)).status != FAIL, cfg
 
 
+# ---- UNKNOWN: the config itself could not be read ----
+
+def test_b10_unparseable_config_is_unknown_not_the_default_pass():
+    """B-524: absent-because-default and absent-because-unparsed are different answers.
+
+    When the collector positively finds openclaw.json and positively fails to parse it,
+    ``ctx.config`` falls back to ``{}`` — so ``audit.enabled`` reads as absent for a
+    reason that has nothing to do with what the operator configured. Answering with the
+    documented default there tells the user "nothing here turns it off" about a file
+    nothing ever read. GR#4: report UNKNOWN, not a PASS the check never earned.
+    """
+    c = _ctx({})
+    c.config_found = True
+    c.config_parse_error = True
+
+    f = check_audit_log(c)
+
+    assert f.status == UNKNOWN
+    assert f.engine_degraded is True, (
+        "must ride the canonical engine-degraded signal so DEGRADED_CHECK_CAP applies"
+    )
+
+
+def test_b10_the_parse_flag_alone_separates_unknown_from_the_default_pass():
+    """The discriminator has to be the parse flag, not the emptiness of the dict.
+
+    Both calls below see exactly the same ``{}``. If this check keyed on "config is
+    empty" instead, it would return UNKNOWN on every non-OpenClaw machine — the mirror
+    false-negative of the bug being fixed, and the one ``_surface_absent`` documents at
+    length. Same input, two verdicts, one flag apart.
+    """
+    absent = _ctx({})
+    unreadable = _ctx({})
+    unreadable.config_found = True
+    unreadable.config_parse_error = True
+
+    assert check_audit_log(absent).status == PASS
+    assert check_audit_log(unreadable).status == UNKNOWN
+
+
+def test_b10_unparseable_config_never_claims_nothing_turned_it_off(tmp_path):
+    """End to end through the real audit(), on the shape that produced the defect.
+
+    The sentence is the finding: on a truncated config the old branch asserted "Nothing
+    here turns it off" about a file the auditor could not read.
+    """
+    import os
+
+    import clawseccheck
+
+    (tmp_path / "openclaw.json").write_text('{"mcp": {"servers": ')  # truncated JSON
+    os.chmod(tmp_path / "openclaw.json", 0o600)
+
+    ctx, findings, _ = clawseccheck.audit(tmp_path)
+
+    assert ctx.config_parse_error is True
+    b10 = next(f for f in findings if f.id == "B10")
+    assert b10.status == UNKNOWN, f"got {b10.status} — {b10.detail}"
+    assert "nothing here turns it off" not in b10.detail.lower()
+    assert "default is true" not in b10.detail
+
+
 # ---- end to end through the real audit, on real fixture homes ----
 
 def test_b10_fixture_homes_reach_the_new_verdicts():
