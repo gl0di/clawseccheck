@@ -42,8 +42,12 @@ from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
 from .monitor import (
     BASELINE_ABSENT, BASELINE_CORRUPT, BASELINE_CORRUPT_ALERT, BASELINE_OK,
-    diff_with_notes, read_baseline,
+    BASELINE_DIGEST_CHARS, baseline_reference, baseline_witness_event,
+    diff_with_notes, read_baseline, snapshot_reference,
 )
+# Aliased: `args.verify_baseline` holds the user's reference string, and giving the
+# function the same bare name next to it reads as though one were the other.
+from .monitor import verify_baseline as _verify_baseline
 from .update import update_notice
 from .ledger import freshness_notice as _compute_freshness, load_ledger, record_run
 from .iocdb import coverage_notice as _iocdb_coverage_notice
@@ -74,7 +78,7 @@ from .scanbudget import (
 )
 from . import pipeline as _pipeline
 from .baseline import append_entries, is_fingerprint
-from .catalog import CRITICAL, HIGH, LOW, MEDIUM, Finding
+from .catalog import CRITICAL, HIGH, LOW, MEDIUM, UNKNOWN, Finding
 from .dossier import build_profile
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE, verify_chain
@@ -1124,6 +1128,7 @@ _PRIMARY_MODES = [
     ("verify_self", "--verify-self", "bool"),
     ("verify_history", "--verify-history", "bool"),
     ("verify_events", "--verify-events", "bool"),
+    ("verify_baseline", "--verify-baseline", "opt"),
     ("vet_plan", "--vet-plan", "opt"),
     ("menu", "--menu", "bool"),
     ("brief", "--brief", "bool"),
@@ -1901,6 +1906,9 @@ def _main(argv=None) -> int:
                    help="verify the Agent Watch event journal's (--events) tamper-evident "
                         "hash-chain and exit — same check as --verify-history, run against "
                         "--events instead of --history")
+    p.add_argument("--verify-baseline", metavar="REFERENCE", dest="verify_baseline",
+                   help="check the drift baseline (--state) against a reference value a "
+                        "previous --monitor run printed, and exit; read-only")
     p.add_argument("--purge", action="store_true",
                    help="delete ClawSecCheck's local store (history/events/state/coverage "
                         "files + their lock sidecars) and exit — confirmation-gated unless "
@@ -2071,6 +2079,48 @@ def _main(argv=None) -> int:
             _emit(f"Events chain OK ({args.events}): {msg}")
             return 0
         _emit(f"Events chain BROKEN ({args.events}): {msg}")
+        return 1
+
+    if getattr(args, "verify_baseline", None):
+        # F-173: three outcomes, never two. "It does not match" and "I could not check"
+        # ask the reader for opposite reactions, and collapsing them into a bool is how an
+        # absent state file starts reporting as tampering — the single most damaging thing
+        # a security tool can get wrong in this direction, because the user's next move is
+        # to go looking for an intruder who is not there.
+        #
+        # A mismatch is reported as a fact about the two values and NOTHING more. It has
+        # ordinary causes — any --monitor run advances the baseline, so a reference from
+        # before the last scheduled run is simply stale — and this tool cannot tell those
+        # from an edit. Saying which it is would be a claim the evidence does not support.
+        _ok, _actual, _why = _verify_baseline(args.verify_baseline, args.state)
+        if _ok is None:
+            # "Absent" and "unreadable" are separate sentences, not one hedge. An earlier
+            # version collapsed them and told the user of a present-but-unreadable
+            # state.json that no baseline had ever been saved — which sends them to re-run
+            # --monitor, the one action that overwrites the evidence.
+            _emit(f"Cannot check ({args.state}): " + {
+                "absent": "no baseline has been saved yet — run --monitor first.",
+                "unreadable": "the baseline file is there but could not be read or parsed. "
+                              "Check its permissions. Do NOT re-run --monitor first — that "
+                              "would overwrite it.",
+                "reference_too_short": (
+                    f"a reference needs at least {BASELINE_DIGEST_CHARS} characters to mean "
+                    f"anything; the current one is {_actual[:BASELINE_DIGEST_CHARS]}."),
+            }.get(_why, "no comparison was possible."))
+            return 1
+        if _ok:
+            _emit(f"Baseline still matches your reference "
+                  f"({_actual[:BASELINE_DIGEST_CHARS]}). Nothing it records has changed "
+                  f"since the run that gave you that value.")
+            return 0
+        _emit(f"Baseline does NOT match your reference.\n"
+              f"  you gave: {args.verify_baseline.strip().lower()}\n"
+              f"  currently: {_actual[:BASELINE_DIGEST_CHARS]}\n"
+              f"This value moves whenever anything the watch records moves — a setting, an "
+              f"installed skill, a check result, or a ClawSecCheck upgrade that adds "
+              f"checks. So a difference is expected if any of those happened; it is worth "
+              f"investigating only if none did. Run --watch-log to see what was recorded "
+              f"in between.")
         return 1
 
     if getattr(args, "vet_plan", None):
@@ -2865,10 +2915,37 @@ def _main(argv=None) -> int:
         # gone). Both used to collapse into `prev is None`, so a destroyed baseline
         # rendered the same reassuring "Baseline saved." line as a healthy first run.
         base_status, prev = read_baseline(args.state)
+        # F-173: run the behavioural layer HERE, in the shell, and hand `snapshot()` only
+        # the reduced verdict. Two deliberate choices:
+        #
+        # `monitor.py` never imports `behavioral` — the containment for a subsystem that
+        # can raise on a schema-drifted config belongs in the shell, which is where
+        # `_resolve_runtime_caps` and `pipeline.run_behavioral` already wrap this identical
+        # call. A monitor run must not be taken down by the layer it just gained.
+        #
+        # `_behavioral_grade_cap_signal`, never `result["findings"]`. Measured on this
+        # machine: files_capped is True and a bare B191 divergence under a rotated cap is
+        # behavioral.py's own documented benign background noise, so raw findings would put
+        # a permanent entry in the drift stream. On failure the key is left ABSENT rather
+        # than set empty, so the next diff says "not examined" instead of "nothing found".
+        #
+        # Cost measured before it was written: analyze() is 0.176 s against a 4.9 s
+        # run_all — the layer this adds is 3.5% of a run it makes materially less blind.
+        _behavioral_snap = None
+        try:
+            _b_result = _behavioral_analyze(ctx)
+            _behavioral_snap = {
+                "fired": sorted(_behavioral_grade_cap_signal(_b_result)),
+                "undetermined": sorted(
+                    f.id for f in _b_result.get("findings", ()) if f.status == UNKNOWN),
+                "capped": bool(_b_result.get("files_capped")),
+            }
+        except Exception:  # noqa: BLE001 — see run_behavioral's identical containment
+            _behavioral_snap = None
         # B-269: snapshot() needs the previous state so that a run which could not read
         # openclaw.json preserves the last known-good config baseline instead of writing
         # the collapsed (empty) view over it — see monitor._degrade_snapshot.
-        snap = snapshot(ctx, findings, score, prev=prev)
+        snap = snapshot(ctx, findings, score, prev=prev, behavioral=_behavioral_snap)
         # C-418: `notes` records every comparison this run DECLINED to make. They are
         # deliberately NOT passed to record_events below — a note is not an event, and a
         # tamper-evident timeline of what changed must not fill with entries about what
@@ -2910,6 +2987,41 @@ def _main(argv=None) -> int:
             except OSError as exc:
                 state_err = str(exc)
         persisted = journal_err is None and state_err is None and not _skip_live_test_persist
+        # F-173 Part B: an off-machine anchor for the baseline — on screen always, in the
+        # event chain only when it MOVED.
+        #
+        # Read back from disk after the save (not fingerprinted from `snap` in memory), so
+        # a short write that left the file truncated fails here instead of matching.
+        #
+        # Journaled AFTER save_state, which is the reverse of the B-278 order above —
+        # deliberately, and without conflicting with it. B-278 journals first so a failed
+        # journal cannot let the baseline advance past unrecorded drift. This entry makes a
+        # claim ABOUT the file on disk, so writing it before the save would assert
+        # something not yet true, and a failed save would leave a record of a baseline that
+        # never existed.
+        #
+        # Gated on the value having CHANGED, and that gate is load-bearing. An earlier
+        # version journaled unconditionally and broke three things at once: two tests that
+        # pin "a first monitor run journals nothing", `--brief`'s event count (a daily cron
+        # would report "365 event(s) recorded" over a timeline of nothing), and the
+        # journal's own 5,000-line retention, which would start evicting the genuine drift
+        # alerts a quiet machine had kept.
+        #
+        # A failure here is NOT `MONITORING NOT ESTABLISHED`: the baseline is saved and
+        # drift detection works. What is lost is one local record of the anchor, which is
+        # worth a line on stderr and nothing more.
+        _reference = baseline_reference(args.state)[0] if persisted else ""
+        _prev_reference = snapshot_reference(prev)
+        # `_prev_reference` empty means there was no prior baseline to move FROM — a first
+        # run, or one whose baseline was corrupt. Treating that as "the value changed" is
+        # what a first version did, and it journaled on a first run, which two existing
+        # tests pin as writing nothing. The reference still reaches the user: the screen is
+        # where they get it, and the journal is where its LATER movements are recorded.
+        if _reference and _prev_reference and _reference != _prev_reference:
+            _witness_err = record_events(baseline_witness_event(_reference), args.events)
+            if _witness_err is not None:
+                print(f"Note: the baseline was saved, but its reference value could not be "
+                      f"recorded in {args.events}: {_witness_err}", file=sys.stderr)
         # B-271: render AFTER the writes, and tell the renderer whether they landed — the
         # success wording used to be printed before the save was even attempted.
         _emit(render_monitor(alerts, score, ascii_only,
@@ -2918,7 +3030,8 @@ def _main(argv=None) -> int:
                              baseline_corrupt=base_status == BASELINE_CORRUPT,
                              live_test_skipped=_skip_live_test_persist,
                              notes=monitor_notes,
-                             verbose=bool(getattr(args, "verbose", False))))
+                             verbose=bool(getattr(args, "verbose", False)),
+                             baseline_ref=_reference))
         # --monitor records a score-history point as part of tracking drift, even under
         # --no-history; the conflict is surfaced as a stderr note (B-066), not silently
         # honored, to keep monitor's drift baseline intact. Recorded even on the failure

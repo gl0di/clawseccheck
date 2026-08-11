@@ -70,6 +70,11 @@ def _complete(**over) -> dict:
         "host": {"edr_av": "absent", "firewall": "present"},
         "gateway_bind": "127.0.0.1",
         "ignore_hash": "", "native_count": 0, "config_ever_seen": True,
+        # F-173: the behavioural layer ran, found nothing, and read everything. Anything
+        # less than all three is a gap, so a "complete" snapshot has to state them —
+        # leaving them out is exactly the run this helper exists to distinguish itself
+        # from, and it correctly reddened this file the moment the arm landed.
+        "behavioral_fired": [], "behavioral_undetermined": [], "behavioral_capped": False,
     }
     snap.update(over)
     return snap

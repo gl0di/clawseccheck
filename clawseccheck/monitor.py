@@ -44,7 +44,11 @@ def _ignore_hash(home: Path) -> str:
 # against a new-format one simply skips the new comparison for one run rather than
 # misreading "key absent" as "new X appeared". SNAPSHOT_VERSION itself is a stamp for
 # humans/tests, not something diff() branches on.
-SNAPSHOT_VERSION = 6
+#
+# F-173: bumped 6 -> 7 for the OPTIONAL `behavioral_fired` / `behavioral_undetermined` /
+# `behavioral_capped` keys. Same degradation rule as every bump before it — an older
+# baseline simply lacks them and the arm stands down for one run.
+SNAPSHOT_VERSION = 7
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
@@ -1530,22 +1534,30 @@ _SHRINKABLE_DIMENSIONS = ("skills", "bootstrap", "memory")
 # Nothing READS this field yet, on purpose: Phase 0 of the monitor epic is store-only, so
 # it cannot emit an alert by construction. The consumer arrives with the phase that needs it.
 #
-# **Absence does not mean the same thing for all 22, and the consumer must not assume it
-# does.** Nineteen of these are written on every run, so their absence from a stored
-# baseline can only mean that baseline predates them — the "your baseline predates this"
-# message is sound. The other three are written conditionally, so absence is a real,
-# current state and that message would be a fabrication: `host` (absent = no supported
-# host detected), `config_parse_error` and `config_baseline` (both absent = this was NOT a
-# blind run — see `_degrade_snapshot`, the only writer of either). A consumer that treats
-# a missing `config_parse_error` as "we don't know whether that run was blind" would
-# invert the meaning of a key that says "it wasn't". The split is pinned in
-# tests/test_c417_snapshot_enablers.py's `_CONDITIONAL`.
+# **Absence does not mean the same thing for all of them, and the consumer must not assume
+# it does.** Most are written on every run, so their absence from a stored baseline can
+# only mean that baseline predates them — the "your baseline predates this" message is
+# sound. A named minority is written CONDITIONALLY, so absence is a real, current state
+# and that message would be a fabrication: `host` (absent = no supported host detected),
+# `config_parse_error` and `config_baseline` (both absent = this was NOT a blind run — see
+# `_degrade_snapshot`, the only writer of either), the three F-170 config-journal keys, and
+# the three F-173 `behavioral_*` keys (absent = the shell did not run the behavioural layer
+# this invocation, or it raised). A consumer that treats a missing `config_parse_error` as
+# "we don't know whether that run was blind" would invert the meaning of a key that says
+# "it wasn't". The split is pinned in tests/test_c417_snapshot_enablers.py's `_CONDITIONAL`
+# — deliberately as a named list rather than a count, because the count in this comment had
+# already rotted once (it still said 22/19/3 after F-170 shipped three more).
 #
 # Kept honest mechanically: tests/test_c417_snapshot_enablers.py derives the keys this
 # module reads off a stored snapshot straight from the AST and asserts EXACT equality with
 # this tuple — subset in either direction is how the first version passed while being
 # wrong. Sorted, so the persisted list is stable across runs.
 WATCHED_DIMENSIONS = (
+    # F-173. Conditional: present only when the shell handed `snapshot()` a behavioural
+    # result, so their absence says "that layer did not run", never "your baseline is old".
+    "behavioral_capped",
+    "behavioral_fired",
+    "behavioral_undetermined",
     "bootstrap",
     "channels",
     "checks",
@@ -1782,7 +1794,8 @@ def _config_file_digest(ctx) -> str:
     return getattr(ctx, "config_sha256", None) or ""
 
 
-def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
+def snapshot(ctx, findings, score, prev: "dict | None" = None,
+             behavioral: "dict | None" = None) -> dict:
     """Build the drift snapshot for this run.
 
     *prev* is the previously saved snapshot, used to preserve the baseline when this run
@@ -1791,6 +1804,20 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
     ABSENT this run counts as blind too (C-135 FIX2 — see the ``config_ever_seen`` /
     ``config_missing_blind`` computation below). Passing None keeps the historical
     behaviour for a first run or a caller with no stored state.
+
+    *behavioral* (F-173) is the REDUCED result of ``behavioral.analyze`` — ``{"fired":
+    [...], "undetermined": [...], "capped": bool}`` — computed by the caller, never here.
+    This module deliberately does not import ``behavioral``: the containment idiom for a
+    subsystem that can raise on a schema-drifted config lives in the shell (``cli.py``
+    already wraps the identical call that way for ``--full``'s cap-only signal, and
+    ``pipeline.run_behavioral`` does the same), and importing it here would put a
+    layer-3 concern inside a layer-1/2 module.
+
+    Passing None writes no ``behavioral_*`` key at all, and that absence is load-bearing:
+    it is how ``diff_with_notes`` tells "the layer did not run" from "it ran and found
+    nothing". Writing an empty list for a layer that never executed would be the
+    clean-verdict-about-an-unexamined-surface shape this whole epic exists to remove — and
+    on the *next* run it would read as "the signal cleared", inventing a resolution.
     """
     native = getattr(ctx, "native", None)
     native_count = len(getattr(native, "findings", []) or []) if native else 0
@@ -1872,6 +1899,25 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None) -> dict:
     snap["skills_capped"] = sorted(getattr(ctx, "skills_capped_names", None) or ())
     snap["skills_capped_count"] = int(getattr(ctx, "skills_capped_count", 0) or 0)
     snap["skills_frontier_partial"] = bool(getattr(ctx, "skills_frontier_partial", False))
+
+    # F-173: the behavioural layer, reduced to what a drift comparison can honestly use.
+    #
+    # `fired` is `behavioral.grade_cap_signal()`'s output and MUST NOT be the raw
+    # `result["findings"]`. Measured on this machine: `files_capped` is True (60 of 93
+    # trajectory files read), and behavioral.py's own comment calls a bare B191 divergence
+    # under a rotated cap "expected, near-certain-benign background noise". Raw findings
+    # here would put that in the drift stream on every run, forever. `grade_cap_signal`
+    # applies `_B191_STRONG_SUB_SIGNALS`; that filter is the entire reason this dimension
+    # can exist at all.
+    #
+    # `undetermined` is a first-class dimension rather than an afterthought because on the
+    # real machine it is the ONLY one of the three carrying live data: measured
+    # T1 PASS / T2 PASS / T3 UNKNOWN / B191 PASS, so `fired` is empty and T3's UNKNOWN is
+    # the fact the user is currently never told.
+    if isinstance(behavioral, dict):
+        snap["behavioral_fired"] = sorted(behavioral.get("fired") or ())
+        snap["behavioral_undetermined"] = sorted(behavioral.get("undetermined") or ())
+        snap["behavioral_capped"] = bool(behavioral.get("capped"))
 
     host = getattr(ctx, "host", None)
     if host and host.get("supported"):
@@ -3021,6 +3067,74 @@ def diff_with_notes(prev: dict | None, curr: dict
              f"{len(_newly_visible)} check(s) began reporting a problem they could not "
              f"determine last time — it may be new, or it may have been there unseen.")
 
+    # ---- F-173: the behavioural layer ------------------------------------------------
+    #
+    # `--behavioral` and `--monitor` were mutually exclusive by construction (the
+    # behavioural branch returns before the monitor one), so four of the `logs` subject's
+    # seven checks never ran under a scheduled watch and the all-clear covered none of that
+    # ground. This arm ends the silence. It is deliberately asymmetric, and each asymmetry
+    # is a separate decision:
+    #
+    # 1. APPEARANCE is reported, DISAPPEARANCE never is. The evidence window rotates — 60
+    #    of 93 trajectory files are read on this machine — so a pattern leaving the window
+    #    is not evidence it stopped happening. "T1 cleared" would be a resolution we
+    #    invented; a real one shows up as a check status change in `checks`, which is
+    #    compared elsewhere.
+    # 2. It reports through `alerts` at INFO, not through `note()`, even though the task
+    #    that specified it said "notes, never alerts". Notes collapse to a bare count
+    #    unless `--verbose` (see report._not_compared_lines, and its measured reason), so a
+    #    detector that fired would have been INVISIBLE on a default run. INFO is below the
+    #    HIGH default of the C-419 exit-code threshold, so this still cannot page anyone,
+    #    and it never touches the score — the F-154 cap-only discipline is preserved
+    #    because nothing here reaches `scoring.compute`.
+    # 3. It stands down when either side was blind. Structural, not measured: T3's
+    #    "declared" capability set is read out of the config, so a collapsed `ctx.config`
+    #    could in principle widen "observed minus declared" and fabricate a firing. The
+    #    experiment was run and could NOT discriminate — with `ctx.config = {}` the real
+    #    machine returns byte-identical verdicts, because its T3 is UNKNOWN in both views.
+    #    An inconclusive experiment is not a licence to drop the guard.
+    _c_fired = curr.get("behavioral_fired")
+    _p_fired = prev.get("behavioral_fired")
+    if not isinstance(_c_fired, list):
+        note(NOTE_UNDETERMINED,
+             "What your agent actually did was not examined this run, so nothing in this "
+             "report covers its behaviour — only how it is set up.")
+    else:
+        if curr.get("behavioral_capped"):
+            note(NOTE_INSPECTION_CAPPED,
+                 "There is more saved agent activity than can be replayed in one run, so "
+                 "only the most recent part of it was examined for behaviour patterns.")
+        _b_unknown = curr.get("behavioral_undetermined")
+        if isinstance(_b_unknown, list) and _b_unknown:
+            # Neither the count's catalog TITLE nor the phrase "the activity log" — both
+            # were in the first version and both were wrong here. The titles are written
+            # for the check catalog ("OpenClaw's runtime audit_events trail — coverage,
+            # policy-blocked tools, and evasive tool names") and read as jargon in a
+            # sentence aimed at someone who just wants to know if their agent is fine. And
+            # "from the activity log" presupposes there is one: measured on a fresh home
+            # with no recorded activity at all, B191 is UNKNOWN and this note fires, so the
+            # wording has to be true for "there is nothing to read" as well as for "what
+            # was read did not settle it".
+            note(NOTE_UNDETERMINED,
+                 f"{len(_b_unknown)} thing(s) about how your agent has been behaving could "
+                 f"not be determined — there may be too little recorded activity to judge "
+                 f"yet. Run --behavioral to see which.")
+        if isinstance(_p_fired, list):
+            if prev_blind or curr_blind:
+                note(NOTE_CONFIG_BLIND,
+                     "Behaviour patterns were not compared with last time: judging them "
+                     "needs your settings file, and one of the two runs could not read it.")
+            else:
+                _b_new = sorted(set(_c_fired) - set(_p_fired))
+                if _b_new:
+                    alerts.append((
+                        "INFO",
+                        f"{len(_b_new)} behaviour pattern(s) now appear in your agent's "
+                        f"replayable activity and did not last time: "
+                        f"{', '.join(_check_title(c) for c in _b_new)}. That window only "
+                        f"holds the most recent activity, so this may be newly seen rather "
+                        f"than newly done. Run --behavioral for the detail."))
+
     # ---- F-170: OpenClaw's own config-write journal, as a second witness ---------------
     #
     # Everything here is derived from the two STORED snapshots, so it stays reproducible
@@ -3190,6 +3304,130 @@ def save_state(path: str | Path, snap: dict) -> None:
     # so a planted symlink can never turn this write into an arbitrary-file clobber.
     secure_dir(p.parent)
     secure_write_text(p, json.dumps(snap, indent=2))
+
+
+# F-173: snapshot fields deliberately EXCLUDED from the baseline reference.
+#
+# The first version of this feature hashed the state file's raw BYTES, and an independent
+# adversarial pass killed it in one command: `state.json` carries `ts` (C-417 put it there,
+# so "what happened since the last run" is answerable), so three consecutive runs against a
+# completely untouched home produced three different references —
+#
+#     "Baseline advanced to fca496141fa87813."
+#     "Baseline advanced to 070c087f044f5732."
+#     "Baseline advanced to cb741da3adc5dfae."
+#
+# — while a diff of two consecutive baselines showed the `ts` line and nothing else. The
+# value that travels OFF the machine (the whole point of the feature) would then have told
+# the user to investigate a condition that holds after every scheduled run on a healthy
+# machine, and `--verify-baseline` could only ever match inside one cron interval.
+#
+# So the reference describes the baseline's CONTENT, not its bytes. That is also the better
+# primitive on its own merits: a forged baseline with different content moves it, and a
+# forged baseline with identical content changed nothing that is watched.
+_REFERENCE_VOLATILE_KEYS = frozenset({"ts"})
+
+# How many hex characters of the reference are shown and compared. Short enough to read off
+# a phone screen and retype, long enough that finding a second baseline with the same prefix
+# is not something an attacker does on the way past — 16 hex chars is 64 bits.
+# `--verify-baseline` accepts any prefix at least this long, so a user who pasted the full
+# value is not told it is wrong.
+BASELINE_DIGEST_CHARS = 16
+
+
+def snapshot_reference(snap: "dict | None") -> str:
+    """F-173: a stable fingerprint of everything a baseline records, minus the clock.
+
+    Canonical JSON (sorted keys, no whitespace) so key order and indentation cannot move
+    it, and ``""`` for anything that is not a usable snapshot.
+
+    What it does and does not mean, stated here because the wording everywhere else has to
+    match it: this moves when ANYTHING the watch records moves — including a ClawSecCheck
+    upgrade that adds checks, which changes `checks` and `watched` without the user having
+    touched a thing. It is a fingerprint of the recorded state, not a tamper alarm, and no
+    caller may present a mismatch as evidence of anything on its own.
+    """
+    if not isinstance(snap, dict) or not snap:
+        return ""
+    trimmed = {k: v for k, v in snap.items() if k not in _REFERENCE_VOLATILE_KEYS}
+    try:
+        canonical = json.dumps(trimmed, sort_keys=True, separators=(",", ":"),
+                               default=str)
+    except (TypeError, ValueError):
+        return ""
+    return hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()
+
+
+def baseline_reference(path: str | Path = DEFAULT_STATE) -> "tuple[str, str]":
+    """The stored baseline's reference, as ``(value, reason)``.
+
+    *reason* is ``"ok"``, ``"absent"`` (no such file) or ``"unreadable"`` (it is there and
+    we could not parse or read it) — three states rather than one empty string, because an
+    independent pass found the CLI printing "no baseline has been saved yet" over a
+    `state.json` that was present and unreadable. That sends the user to re-run `--monitor`,
+    which is the one action that overwrites the evidence.
+
+    Read back FROM DISK rather than fingerprinted from the dict still in memory: it is the
+    file a later `--verify-baseline` will re-read, and a short write that left it truncated
+    fails to parse here instead of matching.
+    """
+    p = Path(path).expanduser()
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return "", "absent"
+    except OSError:
+        return "", "unreadable"
+    try:
+        snap = json.loads(raw)
+    except ValueError:
+        return "", "unreadable"
+    value = snapshot_reference(snap)
+    return (value, "ok") if value else ("", "unreadable")
+
+
+def baseline_witness_event(reference: str) -> "list[tuple[str, str]]":
+    """The one journal entry recording that the baseline's reference MOVED, or ``[]``.
+
+    A list, so the caller passes it straight to ``record_events`` and an unavailable
+    reference records nothing rather than journaling a sentence with a hole in it.
+
+    The caller must only call this when the value actually changed. Journaling it on every
+    run was the first version, and it broke three things at once: two existing tests that
+    pin "a first monitor run journals nothing", `--brief`'s event count (a daily cron would
+    report "365 event(s) recorded" over a timeline of nothing), and the journal's own
+    retention — one unconditional line per run against a 5,000-line cap eventually evicts
+    the genuine drift alerts a quiet machine had kept.
+    """
+    if not reference:
+        return []
+    return [("INFO", f"Baseline reference is now {reference[:BASELINE_DIGEST_CHARS]}. Keep "
+                     f"it somewhere off this machine; check it later with "
+                     f"--verify-baseline.")]
+
+
+def verify_baseline(expected: str, path: str | Path = DEFAULT_STATE
+                    ) -> "tuple[bool | None, str, str]":
+    """F-173: does the stored baseline still fingerprint to *expected*?
+
+    Returns ``(verdict, actual, reason)``. ``verdict`` is None — not False — whenever there
+    is nothing to compare, and *reason* says which nothing it was: ``"absent"``,
+    ``"unreadable"``, ``"reference_too_short"``, or ``"ok"`` when a real comparison happened.
+    Three verdicts, because "it does not match" and "I could not check" ask the reader for
+    opposite reactions, and collapsing them is how a missing file starts reporting as
+    tampering.
+
+    Matching is done on a prefix so the value a user copied out of a report or a phone
+    notification verifies as-is, and it is case-insensitive because that string will have
+    been retyped by hand at least once.
+    """
+    want = (expected or "").strip().lower()
+    actual, reason = baseline_reference(path)
+    if not actual:
+        return None, "", reason
+    if len(want) < BASELINE_DIGEST_CHARS:
+        return None, actual, "reference_too_short"
+    return actual.startswith(want), actual, "ok"
 
 
 def _last_chain_hash(p: Path) -> str:

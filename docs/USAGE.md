@@ -496,6 +496,22 @@ something different. This tool-surface source is entirely optional: a host with 
 evidence simply gets no such comparison (never treated as a change, and the source becoming
 available for the first time is never itself reported as drift).
 
+**What the agent has been doing, not just how it is set up.** Everything above compares
+*configuration*. A scheduled run now also replays your agent's own recorded activity through the
+same detectors `--behavioral` uses (an observed ingress→sensitive→egress sequence, a fail-fail-
+success series on a sensitive action, capability drift, and OpenClaw's runtime audit trail), and
+reports a pattern that has newly appeared. It costs about 0.2 s on a run that takes several
+seconds. Three deliberate limits:
+
+- **It reports appearance, never disappearance.** The replay window holds only the most recent
+  activity and rotates, so a pattern leaving it is evidence the window moved, not that anything
+  stopped. You will never be told a behaviour "cleared".
+- **It never changes your score.** These signals reach the report and the journal only, so score
+  history stays comparable across the release that added them.
+- **A capped or inconclusive replay says so.** If there is more recorded activity than one run can
+  replay, or a pattern cannot be settled from what is there, that is disclosed as a skipped
+  comparison rather than folded into the all-clear. Run `--behavioral` for the detail.
+
 Two things worth knowing about how the comparison behaves:
 
 - **Drift detection is upgrade-safe for the dimensions a snapshot can predate.** The MCP,
@@ -526,6 +542,17 @@ Verify the event journal's own tamper-evident chain by name (not the score-histo
 clawseccheck --verify-events                       # checks the default ~/.clawseccheck/events.jsonl
 clawseccheck --verify-events --events PATH         # or a specific journal
 ```
+
+Every run prints a short reference value for the baseline, and records it in that journal on the
+runs where it actually moved (a quiet machine adds no line). Keep it somewhere the machine cannot
+reach and check it later:
+
+```bash
+clawseccheck --verify-baseline 1f4b9c02ae77d310    # read-only; writes nothing
+```
+
+This is not a signature and is not claimed to be one — see the `state.json` limit below for why
+signing it locally would defend against nobody, and for what a mismatch does and does not mean.
 
 ### Known limits of `--monitor` (read before relying on it)
 
@@ -566,7 +593,18 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   (`~/.clawseccheck/state.json`) carries no chain and no signature. Anyone with write access to
   that file (i.e. anyone who already runs as you) can forge a baseline, and the next `--monitor`
   run re-baselines against whatever it finds there, silently — a compromise that predates a
-  forged baseline is never reported as drift.
+  forged baseline is never reported as drift. **This stays true**, and signing the file would not
+  change it: the key would live in the same `$HOME`, behind the same `0700`, so it would only
+  defend against an attacker the filesystem has already excluded. What *does* help is an anchor
+  the attacker cannot reach, so every `--monitor` run prints `Baseline reference: <16 hex>` — a
+  fingerprint of what the baseline records, with the run clock excluded, so it **stays the same
+  while nothing the watch records changes**. Keep it off the machine (the cron recipe's
+  `announce` delivery puts it in a message you already hold) and check it later with
+  `--verify-baseline <reference>`. Three outcomes, never two: match, mismatch, and *cannot
+  check* — an absent or unreadable baseline is never reported as a mismatch. And a mismatch is
+  reported as a fact and nothing more: the value moves whenever any watched thing moves,
+  **including a ClawSecCheck upgrade that adds checks**, so a difference is worth investigating
+  only if you know nothing changed.
 - **The events chain only catches naive edits.** A knowledgeable attacker who already has write
   access can recompute the whole chain forward after tampering, truncate the tail, or delete the
   file outright — all three verify "clean". See "What the chain does and does not defend" in

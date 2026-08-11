@@ -289,6 +289,33 @@ forged baseline is never reported as drift. `read_baseline()` (`monitor.py`) val
 lost baseline rather than mistaken for a first run or silently crashing the run — it does
 not, and structurally cannot, validate *provenance*.
 
+Signing it locally would not change any of that, which is why this tool does not: the key
+would have to live in the same `$HOME` as the baseline, behind the same `0700`, so it would
+only defend against an attacker the filesystem has already excluded. The one thing that
+does help is an anchor **outside** the machine's reach, so every `--monitor` run prints
+`Baseline reference: <16 hex>` and — on the runs where that value actually moved — appends
+it to the (chained) event journal. Kept off-box (the cron recipe's `announce` delivery puts
+it in a message you already hold), it means rewriting the baseline also requires rewriting a
+record this tool cannot be used to reach. `--verify-baseline <reference>` re-reads the file
+and compares.
+
+The reference fingerprints the baseline's **contents**, canonicalized, with the run
+timestamp excluded — so it stays constant while nothing the watch records changes. That
+exclusion is not cosmetic: an earlier version hashed the file's raw bytes, `state.json`
+carries a `ts`, and three runs against an untouched machine produced three different
+values, which would have made every scheduled run look like a modification.
+
+This is a **detection aid, not authentication**, and the paragraphs above stay true beside
+it. Four specific things it does not do: it cannot tell a forged baseline from an ordinary
+change (both move the value, and the tool reports only that it moved); it moves on a
+ClawSecCheck upgrade that adds checks, with nothing on your machine having changed; it says
+nothing about *which* recorded thing differs (`--watch-log` does); and an attacker present
+when the run happens sees the reference too. `--verify-baseline` therefore has three
+outcomes, never two — match, mismatch, and *cannot check* — and *cannot check* further
+distinguishes an absent baseline from a present-but-unreadable one, because telling a user
+whose `state.json` is unreadable that none was ever saved sends them to re-run `--monitor`,
+which is the one action that overwrites it.
+
 **Concurrency locking is POSIX-only.** The advisory lock (`locking.journal_lock`) that
 keeps two racing appends from both reading the same "last" `chain_hash` is a `flock`
 (`fcntl`) on a sidecar file. Without `fcntl` — most notably **Windows**, which this

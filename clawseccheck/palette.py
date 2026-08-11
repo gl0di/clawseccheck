@@ -164,6 +164,8 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "the score history's hash-chain is untampered"),
         PaletteEntry("Verify events", "--verify-events",
                      "the same check, on the Agent Watch journal"),
+        PaletteEntry("Verify baseline <reference>", "--verify-baseline",
+                     "the drift baseline still matches a value you kept"),
     )),
     # ── C · Before you install ───────────────────────────────────────────────
     PaletteCategory("Vet before you trust", READONLY, MODE_C, (

@@ -3352,7 +3352,7 @@ def _header_rule_width(header_line: str, ascii_only: bool) -> int:
 def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
                    baseline: bool = False, persisted: bool = True,
                    baseline_corrupt: bool = False, live_test_skipped: bool = False,
-                   notes=None, verbose: bool = False) -> str:
+                   notes=None, verbose: bool = False, baseline_ref: str = "") -> str:
     """Render the --monitor body.
 
     *baseline* — this was a genuine first run (no prior state file at all).
@@ -3379,8 +3379,20 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     "not persisted because..." line replaces the generic silence `persisted=False` would
     otherwise produce, so the reader is told WHY rather than left to infer a crash.
 
-    All four default to the pre-B-270/B-271/B-379 behaviour, so existing callers are
-    unchanged.
+    *baseline_ref* — F-173: the reference value of the baseline this run just wrote — a
+    fingerprint of what it records, with the run clock excluded so an untouched setup keeps
+    the same value — or "" when nothing was written or it could not be read back. Printed
+    so it reaches terminal
+    scrollback and, through the F-172 cron recipe's `announce` delivery, a message the user
+    already holds off the machine. That is the entire mechanism: `~/.clawseccheck/` is
+    already 0700, so a signature stored beside the baseline would only defend against an
+    attacker the filesystem has already excluded, while a value the user received elsewhere
+    has to be forged somewhere this tool cannot reach. Deliberately never worded as a
+    guarantee — SECURITY_MODEL.md's paragraph on the baseline carrying no chain and no
+    signature remains true and stays.
+
+    All defaults reproduce the pre-B-270/B-271/B-379/F-173 behaviour, so existing callers
+    are unchanged.
     """
     # LOW is a real catalog severity and must outrank INFO: a LOW check that regressed to
     # FAIL is a security finding, while INFO is an informational counter. Omitting it made
@@ -3450,6 +3462,17 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     # claim that was never made — the reader is handed a caveat with nothing to attach it to.
     if not baseline and not baseline_corrupt and persisted:
         lines += _not_compared_lines(notes, verbose, ascii_only)
+    # F-173: printed on every run that actually advanced the baseline, including the very
+    # first — a first run is exactly when a user has nothing to compare against later, so
+    # it is the run whose reference value is worth most.
+    if baseline_ref:
+        # noqa: PLC0415 (renderer -> engine, one way) — same local import the notes block
+        # above uses, and for the same reason: the width is the engine's decision, not a
+        # second copy of 16 living in the renderer.
+        from .monitor import BASELINE_DIGEST_CHARS  # noqa: PLC0415
+        lines += ["", f"Baseline reference: {baseline_ref[:BASELINE_DIGEST_CHARS]}",
+                  "  Keep this somewhere off this machine. It stays the same while nothing "
+                  "the watch records changes; check it later with --verify-baseline."]
     out = "\n".join(lines).rstrip() + "\n"
     return _asciify(out) if ascii_only else out
 

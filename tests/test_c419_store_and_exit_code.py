@@ -6,8 +6,11 @@ Two independent problems, one task.
 not tell a CRITICAL gateway exposure from a clean run. That was a documented decision, not
 an oversight — `docs/USAGE.md` says so and ships a shell recipe built on it — so the
 channel is opt-in and `rc=1` stays reserved for "monitoring is not established". Drift
-exits **2**, which is what lets a cron job tell "something changed" from "the store is
-unwritable".
+exits **3**, which is what lets a cron job tell "something changed" from "the store is
+unwritable" — and 3 rather than 2 because argparse exits 2 on any usage error, so a
+mistyped flag reported as drift. This paragraph said 2 until F-173 noticed it: the fix
+landed in the code and in every assertion below, and the prose that motivated them was
+left describing the version that had the bug.
 
 The flags were already there. `--exit-code` and `--fail-on SEVERITY` ship on the audit path
 and `--monitor` merely refused them, saying so through the no-effect note. The work was to

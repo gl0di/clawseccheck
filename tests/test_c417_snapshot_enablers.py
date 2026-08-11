@@ -56,7 +56,9 @@ def _write_config(home: Path, body: str) -> Path:
 
 def test_the_snapshot_carries_all_three_new_fields():
     snap = _snap(FIXTURES / "home_safe")
-    assert snap["version"] == SNAPSHOT_VERSION == 6
+    # The literal is deliberate: a schema bump should cost a conscious edit here, not slide
+    # through because the assertion reads the constant it is meant to be pinning.
+    assert snap["version"] == SNAPSHOT_VERSION == 7
     for key in _NEW_KEYS:
         assert key in snap, f"{key} missing from a clean-run snapshot: {sorted(snap)}"
 
@@ -115,25 +117,47 @@ def test_only_one_producer_of_that_timestamp_remains_in_the_module():
         )
 
 
-def test_the_snapshot_grows_only_marginally():
-    """A proportion, not a byte count.
+_SNAPSHOT_CEILING_BYTES = 32_768
 
-    The task estimated ~120 bytes. Measured, it is ~460 on the `home_safe` fixture: the
-    estimate predated the `watched` manifest being correct, and a correct manifest is 22
-    names rather than the 13 the first version shipped. Recording the real figure is the
-    point — an assertion tuned to a wrong estimate would have to be relaxed every time the
-    manifest gained a name it should have had all along, which is how a bound stops
-    meaning anything. What actually matters is that the drift baseline stays a small local
-    file, so that is what is pinned.
+
+def test_the_baseline_stays_a_small_local_file():
+    """The property this test has claimed to hold since C-417, now actually asserted.
+
+    It used to pin a RATIO — "the three new keys are under 15% of everything else" — while
+    its own docstring said the thing that matters is that the baseline stays a small local
+    file. Those are different claims, and F-173 is where the difference showed: adding
+    three names to `WATCHED_DIMENSIONS` pushed the ratio to 16% and reddened a test about
+    file size over a file that had grown by 260 bytes. A bound that fires on something
+    other than the harm it names is a bound that gets relaxed, and a bound that gets
+    relaxed each release stops meaning anything.
+
+    So: an absolute ceiling, sized against measurement rather than estimate. Real figures
+    at the time of writing — the maintainer's own `~/.clawseccheck/state.json` is 6.4 KB,
+    `home_safe` 4.8 KB, `home_vuln` 5.2 KB, of which the `watched` manifest is 524 bytes.
+    32 KB is roughly 5x the largest of those: enough headroom that ordinary growth never
+    touches it, tight enough that a dimension which accidentally stored a whole file's
+    contents (the failure that would actually hurt) fails immediately.
     """
+    for home in ("home_safe", "home_vuln"):
+        ctx, findings, score = audit(FIXTURES / home)
+        size = len(json.dumps(snapshot(ctx, findings, score)))
+        assert size < _SNAPSHOT_CEILING_BYTES, (
+            f"{home}'s baseline is {size} bytes — a drift baseline is rewritten on every "
+            f"scheduled run and must stay small"
+        )
+
+
+def test_the_coverage_manifest_does_not_dominate_the_baseline():
+    """The one part of the snapshot that grows with every RELEASE rather than with the
+    user's setup: `watched` stores a name per comparison this build makes. That is worth
+    its cost — it is what lets a run say "your baseline predates this" instead of printing
+    a bare all-clear — but it is also the piece most likely to creep, so it is bounded
+    separately from the total above rather than hidden inside it."""
     ctx, findings, score = audit(FIXTURES / "home_safe")
     full = snapshot(ctx, findings, score)
-    trimmed = {k: v for k, v in full.items() if k not in _NEW_KEYS}
-    grew = len(json.dumps(full)) - len(json.dumps(trimmed))
-    assert grew > 0
-    assert grew < 0.15 * len(json.dumps(trimmed)), (
-        f"the three new fields added {grew} bytes to a {len(json.dumps(trimmed))}-byte "
-        f"payload — more than a marginal cost"
+    manifest = len(json.dumps(full["watched"]))
+    assert manifest < 0.25 * len(json.dumps(full)), (
+        f"the coverage manifest is {manifest} of {len(json.dumps(full))} bytes"
     )
 
 
@@ -425,6 +449,12 @@ _CONDITIONAL = {
     "config_file_sha256": "absent when the config could not be read",
     "config_journal_head": "absent when OpenClaw keeps no config-audit journal",
     "config_written_by": "absent when no journaled write produced the current bytes",
+    # F-173. All three share one condition — the caller ran the behavioural layer and
+    # handed the result to `snapshot()` — but they are named individually anyway, because
+    # the alternative is one entry that quietly covers whatever else gets added beside them.
+    "behavioral_fired": "absent when the caller did not run the behavioural layer",
+    "behavioral_undetermined": "absent when the caller did not run the behavioural layer",
+    "behavioral_capped": "absent when the caller did not run the behavioural layer",
 }
 
 
@@ -448,6 +478,21 @@ def test_the_conditional_keys_really_are_produced_under_their_condition(tmp_path
     blind = snapshot(ctx, findings, score, prev=prev)
     assert blind.get("config_parse_error") is True
     assert blind.get("config_baseline") in ("carried", "unknown")
+
+
+def test_the_behavioral_keys_really_are_produced_under_their_condition(tmp_path):
+    """The same anti-parking-lot check for the F-173 trio: absent when the caller passes
+    nothing, present the moment it passes a result. Without this, `_CONDITIONAL` would
+    happily excuse three keys that no code path ever writes."""
+    _write_config(tmp_path, '{"gateway": {"bind": "127.0.0.1"}}')
+    ctx, findings, score = audit(tmp_path)
+    bare = snapshot(ctx, findings, score)
+    assert not any(k.startswith("behavioral_") for k in bare)
+    withb = snapshot(ctx, findings, score,
+                     behavioral={"fired": ["T1"], "undetermined": ["T3"], "capped": True})
+    assert withb["behavioral_fired"] == ["T1"]
+    assert withb["behavioral_undetermined"] == ["T3"]
+    assert withb["behavioral_capped"] is True
 
 
 def test_the_manifest_is_sorted_and_survives_a_json_round_trip():
