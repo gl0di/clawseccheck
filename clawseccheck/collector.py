@@ -12,6 +12,7 @@ surface. No network. No writes. Pure stdlib.
 """
 from __future__ import annotations
 
+import codecs
 import math
 import hashlib
 import io
@@ -756,6 +757,37 @@ def _pyc_fmt(data: bytes) -> str | None:
     return "pyc" if len(data) >= 4 and data[1:4] == b"\x0d\x0d\x0a" else None
 
 
+# How many leading bytes classify_bytes samples when deciding text vs binary. Named
+# because B-533 turns on the fact that this is a fixed offset with no regard for
+# character boundaries — see the decode comment there.
+_TEXT_SAMPLE_BYTES = 4096
+
+
+def _looks_like_utf16(chunk: bytes) -> bool:
+    """Do these bytes plausibly *are* UTF-16, rather than merely decode as it?
+
+    B-533: a UTF-16 decode raises only on an unpaired surrogate, so almost any byte
+    string "decodes" — which made a non-raising decode worthless as evidence and let
+    mojibake win over a correct UTF-8 reading. Two positive signals instead: a byte-order
+    mark, or the interleaved-NUL shape ASCII-range text has in UTF-16 (every other byte
+    zero). Text outside the ASCII range without a BOM is not claimed here; it decodes as
+    UTF-8 or it is binary.
+    """
+    if chunk[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return True
+    head = chunk[:512]
+    if len(head) < 4:
+        return False
+    even_nul = sum(1 for b in head[0::2] if b == 0)
+    odd_nul = sum(1 for b in head[1::2] if b == 0)
+    half = len(head) // 2
+    if half == 0:
+        return False
+    # One side essentially all NUL and the other essentially none: the UTF-16 shape.
+    return (odd_nul / half >= 0.9 and even_nul / half <= 0.1) or \
+           (even_nul / half >= 0.9 and odd_nul / half <= 0.1)
+
+
 def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
     """Classify data as "TEXT" or "BINARY" and return (classification, format_name)."""
     fmt = None
@@ -809,15 +841,62 @@ def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
     if fmt is not None:
         return "BINARY", fmt
 
-    # Attempt to decode first 4096 bytes as UTF-8, UTF-16LE, UTF-16BE
-    chunk = data[:4096]
+    # Decode a bounded sample as text.
+    #
+    # B-533: the sample is cut at a FIXED offset, so it must be decoded incrementally.
+    # `bytes.decode` is strict about the tail, and a multi-byte character straddling the
+    # cut made it raise. ASCII is one byte per character, so the cut can never split one
+    # and English prose was structurally immune. Everything else could raise, and what
+    # happened next was pure accident: the UTF-16 fallback below "succeeded" into
+    # mojibake, and the printable gate then judged the mojibake rather than the file.
+    # Measured, on documents where the cut really does split a character:
+    #
+    #   3-byte scripts (Chinese, Japanese, Korean)  mojibake ratio 0.667 -> BINARY, always
+    #   2-byte scripts (Cyrillic, Greek, Hebrew)    mojibake ratio 1.000 -> TEXT, by luck
+    #   Arabic                                       utf-16le fails, utf-16be carries it
+    #
+    # So CJK was reliably broken and the rest merely got away with it — the same wrong
+    # cut, a different roll. Do not read the 2-byte rows as "those were fine".
+    #
+    # The cost was never the cosmetic "Binary files found" WARN: a BINARY verdict drops
+    # the file from content scanning (see ctx.binary_files at the decompress call site),
+    # so a CJK skill's prose went unscanned past this sample size — injection and
+    # exfiltration instructions in it were invisible.
+    #
+    # An incremental decoder buffers an incomplete trailing sequence instead of raising,
+    # so only a genuinely invalid byte reaches the except branch.
+    chunk = data[:_TEXT_SAMPLE_BYTES]
     decoded = None
-    for encoding in ("utf-8", "utf-16le", "utf-16be"):
-        try:
-            decoded = chunk.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
+    try:
+        decoded = codecs.getincrementaldecoder("utf-8")().decode(chunk, False)
+    except UnicodeDecodeError:
+        # A real invalid sequence, not a truncated tail. Only now consider UTF-16, and
+        # only when the bytes actually look like UTF-16 — accepting any non-raising
+        # UTF-16 decode is what let arbitrary bytes through as text-shaped garbage in
+        # the first place. Nearly every byte pair is valid UTF-16, so "it did not raise"
+        # carries almost no evidence; a BOM or the interleaved-NUL shape of ASCII-range
+        # text does.
+        if _looks_like_utf16(chunk):
+            for encoding in ("utf-16le", "utf-16be"):
+                try:
+                    decoded = codecs.getincrementaldecoder(encoding)().decode(chunk, False)
+                    break
+                except UnicodeDecodeError:
+                    continue
+        elif b"\x00" not in chunk:
+            # Legacy single-byte encodings (latin-1, cp1251, iso-8859-*): valid prose
+            # that is not valid UTF-8. Found by the B-533 real-file sweep — /usr/bin/
+            # pygettext3.12 carries `# -*- coding: iso-8859-1 -*-` and classified TEXT
+            # before this change only because the old UTF-16 fallback happened to score
+            # its mojibake above the gate. Losing it would mean a legacy-encoded README
+            # in a skill goes unscanned, which is the exact defect B-533 is about.
+            #
+            # The NUL test is the discriminator, and it is a strong one: compiled and
+            # container formats are NUL-dense (the .pyc files in that same sweep carry
+            # thousands), while single-byte text has none. latin-1 itself never raises,
+            # so it decides nothing on its own — the printable-ratio gate below still
+            # makes the call, which is the sound half of the original design.
+            decoded = chunk.decode("latin-1")
 
     if decoded is None:
         return "BINARY", _pyc_fmt(data)
