@@ -1604,6 +1604,12 @@ WATCHED_DIMENSIONS = (
     "config_written_by",
     "gateway_bind",
     "grade",
+    # B-511: whether the grade above was EARNED. diff() reads it off the stored
+    # baseline to decide whether there is a verdict to compare at all, so it is a
+    # watched dimension like any other. Written unconditionally, hence not in
+    # _CONDITIONAL: its absence means a snapshot older than this build, which diff()
+    # treats as ungraded rather than assuming the number was shown.
+    "graded",
     "host",
     "ignore_hash",
     "mcp",
@@ -1884,6 +1890,14 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         # upgrade shipping new checks), rather than comparing two incomparable numbers.
         "raw_score_scope": _raw_score_scope(findings),
         "grade": score.grade,
+        # B-511: whether this run EARNED that grade. E-077 withholds the letter unless all
+        # five layers ran, and since C-426 the default run does not — so `score`/`grade`
+        # above are computed values the user was never shown. They stay recorded, because
+        # a later complete run needs something to compare against and writing null is
+        # worse than useless: `_num()` defaults an absent score to 0, which would fabricate
+        # a catastrophic drop on a config that did not change. What was missing is the flag
+        # saying they are not a verdict, so diff() can decline to republish them.
+        "graded": bool(getattr(score, "graded", True)),
         "checks": {f.id: f.status for f in findings
                    if not getattr(f, "suppressed", False)},
         # B-500: WHY a check is UNKNOWN, recorded because the status alone cannot say.
@@ -2198,6 +2212,21 @@ def diff_with_notes(prev: dict | None, curr: dict
              "Check results were not compared: this run and the last were taken with "
              "different options, so they do not cover the same ground.")
 
+    # B-511: a run whose grade was withheld has no verdict to compare. Printing
+    # "Security score dropped: A 97 -> A 96." underneath the same run's own
+    # "No grade yet - 3 of 5 layers did not run" was E-077's headline invariant
+    # contradicting itself out loud — and on the DEFAULT path, since C-426 made the bare
+    # run ungraded. Absent on either side means a snapshot written before this flag was
+    # recorded: read as UNGRADED rather than assumed graded, so a legacy baseline can
+    # never republish a number its run declined to show. Costs one run's score
+    # comparison after the upgrade and then self-heals — the same trade the raw_score
+    # backstop below already makes for the same reason.
+    _both_graded = bool(prev.get("graded")) and bool(curr.get("graded"))
+    if not _both_graded:
+        note(NOTE_UNDETERMINED,
+             "The score was not compared: at least one of these two runs did not earn a "
+             "grade, so there is no verdict to compare it against.")
+
 
     # C-418: the blind-config family. Each of these is a comparison declined, and each used
     # to vanish into the all-clear. The HIGH alert below explains the CAUSE; these say what
@@ -2504,7 +2533,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # alert above says so explicitly instead.
     # `_same_scope_flags`: a score taken with --no-host is not the same measurement as
     # one taken without it, so a fall between them is arithmetic, not drift.
-    if not (prev_blind or curr_blind) and _same_scope_flags:
+    if not (prev_blind or curr_blind) and _same_scope_flags and _both_graded:
         if _num(curr, "score") < _num(prev, "score"):
             alerts.append(("HIGH", f"Security score dropped: {prev.get('grade')} {prev.get('score')} "
                                    f"-> {curr.get('grade')} {curr.get('score')}."))

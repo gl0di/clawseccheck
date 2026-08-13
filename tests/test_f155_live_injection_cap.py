@@ -675,13 +675,17 @@ class TestTrendMonitorReachC135:
         comparison fabricate a catastrophic "score dropped to 0" on a config where
         nothing moved (the B-269 fabrication shape that epic already warns about).
 
-        It is inert TODAY -- every run writes the same shape, so no drop is fabricated
-        and the number is never shown -- but it is a published verdict one run delayed,
-        because the drop alert reads these snapshots back to the user.
+        **CLOSED by B-511, and the claim that used to stand here was wrong.** This
+        docstring said the gap was "inert TODAY -- the number is never shown". It was
+        not: two ordinary `--monitor` runs printed `Security score dropped: A 97 -> A 96.`
+        directly beneath the same run's own `No grade yet - 3 of 5 layers did not run`,
+        and the same sentence was chain-hashed into `events.jsonl`. C-426 is what made it
+        reachable on the DEFAULT path, by making the bare run ungraded.
 
-        Pinned rather than assumed, so the gap stays visible. When E-076 gives the
-        snapshot its own `graded` field and guards the comparison, these two assertions
-        are the ones to flip.
+        The persistence itself stays, and these assertions with it: `snapshot()` still
+        records the computed `score`/`grade`, because writing null is the worse bug
+        described above. What was added is `graded`, so `diff()` can decline to
+        republish a number the run never showed.
         """
         bundle = self._seeded_bundle(tmp_path)
         state = tmp_path / "state.json"
@@ -695,11 +699,16 @@ class TestTrendMonitorReachC135:
         assert "No grade yet" in out
         assert "Current: 49/100  Grade: F" not in out
 
-        # KNOWN GAP, owned by E-076 -- see this test's docstring.
+        # B-511: the numbers are still persisted (nulling them fabricates a drop), but
+        # the snapshot now says out loud that they were never a verdict.
         baseline = load_state(str(state))
         assert baseline is not None
         assert baseline["score"] == LIVE_INJECTION_CAP == 49
         assert baseline["grade"] == "F"
+        assert baseline["graded"] is False, (
+            "the snapshot must record that this run did not earn its grade — that flag "
+            "is the whole of what stops diff() republishing the number one run later"
+        )
 
         rows = history_load(str(hist))
         assert len(rows) == 1                      # seeded => recorded

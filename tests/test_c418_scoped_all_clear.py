@@ -52,6 +52,10 @@ def _complete(**over) -> dict:
         "version": 4,
         "watched": list(WATCHED_DIMENSIONS),
         "score": 90, "raw_score": 90, "raw_score_scope": "abc", "grade": "A",
+        # B-511: a snapshot that "leaves nothing uncompared" must include having
+        # earned its grade — without this the score comparison stands down and the
+        # helper stops describing the shape it is named for.
+        "graded": True,
         "checks": {"B1": PASS},
         "checks_not_applicable": [], "checks_degraded": [],
         "skills": {"helper": {"hash": "h", "tree": "t", "caps": ["fs"], "version": "1.0"}},
