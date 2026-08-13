@@ -36,6 +36,33 @@ Tests are **offline and read-only**: no network, nothing written outside
 pytest's `tmp_path`. CI runs the suite on Python 3.9 and 3.12, plus
 markdownlint (`markdownlint-cli@0.44.0`) over the docs.
 
+### The two false-positive gates
+
+CI cannot see your machine, and both of this tool's noisiest failure modes are
+things only a real setup shows. Two local gates cover them. Neither runs in CI,
+so running them is on you:
+
+```bash
+python3 scripts/fleet_fp_gate.py compare   # after a detection change
+python3 scripts/monitor_fp_gate.py check   # after a --monitor change
+```
+
+- **`fleet_fp_gate.py`** compares the FAIL set your real config produces against
+  a recorded baseline. A FAIL that is new is a hard blocker until diagnosed,
+  whatever a benchmark number did. Run it for any change to a check, and
+  re-record on a version bump.
+- **`monitor_fp_gate.py`** takes two snapshots of an unchanged home and asserts
+  the diff raises no alert — anything it reports is a false positive by
+  construction, because nothing moved between them. Run it for any change to
+  `monitor.py` or to a snapshot dimension. It asserts on **alerts only**: notes
+  record comparisons a run declined to make, and a healthy machine has several.
+
+Both refuse to judge a run in which a check degraded, rather than judging it
+anyway — a lost signal read as a resolved one is the failure they exist to
+prevent. Their test twins (`tests/test_fleet_fp_gate.py`,
+`tests/test_c420_monitor_fp_gate.py`) do run in CI and keep the gates themselves
+honest on synthetic input.
+
 ## Adding or changing a check
 
 Read [docs/CHECK_AUTHORING.md](docs/CHECK_AUTHORING.md) first. In short, every
