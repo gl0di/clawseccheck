@@ -25,6 +25,21 @@ The two defects this module was written for:
   the one they paste into an issue.
 * `render_html` leaked the same number through the stylesheet, as above.
 
+**B-531 got past this module anyway, in two independent ways, and both are now closed
+here** — worth recording, because a sweep that is believed comprehensive and is not is
+more dangerous than no sweep:
+
+* **It could not read the PDF.** `render_pdf` deflates its content stream once the page
+  is large enough, so searching the raw bytes sailed past every string the PDF actually
+  shows a reader. The premise "treat the artifact as an opaque byte string" was simply
+  false for that surface. `_searchable` now inflates first.
+* **It never exercised the cap path.** The fixture carries a CRITICAL FAIL and scores 9,
+  while the live-test cap is a ceiling of 49 — so no cap was ever applied and the cap
+  line was never emitted, in either direction. Comprehensive over SURFACES, blind on a
+  PATH. `CLEAN_FINDINGS` and the capped fixtures below close that.
+
+And `raw_score` is a third withheld number that none of the score/grade tokens covered.
+
 Stdlib-only, offline, writes nothing outside pytest's `tmp_path`.
 """
 from __future__ import annotations
@@ -81,7 +96,7 @@ def _forbidden(score) -> list[str]:
     Derived from the real `ScoreResult` rather than hardcoded, so the guard keeps
     working when the fixture's arithmetic changes.
     """
-    n, g = score.score, score.grade
+    n, g, raw = score.score, score.grade, score.raw_score
     return [
         f"{n}/100",          # the report / dashboard / card / PDF shape
         f"{n}%",             # the stylesheet shape that actually leaked (B-512)
@@ -93,11 +108,43 @@ def _forbidden(score) -> list[str]:
         f"grade={g}",
         f'"grade": "{g}"',
         f'"grade":"{g}"',
+        # B-531: raw_score is a THIRD withheld number, and no token above covered it.
+        # The PDF printed "Capped from 100" on a run that had just said it would not
+        # give a number — the pre-cap score, which is strictly larger than the one the
+        # other tokens guard. A sweep keyed only on `score`/`grade` cannot see it.
+        f"Capped from {raw}",
+        f"capped from {raw}",
+        f'"raw_score": {raw}',
+        f'"raw_score":{raw}',
     ]
 
 
-def _assert_clean(artifact, score, surface: str) -> None:
+def _searchable(artifact) -> str:
+    """The artifact as text, with any compressed stream inflated alongside it.
+
+    B-531: `render_pdf` emits its text inside a FlateDecode content stream, so this
+    module's whole premise — "treat the artifact as an opaque byte string and assert
+    the withheld value does not appear ANYWHERE in it" — was not true of the PDF. A raw
+    byte search sailed past every string the PDF actually shows the reader, which is why
+    the sweep did not catch the ungated cap line. Inflating first is what makes the PDF
+    surface as searchable as the text ones already were.
+    """
     text = artifact.decode("latin-1") if isinstance(artifact, bytes) else artifact
+    if not isinstance(artifact, bytes) or b"FlateDecode" not in artifact:
+        return text
+    import re
+    import zlib
+
+    for match in re.finditer(rb"stream\r?\n(.*?)endstream", artifact, re.S):
+        try:
+            text += zlib.decompress(match.group(1)).decode("latin-1")
+        except Exception:  # not every stream is deflate, and a bad one proves nothing
+            continue
+    return text
+
+
+def _assert_clean(artifact, score, surface: str) -> None:
+    text = _searchable(artifact)
     hits = [tok for tok in _forbidden(score) if tok in text]
     assert not hits, (
         f"{surface} leaks the withheld score/grade as {hits!r}. The value is present "
@@ -107,21 +154,22 @@ def _assert_clean(artifact, score, surface: str) -> None:
 
 # ── the sweep ────────────────────────────────────────────────────────────────
 
-def _surfaces(score):
+def _surfaces(score, findings=None):
     """(name, artifact) for every writer that turns a ScoreResult into an artifact."""
+    FINDINGS_ = FINDINGS if findings is None else findings
     return [
-        ("render_report", render_report(FINDINGS, score, ascii_only=True, color=False)),
-        ("render_dashboard", render_dashboard(FINDINGS, score, ascii_only=True)),
-        ("render_card", render_card(score, FINDINGS, ascii_only=True)),
-        ("render_svg", render_svg(score, FINDINGS)),
-        ("render_html", render_html(FINDINGS, score)),
-        ("render_json", render_json(FINDINGS, score)),
+        ("render_report", render_report(FINDINGS_, score, ascii_only=True, color=False)),
+        ("render_dashboard", render_dashboard(FINDINGS_, score, ascii_only=True)),
+        ("render_card", render_card(score, FINDINGS_, ascii_only=True)),
+        ("render_svg", render_svg(score, FINDINGS_)),
+        ("render_html", render_html(FINDINGS_, score)),
+        ("render_json", render_json(FINDINGS_, score)),
         ("render_monitor", render_monitor([], score, ascii_only=True)),
-        ("render_pdf", render_pdf(FINDINGS, score)),
+        ("render_pdf", render_pdf(FINDINGS_, score)),
         # The incident pack is a writer too, and it is the artifact most likely to be
         # handed to someone else during a real incident — so it is in the sweep, not
         # trusted because it happens to gate correctly today.
-        ("render_incident", render_incident(Context(home=Path("/nonexistent")), FINDINGS, score)),
+        ("render_incident", render_incident(Context(home=Path("/nonexistent")), FINDINGS_, score)),
     ]
 
 
@@ -209,3 +257,68 @@ def test_graded_run_still_states_its_number(surface):
     artifact = dict(_surfaces(score))[surface]
     text = artifact.decode("latin-1") if isinstance(artifact, bytes) else artifact
     assert str(score.score) in text, f"{surface} withheld a number it had earned"
+
+
+# ── B-531: the cap line, on the fixture shape that actually exercises it ─────
+#
+# The sweep above could never have caught B-531, and the reason is worth stating: its
+# fixture carries no cap at all (raw_score == score, _cap_cascade returns None), so the
+# cap line was never emitted for it in either direction. Comprehensive over SURFACES,
+# blind on one PATH. These fixtures close that.
+
+# The cap is a CEILING (49), so a run that already scores below it is never capped.
+# FINDINGS carries a CRITICAL FAIL and lands at 9 — which is why these fixtures need
+# their own clean finding set. Getting this wrong the first time is what the
+# `_really_is_capped` precondition below exists to catch.
+CLEAN_FINDINGS = [_f("B2", "some clean check", LOW, PASS)]
+
+
+def _capped_ungraded():
+    """A live test ran and found a vulnerability; the agent self-report never arrived.
+
+    Coherent, not contrived: layer 5 submits VULNERABLE (so the score is capped) while
+    layer 4 is unavailable (so no letter is earned). raw_score 100, score 49."""
+    states = {ln: LayerState(status=STATUS_RAN) for ln in LAYER_ORDER}
+    states[LAYER_SELF_REPORT] = LayerState(status=STATUS_UNAVAILABLE)
+    return compute(CLEAN_FINDINGS, ledger=LayerLedger(states=states),
+                   live_test_vulnerable=True, live_test_reason="probe")
+
+
+def _capped_graded():
+    return compute(CLEAN_FINDINGS, live_test_vulnerable=True, live_test_reason="probe")
+
+
+def test_the_capped_fixture_really_is_capped_and_ungraded():
+    """Precondition. Without it the tests below pass by describing nothing."""
+    score = _capped_ungraded()
+    assert score.graded is False
+    assert score.raw_score > score.score, "fixture must carry a real cap"
+
+
+@pytest.mark.parametrize("surface", [s[0] for s in _surfaces(_capped_ungraded(),
+                                                             CLEAN_FINDINGS)])
+def test_no_writer_leaks_the_pre_cap_number_either(surface):
+    score = _capped_ungraded()
+    _assert_clean(dict(_surfaces(score, CLEAN_FINDINGS))[surface], score, surface)
+
+
+def test_the_pdf_still_discloses_a_cap_it_did_earn():
+    """The fix must be a gate, not a deletion: on a graded run the cap line is a real
+    disclosure, and withholding it would hide why the number is lower than it looks."""
+    score = _capped_graded()
+    assert score.graded is True and score.raw_score > score.score
+    assert f"Capped from {score.raw_score}" in _searchable(
+        render_pdf(CLEAN_FINDINGS, score))
+
+
+def test_the_inflating_search_can_see_what_a_raw_byte_search_cannot():
+    """A guard that cannot fail is decoration. The PDF writer deflates its content
+    stream once the page is large enough, and on exactly those artifacts a raw byte
+    search finds nothing — the asymmetry that made this module blind to the PDF."""
+    pdf = render_pdf(CLEAN_FINDINGS, _capped_graded())
+    assert "Capped from" in _searchable(pdf), "the cap line is missing entirely"
+    if b"FlateDecode" in pdf:
+        assert b"Capped from" not in pdf, (
+            "compressed stream, yet the text is findable raw — if that becomes true "
+            "generally, _searchable's inflation step is no longer load-bearing"
+        )

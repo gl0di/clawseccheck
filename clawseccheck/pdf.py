@@ -600,8 +600,14 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
             "(crashed, timed out, or hit unreadable/corrupted input) - this grade is incomplete.",
             size=9.5, color="#b94a48",
         )
+    # C-423 / B-531: a cap explanation for a number that is not printed is noise, and
+    # worse than noise here — `Capped from 50` IS a score, on a run whose whole point is
+    # that no score was earned. render_report (report.py) and the HTML renderer have
+    # carried this gate since C-423; the PDF was the one site that missed it, which is
+    # precisely the failure mode E-077's design note rejected when it refused to let each
+    # renderer decide for itself whether a number may be shown.
     primary, extras = _cap_cascade(score)
-    if primary is not None:
+    if getattr(score, "graded", True) and primary is not None:
         reason = _cap_primary_reason_text(primary, score)
         also = _cap_also_clause(extras)
         flow.wrapped(f"Capped from {score.raw_score} ({reason}{also})", size=9.5, color="#b94a48")
