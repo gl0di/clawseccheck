@@ -44,7 +44,7 @@ from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Fin
 from .layers import LAYER_ORDER, describe_layer
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
-    _coverage_lines, _group_issues_by_subject, _mcp_inventory_lines,
+    _coverage_lines, _degraded_incomplete_clause, _group_issues_by_subject, _mcp_inventory_lines,
     _plugins_inventory_lines, _risk_chain_lines, _sanitize, _second_opinion_item_lines,
     _second_opinion_lines,
     _SEV_ORDER, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
@@ -595,9 +595,16 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     degraded_n = getattr(score, "degraded_count", 0)
     if degraded_n:
         plural = "check" if degraded_n == 1 else "checks"
+        # B-532: the count and its cause are printed on every run — a degraded check is
+        # a fact about coverage, not about grading, and suppressing it here would trade a
+        # wrong word for a lost fact. Only the trailing clause is grade-aware, and it
+        # comes from report._degraded_incomplete_clause so this renderer cannot word it
+        # for itself (same single-source discipline as _cap_cascade above; see C-423 /
+        # B-531 below for what per-renderer wording already cost us once).
         flow.wrapped(
             f"Incomplete: {degraded_n} {plural} could not reach a reliable verdict this run "
-            "(crashed, timed out, or hit unreadable/corrupted input) - this grade is incomplete.",
+            "(crashed, timed out, or hit unreadable/corrupted input) - "
+            + _degraded_incomplete_clause(score),
             size=9.5, color="#b94a48",
         )
     # C-423 / B-531: a cap explanation for a number that is not printed is noise, and

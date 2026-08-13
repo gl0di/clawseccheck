@@ -512,6 +512,34 @@ def _not_fully_covered_line(score: ScoreResult) -> str:
     return "Not fully covered: " + "; ".join(not_checked)
 
 
+def _degraded_incomplete_clause(score: ScoreResult) -> str:
+    """B-532: the trailing clause of the degraded-checks disclosure.
+
+    The disclosure itself ("N checks could not reach a reliable verdict this run
+    (crashed, timed out, or hit unreadable/corrupted input)") is true regardless of
+    whether the run earned a letter, and prints byte-identical in both branches — the
+    fact is never withheld to tidy up an ungraded screen. Only this clause moves,
+    because ``— this grade is incomplete.`` names a grade the ungraded run never
+    printed, leaving the reader to hunt for a letter that is not on the page.
+
+    The replacement deliberately says *coverage*, not grade, and deliberately does NOT
+    say "that is part of why this run has no grade": degraded checks do not cause
+    ungraded status (missing layers do, `layers.LayerLedger.complete`), so that phrasing
+    would be a fabricated causal claim. It is also kept short — an ungraded run already
+    prints `_not_fully_covered_line` above it, and a third restatement of "coverage was
+    incomplete" is noise.
+
+    Lives here, shared by all three renderers (text · HTML · PDF), for B-483's reason:
+    the same sentence built from three literals is three chances to diverge, and C-423 /
+    B-531 are the record of what happens when each renderer decides for itself whether a
+    grade may be spoken of. `getattr` default tolerates the duck-typed ScoreResult
+    stand-ins some tests build, matching every other `graded` read in this module.
+    """
+    return ("this grade is incomplete."
+            if getattr(score, "graded", True)
+            else "this run's coverage is incomplete.")
+
+
 # C-418: one heading per reason a comparison was skipped, in the order the monitor's
 # NOTE_CATEGORY_ORDER ranks them. Phrased as "because ..." so the enumerated lines read as
 # consequences of a single cause rather than as a list of unrelated malfunctions.
@@ -1996,8 +2024,9 @@ def render_report(findings: list[Finding], score: ScoreResult,
         _plural = "check" if _degraded_n == 1 else "checks"
         lines.append(
             f"{warn_icon}{_degraded_n} {_plural} could not reach a reliable verdict this"
-            " run (crashed, timed out, or hit unreadable/corrupted input) — this grade is"
-            " incomplete. Re-run with --debug for a crash/timeout traceback, or review the"
+            " run (crashed, timed out, or hit unreadable/corrupted input) — "
+            + _degraded_incomplete_clause(score)
+            + " Re-run with --debug for a crash/timeout traceback, or review the"
             " affected finding(s) below for an unreadable-input detail."
         )
     # C-423: `score.graded is False` means no letter/number for this run, anywhere —
@@ -2379,10 +2408,19 @@ def render_report(findings: list[Finding], score: ScoreResult,
             " config could not be assessed."
         )
         if n_unknown:
+            # B-532: "your score"/"the grade" name two things an ungraded run never
+            # printed — the same defect class as the degraded-checks clause above, and
+            # reworded the same way (C-166's line at the top of this function is the
+            # existing precedent for the ternary). The reassurance itself — UNKNOWN is
+            # never held against the reader — is what matters and survives in both
+            # branches; only the noun it hangs off moves.
             lines.append(
                 f"{n_unknown} check(s) were not assessed (UNKNOWN) and are NOT"
-                f" counted against your score — the grade reflects only the"
-                f" {n_scored} assessable check(s)."
+                + (f" counted against your score — the grade reflects only the"
+                   f" {n_scored} assessable check(s)."
+                   if getattr(score, "graded", True)
+                   else f" counted against you — these findings reflect only the"
+                        f" {n_scored} assessable check(s).")
             )
     lines.append("")
     # F-131 Phase 1: "Inventory by subject" sits directly ABOVE the 7-family view (design
@@ -4403,7 +4441,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         degraded_html = (
             f'<p class="degraded"><strong>⚠️ Incomplete:</strong> {_degraded_n} {_plural}'
             ' could not reach a reliable verdict this run (crashed, timed out, or hit'
-            ' unreadable/corrupted input) — this grade is incomplete.</p>'
+            ' unreadable/corrupted input) — ' + _degraded_incomplete_clause(score)
+            + '</p>'
         )
     # B-380: same shared `_cap_cascade` decision render_report now uses
     # (see the comment there) — this renderer used to keep its OWN five-branch "elif"
