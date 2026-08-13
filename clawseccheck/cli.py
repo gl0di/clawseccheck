@@ -1272,6 +1272,9 @@ def _empty_mode_target(args):
 
 
 _MODE_ORDER = [attr for attr, _flag, _kind in _PRIMARY_MODES]
+# Attribute -> the flag the user typed, derived from the SAME table so a note naming the
+# winning mode cannot invent a spelling (`--dashboard_findings`) no parser accepts.
+_MODE_FLAG = {attr: flag for attr, flag, _kind in _PRIMARY_MODES}
 
 
 def _pdf_is_produced(args, win_attr) -> bool:
@@ -1279,17 +1282,18 @@ def _pdf_is_produced(args, win_attr) -> bool:
 
     C-373/C-374 make `--pdf` COMPOSE with `--dashboard` instead of racing it, so calling
     it "ignored" would be a lie — but only when the winning mode gets as far as the
-    write. Two ways it does not, both of which must keep `--pdf` in the ignored list
-    because it was asked for and never produced (B-067 is exactly this):
+    write. One way it does not, and it must keep `--pdf` in the ignored list because it
+    was asked for and never produced (B-067 is exactly this): a mode declared BEFORE
+    `--pdf` wins and returns first — `--badge b.svg --pdf p.pdf --dashboard` writes a
+    badge and no PDF.
 
-      * a mode declared BEFORE `--pdf` wins and returns first — `--badge b.svg --pdf
-        p.pdf --dashboard` writes a badge and no PDF;
-      * under `--full` the write is DEFERRED into the dashboard branch, so a rider that
-        beats the dashboard (`--trend`/`--percentile`/`--next`) means it never happens.
-
-    The second case is a pre-existing hole, not one this change opened: the old cascade
-    lost that PDF too. What it did do was say something — the wrong thing — where an
-    unconditional exemption here would have said nothing at all.
+    B-530 removed the second way. Under `--full` the write used to be DEFERRED into the
+    dashboard branch unconditionally, so a rider that beat it (`--trend`/`--percentile`/
+    `--next`) meant it never happened — a real lost file this predicate could only report
+    after the fact. Deferral is now conditioned on the dashboard being the elected mode,
+    so a rider gets the reduced (findings-only) PDF written at the `--pdf` site, disclosed
+    by both the document's own C-423 ledger page and a stderr note. So there is no
+    `--full` case left to special-case: past the ordering test above, the file is written.
     """
     if not (getattr(args, "pdf", None) and bool(getattr(args, "dashboard", False))):
         return False
@@ -1297,8 +1301,6 @@ def _pdf_is_produced(args, win_attr) -> bool:
         return False
     if _MODE_ORDER.index(win_attr) < _MODE_ORDER.index("pdf"):
         return False
-    if bool(getattr(args, "full", False)):
-        return win_attr == "dashboard"
     return True
 
 
@@ -2825,7 +2827,16 @@ def _main(argv=None) -> int:
     # those phases are computed further down (in the dashboard branch). Defer the write
     # to there rather than emitting a findings-only PDF the card would then describe as
     # complete.
-    _defer_pdf = bool(args.pdf) and args.dashboard and args.full
+    #
+    # B-530: `and _mode == "dashboard"` — deferring is only right when the branch the
+    # write was deferred INTO is the one that runs. A rider (`--dashboard --full --pdf
+    # out.pdf --trend`) returns ~1200 lines above the dashboard branch, so the write was
+    # never reached: exit 0, a sparkline, no file — and no P7-P10 phase had run either,
+    # so deferral bought nothing there but the loss. A rider now gets the reduced
+    # (findings-only) PDF, which discloses its own scope via C-423's ledger page with no
+    # help from here; the note below repeats that for the agent. Full reasoning, and why
+    # the two other options lose, in tests/test_b530_deferred_pdf_rider.py.
+    _defer_pdf = bool(args.pdf) and args.dashboard and args.full and _mode == "dashboard"
     # C-426 part B: --pdf is a MODE when asked for alone and a SIDE OUTPUT when it rides
     # with --dashboard — the one composition _PRIMARY_MODES cannot express, since the
     # table models "exactly one mode wins". _resolve_mode elects the dashboard (or
@@ -2848,6 +2859,28 @@ def _main(argv=None) -> int:
                 "opens a PDF inline where an HTML attachment would just be a download)"
             )
             return 0
+        if _mode != "dashboard":
+            # B-530: `--pdf` rode in with `--dashboard`, but a rider (`--trend`/
+            # `--percentile`/`--next`) renders, and every rider branch returns before the
+            # dashboard branch's own `_emit_attach_instruction`. Without this the file was
+            # written and NOT ONE WORD said about it — real CLI: `--dashboard --pdf o.pdf
+            # --trend` exited 0 printing only "--dashboard ignored (running --trend)". A
+            # report the tool produced and never mentioned is one nobody attaches.
+            _emit_attach_instruction(pdf_written)
+            if args.full:
+                # Say the scope out loud rather than let "--full was passed" imply a
+                # completeness this document lacks. Not a suppression of the PDF's own
+                # disclosure — a second copy, on the channel the agent reads, since it
+                # decides what to say about a file it may never open.
+                _won = _MODE_FLAG.get(_mode, _mode)
+                print(
+                    "note: this PDF carries the findings only — the --full pipeline "
+                    "blocks (installed-skill/plugin sweep, behavioural replay, second "
+                    f"opinion) did not run, because {_won} ran instead of the "
+                    "dashboard. The report states this on its own first page. For the "
+                    f"complete document, run --dashboard --full --pdf without {_won}.",
+                    file=sys.stderr,
+                )
 
     if _mode == "trend":
         # F-155 fix (C-135): resolve the liveTest cap BEFORE recording/rendering, so a

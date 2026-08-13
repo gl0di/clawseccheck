@@ -248,13 +248,17 @@ def test_a_mode_at_or_after_the_write_site_does_earn_it(attr):
 
 
 @pytest.mark.parametrize("rider", ["trend", "percentile", "next"])
-def test_under_full_the_deferred_write_only_happens_for_the_dashboard(rider):
-    """--full defers the write into the dashboard branch, so a rider that beats the
-    dashboard never reaches it. Pre-existing (the old cascade lost that PDF too) — what
-    must not happen is exempting --pdf from the note and losing the file in silence."""
+def test_under_full_a_rider_now_gets_the_pdf_too(rider):
+    """B-530, the unit-level half of the flip above. `--full` used to defer the write
+    into the dashboard branch unconditionally, so a rider that beats the dashboard never
+    reached it and this predicate had to answer False. The deferral is now conditioned on
+    the dashboard being the elected mode, so past the ordering test the file is written
+    for every mode at or after `--pdf` — with or without `--full`."""
     full = _Args(pdf="out.pdf", dashboard=True, full=True)
-    assert _pdf_is_produced(full, rider) is False
+    assert _pdf_is_produced(full, rider) is True
     assert _pdf_is_produced(full, "dashboard") is True
+    # The ordering boundary is untouched: a mode BEFORE --pdf still returns first.
+    assert _pdf_is_produced(full, "badge") is False
 
 
 def test_an_earlier_mode_keeps_pdf_in_the_ignored_note(tmp_path, capsys):
@@ -269,13 +273,33 @@ def test_an_earlier_mode_keeps_pdf_in_the_ignored_note(tmp_path, capsys):
     assert "--pdf" in err and "ignored (running --badge)" in err, err
 
 
-def test_a_deferred_pdf_lost_to_a_rider_is_still_reported(tmp_path, capsys):
-    dest = tmp_path / "never.pdf"
+def test_a_pdf_lost_to_a_rider_is_no_longer_lost(tmp_path, capsys):
+    """B-530 flipped this test, deliberately.
+
+    It used to be `test_a_deferred_pdf_lost_to_a_rider_is_still_reported`, and it pinned
+    the least-bad half of a real defect: `--full` deferred the write into the dashboard
+    branch, `--trend` returned ~1,200 lines before that branch, so the file was never
+    written and all C-426 could do was make sure the loss was *announced* rather than
+    silent. B-530 fixed the loss itself — `_defer_pdf` now defers only when the dashboard
+    is the elected mode — so both of the old assertions invert: the file exists, and
+    `--pdf` leaves the ignored list because it was in fact produced.
+
+    What must NOT be lost in the flip is the property this test was protecting: the run
+    still has to SAY what happened. So the assertions below are the same shape as before
+    — exit code plus a specific stderr claim — pointed at the new truth. The reduced
+    (findings-only) scope of that PDF and the disclosure carried inside the document are
+    covered in tests/test_b530_deferred_pdf_rider.py; kept there so this module stays
+    about dispatch."""
+    dest = tmp_path / "report.pdf"
     rc = _run(tmp_path, "--dashboard", "--full", "--fast", "--pdf", str(dest), "--trend")
     err = capsys.readouterr().err
     assert rc == 0
-    assert not dest.exists(), "precondition: --full defers the write past --trend's return"
-    assert "--pdf" in err and "ignored (running --trend)" in err, err
+    assert dest.exists(), "--full deferred the write past --trend's return (B-530)"
+    assert "--dashboard ignored (running --trend)" in err, err
+    assert "--pdf" not in err.split("ignored (running --trend)")[0], (
+        "--pdf was produced, so naming it ignored is the B-067 lie in reverse: " + err
+    )
+    assert str(dest) in err, f"the PDF was written and never mentioned: {err!r}"
 
 
 def test_a_bare_run_is_unaffected_by_the_inversion(tmp_path, capsys):
