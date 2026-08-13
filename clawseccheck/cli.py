@@ -1246,9 +1246,104 @@ def _mode_active(args, attr: str, kind: str) -> bool:
     return v is not None if kind == "opt" else bool(v)
 
 
+# C-426 part B: mode flags that take a REQUIRED value, so an empty one is a malformed
+# invocation rather than a mode. `--vet-mcp`, `--analyze-trajectory` and `--behavioral`
+# are deliberately absent: each is declared nargs="?" const="", so an empty value is its
+# documented "everything of this kind" form, not a missing argument.
+#
+# This list is what makes _mode_active's `is not None` safe as the single dispatch
+# predicate. The branches it selects test truthiness, so before this check existed the
+# two disagreed for every opt mode given "" — 182 argv shapes, of which `--badge ""`
+# printing a full default report at rc=0 was the visible one. Rejecting the empty value
+# up front removes the disagreement instead of encoding it twice.
+_VALUE_REQUIRED_MODES = tuple(
+    (flag, attr) for attr, flag, kind in _PRIMARY_MODES
+    if kind == "opt" and attr not in ("vet_mcp", "analyze_trajectory", "behavioral")
+)
+
+
+def _empty_mode_target(args):
+    """The first mode flag given an empty value, or None. Never mutates args."""
+    for flag, attr in _VALUE_REQUIRED_MODES:
+        v = getattr(args, attr, None)
+        if v is not None and not str(v).strip():
+            return flag
+    return None
+
+
+_MODE_ORDER = [attr for attr, _flag, _kind in _PRIMARY_MODES]
+
+
+def _pdf_is_produced(args, win_attr) -> bool:
+    """Is --pdf's file actually written on this run, alongside *win_attr*'s own output?
+
+    C-373/C-374 make `--pdf` COMPOSE with `--dashboard` instead of racing it, so calling
+    it "ignored" would be a lie — but only when the winning mode gets as far as the
+    write. Two ways it does not, both of which must keep `--pdf` in the ignored list
+    because it was asked for and never produced (B-067 is exactly this):
+
+      * a mode declared BEFORE `--pdf` wins and returns first — `--badge b.svg --pdf
+        p.pdf --dashboard` writes a badge and no PDF;
+      * under `--full` the write is DEFERRED into the dashboard branch, so a rider that
+        beats the dashboard (`--trend`/`--percentile`/`--next`) means it never happens.
+
+    The second case is a pre-existing hole, not one this change opened: the old cascade
+    lost that PDF too. What it did do was say something — the wrong thing — where an
+    unconditional exemption here would have said nothing at all.
+    """
+    if not (getattr(args, "pdf", None) and bool(getattr(args, "dashboard", False))):
+        return False
+    if win_attr not in _MODE_ORDER:
+        return False
+    if _MODE_ORDER.index(win_attr) < _MODE_ORDER.index("pdf"):
+        return False
+    if bool(getattr(args, "full", False)):
+        return win_attr == "dashboard"
+    return True
+
+
+def _select_primary_mode(args, skip=frozenset()):
+    """The mode _PRIMARY_MODES elects, in table order. Single source of truth."""
+    for attr, _flag, kind in _PRIMARY_MODES:
+        if attr not in skip and _mode_active(args, attr, kind):
+            return attr
+    return None
+
+
+def _resolve_mode(args):
+    """Which mode actually runs — the table's verdict, with --pdf's composition applied.
+
+    C-426 part B. Dispatch used to be decided by the physical order of _main()'s
+    if-cascade while this table only NAMED the winner for the coherence notes. Keeping
+    two mechanisms in agreement was left to a test, and B-276 caught them disagreeing in
+    27 pairs. Both now read this one function, so "which mode runs" and "which mode the
+    note names" cannot differ by construction.
+
+    The one thing the table cannot express is that `--pdf` COMPOSES with `--dashboard`
+    rather than racing it (C-373/C-374): with both flags the PDF is a side output and
+    the dashboard — or `--trend`/`--percentile`/`--next`, when asked for — is what
+    renders. In the cascade that came out of `--pdf`'s branch not returning, so control
+    fell through to whichever branch came next. Resolving it here, once, is what lets
+    every branch below ask a plain `_mode == "..."` question; leaving it implicit is why
+    `--dashboard --pdf out.pdf --trend` printed "note: --trend ignored (running --pdf)"
+    on a run where `--trend` was exactly what ran.
+    """
+    mode = _select_primary_mode(args)
+    if mode == "pdf" and bool(getattr(args, "dashboard", False)):
+        return _select_primary_mode(args, skip={"pdf"})
+    return mode
+
+
 def _flag_coherence_notes(args) -> list[str]:
     """Notes for ignored modes / no-effect global modifiers. Never mutates args."""
     active = [(a, f) for a, f, k in _PRIMARY_MODES if _mode_active(args, a, k)]
+    # C-426 part B: the winner is whoever _resolve_mode elects — the SAME call _main
+    # dispatches on — not merely the first active entry. The two differ only for the
+    # --pdf/--dashboard composition, and that difference is the B-276 bug class itself:
+    # the run that announced "--trend ignored (running --pdf)" is the run on which
+    # --trend was what rendered.
+    _winner = _resolve_mode(args)
+    active.sort(key=lambda af: af[0] != _winner)
     notes: list[str] = []
     # C-426: the "--fail-under is deprecated and ignored" note lived here. The flag is
     # gone now, so argparse itself reports it (`unrecognized arguments`) and a note
@@ -1292,7 +1387,14 @@ def _flag_coherence_notes(args) -> list[str]:
         # chat message that fits, the PDF is the attachment it points at, and both are
         # produced in one run. Reporting "--dashboard ignored (running --pdf)" was true
         # of the old early-return dispatch and is a lie about the new one.
-        and not (a == "dashboard" and win_attr == "pdf")
+        #
+        # C-426 part B: _resolve_mode now elects the dashboard (or a --trend/--percentile/
+        # --next rider) in that case and leaves --pdf as the side output, so the exemption
+        # runs the other way round — but ONLY when the file is genuinely written. An
+        # unconditional exemption re-created B-067 in a new place: `--badge b.svg --pdf
+        # p.pdf --dashboard` returns from the badge branch having produced no PDF, and
+        # would have said nothing about it.
+        and not (a == "pdf" and _pdf_is_produced(args, win_attr))
     ]
     # --card is a default-path output selector; any primary mode supersedes it.
     if bool(getattr(args, "card", False)):
@@ -2041,18 +2143,38 @@ def _main(argv=None) -> int:
         logfile=getattr(args, "log", None),
     )
 
+    # B-466 / C-426 part B: a mode flag given an empty target is a malformed invocation,
+    # and it is rejected here — before ANY mode dispatches — rather than inside the vet
+    # family where the check used to sit. Two reasons. It stops an empty value being
+    # masked by whichever mode happened to be earlier in the cascade (`--menu --vet ""`
+    # ran the menu and said nothing). And it is what makes _mode_active's `is not None`
+    # sound as the one dispatch predicate: the branches below test truthiness, so an
+    # empty value was the single input on which the note layer and the dispatch layer
+    # disagreed — `--badge ""` printed a full default report at rc=0 while the coherence
+    # note announced it was running --badge.
+    _empty_flag = _empty_mode_target(args)
+    if _empty_flag:
+        print(f"{_empty_flag} needs a target — got an empty value. "
+              "Pass a path, slug, or URL.", file=sys.stderr)
+        return 2
+
+    # C-426 part B: _PRIMARY_MODES decides which mode runs. Every branch below asks this
+    # one value rather than re-testing its own flag, so the table's order IS the dispatch
+    # order instead of a hand-maintained mirror of it (see _resolve_mode).
+    _mode = _resolve_mode(args)
+
     # standalone modes that don't audit ~/.openclaw
-    if args.purge:
+    if _mode == "purge":
         # Dispatched FIRST, before any audit()/history-record call-site below, so
         # purge can never race its own uninstall by writing a fresh history point.
         return _run_purge(args)
 
-    if args.apply_ignore_proposals:
+    if _mode == "apply_ignore_proposals":
         # C-253: like --purge, this only touches its own known file (.clawseccheckignore
         # under --home) and needs no audit() pass, so it is dispatched here too.
         return _run_apply_ignore_proposals(args)
 
-    if args.verify_self:
+    if _mode == "verify_self":
         combined, per_file = package_digest()
         lines = [f"{WORDMARK} {__version__} — engine source digest (SHA-256)",
                  f"combined : {combined}",
@@ -2076,7 +2198,7 @@ def _main(argv=None) -> int:
         _emit("\n".join(lines))
         return 0
 
-    if args.verify_history:
+    if _mode == "verify_history":
         ok, msg = history_verify(args.history)
         if ok:
             _emit(f"History chain OK ({args.history}): {msg}")
@@ -2084,7 +2206,7 @@ def _main(argv=None) -> int:
         _emit(f"History chain BROKEN ({args.history}): {msg}")
         return 1
 
-    if args.verify_events:
+    if _mode == "verify_events":
         # C-250(c): --verify-history --history <events-path> already verified an events
         # journal correctly (verify_chain() is the same entry-agnostic algorithm for both
         # journals — see history.verify()'s own docstring), but its output always said
@@ -2097,7 +2219,7 @@ def _main(argv=None) -> int:
         _emit(f"Events chain BROKEN ({args.events}): {msg}")
         return 1
 
-    if getattr(args, "verify_baseline", None):
+    if _mode == "verify_baseline":
         # F-173: three outcomes, never two. "It does not match" and "I could not check"
         # ask the reader for opposite reactions, and collapsing them into a bool is how an
         # absent state file starts reporting as tampering — the single most damaging thing
@@ -2154,12 +2276,12 @@ def _main(argv=None) -> int:
               f"--watch-log to see what was recorded in between.")
         return 1
 
-    if getattr(args, "vet_plan", None):
+    if _mode == "vet_plan":
         # F-065: zero-network plan emitter — prints commands, touches nothing itself.
         _emit(render_vet_plan(args.vet_plan))
         return 0
 
-    if args.menu:
+    if _mode == "menu":
         # The guided Welcome screen as a runnable command. Read-only: reads local
         # score history for the "last check" nudge and the offline staleness hint;
         # no network, no writes, no record_run().
@@ -2171,7 +2293,7 @@ def _main(argv=None) -> int:
                           last_check_days=last_days, stale=stale, ascii_only=ascii_only))
         return 0
 
-    if args.brief:
+    if _mode == "brief":
         # F-171: reads state.json, events.jsonl and history.jsonl — and writes NOTHING.
         # No audit, no snapshot, no journal append. That constraint is what lets SKILL.md
         # have the agent run this at session start with no consent prompt; the consent rule
@@ -2198,7 +2320,7 @@ def _main(argv=None) -> int:
                            state_mtime_iso=_mtime, ascii_only=ascii_only))
         return 0
 
-    if args.cron_recipe:
+    if _mode == "cron_recipe":
         # F-172: print-only by construction — no scan, no writes, and emphatically no
         # `openclaw cron` call. A security tool that installs a recurring job as a side
         # effect of being asked how to install one has taken a decision nobody offered it.
@@ -2207,7 +2329,7 @@ def _main(argv=None) -> int:
                                  data_dir=args.data_dir or "~/.clawseccheck"))
         return 0
 
-    if args.functions:
+    if _mode == "functions":
         # Screen 12 — the full capability palette (Welcome's "menu"/item 4 expands here).
         # Read-only: no scan, no network, no writes — just the grounded capability list.
         from .checks import CHECKS  # noqa: PLC0415
@@ -2224,28 +2346,20 @@ def _main(argv=None) -> int:
     #
     # `--vet-mcp` is deliberately absent from this list: it is declared nargs="?" const="",
     # so an empty value is its documented "every configured MCP server" form.
-    _empty_target = [
-        flag for flag, attr in (
-            ("--vet", "vet"), ("--vet-skill", "vet_skill"), ("--vet-plugin", "vet_plugin"),
-            ("--vet-source", "vet_source"), ("--advise", "advise"),
-        )
-        if getattr(args, attr, None) is not None and not str(getattr(args, attr)).strip()
-    ]
-    if _empty_target:
-        print(f"{_empty_target[0]} needs a target — got an empty value. "
-              "Pass a path, slug, or URL.", file=sys.stderr)
-        return 2
+    # C-426 part B: the empty-target check that lived here now runs before ANY mode
+    # dispatches (see _empty_mode_target), so it covers every mode flag that takes a
+    # required value instead of only this family.
 
     _vet_route = None  # (kind, target) with kind in {"skill", "plugin", "mcp"}
-    if args.vet:
+    if _mode == "vet":
         detected = detect_vet_type(args.vet, home=args.home)
         print(f"detected type: {detected}", file=sys.stderr)
         # 'unknown' routes to the skill engine, which answers with an honest UNKNOWN —
         # exactly today's --vet behavior for a non-skill target (never a guessed PASS).
         _vet_route = (detected if detected in ("plugin", "mcp") else "skill", args.vet)
-    elif getattr(args, "vet_skill", None):
+    elif _mode == "vet_skill":
         _vet_route = ("skill", args.vet_skill)
-    elif getattr(args, "vet_plugin", None):
+    elif _mode == "vet_plugin":
         _vet_route = ("plugin", args.vet_plugin)
 
     if args.emit_manifest and not (_vet_route and _vet_route[0] == "skill"):
@@ -2336,14 +2450,14 @@ def _main(argv=None) -> int:
         # (above --vet-all), so the shared renderer runs here, not further below.
         return _run_vet_mcp(_vet_route[1], args, ascii_only)
 
-    if args.vet_all:
+    if _mode == "vet_all":
         home_dir = Path(args.home).expanduser()
         return vet_all(home_dir, ascii_only=ascii_only)
 
-    if args.vet_mcp is not None:
+    if _mode == "vet_mcp":
         return _run_vet_mcp(args.vet_mcp if args.vet_mcp else None, args, ascii_only)
 
-    if getattr(args, "vet_source", None):
+    if _mode == "vet_source":
         # F-073: pre-download reputation gate — identity only, zero network, no fetch.
         f = vet_source(args.vet_source)
         profile = build_profile(f, args.vet_source, "source")
@@ -2364,7 +2478,7 @@ def _main(argv=None) -> int:
         _emit(render_vet_dossier(profile, ascii_only=ascii_only))
         return _src_rc
 
-    if getattr(args, "advise", None):
+    if _mode == "advise":
         # F-067: same vet engines/profile as --vet, reframed as an install decision.
         advise_target = args.advise
         detected = detect_vet_type(advise_target, home=args.home)
@@ -2380,28 +2494,28 @@ def _main(argv=None) -> int:
         _emit(render_advise(profile, ascii_only=ascii_only))
         return _advise_rc
 
-    if args.canary:
+    if _mode == "canary":
         _emit(render_canary(make_canary(args.seed), ascii_only))
         _record_run("self_test", args)
         return 0
 
-    if args.redteam:
+    if _mode == "redteam":
         seed = args.seed if args.seed is not None else secrets.token_hex(8)
         _emit(render_suite(make_suite(seed), ascii_only, seed=seed))
         _record_run("self_test", args)
         return 0
 
-    if args.dryrun:
+    if _mode == "dryrun":
         _emit(render_dryrun(make_scenarios(args.seed), ascii_only))
         _record_run("self_test", args)
         return 0
 
-    if args.multiturn:
+    if _mode == "multiturn":
         _emit(render_multiturn(make_multiturn(args.seed), ascii_only))
         _record_run("self_test", args)
         return 0
 
-    if args.self_test:
+    if _mode == "self_test":
         seed = args.seed if args.seed is not None else secrets.token_hex(8)
         _emit(render_canary(make_canary(args.seed), ascii_only))
         _emit("")
@@ -2413,13 +2527,13 @@ def _main(argv=None) -> int:
         _record_run("self_test", args)
         return 0
 
-    if args.ask:
+    if _mode == "ask":
         import json as _json  # noqa: PLC0415
         from . import attest as _attest  # noqa: PLC0415
         _emit(_json.dumps(_attest.template(), indent=2, ensure_ascii=False))
         return 0
 
-    if args.show_suppressed:
+    if _mode == "show_suppressed":
         ignore = load_ignore(Path(args.home).expanduser())
         if not ignore:
             _emit("No .clawseccheckignore entries found.")
@@ -2482,7 +2596,7 @@ def _main(argv=None) -> int:
                     _emit(f"  {entry}")
         return 0
 
-    if args.watch_log:
+    if _mode == "watch_log":
         _emit(render_events(load_events(args.events), ascii_only))
         return 0
 
@@ -2626,7 +2740,7 @@ def _main(argv=None) -> int:
     paths = [p for p in _risk.risk_paths(ctx, findings, ignore=_risk_ignore)
              if not p.suppressed]
 
-    if args.risk_paths:
+    if _mode == "risk_paths":
         _emit(_risk.render_risk_paths(paths, ascii_only=ascii_only))
         return 0
 
@@ -2652,7 +2766,7 @@ def _main(argv=None) -> int:
             parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         return p
 
-    if args.badge:
+    if _mode == "badge":
         try:
             secure_write_text(_report_dest(args.badge), render_svg(score, findings))
             _emit(
@@ -2664,7 +2778,7 @@ def _main(argv=None) -> int:
             _emit(f"(could not write badge: {exc})")
             return 1
 
-    if args.html:
+    if _mode == "html":
         try:
             secure_write_text(
                 _report_dest(args.html),
@@ -2676,7 +2790,7 @@ def _main(argv=None) -> int:
             _emit(f"(could not write HTML report: {exc})")
             return 1
 
-    if args.sarif:
+    if _mode == "sarif":
         try:
             secure_write_text(_report_dest(args.sarif), render_sarif(findings, score, __version__, ctx=ctx))
             _emit(f"(SARIF written to {args.sarif})")
@@ -2712,7 +2826,13 @@ def _main(argv=None) -> int:
     # to there rather than emitting a findings-only PDF the card would then describe as
     # complete.
     _defer_pdf = bool(args.pdf) and args.dashboard and args.full
-    if args.pdf and not _defer_pdf:
+    # C-426 part B: --pdf is a MODE when asked for alone and a SIDE OUTPUT when it rides
+    # with --dashboard — the one composition _PRIMARY_MODES cannot express, since the
+    # table models "exactly one mode wins". _resolve_mode elects the dashboard (or
+    # --trend/--percentile/--next) in that case, so this names the other half explicitly
+    # instead of relying on this branch not returning and control falling through.
+    _pdf_side_output = bool(args.pdf) and args.dashboard
+    if (_mode == "pdf" or _pdf_side_output) and not _defer_pdf:
         try:
             _pdf_dest = _report_dest(args.pdf)
             secure_write_bytes(_pdf_dest,
@@ -2729,7 +2849,7 @@ def _main(argv=None) -> int:
             )
             return 0
 
-    if args.trend:
+    if _mode == "trend":
         # F-155 fix (C-135): resolve the liveTest cap BEFORE recording/rendering, so a
         # VULNERABLE verdict binds here too, not just on the default --full --json path
         # (see _apply_live_test_cap's own docstring for why this is scoped to ONLY the
@@ -2748,7 +2868,7 @@ def _main(argv=None) -> int:
         _emit(_percentile_line(score, ascii_only))
         return 0
 
-    if args.percentile:
+    if _mode == "percentile":
         # B-379: resolve the liveTest cap before ranking — previously this returned
         # before any cap resolution ran at all, so a run --full would grade F was
         # ranked against the recorded distribution as though it were an uncapped A.
@@ -2756,14 +2876,14 @@ def _main(argv=None) -> int:
         _emit(_percentile_line(score, ascii_only))
         return 0
 
-    if args.next:
+    if _mode == "next":
         # B-379: same cap-resolution gap as --percentile above — suggested next actions
         # should reflect the capped grade, not an uncapped one.
         score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
         _emit(render_next_actions(suggest_actions(findings, score), ascii_only))
         return 0
 
-    if args.dashboard:
+    if _mode == "dashboard":
         if not args.full:
             # Byte-identical to before F-153: the overwhelming majority of callers
             # (every pre-existing test, and every plain `--dashboard` invocation)
@@ -2866,26 +2986,26 @@ def _main(argv=None) -> int:
         _emit_attach_instruction(pdf_written)
         return 0
 
-    if args.dashboard_findings:
+    if _mode == "dashboard_findings":
         _emit(render_dashboard_findings(findings, ascii_only=ascii_only))
         return 0
 
-    if args.sbom:
+    if _mode == "sbom":
         _emit(render_sbom(ctx))
         return 0
 
-    if args.incident:
+    if _mode == "incident":
         # B-277: --events was accepted and silently dropped here, so the pack
         # harvested the DEFAULT journal no matter what the operator named. Threaded
         # like --watch-log (:~915) and --monitor (:~1078) already do.
         _emit(render_incident(ctx, findings, score, events=args.events))
         return 0
 
-    if args.judge_packet:
+    if _mode == "judge_packet":
         _emit(render_judge_packet_json(ctx, findings, version=__version__))
         return 0
 
-    if args.judged:
+    if _mode == "judged":
         if args.judged == "-":
             verdicts_raw = sys.stdin.read()
         else:
@@ -2901,7 +3021,7 @@ def _main(argv=None) -> int:
         _emit(render_judged_json(ctx, findings, score, verdicts_raw=verdicts_raw, risk=paths))
         return 0
 
-    if args.propose_ignore:
+    if _mode == "propose_ignore":
         if args.propose_ignore == "-":
             verdicts_raw = sys.stdin.read()
         else:
@@ -2912,12 +3032,12 @@ def _main(argv=None) -> int:
         _emit(render_ignore_proposals_json(findings, verdicts_raw=verdicts_raw, version=__version__))
         return 0
 
-    if args.analyze_trajectory is not None:
+    if _mode == "analyze_trajectory":
         _emit(render_trajectory_analysis(
             ctx, explicit_path=args.analyze_trajectory or None, ascii_only=ascii_only))
         return 0
 
-    if args.behavioral is not None:
+    if _mode == "behavioral":
         _record_run("behavioral", args)
         _behavioral_target = args.behavioral or None
         _emit(render_behavioral_analysis(
@@ -2929,7 +3049,7 @@ def _main(argv=None) -> int:
             return 1
         return 0
 
-    if args.monitor:
+    if _mode == "monitor":
         # F-155 fix (C-135): resolve the liveTest cap BEFORE the snapshot is taken, so a
         # VULNERABLE verdict is baked into the drift baseline capped — not the uncapped
         # score --monitor recorded before this fix (this branch returned before the
