@@ -30,7 +30,13 @@ from .brand import BRAND_RED, FAVICON_DATA_URI, LOGO_SVG, SEVERITY, WORDMARK, gr
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
-from .layers import LAYER_ORDER, describe_layer
+from .layers import (
+    LAYER_INSTALLED_SWEEP,
+    LAYER_LIVE_BEHAVIOUR,
+    LAYER_LOGS_TRAJECTORIES,
+    LAYER_ORDER,
+    describe_layer,
+)
 from .scoring import ScoreResult, assessment_coverage
 from .textnorm import ASCII_MAP, asciify
 
@@ -510,6 +516,114 @@ def _not_fully_covered_line(score: ScoreResult) -> str:
     if not not_checked:
         return ""
     return "Not fully covered: " + "; ".join(not_checked)
+
+
+# ── B-520: the scope note describes THIS run, not a static assumption ────────
+# The paragraph under the score used to assert, unconditionally, three things the run
+# "does not" do. On the maintainer's own `--full` run all three were false: the live
+# self-test harnesses, the MCP vet, the skill/plugin sweeps and the behavioural replay
+# had all already run, and their sections print a few hundred lines BELOW the sentence
+# telling the reader to go run them.
+#
+# The run's own five-layer ledger (layers.py, carried here as
+# `ScoreResult.missing_layers`) is the only thing in scope that knows which of them
+# happened, so this reads it rather than re-deriving coverage from flags, from `ctx`,
+# or from what some later phase is about to print.
+#
+# Each entry is `(layer, subject, advice, ran_is_proof, partial_note)`:
+#   * `subject` — what the reader loses when this layer does not run, in their words.
+#   * `advice` — what actually makes it count. Printed only when this subject is NOT
+#     proven covered; recommending a mode whose output is already on screen is the
+#     whole defect.
+#   * `ran_is_proof` — whether `status == "ran"` proves THIS subject was covered.
+#     False for the log/trajectory layer, and that asymmetry is the point: pipeline.py
+#     marks that layer as having run on EVERY audit (B164 scans log sinks in the base
+#     run), so it being marked so does not mean the replay modes ran. Dropping the
+#     pointer on that evidence would invent a clean — the exact trade this family of
+#     fixes keeps making by accident, and one both FP gates are blind to (one compares
+#     FAIL sets, the other diffs an unchanged home; neither can see a lost signal). No
+#     discriminator for "did the behavioural phase run" exists in the ledger, so the
+#     pointer stays and only the false negative claim goes.
+#   * `partial_note` — how that partial coverage is stated, for the same layer.
+#
+# Known residual, deliberately not "fixed" with a second discriminator: under
+# `--full --fast` cli.py still runs the MCP vet while the sweep phases do not, so the
+# installed-surface clause fires and its advice names `--vet-mcp` alongside `--full`.
+# The claim it makes (the on-disk sweep did not happen) is true; only the flag list is
+# broader than that run needed. The vet is not a pipeline phase and so has no ledger
+# layer of its own — inferring one from `--fast` inside a renderer is precisely the
+# re-derivation that produced this bug.
+_SCOPE_CLAUSES = (
+    (LAYER_LIVE_BEHAVIOUR,
+     "live prompt-injection resistance",
+     "Run `--canary` / `--redteam` / `--dryrun`, then submit the agent's own verdict"
+     " back with `--judged-bundle` — that submission is what makes this layer count",
+     True,
+     ""),
+    (LAYER_INSTALLED_SWEEP,
+     "a deep vet of the skills, plugins and MCP servers sitting on disk",
+     "Run `--full` (or `--vet-all` / `--vet-mcp` for one surface at a time)",
+     True,
+     ""),
+    (LAYER_LOGS_TRAJECTORIES,
+     "what your agent has already logged",
+     "Run `--behavioral` (proven-by-log verb-sequence trifecta / outcome anomaly /"
+     " capability drift) or `--analyze-trajectory` (skill-indicator correlation) to"
+     " check whether a trifecta is already recorded in your trajectory sidecar",
+     False,
+     "this audit's own log/transcript scan covered it; the replay analyses did not"),
+)
+
+
+def _scope_note_lines(score: ScoreResult) -> tuple[list[str], bool]:
+    """The scope note under the score, branched on the run's own layer ledger (B-520).
+
+    Returns ``(lines, live_tested)``. ``live_tested`` is True only on POSITIVE ledger
+    evidence that the live-behaviour layer ran; the "Static audit —" paragraph below
+    uses it so its closing "use the live tests above" cannot dangle on a run whose live
+    tests are already done and printed.
+
+    An empty ``missing_layers`` is ambiguous BY CONSTRUCTION: ``scoring.compute`` leaves
+    it empty both when no ledger was supplied and when a complete one was (``graded``
+    stays True in both, see its docstring). So "no entry for this layer" is read as
+    evidence only when the ledger said something at all. With nothing to read, every
+    clause is kept — the note under-claims coverage rather than inventing it, which is
+    the safe direction here: an unnecessary "run it" costs the reader one command, a
+    suppressed one costs them the check.
+    """
+    lines = [
+        # C-423: found by reading a real ungraded run, not by a test — the tests assert
+        # that no letter appears, which they cannot do for the coherence of the
+        # paragraph under it. "This score" on a run that has no score is the same lie in
+        # smaller type.
+        "This score reflects your configuration." if getattr(score, "graded", True)
+        else "This audit reflects your configuration."
+    ]
+    missing = dict(getattr(score, "missing_layers", ()) or ())
+    have_ledger = bool(missing)
+    clauses: list[str] = []
+    for layer, subject, advice, ran_is_proof, partial_note in _SCOPE_CLAUSES:
+        status = missing.get(layer)
+        if status is not None:
+            # Layer/status wording comes from `layers.describe_layer` ONLY — this
+            # module never phrases a layer or a status itself (tests/test_c423_*
+            # fails the build on a competing table).
+            clauses.append(f" · not covered — {subject}: {describe_layer(layer, status)}."
+                           f" {advice}.")
+        elif not have_ledger:
+            # No ledger reached this render, so the only honest scope is the audit's
+            # own: a purely static audit does not cover these by itself. Nothing is
+            # claimed about what the wider RUN may have done — that is precisely what
+            # cannot be known here.
+            clauses.append(f" · not covered by the static audit — {subject}. {advice}.")
+        elif ran_is_proof:
+            clauses.append(f" · covered by this run — {subject}.")
+        else:
+            clauses.append(f" · partly covered — {subject}: {partial_note}. {advice}.")
+    lines.append("Coverage of the layers beyond the static audit"
+                 + (", from this run's own ledger:" if have_ledger else ":"))
+    lines.extend(clauses)
+    return lines, (have_ledger and LAYER_LIVE_BEHAVIOUR not in missing)
 
 
 def _degraded_incomplete_clause(score: ScoreResult) -> str:
@@ -1189,16 +1303,45 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     rows.append((SUBJECT_LABEL["agents"], ag["status"],
                  f"{_issues_count('agents')} · {n_ag} agent{'' if n_ag == 1 else 's'}"))
 
+    # B-506, second half: these two rows read the per-ITEM roster and nothing else, which
+    # is the identical defect the terminal "Inventory by subject" block was fixed for —
+    # `skills`/`mcp` are lists of installed items, so a finding filed against the SUBJECT
+    # had nowhere to land and an empty roster rendered as an assessed all-clear. The
+    # terminal block was corrected; this function was not, and it is the single source of
+    # the HTML table, the PDF summary table AND the chat card, so all three still printed
+    # `Skills — PASS — none installed` over a body reading `Skills — 2 issue(s)` with a
+    # FAIL in it. The subject bucket (`skills_subject`/`mcp_subject`, the sibling keys
+    # B-506 added to `build_inventory`) is what the body counts, so it is what these rows
+    # count too — one source of truth, per the contract the docs already state.
+    #
+    # Roster and subject stay NAMED SEPARATELY rather than summed ("none installed ·
+    # 2 issue(s)"): "two of your installed skills look wrong" and "the skill subsystem is
+    # misconfigured" are different facts, and merging them would trade one lie for
+    # another — the same reasoning `_roster_and_subject_count_text` records for the
+    # terminal block. `_subject_count_text` supplies the subject half, so an UNKNOWN-only
+    # subject reads "not assessed" here exactly as it does there, never "clear".
     skills = inv["skills"]
+    sk_subject = inv.get("skills_subject") or {}
+    sk_subject_text = _subject_count_text(len(sk_subject.get("findings") or []),
+                                          int(sk_subject.get("unassessed") or 0))
     sk_flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
-    sk_status = _worst_of_statuses(s.get("status") for s in sk_flagged) if sk_flagged else PASS
+    sk_status = _worst_of_statuses(
+        [s.get("status") for s in sk_flagged] + [sk_subject.get("status", PASS)])
     sk_count = f"{len(sk_flagged)} flagged · {len(skills)} installed" if skills else "none installed"
+    if sk_subject_text != "clear":
+        sk_count += f" · {sk_subject_text}"
     rows.append((SUBJECT_LABEL["skills"], sk_status, sk_count))
 
     mcp = inv["mcp"]
+    mcp_subject = inv.get("mcp_subject") or {}
+    mcp_subject_text = _subject_count_text(len(mcp_subject.get("findings") or []),
+                                           int(mcp_subject.get("unassessed") or 0))
     mcp_bad = [m for m in mcp if m.get("verdict") != "ok"]
-    mcp_status = _worst_of_statuses(m.get("verdict") for m in mcp_bad) if mcp_bad else PASS
+    mcp_status = _worst_of_statuses(
+        [m.get("verdict") for m in mcp_bad] + [mcp_subject.get("status", PASS)])
     mcp_count = f"{len(mcp_bad)} flagged · {len(mcp)} configured" if mcp else "none configured"
+    if mcp_subject_text != "clear":
+        mcp_count += f" · {mcp_subject_text}"
     rows.append((SUBJECT_LABEL["mcp"], mcp_status, mcp_count))
 
     plug = inv["plugins"]
@@ -2220,21 +2363,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 sev_parts.append(f"{_sev_counts[sev]} {sev}")
         sev_summary = ", ".join(sev_parts)
         lines.append(f"({_issue_fail} FAIL, {_issue_warn} WARN — incl. {sev_summary})")
-    # C-423: found by reading a real ungraded run, not by a test — the tests assert that
-    # no letter appears, which they cannot do for the coherence of the paragraph under
-    # it. "This score" on a run that has no score is the same lie in smaller type.
-    lines.append(
-        ("This score reflects your configuration." if getattr(score, "graded", True)
-         else "This audit reflects your configuration.") +
-        " It does not test live"
-        " prompt-injection resistance or do a deep MCP supply-chain vet —"
-        " run `--canary` / `--redteam` / `--dryrun` (live injection) and"
-        " `--vet-mcp` (deep MCP) for those. It also doesn't mine what your agent has"
-        " already logged — run `--behavioral` (proven-by-log verb-sequence trifecta /"
-        " outcome anomaly / capability drift) or `--analyze-trajectory` (skill-indicator"
-        " correlation) to check whether a trifecta is already recorded in your"
-        " trajectory sidecar."
-    )
+    # B-520: what this run did and did not cover, read off its own layer ledger — see
+    # `_scope_note_lines`. This sentence used to be static, and on a `--full` run it told
+    # the reader to run five modes whose output was already printed below it.
+    _scope_lines, _live_tested = _scope_note_lines(score)
+    lines.extend(_scope_lines)
     # Capability-vs-behavior honesty (F-038): a static audit bounds what the agent CAN do,
     # not what it DOES at runtime. OpenClaw core ships no runtime egress/taint gate, so a
     # clean Lethal Trifecta here is not a runtime guarantee — a high grade means "not
@@ -2245,12 +2378,18 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # the increment that removed the number — so name the run's own artifact instead.
     _clean_subject = ("a high grade" if getattr(score, "graded", True)
                       else "a clean static result")
+    # B-520: the closing pointer is a sibling of the scope note above and had the same
+    # defect in miniature — "use the live tests above" is advice on a run that has not
+    # run them, and a dangling back-reference on one that has (the paragraph above no
+    # longer names those flags once the ledger says the layer ran). Same evidence, same
+    # branch: positive `STATUS_RAN` only, never an absence.
+    _live_tail = ("The live-behaviour result above is what speaks to that."
+                  if _live_tested else "Use the live tests above to probe actual resistance.")
     lines.append(
         "Static audit — this bounds what your agent *can* do, not how it *behaves* under a"
         " live attack. OpenClaw core has no runtime egress/taint gate, so even a clean"
         f" Lethal Trifecta here can still be chained by prompt-injection at runtime: {_clean_subject}"
-        " means \"not statically lethal-capable\", not \"runtime-proof\". Use the live"
-        " tests above to probe actual resistance."
+        " means \"not statically lethal-capable\", not \"runtime-proof\". " + _live_tail
     )
     # I-025/B-309: an exception to "this grade never reflects runtime behaviour" above —
     # a trajaudit-style skill/bootstrap indicator match (--analyze-trajectory) MAY CAP
