@@ -257,6 +257,45 @@ def walk_dir_safely(
             unreadable_dirs.append((str(getattr(exc, "filename", "") or base_dir),
                                     exc.strerror or str(exc), exc.errno))
 
+    # dirpath -> [first entry, its OSError, how many entries in that directory failed]
+    _unlistable: dict = {}
+
+    def _note_unlistable(dirpath: str, entry: str, exc: OSError) -> None:
+        """An entry inside a listed directory that could not even be classified.
+
+        Re-raises when the caller did not opt in. Opt-in has to mean opt-in: before B-551
+        this OSError propagated, and swallowing it here would have converted a loud crash
+        into a silent drop at the **16** other call sites that never asked for the channel —
+        a fail-open introduced by the fix for a fail-open, and the exact opposite of the
+        "byte-identical for every existing caller" claim this parameter is documented with.
+        Caught by the independent adversarial pass, not by review or by any gate.
+        """
+        if unreadable_dirs is None:
+            raise exc
+        seen = _unlistable.get(dirpath)
+        if seen is None:
+            _unlistable[dirpath] = [entry, exc, 1]
+        else:
+            seen[2] += 1
+
+    def _flush_unlistable() -> None:
+        """One record per directory, but the record says how many entries it stands for.
+
+        The first version emitted one record and stopped counting, so a directory holding
+        three unreadable entries reported ``(1 path(s))`` and named only the first — and
+        because the walk yields `sorted(filenames)`, an attacker picks which one that is by
+        naming it. The disclosure still fired, but it understated the gap and pointed at a
+        file of the attacker's choosing. Counting costs nothing and the sentence stops
+        being a decoy.
+        """
+        if unreadable_dirs is None:
+            return
+        for entry, exc, count in _unlistable.values():
+            reason = exc.strerror or str(exc)
+            if count > 1:
+                reason = f"{reason} ({count} entries in this directory)"
+            unreadable_dirs.append((entry, reason, exc.errno))
+
     for dirpath, dirnames, filenames in os.walk(
         base_dir, topdown=True, followlinks=False, onerror=_on_walk_error
     ):
@@ -288,7 +327,28 @@ def walk_dir_safely(
                 continue
             if exclude_vcs and any(vcs in p.parts for vcs in _VCS_DIR_NAMES):
                 continue
-            if p.is_symlink():
+            try:
+                is_link = p.is_symlink()
+            except OSError as exc:
+                # B-551: `os.walk` succeeded here — `opendir` needs only `r`, which a `0444`
+                # directory grants — so `onerror` never fired and the `unreadable_dirs`
+                # channel above stayed empty. But without `x` on the parent, `stat` fails for
+                # EVERY entry, so `Path.is_symlink()` (which re-raises anything outside
+                # ENOENT/ENOTDIR/EBADF/ELOOP) threw straight out of this function before any
+                # bookkeeping ran. Measured: `--vet-skill` died with "unexpected internal
+                # error (PermissionError)" and no dossier at all, while the audit path caught
+                # it per-skill and printed `B13 PASS | Scanned 1 installed skill(s); no
+                # shell-exec / exfiltration / obfuscation patterns found` on a home holding
+                # two, with the unscanned one absent from the inventory entirely.
+                #
+                # Recorded once per directory, not once per entry: with no `x` every sibling
+                # fails identically, so a per-entry record would emit one line per file while
+                # saying the same thing. The dedup is keyed on the directory rather than
+                # skipping the rest of it, so a genuine single-entry failure (a race, a name
+                # the filesystem rejects) still drops only that entry.
+                _note_unlistable(dirpath, str(p), exc)
+                continue
+            if is_link:
                 if skips is not None:
                     try:
                         tgt = os.readlink(p)
@@ -303,7 +363,10 @@ def walk_dir_safely(
                     if skips is not None:
                         skips.append((str(p), f"path-escape -> {real}"))
                     continue
-            except OSError:
+            except OSError as exc:
+                # The same silent drop one line later, and reachable independently: a file
+                # that resolves through a directory the walk may not search.
+                _note_unlistable(dirpath, str(p), exc)
                 continue
 
             if keep_file is not None and not keep_file(p):
@@ -319,6 +382,8 @@ def walk_dir_safely(
             if max_files is not None and len(out) >= max_files:
                 if capped is not None:
                     capped.append(True)
+                _flush_unlistable()
                 return out
             out.append(p)
+    _flush_unlistable()
     return out

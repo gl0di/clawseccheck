@@ -209,6 +209,27 @@ _MAX_AUDIT_EVENTS = 1000
 _UNTRUSTED_NAME_CAP = 120
 
 
+def _note_skill_gap(ctx, skill_dir: Path, entry: str) -> None:
+    """Attribute a coverage gap to the skill it belongs to.
+
+    B-551: `unreadable_files` entries are paths relative to their own skill directory, so
+    `lib/payload.sh` alone cannot say whose it is. `report._skill_inventory` builds a FRESH
+    per-skill Context and copies only the four content maps, so the gap recorded on the main
+    ctx was structurally invisible to it — and the row for the skill whose payload directory
+    had just been reported unreadable came out `NO KNOWN ISSUE / PASS`, in the same report
+    that said B13 could not read it. Found by the independent adversarial pass; the row was
+    *created* by making that skill collectable at all, so the false-clean claim moved out of
+    B13 and into the inventory rather than disappearing.
+
+    Keyed the same way `unreadable_manifests` is keyed (the skill DIRECTORY's name), so both
+    bridges agree about who owns a file.
+    """
+    if ctx is None:
+        return
+    owner = skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+    ctx.skill_coverage_gaps.setdefault(owner, []).append(entry)
+
+
 def _exists_but_not_regular(path: Path) -> bool:
     """True for a directory entry that is present but is not a regular file.
 
@@ -702,6 +723,13 @@ class Context:
     # generic "truncated / split oversized files" remediation, which would be false
     # advice here (mirrors how padding_anomalies earns its own narrower channel).
     unreadable_files: list[str] = field(default_factory=list)
+    # B-551: the same facts, attributed to the skill they belong to. `unreadable_files`
+    # entries are paths relative to their own skill directory, so `lib/payload.sh` alone
+    # cannot say whose it is — which is why `report._skill_inventory`, building a fresh
+    # per-skill Context, could not carry the coverage gap and stamped `NO KNOWN ISSUE` on
+    # the very skill whose payload directory the same report said it never read. Keyed by
+    # skill name so a per-skill consumer can take exactly its own.
+    skill_coverage_gaps: dict = field(default_factory=dict)
     # B-461: skill names whose SKILL.md itself could not be read. Without this, B88 sees an
     # empty text blob and reports the manifest as ABSENT ("no SKILL.md frontmatter block
     # found — this skill will not appear to the agent"), which is a false statement about a
@@ -1616,9 +1644,23 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 # itself, and EIO/ELOOP/ENAMETOOLONG are genuine "present but unread" too.
                 # Fail-closed by default: a new errno nobody anticipated discloses rather than
                 # hides, which is the direction B-458 already chose one level down.
-                ctx.unreadable_files.append(f"{rel}/ (directory not entered): {reason}")
-                ctx.file_manifest.setdefault(rel + "/", "unreadable")
-                if rel in (".", ""):
+                # B-551: the same channel now carries two shapes — a directory the walk could
+                # not list, and an entry inside a listed directory that could not even be
+                # classified (no `x` on the parent). Label by what can actually be verified
+                # rather than by which branch recorded it: claiming "directory not entered"
+                # about a regular file would be the same kind of small lie this whole task is
+                # about. The probe is itself guarded, because the reason we are here is that
+                # stat calls on this path fail.
+                try:
+                    is_dir = Path(dpath).is_dir()
+                except OSError:
+                    is_dir = False
+                label = "directory not entered" if is_dir else "could not be read"
+                suffix = "/" if is_dir else ""
+                ctx.unreadable_files.append(f"{rel}{suffix} ({label}): {reason}")
+                _note_skill_gap(ctx, skill_dir, f"{rel}{suffix} ({label}): {reason}")
+                ctx.file_manifest.setdefault(rel + suffix, "unreadable")
+                if is_dir and rel in (".", ""):
                     # The skill ROOT is what could not be listed, so whether SKILL.md exists is
                     # unknown — and B88 defaults to "absent". Without this bridge the dossier
                     # contradicted itself in adjacent rows: Danger said "an unreadable path is
@@ -1633,7 +1675,8 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     )
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_SKILL,
-                    f"Could not list {_cap_name(rel)}/: {reason}",
+                    f"Could not {'list' if is_dir else 'read'} {_cap_name(rel)}{suffix}: "
+                    f"{reason}",
                 )
         if ctx is not None and _skips:
             # F-061: a skill shipping `data -> ~/.ssh/id_rsa` or `-> ../../openclaw.json` used to
@@ -1673,6 +1716,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
             return
         rel = _rel(p)
         ctx.unreadable_files.append(f"{rel}: {exc.strerror or exc}")
+        _note_skill_gap(ctx, skill_dir, f"{rel}: {exc.strerror or exc}")
         ctx.file_manifest[rel] = "unreadable"
         if p.name.lower() == "skill.md":
             # Keyed the same way vet_skill/the skill sweep key ctx.installed_skills (the
@@ -1704,6 +1748,9 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 rel = _rel(f)
                 ctx.unreadable_files.append(
                     f"{rel} (not a regular file — nothing to read at rest)"
+                )
+                _note_skill_gap(
+                    ctx, skill_dir, f"{rel} (not a regular file — nothing to read at rest)"
                 )
                 ctx.file_manifest.setdefault(rel, "not-a-regular-file")
                 if f.name.lower() == "skill.md":

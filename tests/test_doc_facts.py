@@ -63,8 +63,20 @@ _RISK_RANGE_RE = re.compile(
 # real count reaches the next multiple of ten, the doc has to be restated.
 _OPEN_CLAIM_SLACK = 10
 
-# "6,236 automated tests" — with or without the thousands comma.
-_TEST_COUNT_RE = re.compile(r"(\d{1,3}(?:,\d{3})+|\d{4,6})\+?\s*(?:automated\s+)?tests\b", re.IGNORECASE)
+# "6,236 automated tests" — with or without the thousands comma, and "549 test files":
+# a bare three-to-six-digit count (not just four-to-six — a claim like "549 test files"
+# is a real, currently-shipped shape and a three-digit count never matched before
+# C-445), followed by either "tests" or "test files".
+# The `files` group is what keeps the two claim KINDS apart. Widening the regex to see
+# "561 test files" without it fed a file count into the guard that compares against the
+# test count, and the full suite went red with "docs/USAGE.md says 561 while the suite has
+# 15,594 — restate it (drifted by 15,033)". It passed review because the value guard skips
+# below `_FULL_SUITE_FLOOR`, so a partial run — the only kind anyone runs while editing this
+# file — never exercised it. Seeing a claim and knowing what it claims are two jobs.
+_TEST_COUNT_RE = re.compile(
+    r"(\d{1,3}(?:,\d{3})+|\d{3,6})\+?\s*(?:automated\s+)?test(?:s|(?P<files>\s+files))\b",
+    re.IGNORECASE,
+)
 
 # Below this, the run is a subset rather than the suite, so the collected count says
 # nothing about the true total.
@@ -74,6 +86,11 @@ _FULL_SUITE_FLOOR = 3000
 # enough that ordinary commits do not redden CI, narrow enough that a stale claim cannot
 # survive to a release.
 _TEST_CLAIM_SLACK = 400
+
+# The same two rules, at the magnitude a file count actually moves: never overstate,
+# and restate once the gap stops informing. 400 would let a claim of 161 stand against
+# 561 files, which is the open-ended rot this guard exists to prevent.
+_TEST_FILE_CLAIM_SLACK = 40
 
 
 def _shipped_files():
@@ -260,6 +277,7 @@ def test_test_count_claims_are_true_and_not_badly_stale(request):
     whole suite, so the guard is live exactly where a release is cut.
     """
     actual = len(request.session.items)
+    file_total = len(list((REPO / "tests").glob("test_*.py")))
     if actual < _FULL_SUITE_FLOOR:
         import pytest
 
@@ -272,11 +290,45 @@ def test_test_count_claims_are_true_and_not_badly_stale(request):
             claimed = int(m.group(1).replace(",", ""))
             line = text[: m.start()].count("\n") + 1
             where = f"{path.relative_to(REPO)}:{line}"
-            if claimed > actual:
-                wrong.append(f"{where} claims {claimed:,} tests but only {actual:,} exist")
-            elif actual - claimed >= _TEST_CLAIM_SLACK:
+            # "561 test files" and "15,200 tests" are both test-count claims and they are
+            # measured against different truths. Comparing a file count to the suite total
+            # produces a demand to "restate it (drifted by 15,033)" about a figure that was
+            # exactly right.
+            is_files = m.group("files") is not None
+            truth = file_total if is_files else actual
+            noun = "test files" if is_files else "tests"
+            slack = _TEST_FILE_CLAIM_SLACK if is_files else _TEST_CLAIM_SLACK
+            if claimed > truth:
+                wrong.append(f"{where} claims {claimed:,} {noun} but only {truth:,} exist")
+            elif truth - claimed >= slack:
                 wrong.append(
-                    f"{where} says {claimed:,} while the suite has {actual:,} — "
-                    f"restate it (drifted by {actual - claimed:,})"
+                    f"{where} says {claimed:,} {noun} while there are {truth:,} — "
+                    f"restate it (drifted by {truth - claimed:,})"
                 )
     assert not wrong, "test-count claims need attention:\n  " + "\n  ".join(wrong)
+
+
+def test_test_count_guard_reads_three_digit_counts_and_the_test_files_phrasing():
+    """Guard the guard: C-445 found "549 test files" invisible to `_TEST_COUNT_RE` for
+    two independent reasons — the numeric alternation admitted only a comma-thousands
+    form or four-to-six bare digits (never a bare three-digit count like 549), and the
+    trailing literal was `tests\\b`, which "test files" never satisfies. Pins both
+    widenings in both directions, same idiom as the RISK-range guard-the-guard test.
+    """
+    for claim, count in (
+        ("549 test files", "549"),
+        ("561 test files", "561"),
+        ("6,236 automated tests", "6,236"),
+        ("15,200 tests", "15,200"),
+    ):
+        m = _TEST_COUNT_RE.search(claim)
+        assert m is not None, f"{claim!r} is a test-count claim the guard cannot see"
+        assert m.group(1) == count
+    for not_a_claim in (
+        "99 test files",  # stays two digits — out of this widening's scope
+        "a broader test harness",
+        "the testsuite ran clean",
+    ):
+        assert _TEST_COUNT_RE.search(not_a_claim) is None, (
+            f"{not_a_claim!r} is not a test-count claim, but the guard reads one"
+        )

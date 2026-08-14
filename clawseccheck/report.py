@@ -1607,7 +1607,7 @@ def _skill_inventory(ctx) -> list[dict]:
         check_installed_skills,
         coverage_gap_finding,
     )
-    from .collector import Context  # noqa: PLC0415
+    from .collector import LIMIT_DOMAIN_SKILL, Context, note_limit  # noqa: PLC0415
     from .scanbudget import (  # noqa: PLC0415
         DEFAULT_CHECK_BUDGET_S, ScanBudgetExceeded, audit_budget_exceeded, audit_deadline,
         check_deadline,
@@ -1637,6 +1637,23 @@ def _skill_inventory(ctx) -> list[dict]:
         skill_ctx.installed_skill_py = {name: py_map.get(name, [])}
         skill_ctx.installed_skill_shell = {name: sh_map.get(name, [])}
         skill_ctx.installed_skill_js = {name: js_map.get(name, [])}
+        # B-551: carry THIS skill's coverage gaps into its own Context. Without them the
+        # fresh Context looks like a complete scan, and `check_installed_skills` duly
+        # returned `NO KNOWN ISSUE / PASS` for the skill whose payload directory the same
+        # report had just declared unreadable — an affirmative false claim in the block a
+        # reader scans first, contradicting B13 a few lines away. Attributed by skill name
+        # at collection time (`collector._note_skill_gap`), because the paths themselves are
+        # skill-relative and cannot say whose they are.
+        gaps = (getattr(ctx, "skill_coverage_gaps", None) or {}).get(name)
+        if gaps:
+            skill_ctx.unreadable_files = list(gaps)
+            # The unreadable branch sits INSIDE B13's `if skill_limit_hits:` block, so the
+            # list alone is inert — carrying it without the domain entry looked like a fix
+            # and changed nothing, which is exactly the kind of half-wiring this whole task
+            # keeps turning up. Both, or neither.
+            for gap in gaps:
+                note_limit(skill_ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                           f"Could not read {gap.split(' (', 1)[0]}")
         # base and ring are budgeted SEPARATELY, and that split is the whole point.
         # Sharing one try meant a deadline firing inside the ring abandoned the block and
         # discarded the verdict `base` had ALREADY produced: measured on a real hostile
