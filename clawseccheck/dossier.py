@@ -187,9 +187,11 @@ _STATUS_RANK: dict[str, int] = {
 # further grade (mirrors scoring.FAIL_CAPS[HIGH] — "one real failure always costs a grade").
 _WARN_CAP = 89
 _NON_DANGER_FAIL_CAP = 79
-# B-092: a Danger-axis UNKNOWN caused by a coverage-limit hit (a payload padded past the
-# per-skill/500-file scan cap could hide unscanned) must never read as "A / SAFE" — cap it at
-# the top of the C band, same ceiling scoring.py gives a real HIGH finding.
+# B-092 / B-485: a Danger-axis UNKNOWN caused by a coverage gap — content that exists but
+# was never covered, whether because a payload was padded past the per-skill/500-file scan
+# cap, a file could not be read, or the AST layer could not parse it — must never read as
+# "A / SAFE". Cap it at the top of the C band, same ceiling scoring.py gives a real HIGH
+# finding. See `_danger_coverage_gap` for how that state is detected.
 _COVERAGE_GAP_DANGER_CAP = 79
 
 
@@ -252,28 +254,68 @@ def _worst(findings: list):
 
 
 def _danger_coverage_gap(danger_bucket: list, ctx) -> bool:
-    """True iff the Danger axis is UNKNOWN *because scanning hit a coverage limit* —
-    e.g. a payload padded past the per-skill/500-file scan cap in collector.py — rather
-    than the benign "nothing to scan" UNKNOWN (no code, no MCP servers, etc.).
+    """True iff the Danger axis is UNKNOWN because scanning could not COVER what is
+    there — rather than the benign "there was nothing to scan" UNKNOWN (no code, no MCP
+    servers, a docs-only skill).
 
     B-092: those two UNKNOWN flavors must not be conflated. "Nothing to scan" is a
-    legitimately clean result and stays excluded from scoring as before. "Scan coverage
-    hit a limit" means real content may exist and was never looked at — that is not
-    benign, so the caller floors the headline grade instead of letting it read A/SAFE.
+    legitimately clean result and stays excluded from scoring as before. "Could not read
+    / could not finish reading what is there" means real content may exist and was never
+    looked at — so the caller floors the headline instead of letting it read INSTALL.
 
-    Primary signal: ``ctx.limit_hits`` (collector.py appends to it on every size/file/
-    nesting cap hit). Falls back to matching the bucket's own UNKNOWN finding detail text
-    when no ctx is attached (e.g. a hand-built Finding in a unit test) — the checks engine's B13
-    limit-hit branch always phrases it "coverage is incomplete".
+    Three legs, in order. The first two are STRUCTURAL — a flag a producer set, or a
+    counter the collector bumped — and are the primary signal:
+
+    1. ``Finding.engine_degraded`` on an UNKNOWN in the bucket. catalog.py defines this
+       field as "the single source of truth for 'this UNKNOWN is engine-side'": the check
+       ran, tried to reach a verdict, and could not for a reason on OUR side (a crash, a
+       budget escape, an input that turned out unreadable/unparseable). That is precisely
+       this predicate's question, already answered by the producer.
+    2. ``ctx.limit_hits`` — collector.py appends to it on every size/file/nesting cap hit
+       and on an unreadable file (``note_limit``), which is how B13's own cap and
+       unreadable-file branches disclose a truncated scan.
+    3. The literal ``"coverage is incomplete"`` phrasing in an UNKNOWN's ``detail``. This
+       is a DOCUMENTED FALLBACK ONLY, kept for hand-built ``Finding`` objects in unit
+       tests that carry neither a real ``ctx`` nor the flag (see
+       ``tests/test_b092_coverage_gap.py``). It must never be the primary: matching
+       English prose means any producer that rewords its detail silently loses the
+       signal, and any producer that never used that wording never had it.
+
+    B-485: leg 1 is new and is what closes the reported route. B13's parse-error branch
+    (checks/_vet.py) already sets ``engine_degraded=True`` on its UNKNOWN — "could not
+    analyze <file> — parse error(s); file(s) not scanned by the AST/taint layer" — but it
+    calls no ``note_limit`` and does not use the phrase leg 3 keys on, so a skill whose
+    bundled script the AST layer could not read rolled all the way up to INSTALL, one
+    line under the Danger axis printing that it never got to look. The same hole covered
+    every future producer of an engine-side UNKNOWN that happens not to hit a collector
+    cap; keying on the flag closes the class, not the one instance.
+
+    Measured FP direction before landing leg 1 (the flip set = targets where this returns
+    True and the pre-B-485 predicate returned False): 0 of 16 real installed skills on
+    BOTH python3.12 and the python3.9 CI floor; 1 of ~1,119 fixture targets, namely
+    ``fixtures/unknown_b347_deaddrop_unparseable`` — the fixture whose name declares it
+    UNKNOWN. No narrower trigger and no WARN-instead-of-floor variant is warranted at
+    that rate, so this floors like the other legs.
+
+    Known residual, NOT closed here (both need a producer change, not a predicate one):
+    a ring check that raises is swallowed by ``_run_content_ring``'s bare ``except``,
+    which emits no finding at all — an empty bucket carries no signal for any predicate
+    to read; and a binary blob excluded from scanning discloses no coverage gap (it
+    reaches the headline only via the separate stowaway WARN).
     """
     if not danger_bucket:
         return False
-    if any(s.status == UNKNOWN for s in danger_bucket) and getattr(ctx, "limit_hits", None):
+    unknowns = [f for f in danger_bucket if f.status == UNKNOWN]
+    if not unknowns:
+        return False
+    # (1) structural, per finding: the producer flagged this UNKNOWN as engine-side.
+    if any(getattr(f, "engine_degraded", False) for f in unknowns):
         return True
-    return any(
-        f.status == UNKNOWN and "coverage is incomplete" in (f.detail or "")
-        for f in danger_bucket
-    )
+    # (2) structural, per run: the collector recorded a cap hit / unreadable file.
+    if getattr(ctx, "limit_hits", None):
+        return True
+    # (3) documented prose fallback — hand-built Findings with no ctx and no flag.
+    return any("coverage is incomplete" in (f.detail or "") for f in unknowns)
 
 
 def _normalize_pool(engine_output) -> list:
@@ -488,13 +530,13 @@ def _grade_profile(axes: list, *, danger_coverage_gap: bool = False) -> tuple[st
     ``grade``/``score`` to a renderer; that is exactly the "two different A's on two
     different scales" bug C427 removed.
 
-    ``danger_coverage_gap`` (B-092): the Danger axis reads UNKNOWN not because there was
-    nothing to scan, but because scanning hit a size/file cap — a payload padded past the
-    cap could be hiding unscanned. That must never roll up to a confident "A / SAFE"
-    headline one line above the axis's own "coverage incomplete" note, so it is treated
-    like a real non-danger-axis problem: WARN-equivalent overall status (→ verdict
-    SUSPICIOUS, the existing non-SAFE word — no new verdict enum value) and the same
-    grade ceiling a HIGH finding gets, never A/B.
+    ``danger_coverage_gap`` (B-092, widened by B-485): the Danger axis reads UNKNOWN not
+    because there was nothing to scan, but because content that IS there was never
+    covered — padded past a size/file cap, unreadable, or unparseable by the AST layer.
+    That must never roll up to a confident "A / SAFE" headline one line above the axis's
+    own "could not analyze" note, so it is treated like a real non-danger-axis problem:
+    WARN-equivalent overall status (→ verdict CAUTION, the existing non-clean word — no
+    new verdict enum value) and the same grade ceiling a HIGH finding gets, never A/B.
     """
     by_axis = {a.axis: a for a in axes}
 

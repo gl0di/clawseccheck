@@ -1,9 +1,12 @@
-"""B-485 — `--vet` answers INSTALL about a package it could not read, and the obvious
-fix is worse. Both halves are pinned here so neither can be lost.
+"""B-485 — `--vet` answered INSTALL about a package it could not read. CLOSED 2026-08-14.
 
-## The gap (real, open)
+Route coverage for the fix lives in `tests/test_b485_danger_coverage_routes.py`. THIS
+module keeps the history: what the gap was, what the first attempt at fixing it got
+wrong, and the version-skew measurement that must keep being re-checked.
 
-A skill whose only bundled script is prose in a `.py` file renders:
+## The gap (fixed)
+
+A skill whose only bundled script is prose in a `.py` file used to render:
 
     ✅  RISK DOSSIER — skill 'probe'    INSTALL
       Danger  ❔ UNKNOWN  could not analyze probe: scripts/helper.py — parse
@@ -13,45 +16,54 @@ A green check and an imperative, two lines above the tool's own statement that t
 whose job is "is this dangerous" never got to look. `docs/USAGE.md` documents
 `--vet … || fail` as an install gate, so the gate passes on an unscanned package.
 
-Where the signal is lost: `_run_content_ring`'s bare `except Exception: continue`
-swallows `skillast.ScriptProseCoverageIncomplete` with no `note_limit()`, no finding and
-no `skipped` entry — while the two budget handlers ten lines above it do all three. So
-`ctx.limit_hits` stays empty and `dossier._danger_coverage_gap`'s leg (1) never fires.
-`verdict_for` and `_grade_profile` are both already correct and need no change: a
-coverage gap that reaches them DOES roll up to WARN → CAUTION.
+## The first attempt, and why it was retracted (C-135, 2026-08-08)
 
-## Why it is not fixed (C-135, 2026-08-08)
+The original diagnosis blamed `_run_content_ring`'s bare `except Exception: continue`,
+which swallows `skillast.ScriptProseCoverageIncomplete` with no `note_limit()`, no
+finding and no `skipped` entry — so `ctx.limit_hits` stayed empty. The five-line fix
+routed that handler into `note_limit()`, and was retracted on this measurement:
 
-The five-line fix was built, verified against the reported case, and **retracted**.
+whether a bundled file parses depends on the interpreter *we* run under, so on an
+ordinary skill whose only script uses a `match` statement (Python 3.10+, standard since
+2021) the verdict became 3.12 → INSTALL / rc=0 and 3.9 → CAUTION / rc=1. Same bytes,
+opposite verdict, tripping the documented `--vet … || fail` install gate.
 
-Whether a bundled file parses depends on the interpreter *we* run under. Measured on an
-ordinary skill whose only script uses a `match` statement — Python 3.10+, standard since
-2021:
+## How it was actually closed (2026-08-14)
 
-| interpreter | verdict | exit code |
+Not through the handler. `check_installed_skills`' parse-error branch was ALREADY
+emitting an UNKNOWN with `engine_degraded=True`; `dossier._danger_coverage_gap` was
+simply not reading that flag, keying instead on `ctx.limit_hits` and on the English
+substring "coverage is incomplete", which that branch does not use. The predicate now
+keys on the structural flag first.
+
+That does not make the retraction wrong — it makes its premise measurable. Re-measured
+before landing, with the flip set defined as "targets this predicate floors that the old
+one did not":
+
+| corpus | py3.12 | py3.9 (CI floor) |
 | --- | --- | --- |
-| 3.12 | INSTALL | 0 |
-| 3.9 (the CI floor) | **CAUTION** | **1** |
+| real installed skills (16) | 0 flips | 0 flips |
+| `fixtures/` (1,119 targets) | 1 (`unknown_b347_deaddrop_unparseable`) | same 1 |
 
-Same bytes, opposite verdict, and `rc=1` trips the documented install gate. That is a
-false non-clean verdict on a benign package (Golden Rule #5), and it would hit a large
-share of modern skills.
+Two things the retraction did not have. First, the version-dependent *finding* already
+shipped: on 3.9 the `match`-statement skill already produced `UNKNOWN /
+engine_degraded=True / "could not analyze … parse error(s)"` and already printed it on
+the Danger axis. The predicate did not introduce the divergence; it stopped the profile
+from laundering it into a green headline. Second, "a large share of modern skills" was
+never measured — the real-fleet rate is 0, on both interpreters.
 
-No sound narrowing exists with the current machinery: `_danger_coverage_gap` matches on
-`coverage_gap_finding`'s own "coverage is incomplete" wording, so emitting the disclosure
-IS what moves the verdict — there is no disclose-without-capping variant. And separating
-"unparseable because hostile" from "unparseable because newer than us" is not decidable
-from 3.9's view of the file.
-
-Closing this properly means making the scanner version-tolerant, not patching the handler.
+So the skew is real and is now visible in the verdict on 3.9, and the residual close is
+still the one the retraction named: make the scanner version-tolerant, so a file newer
+than the interpreter is not reported as unreadable at all. Until then the honest reading
+of a 3.9 CAUTION is that the scanner genuinely did not read the file.
 
 ## What this module pins
 
-1. Today's real behaviour, so the gap stays visible and nobody believes it is fixed.
-2. The false positive that blocks the obvious fix, so the next person to reach for it
-   finds the measurement instead of rediscovering it.
-3. The invariant any real fix must preserve — B-092's distinction between "could not
-   scan" and "nothing to scan".
+1. The version-skew fact and its bounded consequence, so the next person reaching for a
+   version-tolerant parser finds the measurement instead of rediscovering it.
+2. The invariant the fix had to preserve — B-092's distinction between "could not scan"
+   and "nothing to scan".
+3. That a raising ring check still cannot break `--vet` (R1, an unclosed residual).
 
 Stdlib-only, offline, writes only under pytest's `tmp_path`.
 """
@@ -62,7 +74,7 @@ from pathlib import Path
 
 import pytest
 
-from clawseccheck.catalog import PASS, UNKNOWN
+from clawseccheck.catalog import PASS, UNKNOWN, WARN
 from clawseccheck.checks import vet_skill
 from clawseccheck.dossier import build_profile
 
@@ -98,13 +110,12 @@ def _profile(sk: Path):
 
 # ── 1. the gap, pinned as it really is ───────────────────────────────────────
 
-def test_unreadable_bundled_file_still_reads_install(tmp_path):
-    """B-485, OPEN. The Danger axis says it could not look; the headline says INSTALL.
+def test_unreadable_bundled_file_no_longer_reads_install(tmp_path):
+    """B-485, CLOSED. The Danger axis says it could not look, and so does the headline.
 
-    When B-485 is genuinely fixed, THIS is the assertion to flip — to
-    `overall_status == WARN` and `verdict == "CAUTION"`. Do not flip it by routing the
-    bare `except` into `note_limit()`; see this module's docstring and the retraction
-    note in `checks/_vet.py` for why that was tried and reverted.
+    This is the assertion the open version of this test named as the one to flip. It was
+    flipped by keying `dossier._danger_coverage_gap` on `Finding.engine_degraded`, NOT by
+    routing the bare `except` into `note_limit()` — see this module's docstring.
     """
     sk = _skill(tmp_path, "probe", {
         "scripts/helper.py": "This file is English prose, not Python.\nIt will not parse.\n",
@@ -115,9 +126,8 @@ def test_unreadable_bundled_file_still_reads_install(tmp_path):
     assert danger.status == UNKNOWN
     assert "not scanned" in danger.reason or "parse error" in danger.reason
 
-    # The real, current value — not the aspirational one.
-    assert p.overall_status == PASS
-    assert p.verdict == "INSTALL"
+    assert p.overall_status == WARN
+    assert p.verdict == "CAUTION"
 
 
 def test_a_readable_bundled_file_is_genuinely_clean(tmp_path):
@@ -153,15 +163,31 @@ def test_parseability_depends_on_the_interpreter_not_on_the_skill():
             ast.parse(_MATCH_STATEMENT_SOURCE)
 
 
-def test_a_modern_syntax_skill_is_not_flagged_today(tmp_path):
-    """Whatever a fix does, it must not make this skill non-clean on an old interpreter.
+def test_version_skew_on_a_modern_syntax_skill_is_bounded(tmp_path):
+    """The consequence of the skew, stated as it really is on each interpreter.
 
-    Green on 3.12 because the file parses; green on 3.9 because the gap is currently
-    swallowed. A fix that closes the gap without addressing version skew turns this red
-    on the CI floor only — which is exactly the failure mode that must not ship.
+    On 3.10+ the file parses and the skill earns its clean verdict. On the 3.9 CI floor
+    it does not parse, the AST/taint layer genuinely never read it, and the verdict is
+    the coverage-gap CAUTION — which is now the honest answer rather than a laundered
+    INSTALL, but is still an answer about OUR interpreter and not about the skill.
+
+    The invariant that must hold on BOTH floors, and the reason this shipped despite the
+    skew: a benign modern-syntax skill is never called dangerous. The worst version skew
+    can do is withhold the clean verdict; it can never manufacture DO-NOT-INSTALL. If
+    that ever breaks, the version-tolerant-parser work is no longer optional.
     """
+    import sys
+
     sk = _skill(tmp_path, "modern", {"scripts/helper.py": _MATCH_STATEMENT_SOURCE})
-    assert _profile(sk).verdict == "INSTALL"
+    p = _profile(sk)
+
+    assert p.verdict != "DO-NOT-INSTALL"
+    if sys.version_info >= (3, 10):
+        assert p.verdict == "INSTALL"
+        assert next(a for a in p.axes if a.axis == "danger").status == PASS
+    else:
+        assert p.verdict == "CAUTION"
+        assert next(a for a in p.axes if a.axis == "danger").status == UNKNOWN
 
 
 # ── 3. the invariant any real fix must preserve ──────────────────────────────

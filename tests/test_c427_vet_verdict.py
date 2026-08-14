@@ -104,20 +104,22 @@ def test_dangerous_skill_vet_text_is_do_not_install(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 # (c) the coverage-gap case: a bundled .py that does not parse.
 #
-# B-485 (todo, NOT fixed here): `_danger_coverage_gap` only recognizes an UNKNOWN Danger
-# axis caused by a size/file SCAN-CAP hit (`ctx.limit_hits`, or the literal substring
-# "coverage is incomplete" in the finding detail) -- not one caused by a genuine PARSE
-# FAILURE, whose detail instead reads "... parse error(s); file(s) not scanned by the
-# AST/taint layer". A parse failure never sets `ctx.limit_hits` and never uses that
-# substring, so `_danger_coverage_gap` returns False, the coverage-gap cap in
-# `_grade_profile` never applies, and -- when every other axis is otherwise clean -- the
-# profile grades a clean PASS/INSTALL even though the one axis whose job is "is this
-# dangerous" was never actually able to look. Verified directly against the real engine
-# below, not asserted from a trace.
+# B-485 (FIXED 2026-08-14): `_danger_coverage_gap` used to recognize only an UNKNOWN
+# Danger axis caused by a size/file SCAN-CAP hit (`ctx.limit_hits`, or the literal
+# substring "coverage is incomplete" in the finding detail) -- not one caused by a genuine
+# PARSE FAILURE, whose detail instead reads "... parse error(s); file(s) not scanned by
+# the AST/taint layer". A parse failure never sets `ctx.limit_hits` and never used that
+# substring, so the predicate returned False, the coverage-gap cap in `_grade_profile`
+# never applied, and -- when every other axis was otherwise clean -- the profile graded a
+# clean PASS/INSTALL even though the one axis whose job is "is this dangerous" was never
+# actually able to look.
 #
-# C427's verdict mapping (`verdict_for`) is a pure function of `overall_status`; it
-# cannot correct a wrong `overall_status` upstream of it, so this is unchanged, pre-
-# existing behavior -- pinned here (not silently fixed) so the gap stays visible.
+# The predicate now keys on the structural `Finding.engine_degraded` flag, which that
+# branch already set, so the parse-failure UNKNOWN caps like any other coverage gap.
+# C427's verdict mapping (`verdict_for`) is a pure function of `overall_status` and was
+# never the problem; it is unchanged. Route coverage lives in
+# `tests/test_b485_danger_coverage_routes.py` -- what is pinned HERE is only that C427's
+# vocabulary still renders the corrected status correctly.
 # ---------------------------------------------------------------------------
 
 def _skill_with_unparseable_python(tmp_path: Path) -> Path:
@@ -132,11 +134,13 @@ def _skill_with_unparseable_python(tmp_path: Path) -> Path:
     return sk
 
 
-def test_unparseable_danger_axis_does_not_yet_cap_to_caution(tmp_path):
-    """B-485, pinned: today this still reads INSTALL, not CAUTION. When B-485 is fixed
-    elsewhere, `_danger_coverage_gap` will recognize the parse-failure UNKNOWN too, the
-    coverage-gap cap will apply, `overall_status` will roll up to WARN, and THIS
-    assertion (not `verdict_for` itself) is the one that will need updating."""
+def test_unparseable_danger_axis_caps_to_caution(tmp_path):
+    """B-485, fixed: an UNKNOWN Danger axis caused by a parse failure now caps.
+
+    This is the assertion the pre-fix version of this test named as the one to flip
+    ("should be CAUTION once fixed"). It is test-plan item 3's documented ideal: CAUTION
+    at worst, never the clean verdict, when the axis whose job is "is this dangerous"
+    never got to look."""
     from clawseccheck.checks import vet_skill  # noqa: PLC0415
 
     sk = _skill_with_unparseable_python(tmp_path)
@@ -147,11 +151,10 @@ def test_unparseable_danger_axis_does_not_yet_cap_to_caution(tmp_path):
     assert danger.status == UNKNOWN
     assert "parse error" in danger.reason
 
-    # The documented ideal (test-plan item 3): CAUTION at worst, never the clean verdict.
-    # B-485 means it is NOT yet CAUTION -- pin the real, current value instead of the
-    # aspirational one, so this test tells the truth about today's behavior.
-    assert profile.overall_status == PASS  # B-485: should not be PASS once fixed
-    assert profile.verdict == "INSTALL"  # B-485: should be CAUTION once fixed
+    assert profile.overall_status == WARN
+    assert profile.verdict == "CAUTION"
+    # C427's own invariant, still true on the corrected status: no A-F letter escapes.
+    assert not _GRADE_LABEL_RE.search(render_vet_dossier(profile))
 
 
 # ---------------------------------------------------------------------------
