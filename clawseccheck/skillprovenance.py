@@ -29,9 +29,9 @@ this module says the two sources differ, and nothing about why.
 
 **Nothing here is a secret**, but nothing here is a path either: the skill NAME goes into
 the snapshot and the on-disk location does not, because a drift baseline reaches the event
-journal and any report a user pastes into an issue. That holds for `witness_digest` too —
-it identifies WHICH roots hold a record so a later run can tell "the same records" from "a
-different set", and it does so through `_root_identity`, which names roots under *home* by
+journal and any report a user pastes into an issue. That holds for `winner_root` too — it
+identifies WHICH root's record won, so a later run can tell "the same record" from "a
+different one", and it does so through `_root_identity`, which names roots under *home* by
 OpenClaw's own fixed directory names and reduces anything else to a digest.
 """
 from __future__ import annotations
@@ -92,14 +92,29 @@ class SkillOrigin:
     # How many workspace roots held a record under this name. For WORDING only: the
     # consumer says "3 records found" rather than a bare "more than one".
     n_records: int = 1
-    # Which roots those were, as a digest — IDENTITY, never content. This is the field that
-    # decides whether an ambiguous record may still be compared across runs. `ambiguous`
-    # alone cannot: it is a bool, and two runs both reporting True does NOT prove they are
-    # about the same winning record (one root can be added while another is removed). An
-    # unchanged witness digest does prove it, because first-wins picks by root order — so a
-    # skill that stays ambiguous with a stable record set still gets its content compared,
-    # instead of an attacker buying permanent silence for the cost of one extra file.
-    witness_digest: str = ""
+    # WHICH root's record won, as a location-free identity (`_root_identity`) — IDENTITY,
+    # never content. This is the field that decides whether an ambiguous record may still
+    # be compared across runs.
+    #
+    # `ambiguous` alone cannot decide it: it is a bool, and two runs both reporting True
+    # does NOT prove they are about the same winning record — one root can be added while
+    # another is removed, and first-wins would elect a different one with the flag never
+    # moving.
+    #
+    # Neither can the witness SET, which is what this field replaces. A digest over every
+    # root that held a record answers "did the set move", and the set moves when an
+    # ATTACKER ADDS A FILE. Measured end-to-end through the real CLI: a skill downgraded
+    # 2.0.0 -> 1.0.0 with a swapped artifact digest in the winning record, plus one decoy
+    # `<workspace>/.clawhub/lock.json` that never wins, alerted before the set-keyed
+    # stand-down and went silent after it — and stayed silent on every later run, because
+    # by then the tampered record IS the baseline. Silence bought for one file.
+    #
+    # The winner's identity answers what the guard is actually asking: is the record about
+    # to be compared the record the baseline recorded? A root that does not win cannot
+    # change that answer and so must not be able to stop the comparison; a config edit
+    # that genuinely elects a different root does, and that is the benign case the
+    # stand-down exists for.
+    winner_root: str = ""
 
     def conflict_tuple(self) -> tuple:
         """What two records under one name must agree on to be one subject."""
@@ -115,7 +130,7 @@ class SkillOrigin:
             "corroborated": self.corroborated,
             "ambiguous": self.ambiguous,
             "n_records": self.n_records,
-            "witness_digest": self.witness_digest,
+            "winner_root": self.winner_root,
         }
 
 
@@ -186,15 +201,6 @@ def _root_identity(home: Path, root: Path) -> str:
         return root.resolve().relative_to(home.resolve()).as_posix() or "."
     except (OSError, ValueError, RuntimeError):
         return "x" + hashlib.sha256(str(root).encode("utf-8", "replace")).hexdigest()[:16]
-
-
-def _witness_digest(identities: "list[str]") -> str:
-    """Digest of the ORDERED root identities that held a record under one name.
-
-    Ordered, because first-wins picks by root order: the same roots in a different order
-    can elect a different record, and that must read as a changed witness set.
-    """
-    return hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest()
 
 
 def workspace_roots(home: Path, config: "dict | None" = None) -> "list[Path]":
@@ -325,7 +331,11 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
     for name, origin in skills.items():
         ids = witnesses.get(name) or []
         origin.n_records = len(ids)
-        origin.witness_digest = _witness_digest(ids)
+        # The FIRST identity, because the merge above is first-wins: the root that
+        # contributed `skills[name]` is the root that appended `ids[0]`. Not `sorted(ids)`
+        # and not a digest over all of them — the consumer needs to know WHICH record it is
+        # looking at, and only the winner's identity answers that.
+        origin.winner_root = ids[0] if ids else ""
     if capped:
         notes.append("more installed skills than this run records")
     return ProvenanceScan(present=present, skills=skills, capped=capped,

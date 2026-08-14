@@ -343,11 +343,20 @@ def test_adding_a_workspace_to_the_config_does_not_report_a_replaced_skill(tmp_p
     # source really did appear. That is disclosed as a note, never as a supply-chain alert.
     assert with_cfg["clawseccheck"]["ambiguous"] is True
 
+    # The added root LOSES: `workspace` is one of OpenClaw's own default directories and
+    # those are searched before any config-declared one. So the winner did not move, the
+    # comparison is MADE rather than stood down, and it finds the winning record unchanged
+    # — silence earned by looking, which is strictly stronger than the silence a
+    # stand-down buys. (Keying the stand-down on the whole witness SET stood this down and
+    # emitted a note instead; keying it on the winner compares and stays quiet.)
+    assert without["clawseccheck"]["winner_root"] == \
+        with_cfg["clawseccheck"]["winner_root"] == "workspace"
     alerts, notes = diff_with_notes(_snap(skill_provenance=without),
                                     _snap(skill_provenance=with_cfg))
     assert alerts == [], f"a config edit produced {alerts}"
     assert not any("was updated, from" in m for _, m in alerts)
-    assert any("more than one of your workspaces" in m.lower() for _, m in notes)
+    assert not any("clawseccheck" in m for _, m in notes), (
+        f"nothing was declined here — the winning record was compared: {notes}")
 
 
 def test_the_first_run_after_this_release_does_not_tell_users_to_delete_anything():
@@ -508,17 +517,17 @@ def test_repro_2_two_workspaces_agreeing_on_the_lock_and_not_on_origin(tmp_path)
     assert any("more than one of your workspaces" in m.lower() for _, m in notes)
 
 
-def test_a_stable_witness_set_still_gets_its_content_compared(tmp_path):
+def test_a_stable_winner_still_gets_its_content_compared(tmp_path):
     """THE FN GUARD, and the reason this change is not just a wider suppression.
 
-    A skill that is ambiguous at the baseline and STILL ambiguous now, over an unchanged
-    set of records, has a provably stable winner: first-wins picks by root order, and the
-    roots did not move. So a genuine same-version content swap in that winning record is a
-    real event and must still be reported at full severity.
+    A skill that is ambiguous at the baseline and STILL ambiguous now, with the same root
+    winning both times, has a provably stable subject: first-wins picks by root order, and
+    the winning root did not move. So a genuine same-version content swap in that winning
+    record is a real event and must still be reported at full severity.
 
     Suppressing on the `ambiguous` bool alone made this case silent — no alert, no note,
     not even queued for re-vet — which is a silence an attacker buys for the cost of one
-    extra file in a second workspace. This test fails on the code before this change."""
+    extra file in a second workspace. This test fails on the code before that change."""
     ws, other = tmp_path / "workspace", tmp_path / "second"
     _ws(ws, artifact=_ART_A)
     _ws(other, artifact=_ART_C)          # a standing disagreement, in both runs
@@ -530,8 +539,8 @@ def test_a_stable_witness_set_still_gets_its_content_compared(tmp_path):
 
     assert before["clawseccheck"]["ambiguous"] is True
     assert after["clawseccheck"]["ambiguous"] is True
-    assert before["clawseccheck"]["witness_digest"] == \
-        after["clawseccheck"]["witness_digest"], "the record set did not move"
+    assert before["clawseccheck"]["winner_root"] == \
+        after["clawseccheck"]["winner_root"] == "workspace", "the winner did not move"
 
     alerts, _ = diff_with_notes(_snap(skill_provenance=before),
                                 _snap(skill_provenance=after))
@@ -543,10 +552,21 @@ def test_a_stable_witness_set_still_gets_its_content_compared(tmp_path):
                           {"skill_provenance": after}) == ["clawseccheck"]
 
 
-def test_a_witness_set_that_moved_stands_down_because_the_winner_may_have_flipped(tmp_path):
-    """The other half of the same predicate. Same two runs, except the second workspace is
-    REMOVED between them — so the record this run compares may not be the record the last
-    run recorded, and the digest difference proves nothing."""
+def test_a_losing_root_leaving_does_not_stop_the_comparison(tmp_path):
+    """THIS TEST USED TO PIN THE BUG, under the name "a witness set that moved stands down
+    because the winner may have flipped". It does not flip. `workspace` is one of
+    OpenClaw's own default directories and those are searched before any config-declared
+    root, so `workspace` wins in BOTH runs — the config root it loses to nothing is simply
+    gone in the second. The old assertion (`alerts == []` plus a note) therefore recorded a
+    suppression over a record whose identity never moved, and it went green because the
+    guard was keyed on the whole witness SET: any change to the set, including one an
+    attacker makes, closed every arm.
+
+    Corrected here to assert what is actually true of these two runs — the winning record's
+    artifact digest was swapped under a pinned version, and that is a HIGH.
+
+    Keep this test adversarial when it is edited: if a future change makes it pass by
+    standing down again, the decoy attack below is the same shape."""
     ws, other = tmp_path / "workspace", tmp_path / "second"
     _ws(ws, artifact=_ART_A)
     _ws(other, artifact=_ART_C)
@@ -557,17 +577,87 @@ def test_a_witness_set_that_moved_stands_down_because_the_winner_may_have_flippe
 
     assert before["clawseccheck"]["ambiguous"] is True
     assert after["clawseccheck"]["ambiguous"] is False
-    assert before["clawseccheck"]["witness_digest"] != \
-        after["clawseccheck"]["witness_digest"]
+    assert before["clawseccheck"]["n_records"] == 2
+    assert after["clawseccheck"]["n_records"] == 1, "the record set really did move"
+    assert before["clawseccheck"]["winner_root"] == \
+        after["clawseccheck"]["winner_root"] == "workspace", \
+        "and the winner really did not — that is why this must still be compared"
 
     alerts, notes = diff_with_notes(_snap(skill_provenance=before),
                                     _snap(skill_provenance=after))
-    assert alerts == []
+    assert [lvl for lvl, _ in alerts] == ["HIGH"], alerts
+    assert "replaced with different content" in _msgs(alerts)
+    assert not [m for c, m in notes if c == NOTE_UNDETERMINED and "clawseccheck" in m]
+    assert changed_skills({"skill_provenance": before},
+                          {"skill_provenance": after}) == ["clawseccheck"]
+
+
+def test_the_winner_genuinely_flipping_is_what_stands_the_comparison_down(tmp_path):
+    """The other half of the predicate, built so the winner really does move.
+
+    No default workspace directory exists here, so the only roots are the config-declared
+    ones and they are searched in sorted order. Declaring `alpha` in the second run puts it
+    ahead of the `zeta` the first run compared, so the record under the name is a different
+    workspace's — and the version and digest differences between them are differences
+    between two records, not a change in one. Comparing them would manufacture "the skill
+    was downgraded" out of an ordinary config edit, which is the false alarm the whole
+    stand-down exists for."""
+    zeta, alpha = tmp_path / "zeta", tmp_path / "alpha"
+    _ws(zeta, version="2.0.0", artifact=_ART_A)
+    _ws(alpha, version="1.0.0", artifact=_ART_B)
+
+    def _read(*roots):
+        return read_provenance(tmp_path, {"agents": {"list": [
+            {"workspace": str(r)} for r in roots]}}).as_dimension()
+
+    before, after = _read(zeta), _read(alpha, zeta)
+    assert before["clawseccheck"]["winner_root"] != after["clawseccheck"]["winner_root"]
+    assert after["clawseccheck"]["ambiguous"] is True
+
+    alerts, notes = diff_with_notes(_snap(skill_provenance=before),
+                                    _snap(skill_provenance=after))
+    assert alerts == [], f"a config edit that flips the winner produced {alerts}"
     mine = [m for c, m in notes if c == NOTE_UNDETERMINED and "clawseccheck" in m]
     assert len(mine) == 1, notes
-    assert "cannot confirm it is looking at the same one" in mine[0]
     assert "was not compared" in mine[0]
     assert "(2 records found)" in mine[0], "the count comes off whichever side saw them"
+
+
+def test_a_baseline_written_before_the_winner_field_stands_an_ambiguous_record_down():
+    """The upgrade path. An old baseline carries no `winner_root`, so it cannot show which
+    record it recorded and an ambiguous comparison against it has nothing to anchor on.
+    Stood down, and disclosed — the conservative direction, for exactly one run."""
+    base = _prov()["clawseccheck"]
+    before = {**base, "ambiguous": True, "n_records": 2}          # no winner_root
+    after = {**base, "ambiguous": True, "n_records": 2, "winner_root": "workspace",
+             "version": "9.9.9"}
+    alerts, notes = diff_with_notes(_snap(skill_provenance={"clawseccheck": before}),
+                                    _snap(skill_provenance={"clawseccheck": after}))
+    assert alerts == []
+    assert len([m for c, m in notes if c == NOTE_UNDETERMINED and "clawseccheck" in m]) == 1
+
+
+def test_the_winner_is_the_first_root_searched_not_the_first_one_alphabetically(tmp_path):
+    """A SURVIVING MUTATION, closed. The winner's identity is `ids[0]` — the root the
+    first-wins merge actually took the record from. `sorted(ids)[0]` is a one-word edit
+    that looks like tidying and would name a root that lost, so a swap in the record the
+    agent loads would be compared against a record it never loaded.
+
+    Undetectable while the field was a digest over the whole set: `sorted(identities)` there
+    kept all 67 tests in this file green, which left the ordering claim in its docstring
+    undefended. Pinned here on content, not just on the string: the identity named must be
+    the identity of the record that won."""
+    home_ws, config_ws = tmp_path / "workspace", tmp_path / "aaa-sorts-first"
+    _ws(home_ws, version="2.0.0", artifact=_ART_A)
+    _ws(config_ws, version="1.0.0", artifact=_ART_B)
+    dim = read_provenance(tmp_path, {"agents": {"list": [
+        {"workspace": str(config_ws)}]}}).as_dimension()["clawseccheck"]
+
+    assert sorted(("workspace", "aaa-sorts-first"))[0] == "aaa-sorts-first", \
+        "the losing root must sort first, or this pins nothing"
+    assert dim["winner_root"] == "workspace"
+    assert (dim["version"], dim["artifact_sha256"]) == ("2.0.0", _ART_A), \
+        "the named winner must be the root the winning record came from"
 
 
 def test_every_stand_down_is_disclosed_and_none_of_them_accuses():
@@ -586,13 +676,13 @@ def test_every_stand_down_is_disclosed_and_none_of_them_accuses():
                                        "artifact_sha256": _ART_B}),
         "ambiguity resolved": ({**base, "ambiguous": True}, {**base,
                                                              "artifact_sha256": _ART_B}),
-        "witness set moved": ({**base, "ambiguous": True, "n_records": 2,
-                               "witness_digest": "w" * 64},
-                              {**base, "ambiguous": True, "n_records": 3,
-                               "witness_digest": "v" * 64, "version": "9.9.9"}),
-        "baseline predates the witness digest": (
+        "winner moved": ({**base, "ambiguous": True, "n_records": 2,
+                          "winner_root": "workspace"},
+                         {**base, "ambiguous": True, "n_records": 3,
+                          "winner_root": "workspace-home", "version": "9.9.9"}),
+        "baseline predates the winner field": (
             {**base, "ambiguous": True},
-            {**base, "ambiguous": True, "n_records": 2, "witness_digest": "w" * 64,
+            {**base, "ambiguous": True, "n_records": 2, "winner_root": "workspace",
              "corroborated": False}),
     }
     for label, (before, after) in cases.items():
@@ -607,8 +697,8 @@ def test_every_stand_down_is_disclosed_and_none_of_them_accuses():
             assert accusation not in mine[0], f"{label} accuses: {mine[0]}"
     assert "(3 records found)" in " ".join(
         m for _, m in diff_with_notes(
-            _snap(skill_provenance={"clawseccheck": cases["witness set moved"][0]}),
-            _snap(skill_provenance={"clawseccheck": cases["witness set moved"][1]}))[1])
+            _snap(skill_provenance={"clawseccheck": cases["winner moved"][0]}),
+            _snap(skill_provenance={"clawseccheck": cases["winner moved"][1]}))[1])
 
 
 def test_a_real_change_on_an_unambiguous_skill_still_alerts_at_full_severity(tmp_path):
@@ -675,7 +765,7 @@ def test_the_conflict_tuple_covers_every_field_the_guarded_arms_read():
     assert read, "the field scan matched nothing — the arms or their names moved"
     # `ambiguous` / `n_records` / `witness_digest` are the stand-down machinery itself, not
     # subjects of a verdict.
-    verdict_fields = read - {"ambiguous", "n_records", "witness_digest"}
+    verdict_fields = read - {"ambiguous", "n_records", "winner_root"}
     assert verdict_fields <= set(CONFLICT_FIELDS), (
         f"{sorted(verdict_fields - set(CONFLICT_FIELDS))} is read by a guarded arm but is "
         f"not in CONFLICT_FIELDS, so two records differing only in it would be compared as "
@@ -683,3 +773,117 @@ def test_the_conflict_tuple_covers_every_field_the_guarded_arms_read():
     # The tuple may be WIDER than what is read today; that direction only ever stands more
     # comparisons down. Pinned so the slack stays deliberate and named.
     assert set(CONFLICT_FIELDS) - verdict_fields == {"skill_file_sha256"}
+
+
+# ================================================ the decoy attack, end to end, and the
+# ================================================ benign battery it must not re-open
+
+def _lab(home, *, version, artifact, decoy=None):
+    """A home the real CLI can audit: a config it can read, one default workspace holding
+    the install record, and optionally ONE decoy lock file in a second default workspace.
+
+    `workspace-home` is first in `WORKSPACE_DIRS`, so it wins; `workspace` is last, so the
+    decoy loses. No config edit is involved anywhere — both are paths OpenClaw itself uses,
+    which is what makes the decoy something an attacker can drop with a single write.
+    """
+    import os
+
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "openclaw.json").write_text('{"gateway": {"bind": "127.0.0.1"}}',
+                                        encoding="utf-8")
+    os.chmod(home / "openclaw.json", 0o600)
+    _ws(home / "workspace-home", name="demo", version=version, artifact=artifact)
+    _origin(home / "workspace-home", name="demo", version=version, artifact=artifact)
+    if decoy is not None:
+        _ws(home / "workspace", name="demo", version=decoy[0], artifact=decoy[1])
+    return home
+
+
+def test_a_decoy_lock_file_cannot_silence_a_downgrade_in_the_winning_record(tmp_path,
+                                                                            capsys):
+    """THE ATTACK, reproduced end to end through the real `--monitor` CLI over four runs.
+
+    Keying the stand-down on the whole witness SET made this silent. The set is every root
+    holding a record, so the ATTACKER can move it: drop one `<workspace>/.clawhub/lock.json`
+    — a path OpenClaw itself uses, needing no config edit and no privilege — and the digests
+    differ, every arm stands down, and a skill downgraded 2.0.0 -> 1.0.0 with a swapped
+    artifact digest passes with `No new threats among what was compared.` and exit 0.
+
+    The measured pre-fix behaviour, which is why runs 3 and 4 are here: the alert was not
+    deferred, it was LOST. By the third run the tampered record is what the baseline holds,
+    so there is nothing left to differ and no later run ever raises it.
+
+    The winner does not move in any of this — `workspace-home` is searched before
+    `workspace` — so there is nothing undeterminable about the record being compared, and
+    the downgrade must be reported on the run it happens."""
+    from clawseccheck.cli import main
+
+    home, store = tmp_path / "home", tmp_path / "store"
+    _lab(home, version="2.0.0", artifact=_ART_A)
+    argv = ["--monitor", "--home", str(home), "--data-dir", str(store)]
+    main(argv)                                        # run 1 — baseline
+    capsys.readouterr()
+
+    # The whole attack: downgrade + swapped artifact in the winner, one decoy beside it.
+    _lab(home, version="1.0.0", artifact=_ART_B, decoy=("2.0.0", _ART_C))
+    dim = read_provenance(home).as_dimension()["demo"]
+    assert dim["winner_root"] == "workspace-home", "the decoy must not become the winner"
+    assert dim["n_records"] == 2 and dim["ambiguous"] is True, "the decoy must be seen"
+
+    main(argv)                                        # run 2 — the run that must alert
+    said = capsys.readouterr().out
+    assert "was updated, from 2.0.0 to 1.0.0" in said, said
+    assert "No new threats" not in said, said
+
+    # Runs 3 and 4: the set is stable now and the tampered record is the baseline, so
+    # silence here is correct. This is the window the set-keyed build gave away — it is
+    # only harmless because run 2 spoke.
+    for _ in range(2):
+        main(argv)
+        assert "No new threats" in capsys.readouterr().out
+
+
+def test_the_benign_battery_stays_silent(tmp_path):
+    """Every ordinary edit that has ever been suspected of moving this dimension, run
+    through the real reader. Notes are fine and alerts are not: none of these changes what
+    the agent loads, and the winning root is `workspace` throughout.
+
+    The two original F-174 repros are tested above by name
+    (`test_adding_a_workspace_to_the_config_does_not_report_a_replaced_skill`,
+    `test_repro_2_two_workspaces_agreeing_on_the_lock_and_not_on_origin`); these are the
+    rest of the config edits a user actually makes."""
+    home = tmp_path
+    _ws(home / "workspace", version="2.0.0", artifact=_ART_A)
+    _origin(home / "workspace", version="2.0.0", artifact=_ART_A)
+    # Losing roots that DISAGREE, so the ambiguity in these cases is real rather than a
+    # technicality — a stand-down keyed on anything but the winner would close here.
+    _ws(home / "second", version="9.9.9", artifact=_ART_B)
+    _ws(home / "third", version="8.8.8", artifact=_ART_C)
+    (home / "renamed").mkdir()
+    _ws(home / "renamed", version="9.9.9", artifact=_ART_B)
+    (home / "truncated" / ".clawhub").mkdir(parents=True)
+    (home / "truncated" / ".clawhub" / "lock.json").write_text(
+        '{"version": 1, "skills": {"clawsecc', encoding="utf-8")
+
+    def _cfg(*workspaces):
+        return {"agents": {"list": [{"workspace": w} for w in workspaces]}}
+
+    one, two = str(home / "second"), str(home / "third")
+    cases = {
+        "an agent is added":            (_cfg(one), _cfg(one, two)),
+        "agents.list is reordered":     (_cfg(one, two), _cfg(two, one)),
+        "the path is written relative": (_cfg(one), _cfg("second")),
+        "a workspace is renamed":       (_cfg(one), _cfg(str(home / "renamed"))),
+        "two agents share one dir":     (_cfg(one), _cfg(one, one)),
+        "a lock file is truncated":     (_cfg(one), _cfg(one, str(home / "truncated"))),
+    }
+    for label, (before_cfg, after_cfg) in cases.items():
+        before = read_provenance(home, before_cfg).as_dimension()
+        after = read_provenance(home, after_cfg).as_dimension()
+        assert before["clawseccheck"]["winner_root"] == \
+            after["clawseccheck"]["winner_root"] == "workspace", label
+        alerts, _ = diff_with_notes(_snap(skill_provenance=before),
+                                    _snap(skill_provenance=after))
+        assert alerts == [], f"{label} produced {alerts}"
+        assert changed_skills({"skill_provenance": before},
+                              {"skill_provenance": after}) == [], label

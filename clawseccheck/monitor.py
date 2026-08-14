@@ -2071,25 +2071,33 @@ def _prov_comparable(a: dict, b: dict) -> bool:
     When either run DID find a conflict, `ambiguous` alone cannot answer it. It is a bool,
     and True on both sides does not prove the two runs are talking about the same winning
     record — one workspace can be added while another is removed, and first-wins would
-    elect a different one with the flag never moving. What does prove it is the WITNESS
-    SET: the ordered roots that held a record under this name (`witness_digest`). Unchanged
-    witnesses ⇒ first-wins picked the same record ⇒ comparing its content across the two
-    runs is sound, ambiguity or not.
+    elect a different one with the flag never moving. What does prove it is the WINNER'S
+    IDENTITY: which root's record was actually taken (`winner_root`). The same root won
+    both times ⇒ the record about to be compared is the record the baseline recorded ⇒
+    comparing its content across the two runs is sound, ambiguity or not.
 
-    That distinction is the whole point. Suppressing on the flag alone shipped a silence an
-    attacker could buy for the cost of one extra file: a skill left permanently ambiguous
-    then had a genuine same-version content swap in its winning record produce no alert, no
-    note and no re-vet. Standing down on a MOVED witness set keeps the false alarm this
-    guard exists for (an ordinary config edit adding a workspace) while keeping the alarm
-    that matters.
+    That distinction is the whole point, and getting it wrong is worse than the false alarm
+    it fixes. Suppressing on the `ambiguous` flag alone shipped a silence an attacker could
+    buy for one extra file. Suppressing on the whole WITNESS SET — a digest over every root
+    holding a record, which was the first repair — shipped the same silence at the same
+    price, because the set moves when the ATTACKER adds a root: measured through the real
+    CLI, a skill downgraded 2.0.0 -> 1.0.0 with a swapped artifact digest in the winning
+    record, plus one decoy `<workspace>/.clawhub/lock.json` that never wins, produced an
+    INFO and a MEDIUM alert on the set-keyed build's predecessor and nothing at all on the
+    set-keyed build. Not deferred either — the following runs compare against a baseline
+    that already holds the tampered record, so the alert is never raised at all.
 
-    A record with no `witness_digest` — an old baseline, written before this field — cannot
+    A root that does not win cannot change which record is compared, so it must not be able
+    to stop the comparison. A root that DOES win changes it, and that is the ordinary
+    config edit this guard exists for.
+
+    A record with no `winner_root` — an old baseline, written before this field — cannot
     prove stability, so an ambiguous one stands down. Conservative and disclosed, never
     silent: every caller of this that gets False owes the reader a sentence.
     """
     if not a.get("ambiguous") and not b.get("ambiguous"):
         return True
-    wa, wb = a.get("witness_digest"), b.get("witness_digest")
+    wa, wb = a.get("winner_root"), b.get("winner_root")
     return isinstance(wa, str) and bool(wa) and wa == wb
 
 
@@ -2116,9 +2124,10 @@ def _prov_not_compared(name: str, a: dict, b: dict) -> str:
                 f"'{name}'{count}, and they do not match. Which one your agent loads is "
                 f"not something this check can determine, so its install record was not "
                 f"compared with your last run.")
-    # Reached when the CONFLICT is on the baseline's side. "The record set moved" is the
-    # likely cause but not a fact this run established — a baseline written before the
-    # witness digest existed lands here too — so the sentence claims only what is certain:
+    # Reached when the CONFLICT is on the baseline's side. "A different workspace's record
+    # won this time" is the likely cause but not a fact this run established — a baseline
+    # written before `winner_root` existed lands here too — so the sentence claims only
+    # what is certain:
     # there was more than one record, and this run cannot show it is looking at the same
     # one. Overclaiming here would be the same fault as the accusation it replaces.
     return (f"More than one of your workspaces held an install record for the skill "
@@ -2141,10 +2150,11 @@ def changed_skills(prev: "dict | None", curr: "dict | None") -> "list[str]":
     Three deliberate exclusions:
 
     * **Records that cannot be matched up**, per `_prov_comparable`: a newly ambiguous
-      skill, or one whose witness set moved between the runs, has no determinable winner to
-      re-vet. A skill that is merely STILL ambiguous over an unchanged witness set is not
-      excluded — first-wins picked the same record both times, so a change in it is a real
-      change and re-vetting it is exactly right.
+      skill, or one whose WINNING ROOT moved between the runs, has no determinable record
+      to re-vet. A skill that is merely STILL ambiguous while the same root keeps winning
+      is not excluded — first-wins took the same record both times, so a change in it is a
+      real change and re-vetting it is exactly right. Nor is one that merely gained a
+      losing root: a record that did not win cannot be the record we would re-vet.
     * **A missing dimension on either side**, via `_both_dims`. A first run after this
       release, or a run that found no install records, has nothing to compare and must not
       re-vet the whole estate as though everything had just changed.
