@@ -20,6 +20,7 @@ import io
 import json
 import os
 import sqlite3
+import stat
 import zipfile
 import tarfile
 import gzip
@@ -206,6 +207,20 @@ _MAX_AUDIT_EVENTS = 1000
 # which are joined straight into report evidence text (see B13 in the checks engine). Cap it at the
 # point of entry so every downstream consumer inherits the bound.
 _UNTRUSTED_NAME_CAP = 120
+
+
+def _exists_but_not_regular(path: Path) -> bool:
+    """True for a directory entry that is present but is not a regular file.
+
+    Deliberately `lstat`, never `open`: a FIFO blocks forever on read with no writer, so the
+    one thing this must not do is try to read the thing it is reporting. A vanished entry
+    (the walk listed it, it is gone now) answers False — same errno discipline as the
+    unreadable-directory branch: "gone" is not "hidden".
+    """
+    try:
+        return not stat.S_ISREG(path.lstat().st_mode)
+    except (OSError, ValueError):
+        return False
 
 
 def _cap_name(name: str) -> str:
@@ -1671,6 +1686,40 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
 
     for f in files:
         if not f.is_file():
+            # B-549: the walk yields everything os.walk did not classify as a directory, so a
+            # FIFO, a socket or a device node lands here — and this `continue` dropped it with
+            # no bookkeeping. Measured through `--vet-skill` on a skill whose `run.sh` was a
+            # FIFO: INSTALL / "no least-privilege, pinning, or authoring-hygiene issue found" /
+            # exit 0, i.e. a positive clean over a file the scanner structurally cannot read.
+            # The agent will still execute it and take its bytes from whoever writes the pipe.
+            #
+            # Only `lstat` is consulted (via is_file()); a FIFO is never opened, because
+            # reading one blocks forever with no writer — which is also why "scan it anyway"
+            # is not an option and disclosure is the only honest answer.
+            #
+            # False-positive surface measured before landing: 0 non-regular files (symlinks
+            # excluded, they have their own channel) across 9,480 real ones — ~/.openclaw
+            # 8,222, ~/.claude/skills 30, fixtures/ 1,228.
+            if ctx is not None and _exists_but_not_regular(f):
+                rel = _rel(f)
+                ctx.unreadable_files.append(
+                    f"{rel} (not a regular file — nothing to read at rest)"
+                )
+                ctx.file_manifest.setdefault(rel, "not-a-regular-file")
+                if f.name.lower() == "skill.md":
+                    # B-461's absent-vs-unreadable bridge, which `_note_unreadable` below
+                    # already crosses and this path did not. Caught by the independent C-135
+                    # pass with a FIFO named SKILL.md: Danger correctly reported an unread
+                    # path while Build quality announced "no SKILL.md frontmatter block
+                    # found ... this skill will not appear to the agent" one row down, and
+                    # that WARN owns the top `Fix (top):` line — so the user was told to add
+                    # a `description:` field to a named pipe.
+                    owner = skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+                    ctx.unreadable_manifests.add(owner)
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                    f"Could not read {_cap_name(rel)}: not a regular file",
+                )
             continue
 
         if ctx is not None:

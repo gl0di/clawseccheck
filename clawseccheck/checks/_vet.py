@@ -3254,6 +3254,16 @@ def check_installed_skills(ctx: Context) -> Finding:
 
     skills = ctx.installed_skills
     if not skills:
+        # B-549: this early return does not distinguish "there are no skills" from "I could
+        # not tell", and that is a real gap — but the obvious fix is not the one it looks
+        # like. Gating on `limit_hits_for(ctx, LIMIT_DOMAIN_SKILL)` being non-empty was tried
+        # and retracted: that domain has many writers, so 2,100 ordinary readable empty
+        # directories under a skills root (the pre-existing `_MAX_DIRS` cap, a COUNT limit,
+        # nothing unreadable at all) produced "part of the skill area could not be read ...
+        # Make it readable and re-run" on a healthy machine, and routed an absolute
+        # filesystem path into `Finding.detail`, which `baseline.fingerprint()` hashes.
+        # Closing this needs a signal that means "a subject was not assessed", not one that
+        # means "some limit was hit"; tracked separately.
         return _custom(
             "B13",
             HIGH,
