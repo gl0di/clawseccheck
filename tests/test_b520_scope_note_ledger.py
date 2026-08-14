@@ -31,6 +31,26 @@ clause is where that trap actually lives: `pipeline.py` marks that layer as havi
 on EVERY audit, because B164 scans log sinks in the base run, so treating that as proof
 the replay modes ran would silently stop telling a plain-run user to run them.
 
+B-537 — the same paragraph, inverted, and the reason this file grew a third section.
+The fix above was right that an absence must be proven; it then read "not listed as
+missing" as proof of COVERAGE, which the ledger cannot support:
+
+  * a COMPLETE ledger is indistinguishable from no ledger (C-422 pins the two
+    `ScoreResult`s equal), so the flagship graded run — five layers `ran`, Grade A —
+    fell into the no-evidence branch and told the reader to run all three modes;
+  * `status == "ran"` is not "covered its subject" — `pipeline.to_ledger` reads the
+    sweep phases' STATUS and never their `PhaseResult.complete`, so a run printing
+    `Not fully covered: third-party-skill-0 … -5` also printed
+    `· covered by this run — a deep vet of the skills … on disk.`;
+  * at default budgets a TRUNCATED-but-WARN target leaves `not_scanned` empty, so the
+    over-claim printed with no "Not fully covered" line to contradict it.
+
+None of the three had a test, and the first is why: no test in the tree exercised a
+complete ledger. The tests below now do, and the invariant that replaces the coverage
+claim is mechanical — EVERY clause, in EVERY ledger shape, still names the flag that
+would cover it (`test_no_ledger_shape_ever_drops_the_advice`). That is what keeps this
+repair from being the fourth fix in the family to trade an FP for an FN.
+
 Stdlib-only, offline, writes nothing.
 """
 from __future__ import annotations
@@ -65,6 +85,10 @@ CANARY = "`--canary`"
 VET_MCP = "`--vet-mcp`"
 BEHAVIORAL = "`--behavioral`"
 
+#: The clause prefix B-537 put in place of `· covered by this run — `. Spelled out
+#: rather than imported for the same reason as the flags above.
+RAN = " · ran, coverage not accounted for — "
+
 SUBJECT_OF_LAYER = {
     LAYER_LIVE_BEHAVIOUR: "live prompt-injection resistance",
     LAYER_INSTALLED_SWEEP: "a deep vet of the skills, plugins and MCP servers sitting on disk",
@@ -76,6 +100,16 @@ def _ledger(**overrides) -> LayerLedger:
     """A ledger where every layer ran unless overridden."""
     states = {layer: LayerState(status=overrides.get(layer, STATUS_RAN))
               for layer in LAYER_ORDER}
+    return LayerLedger(states=MappingProxyType(states))
+
+
+def _ledger_with_unreached(layer: str, items, **overrides) -> LayerLedger:
+    """As `_ledger`, but *layer* ran while leaving *items* of its subject unread —
+    the shape `pipeline.to_ledger` produces from a sweep phase's `not_scanned`."""
+    states = {name: LayerState(status=overrides.get(name, STATUS_RAN))
+              for name in LAYER_ORDER}
+    states[layer] = LayerState(status=overrides.get(layer, STATUS_RAN),
+                               not_reached=tuple(items))
     return LayerLedger(states=MappingProxyType(states))
 
 
@@ -93,7 +127,7 @@ def _scope_block(text: str) -> str:
     """The scope note only — from its header to the paragraph after it — so an
     assertion about a flag cannot be satisfied by some unrelated line elsewhere in a
     thousand-line report."""
-    head = "Coverage of the layers beyond the static audit"
+    head = "What this run reached beyond the static audit"
     assert text.count(head) == 1, f"expected exactly one scope note, got {text.count(head)}"
     after = text.split(head, 1)[1]
     return head + after.split("Static audit —", 1)[0]
@@ -101,23 +135,32 @@ def _scope_block(text: str) -> str:
 
 # ── direction 1: a layer that RAN is no longer advertised as missing ──────────
 
-def test_full_run_does_not_tell_the_reader_to_run_what_it_just_ran():
+def test_full_run_no_longer_claims_the_sweep_did_not_happen():
     """The exact `--full` shape that produced the bug: the sweeps and the MCP vet ran,
-    only self-report and live behaviour did not."""
+    only self-report and live behaviour did not.
+
+    B-537 narrowed what this asserts, deliberately. The defect was the false CLAIM
+    ("it does not do a deep vet"), and that is what must not come back. The advice
+    beside it is NOT part of the defect and is now unconditional — see
+    `test_no_ledger_shape_ever_drops_the_advice` for why suppressing it on `ran`
+    evidence is unsound.
+    """
     text = _render(_ledger(**{LAYER_SELF_REPORT: STATUS_UNAVAILABLE,
                               LAYER_LIVE_BEHAVIOUR: STATUS_UNAVAILABLE}))
     block = _scope_block(text)
-    assert VET_MCP not in block, (
-        "the installed-surface sweep ran this run and the report still tells the reader "
-        f"to go run it:\n{block}")
-    assert "covered by this run — " + SUBJECT_OF_LAYER[LAYER_INSTALLED_SWEEP] in block, block
+    assert f"not covered — {SUBJECT_OF_LAYER[LAYER_INSTALLED_SWEEP]}" not in block, (
+        "the installed-surface sweep ran this run and the report still says it did not:"
+        f"\n{block}")
+    assert f"not covered by the static audit — {SUBJECT_OF_LAYER[LAYER_INSTALLED_SWEEP]}" \
+        not in block, block
+    assert RAN + SUBJECT_OF_LAYER[LAYER_INSTALLED_SWEEP] in block, block
 
 
-def test_a_live_tested_run_stops_recommending_the_live_harnesses():
+def test_a_live_tested_run_no_longer_claims_the_live_layer_is_absent():
     text = _render(_ledger(**{LAYER_SELF_REPORT: STATUS_UNAVAILABLE}))
     block = _scope_block(text)
-    assert CANARY not in block, block
-    assert "covered by this run — " + SUBJECT_OF_LAYER[LAYER_LIVE_BEHAVIOUR] in block, block
+    assert f"not covered — {SUBJECT_OF_LAYER[LAYER_LIVE_BEHAVIOUR]}" not in block, block
+    assert RAN + SUBJECT_OF_LAYER[LAYER_LIVE_BEHAVIOUR] in block, block
 
 
 def test_the_static_audit_tail_does_not_dangle_when_the_live_tests_already_ran():
@@ -146,7 +189,13 @@ def test_the_log_layer_is_not_reported_as_unmined_when_it_ran():
     text = _render(_ledger(**{LAYER_SELF_REPORT: STATUS_UNAVAILABLE}))
     block = _scope_block(text)
     assert f"not covered — {SUBJECT_OF_LAYER[LAYER_LOGS_TRAJECTORIES]}" not in block, block
-    assert "partly covered — " + SUBJECT_OF_LAYER[LAYER_LOGS_TRAJECTORIES] in block, block
+    assert RAN + SUBJECT_OF_LAYER[LAYER_LOGS_TRAJECTORIES] in block, block
+    # ... and it still says which half of the layer that `ran` accounts for. B-537
+    # dropped "covered it" here for the same reason it dropped it everywhere: B164's
+    # own disclosure is "N log/transcript sink(s) not scanned", so the base scan
+    # running is not the base scan finishing.
+    assert "this audit's own log/transcript scan ran; the replay analyses did not" in block
+    assert "covered it" not in block, block
 
 
 # ── direction 2: a layer that did NOT run must still be recommended ───────────
@@ -184,17 +233,17 @@ def test_the_replay_modes_survive_the_layer_being_marked_as_having_run():
 
 
 def test_no_ledger_keeps_every_clause():
-    """`missing_layers` is empty both when no ledger was supplied and when a complete
-    one was — `graded` stays True in both, so the two are indistinguishable here. With
-    no evidence the note under-claims coverage rather than inventing it: an unnecessary
-    "run it" costs one command, a suppressed one costs the check."""
+    """With no ledger-derived evidence at all, the only provable scope is the static
+    audit's own, and every clause keeps its advice: an unnecessary "run it" costs one
+    command, a suppressed one costs the check."""
     findings = _findings()
     text = render_report(findings, compute(findings), ctx=Context(home=None))
     block = _scope_block(text)
     for flag in (CANARY, VET_MCP, BEHAVIORAL):
         assert flag in block, (flag, block)
-    assert "from this run's own ledger" not in block, (
+    assert "from its own ledger" not in block, (
         "no ledger reached this render; the note must not claim one did")
+    assert block.count("not covered by the static audit — ") == 3, block
 
 
 def test_the_reason_a_layer_did_not_run_comes_from_the_shared_wording_table():
@@ -213,3 +262,118 @@ def test_static_layer_is_not_in_the_scope_note():
     block = _scope_block(_render(_ledger(**{LAYER_STATIC: STATUS_RAN,
                                             LAYER_SELF_REPORT: STATUS_UNAVAILABLE})))
     assert "static config audit" not in block, block
+
+
+# ── B-537: the note may only say what the ledger can prove ────────────────────
+#
+# Three shapes, none of which had a test before this. The first is the flagship case
+# and its absence is the whole story: `test_no_ledger_keeps_every_clause` above pinned
+# the ambiguity of an empty `missing_layers` as a *documented* limitation, and nothing
+# ever rendered the other side of it.
+
+def _complete_ledger() -> LayerLedger:
+    """A ledger in the shape `pipeline.to_ledger` builds when all five layers ran:
+    an attestation was supplied (so `self_report` is `ran`, and ALWAYS carries the
+    freshness `not_reached` disclosure — that branch is unconditional in to_ledger)
+    and a structurally-valid live-test entry arrived with `--judged-bundle`."""
+    return _ledger_with_unreached(
+        LAYER_SELF_REPORT,
+        ["attestation freshness not verified — the schema carries no timestamp, so "
+         "this can only mean one was supplied, never that it is recent"],
+    )
+
+
+def test_a_complete_ledger_is_rendered_at_all():
+    """The case that shipped the bug: five layers `ran`, `ledger.complete` True,
+    Grade A — and the note said "not covered by the static audit … run it" for all
+    three subjects, because `missing_layers` is empty on a complete ledger exactly as
+    it is on no ledger (C-422 pins the two ScoreResults equal)."""
+    ledger = _complete_ledger()
+    assert ledger.complete, "fixture is wrong — this must be a COMPLETE ledger"
+    score = compute(_findings(), ledger=ledger)
+    assert score.graded is True and score.missing_layers == (), (
+        "fixture is wrong — a complete ledger must look graded with nothing missing")
+    block = _scope_block(_render(ledger))
+    assert "not covered by the static audit" not in block, (
+        "every layer ran and the note still tells the reader to go run them:\n" + block)
+    assert "from its own ledger" in block, block
+    for layer in SUBJECT_OF_LAYER:
+        assert RAN + SUBJECT_OF_LAYER[layer] in block, (layer, block)
+
+
+def test_a_complete_ledger_never_claims_coverage_it_cannot_prove():
+    """The other half: having noticed the ledger, the note must not swing to asserting
+    that each layer covered its subject. `ran` is a status, not a completeness."""
+    block = _scope_block(_render(_complete_ledger()))
+    assert "covered by this run" not in block, block
+    assert "partly covered" not in block, block
+
+
+def test_a_ran_sweep_that_skipped_skills_does_not_vouch_for_them():
+    """Defect 2, verbatim: a real sweep whose phases ran but whose `not_scanned` list
+    named six skills printed `Not fully covered: third-party-skill-0 … -5` and, seven
+    lines later, `· covered by this run — a deep vet of the skills … on disk.`"""
+    unscanned = [f"third-party-skill-{i}" for i in range(6)]
+    ledger = _ledger_with_unreached(
+        LAYER_INSTALLED_SWEEP, unscanned,
+        **{LAYER_SELF_REPORT: STATUS_UNAVAILABLE, LAYER_LIVE_BEHAVIOUR: STATUS_UNAVAILABLE})
+    assert ledger.status(LAYER_INSTALLED_SWEEP) == STATUS_RAN, "fixture is wrong"
+    text = _render(ledger)
+    # The contradiction was between these two lines of the SAME report, so assert on both.
+    assert "Not fully covered: " + "; ".join(unscanned) in text, text[:800]
+    block = _scope_block(text)
+    assert "covered by this run" not in block, (
+        "the report lists six skills it never opened and still vouches for the sweep:"
+        f"\n{block}")
+    assert RAN + SUBJECT_OF_LAYER[LAYER_INSTALLED_SWEEP] in block, block
+    assert VET_MCP in block, "the way to cover the six is no longer named: " + block
+
+
+def test_a_truncated_but_warn_sweep_is_not_vouched_for_either():
+    """Defect 3 — the same over-claim, silent. At default budgets a TRUNCATED-but-WARN
+    target leaves `not_scanned` empty while the sweep is incomplete, so the ledger is
+    byte-identical to a sweep that finished and no "Not fully covered" line prints to
+    contradict the vouch. Keying the note on `not_checked` being non-empty would
+    therefore suppress the advice in EXACTLY the case that has no other disclosure —
+    which is why the clause wording, not the advice, is what B-537 changed."""
+    ledger = _ledger(**{LAYER_SELF_REPORT: STATUS_UNAVAILABLE,
+                        LAYER_LIVE_BEHAVIOUR: STATUS_UNAVAILABLE})
+    text = _render(ledger)
+    assert "Not fully covered" not in text, (
+        "fixture is wrong — this shape must have NO partial-coverage disclosure")
+    block = _scope_block(text)
+    assert "covered by this run" not in block, block
+    assert RAN + SUBJECT_OF_LAYER[LAYER_INSTALLED_SWEEP] in block, block
+    assert VET_MCP in block, block
+
+
+def test_the_header_does_not_promise_an_accounting_the_clauses_refuse_to_give():
+    """A heading is a claim too. "Coverage of the layers …" over three lines that
+    deliberately decline to state coverage is the same defect one level up."""
+    for ledger in (_complete_ledger(), _ledger(**{LAYER_LIVE_BEHAVIOUR: STATUS_SKIPPED})):
+        block = _scope_block(_render(ledger))
+        assert "Coverage of the layers" not in block, block
+
+
+@pytest.mark.parametrize("status", [STATUS_RAN, STATUS_UNAVAILABLE, STATUS_SKIPPED,
+                                    STATUS_NOT_REACHED])
+@pytest.mark.parametrize("subject_layer", list(SUBJECT_OF_LAYER))
+def test_no_ledger_shape_ever_drops_the_advice(subject_layer, status):
+    """The invariant that replaces the coverage claim, and this change's whole answer
+    to "what does it swallow": every clause names the flag that would cover it, in
+    every ledger shape, including the ones where the layer ran.
+
+    This is deliberately mechanical. Both release FP gates are structurally blind to a
+    lost signal (`fleet_fp_gate.py` compares FAIL sets on an unchanged config;
+    `monitor_fp_gate.py` diffs two snapshots of an unchanged home), so an advice line
+    that quietly stops printing on some ledger shape would ship green — which is how
+    the previous three fixes in this family each traded an FP for an FN.
+    """
+    flags = {LAYER_LIVE_BEHAVIOUR: CANARY,
+             LAYER_INSTALLED_SWEEP: VET_MCP,
+             LAYER_LOGS_TRAJECTORIES: BEHAVIORAL}
+    block = _scope_block(_render(_ledger(**{subject_layer: status})))
+    for layer, flag in flags.items():
+        assert flag in block, (
+            f"{layer}'s advice vanished when {subject_layer} was {status}:\n{block}")
+        assert SUBJECT_OF_LAYER[layer] in block, (layer, block)

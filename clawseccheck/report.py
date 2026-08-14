@@ -530,21 +530,51 @@ def _not_fully_covered_line(score: ScoreResult) -> str:
 # happened, so this reads it rather than re-deriving coverage from flags, from `ctx`,
 # or from what some later phase is about to print.
 #
-# Each entry is `(layer, subject, advice, ran_is_proof, partial_note)`:
+# B-537 rewrote the second half of that fix. Its first half — an absence must be PROVEN
+# before it is asserted — was right and survives. Its second half inverted the same
+# error: it read "this layer is not listed as missing" as proof of coverage and printed
+# `· covered by this run — a deep vet of the skills … on disk.` seven lines under its own
+# `Not fully covered: third-party-skill-0 … -5`. The ledger cannot support that claim, in
+# three independent ways:
+#
+#   1. A COMPLETE ledger is indistinguishable from NO ledger. C-422 pins that
+#      `compute(findings, ledger=<complete>)` returns a `ScoreResult` EQUAL to
+#      `compute(findings)`, so on the flagship case — every layer `ran`, Grade A — the
+#      old `have_ledger = bool(missing_layers)` read False and all three clauses printed
+#      "not covered by the static audit … run it", naming the modes that had just run.
+#   2. `status == "ran"` is not "covered its subject". `pipeline.to_ledger` sets
+#      `installed_sweep=ran` from the two sweep phases' STATUS and never their
+#      `PhaseResult.complete`, so a sweep that hit its cap on six skills is `ran`.
+#   3. Even the partial-coverage evidence that DOES exist is not attributable.
+#      `ScoreResult.not_checked` is `LayerLedger.not_checked` — the flat, de-duplicated
+#      UNION across all five layers — so this renderer cannot tell whose surface was
+#      left unread.
+#
+# Fixing 2 or 3 properly means changing `pipeline.py` / `scoring.py` (a per-layer
+# completeness flag, or layer-attributed `not_checked`). Until one of those exists, the
+# only sound move is the conservative half: state the reached/not-reached facts that
+# ARE evidenced and assert coverage nowhere. Three forms, one per evidence state:
+#
+#   proven not-ran  →  `· not covered — {subject}: {describe_layer}. {advice}.`
+#   proven ran      →  `· ran, coverage not accounted for — {subject}: {ran_note}. {advice}.`
+#   nothing known   →  `· not covered by the static audit — {subject}. {advice}.`
+#
+# `{advice}` is in ALL THREE by construction, and a test sweeps every ledger shape to
+# keep it that way. That is this change's answer to "what does it swallow": nothing. It
+# can only ever add a redundant "run it", never withhold one — which matters because
+# both release FP gates are structurally blind to a lost signal (`fleet_fp_gate.py`
+# compares FAIL sets on an unchanged config; `monitor_fp_gate.py` diffs two snapshots of
+# an unchanged home).
+#
+# Each entry is `(layer, subject, advice, ran_note)`:
 #   * `subject` — what the reader loses when this layer does not run, in their words.
-#   * `advice` — what actually makes it count. Printed only when this subject is NOT
-#     proven covered; recommending a mode whose output is already on screen is the
-#     whole defect.
-#   * `ran_is_proof` — whether `status == "ran"` proves THIS subject was covered.
-#     False for the log/trajectory layer, and that asymmetry is the point: pipeline.py
-#     marks that layer as having run on EVERY audit (B164 scans log sinks in the base
-#     run), so it being marked so does not mean the replay modes ran. Dropping the
-#     pointer on that evidence would invent a clean — the exact trade this family of
-#     fixes keeps making by accident, and one both FP gates are blind to (one compares
-#     FAIL sets, the other diffs an unchanged home; neither can see a lost signal). No
-#     discriminator for "did the behavioural phase run" exists in the ledger, so the
-#     pointer stays and only the false negative claim goes.
-#   * `partial_note` — how that partial coverage is stated, for the same layer.
+#   * `advice` — what actually makes it count. Unconditional, see above.
+#   * `ran_note` — what `status == "ran"` actually proves for THIS layer, and no more.
+#     The log/trajectory entry is the strongest case for why this must be per-layer and
+#     must not say "covered": pipeline.py marks that layer as having run on EVERY audit
+#     (B164 scans log sinks in the base run), so `ran` there does not even mean the
+#     replay modes were invoked, let alone that they exhausted the sinks — B164's own
+#     disclosure is "N log/transcript sink(s) not scanned".
 #
 # Known residual, deliberately not "fixed" with a second discriminator: under
 # `--full --fast` cli.py still runs the MCP vet while the sweep phases do not, so the
@@ -558,20 +588,17 @@ _SCOPE_CLAUSES = (
      "live prompt-injection resistance",
      "Run `--canary` / `--redteam` / `--dryrun`, then submit the agent's own verdict"
      " back with `--judged-bundle` — that submission is what makes this layer count",
-     True,
-     ""),
+     "a live-behaviour result was submitted with this run"),
     (LAYER_INSTALLED_SWEEP,
      "a deep vet of the skills, plugins and MCP servers sitting on disk",
      "Run `--full` (or `--vet-all` / `--vet-mcp` for one surface at a time)",
-     True,
-     ""),
+     "the on-disk sweep phases ran"),
     (LAYER_LOGS_TRAJECTORIES,
      "what your agent has already logged",
      "Run `--behavioral` (proven-by-log verb-sequence trifecta / outcome anomaly /"
      " capability drift) or `--analyze-trajectory` (skill-indicator correlation) to"
      " check whether a trifecta is already recorded in your trajectory sidecar",
-     False,
-     "this audit's own log/transcript scan covered it; the replay analyses did not"),
+     "this audit's own log/transcript scan ran; the replay analyses did not"),
 )
 
 
@@ -581,15 +608,23 @@ def _scope_note_lines(score: ScoreResult) -> tuple[list[str], bool]:
     Returns ``(lines, live_tested)``. ``live_tested`` is True only on POSITIVE ledger
     evidence that the live-behaviour layer ran; the "Static audit —" paragraph below
     uses it so its closing "use the live tests above" cannot dangle on a run whose live
-    tests are already done and printed.
+    tests are already done and printed. Note what that flag is and is not: a PRESENCE
+    claim ("a live-behaviour result is on this page"), which ``ran`` does prove, never a
+    coverage claim — see :data:`_SCOPE_CLAUSES` for why the clauses themselves may not
+    make the latter.
 
-    An empty ``missing_layers`` is ambiguous BY CONSTRUCTION: ``scoring.compute`` leaves
-    it empty both when no ledger was supplied and when a complete one was (``graded``
-    stays True in both, see its docstring). So "no entry for this layer" is read as
-    evidence only when the ledger said something at all. With nothing to read, every
-    clause is kept — the note under-claims coverage rather than inventing it, which is
-    the safe direction here: an unnecessary "run it" costs the reader one command, a
-    suppressed one costs them the check.
+    Ledger presence is read from BOTH ledger-derived fields, ``missing_layers`` and
+    ``not_checked`` (B-537). Neither alone is sufficient and both are one-directional:
+    a non-empty value of either PROVES a ledger reached this render, but two empty ones
+    prove nothing, because a COMPLETE ledger and no ledger at all produce the same
+    ``ScoreResult`` (C-422). Reading only ``missing_layers`` is what made the flagship
+    complete-ledger run — five layers ``ran``, Grade A — print "not covered by the
+    static audit … run it" for all three subjects. Widening the read fixes the real
+    product case (``pipeline.to_ledger`` always attaches an attestation-freshness
+    ``not_reached`` entry when the self-report layer ran, so a genuinely complete ledger
+    carries a non-empty ``not_checked``) without ever inferring a ledger that is not
+    there: with both empty the note falls back to the static-audit-only wording, which
+    over-claims nothing in either direction.
     """
     lines = [
         # C-423: found by reading a real ungraded run, not by a test — the tests assert
@@ -600,28 +635,32 @@ def _scope_note_lines(score: ScoreResult) -> tuple[list[str], bool]:
         else "This audit reflects your configuration."
     ]
     missing = dict(getattr(score, "missing_layers", ()) or ())
-    have_ledger = bool(missing)
+    have_ledger = bool(missing) or bool(getattr(score, "not_checked", ()) or ())
     clauses: list[str] = []
-    for layer, subject, advice, ran_is_proof, partial_note in _SCOPE_CLAUSES:
+    for layer, subject, advice, ran_note in _SCOPE_CLAUSES:
         status = missing.get(layer)
         if status is not None:
-            # Layer/status wording comes from `layers.describe_layer` ONLY — this
-            # module never phrases a layer or a status itself (tests/test_c423_*
-            # fails the build on a competing table).
+            # Proven absence. Layer/status wording comes from `layers.describe_layer`
+            # ONLY — this module never phrases a layer or a status itself
+            # (tests/test_c423_* fails the build on a competing table).
             clauses.append(f" · not covered — {subject}: {describe_layer(layer, status)}."
                            f" {advice}.")
-        elif not have_ledger:
+        elif have_ledger:
+            # Proven the layer ran, and NOT proven that it covered its subject — the
+            # ledger records a status, not a completeness. Saying "covered by this run"
+            # here vouched for skills the sweep never opened.
+            clauses.append(f" · ran, coverage not accounted for — {subject}: {ran_note}."
+                           f" {advice}.")
+        else:
             # No ledger reached this render, so the only honest scope is the audit's
             # own: a purely static audit does not cover these by itself. Nothing is
             # claimed about what the wider RUN may have done — that is precisely what
             # cannot be known here.
             clauses.append(f" · not covered by the static audit — {subject}. {advice}.")
-        elif ran_is_proof:
-            clauses.append(f" · covered by this run — {subject}.")
-        else:
-            clauses.append(f" · partly covered — {subject}: {partial_note}. {advice}.")
-    lines.append("Coverage of the layers beyond the static audit"
-                 + (", from this run's own ledger:" if have_ledger else ":"))
+    # "What this run reached", not "Coverage of the layers": the heading may not promise
+    # an accounting the three lines under it deliberately refuse to give.
+    lines.append("What this run reached beyond the static audit"
+                 + (", from its own ledger:" if have_ledger else ":"))
     lines.extend(clauses)
     return lines, (have_ledger and LAYER_LIVE_BEHAVIOUR not in missing)
 
