@@ -3910,11 +3910,12 @@ def check_installed_skills(ctx: Context) -> Finding:
                 HIGH,
                 UNKNOWN,
                 "Part of this skill could not be READ, so it was not scanned — coverage "
-                f"is incomplete ({len(unreadable)} file(s)): " + "; ".join(unreadable[:6]),
-                "These files are present but unopenable (permissions, a dangling link, or "
+                f"is incomplete ({len(unreadable)} path(s)): " + "; ".join(unreadable[:6]),
+                "These paths are present but unopenable (permissions, a dangling link, or "
                 "an I/O error), so nothing can be concluded about what they contain. Make "
                 "them readable and re-run, or inspect them manually before trusting this "
-                "skill — an unreadable file is not an absent one.",
+                "skill — an unreadable path is not an absent one. An entry marked "
+                "'(directory not entered)' hides an unbounded subtree, not a single file.",
                 unreadable,
                 _signal_buckets,
                 "skill_limit_hits",

@@ -193,6 +193,7 @@ def walk_dir_safely(
     prune_dir=None,
     keep_file=None,
     capped: list | None = None,
+    unreadable_dirs: list | None = None,
 ) -> list[Path]:
     """Recursively walk base_dir, skipping symlinks and any file that escapes base_dir.
 
@@ -223,6 +224,26 @@ def walk_dir_safely(
     appended to it — so a caller can tell "genuinely truncated, more of the tree was
     never reached" apart from "walked everything and it just happened to total
     <= max_files files" (GR#4: no silent completeness claim over a capped scan).
+
+    If `unreadable_dirs` (a list) is provided, a subdirectory that could not be listed is
+    appended to it as a ``(path, reason, errno)`` triple instead of vanishing. `os.walk`'s default
+    ``onerror=None`` **discards** that error, so an unreadable directory produced no files,
+    no `skips` entry and no `capped` sentinel — the subtree simply did not exist as far as
+    every caller was concerned (B-549). That is the same fail-open B-458 closed for an
+    unreadable *file*, one level up and strictly worse: a file hides one file, a directory
+    hides an unbounded subtree. Measured through `--vet-skill` before this parameter
+    existed: a skill with `chmod 000` on a subdirectory containing a `curl | sh` payload
+    reported `INSTALL` / `Danger PASS "no malware signature or known-bad indicator"` /
+    exit 0, with nothing in `--json` either.
+
+    The `errno` is carried because the caller has to tell two very different facts apart and
+    only it can: ``EACCES``/``EPERM`` means the subtree is there and deliberately unlistable
+    (the defect above), while ``ENOENT`` means it ceased to exist between `os.walk` listing it
+    and descending into it — ordinary churn on a live machine, not something hidden. This
+    layer records both and rules on neither; that split is `collect_skill_files`'s to make.
+
+    Default `None` keeps the previous behaviour for every existing caller, so opting in is
+    per-call-site — the same additive discipline as `skips` and `capped`.
     """
     try:
         root = base_dir.resolve()
@@ -230,7 +251,15 @@ def walk_dir_safely(
         return []
 
     out = []
-    for dirpath, dirnames, filenames in os.walk(base_dir, topdown=True, followlinks=False):
+
+    def _on_walk_error(exc: OSError) -> None:
+        if unreadable_dirs is not None:
+            unreadable_dirs.append((str(getattr(exc, "filename", "") or base_dir),
+                                    exc.strerror or str(exc), exc.errno))
+
+    for dirpath, dirnames, filenames in os.walk(
+        base_dir, topdown=True, followlinks=False, onerror=_on_walk_error
+    ):
         # Deterministic traversal
         if exclude_pycache or exclude_vcs or prune_dir is not None:
             rel_dirpath = os.path.relpath(dirpath, base_dir)

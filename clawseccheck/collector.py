@@ -13,6 +13,7 @@ surface. No network. No writes. Pure stdlib.
 from __future__ import annotations
 
 import codecs
+import errno
 import math
 import hashlib
 import io
@@ -1519,9 +1520,10 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         base_dir = skill_dir
         _skips: list = []
         _capped: list = []
+        _unreadable_dirs: list = []
         files = walk_dir_safely(
             base_dir, exclude_pycache=True, exclude_vcs=True, max_files=_MAX_FILES_PER_SKILL,
-            skips=_skips, capped=_capped,
+            skips=_skips, capped=_capped, unreadable_dirs=_unreadable_dirs,
         )
         if ctx is not None and _capped:
             # The walk stopped at _MAX_FILES_PER_SKILL and the rest of the skill was never
@@ -1541,6 +1543,83 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 ctx.limit_hits, LIMIT_DOMAIN_SKILL,
                 f"only the first {_MAX_FILES_PER_SKILL} file(s) of this skill were scanned",
             )
+        if ctx is not None and _unreadable_dirs:
+            # B-549: a subdirectory that could not be listed. Routed into the SAME channel
+            # B-458 built for an unreadable file, because it is the same fact one level up:
+            # the content is present and unknown, not absent. Keeping it in `symlink_skips`
+            # instead would have described it as "symlink / path-escape not followed" (false)
+            # and, worse, as a WARN — while an unreadable *file* correctly forces the Danger
+            # axis to UNKNOWN. A directory hides strictly more than a file, so it cannot
+            # carry the weaker verdict.
+            #
+            # Measured before the fix, through the real `--vet-skill`: `chmod 000` on a
+            # subdirectory holding a `curl | sh` payload gave `INSTALL` / `Danger PASS` /
+            # exit 0, and `--json` carried no coverage key at all. False-positive surface
+            # measured the same way B-458's was, before landing: **0 unreadable directories**
+            # across 4,741 real ones (`~/.openclaw` 3,083 · `~/.claude/skills` 28 ·
+            # `fixtures/` 1,630). A branch that fires on nothing benign and on every hidden
+            # subtree is the same trade B-458 already took.
+            for dpath, reason, err in _unreadable_dirs:
+                try:
+                    rel = str(Path(dpath).relative_to(base_dir))
+                except (ValueError, OSError):
+                    rel = dpath
+                if err == errno.ENOENT:
+                    # The directory did not become unreadable — it stopped existing between
+                    # `os.walk` listing it and descending into it. Recorded, but never as a
+                    # coverage gap: "present and unreadable" and "gone" are different facts,
+                    # and only the first one hides anything.
+                    #
+                    # Found by the independent C-135 pass on this very fix, which is the only
+                    # reason it is not shipping: a skill with NO unreadable path and no payload
+                    # went INSTALL/exit 0 -> CAUTION/exit 1 when an ordinary scratch subdir was
+                    # removed mid-scan (a ClawHub update under --vet-all, a `git checkout` in a
+                    # skill repo, a pytest/npm temp dir being cleaned). That is a false FAIL on
+                    # the documented `--vet ... || fail` install gate, i.e. a Golden Rule #5
+                    # blocker, and the sentence was false twice over — nothing "could not be
+                    # READ", and the remediation asserted a hidden subtree where there was none.
+                    #
+                    # Not a silencer (the FP fix that opens a false negative): to make ENOENT
+                    # fire, a directory has to exist at listing time and be gone at descent
+                    # time. `rmdir` needs it empty, so every file under it was already
+                    # unlinked — the bytes are off disk at the moment the scanner looks, and a
+                    # static reader cannot be blinded to content that no longer exists.
+                    # Restoring it afterwards needs a process running during the scan. That
+                    # precondition is absent by construction for `--vet`/`--advise` (an inert,
+                    # not-yet-installed tree cannot race itself) but NOT for the audit path or
+                    # `--vet-all` over installed skills on a live machine, where an attacker's
+                    # agent may be running — so the claim is "no worse than before" there, not
+                    # "impossible": pre-fix, ENOENT was recorded nowhere at all. The independent
+                    # C-135 pass tried dangling/looping symlinks, a directory replaced by a file
+                    # (ENOTDIR), and PATH_MAX nesting (ENAMETOOLONG) — every one lands on the
+                    # disclosing side above. `file_manifest` keeps the observation (it reaches
+                    # SARIF's inventory and drives no verdict anywhere), so the fact is not
+                    # lost, only demoted out of the grade.
+                    ctx.file_manifest.setdefault(rel + "/", "vanished-during-scan")
+                    continue
+                # Every other errno stays on the disclosing side — EACCES/EPERM is the defect
+                # itself, and EIO/ELOOP/ENAMETOOLONG are genuine "present but unread" too.
+                # Fail-closed by default: a new errno nobody anticipated discloses rather than
+                # hides, which is the direction B-458 already chose one level down.
+                ctx.unreadable_files.append(f"{rel}/ (directory not entered): {reason}")
+                ctx.file_manifest.setdefault(rel + "/", "unreadable")
+                if rel in (".", ""):
+                    # The skill ROOT is what could not be listed, so whether SKILL.md exists is
+                    # unknown — and B88 defaults to "absent". Without this bridge the dossier
+                    # contradicted itself in adjacent rows: Danger said "an unreadable path is
+                    # not an absent one" while Build quality said "no SKILL.md frontmatter block
+                    # found ... this skill will not appear to the agent", and that WARN owns the
+                    # top `Fix (top):` line — so the user was told to repair frontmatter that was
+                    # perfectly valid and merely behind a closed door. B-461 built exactly this
+                    # bridge for the unreadable *file* case; the directory case has to cross it
+                    # too or the two paths disagree about the same fact.
+                    ctx.unreadable_manifests.add(
+                        skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+                    )
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                    f"Could not list {_cap_name(rel)}/: {reason}",
+                )
         if ctx is not None and _skips:
             # F-061: a skill shipping `data -> ~/.ssh/id_rsa` or `-> ../../openclaw.json` used to
             # be skipped silently. Record the skip + its target so it surfaces as a WARN.
