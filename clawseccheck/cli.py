@@ -79,7 +79,7 @@ from .scanbudget import (
 from . import pipeline as _pipeline
 from .baseline import append_entries, is_fingerprint
 from .catalog import CRITICAL, HIGH, LOW, MEDIUM, UNKNOWN, Finding
-from .dossier import build_profile
+from .dossier import build_profile, verdict_for
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE, verify_chain
 from .tamperscore import tamper_subgrade
@@ -3202,6 +3202,19 @@ def _main(argv=None) -> int:
                     # worse than not re-checking at all.
                     _profile = build_profile(_finding, str(_target), "skill")
                     _status = _profile.overall_status
+                    # B-540: with ONE exception. `build_profile` scores only the
+                    # PASS/WARN/FAIL axes and then promotes the surviving PASS ones to the
+                    # overall word, so a skill whose content could not be parsed at all
+                    # came back PASS here and was dropped by the `_lvl is None` branch
+                    # below — the re-check ran, concluded "I cannot tell", and the user
+                    # heard nothing. Measured on `fixtures/unknown_b347_deaddrop_
+                    # unparseable`: bare UNKNOWN, profile PASS. This does NOT reopen the
+                    # disagreement the comment above closes: `--vet-skill` on that same
+                    # directory prints the UNKNOWN danger axis one line under its
+                    # headline, so the fact survives there and only the monitor lost it.
+                    # The profile still owns every PASS/WARN/FAIL verdict.
+                    if _finding.status == UNKNOWN:
+                        _status = UNKNOWN
                 except Exception:  # noqa: BLE001 — see the containment above
                     monitor_notes.append((NOTE_UNDETERMINED,
                                           f"The skill '{_name}' changed and could not be "
@@ -3210,6 +3223,18 @@ def _main(argv=None) -> int:
                 _lvl = _REVET_SEVERITY.get(_status)
                 if _lvl is None:
                     continue          # PASS after a change is not news; the change is
+                if _status == UNKNOWN:
+                    # Say both facts and neither more: it changed, and this run could not
+                    # tell whether the new content is safe. UNKNOWN is the absence of
+                    # evidence, not evidence — the line must not read as an accusation.
+                    # The verdict word comes from the FORCED status, because
+                    # `_profile.verdict` is INSTALL here and "INSTALL: could not analyze"
+                    # is the same self-contradiction one layer down.
+                    alerts.append((
+                        _lvl,
+                        f"The skill '{_name}' changed and this run could not determine "
+                        f"whether it is safe — {verdict_for(UNKNOWN)}: {_finding.detail}"))
+                    continue
                 alerts.append((
                     _lvl,
                     f"Re-checked '{_name}' after it changed — {_profile.verdict}: "

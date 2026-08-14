@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 from clawseccheck.cli import main
@@ -207,3 +208,99 @@ def test_the_re_check_never_claims_to_block_an_install(tmp_path, capsys):
     out = capsys.readouterr().out.lower()
     for word in ("blocked", "prevented", "stopped the install", "quarantined"):
         assert word not in out, word
+
+
+# ------------------------------------- B-540: a re-check that could not read the skill
+
+def _tree_home(tmp_path: Path, *, src: Path, version: str, artifact: str) -> Path:
+    """Install a whole fixture skill TREE, not a hand-written SKILL.md body.
+
+    `_home` above writes one file, which cannot express a skill whose *script* is what
+    fails to parse — and that is precisely the shape B-540 lost. Installed under the
+    fixture's own directory name so the verdict text stays the one the corpus pins."""
+    home = tmp_path / "home"
+    (home / "workspace" / ".clawhub").mkdir(parents=True, exist_ok=True)
+    cfg = home / "openclaw.json"
+    cfg.write_text('{"gateway": {"bind": "127.0.0.1"}}', encoding="utf-8")
+    os.chmod(cfg, 0o600)
+    dest = home / "workspace" / "skills" / src.name
+    if not dest.exists():
+        shutil.copytree(src, dest)
+    (home / "workspace" / ".clawhub" / "lock.json").write_text(
+        json.dumps({"version": 1, "skills": {src.name: _record(version, artifact)}}),
+        encoding="utf-8")
+    return home
+
+
+_UNREADABLE = FIXTURES / "unknown_b347_deaddrop_unparseable" / "skills" / "broken-sync"
+_MALICIOUS = FIXTURES / "bad_b103_known_ioc_host" / "skills" / "mediatool"
+
+
+def test_a_re_check_that_could_not_read_the_skill_still_reaches_the_user(tmp_path, capsys):
+    """B-540. The regression this pins: `build_profile` scores only the PASS/WARN/FAIL
+    axes and then promotes the surviving PASS ones, so an UNKNOWN danger axis came back as
+    an overall PASS and the monitor dropped it as "not news". The re-check had run, had
+    concluded it could not tell, and the user heard silence — the one outcome a watch may
+    never produce, because "could not check" is not "checked and clean"."""
+    store = tmp_path / "store"
+    home = _tree_home(tmp_path, src=_UNREADABLE, version="1.0.0", artifact="a" * 64)
+    assert _run(home, store) == 0
+    capsys.readouterr()
+
+    _tree_home(tmp_path, src=_UNREADABLE, version="1.1.0", artifact="b" * 64)
+    _run(home, store, "--ascii")
+    out = capsys.readouterr().out
+    assert "was updated, from 1.0.0 to 1.1.0" in out, "precondition: the change IS reported"
+    assert ("The skill 'broken-sync' changed and this run could not determine whether it "
+            "is safe") in out, out
+    # Both halves of the fact, and nothing beyond them: the reason it could not tell, and
+    # the conservative verdict word. NOT the profile's INSTALL, which would have rendered
+    # "INSTALL: could not analyze ..." — the same self-contradiction one layer down.
+    assert "CAUTION: could not analyze broken-sync" in out, out
+    assert "INSTALL: could not analyze" not in out, out
+
+
+def test_the_unreadable_re_check_is_informational_not_an_accusation(tmp_path, capsys):
+    """UNKNOWN is the absence of evidence, not evidence. It rides at INFO — the `[i]`
+    glyph — and must not borrow the vocabulary of a finding."""
+    store = tmp_path / "store"
+    home = _tree_home(tmp_path, src=_UNREADABLE, version="1.0.0", artifact="a" * 64)
+    _run(home, store)
+    capsys.readouterr()
+    _tree_home(tmp_path, src=_UNREADABLE, version="1.1.0", artifact="b" * 64)
+    _run(home, store, "--ascii")
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if "could not determine whether it is safe" in ln)
+    assert line.lstrip().startswith("[i]"), line
+    for word in ("malicious", "suspicious", "compromised", "attack", "DO-NOT-INSTALL"):
+        assert word not in line, word
+
+
+def test_a_clean_skill_after_a_change_is_still_silent(tmp_path, capsys):
+    """The regression risk of B-540, stated as its own test. A monitor that speaks on
+    every update is a monitor the reader turns off. Only the UNKNOWN branch was opened;
+    PASS stays absent from `_REVET_SEVERITY` and stays quiet."""
+    store = tmp_path / "store"
+    home = _home(tmp_path, body=_CLEAN, version="1.0.0", artifact="a" * 64)
+    _run(home, store)
+    capsys.readouterr()
+    _home(tmp_path, body=_CLEAN + "\nStill harmless.\n", version="1.1.0", artifact="b" * 64)
+    _run(home, store, "--ascii")
+    out = capsys.readouterr().out
+    assert "was updated, from 1.0.0 to 1.1.0" in out, "precondition: the change IS reported"
+    assert "Re-checked" not in out, out
+    assert "could not determine whether it is safe" not in out, out
+
+
+def test_a_do_not_install_skill_after_a_change_still_gets_its_loud_line(tmp_path, capsys):
+    """The other direction. Forcing the status on the UNKNOWN branch must not disturb the
+    FAIL path, which is the one the whole tier exists for."""
+    store = tmp_path / "store"
+    home = _tree_home(tmp_path, src=_MALICIOUS, version="1.0.0", artifact="a" * 64)
+    _run(home, store)
+    capsys.readouterr()
+    _tree_home(tmp_path, src=_MALICIOUS, version="1.1.0", artifact="b" * 64)
+    _run(home, store, "--ascii")
+    out = capsys.readouterr().out
+    assert "Re-checked 'mediatool' after it changed - DO-NOT-INSTALL:" in out, out
+    assert "[!]" in out, out
