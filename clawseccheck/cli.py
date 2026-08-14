@@ -79,7 +79,7 @@ from .scanbudget import (
 from . import pipeline as _pipeline
 from .baseline import append_entries, is_fingerprint
 from .catalog import CRITICAL, HIGH, LOW, MEDIUM, UNKNOWN, Finding
-from .dossier import build_profile, verdict_for
+from .dossier import build_profile, vet_scan_incomplete, verdict_for
 from .ansi import should_color, strip_ansi
 from .monitor import DEFAULT_EVENTS, DEFAULT_STATE, verify_chain
 from .tamperscore import tamper_subgrade
@@ -212,38 +212,33 @@ _SWEEP_VERDICT: dict[str, str] = {
     "TRUNCATED": "partially scanned — coverage incomplete",
 }
 
-# The wording every producer of an incomplete scan uses in its finding detail —
-# load-bearing elsewhere too (dossier.py's _danger_coverage_gap matches the same
-# substring). Named here rather than re-literalled at each call site.
-_VET_COVERAGE_GAP_SUBSTRING = "coverage is incomplete"
-
-
 def _vet_coverage_incomplete(f) -> bool:
     """True when a ``vet_skill()`` result `f` did not inspect all of its target.
 
     Detects the CONDITION, not one cause of it, and the distinction matters: several
     unrelated limits produce a coverage gap — the per-target scan budget inside
-    ``checks/_vet.py:_run_content_ring``, and the collector's own size/file caps that
+    ``checks/_vet.py:_run_content_ring``, the collector's own size/file caps that
     ``check_installed_skills`` reports the same way (a 1.5 MB benign skill hits the
-    1000KB/500-file cap without going anywhere near a time budget). An earlier version
-    of this helper claimed to detect the budget specifically and then printed "this
-    skill's own scan budget was exceeded" over a size-cap finding that said, one line
-    above, that it had hit the file cap — a self-contradicting report and a fabricated
-    cause. Callers must therefore describe the STATE ("partially scanned") and let the
-    finding itself carry the reason.
+    1000KB/500-file cap without going anywhere near a time budget), a file the AST layer
+    could not parse, and a file in a language the deep layer was never handed. An earlier
+    version of this helper claimed to detect the budget specifically and then printed
+    "this skill's own scan budget was exceeded" over a size-cap finding that said, one
+    line above, that it had hit the file cap — a self-contradicting report and a
+    fabricated cause. Callers must therefore describe the STATE ("partially scanned")
+    and let the finding itself carry the reason.
 
-    Mirrors dossier.py's ``_danger_coverage_gap`` detection: the signal is an UNKNOWN
-    finding whose ``.detail`` contains the literal substring "coverage is incomplete".
-    It can either BE the primary finding `f`, or ride along on ``f.ring_findings`` when
-    a worse WARN/FAIL outranked it as primary (``checks/_vet.py:vet_skill``'s
-    ``_VET_MERGE_RANK``) — so both must be checked, or a partially scanned target that
-    also tripped a real WARN/FAIL would read as an ordinary, complete result.
+    B-485: this is now a thin alias for ``dossier.vet_scan_incomplete`` — the ONE
+    implementation both this module and the dossier's grading path share. It used to be
+    a second, hand-written copy that keyed only on the English substring "coverage is
+    incomplete", under a docstring promising it mirrored ``_danger_coverage_gap``. That
+    promise went false the moment the dossier grew its ``engine_degraded`` leg, and the
+    drift was live: ``--vet-all --home fixtures/unknown_b347_deaddrop_unparseable``
+    printed "could not assess" for `broken-sync` and then tallied "1 skill(s) checked |
+    1 safe", contradicting ``docs/USAGE.md``'s own guarantee that a partially scanned
+    target is "excluded from the 'safe' tally". Two predicates that must agree are kept
+    as one function, not as two bodies and a comment asking them to match.
     """
-    pool = [f, *getattr(f, "ring_findings", [])]
-    return any(
-        fx.status == "UNKNOWN" and _VET_COVERAGE_GAP_SUBSTRING in (fx.detail or "")
-        for fx in pool
-    )
+    return vet_scan_incomplete(f)
 
 
 @dataclass

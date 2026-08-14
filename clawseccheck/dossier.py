@@ -194,6 +194,102 @@ _NON_DANGER_FAIL_CAP = 79
 # finding. See `_danger_coverage_gap` for how that state is detected.
 _COVERAGE_GAP_DANGER_CAP = 79
 
+# ── Scan-coverage vocabulary (shared by every consumer) ───────────────────────
+# The wording `checks/_vet.py:coverage_gap_finding` puts in the detail of the synthetic
+# UNKNOWN it emits when part of a target was never inspected. Named once here because
+# TWO consumers key on it — this module's `_danger_coverage_gap` and `cli.py`'s
+# `_vet_coverage_incomplete` — and they used to carry two copies of the literal.
+COVERAGE_GAP_PROSE = "coverage is incomplete"
+
+# The extensions the DEEP-CODE layer actually reads: an exact mirror of the three
+# collector readers' own filters (`read_skill_python` → .py/.ipynb,
+# `read_skill_shell` → .sh/.bash/.zsh, `read_skill_js` → .js/.ts/.mjs/.cjs). Anything
+# outside this set reaches the regex/prose content ring — `_read_skill_text`
+# concatenates every TEXT-classified file regardless of extension — but never reaches
+# skillast, the taint engine, or the effect profiles that populate
+# `ctx.installed_skill_py` / `ctx.effect_profiles`. Kept here as documentation of the
+# boundary the two sets below are defined against; not itself consulted at runtime.
+_DEEP_ANALYZED_EXTS = frozenset({
+    ".py", ".ipynb", ".sh", ".bash", ".zsh", ".js", ".ts", ".mjs", ".cjs",
+})
+
+# B-485 route 4, TIER 1 — "unrouted": a file the existing analyzer WOULD have handled,
+# withheld from it by nothing but its suffix. Python is read from `.py`, so a
+# `payload.pyw` (valid Python; `ast.parse` reads it unchanged) is Python the AST/taint
+# layer never saw; `skillast.analyze_shell` and the JS rules are regex passes over
+# source text, so `.ksh/.csh/.fish` and `.cts/.mts` are equally within their reach. A
+# ROUTING gap, not a capability limit — the analyzer exists AND works on these bytes —
+# and it is precisely the rename-to-blind-the-scanner evasion, so it floors the verdict
+# (see `_danger_coverage_gap`).
+#
+# The membership test is "would the analyzer we already have work on this file?", which
+# is why `.pyx` is NOT here: Cython is not Python, `ast.parse` cannot read `cdef`, and a
+# `.pyx` renamed to `.py` would come back as a parse error — already covered by the
+# engine_degraded leg. It sits in tier 2 instead.
+#
+# FP measured before choosing that severity, on the 35,035 real published skills in the
+# ClawBench corpus: **0** skills carry any extension in this set (0.000%). Also 0 of the
+# 307 skill directories in `fixtures/` + the installed fleet. `.jsx`/`.tsx` satisfy the
+# membership test above and are still deliberately NOT here: they hit 78 of those 35,035
+# skills (0.223%), essentially all React templates, and a CAUTION — which `--vet` turns
+# into rc=1, an install gate — on 78 benign packages is not shippable. That exception is
+# the rule this set is governed by: measurement outranks the principle, so re-measure
+# before adding an extension rather than reasoning about whether it "should" be rare.
+_UNROUTED_CODE_EXTS = frozenset({
+    ".pyw", ".pyi",                      # Python — read_skill_python takes .py/.ipynb
+    ".ksh", ".csh", ".tcsh", ".fish",    # shell  — read_skill_shell takes .sh/.bash/.zsh
+    ".cts", ".mts",                      # TS     — read_skill_js takes .js/.ts/.mjs/.cjs
+})
+
+# TIER 2 — "unanalyzed": a language this tool has NO deep analyzer for at all. The file
+# was still read and regex/prose-scanned (proved: a `.rb` carrying a pipe-to-shell from
+# a non-reputable host still FAILs B13), so the Danger verdict over it is a real ring
+# result, not a fabrication — but it never got taint analysis, reachability, or an
+# effect profile, and the Persistence/Connections axes must stop claiming there was "no
+# executable code to analyze" when a Ruby or PowerShell program is sitting in the tree.
+#
+# Disclosure only — NO verdict floor, deliberately. This is a permanent, structural
+# limit of the scanner (there is no PowerShell/Ruby/PHP analyzer to route to), so
+# flooring on it would park 141 of 35,035 real skills (0.402% — 132 of them ordinary
+# `.ps1` installers) at CAUTION forever, with no action the owner could take to clear
+# it. A caveat the user cannot act on and that never changes is noise, not a finding;
+# the honest form is a stated coverage boundary, which is what this produces.
+_UNANALYZED_LANG_EXTS = frozenset({
+    ".ps1", ".psm1",                                  # PowerShell
+    ".bat", ".cmd",                                   # Windows batch
+    ".vbs", ".vbe", ".wsf", ".hta",                   # Windows Script Host
+    ".rb", ".rake", ".gemspec",                       # Ruby
+    ".pl", ".pm",                                     # Perl
+    ".php", ".phtml",                                 # PHP
+    ".pyx",                                           # Cython — ast.parse cannot read it
+    ".lua", ".r", ".jl", ".tcl", ".groovy", ".awk",   # misc interpreters
+    ".applescript", ".scpt",                          # AppleScript
+    ".jsx", ".tsx",                                   # JS-family, see the 0.223% note above
+})
+
+# Human-readable language name per extension, for the disclosure sentence. Naming the
+# LANGUAGE (not just the suffix) is what makes the note actionable: "1 file this scanner
+# does not analyze (PowerShell)" tells the reader what to go read by hand.
+_LANG_BY_EXT: dict[str, str] = {
+    ".pyw": "Python", ".pyi": "Python", ".pyx": "Cython",
+    ".ksh": "shell", ".csh": "shell", ".tcsh": "shell", ".fish": "shell",
+    ".cts": "TypeScript", ".mts": "TypeScript",
+    ".ps1": "PowerShell", ".psm1": "PowerShell",
+    ".bat": "Windows batch", ".cmd": "Windows batch",
+    ".vbs": "VBScript", ".vbe": "VBScript", ".wsf": "Windows Script Host",
+    ".hta": "HTML application",
+    ".rb": "Ruby", ".rake": "Ruby", ".gemspec": "Ruby",
+    ".pl": "Perl", ".pm": "Perl",
+    ".php": "PHP", ".phtml": "PHP",
+    ".lua": "Lua", ".r": "R", ".jl": "Julia", ".tcl": "Tcl",
+    ".groovy": "Groovy", ".awk": "awk",
+    ".applescript": "AppleScript", ".scpt": "AppleScript",
+    ".jsx": "JSX", ".tsx": "TSX",
+}
+
+# How many file names a disclosure sentence names before eliding.
+_GAP_FILES_SHOWN = 3
+
 
 @dataclass
 class AxisResult:
@@ -253,69 +349,155 @@ def _worst(findings: list):
     return max(findings, key=lambda f: _STATUS_RANK.get(f.status, 0))
 
 
-def _danger_coverage_gap(danger_bucket: list, ctx) -> bool:
-    """True iff the Danger axis is UNKNOWN because scanning could not COVER what is
-    there — rather than the benign "there was nothing to scan" UNKNOWN (no code, no MCP
-    servers, a docs-only skill).
+def scan_gap_disclosed(f) -> bool:
+    """True when finding `f` ITSELF discloses that the scan did not cover its target.
 
-    B-092: those two UNKNOWN flavors must not be conflated. "Nothing to scan" is a
-    legitimately clean result and stays excluded from scoring as before. "Could not read
-    / could not finish reading what is there" means real content may exist and was never
-    looked at — so the caller floors the headline instead of letting it read INSTALL.
+    This is the one per-finding coverage-gap test in the codebase. Both consumers call
+    it — this module's `_danger_coverage_gap` (which grades) and `cli.py`'s
+    `_vet_coverage_incomplete` (which decides the ``--vet-all`` row state and tally).
+    They ask different *questions* — "is the Danger axis's verdict complete?" vs "did
+    this sweep row inspect all of its target?" — but the atom underneath is identical,
+    and until B-485 they were two hand-written copies of it that had already drifted:
+    `cli.py`'s docstring claimed to mirror this module while matching only the English
+    substring, so the `engine_degraded` leg added here on 2026-08-14 reached the grade
+    and never reached the sweep tally. A parse-error skill printed "could not assess"
+    and was then counted in "1 safe".
 
-    Three legs, in order. The first two are STRUCTURAL — a flag a producer set, or a
-    counter the collector bumped — and are the primary signal:
+    Two legs, in the order of how much they know:
 
-    1. ``Finding.engine_degraded`` on an UNKNOWN in the bucket. catalog.py defines this
-       field as "the single source of truth for 'this UNKNOWN is engine-side'": the check
-       ran, tried to reach a verdict, and could not for a reason on OUR side (a crash, a
-       budget escape, an input that turned out unreadable/unparseable). That is precisely
-       this predicate's question, already answered by the producer.
-    2. ``ctx.limit_hits`` — collector.py appends to it on every size/file/nesting cap hit
-       and on an unreadable file (``note_limit``), which is how B13's own cap and
-       unreadable-file branches disclose a truncated scan.
-    3. The literal ``"coverage is incomplete"`` phrasing in an UNKNOWN's ``detail``. This
-       is a DOCUMENTED FALLBACK ONLY, kept for hand-built ``Finding`` objects in unit
-       tests that carry neither a real ``ctx`` nor the flag (see
-       ``tests/test_b092_coverage_gap.py``). It must never be the primary: matching
-       English prose means any producer that rewords its detail silently loses the
-       signal, and any producer that never used that wording never had it.
-
-    B-485: leg 1 is new and is what closes the reported route. B13's parse-error branch
-    (checks/_vet.py) already sets ``engine_degraded=True`` on its UNKNOWN — "could not
-    analyze <file> — parse error(s); file(s) not scanned by the AST/taint layer" — but it
-    calls no ``note_limit`` and does not use the phrase leg 3 keys on, so a skill whose
-    bundled script the AST layer could not read rolled all the way up to INSTALL, one
-    line under the Danger axis printing that it never got to look. The same hole covered
-    every future producer of an engine-side UNKNOWN that happens not to hit a collector
-    cap; keying on the flag closes the class, not the one instance.
-
-    Measured FP direction before landing leg 1 (the flip set = targets where this returns
-    True and the pre-B-485 predicate returned False): 0 of 16 real installed skills on
-    BOTH python3.12 and the python3.9 CI floor; 1 of ~1,119 fixture targets, namely
-    ``fixtures/unknown_b347_deaddrop_unparseable`` — the fixture whose name declares it
-    UNKNOWN. No narrower trigger and no WARN-instead-of-floor variant is warranted at
-    that rate, so this floors like the other legs.
-
-    Known residual, NOT closed here (both need a producer change, not a predicate one):
-    a ring check that raises is swallowed by ``_run_content_ring``'s bare ``except``,
-    which emits no finding at all — an empty bucket carries no signal for any predicate
-    to read; and a binary blob excluded from scanning discloses no coverage gap (it
-    reaches the headline only via the separate stowaway WARN).
+    1. ``Finding.engine_degraded`` — catalog.py's single source of truth for "this
+       UNKNOWN is engine-side": the check ran, tried for a verdict, and could not for a
+       reason on OUR side. Structural; survives any rewording.
+    2. The literal ``COVERAGE_GAP_PROSE`` in ``.detail``. A DOCUMENTED FALLBACK for
+       hand-built ``Finding`` objects in unit tests that carry neither a real ctx nor
+       the flag. Never the primary: matching English means a producer that rewords its
+       detail silently loses the signal.
     """
+    if getattr(f, "status", None) != UNKNOWN:
+        return False
+    if getattr(f, "engine_degraded", False):
+        return True
+    return COVERAGE_GAP_PROSE in (getattr(f, "detail", "") or "")
+
+
+def code_coverage_gaps(ctx) -> tuple[list[str], list[str]]:
+    """``(unrouted, unanalyzed)`` — the target's code files the deep layer never read.
+
+    B-485 route 4. ``ctx.file_manifest`` is the collector's own record of every file it
+    collected for this target and what it did with it, so this reads a fact the run
+    already established rather than re-walking the tree (this module does not scan —
+    see the module docstring).
+
+    The split is by whether the miss was a routing gap or a capability limit; see
+    ``_UNROUTED_CODE_EXTS`` / ``_UNANALYZED_LANG_EXTS`` for the measured reasoning and
+    the FP numbers that set each tier's severity. Both lists are sorted so the rendered
+    sentence is deterministic across runs.
+
+    NOT a re-implementation of "was there code?": ``_skill_capabilities`` answers that
+    from ``ctx.installed_skill_py``, which by construction only ever holds ``.py`` —
+    which is exactly why it answered "no executable code to analyze" over a skill whose
+    only script was ``post_install.pyw``. This function is the missing other half of
+    that question, and its result is what stops that sentence being printed as fact.
+    """
+    manifest = getattr(ctx, "file_manifest", None) or {}
+    unrouted: list[str] = []
+    unanalyzed: list[str] = []
+    for relpath in manifest:
+        ext = relpath[relpath.rfind("."):].lower() if "." in relpath else ""
+        if ext in _UNROUTED_CODE_EXTS:
+            unrouted.append(relpath)
+        elif ext in _UNANALYZED_LANG_EXTS:
+            unanalyzed.append(relpath)
+    return (sorted(unrouted), sorted(unanalyzed))
+
+
+def vet_scan_incomplete(f) -> bool:
+    """True when a ``vet_*`` result `f` did not fully inspect its target.
+
+    The consumer-level predicate: `scan_gap_disclosed` over the whole result (the
+    primary finding AND its ``.ring_findings``, since a worse WARN/FAIL can outrank a
+    coverage UNKNOWN into the ring pool — see ``checks/_vet.py``'s ``_VET_MERGE_RANK``),
+    plus the route-4 leg for code the deep layer was never handed.
+
+    Only ``unrouted`` (tier 1) counts here, matching `_danger_coverage_gap`: a target is
+    "partially scanned" for the sweep tally on the same evidence that stops it reading
+    INSTALL, so the narrative row and the dossier verdict can never disagree about
+    whether the same skill was fully covered.
+    """
+    pool = [f, *(getattr(f, "ring_findings", None) or [])]
+    if any(scan_gap_disclosed(fx) for fx in pool):
+        return True
+    unrouted, _unanalyzed = code_coverage_gaps(getattr(f, "ctx", None))
+    return bool(unrouted)
+
+
+def _danger_coverage_gap(danger_bucket: list, ctx) -> bool:
+    """True iff the Danger verdict rests on a scan that could not COVER what is there —
+    rather than on the benign "there was nothing to scan" (no code, no MCP servers, a
+    docs-only skill), which is a legitimately clean result.
+
+    B-092: those two must not be conflated. "Could not read / could not finish reading /
+    was never handed to the analyzer" means real content exists and was not analyzed —
+    so the caller floors the headline instead of letting it read INSTALL.
+
+    Legs, in the order of how much they know:
+
+    0. ``code_coverage_gaps(ctx)[0]`` — a file in a language this tool analyzes that was
+       never routed to the analyzer (B-485 route 4; see `_UNROUTED_CODE_EXTS`). This one
+       is deliberately evaluated FIRST and OUTSIDE the "is the bucket UNKNOWN?" gate
+       below, because it is the only leg that fires while the Danger axis reads **PASS**:
+       the regex/prose ring did read the file and found nothing, so a finding exists and
+       it is a clean one. That was route 4's whole shape — a positive fabricated clean,
+       not a silence. Byte-identical `bad_b13_fetch_to_exec` payload: `.py` →
+       DO-NOT-INSTALL, `.pyw` → INSTALL / rc=0 with "no malware signature" over it,
+       because `read_skill_python` only takes `.py` so the taint chain never ran.
+       Unlike the 2026-08-08 retraction recorded in `checks/_vet.py`'s ring handler —
+       which turned on whether OUR interpreter could parse a file, and so gave opposite
+       verdicts for the same bytes on 3.9 and 3.12 — a file extension is a stable fact
+       about the tree. Same bytes, same verdict, every interpreter.
+    1. ``scan_gap_disclosed`` on an UNKNOWN in the bucket — the producer flagged it
+       engine-side (or, fallback, said so in prose). See that function.
+    2. ``ctx.limit_hits`` — collector.py appends on every size/file/nesting cap hit and
+       on an unreadable file (``note_limit``), which is how B13's own cap and
+       unreadable-file branches disclose a truncated scan.
+
+    Tier 2 (`_UNANALYZED_LANG_EXTS` — a language with no analyzer at all) is NOT a leg
+    here: it is disclosed on the axis reasons and never floors the verdict. The measured
+    reason is on that constant; the short form is that flooring a permanent capability
+    limit would put 0.402% of real skills at CAUTION forever with no remedy available to
+    their owners.
+
+    Measured FP for leg 0 on the 35,035-skill ClawBench corpus of real published skills:
+    **0** (0.000%), and 0 across `fixtures/` + the installed fleet. Measured FP for leg 1
+    when it landed: 0 of 16 real installed skills on both 3.12 and the 3.9 CI floor, and
+    1 of ~1,119 fixture targets (``fixtures/unknown_b347_deaddrop_unparseable``, the
+    fixture whose name declares it UNKNOWN).
+
+    Known residuals, NOT closed here — all three need a producer change, not a predicate
+    one. (a) A ring check that raises is swallowed by ``_run_content_ring``'s bare
+    ``except``, emitting no finding at all; an empty bucket carries no signal any
+    predicate can read. (b) A binary blob excluded from scanning discloses no coverage
+    gap (it reaches the headline only via the separate stowaway WARN). (c) Leg 0
+    DISCLOSES the unrouted file; it does not analyze it. The actual close is widening the
+    three reader filters in ``collector.py`` so `.pyw` reaches `read_skill_python` — that
+    file is owned elsewhere, and until it changes a `.pyw` payload is reported as
+    uncovered, not as detected.
+    """
+    # (0) route 4 — fires even when the bucket's worst finding is a PASS.
+    unrouted, _unanalyzed = code_coverage_gaps(ctx)
+    if unrouted:
+        return True
     if not danger_bucket:
         return False
     unknowns = [f for f in danger_bucket if f.status == UNKNOWN]
     if not unknowns:
         return False
-    # (1) structural, per finding: the producer flagged this UNKNOWN as engine-side.
-    if any(getattr(f, "engine_degraded", False) for f in unknowns):
+    # (1) structural, per finding: the producer flagged this UNKNOWN as engine-side
+    #     (with the documented prose fallback for hand-built test Findings).
+    if any(scan_gap_disclosed(f) for f in unknowns):
         return True
     # (2) structural, per run: the collector recorded a cap hit / unreadable file.
-    if getattr(ctx, "limit_hits", None):
-        return True
-    # (3) documented prose fallback — hand-built Findings with no ctx and no flag.
-    return any("coverage is incomplete" in (f.detail or "") for f in unknowns)
+    return bool(getattr(ctx, "limit_hits", None))
 
 
 def _normalize_pool(engine_output) -> list:
@@ -481,6 +663,11 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
         target_type in ("skill", "plugin") and bool(getattr(ctx, "installed_skills", None))
     )
 
+    # B-485 route 4: code the deep layer was never handed. Read once here; it qualifies
+    # the Danger reason, replaces the "no executable code" sentences, and (tier 1 only)
+    # floors the verdict via `_danger_coverage_gap`.
+    unrouted, unanalyzed = code_coverage_gaps(ctx)
+
     axes: list[AxisResult] = []
     for axis in AXES:
         applicable = applicability.get(axis, True)
@@ -496,8 +683,17 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
             reason, fix = _na_reason(axis, target_type), ""
         elif status == PASS:
             reason, fix = _clean_reason(axis, families), ""
+            if axis == "danger" and (unrouted or unanalyzed):
+                # The ring genuinely looked and found nothing, so the finding is real —
+                # but it did not cover these files as code, and "no malware signature"
+                # alone reads as a completed clean. Qualify it, and for tier 1 stop
+                # calling it a PASS at all: the analyzer for that language exists and
+                # simply was not run, which is the rename-to-blind-the-scanner evasion.
+                reason = f"{reason} — {_gap_phrase(unrouted, unanalyzed)}"
+                if unrouted:
+                    status = UNKNOWN
         elif status == UNKNOWN and not bucket:
-            reason, fix = _unmeasurable_reason(axis), ""
+            reason, fix = _unmeasurable_reason(axis, unrouted, unanalyzed), ""
         else:
             reason, fix = _reason_and_fix(bucket, axis, empty_reason=_clean_reason(axis, families))
         axes.append(AxisResult(axis=axis, status=status, reason=reason, fix=fix, findings=list(bucket)))
@@ -599,7 +795,42 @@ def _clean_reason(axis: str, families: set) -> str:
     return "no issue found"
 
 
-def _unmeasurable_reason(axis: str) -> str:
+def _gap_phrase(unrouted: list, unanalyzed: list) -> str:
+    """Name what the deep-code layer did not read, in one clause.
+
+    Deliberately states BOTH halves of the truth: the files were read and content-ring
+    scanned (they were — `_read_skill_text` concatenates every TEXT file whatever its
+    extension), and they were not analyzed as code. Saying only "not scanned" would be a
+    fresh false statement in the opposite direction, which Golden Rule #4 forbids just as
+    firmly as the claim this replaces.
+    """
+    files = unrouted + unanalyzed
+    langs = sorted({_LANG_BY_EXT.get(p[p.rfind("."):].lower(), "unknown") for p in files})
+    shown = ", ".join(files[:_GAP_FILES_SHOWN])
+    if len(files) > _GAP_FILES_SHOWN:
+        shown += f", +{len(files) - _GAP_FILES_SHOWN} more"
+    return (
+        f"{len(files)} bundled file(s) were text-scanned but NOT analyzed as code "
+        f"({'/'.join(langs)}): {shown}"
+    )
+
+
+def _unmeasurable_reason(axis: str, unrouted: list = (), unanalyzed: list = ()) -> str:
+    """Why an axis could not be measured.
+
+    B-485 route 4: the bare "no executable code to analyze" sentences below are a claim
+    about the ARTIFACT, and they were being printed over skills that ship a working
+    program — because `_skill_capabilities` derives "has code" from
+    ``ctx.installed_skill_py``, which by construction only ever contains ``.py``. A
+    `post_install.pyw`, a `setup.ps1`, an `install.rb`: each produced "no executable code
+    to analyze for staged / persistent behavior" with that code sitting in the tree, and
+    that is a fabricated fact, not a cautious one. When such files exist, state what was
+    actually not done instead. The axis STATUS is unchanged (UNKNOWN either way) — this
+    is the honest reason for an already-honest status, so it costs nothing in the
+    false-positive direction on any target.
+    """
+    if unrouted or unanalyzed:
+        return _gap_phrase(list(unrouted), list(unanalyzed))
     if axis == "connections":
         return "no executable code to analyze for outbound connections"
     if axis == "persistence":
