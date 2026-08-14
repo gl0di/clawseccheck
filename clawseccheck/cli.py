@@ -877,6 +877,36 @@ def _percentile_line(score, ascii_only: bool) -> str:
     return render_percentile(score.score, ascii_only)
 
 
+def _sweep_not_folded_clause(score) -> str:
+    """B-536: the middle clause of the SKILL SWEEP header's "visibility only" sentence.
+
+    The sentence exists to carry ONE fact — a per-skill sweep verdict never moves the
+    audit's own number — and that fact is true whether or not a number exists. So the
+    fact survives in both branches and only the *noun* moves, exactly as
+    `report._degraded_incomplete_clause` moves only its trailing clause.
+
+    What moves, and why: ``the score or grade above`` is deixis, and on a `graded=False`
+    run there is no score and no grade above it to point at (C-423 removed both from
+    every renderer). The reader is sent hunting up the page for a figure this run
+    deliberately refused to print, and the only "score" they find on the way is the
+    tamper posture, which carries its own "not this run's verdict" disclaimer. The
+    ungraded wording therefore states the same mechanism rule without pointing anywhere.
+
+    Deliberately NOT one invariant wording for both branches. A graded run really does
+    print a score and a grade a few lines up, and naming them is what tells that reader
+    *which* number the sweep leaves alone — collapsing to a single pointer-free sentence
+    would trade a false claim on one run shape for a vaguer one on the other, which is
+    the swap this increment is supposed to avoid, not perform.
+
+    `getattr` default matches every other `graded` read in this module (and in
+    `report.py`): a duck-typed ScoreResult stand-in with no `graded` attribute reads as
+    graded, which is `scoring.compute`'s own `ledger=None` contract.
+    """
+    return ("the score or grade above"
+            if getattr(score, "graded", True)
+            else "the audit's score or grade")
+
+
 def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     """F-153: shared by `--full`'s own cap computation and `--dashboard --full`'s —
     the exact same two cap-only signals (F-154 behavioral, F-155 live-injection),
@@ -1998,7 +2028,14 @@ def _main(argv=None) -> int:
     p.add_argument("--trend", action="store_true",
                    help="record this run to history, print trend + percentile, and exit")
     p.add_argument("--percentile", action="store_true",
-                   help="print offline percentile rank for the current score and exit")
+                   # B-536 sibling: "the current score" presupposed every run has one.
+                   # `_percentile_line` has withheld the rank on an ungraded run since
+                   # C-426 ("No rank yet — ... this run has no score"), so the blurb
+                   # promised an output the flag already, correctly, declines to print.
+                   # Additive, not a narrowing: the graded case still says exactly what
+                   # it ranks.
+                   help="print offline percentile rank for this run's score, or say why "
+                        "there is none, and exit")
     p.add_argument("--history", default=None, metavar="PATH",
                    help=f"path for trend history file (default: {DEFAULT_HISTORY})")
     # NOT `--store`, however much better that reads. `--st` was an unambiguous abbreviation
@@ -2079,9 +2116,14 @@ def _main(argv=None) -> int:
                         "B62, dropped taint) as JSON for a host-agent judge to review "
                         "— never changes the grade")
     p.add_argument("--judged", metavar="PATH", dest="judged",
+                   # B-536 sibling: UNCHANGED is the load-bearing word and stays put —
+                   # only the noun moves, because an ungraded run has no grade to leave
+                   # unchanged (its --judged output carries "grade": null) and the
+                   # promise is really that a judge never moves the audit's verdict,
+                   # whatever shape that verdict has.
                    help="feed back a host-agent judge panel's verdicts JSON for a prior "
-                        "--judge-packet; renders the audit's UNCHANGED grade/findings plus "
-                        "an advisory secondOpinion panel — use '-' to read from stdin")
+                        "--judge-packet; renders the audit's UNCHANGED verdict and findings "
+                        "plus an advisory secondOpinion panel — use '-' to read from stdin")
     p.add_argument("--propose-ignore", metavar="PATH", dest="propose_ignore",
                    help="feed back a host-agent judge panel's verdicts JSON for a prior "
                         "--judge-packet; prints PROPOSED (not applied) .clawseccheckignore "
@@ -3642,13 +3684,19 @@ def _main(argv=None) -> int:
                 # decision — it is not something a new section gets to do as a side
                 # effect. The one place the sweep does reach the outside world is
                 # --exit-code, FAIL-only, exactly as the vet-mcp section already does.
+                #
+                # B-536: that "visibility only" fact holds on every run shape, but the
+                # sentence below used to assert it by POINTING ("the score or grade
+                # above"), which is false on an ungraded run — see
+                # `_sweep_not_folded_clause` for why only the noun moves.
                 if not args.fast:
                     _emit("")
                     _emit("=" * 60)
                     _emit("CLAWSECCHECK SKILL SWEEP")
                     _emit("=" * 60)
-                    _emit("Per-skill verdict for every installed skill. Not folded into the "
-                         "score or grade above; per-skill dossier: --vet <path>.")
+                    _emit("Per-skill verdict for every installed skill. Not folded into "
+                          + _sweep_not_folded_clause(score)
+                          + "; per-skill dossier: --vet <path>.")
                     # B-404: reuse the SAME ctx the audit above already collected —
                     # see the matching comment at the --json call site above.
                     sweep = sweep_installed_skills(
