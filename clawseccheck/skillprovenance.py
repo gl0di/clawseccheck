@@ -29,10 +29,14 @@ this module says the two sources differ, and nothing about why.
 
 **Nothing here is a secret**, but nothing here is a path either: the skill NAME goes into
 the snapshot and the on-disk location does not, because a drift baseline reaches the event
-journal and any report a user pastes into an issue.
+journal and any report a user pastes into an issue. That holds for `witness_digest` too —
+it identifies WHICH roots hold a record so a later run can tell "the same records" from "a
+different set", and it does so through `_root_identity`, which names roots under *home* by
+OpenClaw's own fixed directory names and reduces anything else to a digest.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +51,21 @@ WORKSPACE_DIRS = ("workspace-home", "workspace-work", "workspace")
 # fingerprint in a scheduled run, and the cap is disclosed rather than silently applied.
 MAX_SKILLS = 500
 MAX_LOCK_BYTES = 4 * 1024 * 1024
+
+# The fields two records under one NAME must agree on before the consumer may treat them as
+# one subject. The rule is not a matter of taste: **it must equal the union of the fields
+# the consumer's guarded comparisons read**, or a comparison ends up gated on a flag that
+# never looked at the field it is about to render a verdict on. That is exactly how
+# `corroborated` came to be missing here — two workspaces holding byte-identical lock
+# records but disagreeing `origin.json` files produced `ambiguous=False`, and
+# `monitor.diff_with_notes` then raised "the two install records no longer agree" about
+# whichever record first-wins happened to pick.
+#
+# `installed_at` is deliberately OUT, for the reason `_corroborate` gives: it is written by
+# two separate writes, and a benign millisecond turning into "your workspaces disagree"
+# would manufacture silence out of clock noise. `registry` is OUT because no comparison in
+# the consumer renders a verdict on it, so including it would only widen the stand-down.
+CONFLICT_FIELDS = ("version", "artifact_sha256", "skill_file_sha256", "corroborated")
 
 
 @dataclass
@@ -66,10 +85,25 @@ class SkillOrigin:
     # before origin.json existed as though its records conflicted.
     corroborated: "bool | None" = None
     # True when more than one workspace holds an install record under this NAME and they
-    # do not agree. Which one the agent actually loads is not something this tool can
-    # determine, so the consumer must not compare the chosen record's digests across runs
-    # — see the suppression in monitor.diff_with_notes.
+    # do not agree on CONFLICT_FIELDS. Which one the agent actually loads is not something
+    # this tool can determine, so the consumer must not compare the chosen record's digests
+    # across runs — see the stand-down in monitor.diff_with_notes.
     ambiguous: bool = False
+    # How many workspace roots held a record under this name. For WORDING only: the
+    # consumer says "3 records found" rather than a bare "more than one".
+    n_records: int = 1
+    # Which roots those were, as a digest — IDENTITY, never content. This is the field that
+    # decides whether an ambiguous record may still be compared across runs. `ambiguous`
+    # alone cannot: it is a bool, and two runs both reporting True does NOT prove they are
+    # about the same winning record (one root can be added while another is removed). An
+    # unchanged witness digest does prove it, because first-wins picks by root order — so a
+    # skill that stays ambiguous with a stable record set still gets its content compared,
+    # instead of an attacker buying permanent silence for the cost of one extra file.
+    witness_digest: str = ""
+
+    def conflict_tuple(self) -> tuple:
+        """What two records under one name must agree on to be one subject."""
+        return tuple(getattr(self, field) for field in CONFLICT_FIELDS)
 
     def as_dimension(self) -> dict:
         return {
@@ -80,6 +114,8 @@ class SkillOrigin:
             "skill_file_sha256": self.skill_file_sha256,
             "corroborated": self.corroborated,
             "ambiguous": self.ambiguous,
+            "n_records": self.n_records,
+            "witness_digest": self.witness_digest,
         }
 
 
@@ -134,6 +170,31 @@ def _int_or_zero(value) -> int:
     """`installedAt` as an int. Excludes bool, which is an int in Python and would let a
     corrupted `true` compare as 1 against a real epoch."""
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _root_identity(home: Path, root: Path) -> str:
+    """A stable, location-free name for one workspace root.
+
+    Roots under *home* are named by their relative path — those are OpenClaw's own fixed
+    directory names (`workspace`, `workspace-home`, …), already public constants in this
+    module, and they carry nothing personal. A root declared elsewhere in the config is
+    reduced to a short digest instead of its path, because the identity list below feeds a
+    field that reaches the drift baseline, the event journal and any report a user pastes
+    into an issue — and an install location does not belong in any of them.
+    """
+    try:
+        return root.resolve().relative_to(home.resolve()).as_posix() or "."
+    except (OSError, ValueError, RuntimeError):
+        return "x" + hashlib.sha256(str(root).encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _witness_digest(identities: "list[str]") -> str:
+    """Digest of the ORDERED root identities that held a record under one name.
+
+    Ordered, because first-wins picks by root order: the same roots in a different order
+    can elect a different record, and that must read as a changed witness set.
+    """
+    return hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest()
 
 
 def workspace_roots(home: Path, config: "dict | None" = None) -> "list[Path]":
@@ -197,6 +258,8 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
     home = Path(home).expanduser()
     notes: list[str] = []
     skills: dict = {}
+    # name -> the ordered root identities that held a record under it, winner first.
+    witnesses: dict = {}
     present = False
     capped = False
 
@@ -212,7 +275,30 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
         for name, rec in sorted(records.items()):
             if not isinstance(name, str) or not isinstance(rec, dict):
                 continue
-            if name in skills:
+            if name not in skills and len(skills) >= max_skills:
+                capped = True
+                break
+            artifact, skill_file = _digest_pair(rec)
+            version = rec.get("version")
+            registry = rec.get("registry")
+            entry = SkillOrigin(
+                name=name,
+                version=version if isinstance(version, str) else "",
+                installed_at=_int_or_zero(rec.get("installedAt")),
+                registry=registry if isinstance(registry, str) else "",
+                artifact_sha256=artifact,
+                skill_file_sha256=skill_file,
+                # Built for the rival too, not just the winner. Corroboration is one of the
+                # CONFLICT_FIELDS, so establishing it costs one bounded read per DUPLICATE
+                # record — and skipping it is what let two workspaces with identical locks
+                # and disagreeing origin.json files pass as one unambiguous subject.
+                corroborated=_corroborate(root, name, rec),
+            )
+            witnesses.setdefault(name, []).append(_root_identity(home, root))
+            won = skills.get(name)
+            if won is None:
+                skills[name] = entry
+            elif won.conflict_tuple() != entry.conflict_tuple():
                 # FIRST root wins — but winning is not enough on its own, and the first
                 # attempt at this fix stopped there and was broken again by the next pass.
                 #
@@ -231,29 +317,15 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
                 # the conflict is recorded rather than resolved, and the consumer stands
                 # down from the digest comparison for that skill instead of comparing a
                 # record it picked arbitrarily.
-                won = skills[name]
-                rival_artifact, rival_skill_file = _digest_pair(rec)
-                rival_version = rec.get("version")
-                if (won.version, won.artifact_sha256, won.skill_file_sha256) != (
-                        rival_version if isinstance(rival_version, str) else "",
-                        rival_artifact, rival_skill_file):
-                    won.ambiguous = True
-                continue
-            if len(skills) >= max_skills:
-                capped = True
-                break
-            artifact, skill_file = _digest_pair(rec)
-            version = rec.get("version")
-            registry = rec.get("registry")
-            skills[name] = SkillOrigin(
-                name=name,
-                version=version if isinstance(version, str) else "",
-                installed_at=_int_or_zero(rec.get("installedAt")),
-                registry=registry if isinstance(registry, str) else "",
-                artifact_sha256=artifact,
-                skill_file_sha256=skill_file,
-                corroborated=_corroborate(root, name, rec),
-            )
+                #
+                # What "different" means is CONFLICT_FIELDS, built through the same
+                # `SkillOrigin` on both sides so the winner and the rival can never be
+                # compared on different fields.
+                won.ambiguous = True
+    for name, origin in skills.items():
+        ids = witnesses.get(name) or []
+        origin.n_records = len(ids)
+        origin.witness_digest = _witness_digest(ids)
     if capped:
         notes.append("more installed skills than this run records")
     return ProvenanceScan(present=present, skills=skills, capped=capped,

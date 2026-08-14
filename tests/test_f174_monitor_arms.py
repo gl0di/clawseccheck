@@ -20,17 +20,46 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
+import json
+
 from clawseccheck.monitor import (
     NOTE_INSPECTION_CAPPED,
     NOTE_UNDETERMINED,
     WATCHED_DIMENSIONS,
     _SHRINKABLE_DIMENSIONS,
+    changed_skills,
     diff_with_notes,
 )
 from clawseccheck.openclawdist import compare_versions
+from clawseccheck.skillprovenance import read_provenance
 
 _CODE_A, _CODE_B = "a" * 64, "b" * 64
 _ART_A, _ART_B = "c" * 64, "d" * 64
+_ART_C = "e" * 64
+_SKF = "s" * 64
+
+
+def _ws(root, *, name="clawseccheck", version="3.61.0", artifact=_ART_A, skill_file=_SKF):
+    """One workspace's ClawHub lock file, in the real on-disk shape."""
+    (root / ".clawhub").mkdir(parents=True, exist_ok=True)
+    (root / ".clawhub" / "lock.json").write_text(json.dumps({
+        "version": 1, "skills": {name: {
+            "version": version, "installedAt": 1, "registry": "https://clawhub.ai",
+            "artifact": {"sha256": artifact}, "skillFile": {"sha256": skill_file}}}}),
+        encoding="utf-8")
+    return root
+
+
+def _origin(root, *, name="clawseccheck", version="3.61.0", artifact=_ART_A,
+            skill_file=_SKF):
+    """The second witness the installer writes beside the skill itself."""
+    d = root / "skills" / name / ".clawhub"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "origin.json").write_text(json.dumps({
+        "slug": name, "installedVersion": version, "installedAt": 1,
+        "artifact": {"sha256": artifact}, "skillFile": {"sha256": skill_file}}),
+        encoding="utf-8")
+    return root
 
 
 def _inst(version="2026.7.1-2", code=_CODE_A, lock="l" * 64, capped=False) -> dict:
@@ -285,28 +314,23 @@ def test_a_genuinely_damaged_record_still_gets_the_damaged_wording():
 
 
 def test_adding_a_workspace_to_the_config_does_not_report_a_replaced_skill(tmp_path):
-    """D1, the BLOCKER, reproduced end-to-end through the real reader.
+    """D1, the BLOCKER, reproduced end-to-end through the real reader — and REPRO 1 of the
+    follow-up, which is the same config edit reaching the arm one line above.
 
-    Two workspaces each hold a skill of the same NAME with different artifact digests.
-    With last-wins merging, merely adding `agents.list[].workspace` to openclaw.json
-    changed which record won and the diff read the swap as a content replacement — a false
-    HIGH supply-chain alert from an ordinary config edit, and the same flip in reverse the
-    moment a blind run dropped the config root again."""
-    import json as _json
+    Two workspaces each hold a skill of the same NAME with a different version AND a
+    different artifact digest. With last-wins merging, merely adding
+    `agents.list[].workspace` to openclaw.json changed which record won and the diff read
+    the swap as a content replacement — a false HIGH supply-chain alert from an ordinary
+    config edit, and the same flip in reverse the moment a blind run dropped the config
+    root again.
 
-    from clawseccheck.skillprovenance import read_provenance
-
-    def _ws(root, digest):
-        (root / ".clawhub").mkdir(parents=True, exist_ok=True)
-        (root / ".clawhub" / "lock.json").write_text(_json.dumps({
-            "version": 1, "skills": {"clawseccheck": {
-                "version": "3.61.0", "installedAt": 1, "registry": "r",
-                "artifact": {"sha256": digest}, "skillFile": {"sha256": "s" * 64}}}}),
-            encoding="utf-8")
-
-    _ws(tmp_path / "workspace", _ART_A)
+    The version difference is what this test grew: `ambiguous` gated the HIGH arm only, so
+    the very same edit still produced "The skill 'clawseccheck' was updated, from 3.61.0 to
+    9.9.9" from the INFO arm — a claim about a record this run could not identify, printed
+    beside the note saying so."""
+    _ws(tmp_path / "workspace", version="3.61.0", artifact=_ART_A)
     other = tmp_path / "second"
-    _ws(other, _ART_B)
+    _ws(other, version="9.9.9", artifact=_ART_B)
 
     without = read_provenance(tmp_path, None).as_dimension()
     with_cfg = read_provenance(
@@ -314,6 +338,7 @@ def test_adding_a_workspace_to_the_config_does_not_report_a_replaced_skill(tmp_p
     assert without["clawseccheck"]["artifact_sha256"] == \
         with_cfg["clawseccheck"]["artifact_sha256"], \
         "the winning record must not depend on the config"
+    assert without["clawseccheck"]["version"] == with_cfg["clawseccheck"]["version"]
     # The one field that DOES move is `ambiguous`, and it should: a second, disagreeing
     # source really did appear. That is disclosed as a note, never as a supply-chain alert.
     assert with_cfg["clawseccheck"]["ambiguous"] is True
@@ -321,6 +346,7 @@ def test_adding_a_workspace_to_the_config_does_not_report_a_replaced_skill(tmp_p
     alerts, notes = diff_with_notes(_snap(skill_provenance=without),
                                     _snap(skill_provenance=with_cfg))
     assert alerts == [], f"a config edit produced {alerts}"
+    assert not any("was updated, from" in m for _, m in alerts)
     assert any("more than one of your workspaces" in m.lower() for _, m in notes)
 
 
@@ -365,12 +391,22 @@ def test_a_skill_recorded_in_two_disagreeing_workspaces_is_not_compared():
     """The remaining half of D1. Sorting the config roots makes the winner stable but not
     correct: when two workspaces hold different records under one name, which one the agent
     loads is not something this tool can determine. So the conflict is disclosed and the
-    digest comparison stands down, rather than a picked-at-random record being compared."""
+    digest comparison stands down, rather than a picked-at-random record being compared.
+
+    `corroborated` moves here too, which is what this test grew: the MEDIUM arm was outside
+    the guard, so the same undeterminable record produced "The two install records for the
+    skill 'clawseccheck' no longer agree with each other. They are written together by the
+    installer, so one changing alone is not something an ordinary update produces" — an
+    accusation, about a record this run could not identify."""
     ambiguous = {"clawseccheck": {**_prov()["clawseccheck"], "ambiguous": True,
-                                  "artifact_sha256": _ART_B}}
+                                  "artifact_sha256": _ART_B, "corroborated": False}}
     alerts, notes = diff_with_notes(_snap(), _snap(skill_provenance=ambiguous))
     assert not any("replaced with different content" in m for _, m in alerts)
+    assert not any("no longer agree" in m for _, m in alerts)
+    assert alerts == []
     assert any("more than one of your workspaces" in m.lower() for _, m in notes)
+    # The accusation must not reappear in the note that replaces it.
+    assert not any("ordinary update" in m for _, m in notes)
 
 
 def test_a_swapped_build_needs_both_versions_recorded_and_equal():
@@ -424,3 +460,226 @@ def test_a_junk_record_on_either_side_is_skipped_rather_than_compared():
     alerts, _ = diff_with_notes(_snap(skill_provenance={"clawseccheck": "junk"}),
                                 _snap())
     assert alerts == []
+
+
+# ============================================ the stand-down: what it covers, and what it
+# ============================================ must never buy an attacker
+
+def test_repro_2_two_workspaces_agreeing_on_the_lock_and_not_on_origin(tmp_path):
+    """REPRO 2, end-to-end through the real reader.
+
+    Both workspaces hold a BYTE-IDENTICAL lock record; only the skills' own `origin.json`
+    files disagree. The old conflict tuple was `(version, artifact, skillFile)`, so this
+    came out `ambiguous: False` — an undeterminable winner passed off as a settled one —
+    and the MEDIUM arm then accused the user's setup on the strength of whichever record
+    first-wins happened to pick.
+
+    The rule the widened tuple encodes: it must cover every field the guarded comparisons
+    read. `corroborated` is one of them, so it belongs in the tuple.
+
+    Built as the grounding built it — the added workspace WINS. Config roots are searched
+    in sorted order, so declaring `alpha` in run 2 puts it ahead of the `zeta` that run 1
+    compared, and the corroboration the MEDIUM arm reads is suddenly a different record's.
+    That flip is invisible in the lock files, which are byte-identical, which is exactly
+    why the tuple had to grow rather than the arm being told to look harder."""
+    zeta, alpha = tmp_path / "zeta", tmp_path / "alpha"
+    _ws(zeta), _origin(zeta)                             # agrees      -> corroborated True
+    _ws(alpha), _origin(alpha, artifact=_ART_B)          # disagrees   -> corroborated False
+    assert sorted((str(alpha), str(zeta)))[0] == str(alpha), "alpha must win the sort"
+
+    def _read(*roots):
+        return read_provenance(tmp_path, {"agents": {"list": [
+            {"workspace": str(r)} for r in roots]}}).as_dimension()
+
+    before, after = _read(zeta), _read(alpha, zeta)
+    assert before["clawseccheck"]["corroborated"] is True
+    assert after["clawseccheck"]["corroborated"] is False, (
+        "the record the MEDIUM arm reads really did change under it — that is the repro")
+    assert after["clawseccheck"]["artifact_sha256"] == \
+        before["clawseccheck"]["artifact_sha256"], "the lock files are identical"
+    assert after["clawseccheck"]["ambiguous"] is True, (
+        "identical locks with disagreeing origin files are still two records this check "
+        "cannot choose between — the pre-fix tuple said False here")
+
+    alerts, notes = diff_with_notes(_snap(skill_provenance=before),
+                                    _snap(skill_provenance=after))
+    assert not any("no longer agree with each other" in m for _, m in alerts)
+    assert alerts == []
+    assert any("more than one of your workspaces" in m.lower() for _, m in notes)
+
+
+def test_a_stable_witness_set_still_gets_its_content_compared(tmp_path):
+    """THE FN GUARD, and the reason this change is not just a wider suppression.
+
+    A skill that is ambiguous at the baseline and STILL ambiguous now, over an unchanged
+    set of records, has a provably stable winner: first-wins picks by root order, and the
+    roots did not move. So a genuine same-version content swap in that winning record is a
+    real event and must still be reported at full severity.
+
+    Suppressing on the `ambiguous` bool alone made this case silent — no alert, no note,
+    not even queued for re-vet — which is a silence an attacker buys for the cost of one
+    extra file in a second workspace. This test fails on the code before this change."""
+    ws, other = tmp_path / "workspace", tmp_path / "second"
+    _ws(ws, artifact=_ART_A)
+    _ws(other, artifact=_ART_C)          # a standing disagreement, in both runs
+    cfg = {"agents": {"list": [{"workspace": str(other)}]}}
+    before = read_provenance(tmp_path, cfg).as_dimension()
+
+    _ws(ws, artifact=_ART_B)             # the winner's content is swapped, version pinned
+    after = read_provenance(tmp_path, cfg).as_dimension()
+
+    assert before["clawseccheck"]["ambiguous"] is True
+    assert after["clawseccheck"]["ambiguous"] is True
+    assert before["clawseccheck"]["witness_digest"] == \
+        after["clawseccheck"]["witness_digest"], "the record set did not move"
+
+    alerts, _ = diff_with_notes(_snap(skill_provenance=before),
+                                _snap(skill_provenance=after))
+    assert [lvl for lvl, _ in alerts] == ["HIGH"], alerts
+    assert "replaced with different content" in _msgs(alerts)
+    # And it reaches the re-vet queue too: the tier that acts on the change, not just the
+    # one that prints it.
+    assert changed_skills({"skill_provenance": before},
+                          {"skill_provenance": after}) == ["clawseccheck"]
+
+
+def test_a_witness_set_that_moved_stands_down_because_the_winner_may_have_flipped(tmp_path):
+    """The other half of the same predicate. Same two runs, except the second workspace is
+    REMOVED between them — so the record this run compares may not be the record the last
+    run recorded, and the digest difference proves nothing."""
+    ws, other = tmp_path / "workspace", tmp_path / "second"
+    _ws(ws, artifact=_ART_A)
+    _ws(other, artifact=_ART_C)
+    before = read_provenance(
+        tmp_path, {"agents": {"list": [{"workspace": str(other)}]}}).as_dimension()
+    _ws(ws, artifact=_ART_B)
+    after = read_provenance(tmp_path, None).as_dimension()
+
+    assert before["clawseccheck"]["ambiguous"] is True
+    assert after["clawseccheck"]["ambiguous"] is False
+    assert before["clawseccheck"]["witness_digest"] != \
+        after["clawseccheck"]["witness_digest"]
+
+    alerts, notes = diff_with_notes(_snap(skill_provenance=before),
+                                    _snap(skill_provenance=after))
+    assert alerts == []
+    mine = [m for c, m in notes if c == NOTE_UNDETERMINED and "clawseccheck" in m]
+    assert len(mine) == 1, notes
+    assert "cannot confirm it is looking at the same one" in mine[0]
+    assert "was not compared" in mine[0]
+    assert "(2 records found)" in mine[0], "the count comes off whichever side saw them"
+
+
+def test_every_stand_down_is_disclosed_and_none_of_them_accuses():
+    """B-269's rule, and the requirement this change was written under: a comparison that
+    stands down must SAY SO. A silenced branch with no note is a bare all-clear printed
+    over ground nobody looked at.
+
+    The second half matters as much: the sentence states what was observed and stops. "Two
+    of your workspaces hold different records for this skill, so its content was not
+    compared" is a fact; "the records no longer agree, which an ordinary update does not
+    produce" is a verdict, and printing it about an undeterminable record would accuse a
+    user of an attack for editing their config."""
+    base = _prov()["clawseccheck"]
+    cases = {
+        "newly ambiguous": ({**base}, {**base, "ambiguous": True,
+                                       "artifact_sha256": _ART_B}),
+        "ambiguity resolved": ({**base, "ambiguous": True}, {**base,
+                                                             "artifact_sha256": _ART_B}),
+        "witness set moved": ({**base, "ambiguous": True, "n_records": 2,
+                               "witness_digest": "w" * 64},
+                              {**base, "ambiguous": True, "n_records": 3,
+                               "witness_digest": "v" * 64, "version": "9.9.9"}),
+        "baseline predates the witness digest": (
+            {**base, "ambiguous": True},
+            {**base, "ambiguous": True, "n_records": 2, "witness_digest": "w" * 64,
+             "corroborated": False}),
+    }
+    for label, (before, after) in cases.items():
+        alerts, notes = diff_with_notes(_snap(skill_provenance={"clawseccheck": before}),
+                                        _snap(skill_provenance={"clawseccheck": after}))
+        assert alerts == [], f"{label}: stood down but still alerted with {alerts}"
+        mine = [m for c, m in notes if c == NOTE_UNDETERMINED and "clawseccheck" in m]
+        assert len(mine) == 1, f"{label}: silenced with notes {notes}"
+        assert "was not compared" in mine[0], f"{label}: {mine[0]}"
+        for accusation in ("no longer agree", "ordinary update", "replaced with",
+                           "was updated, from"):
+            assert accusation not in mine[0], f"{label} accuses: {mine[0]}"
+    assert "(3 records found)" in " ".join(
+        m for _, m in diff_with_notes(
+            _snap(skill_provenance={"clawseccheck": cases["witness set moved"][0]}),
+            _snap(skill_provenance={"clawseccheck": cases["witness set moved"][1]}))[1])
+
+
+def test_a_real_change_on_an_unambiguous_skill_still_alerts_at_full_severity(tmp_path):
+    """THE FN DIRECTION, for all three arms, end-to-end on the ordinary shape: ONE
+    workspace, one install record, nothing undeterminable anywhere.
+
+    Every line of this change makes an alert quieter somewhere, so the thing to prove is
+    that the ordinary case — the one every real machine is in, and the one where 100% of
+    the real fleet's skills sit — did not get quieter with it."""
+    ws = tmp_path / "workspace"
+
+    # (1) INFO — the version moved.
+    _ws(ws, version="1.0.0", artifact=_ART_A)
+    _origin(ws, version="1.0.0", artifact=_ART_A)
+    before = read_provenance(tmp_path).as_dimension()
+    assert before["clawseccheck"]["ambiguous"] is False
+    assert before["clawseccheck"]["n_records"] == 1
+    _ws(ws, version="2.0.0", artifact=_ART_B)
+    _origin(ws, version="2.0.0", artifact=_ART_B)
+    alerts, _ = diff_with_notes(_snap(skill_provenance=before),
+                                _snap(skill_provenance=read_provenance(
+                                    tmp_path).as_dimension()))
+    assert [lvl for lvl, _ in alerts] == ["INFO"], alerts
+    assert "was updated, from 1.0.0 to 2.0.0" in _msgs(alerts)
+
+    # (2) HIGH — the content moved under a pinned version.
+    _ws(ws, version="2.0.0", artifact=_ART_B)
+    _origin(ws, version="2.0.0", artifact=_ART_B)
+    before = read_provenance(tmp_path).as_dimension()
+    _ws(ws, version="2.0.0", artifact=_ART_C)
+    _origin(ws, version="2.0.0", artifact=_ART_C)
+    alerts, _ = diff_with_notes(_snap(skill_provenance=before),
+                                _snap(skill_provenance=read_provenance(
+                                    tmp_path).as_dimension()))
+    assert [lvl for lvl, _ in alerts] == ["HIGH"], alerts
+    assert "replaced with different content" in _msgs(alerts)
+
+    # (3) MEDIUM — the two witnesses fell out of step.
+    before = read_provenance(tmp_path).as_dimension()
+    assert before["clawseccheck"]["corroborated"] is True
+    _origin(ws, version="2.0.0", artifact=_ART_A)      # origin.json alone moves
+    after = read_provenance(tmp_path).as_dimension()
+    assert after["clawseccheck"]["corroborated"] is False
+    assert after["clawseccheck"]["ambiguous"] is False, "one workspace is never a conflict"
+    alerts, _ = diff_with_notes(_snap(skill_provenance=before),
+                                _snap(skill_provenance=after))
+    assert [lvl for lvl, _ in alerts] == ["MEDIUM"], alerts
+    assert "no longer agree with each other" in _msgs(alerts)
+
+
+def test_the_conflict_tuple_covers_every_field_the_guarded_arms_read():
+    """The invariant repro 2 is an instance of: a comparison gated on `ambiguous` must not
+    read a field that `ambiguous` never looked at. Mechanized rather than remembered,
+    because the next arm added here will be written by someone who never saw repro 2."""
+    import inspect
+    import re
+
+    from clawseccheck.skillprovenance import CONFLICT_FIELDS
+
+    src = inspect.getsource(diff_with_notes)
+    block = src[src.index("# ---- F-174: where each installed skill came from"):
+                src.index("# ---- F-170:")]
+    read = set(re.findall(r'_[ab]\.get\("([a-z_0-9]+)"', block))
+    assert read, "the field scan matched nothing — the arms or their names moved"
+    # `ambiguous` / `n_records` / `witness_digest` are the stand-down machinery itself, not
+    # subjects of a verdict.
+    verdict_fields = read - {"ambiguous", "n_records", "witness_digest"}
+    assert verdict_fields <= set(CONFLICT_FIELDS), (
+        f"{sorted(verdict_fields - set(CONFLICT_FIELDS))} is read by a guarded arm but is "
+        f"not in CONFLICT_FIELDS, so two records differing only in it would be compared as "
+        f"one subject — exactly repro 2")
+    # The tuple may be WIDER than what is read today; that direction only ever stands more
+    # comparisons down. Pinned so the slack stays deliberate and named.
+    assert set(CONFLICT_FIELDS) - verdict_fields == {"skill_file_sha256"}

@@ -2062,6 +2062,70 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     return snap
 
 
+def _prov_comparable(a: dict, b: dict) -> bool:
+    """May these two install records for one skill be compared as the same subject?
+
+    Yes when neither run found a conflict: one workspace held the record, or several held
+    records that agreed, and there is nothing to be undetermined about.
+
+    When either run DID find a conflict, `ambiguous` alone cannot answer it. It is a bool,
+    and True on both sides does not prove the two runs are talking about the same winning
+    record — one workspace can be added while another is removed, and first-wins would
+    elect a different one with the flag never moving. What does prove it is the WITNESS
+    SET: the ordered roots that held a record under this name (`witness_digest`). Unchanged
+    witnesses ⇒ first-wins picked the same record ⇒ comparing its content across the two
+    runs is sound, ambiguity or not.
+
+    That distinction is the whole point. Suppressing on the flag alone shipped a silence an
+    attacker could buy for the cost of one extra file: a skill left permanently ambiguous
+    then had a genuine same-version content swap in its winning record produce no alert, no
+    note and no re-vet. Standing down on a MOVED witness set keeps the false alarm this
+    guard exists for (an ordinary config edit adding a workspace) while keeping the alarm
+    that matters.
+
+    A record with no `witness_digest` — an old baseline, written before this field — cannot
+    prove stability, so an ambiguous one stands down. Conservative and disclosed, never
+    silent: every caller of this that gets False owes the reader a sentence.
+    """
+    if not a.get("ambiguous") and not b.get("ambiguous"):
+        return True
+    wa, wb = a.get("witness_digest"), b.get("witness_digest")
+    return isinstance(wa, str) and bool(wa) and wa == wb
+
+
+def _prov_records_seen(rec: dict) -> "int | None":
+    """How many workspace roots this run found records in, when that is worth saying."""
+    n = rec.get("n_records")
+    return n if isinstance(n, int) and not isinstance(n, bool) and n >= 2 else None
+
+
+def _prov_not_compared(name: str, a: dict, b: dict) -> str:
+    """The sentence a stood-down skill comparison owes the reader (C-418 channel).
+
+    States a fact and never an accusation. "Two of your workspaces hold different records
+    for this skill, so its content was not compared" is something this run observed; "the
+    records no longer agree, which an ordinary update does not produce" is a verdict, and
+    printing it when the cause is undeterminable ambiguity would accuse a user of an attack
+    for editing their config. The loud sentence stays where it is earned — on the MEDIUM
+    alert, which only fires when the comparison was actually made.
+    """
+    seen = _prov_records_seen(b) or _prov_records_seen(a)
+    count = f" ({seen} records found)" if seen else ""
+    if b.get("ambiguous"):
+        return (f"More than one of your workspaces holds an install record for the skill "
+                f"'{name}'{count}, and they do not match. Which one your agent loads is "
+                f"not something this check can determine, so its install record was not "
+                f"compared with your last run.")
+    # Reached when the CONFLICT is on the baseline's side. "The record set moved" is the
+    # likely cause but not a fact this run established — a baseline written before the
+    # witness digest existed lands here too — so the sentence claims only what is certain:
+    # there was more than one record, and this run cannot show it is looking at the same
+    # one. Overclaiming here would be the same fault as the accusation it replaces.
+    return (f"More than one of your workspaces held an install record for the skill "
+            f"'{name}'{count} when your last check ran, and this run cannot confirm it is "
+            f"looking at the same one, so its install record was not compared.")
+
+
 def changed_skills(prev: "dict | None", curr: "dict | None") -> "list[str]":
     """F-175 tier 3: which skills' install records MOVED between two stored snapshots.
 
@@ -2076,9 +2140,11 @@ def changed_skills(prev: "dict | None", curr: "dict | None") -> "list[str]":
 
     Three deliberate exclusions:
 
-    * **Ambiguous records.** When two workspaces disagree under one name we cannot tell
-      which the agent loads, so there is nothing to re-vet with confidence — see
-      `skillprovenance.SkillOrigin.ambiguous`.
+    * **Records that cannot be matched up**, per `_prov_comparable`: a newly ambiguous
+      skill, or one whose witness set moved between the runs, has no determinable winner to
+      re-vet. A skill that is merely STILL ambiguous over an unchanged witness set is not
+      excluded — first-wins picked the same record both times, so a change in it is a real
+      change and re-vetting it is exactly right.
     * **A missing dimension on either side**, via `_both_dims`. A first run after this
       release, or a run that found no install records, has nothing to compare and must not
       re-vet the whole estate as though everything had just changed.
@@ -2092,11 +2158,14 @@ def changed_skills(prev: "dict | None", curr: "dict | None") -> "list[str]":
     before, after = pair
     out: list[str] = []
     for name, rec in sorted(after.items()):
-        if not isinstance(rec, dict) or rec.get("ambiguous"):
+        if not isinstance(rec, dict):
             continue
         old = before.get(name)
         if not isinstance(old, dict):
-            out.append(name)          # newly installed — exactly a thing to vet
+            if not rec.get("ambiguous"):
+                out.append(name)      # newly installed — exactly a thing to vet
+            continue
+        if not _prov_comparable(old, rec):
             continue
         if (old.get("version"), old.get("artifact_sha256")) != (
                 rec.get("version"), rec.get("artifact_sha256")):
@@ -3368,6 +3437,20 @@ def diff_with_notes(prev: dict | None, curr: dict
             _a, _b = _pp.get(name), _cp.get(name)
             if not isinstance(_a, dict) or not isinstance(_b, dict):
                 continue
+            # ONE gate for all three comparisons below, and a sentence whenever it closes.
+            #
+            # It used to guard the middle one only, so a config edit that added a second
+            # workspace produced "The skill 'demo' was updated, from 1.0.0 to 2.0.0" from
+            # the arm above it and "the two install records no longer agree with each
+            # other" from the arm below — two claims about a skill whose record this run
+            # could not even identify, one of them an accusation. A branch that stands down
+            # must say so rather than fall silent: an unexplained silence is the B-269
+            # failure this project has already paid for twice, and here it is also how an
+            # attacker would learn that manufacturing ambiguity costs one file and buys
+            # quiet.
+            if not _prov_comparable(_a, _b):
+                note(NOTE_UNDETERMINED, _prov_not_compared(name, _a, _b))
+                continue
             _av, _bv = _a.get("version", ""), _b.get("version", "")
             _ad, _bd = _a.get("artifact_sha256", ""), _b.get("artifact_sha256", "")
             if _av and _bv and _av != _bv:
@@ -3375,8 +3458,7 @@ def diff_with_notes(prev: dict | None, curr: dict
                     "INFO",
                     f"The skill '{name}' was updated, from {_av} to {_bv}. Run "
                     f"--vet-skill on it if you did not expect that."))
-            elif (_av and _bv and _av == _bv and _ad and _bd and _ad != _bd
-                    and not _a.get("ambiguous") and not _b.get("ambiguous")):
+            elif _av and _bv and _av == _bv and _ad and _bd and _ad != _bd:
                 # Same version, different artifact: the version is the publisher's to
                 # choose and the digest is not, so this is the stronger of the two signals
                 # even though it is the quieter-looking one.
@@ -3393,13 +3475,9 @@ def diff_with_notes(prev: dict | None, curr: dict
             # Corroboration is reported only on the TRANSITION into disagreement. A skill
             # whose two records already disagreed when the baseline was taken would
             # otherwise re-alert on every run forever, which is how a warning becomes
-            # something the reader learns to skip.
-            if _b.get("ambiguous") and not _a.get("ambiguous"):
-                note(NOTE_UNDETERMINED,
-                     f"More than one of your workspaces holds an install record for the "
-                     f"skill '{name}', and they disagree. Which one your agent loads is "
-                     f"not something this check can determine, so its content was not "
-                     f"compared.")
+            # something the reader learns to skip. (The stand-down NOTE above is the
+            # opposite case and repeats deliberately: it discloses a comparison this run
+            # declined, which stays true for as long as it stays undeterminable.)
             if _b.get("corroborated") is False and _a.get("corroborated") is not False:
                 alerts.append((
                     "MEDIUM",
