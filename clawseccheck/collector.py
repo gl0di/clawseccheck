@@ -788,6 +788,99 @@ def _looks_like_utf16(chunk: bytes) -> bool:
            (even_nul / half >= 0.9 and odd_nul / half <= 0.1)
 
 
+def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
+    """Decode bytes the way the scanner must read them: (text, encoding-used).
+
+    Both are None when no rung fits. The encoding name is returned because the rungs are
+    not equally trustworthy — see the latin-1 branch — and the manifest claim in
+    `collect_skill_files` has to say which one carried the file.
+
+    The single decode ladder — UTF-8, then BOM/shape-confirmed UTF-16, then a legacy
+    single-byte reading — shared by the classifier and by every reader that feeds the
+    content ring.
+
+    B-538: it used to live inside `classify_bytes` and nowhere else. The four skill
+    readers (`_read_skill_text`, `read_skill_python`, `read_skill_shell`,
+    `read_skill_js`) decoded the very same bytes with a bare
+    ``.decode("utf-8", errors="replace")``, so a file the classifier had correctly read
+    as cp1251 or UTF-16 reached the ring as mojibake while `file_manifest` recorded it
+    ``scanned-text``. Measured on a 12.5 KB cp1251 SKILL.md: 9,801 U+FFFD in the text the
+    ring received, and B58 (Unicode obfuscation — a check that can only fire on the
+    non-ASCII bytes themselves) downgraded WARN -> PASS against its byte-identical UTF-8
+    twin. A BOM'd UTF-16 file was worse than partial: even the ASCII payload was
+    destroyed, and B156/B160/B64/B58 all vanished from a skill reported as scanned.
+
+    An incremental decoder is used so an incomplete trailing sequence is buffered rather
+    than raised on — `classify_bytes` passes a sample cut at a fixed offset (B-533), and
+    a reader can be handed bytes truncated at a cap. Only a genuinely invalid byte
+    reaches the fallbacks.
+    """
+    try:
+        return codecs.getincrementaldecoder("utf-8")().decode(data, False), "utf-8"
+    except UnicodeDecodeError:
+        pass
+
+    # A real invalid sequence, not a truncated tail. Only now consider UTF-16, and only
+    # when the bytes actually look like UTF-16 — accepting any non-raising UTF-16 decode
+    # is what let arbitrary bytes through as text-shaped garbage in the first place.
+    # Nearly every byte pair is valid UTF-16, so "it did not raise" carries almost no
+    # evidence; a BOM or the interleaved-NUL shape of ASCII-range text does.
+    if _looks_like_utf16(data):
+        # B-538: when there IS a BOM it names the byte order, so honour it instead of
+        # trying LE first — a big-endian body decoded as little-endian does not raise, it
+        # silently yields byte-swapped CJK. Harmless while only the printable ratio read
+        # the result; not harmless now that the ring reads it.
+        if data[:2] == b"\xff\xfe":
+            order = ("utf-16le",)
+        elif data[:2] == b"\xfe\xff":
+            order = ("utf-16be",)
+        else:
+            order = ("utf-16le", "utf-16be")
+        for encoding in order:
+            try:
+                decoded = codecs.getincrementaldecoder(encoding)().decode(data, False)
+            except UnicodeDecodeError:
+                continue
+            # Drop the decoded BOM: left in place it prefixes the very first line, which
+            # is where a SKILL.md's `---` frontmatter fence has to be.
+            return (decoded[1:] if decoded[:1] == "\ufeff" else decoded), encoding
+    elif b"\x00" not in data:
+        # Legacy single-byte encodings (latin-1, cp1251, iso-8859-*): valid prose that is
+        # not valid UTF-8. Found by the B-533 real-file sweep — /usr/bin/pygettext3.12
+        # carries `# -*- coding: iso-8859-1 -*-` and classified TEXT before that change
+        # only because the old UTF-16 fallback happened to score its mojibake above the
+        # gate. Losing it would mean a legacy-encoded README in a skill goes unscanned,
+        # which is the exact defect B-533 is about.
+        #
+        # The NUL test is the discriminator, and it is a strong one: compiled and
+        # container formats are NUL-dense (the .pyc files in that same sweep carry
+        # thousands), while single-byte text has none. latin-1 itself never raises, so it
+        # decides nothing on its own — `classify_bytes`'s printable-ratio gate still
+        # makes the call, which is the sound half of the original design.
+        #
+        # B-538: this rung is an ASSUMPTION, and the only one in the ladder that is.
+        # UTF-8 and UTF-16 are self-identifying (an invalid sequence raises; a BOM or the
+        # interleaved-NUL shape names the byte order); a single-byte codepage is not.
+        # `b"\xee"` is Cyrillic `о` in cp1251 and `î` in latin-1, and NOTHING in the bytes
+        # says which — measured: reading a cp1251 SKILL.md as latin-1 turns a planted
+        # `оpenclaw` homoglyph into `îpenclaw`, so B58 finds no confusable and reports
+        # PASS. Guessing the codepage would need charset detection (not stdlib, and a
+        # guess either way), so the sound move is to decode bytes-preserving and let the
+        # caller DISCLOSE the assumption rather than let a PASS speak for characters that
+        # were never reconstructed — hence the returned encoding name.
+        return data.decode("latin-1"), "latin-1"
+
+    return None, None
+
+
+def decode_scanned_text(data: bytes) -> str | None:
+    """The decoded text of `data`, or None when no rung of the ladder reads it.
+
+    Thin wrapper over `_decode_ladder` for the callers that only need the text.
+    """
+    return _decode_ladder(data)[0]
+
+
 def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
     """Classify data as "TEXT" or "BINARY" and return (classification, format_name)."""
     fmt = None
@@ -863,40 +956,11 @@ def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
     # so a CJK skill's prose went unscanned past this sample size — injection and
     # exfiltration instructions in it were invisible.
     #
-    # An incremental decoder buffers an incomplete trailing sequence instead of raising,
-    # so only a genuinely invalid byte reaches the except branch.
-    chunk = data[:_TEXT_SAMPLE_BYTES]
-    decoded = None
-    try:
-        decoded = codecs.getincrementaldecoder("utf-8")().decode(chunk, False)
-    except UnicodeDecodeError:
-        # A real invalid sequence, not a truncated tail. Only now consider UTF-16, and
-        # only when the bytes actually look like UTF-16 — accepting any non-raising
-        # UTF-16 decode is what let arbitrary bytes through as text-shaped garbage in
-        # the first place. Nearly every byte pair is valid UTF-16, so "it did not raise"
-        # carries almost no evidence; a BOM or the interleaved-NUL shape of ASCII-range
-        # text does.
-        if _looks_like_utf16(chunk):
-            for encoding in ("utf-16le", "utf-16be"):
-                try:
-                    decoded = codecs.getincrementaldecoder(encoding)().decode(chunk, False)
-                    break
-                except UnicodeDecodeError:
-                    continue
-        elif b"\x00" not in chunk:
-            # Legacy single-byte encodings (latin-1, cp1251, iso-8859-*): valid prose
-            # that is not valid UTF-8. Found by the B-533 real-file sweep — /usr/bin/
-            # pygettext3.12 carries `# -*- coding: iso-8859-1 -*-` and classified TEXT
-            # before this change only because the old UTF-16 fallback happened to score
-            # its mojibake above the gate. Losing it would mean a legacy-encoded README
-            # in a skill goes unscanned, which is the exact defect B-533 is about.
-            #
-            # The NUL test is the discriminator, and it is a strong one: compiled and
-            # container formats are NUL-dense (the .pyc files in that same sweep carry
-            # thousands), while single-byte text has none. latin-1 itself never raises,
-            # so it decides nothing on its own — the printable-ratio gate below still
-            # makes the call, which is the sound half of the original design.
-            decoded = chunk.decode("latin-1")
+    # B-538: the ladder itself now lives in `decode_scanned_text` so the readers that
+    # feed the content ring use the SAME one — this function's verdict and their reading
+    # of the file must come from one decision, or the manifest claims a coverage the ring
+    # never got. Only the sample size is this function's business.
+    decoded = decode_scanned_text(data[:_TEXT_SAMPLE_BYTES])
 
     if decoded is None:
         return "BINARY", _pyc_fmt(data)
@@ -1523,20 +1587,44 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     if sub_fmt in ("ELF", "PE", "class", "pyc", "wasm") or (sub_fmt or "").startswith("Mach-O"):
                         ctx.stowaway_files.append(f"{sub_relpath} ({sub_fmt})")
             
+            # B-538: decode ONCE, here, and carry the text forward. The manifest entry
+            # below is a claim about what the readers will actually receive, so it has to
+            # be derived from the decode they get — not from the classifier's verdict on
+            # a 4096-byte sample, which is how a UTF-16 file whose every reader saw
+            # nothing but mojibake was still recorded `scanned-text`.
+            sub_text, sub_enc = _decode_ladder(sub_bytes) if sub_class == "TEXT" else (None, None)
+            if sub_class == "TEXT" and sub_text is None:
+                # No rung of the ladder reads these bytes whole. Scan them anyway,
+                # lossily: dropping the file would trade a false coverage claim for a
+                # blind spot, which is the B-533 defect. The claim shrinks; the scan
+                # does not.
+                sub_text = sub_bytes.decode("utf-8", errors="replace")
+
+            # How much the manifest is entitled to claim for this file. `scanned-text`
+            # is reserved for a determined encoding — anything else says so, because a
+            # PASS from the content ring is only as good as the characters it was given.
+            qualifier = ""
+            if sub_class == "TEXT":
+                if sub_enc is None:
+                    qualifier = "(lossy)"
+                elif sub_enc == "latin-1":
+                    qualifier = "(latin-1-assumed)"
+
             # Map statuses here!
             if ctx is not None:
                 if sub_relpath not in ctx.file_manifest:
                     if sub_relpath.lower().endswith(".py"):
-                        ctx.file_manifest[sub_relpath] = "scanned-ast"
+                        ctx.file_manifest[sub_relpath] = "scanned-ast" + qualifier
                     elif sub_class == "TEXT":
-                        ctx.file_manifest[sub_relpath] = "scanned-text"
+                        ctx.file_manifest[sub_relpath] = "scanned-text" + qualifier
                     else:
                         if sub_fmt not in ("ZIP", "tar", "gzip", "bz2", "xz"):
                             ctx.file_manifest[sub_relpath] = "binary-strings"
-            
+
             collected.append({
                 "relpath": sub_relpath,
                 "content": sub_bytes,
+                "text": sub_text,
                 "classification": sub_class,
                 "format": sub_fmt,
             })
@@ -1658,6 +1746,26 @@ def _escape_embedded_header_lines(text: str) -> str:
     return "\n".join(raw_lines) if changed else text
 
 
+def _collected_text(item: dict) -> str:
+    """The text a reader must scan for one collected file.
+
+    B-538: `collect_skill_files` already decoded these bytes with the full ladder and
+    recorded the manifest claim from that result, so the readers have to use THAT string.
+    Decoding a second time here with a bare `errors="replace"` is exactly what turned a
+    correctly-classified cp1251 or UTF-16 file into mojibake *after* the manifest had
+    promised `scanned-text`.
+
+    The fallback covers items built outside `collect_skill_files` (tests, other callers)
+    and runs the same ladder, so no path can quietly go back to a UTF-8-only reading.
+    """
+    text = item.get("text")
+    if text is not None:
+        return text
+    content = item["content"]
+    decoded = decode_scanned_text(content)
+    return decoded if decoded is not None else content.decode("utf-8", errors="replace")
+
+
 def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
     """Concatenate the text/code files of one installed skill (capped, read-only).
 
@@ -1685,7 +1793,7 @@ def _read_skill_text(skill_dir: Path, ctx: Context | None = None) -> str:
         if item["classification"] != "TEXT":
             continue
 
-        text = item["content"].decode(encoding="utf-8", errors="replace")
+        text = _collected_text(item)
         budget = _MAX_BYTES_PER_SKILL - total
         if len(text) > budget:
             truncated = True  # this file was sliced — its tail is unscanned
@@ -1881,7 +1989,7 @@ def read_skill_python(skill_dir: Path, ctx: Context | None = None) -> list[tuple
         if not rel.endswith((".py", ".ipynb")):
             continue
 
-        text = item["content"].decode(encoding="utf-8", errors="replace")
+        text = _collected_text(item)
         if rel.endswith(".ipynb"):
             # F-116: route the notebook's code cells through the same AST/taint engine as .py.
             src = _ipynb_code_source(text, skill_dir.name, ctx)
@@ -1922,7 +2030,7 @@ def read_skill_shell(skill_dir: Path, ctx: Context | None = None) -> list[tuple[
             continue
         if not item["relpath"].lower().endswith((".sh", ".bash", ".zsh")):
             continue
-        text = item["content"].decode(encoding="utf-8", errors="replace")
+        text = _collected_text(item)
         out.append((item["relpath"], text))
         total += len(text)
         file_count += 1
@@ -1957,7 +2065,7 @@ def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str
             continue
         if not item["relpath"].lower().endswith((".js", ".ts", ".mjs", ".cjs")):
             continue
-        text = item["content"].decode(encoding="utf-8", errors="replace")
+        text = _collected_text(item)
         out.append((item["relpath"], text))
         total += len(text)
         file_count += 1
