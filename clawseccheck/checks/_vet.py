@@ -3227,7 +3227,9 @@ def _b13_verdict(
     engine_degraded: bool = False,
 ) -> Finding:
     # B-455: *engine_degraded* defaults False (every existing caller unaffected) — see
-    # the parse_error_paths call site below, the only winner that passes True. An
+    # the parse_error_paths call site below, and (B-458) the unreadable-file winner that
+    # follows it: those two are the only winners that pass True, and they are the two
+    # that mean "we tried to read this skill's content and could not". An
     # unparseable bundled file is scoring.py's own definition of engine-side degraded
     # (Finding.engine_degraded's docstring, catalog.py): the AST/taint layer tried to
     # read it and failed, not "nothing here to check". Without this, B13's parse-error
@@ -3916,6 +3918,30 @@ def check_installed_skills(ctx: Context) -> Finding:
                 unreadable,
                 _signal_buckets,
                 "skill_limit_hits",
+                # B-458 (audit path): the flag its own sibling above already sets. Without
+                # it `scoring._degraded_signal` — which gates on exactly
+                # `status == UNKNOWN and engine_degraded` — never counted this UNKNOWN, so
+                # `degraded_count` stayed 0 and DEGRADED_CHECK_CAP never bound. Measured on
+                # a scratch home with one exfiltrating installed skill: readable payload ->
+                # B13 FAIL CRITICAL; `chmod 000` on the same payload -> B13 UNKNOWN HIGH
+                # with degraded_count 0 and an UNCAPPED score, i.e. the --vet path was
+                # fixed (its dossier coverage-gap reads `ctx.limit_hits`, leg 2) while the
+                # AUDIT path still scored the run as if nothing had been hidden.
+                #
+                # NOT narrowed to "the unreadable file looks interesting", and that is the
+                # whole point: the one thing known about an unreadable file is that its
+                # content is unknown. Any narrowing would have to key on the NAME (an
+                # attacker picks the name) or on inert-looking siblings, which is the
+                # false-negative this branch exists to close. The false-positive cost was
+                # measured before landing rather than assumed: the branch needs a regular
+                # file that passes `is_file()` and then fails `stat()`/`open()` — a socket,
+                # a FIFO, a dangling symlink and a directory are all filtered out one loop
+                # above, and an escaping symlink goes to `symlink_skips`. Fire count: 0
+                # across 646 fixture skill roots and 0 across the real installed skills; a
+                # whole-tree sweep found 0 unreadable regular files in 8,217 real
+                # ~/.openclaw files and 0 in 1,228 fixture files. A cap that fires on
+                # nothing benign and on every hidden payload is the right trade.
+                engine_degraded=True,
             )
         return _b13_verdict(
             HIGH,
