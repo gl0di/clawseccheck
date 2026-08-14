@@ -17,6 +17,39 @@ destination containing a space (`"$HOME/Library/LaunchAgents/My Agent.plist"`) t
 pieces, pushing the persistence path out of final position. Deciding this properly needs real
 shell tokenisation, not a path-position heuristic.
 
+A SECOND fix was written and RETRACTED, and it is worth recording because it did not fail the
+same way. It used real shell tokenisation (`shlex` with `punctuation_chars=True`), which closed
+every hole listed above: `2>/dev/null` splits into three tokens, quoted destinations survive
+whole, `cp -t` is handled, trailing comments are stripped, and nested commands (`find -exec`,
+`$( )`) refuse to decide. Three independent adversarial passes confirmed all of it, and a first
+round's quadratic blowup was fixed to linear. It still died, on three counts:
+
+1. A UNIVERSAL, ATTACKER-CONTROLLED BYPASS. The `--target-directory` flag scan ran before the
+   verb was resolved, so `-t` was read as "target directory" for every verb — including verbs the
+   code did not recognise. `frobnicate -t x p.plist ~/Library/LaunchAgents/e.plist` went silent,
+   which falsifies the design's own stated invariant that an unknown verb can never open a false
+   negative. Also measured silent: `cp -t /tmp <install>`, `tee -t x`, `dd -t x`, `scp -t`,
+   `cpio -t -p`, and every `rsync -t` install (in rsync, `-t` is `--times`, one of its commonest
+   flags). Prepending two tokens defeated the whole gate.
+2. COST. 41 s against 3 s ungated on a 989 KB skill of many lines — 13.5x, and 2.7x over
+   `scanbudget.DEFAULT_CHECK_BUDGET_S`. A check that exceeds its budget fails open, so this
+   traded a false positive for a silent no-verdict on large inputs.
+3. NEW FALSE POSITIVES in the presentation that matters. The nesting refusal tripped on any
+   residual backtick, so ``- `ls ~/Library/LaunchAgents` — list them`` convicted; markdown inline
+   code is how a SKILL.md normally writes a command. Ordinary English words in a stripped comment
+   (`do`, `env`, `sudo`, `then`, `watch`) tripped it too.
+
+The generalizable lesson: read-vs-write on a shell line needs a per-verb AND per-flag model of
+shell semantics, and any incomplete model is an attacker-controlled bypass, because the attacker
+reads this source. Iterating the table is not convergence — each round closed its predecessor's
+holes and opened new ones.
+
+A narrow closed allowlist of provably-read whole-segment shapes (the approach Cisco's
+`command_safety.evaluate_command` takes — it allowlists safe forms instead of classifying every
+line, and enumerates `find` without `-exec/-execdir/-ok/-delete`) would be sound and cheap, but
+it only reaches the pure-read verbs. It cannot reach `cp ~/Library/LaunchAgents/x.plist backup/`,
+which is the actual real-fleet false positive that motivated B-534. So it does not solve this.
+
 So the false positive stands, and this file pins BOTH sides of it: the FP that is accepted for
 now, and the install shapes any future fix must never silence. The project rule that made the
 call is that a false positive is never fixed by opening a false negative.
