@@ -788,6 +788,60 @@ def _looks_like_utf16(chunk: bytes) -> bool:
            (even_nul / half >= 0.9 and odd_nul / half <= 0.1)
 
 
+# Above this share of a file's non-ASCII bytes failing UTF-8, the file is a legacy
+# codepage rather than a UTF-8 document carrying damage. Measured (see
+# `_is_predominantly_utf8`) the two populations do not overlap anywhere near this value:
+# genuine cp1251/cp1252/latin-1 prose scores 1.0000, and UTF-8 with stray bytes in it
+# scores <= 0.0079. The threshold sits in the empty space between them, not on a tail.
+_LEGACY_DAMAGE_RATIO = 0.5
+
+
+def _is_predominantly_utf8(data: bytes) -> bool:
+    """Is this a UTF-8 document with a few bad bytes, or is it a legacy single-byte file?
+
+    Asked only once whole-file UTF-8 has already failed and the UTF-16 rungs have been
+    ruled out — i.e. exactly when the ladder is about to assume a codepage.
+
+    B-538 (repair): the latin-1 rung is all-or-nothing, so before this gate ONE invalid
+    byte anywhere in a NUL-free file demoted the WHOLE file to a latin-1 re-read. That
+    turned a per-character cost into a per-file one and handed an attacker a silencer:
+    appending ``\\xff`` to a Russian SKILL.md re-read all of it as mojibake, so B64
+    (multilingual prompt injection) and every other non-ASCII-keyed check went quiet
+    while `file_manifest` still reported the file as scanned. Measured on the
+    reproduction: 1,470 correctly-decoded Cyrillic characters -> 0, ring findings
+    ``B156 B64`` -> ``B13``.
+
+    Two independent reasons to keep reading the file as UTF-8; either one is enough:
+
+    (a) **The sample says so.** If the leading `_TEXT_SAMPLE_BYTES` decode as UTF-8, the
+        file is a UTF-8 file by the same evidence `classify_bytes` uses to call it TEXT
+        at all. Judging the whole file by a byte outside that sample lets the classifier
+        and the readers disagree about what the file is, which is the B-538 defect.
+    (b) **The damage is not at scale.** The sample is a fixed prefix, so a byte planted
+        at offset 200 defeats (a) as easily as one appended at the end — (a) alone would
+        have moved the attack, not stopped it. So also ask what share of the non-ASCII
+        bytes UTF-8 actually fails on. In a legacy codepage essentially every non-ASCII
+        byte is invalid UTF-8 (ratio 1.0); in a UTF-8 document they overwhelmingly form
+        valid sequences and only the planted bytes fail (ratio ~0.0004). The ratio, not
+        the count, is what separates them: 20 stray bytes in a UTF-8 file still score
+        0.0079, while a single stray byte is not evidence of a codepage either.
+
+    A file with no non-ASCII bytes at all returns False: there are no characters for the
+    latin-1 rung to get wrong, so the byte-preserving read is the better one and this
+    gate has nothing to protect.
+    """
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(data[:_TEXT_SAMPLE_BYTES], False)
+        return True
+    except UnicodeDecodeError:
+        pass
+    non_ascii = len(data.translate(None, bytes(range(128))))
+    if not non_ascii:
+        return False
+    damaged = data.decode("utf-8", errors="replace").count("�")
+    return damaged / non_ascii < _LEGACY_DAMAGE_RATIO
+
+
 def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
     """Decode bytes the way the scanner must read them: (text, encoding-used).
 
@@ -796,8 +850,10 @@ def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
     `collect_skill_files` has to say which one carried the file.
 
     The single decode ladder — UTF-8, then BOM/shape-confirmed UTF-16, then a legacy
-    single-byte reading — shared by the classifier and by every reader that feeds the
-    content ring.
+    single-byte reading *only for files that really are single-byte* — shared by the
+    classifier and by every reader that feeds the content ring. That last rung is gated
+    by `_is_predominantly_utf8`: a UTF-8 file with bad bytes in it stays UTF-8 and pays
+    per character, which it reports by returning a None encoding.
 
     B-538: it used to live inside `classify_bytes` and nowhere else. The four skill
     readers (`_read_skill_text`, `read_skill_python`, `read_skill_shell`,
@@ -845,6 +901,16 @@ def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
             # is where a SKILL.md's `---` frontmatter fence has to be.
             return (decoded[1:] if decoded[:1] == "\ufeff" else decoded), encoding
     elif b"\x00" not in data:
+        # B-538 (repair): guard the rung before explaining it. Because the rung is
+        # all-or-nothing, taking it costs EVERY non-ASCII character in the file, not just
+        # the byte that failed — which made one attacker-planted byte a silencer for every
+        # non-ASCII-keyed check. A file that is still predominantly UTF-8 therefore keeps a
+        # UTF-8 reading and pays per character, disclosed as `(lossy)` by the None
+        # encoding; the single-byte rung below is for files that really are single-byte.
+        # See `_is_predominantly_utf8` for the two conditions and the measurements.
+        if _is_predominantly_utf8(data):
+            return data.decode("utf-8", errors="replace"), None
+
         # Legacy single-byte encodings (latin-1, cp1251, iso-8859-*): valid prose that is
         # not valid UTF-8. Found by the B-533 real-file sweep — /usr/bin/pygettext3.12
         # carries `# -*- coding: iso-8859-1 -*-` and classified TEXT before that change
