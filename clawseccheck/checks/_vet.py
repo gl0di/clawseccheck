@@ -3216,6 +3216,30 @@ def _powershell_encoded_payloads(blob: str) -> list[str]:
 # ~0.015 of real precision gain, 78.9% of escalations landing in buckets with zero
 # headroom left. Anyone reopening this should re-run the per-bucket attribution
 # first, not just the aggregate number.
+# Advisories are OBSERVATIONS, not signals. They ride along in `evidence` on every B13
+# verdict — including PASS — and never move a status or count as corroboration. Keyed
+# under a reserved name inside `signal_buckets` so it reaches `_b13_verdict` through the
+# channel every caller already threads, without becoming a corroborating bucket.
+#
+# H6 (F-060, prose telling the agent to run a bundled script) lives here rather than in
+# `warns_content` because it was measured to carry no information. Over the 342 corpus
+# cases where B13 is the only check that warns, H6 fires on 90/212 benign and 50/130
+# non-benign skills — a likelihood ratio of 0.906, i.e. very slightly evidence of
+# BENIGNITY. It decided 140 verdicts and was wrong on 90 of them.
+#
+# The 50 it "caught" are not detections of what it detects: 6 malicious cases are prompt
+# injection in prose (PI_PURE_SKILLMD, T01) and cloud-token abuse (T04/T05), and the 44
+# suspicious ones are hardcoded secrets, wildcard permissions and context leaks. Each of
+# those classes has its own detector, and every one of them was silent — H6 was a
+# coincidental net masking 50 gaps elsewhere. Those cases are tracked separately; do not
+# read this demotion as accepting them as false negatives.
+#
+# The observation itself is kept verbatim. Delegation to a bundled script is worth a
+# human glance; it is not worth a verdict when the referenced file ships and has already
+# been scanned by the checks that own executable content.
+_ADVISORY_BUCKET = "_advisories"
+
+
 def _b13_verdict(
     severity: str,
     status: str,
@@ -3238,9 +3262,14 @@ def _b13_verdict(
     # C-358: coverage disclosure only, appended to evidence (never detail) — every
     # check_installed_skills verdict routed through this helper carries it, so it can
     # never be mistaken for a clean "the dependency tree was looked at and is fine".
-    fx.evidence = fx.evidence + [NPM_DEPTREE_SKILL_COVERAGE_NOTE]
+    fx.evidence = (
+        fx.evidence + list(signal_buckets.get(_ADVISORY_BUCKET) or [])
+        + [NPM_DEPTREE_SKILL_COVERAGE_NOTE]
+    )
     fx.corroborating_buckets = [
-        name for name, bucket in signal_buckets.items() if bucket and name != winner
+        name
+        for name, bucket in signal_buckets.items()
+        if bucket and name != winner and name != _ADVISORY_BUCKET
     ]
     return fx
 
@@ -3278,7 +3307,8 @@ def check_installed_skills(ctx: Context) -> Finding:
     warns_js: list[str] = []  # F-064: soft JS/TS signals (child_process template, dynamic require)
     warns_content: list[
         str
-    ] = []  # F-051/F-060/F-062 soft content signals (broad trigger, local chain, IOCs)
+    ] = []  # F-051/F-062 soft content signals (broad trigger, IOCs); H6 -> advisories
+    advisories: list[str] = []  # observations that ride in evidence, never a status
     warns_notify_host: list[str] = []  # B-122: bare Telegram/Discord self-notify (no taint)
     for name, blob in skills.items():
         # C-041: precompute fence ranges once per blob so every check below can
@@ -3563,9 +3593,11 @@ def check_installed_skills(ctx: Context) -> Finding:
                     "claims to fire on nearly any user action (TR1)"
                 )
                 break
+        # F-060 (H6): advisory, not a signal — see _ADVISORY_BUCKET for the measurement
+        # that moved it here. The observation is unchanged; only its band is.
         for m in _SKILL_LOCAL_CHAIN_RE.finditer(blob):
             if not _is_code_example(blob, m.start(), _fr):
-                warns_content.append(
+                advisories.append(
                     f"{name}: prose instructs running a bundled script "
                     f"({m.group(0)[:60]}) — review the referenced file (H6)"
                 )
@@ -3790,6 +3822,7 @@ def check_installed_skills(ctx: Context) -> Finding:
     # `warnings` list, warns_squat) are registered at their own point of
     # computation, never eagerly.
     _signal_buckets: dict[str, list] = {
+        _ADVISORY_BUCKET: advisories,
         "crit": crit,
         "high": high,
         "parse_error_paths": parse_error_paths,
@@ -4328,7 +4361,9 @@ def check_installed_skills(ctx: Context) -> Finding:
         f"Scanned {n} installed skill(s); no shell-exec / exfiltration / obfuscation "
         "patterns found.",
         "Keep installing only skills whose source you've reviewed — trust no one.",
-        [NPM_DEPTREE_SKILL_COVERAGE_NOTE],
+        # A clean verdict still carries its advisories: an observation that never moved a
+        # status must not vanish just because nothing else fired (_ADVISORY_BUCKET).
+        advisories + [NPM_DEPTREE_SKILL_COVERAGE_NOTE],
     )
 
 
