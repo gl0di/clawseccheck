@@ -1518,9 +1518,29 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
     else:
         base_dir = skill_dir
         _skips: list = []
+        _capped: list = []
         files = walk_dir_safely(
-            base_dir, exclude_pycache=True, exclude_vcs=True, max_files=_MAX_FILES_PER_SKILL, skips=_skips
+            base_dir, exclude_pycache=True, exclude_vcs=True, max_files=_MAX_FILES_PER_SKILL,
+            skips=_skips, capped=_capped,
         )
+        if ctx is not None and _capped:
+            # The walk stopped at _MAX_FILES_PER_SKILL and the rest of the skill was never
+            # looked at. `walk_dir_safely` has always offered this sentinel -- its own
+            # docstring calls it "GR#4: no silent completeness claim over a capped scan" --
+            # and this call site was the one that did not take it, while its sibling in
+            # `_skill_signature` did. So a skill could bury a payload behind enough benign
+            # files to end the walk, and B13 would then report "no shell-exec / exfiltration
+            # / obfuscation patterns found" over a tree it had stopped reading. That needs no
+            # permission trick and no obfuscation, only file count.
+            #
+            # Routed through the same `limit_hits` channel the size-cap branch below uses, so
+            # every consumer that already asks "was MY scan truncated?" (limit_hits_for,
+            # dossier._danger_coverage_gap, B13's coverage-gap branch) sees it with no new
+            # plumbing.
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                f"only the first {_MAX_FILES_PER_SKILL} file(s) of this skill were scanned",
+            )
         if ctx is not None and _skips:
             # F-061: a skill shipping `data -> ~/.ssh/id_rsa` or `-> ../../openclaw.json` used to
             # be skipped silently. Record the skip + its target so it surfaces as a WARN.
