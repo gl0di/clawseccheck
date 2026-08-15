@@ -2924,8 +2924,27 @@ def _main(argv=None) -> int:
                                render_pdf(findings, score, native=ctx.native, ctx=ctx))
             pdf_written = str(_pdf_dest)
         except OSError as exc:
-            _emit(f"(could not write PDF report: {exc})")
-            return 1
+            # B-459: this branch serves two compositions and they want opposite answers.
+            #
+            # `_mode == "pdf"` is a BARE `--pdf`: the artifact is the entire deliverable,
+            # so a write that failed is a run that failed, and exit 1 is the contract
+            # `tests/test_cli_exit_codes.py` pins deliberately.
+            #
+            # `_pdf_side_output` is `--dashboard --pdf`: the dashboard is the deliverable
+            # and the PDF is its DELIVERY. Returning 1 there discards the analysis because
+            # a file could not be written — the same shape as the original defect, which
+            # printed 118 bytes and no grade on the guided flow's own first run. Three
+            # review passes named this branch as the unfixed half; the sibling deferred
+            # branch below already falls through with `pdf_written` left None, and this is
+            # that same treatment.
+            #
+            # The two are mutually exclusive by construction, not by luck: `_resolve_mode`
+            # re-elects when `--dashboard` is present, so `_mode == "pdf"` implies no
+            # dashboard was asked for.
+            if _mode == "pdf":
+                _emit(f"(could not write PDF report: {exc})")
+                return 1
+            _emit(f"(could not write PDF report: {exc} — showing the full report inline)")
         if not args.dashboard:
             _emit(
                 f"(PDF report written to {args.pdf} — attach this file itself into the "
@@ -2933,7 +2952,15 @@ def _main(argv=None) -> int:
                 "opens a PDF inline where an HTML attachment would just be a download)"
             )
             return 0
-        if _mode != "dashboard":
+        if _mode != "dashboard" and pdf_written:
+            # B-459: `and pdf_written` — everything in this block SPEAKS ABOUT A FILE. With
+            # the fall-through above, a failed write now reaches here with pdf_written
+            # None, and the `--full` note below would describe a document that does not
+            # exist ("The report states this on its own first page") while pointing the
+            # agent at nothing. `_emit_attach_instruction` already no-ops on None; the
+            # note did not, and telling the user about an artifact we failed to write is
+            # the same class of defect this task exists to close.
+            #
             # B-530: `--pdf` rode in with `--dashboard`, but a rider (`--trend`/
             # `--percentile`/`--next`) renders, and every rider branch returns before the
             # dashboard branch's own `_emit_attach_instruction`. Without this the file was
