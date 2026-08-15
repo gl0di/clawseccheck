@@ -108,7 +108,7 @@ def test_empty_context_produces_valid_empty_bom():
     payload = json.loads(out)
     assert payload["skills"] == []
     assert payload["mcp_servers"] == []
-    assert payload["version"] == 1
+    assert payload["version"] == 2  # B-521: bumped 1 -> 2, see sbom.py SBOM_VERSION
 
 
 # --------------------------------------------------------------------------- redaction guard
@@ -135,7 +135,7 @@ def test_cli_sbom_emits_valid_json(capsys):
     out = capsys.readouterr().out
     assert rc == 0
     payload = json.loads(out)
-    assert payload["version"] == 1
+    assert payload["version"] == 2  # B-521: bumped 1 -> 2, see sbom.py SBOM_VERSION
     assert "skills" in payload and "mcp_servers" in payload
 
 

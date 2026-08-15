@@ -299,6 +299,18 @@ class SkillSweep:
     # can be non-empty even when every row found so far scanned cleanly. Empty for a
     # sweep whose discovery genuinely completed.
     discovery_incomplete_reasons: list[str] = field(default_factory=list)
+    # B-521: names withheld from `rows`/`findings` above because they are
+    # ClawSecCheck's OWN content-verified install (B-265, collector.py's
+    # `_is_own_source`/`ctx.self_excluded_skills`) — a tool auditing itself is noise,
+    # so `sweep_installed_skills` never vets it, but report.py has disclosed the same
+    # exclusion (`self_excluded`, since B-507) in the text inventory for a while.
+    # `--vet-all`/the SKILL SWEEP section read straight off `rows`/`counts()` and had
+    # no equivalent trace, so a home whose only skill is ClawSecCheck's own copy
+    # printed "0 skill(s) checked" with no hint why. Carried here so both consumers of
+    # this dataclass (the sweep table and the quiet one-liner) can disclose it the
+    # same way the text inventory already does. Empty (never omitted downstream) when
+    # nothing was withheld.
+    self_excluded_skills: list[str] = field(default_factory=list)
 
     def vet_targets(self) -> list[tuple[str, Finding]]:
         """``(vetted path, primary finding)`` for every target that produced one —
@@ -489,6 +501,10 @@ def sweep_installed_skills(
 
     sweep = SkillSweep(home_dir=home_dir, checked_dirs=checked_dirs,
                        budget_s=sweep_budget_s)
+    # B-521: see SkillSweep.self_excluded_skills docstring — sorted, same as report.py's
+    # own self_excluded rendering and sbom.py's self_excluded_skills, for deterministic
+    # output.
+    sweep.self_excluded_skills = sorted(set(getattr(ctx, "self_excluded_skills", None) or []))
     if discovery_gaps:
         sweep.truncated = True
         sweep.discovery_incomplete_reasons = list(discovery_gaps)
@@ -506,6 +522,12 @@ def sweep_installed_skills(
             _emit(f"No skills found under {dirs_str}")
             if discovery_gaps:
                 _emit(_discovery_gap_note(discovery_gaps))
+            if sweep.self_excluded_skills:
+                note_icon = "[i]" if ascii_only else "ℹ️ "
+                _emit(
+                    f"   {note_icon}{', '.join(_sanitize(n) for n in sweep.self_excluded_skills)} "
+                    "not graded -- ClawSecCheck's own installed copy is excluded from "
+                    "its own audit")
         return sweep
 
     if narrate and discovery_gaps:
@@ -690,6 +712,16 @@ def _sweep_summary_lines(sweep: SkillSweep, ascii_only: bool = False) -> list[st
     if c["skipped"]:
         tally += f" | {c['skipped']} not scanned (budget exceeded)"
     lines.append(tally)
+    # B-521: same disclosure report.py's text inventory already carries for the
+    # "skills" subject (report.py:1995-1998 / 2040-2043) — reused verbatim rather
+    # than invented fresh, so the sweep table and the inventory never disagree about
+    # whether ClawSecCheck's own copy is a silently-shrunk count or a named exclusion.
+    if sweep.self_excluded_skills:
+        note_icon = "[i]" if ascii_only else "ℹ️ "
+        names = ", ".join(_sanitize(n) for n in sweep.self_excluded_skills)
+        lines.append(
+            f"   {note_icon}{names} not graded -- ClawSecCheck's own installed copy "
+            "is excluded from its own audit")
     return lines
 
 

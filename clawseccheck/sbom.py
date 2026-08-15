@@ -21,7 +21,11 @@ import json
 from .checks import _dep_names_in_skill, _unpinned_deps_in_skill
 from .monitor import _SKILL_VERSION_RE, _h, _mcp_detail_sig
 
-SBOM_VERSION = 1
+# B-521: bumped 1 -> 2. `self_excluded_skills` is a new key, and `complete` changed
+# meaning under the same name (was `config_found` alone; now also requires nothing
+# withheld) -- a consumer pinning version 1 would otherwise read a document whose
+# semantics moved without any signal in the payload that anything had.
+SBOM_VERSION = 2
 
 
 def _skill_entry(name: str, blob: str) -> dict:

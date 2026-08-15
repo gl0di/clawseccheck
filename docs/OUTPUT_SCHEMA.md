@@ -1263,3 +1263,100 @@ One entry per subject in the 8-subject taxonomy (§18):
   COVERAGE`) built from the same `build_coverage_page` function. `--dashboard --full`,
   `--html`, and `--pdf` do not carry this page yet — they render through a separate
   code path that does not call `pipeline.run_pipeline`.
+
+---
+
+## 21. `--sbom` Output (F-085 — AI-BOM Export)
+
+Produced by the standalone `--sbom` flag. A separate, standalone JSON artifact — not
+part of the `--json` envelope — that exports a local, deterministic bill-of-materials
+(installed skills, configured MCP servers) built from the SAME audited `Context` a
+normal run collects. Local file/stdout only; never uploaded anywhere. Deterministic:
+the same `Context` always renders byte-identical output (stable key ordering).
+
+Redaction discipline (ZKDS): the BOM never contains secret/credential VALUES — only
+key names, hashes, and structural metadata (`env_keys` marks secret-shaped MCP env
+var NAMES only; values are never read).
+
+**`version` is this artifact's own schema version — independent of the package's
+`__version__`** (see `generated_by` below, which carries the package version). Current
+value: `2` (bumped from `1` by B-521 — see the Notes below for what changed).
+
+### Envelope fields
+
+| Field | Type | Description |
+|---|---|---|
+| `version` | `int` | This document's own schema version — currently `2`. Bump-on-breaking-change, the same discipline `SBOM_VERSION` in `sbom.py` documents in-source. A consumer pinning a specific version should treat a different value as a potentially incompatible shape. |
+| `generated_by` | `str` | `"clawseccheck v<package version>"`, e.g. `"clawseccheck v3.60.0"` — the tool identity/version that produced this document (distinct from `version` above, which is the document's own schema version). |
+| `scanned_home` | `str \| null` | Absolute path of the home this BOM was built from, or `null` when no home was supplied to the `Context` (library/unit use). |
+| `config_found` | `bool` | `true` when an `openclaw.json` was present at `scanned_home` (B-463) — lets a consumer distinguish a real setup with zero components from a typo'd `--home` that found nothing at all; both would otherwise serialise as an empty `skills`/`mcp_servers` pair. |
+| `self_excluded_skills` | `array[str]` | B-521: names of installed skills withheld from `skills` below because they are ClawSecCheck's OWN content-verified install (B-265, `collector.py` `_is_own_source`/`self_excluded_skills`) — a tool auditing itself is noise, so it is deliberately excluded, but the name(s) are shipped here so a consumer can tell WHICH component is missing rather than only that one is. Empty array (never omitted) when nothing was withheld. Sorted for deterministic output. |
+| `complete` | `bool` | B-521: `true` only when `config_found` is `true` **and** `self_excluded_skills` is empty — i.e. the config was found and nothing was withheld from the inventory. Before B-521 this field was an alias for `config_found` alone, which over-claimed: a home whose only skill is ClawSecCheck's own install reported `complete: true` while silently shipping zero skills. A consumer gating on "is this BOM a full inventory" must check `complete`, not `config_found`. |
+| `skills` | `array[SkillEntry]` | One entry per installed skill (excluding `self_excluded_skills`), sorted by name. See below. |
+| `mcp_servers` | `array[McpEntry]` | One entry per configured MCP server (both `mcp.servers` nesting and legacy `mcpServers`), sorted by name. See below. |
+
+### `SkillEntry` object
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `str` | Skill directory name. |
+| `version` | `str \| null` | Declared version extracted from the skill's frontmatter, or `null` if undeclared. |
+| `hash` | `str` | Content hash of the skill's `SKILL.md`, using the SAME hash scheme `monitor.py`'s own drift-detection snapshots use — so a BOM hash can be cross-referenced against a `--monitor` baseline. |
+| `declared_deps` | `array[str]` | Dependency names the skill declares, sorted. |
+| `unpinned_deps` | `array[str]` | Subset of `declared_deps` that carry no version pin, sorted. |
+
+### `McpEntry` object
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `str` | Configured server key. |
+| `hash` | `str` | Content hash of the server's detail dict (same hash scheme as `SkillEntry.hash`). |
+| `transport` | `str` | Configured transport (`"stdio"`, etc.), or `""` if unset. |
+| `command` | `str` | Configured launch command, or `""` if unset. |
+| `env_keys` | `array[str]` | Environment variable NAMES the server config passes through — secret-shaped names are marked, but values are never included. |
+| `pinned` | `bool` | Best-effort supply-chain signal: `true` when the command's first argument carries a version pin (e.g. an npx `pkg@1.2.3` spec). |
+
+### Skeleton
+
+```json
+{
+  "version": 2,
+  "generated_by": "clawseccheck v3.60.0",
+  "scanned_home": "/home/you/.openclaw",
+  "config_found": true,
+  "self_excluded_skills": [],
+  "complete": true,
+  "skills": [
+    {
+      "name": "pdf-tools",
+      "version": "1.2.0",
+      "hash": "...",
+      "declared_deps": ["requests"],
+      "unpinned_deps": []
+    }
+  ],
+  "mcp_servers": [
+    {
+      "name": "slack",
+      "hash": "...",
+      "transport": "stdio",
+      "command": "npx",
+      "env_keys": ["SLACK_TOKEN"],
+      "pinned": true
+    }
+  ]
+}
+```
+
+### Notes
+
+- Not part of the `--json` envelope (§1) — a separate, standalone artifact keyed by its
+  own `version` field, not the `--json` schema's stability policy (§17).
+- `skills`/`mcp_servers` are visibility-only inventories, like `inventory` (§18) — this
+  document carries no `score`/`grade`/`findings` at all.
+- **B-521 version bump (1 → 2):** `self_excluded_skills` is a new key, and `complete`
+  changed meaning under the same name (was `config_found` alone; now also requires
+  nothing withheld) — a consumer pinning version `1` would otherwise silently receive a
+  document whose semantics moved with no signal in the payload that anything had. Same
+  defect shape B-463 fixed one field over: two different facts must not serialise
+  identically under one version number.
