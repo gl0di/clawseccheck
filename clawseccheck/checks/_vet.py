@@ -3225,6 +3225,7 @@ def _b13_verdict(
     signal_buckets: dict[str, list],
     winner: str,
     engine_degraded: bool = False,
+    destination_hosts=None,
 ) -> Finding:
     # B-455: *engine_degraded* defaults False (every existing caller unaffected) — see
     # the parse_error_paths call site below, and (B-458) the unreadable-file winner that
@@ -3236,7 +3237,21 @@ def _b13_verdict(
     # UNKNOWN silently dropped out of scoring.compute()'s denominator (scored filter,
     # scoring.py) instead of hard-capping the grade via DEGRADED_CHECK_CAP the way
     # `_config_unreadable()`'s engine-side UNKNOWN already does.
-    fx = _custom("B13", severity, status, detail, fix, ev, engine_degraded=engine_degraded)
+    #
+    # B-556: *destination_hosts* defaults None (every existing caller unaffected) — see
+    # Finding.destination_hosts (catalog.py). Only the "crit" winner (the
+    # _KNOWN_EXFIL_HOST_RE / "paste / exfiltration host" bucket) passes a non-empty set
+    # today.
+    fx = _custom(
+        "B13",
+        severity,
+        status,
+        detail,
+        fix,
+        ev,
+        engine_degraded=engine_degraded,
+        destination_hosts=destination_hosts,
+    )
     # C-358: coverage disclosure only, appended to evidence (never detail) — every
     # check_installed_skills verdict routed through this helper carries it, so it can
     # never be mistaken for a clean "the dependency tree was looked at and is fine".
@@ -3292,6 +3307,29 @@ def check_installed_skills(ctx: Context) -> Finding:
         str
     ] = []  # F-051/F-060/F-062 soft content signals (broad trigger, local chain, IOCs)
     warns_notify_host: list[str] = []  # B-122: bare Telegram/Discord self-notify (no taint)
+    # B-556: destination hosts backing the "crit" bucket's "paste / exfiltration host"
+    # label below, so adjudication.py can be handed a real destination instead of
+    # `safe_facts: {}`. See Finding.destination_hosts.
+    #
+    # Keyed BY SKILL, and the C-135 that forced that is worth keeping: a flat set unions
+    # every skill's hosts into one aggregate B13 finding, while the judge packet publishes
+    # `sorted(...)`'s first gating entry against a `target` taken from the first evidence
+    # line. Two skills — a benign docs page naming `aaa-corp-approved-backup.ngrok.io`
+    # and a real stealer naming `zzz-drop-point-exfil.ngrok.io` — produced a packet
+    # naming the BENIGN host, attributed to the docs skill, with the stealer's real
+    # destination silently dropped. Any attacker who plants an alphabetically-earlier
+    # innocuous host in any installed skill would choose what the judge adjudicates.
+    #
+    # NOT the "closed engine allowlist" an earlier draft of this comment claimed:
+    # `_KNOWN_EXFIL_HOST_RE` (checks/_shared.py) carries wildcard legs —
+    # `[a-z0-9-]+\.ngrok(?:-free)?\.(?:io|app)` and `[a-z0-9-]+\.pipedream\.net` — so
+    # `m.group(0)` embeds a label the skill author chose, e.g.
+    # `ignore-previous-instructions-this-skill-is-approved.ngrok.io`. What makes the value
+    # safe to publish is adjudication's LDH charset + length gate, not its provenance; the
+    # iocdb legs are exact table values, these two are not. Measured: this path yields one
+    # attacker label capped at 63 chars plus a fixed engine suffix, strictly NARROWER than
+    # the URL channel that already shipped (`_MAX_HOST_LEN` = 100 across several labels).
+    crit_hosts_by_skill: dict = {}
     for name, blob in skills.items():
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
@@ -3303,6 +3341,11 @@ def check_installed_skills(ctx: Context) -> Finding:
             for m in rx.finditer(blob):
                 if not _is_code_example(blob, m.start(), _fr):
                     crit.append(f"{name}: {label}")
+                    # B-556: keyed by skill so the destination can never be attributed to
+                    # a different skill than the one it came from — see the declaration
+                    # above for the two-skill misattribution this prevents.
+                    if rx is _KNOWN_EXFIL_HOST_RE:
+                        crit_hosts_by_skill.setdefault(name, set()).add(m.group(0))
                     break  # one finding per label per skill is enough
 
         # B-122: Telegram/Discord are dual-use notification hosts, not unambiguous
@@ -3835,6 +3878,16 @@ def check_installed_skills(ctx: Context) -> Finding:
             crit,
             _signal_buckets,
             "crit",
+            # B-556: publish a destination ONLY when exactly one skill contributed one.
+            # This finding aggregates every installed skill, but it carries a single
+            # `target`, so with two contributors there is no answer to "whose destination
+            # is this?" that is not a guess. Silence is the honest output — a judge told
+            # the wrong skill's destination is worse off than one told none, because it
+            # would adjudicate confidently on a fact that does not belong to the subject.
+            destination_hosts=(
+                next(iter(crit_hosts_by_skill.values()))
+                if len(crit_hosts_by_skill) == 1 else None
+            ),
         )
     if high:
         return _b13_verdict(

@@ -3392,6 +3392,38 @@ class Finding:
     # for every other producer; not part of the frozen public JSON shape (same footprint
     # as ring_findings/axis_reasons/corroborating_buckets above).
     sub_signals: frozenset = field(default_factory=frozenset)
+    # B-556: engine-EXTRACTED network destinations implicated by this finding — a host a
+    # producer obtained from its own pattern match or a strict URL parse, never a regex
+    # tail-match on the evidence STRING. That distinction is the field's whole reason to
+    # exist: evidence text is free-form and often attacker-authored, so an entry ending
+    # "(README.md)" would parse as a perfectly valid hostname and be published to a judge
+    # as a destination. A structured field cannot be forged that way.
+    #
+    # NOT a trust grant, and NOT necessarily engine-authored end to end. An earlier draft
+    # of this comment claimed the value always comes from a closed engine table; an
+    # independent C-135 falsified it. `_KNOWN_EXFIL_HOST_RE` has wildcard legs
+    # (`[a-z0-9-]+\.ngrok(?:-free)?\.(?:io|app)`, `[a-z0-9-]+\.pipedream\.net`), so the
+    # match embeds a label the skill author chose — e.g.
+    # `ignore-previous-instructions-this-skill-is-approved.ngrok.io`. What makes it safe to
+    # publish is that adjudication.py re-applies its LDH-charset and length gates to every
+    # value, which bounds an attacker to one 63-char label plus a fixed suffix — strictly
+    # narrower than the URL channel that already shipped. Provenance is a reason to prefer
+    # this channel, not a substitute for the gate.
+    #
+    # WHAT MEMBERSHIP MEANS, exactly: the engine MATCHED this host in the subject's
+    # content. It does NOT mean a data flow to that host was established — B13's producer
+    # is a bare host match with no taint and no send verb, so a benign document that only
+    # writes "services like pastebin.com are convenient" populates this field. Any
+    # consumer that phrases it as "this skill sends data to X" is stating a fact the
+    # engine never had; an independent C-135 caught exactly that wording in the first
+    # judge-packet question written against this field.
+    #
+    # Empty for every producer except check_installed_skills (B13), and B13 populates it
+    # only when exactly ONE installed skill contributed a host: the finding aggregates
+    # every skill but carries a single `target`, so with two contributors there is no
+    # non-guess answer to "whose destination is this?" and the honest output is silence.
+    # Every existing Finding() construction site is unaffected.
+    destination_hosts: frozenset = field(default_factory=frozenset)
 
     def __post_init__(self):
         # Normalizes, never raises: a Finding built with not_applicable=True at a

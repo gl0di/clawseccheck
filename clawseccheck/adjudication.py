@@ -144,6 +144,56 @@ _ID_QUESTIONS = {
             "secret? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
 }
 
+# B-556: the same ids, asked when `safe_facts.destination_host` is present.
+#
+# `_ID_QUESTIONS["B13"]` names FOUR possible sub-signals and says which fired: none of
+# them. It then asks "do you trust the destination?" without stating the destination.
+# Measured on a real packet for a skill whose SKILL.md directs the agent to read the
+# user's private keys and POST them to a paste host: the judge received the skill's
+# NAME, `safe_facts: {}`, a pointer to a report it does not have, and that disjunction.
+# It could not have convicted on the merits, which makes CLAUDE.md §2.5's "route the
+# mitigation to the borderline-adjudication layer" a promise the product did not keep.
+#
+# These variants are selected by an ENGINE-EXTRACTED structured fact (a gated
+# `destination_host`), never by parsing the finding's text, so the packet cannot be
+# steered into the specific wording by anything a skill author writes.
+#
+# REACHABILITY, stated plainly because a green suite would otherwise imply more: today
+# the only producer of `destination_hosts` is B13's crit winner, which returns FAIL, and
+# `_is_borderline` admits only UNKNOWN or WARN. So on the shipped tree no real run
+# reaches this wording — it is infrastructure, verified against the real
+# `build_judge_packet` with a WARN-band finding, not a measured change in output. It
+# becomes live the moment the paste-host demotion lands, which is precisely what
+# that task was blocked on: its demotion was a silencer while this packet was empty.
+# The two must be reviewed together, because B-555 is also what first exposes this
+# question text to a real judge.
+#
+# They deliberately POINT AT `safe_facts.destination_host` rather than interpolating it.
+# The host is already charset- and length-gated, but `_question_for`'s own contract is
+# that it never inlines finding-derived text, and a hostname is exactly where a short
+# LDH-shaped directive can still hide ("ignore-all-previous-instructions.example.com" is
+# a syntactically valid host — see `_safe_destination_host`). Inside a JSON field named
+# `destination_host` that reads as data; spliced into the question a judge is reading as
+# its instructions, it reads as instructions.
+#
+# The wording says NAMES, not "sends data to", and that distinction is not pedantry —
+# the first draft said "sends data to" and an independent C-135 caught it. The crit entry
+# behind this is a bare `_KNOWN_EXFIL_HOST_RE` match: no taint, no send verb, no upload
+# construct is required to populate the channel. Measured on a benign markdown style
+# guide whose only sin is the sentence "services like pastebin.com are convenient":
+# `destination_hosts == ['pastebin.com']`. Telling a judge that skill "sends data to"
+# pastebin.com is a data flow the engine never established — a fabricated fact handed to
+# the one reader whose job is to weigh the facts (Golden Rule #4). What the engine knows
+# is that the host was NAMED, and the question must not claim more than that.
+_ID_QUESTIONS_WITH_DESTINATION = {
+    "B13": "This installed skill's content references the external destination recorded "
+           "in this item's `safe_facts.destination_host`. The scan matched the host "
+           "name only: it did NOT establish that any data flows there, and the "
+           "reference may be documentation rather than behaviour. Given what this skill "
+           "is for, does it have any business reaching that destination at all? "
+           "[SAFE / SUSPICIOUS / DANGEROUS + reason]",
+}
+
 # Plain-language attestation questions, keyed by the recovered ASTFinding rule.
 _RULE_QUESTIONS = {
     "TT4_FILE_NET": "This skill reads a file and the contents appear to flow "
@@ -173,7 +223,7 @@ _RULE_QUESTIONS = {
 
 # --------------------------------------------------------------------------- helpers
 
-def _question_for(finding_id: str) -> str:
+def _question_for(finding_id: str, *, has_destination: bool = False) -> str:
     """Plain-language attestation question for a finding id or ASTFinding rule.
 
     Falls back to a generic, finding-id-only question for anything not in the
@@ -184,8 +234,18 @@ def _question_for(finding_id: str) -> str:
     jailbreak or prompt-injection directive) -- logsafe.redact() only masks
     known secret shapes, not arbitrary injection text, so it must never be the
     only thing standing between skill-authored prose and this packet.
+
+    *has_destination* (B-556): True when `_item_from_finding` extracted a gated
+    `safe_facts.destination_host` for this finding. It selects a variant that asks
+    about that destination specifically instead of the generic multi-sub-signal
+    question — the flag is a BOOLEAN, so no finding-derived text reaches the wording
+    here and the no-interpolation rule above is unchanged. Falls back to the generic
+    question whenever no variant exists for the id, so every id but B13 is unaffected.
     """
-    q = _ID_QUESTIONS.get(finding_id) or _RULE_QUESTIONS.get(finding_id)
+    q = None
+    if has_destination:
+        q = _ID_QUESTIONS_WITH_DESTINATION.get(finding_id)
+    q = q or _ID_QUESTIONS.get(finding_id) or _RULE_QUESTIONS.get(finding_id)
     if q is None:
         q = (
             f"Check {finding_id} could not be automatically resolved. Review "
@@ -367,6 +427,23 @@ def _safe_destination_host(f) -> str | None:
     packet — an unparseable/oversized/non-LDH "hostname" carries no information a judge
     can act on safely, so silence is the correct answer, not a mangled fragment.
     """
+    # B-556: the STRUCTURED channel first. `Finding.destination_hosts` is set by the
+    # check itself from a closed engine-authored source (an allowlist match, a parsed
+    # URL) — never copied from skill prose — because the evidence-scanning branch below
+    # cannot see a destination the check never wrote into a URL. Measured: B13's
+    # paste/exfil-host evidence is the engine's own LABEL ("<skill>: paste / exfiltration
+    # host"), so no URL exists to find and every such finding reached the judge with
+    # `safe_facts: {}` and a "do you trust the destination?" question that never named
+    # one.
+    #
+    # The field is a CHANNEL, not a trust grant: every value runs the identical
+    # gate as the evidence branch. A check that populated it from prose would still be
+    # bounded by the LDH charset and `_MAX_HOST_LEN`, exactly as C-284/C-135 established,
+    # and anything failing the gate is dropped rather than truncated into the packet.
+    for host in sorted(getattr(f, "destination_hosts", None) or ()):
+        gated = _gate_host(host)
+        if gated:
+            return gated
     for e in (f.evidence or []):
         m = _URL_IN_EVIDENCE_RE.search(e)
         if not m:
@@ -375,20 +452,32 @@ def _safe_destination_host(f) -> str | None:
             host = urlparse(m.group(0)).hostname
         except ValueError:
             continue
-        if not host:
-            continue
-        host = host.lower()
-        if not host.isascii():
-            try:
-                host = host.encode("idna").decode("ascii")
-            except (UnicodeError, ValueError):
-                continue
-        if len(host) > _MAX_HOST_LEN:
-            continue
-        if not _LDH_HOST_RE.match(host):
-            continue
-        return host
+        gated = _gate_host(host)
+        if gated:
+            return gated
     return None
+
+
+def _gate_host(host) -> str | None:
+    """The single charset/length gate every destination host must pass (B-556).
+
+    Extracted verbatim from `_safe_destination_host`'s original evidence-scanning body
+    so the structured channel and the URL channel cannot drift apart — a second copy of
+    this gate is exactly how one of them would later be widened alone.
+    """
+    if not host or not isinstance(host, str):
+        return None
+    host = host.lower()
+    if not host.isascii():
+        try:
+            host = host.encode("idna").decode("ascii")
+        except (UnicodeError, ValueError):
+            return None
+    if len(host) > _MAX_HOST_LEN:
+        return None
+    if not _LDH_HOST_RE.match(host):
+        return None
+    return host
 
 
 # --------------------------------------------------------------------------- C-285: corroboration
@@ -457,12 +546,20 @@ def _item_from_finding(f) -> dict:
         safe_facts["destination_host"] = host
     if field_paths:
         safe_facts["config_field_paths"] = field_paths
+    # B-556: the engine's own closed-vocabulary sub-signal tokens, when the check set
+    # them. Short fixed identifiers authored here (B191's "blocked" / "evasive" /
+    # "divergence"), never skill text, so they carry no injection surface — and they tell
+    # the judge WHICH branch of a multi-branch check fired, which the question alone
+    # cannot when a check covers several.
+    sub_signals = getattr(f, "sub_signals", None) or ()
+    if sub_signals:
+        safe_facts["sub_signals"] = sorted(str(s) for s in sub_signals)
     return {
         "finding_id": f.id,
         "target": _target_from_evidence(f),
         "redacted_evidence": _evidence_locations(f),
         "engine_disposition": f.status,
-        "question": _question_for(f.id),
+        "question": _question_for(f.id, has_destination=bool(host)),
         "verdict_schema": _VERDICT_SCHEMA,
         "safe_facts": safe_facts,
     }

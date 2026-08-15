@@ -753,6 +753,7 @@ def _finding(
     not_applicable=False,
     sub_signals=None,
     engine_degraded=False,
+    destination_hosts=None,
 ) -> Finding:
     """*scored*: per-finding override of CheckMeta.scored, same shape as *severity*.
 
@@ -777,6 +778,9 @@ def _finding(
     out unreadable/corrupt) — never for a plain "nothing to check" UNKNOWN. See
     ``Finding.engine_degraded``'s own docstring (catalog.py) for the full reasoning.
     Defaults False, so every existing caller is unaffected.
+
+    *destination_hosts* (B-556): per-finding, same shape — see Finding.destination_hosts.
+    Defaults to an empty frozenset when omitted; every existing caller is unaffected.
     """
     m = _meta(cid)
     return Finding(
@@ -794,6 +798,7 @@ def _finding(
         not_applicable=not_applicable,
         sub_signals=frozenset(sub_signals) if sub_signals else frozenset(),
         engine_degraded=engine_degraded,
+        destination_hosts=frozenset(destination_hosts) if destination_hosts else frozenset(),
     )
 
 
@@ -1675,7 +1680,15 @@ _MCP_REMOTE_TRANSPORTS = ("sse", "http", "streamable-http", "streamablehttp", "w
 
 
 def _custom(
-    cid, severity, status, detail, fix, ev=None, not_applicable=False, engine_degraded=False
+    cid,
+    severity,
+    status,
+    detail,
+    fix,
+    ev=None,
+    not_applicable=False,
+    engine_degraded=False,
+    destination_hosts=None,
 ) -> Finding:
     """Build a finding with an explicit severity (for dynamic-severity checks).
 
@@ -1690,6 +1703,10 @@ def _custom(
     marking its own engine-side UNKNOWN, so it silently dropped out of
     ``scoring.compute()``'s denominator instead of hard-capping the grade like
     ``_config_unreadable()``'s ``_finding()``-built UNKNOWN already does.
+
+    *destination_hosts* (B-556): same contract as ``_finding()``'s own parameter — see
+    Finding.destination_hosts. Defaults to an empty frozenset when omitted; every
+    existing caller is unaffected.
     """
     m = BY_ID[cid]
     return Finding(
@@ -1705,6 +1722,7 @@ def _custom(
         confidence=m.confidence,
         not_applicable=not_applicable,
         engine_degraded=engine_degraded,
+        destination_hosts=frozenset(destination_hosts) if destination_hosts else frozenset(),
     )
 
 
