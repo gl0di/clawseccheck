@@ -4549,36 +4549,38 @@ def _run_content_ring(
                 )
                 break
             except Exception:  # noqa: BLE001 — a ring check must never break --vet
-                # B-485: this handler is SILENT on purpose as of 2026-08-08, and the
-                # obvious fix was built and RETRACTED. Read this before rebuilding it.
+                # B-485: still silent, and that is now SAFE rather than a known gap. The
+                # note here used to say the opposite; it was written on 2026-08-08 when
+                # the obvious fix had just been retracted, and `3fe2554` closed the defect
+                # two weeks later by a different route. Corrected rather than deleted, so
+                # nobody re-derives the retracted path from a stale warning.
                 #
-                # The known gap is real: a raising check returns no verdict, so nothing
-                # sets `ctx.limit_hits`, `dossier._danger_coverage_gap` never fires, and
-                # `--vet` can answer INSTALL about a package whose Danger scan could not
-                # read a bundled file — two lines above its own "not scanned by the
-                # AST/taint layer". The two handlers above already record their gaps, so
-                # routing this one the same way is a five-line change and it works.
+                # What was true then: a raising check returns no verdict, so this handler
+                # set nothing, and `dossier._danger_coverage_gap` keyed on the literal
+                # phrase "coverage is incomplete" in a finding's detail. Neither fired for
+                # a parse failure, so `--vet` answered INSTALL about a package whose Danger
+                # scan could not read a bundled file. Routing this handler through
+                # `note_limit()` fixed that and was RETRACTED: whether a file parses depends
+                # on the interpreter WE run under, so a benign `match` statement (3.10+)
+                # made the same bytes read INSTALL on 3.12 and CAUTION on the 3.9 floor.
                 #
-                # It also introduces a worse defect. The commonest cause here is
-                # `skillast.ScriptProseCoverageIncomplete` from `ast.parse`, and whether
-                # a file parses depends on the interpreter WE run under. Measured on an
-                # ordinary skill whose only script uses a `match` statement (Python 3.10+,
-                # standard since 2021): INSTALL / rc=0 on 3.12, CAUTION / rc=1 on the 3.9
-                # CI floor. Same bytes, opposite verdict, and rc=1 trips the `--vet … ||
-                # fail` install gate `docs/USAGE.md` documents. That is a false non-clean
-                # verdict on a benign package — Golden Rule #5 — and it would hit a large
-                # share of modern skills.
+                # What is true now: `_danger_coverage_gap`'s primary leg is
+                # `Finding.engine_degraded` — a STRUCTURAL flag the producer sets — and
+                # B13's own parse-error branch sets it. So the coverage gap is detected
+                # whether or not this handler speaks, and the verdict is CAUTION / rc=1.
+                # Verified end to end on both interpreters: an unparseable `.py` gives
+                # CAUTION on 3.12 and 3.9 alike, a valid one INSTALL.
                 #
-                # No sound narrowing exists with the current machinery: `_danger_coverage_gap`
-                # matches on `coverage_gap_finding`'s own "coverage is incomplete" wording,
-                # so emitting the disclosure IS what moves the verdict; there is no
-                # disclose-without-capping variant to reach for. Separating "unparseable
-                # because hostile" from "unparseable because newer than us" is not
-                # decidable from 3.9's view of the file.
-                #
-                # Closing this properly means making the scanner version-tolerant rather
-                # than patching this handler. Pinned in tests/test_b485_vet_coverage_gap.py,
-                # both the gap and the false positive, so neither can be forgotten.
+                # The version skew was not solved — it was ACCEPTED, bounded and pinned
+                # (`tests/test_b485_vet_coverage_gap.py::test_version_skew_on_a_modern_
+                # syntax_skill_is_bounded`): a skill using syntax newer than the running
+                # interpreter still reads CAUTION on 3.9. The bound is what makes that
+                # tolerable — the gap can only WITHHOLD a clean verdict, never manufacture
+                # DO-NOT-INSTALL — and it is an honest statement about our own scanner
+                # rather than a laundered INSTALL. Do not "fix" it by matching prose:
+                # `Finding.detail` is hashed by `baseline.fingerprint()`, and the phrase
+                # leg survives only as a documented fallback for hand-built Findings in
+                # unit tests.
                 continue
             if fx.status not in (FAIL, WARN):
                 continue
