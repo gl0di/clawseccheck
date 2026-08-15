@@ -239,22 +239,84 @@ def test_attack_chain_count_claims_match_the_risk_engine():
     assert not wrong, "stale attack-chain count claims:\n  " + "\n  ".join(wrong)
 
 
-def test_the_svg_badge_number_matches_its_own_label():
-    """The SVG carries the figure twice -- a <text class="num"> and the label beside it --
-    plus again in the title and aria-label. Fixing one and missing another is the whole
-    failure mode here, so pin that they agree."""
+# Each badge states its five figures three times: as visible <text class="num"> elements,
+# and again inside aria-label and <title>. `[\d,]+` and not `\d+` -- the test-count slot is
+# comma-grouped ("15,400"), and a `\d+` pattern silently matches the "15" of it, which is
+# how that position stayed unguarded while reading as covered.
+_SVG_NUM_RE = re.compile(r'<text class="num" x="([\d.]+)"[^>]*>([\d,]+)</text>')
+_SVG_LABEL_RE = re.compile(r'aria-label="([^"]*)"')
+_SVG_TITLE_RE = re.compile(r"<title>([^<]*)</title>")
+# "184 security checks - 26 attack-chain detectors - ..." -> the figure opening each segment.
+_SVG_STAT_RE = re.compile(r"([\d,]+)\s+[A-Za-z]")
+
+
+def _svg_self_disagreements(svg: str, name: str) -> list:
+    """Every way *svg* contradicts itself across its three statements of the same figures.
+
+    Deliberately derives the number of stats FROM THE FILE rather than asserting five, so a
+    sixth stat added later is covered the day it is added -- the previous guard hardcoded a
+    single x position and therefore could only ever watch the one figure it was written for.
+    """
+    out = []
+    nums = [v for _, v in sorted(_SVG_NUM_RE.findall(svg), key=lambda p: float(p[0]))]
+    if not nums:
+        return [f"{name}: no <text class=\"num\"> elements at all"]
+    for what, rx in (("aria-label", _SVG_LABEL_RE), ("title", _SVG_TITLE_RE)):
+        m = rx.search(svg)
+        if not m:
+            out.append(f"{name}: no {what}")
+            continue
+        stated = _SVG_STAT_RE.findall(m.group(1))
+        if len(stated) != len(nums):
+            out.append(
+                f"{name}: {len(nums)} number element(s) but {what} states {len(stated)} figure(s)"
+            )
+            continue
+        for i, (drawn, said) in enumerate(zip(nums, stated)):
+            if drawn != said:
+                out.append(f"{name}: position {i} shows {drawn}, its {what} says {said}")
+    return out
+
+
+def test_the_svg_badge_numbers_match_their_own_label():
+    """Every figure the badge draws must equal what its aria-label and title say it draws.
+
+    The failure this pins really happened: on 2026-08-13 the test-count slot read 14,400
+    while the label beside it said 15,000 -- a 600 disagreement inside one file that no
+    guard could see, because the guard watched only the attack-chain position."""
     wrong = []
     for name in ("stats-light.svg", "stats-dark.svg"):
-        path = REPO / "docs" / "assets" / name
-        svg = path.read_text(encoding="utf-8")
-        label = _CHAIN_COUNT_RE.search(svg)
-        assert label, f"{name}: no 'N attack-chain detectors' text at all"
-        # the <text class="num"> sharing the label's x position carries the same figure
-        num = re.search(r'<text class="num" x="372\.0"[^>]*>(\d+)</text>', svg)
-        assert num, f"{name}: no attack-chain number element at the expected position"
-        if num.group(1) != label.group(1):
-            wrong.append(f"{name}: badge shows {num.group(1)}, its own text says {label.group(1)}")
+        svg = (REPO / "docs" / "assets" / name).read_text(encoding="utf-8")
+        wrong.extend(_svg_self_disagreements(svg, name))
     assert not wrong, "SVG badge disagrees with itself:\n  " + "\n  ".join(wrong)
+
+
+def test_the_badge_guard_bites_on_a_previously_unguarded_position():
+    """Guard the guard, on a position the OLD one structurally could not reach.
+
+    Mutating the attack-chain slot would prove nothing -- that is the one slot the previous
+    regex already watched. So mutate the test-count slot (x=620.0) and the checks slot
+    (x=124.0) instead, and require a complaint naming each."""
+    svg = (REPO / "docs" / "assets" / "stats-light.svg").read_text(encoding="utf-8")
+    assert not _svg_self_disagreements(svg, "control"), "the real file must start clean"
+
+    positions = [x for x, _ in sorted(_SVG_NUM_RE.findall(svg), key=lambda p: float(p[0]))]
+    assert len(positions) >= 3, "badge should carry several figures"
+
+    for idx in (0, 2):  # security checks, automated tests -- neither is x=372.0
+        x, value = sorted(_SVG_NUM_RE.findall(svg), key=lambda p: float(p[0]))[idx]
+        broken = svg.replace(
+            f'<text class="num" x="{x}"', f'<text class="num" x="{x}" data-mutated="1"', 1
+        )
+        # rewrite only that element's value, leaving the label and title untouched
+        broken = re.sub(
+            r'(<text class="num" x="' + re.escape(x) + r'"[^>]*>)[\d,]+(</text>)',
+            r"\g<1>999999\g<2>",
+            broken,
+        )
+        complaints = _svg_self_disagreements(broken, "mutant")
+        assert complaints, f"guard is blind to position {idx} (x={x}, was {value})"
+        assert any("999999" in c for c in complaints), complaints
 
 
 def test_changelog_is_exempt_from_the_count_pins():
