@@ -546,7 +546,8 @@ clean gets no extra line — the change itself is already reported.
 > agent's runtime — which this skill deliberately does not do (see [Trust &
 > provenance](#trust--provenance): it is Python, stdlib-only, and never executes what it reads).
 > So the honest posture is three tiers, and only the third works without you doing anything:
-> **warn early** (B25/B95/C4 tell you when updates will land unvetted), **check on demand**
+> **warn early** (B25/B95/C4 report that auto-update is on today — they do not speak about
+> any particular future update), **check on demand**
 > (`--advise <target>` before you install — INSTALL / CAUTION / DO-NOT-INSTALL), and **catch
 > afterwards** (this). Anything claiming to stop an install from here would be describing a
 > capability the architecture does not have.

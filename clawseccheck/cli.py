@@ -3267,26 +3267,45 @@ def _main(argv=None) -> int:
                 try:
                     _finding = vet_skill(_target)
                     # The PROFILE's verdict, not the bare Finding's status — the same
-                    # `build_profile` result `--vet-skill` and `--advise` render. Caught by
-                    # measurement rather than reasoning: on a real ClickFix fixture
-                    # `vet_skill(...).status` is PASS while the dossier says CAUTION,
-                    # because the content ring hangs off `ring_findings` and only the
-                    # profile folds it in. Reporting the bare status here would have made
-                    # the monitor and `--vet-skill` disagree about the same skill, which is
-                    # worse than not re-checking at all.
+                    # `build_profile` result `--vet-skill` and `--advise` render. The
+                    # reason is structural, not a measurement: INSTALL / CAUTION /
+                    # DO-NOT-INSTALL exists ONLY on the profile, so the bare status cannot
+                    # express the word this line has to print, and reporting it would make
+                    # the monitor and `--vet-skill` disagree about the same skill — worse
+                    # than not re-checking at all.
+                    #
+                    # C-440: this comment used to justify the choice with "on a real
+                    # ClickFix fixture `vet_skill(...).status` is PASS while the dossier
+                    # says CAUTION". That does not reproduce. Measured on
+                    # `fixtures/bad_b100_clickfix_setup/skills/quick-tool`: bare WARN,
+                    # profile WARN, ring_findings 0 — the two agree and the ring is empty.
+                    # The decision is still right for the structural reason above; only
+                    # its stated evidence was wrong, which is worth more than a footnote
+                    # because a false measurement in a comment is load-bearing until
+                    # someone re-runs it.
                     _profile = build_profile(_finding, str(_target), "skill")
                     _status = _profile.overall_status
                     # B-540: with ONE exception. `build_profile` scores only the
-                    # PASS/WARN/FAIL axes and then promotes the surviving PASS ones to the
-                    # overall word, so a skill whose content could not be parsed at all
-                    # came back PASS here and was dropped by the `_lvl is None` branch
-                    # below — the re-check ran, concluded "I cannot tell", and the user
-                    # heard nothing. Measured on `fixtures/unknown_b347_deaddrop_
-                    # unparseable`: bare UNKNOWN, profile PASS. This does NOT reopen the
-                    # disagreement the comment above closes: `--vet-skill` on that same
-                    # directory prints the UNKNOWN danger axis one line under its
-                    # headline, so the fact survives there and only the monitor lost it.
-                    # The profile still owns every PASS/WARN/FAIL verdict.
+                    # PASS/WARN/FAIL axes, so a skill whose content could not be parsed at
+                    # all loses the one fact that mattered — that the re-check concluded
+                    # "I cannot tell". UNKNOWN is not a point on the PASS/WARN/FAIL scale
+                    # and must not be resolved onto it.
+                    #
+                    # C-440: the failure this guards against is not the one the comment
+                    # used to describe. It said the profile came back PASS and the finding
+                    # was then dropped by the `_lvl is None` branch below, so the user
+                    # heard nothing. Re-measured on
+                    # `fixtures/unknown_b347_deaddrop_unparseable/skills/broken-sync`:
+                    # bare UNKNOWN, profile WARN, verdict CAUTION, and
+                    # `_REVET_SEVERITY[WARN]` is MEDIUM — not None, so nothing is dropped.
+                    # Today the same input would be REPORTED, as a CAUTION the engine never
+                    # concluded. Silence became misattribution; the guard is still required
+                    # and is now required for a different reason.
+                    #
+                    # This does NOT reopen the disagreement the comment above closes:
+                    # `--vet-skill` on that same directory prints the UNKNOWN danger axis
+                    # one line under its headline, so the fact survives there. The profile
+                    # still owns every PASS/WARN/FAIL verdict.
                     if _finding.status == UNKNOWN:
                         _status = UNKNOWN
                 except Exception:  # noqa: BLE001 — see the containment above
