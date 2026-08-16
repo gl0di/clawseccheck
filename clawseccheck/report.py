@@ -116,6 +116,42 @@ def _sanitize_tree(value):
 SENSITIVE_SUPPRESSED_IDS = frozenset({"B1", "B2", "B13", "B20"})
 
 
+# B-557: what ClawSecCheck's own installed copy IS and IS NOT excluded from.
+#
+# The old wording — "excluded from its own audit" — was unqualified, and a single `--full`
+# report both printed it and FAILED B181 against `clawseccheck` by name, listing the files
+# that no longer matched the recorded install hashes. The exclusion is real but narrow: the
+# collector's content-verified identity oracle (`collector._is_own_source`) drops our copy
+# from skill DISCOVERY and so from `check_installed_skills`' content ring. Every check that
+# enumerates skills from somewhere else still sees it.
+#
+# The set behind the second clause is measured, not assumed — four lock states over a home
+# carrying a genuine own install, listing every check whose finding names it:
+#
+#     lock state                          names our own copy
+#     everything agrees                   -
+#     post-install tamper                 B181 FAIL
+#     accepted despite failed verify      B135 WARN
+#     installed from a foreign registry   B184 WARN
+#
+# All three read the workspace `.clawhub/lock.json`, which lists our skill by SLUG, so the
+# content oracle never gets a say. (B177 is the family's fourth member and is NOT here: its
+# subject is an installed plugin's trust disposition, not a skill.)
+#
+# One constant, four render sites. Before this the sentence was duplicated across two in
+# `cli.py` and two here, which is the shape where a fix reaches one surface and leaves the
+# claim false on the other three.
+SELF_EXCLUDED_NOTE = (
+    "not graded -- ClawSecCheck's own installed copy is excluded from the "
+    "installed-skill content scan; its ClawHub install integrity and provenance "
+    "(B135/B181/B184) are still checked"
+)
+
+#: The check ids named in :data:`SELF_EXCLUDED_NOTE`, for the guard that keeps the two in
+#: step with what actually fires. Tests derive the real set by running the audit.
+SELF_EXCLUDED_STILL_CHECKED_IDS = frozenset({"B135", "B181", "B184"})
+
+
 def surfaced_despite_suppression(f: Finding) -> bool:
     """True when a suppressed finding must still be surfaced (score-capping or sensitive)."""
     return bool(getattr(f, "suppressed", False)) and (
@@ -2002,8 +2038,7 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
         lines.extend(_subject_finding_lines(fids0, by_id, icon))
         if self_excluded:
             lines.append(
-                f"   {note_icon}{', '.join(self_excluded)} not graded -- "
-                "ClawSecCheck's own installed copy is excluded from its own audit")
+                f"   {note_icon}{', '.join(self_excluded)} {SELF_EXCLUDED_NOTE}")
         return lines
     # B-268: `inv["skills"]` is built from ctx.installed_skills, which the collector caps at
     # _MAX_SKILLS. Printing its length as "(N installed)" reported the CAP as the inventory
@@ -2047,8 +2082,7 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
             "cap were not scanned; their verdict is unknown, not clean")
     if self_excluded:
         lines.append(
-            f"   {note_icon}{', '.join(self_excluded)} not graded -- "
-            "ClawSecCheck's own installed copy is excluded from its own audit")
+            f"   {note_icon}{', '.join(self_excluded)} {SELF_EXCLUDED_NOTE}")
     # Skill names are untrusted (directory names) -- _sanitize() every one before it
     # reaches a line, same as finding title/detail elsewhere in this file (B164: no raw
     # ANSI/control chars may reach the terminal).
