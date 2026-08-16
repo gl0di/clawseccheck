@@ -202,6 +202,16 @@ _EXEMPT = {
                    "reads PhaseResult state, and layers.py must stay a leaf that scoring.py "
                    "can import, so the projection cannot live down there. A finer split "
                    "(phase runners vs. roll-up) is a later cycle.",
+    "behavioral.py": "~1,263 lines — the --behavioral replay ring: the trajectory reader's "
+                     "consumers, the four detectors (T1/T2/T3/B191), the F-154 cap reducer "
+                     "and the renderer. Sat three lines under the budget until B-559, which "
+                     "made T1/T2 answer UNKNOWN instead of a vacuous PASS when the log was "
+                     "not read in full; the predicate that decides that "
+                     "(analysis_incompleteness) has to live beside the flags it reads, or a "
+                     "new incompleteness signal would silently not reach it. Splitting the "
+                     "detectors from the renderer would separate each verdict from the text "
+                     "that discloses its own limits, which is the pairing B-245 and B-559 "
+                     "both exist to keep. A finer split is a later cycle.",
     "adjudication.py": "~1,247 lines — the judge-packet builder. Crossed the budget with the "
                        "ESET H1 2026 gap-closure pass (C-361: config field-path extraction so "
                        "the audit-path majority of findings, which cite a dig() path rather "

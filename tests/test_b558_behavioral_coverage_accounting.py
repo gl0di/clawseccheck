@@ -134,20 +134,27 @@ def _home_with_trajectory(tmp_path: Path, *lines: str) -> Path:
     return home
 
 
-def test_a_pass_over_an_empty_event_set_is_not_counted_as_scanned(tmp_path):
-    """The break an independent review found in this fix's first version.
+def test_a_verdict_the_run_cannot_vouch_for_is_not_counted_as_scanned(tmp_path):
+    """The break an independent review found in this fix's first version, and the
+    invariant that outlived it.
 
-    T1/T2 gate only on `meta["present"]`, so they return PASS with zero events parsed —
-    "no thread shows an ingress -> sensitive -> egress sequence" is trivially true when
-    there are no threads. That is fine as a rendered line, and it is not a basis for
-    counting the subject scanned. No check in `CHECKS` behaves this way: one that cannot
-    determine state returns UNKNOWN, so its PASS is always a verdict.
+    T1/T2 used to gate only on `meta["present"]`, returning PASS with zero events parsed
+    — "no thread shows an ingress -> sensitive -> egress sequence" is trivially true when
+    there are no threads. This fix stopped that PASS buying a coverage point; B-559 then
+    stopped it being emitted at all, so the same case is now excluded twice over.
+
+    Both layers are asserted, because each covers what the other cannot. The status is
+    the honest answer to a reader; the conclusiveness gate is what still withholds B191,
+    whose own verdict is sound but whose subject the run cannot vouch for as a whole.
+    Removing either alone should turn this red.
     """
     ctx = collect(_home_with_trajectory(tmp_path, '{"schemaVersion": 99, "type": "note"}'))
     analysis = behavioral.analyze(ctx)
     assert analysis["event_count"] == 0, analysis
-    assert {f.id: f.status for f in analysis["findings"]}["T1"] == "PASS", (
-        "fixture no longer produces the vacuous PASS this test exists for")
+    # layer 1 (B-559): the producer does not emit a verdict it cannot support
+    assert {f.id: f.status for f in analysis["findings"]}["T1"] == "UNKNOWN"
+    # layer 2 (B-558): the consumer would refuse it even if it were emitted
+    assert not behavioral.analysis_is_conclusive(analysis)
 
     result = pl.run_pipeline(ctx, run_all(ctx), home_dir=ctx.home)
     not_scanned = set(result.coverage_page["logs"]["not_scanned"])

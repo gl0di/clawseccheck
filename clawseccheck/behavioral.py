@@ -474,19 +474,35 @@ def _t1_thread_trifecta(
 
 
 def check_behavioral_trifecta(
-    groups: dict[str, list[dict]], untrusted_origin_channels: "frozenset[str]" = frozenset()
+    groups: dict[str, list[dict]], untrusted_origin_channels: "frozenset[str]" = frozenset(),
+    *, incomplete: "str | None" = None,
 ) -> object:
     """T1 — behavioral trifecta, proven by the trajectory log (not declared capability).
 
-    WARN — at least one thread shows an ingress leg (an ingress VERB, or an
-           externally-delivered group/channel message whose channel's own config
-           admits a non-owner sender — B-298, narrowed F-154 round 2), then a
-           sensitive-verb, then an egress-verb, in that order.
-    PASS — threads present, no thread shows the ordered sequence.
+    WARN    — at least one thread shows an ingress leg (an ingress VERB, or an
+              externally-delivered group/channel message whose channel's own config
+              admits a non-owner sender — B-298, narrowed F-154 round 2), then a
+              sensitive-verb, then an egress-verb, in that order.
+    PASS    — threads present, no thread shows the ordered sequence, and the read raised
+              no incompleteness signal (:func:`analysis_incompleteness`).
+    UNKNOWN — nothing found, but the read raised one (*incomplete*).
+
+    Note what PASS does and does not promise. It says every signal the reader RAISES was
+    clear, not that every record reached the detector: `trajectory.read_events` can drop
+    individual records inside a file it counts as scanned — a corrupt JSON line, or a
+    per-record schema it does not recognise — and reports no flag for it. So a PASS here
+    is "nothing found in a read that reported no problems", which is weaker than "the log
+    is clean" and stronger than the pre-B-559 PASS, which promised nothing at all.
 
     *untrusted_origin_channels* — see `_group_untrusted_origin_channels`; defaults to
     an empty set (no channel arms on origin alone) when the caller supplies nothing,
     matching `_classify_event_role`'s own default.
+
+    *incomplete* (B-559) — the reason the read could not cover the log, from
+    :func:`analysis_incompleteness`, or None. It gates ONLY the clean branch: a firing
+    thread stays WARN whatever went unread, because demoting an observation because the
+    REST of the history was capped is the false negative a fix in this direction
+    introduces. Default None keeps every existing caller on the pre-B-559 contract.
     """
     firing_keys: list[str] = []
     armed_by: dict[str, str] = {}
@@ -517,6 +533,17 @@ def check_behavioral_trifecta(
             "causally-unrelated actions in an ordinary workflow can satisfy this shape, "
             "so treat it as a lead to review manually, not confirmed exfiltration.",
             firing[:6],
+        )
+    if incomplete:
+        return _finding(
+            "T1",
+            UNKNOWN,
+            "No thread in what was read shows an ingress -> sensitive -> egress "
+            f"sequence — but {incomplete}, so this is not a clean result for the log as "
+            "a whole.",
+            "Nothing to act on yet: the sequence was not observed in the sessions that "
+            "were read, and the ones that were not read cannot be spoken for. Re-run "
+            "once the unread sessions are within reach to turn this into a verdict.",
         )
     return _finding(
         "T1",
@@ -559,16 +586,23 @@ def _t2_thread_anomaly(thread_events: list[dict]) -> bool:
     return False
 
 
-def check_outcome_anomaly(groups: dict[str, list[dict]]) -> object:
+def check_outcome_anomaly(groups: dict[str, list[dict]], *,
+                          incomplete: "str | None" = None) -> object:
     """T2 — outcome anomaly: repeated failure then success on a sensitive verb.
 
-    WARN — a sensitive verb failed at least twice in a row, then succeeded, within one
-           thread. Ambiguous by design (§8 — no error-class/message is read, only
-           status/isError/success): this can mean persistence past an initial denial
-           (e.g. permission/path probing), OR ordinary retry/backoff on a transient
-           failure (rate limit, timeout) — the finding text says so explicitly rather
-           than asserting the more alarming reading (C-170 adversarial finding).
-    PASS — threads present, no such series found.
+    WARN    — a sensitive verb failed at least twice in a row, then succeeded, within
+              one thread. Ambiguous by design (§8 — no error-class/message is read, only
+              status/isError/success): this can mean persistence past an initial denial
+              (e.g. permission/path probing), OR ordinary retry/backoff on a transient
+              failure (rate limit, timeout) — the finding text says so explicitly rather
+              than asserting the more alarming reading (C-170 adversarial finding).
+    PASS    — threads present, no such series found, and the read raised no
+              incompleteness signal (see `check_behavioral_trifecta` on what that
+              promises and what it does not).
+    UNKNOWN — none found, but the read raised one (*incomplete*).
+
+    *incomplete* (B-559) — see `check_behavioral_trifecta`; gates the clean branch only,
+    never a firing one.
     """
     firing_keys: list[str] = []
     for group_key, thread_events in groups.items():
@@ -589,6 +623,16 @@ def check_outcome_anomaly(groups: dict[str, list[dict]]) -> object:
             "or an ordinary retry/backoff on a transient failure (rate limit, timeout); "
             "the log's status/isError/success alone can't distinguish the two.",
             firing[:6],
+        )
+    if incomplete:
+        return _finding(
+            "T2",
+            UNKNOWN,
+            "No fail->fail->success series on a sensitive verb in what was read — but "
+            f"{incomplete}, so this is not a clean result for the log as a whole.",
+            "Nothing to act on yet: the series was not observed in the sessions that "
+            "were read, and the ones that were not read cannot be spoken for. Re-run "
+            "once the unread sessions are within reach to turn this into a verdict.",
         )
     return _finding(
         "T2",
@@ -999,9 +1043,13 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     # from `ctx.config` (never re-read per-event).
     cfg = getattr(ctx, "config", None) or {}
     untrusted_origin_channels = _group_untrusted_origin_channels(cfg)
+    # B-559: T1/T2 answer UNKNOWN rather than PASS when the log was not read in full.
+    # Computed once, here, because this is where every incompleteness flag is known;
+    # the detectors take the reason as a string so they never re-derive it.
+    incomplete = analysis_incompleteness(result)
     result["findings"] = [
-        check_behavioral_trifecta(groups, untrusted_origin_channels),
-        check_outcome_anomaly(groups),
+        check_behavioral_trifecta(groups, untrusted_origin_channels, incomplete=incomplete),
+        check_outcome_anomaly(groups, incomplete=incomplete),
         check_capability_drift(ctx),
         b191,
     ]
@@ -1028,35 +1076,53 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
 _B191_STRONG_SUB_SIGNALS = frozenset({"blocked", "evasive"})
 
 
-def analysis_is_conclusive(result: dict) -> bool:
-    """B-558: True only when this :func:`analyze` result may be counted as COVERAGE.
+def analysis_incompleteness(result: dict) -> "str | None":
+    """Why this :func:`analyze` result cannot support a clean verdict, or None if it can.
 
     Lives here, beside the flags it reads, because it is a statement about what this
     module's own result means — a caller re-deriving it would be a second source of
     truth that a new incompleteness flag would silently not reach.
 
-    The distinction it draws does not exist for a `CHECKS` member. A check that cannot
-    determine state returns UNKNOWN (Golden Rule #4), so its PASS is always a verdict.
-    T1/T2 gate only on ``meta["present"]``: they return PASS over an EMPTY event set,
-    because "no thread shows an ingress -> sensitive -> egress sequence" is trivially
-    true when there are no threads. That PASS is honest as a rendered line — the section
-    prints the file/event counts beside it — but it cannot support "this subject was
-    scanned", and the first version of B-558 gave it exactly that weight.
+    Ordered most-fundamental first, so the reason a reader is given is the one that
+    actually bounds the run: "nothing was parsed" is worth saying before "and some of
+    it was capped".
+    """
+    if not result.get("present"):
+        return "no trajectory sidecar was read"
+    if not result.get("event_count"):
+        return "no events could be parsed from the trajectory sidecar(s)"
+    if result.get("unknown_version"):
+        return "some records used an unrecognised trajectory schema version"
+    if result.get("files_capped"):
+        return (f"only the {result.get('files_scanned')} most recent of "
+                f"{result.get('files_total')} trajectory file(s) were read")
+    if result.get("truncated"):
+        return "a trajectory file exceeded the per-file scan cap and was read in part"
+    scanned, total = result.get("files_scanned"), result.get("files_total")
+    if total and scanned is not None and scanned != total:
+        # Found by the C-135 pass on B-559: a sidecar the reader could not OPEN (mode
+        # 000, a broken link, a race) is skipped by `trajectory.read_events`' own
+        # `except OSError: continue` without incrementing `files_scanned` and without
+        # setting any of the flags above. The reviewer put a real trifecta in such a
+        # file and got PASS. `files_capped` covers the cap; nothing covered this.
+        # Safe to add: measured across all 19 fixture homes carrying a sidecar, the two
+        # counts are equal everywhere, so this fires only when a file really went unread.
+        return f"{total - scanned} of {total} trajectory file(s) could not be read"
+    return None
 
-    Deliberately conservative, and it under-claims in one known way: B191 reads
-    ``audit_events``, a store the trajectory cap cannot truncate, so on a host whose
-    sidecars are capped its verdict is withheld here along with the rest. Naming the
-    detectors that read which source would put a second map of that in the tree, next to
-    the one :func:`analyze` already is; withholding a provable verdict costs a coverage
+
+def analysis_is_conclusive(result: dict) -> bool:
+    """B-558: True only when this :func:`analyze` result may be counted as COVERAGE.
+
+    B-559 made T1/T2 answer UNKNOWN rather than a vacuous PASS, so the statuses now
+    carry that themselves. This predicate stays because it is also what withholds B191,
+    whose own verdict is sound but whose subject the run cannot vouch for as a whole —
+    B191 reads ``audit_events``, which the trajectory cap cannot truncate, so this
+    knowingly under-claims there. Naming which detector reads which source would put a
+    second map of that in the tree; withholding a provable verdict costs a coverage
     point, while granting an unprovable one is the defect this exists to close.
     """
-    return bool(
-        result.get("present")
-        and result.get("event_count")
-        and not result.get("truncated")
-        and not result.get("files_capped")
-        and not result.get("unknown_version")
-    )
+    return analysis_incompleteness(result) is None
 
 
 def grade_cap_signal(result: dict) -> "frozenset[str]":
