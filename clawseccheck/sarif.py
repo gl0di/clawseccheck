@@ -16,7 +16,13 @@ from typing import TYPE_CHECKING
 from . import brand
 from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding, remediation_for
 from .dossier import axis_for
-from .report import _sanitize, _sanitize_tree, finding_counts_by_severity, surfaced_despite_suppression
+from .report import (
+    _sanitize,
+    _sanitize_tree,
+    finding_counts_by_severity,
+    self_excluded_line,
+    surfaced_despite_suppression,
+)
 from .scoring import ScoreResult
 
 if TYPE_CHECKING:
@@ -38,6 +44,7 @@ def _build_analysis_completeness(
     findings: list[Finding],
     checks_run: int,
     checks_total: int,
+    self_excluded: "list[str] | tuple[str, ...]" = (),
 ) -> dict:
     """Return the ``analysisCompleteness`` metablock for SARIF run.properties.
 
@@ -49,6 +56,12 @@ def _build_analysis_completeness(
         Number of checks actually executed in this run.
     checks_total:
         Total checks registered in the CHECKS catalogue; ``-1`` when unknown.
+    self_excluded:
+        Skills dropped from the installed-skill content scan by the collector's identity
+        oracle -- in practice ClawSecCheck's own installed copy. B-560: SARIF was the
+        CI-facing surface that never said so, and a pipeline reading it could not tell
+        "scanned and clean" from "not scanned". It belongs here rather than as a
+        ``result``: it is a statement about the run's reach, which is what this block is.
     """
     return {
         "checksRun": checks_run,
@@ -73,10 +86,14 @@ def _build_analysis_completeness(
         # predicate. camelCase key to match this block's existing convention
         # (checksRun/failCount/…); lowercase severity sub-keys to match report.py's.
         "failCountsBySeverity": finding_counts_by_severity(findings),
+        # B-560: camelCase to match this block's convention. Always present, empty list
+        # when nothing was excluded — an absent key would make "no exclusions" and "this
+        # producer is too old to say" the same thing to a consumer.
+        "selfExcludedSkills": sorted(self_excluded),
         "limitations": [
             "host-posture checks require --host",
             "attestation checks require --attest",
-        ],
+        ] + ([self_excluded_line(sorted(self_excluded))] if self_excluded else []),
     }
 
 
@@ -213,7 +230,8 @@ def render_sarif(
     if "properties" not in _run:
         _run["properties"] = {}
     _run["properties"]["analysisCompleteness"] = _build_analysis_completeness(
-        findings, _checks_run, _checks_total
+        findings, _checks_run, _checks_total,
+        self_excluded=list(getattr(ctx, "self_excluded_skills", None) or []),
     )
 
     if ctx is not None:

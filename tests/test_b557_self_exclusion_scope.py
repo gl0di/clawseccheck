@@ -160,7 +160,10 @@ def test_the_sentence_has_exactly_one_definition_in_the_package():
     assert literals == 1, "SELF_EXCLUDED_NOTE must be defined exactly once"
 
 
-def test_every_render_site_uses_the_constant():
-    for name in ("cli.py", "report.py"):
+def test_every_render_site_goes_through_the_shared_source():
+    """Either symbol counts: `SELF_EXCLUDED_NOTE` is the sentence, `self_excluded_line`
+    the names-plus-sentence composition (B-560 moved the join there for the same reason
+    B-557 moved the sentence — it was being rebuilt at each site)."""
+    for name in ("cli.py", "report.py", "sarif.py"):
         text = (REPO_ROOT / "clawseccheck" / name).read_text(encoding="utf-8")
-        assert "SELF_EXCLUDED_NOTE" in text, name
+        assert "SELF_EXCLUDED_NOTE" in text or "self_excluded_line" in text, name

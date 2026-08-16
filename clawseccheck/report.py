@@ -152,6 +152,34 @@ SELF_EXCLUDED_NOTE = (
 SELF_EXCLUDED_STILL_CHECKED_IDS = frozenset({"B135", "B181", "B184"})
 
 
+def self_excluded_line(names) -> str:
+    """The disclosure as one sentence: which skills, and what they are exempt from.
+
+    B-560: every surface that renders a skill roster composes it HERE. The names and the
+    note were being joined at each render site, which is the same duplication B-557 had
+    just removed from the note itself, one level out. Callers add their own decoration
+    (indent, icon, HTML tags); this owns the sentence.
+
+    SANITIZES. Skill names are directory names, so an attacker picks them, and the
+    identity oracle recognises our own copy by package LAYOUT rather than by name — a
+    hostile name is self-excluded like any other and lands in this sentence. The C-135
+    pass on this change proved that concrete: `render_html` escaped with `html.escape`
+    alone, which neutralises `&<>"'` and nothing else, so ESC/BEL, U+200B and U+202E
+    reached the page. U+202E in particular reverses the rendered order of the disclosure
+    itself — display-spoofing the very note this exists to add. Doing it here rather than
+    at each site is the point of having one composer: a surface cannot forget.
+
+    Returns "" for an empty roster, so a caller can emit it unconditionally without
+    inventing a disclosure for a run that excluded nothing.
+    """
+    # A bare string is ONE name, not a sequence of characters. No caller passes one
+    # today; the C-135 pass noticed `self_excluded_line("abc")` rendering "a, b, c".
+    if isinstance(names, str):
+        names = [names]
+    cleaned = [_sanitize(str(n)) for n in (names or [])]
+    return f"{', '.join(cleaned)} {SELF_EXCLUDED_NOTE}" if cleaned else ""
+
+
 def surfaced_despite_suppression(f: Finding) -> bool:
     """True when a suppressed finding must still be surfaced (score-capping or sensitive)."""
     return bool(getattr(f, "suppressed", False)) and (
@@ -2038,7 +2066,7 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
         lines.extend(_subject_finding_lines(fids0, by_id, icon))
         if self_excluded:
             lines.append(
-                f"   {note_icon}{', '.join(self_excluded)} {SELF_EXCLUDED_NOTE}")
+                f"   {note_icon}{self_excluded_line(self_excluded)}")
         return lines
     # B-268: `inv["skills"]` is built from ctx.installed_skills, which the collector caps at
     # _MAX_SKILLS. Printing its length as "(N installed)" reported the CAP as the inventory
@@ -2082,7 +2110,7 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
             "cap were not scanned; their verdict is unknown, not clean")
     if self_excluded:
         lines.append(
-            f"   {note_icon}{', '.join(self_excluded)} {SELF_EXCLUDED_NOTE}")
+            f"   {note_icon}{self_excluded_line(self_excluded)}")
     # Skill names are untrusted (directory names) -- _sanitize() every one before it
     # reaches a line, same as finding title/detail elsewhere in this file (B164: no raw
     # ANSI/control chars may reach the terminal).
@@ -4652,10 +4680,21 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             f'<td class="subj-status"><span class="subj-dot" style="--dot:{_st_color.get(status, "#8a8f98")};"></span>'
             f'{esc(status)}</td></tr>'
             for label, status, count_text in summary_rows)
+        # B-560: the roster this table summarises has a member the content ring never
+        # scanned, and HTML was the one human-facing surface that did not say so — the
+        # text report, the PDF and the JSON inventory all did. It is the surface most
+        # likely to be read by someone who did not run the scan, which is exactly who
+        # cannot otherwise know a skill was skipped. Same sentence as everywhere else
+        # (`self_excluded_line`), never a second one composed here.
+        _self_excluded = self_excluded_line(
+            getattr(ctx, "self_excluded_skills", None) or [])
+        _excluded_html = (
+            f'<p class="inv-note">{esc(_self_excluded)}</p>' if _self_excluded else "")
         subject_inventory_html = (
             '<section class="inventory" aria-label="Inventory by subject">'
             '<h2 class="section-title">Inventory by subject</h2>'
-            f'<table class="subj-table"><tbody>{_inv_rows}</tbody></table></section>')
+            f'<table class="subj-table"><tbody>{_inv_rows}</tbody></table>'
+            f'{_excluded_html}</section>')
     else:
         subject_inventory_html = ""
 
@@ -4878,6 +4917,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         .subj-status {{ text-align: right; white-space: nowrap; color: var(--muted); }}
         .subj-dot {{ display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%;
             background: var(--dot); margin-right: 0.4rem; vertical-align: middle; }}
+        .inv-note {{ margin: 0.6rem 0 0; color: var(--muted); font-size: 0.85rem;
+            line-height: 1.45; }}
         .footer {{ margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
             text-align: center; color: var(--muted); font-size: 0.8rem; }}
         @media (max-width: 560px) {{ .container {{ padding: 1.4rem; }} .header h1 {{ font-size: 1.3rem; }} }}

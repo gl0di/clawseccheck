@@ -652,7 +652,13 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     # phase (a plain audit, --fast, or the phase's own budget) passes None and only that
     # block is omitted. Nothing here re-scans or re-judges anything.
     inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep) if ctx is not None else None
-    if inv is not None and inv["skills"]:
+    # B-560: `self_excluded` too, not `skills` alone. A home whose ONLY skill is our own
+    # installed copy has an empty roster and something to say about it — gating on the
+    # roster dropped the block, and with it the note that a skill was skipped, on exactly
+    # the run where the reader has no other way to notice. `_skills_inventory_lines` has
+    # handled the empty-roster case since B-506; this caller was deciding it never got
+    # asked.
+    if inv is not None and (inv["skills"] or inv.get("self_excluded")):
         _pipeline_block(flow, "Skills", _skills_inventory_lines(inv, ctx, ascii_only=True))
     _pipeline_block(flow, "Plugins", _plugins_inventory_lines(plugin_sweep, ascii_only=True))
     if inv is not None and inv["mcp"]:

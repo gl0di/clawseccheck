@@ -57,13 +57,13 @@ from .guide import render_next_actions, suggest_actions
 from .integrity import package_digest
 from .report import render_html
 from .report import (
-    SELF_EXCLUDED_NOTE,
     _sanitize,
     render_advise,
     render_advise_json,
     render_permission_manifest,
     render_vet_dossier,
     render_vet_plan,
+    self_excluded_line,
     surfaced_despite_suppression,
 )
 from .adjudication import (
@@ -525,10 +525,8 @@ def sweep_installed_skills(
                 _emit(_discovery_gap_note(discovery_gaps))
             if sweep.self_excluded_skills:
                 note_icon = "[i]" if ascii_only else "ℹ️ "
-                _emit(
-                    f"   {note_icon}"
-                    f"{', '.join(_sanitize(n) for n in sweep.self_excluded_skills)} "
-                    f"{SELF_EXCLUDED_NOTE}")
+                _emit(f"   {note_icon}" + self_excluded_line(
+                    _sanitize(n) for n in sweep.self_excluded_skills))
         return sweep
 
     if narrate and discovery_gaps:
@@ -719,8 +717,8 @@ def _sweep_summary_lines(sweep: SkillSweep, ascii_only: bool = False) -> list[st
     # whether ClawSecCheck's own copy is a silently-shrunk count or a named exclusion.
     if sweep.self_excluded_skills:
         note_icon = "[i]" if ascii_only else "ℹ️ "
-        names = ", ".join(_sanitize(n) for n in sweep.self_excluded_skills)
-        lines.append(f"   {note_icon}{names} {SELF_EXCLUDED_NOTE}")
+        lines.append(f"   {note_icon}" + self_excluded_line(
+            _sanitize(n) for n in sweep.self_excluded_skills))
     return lines
 
 
