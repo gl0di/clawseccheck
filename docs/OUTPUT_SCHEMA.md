@@ -802,9 +802,31 @@ entries, a `note:` line naming the reason (`0 of N submitted entries were usable
 `targetFingerprint` mismatch, …) is written to **stderr** — never stdout, which
 carries the JSON artifact. This applies to all three consumers of the verdicts file
 (`--judged`, `--propose-ignore`, `--vet-judged`), which share one parser. An
-explicitly empty `"verdicts": []`, an empty payload, or an unreadable `--judged PATH`
-stays quiet: those genuinely are "no verdicts submitted", and the diagnostic exists
-precisely to tell that case apart from "everything you submitted was rejected".
+explicitly empty `"verdicts": []` or an empty payload stays quiet **for `--judged` and
+`--propose-ignore`**: those genuinely are "no verdicts submitted", and the diagnostic
+exists precisely to tell that case apart from "everything you submitted was rejected".
+`--vet-judged` is the documented exception — it rejects any payload whose top-level
+`targetFingerprint` is missing or does not match (§15), and that rejection is reported,
+so even `{"verdicts": []}` produces a note there.
+
+An **unreadable PATH** is a third case, and gets its own `note:` line naming the path
+and the reason — `no such file or directory`, `is a directory, not a verdicts file`, a
+permission error (B-561). Through v3.61.0 it was lumped in with the quiet ones and the
+path was never echoed anywhere, which the dichotomy above is exactly why: an empty
+payload is a *statement* (the judge submitted nothing), while an unreadable path is the
+**absence** of one — nothing is known about what the judge decided, and the user
+believes they said something. `--vet-judged` is the sharp end: being escalate-only, what
+an unread payload loses is an *escalation*, so the rendered verdict is too lenient for a
+target the user is deciding whether to install. **stdout, the artifact and the exit code
+are unchanged** — the run still continues exactly as if no verdicts had been submitted.
+Only the silence is gone.
+
+That note covers the `OSError` family and no more. Two path shapes still fail loudly
+instead, exiting non-zero with no artifact and without naming the path: a `~user` prefix
+naming no such user (`RuntimeError`), and an existing file holding invalid UTF-8
+(`UnicodeDecodeError`). A path that is a blocking FIFO still blocks. These are stated
+rather than folded into the note on purpose — converting a loud failure into a quiet
+`rc 0` report would be the opposite of what B-561 is for.
 
 ```json
 {

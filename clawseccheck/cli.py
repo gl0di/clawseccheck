@@ -1321,6 +1321,76 @@ _VALUE_REQUIRED_MODES = tuple(
 )
 
 
+def _read_verdicts_payload(raw_path: str) -> "tuple[str, str | None]":
+    """``(payload, problem)`` for a judge-verdicts path. *problem* is None when it was read.
+
+    B-561: all three judge-feedback flags did ``except OSError: verdicts_raw = ""``, so a
+    path that could not be read became an EMPTY payload and the path was never named —
+    not on stdout, not on stderr, not once, in any of the three.
+
+    Scope is exactly the ``OSError`` family, and deliberately no wider. Two shapes reach
+    the generic crash handler instead, in this tree and before it alike:
+
+    * ``~nosuchuser/x.json`` — ``expanduser()`` raises ``RuntimeError``, not ``OSError``.
+    * an existing file holding invalid UTF-8 — ``UnicodeDecodeError``.
+
+    An earlier draft caught the first one. That was wrong in the direction this whole
+    task is about: it turned a LOUD failure (``rc 1``, empty stdout, "unexpected internal
+    error") into a quiet ``rc 0`` full report. B-561 exists to make silent failures
+    audible, so trading a crash for a note is the reverse of it, and it moved the exit
+    code and the artifact — the one thing the narrowed fix promises not to do. Both
+    shapes stay loud. Naming the path in them is a separate improvement to the crash
+    handler, not this one.
+
+    ``-`` reads stdin, unchanged.
+    """
+    if raw_path == "-":
+        return sys.stdin.read(), None
+    shown = _sanitize(str(raw_path))
+    try:
+        return Path(raw_path).expanduser().read_text(encoding="utf-8"), None
+    except FileNotFoundError:
+        return "", f"{shown}: no such file or directory"
+    except IsADirectoryError:
+        return "", f"{shown}: is a directory, not a verdicts file"
+    except OSError as exc:
+        return "", f"{shown}: {_sanitize(exc.strerror or str(exc))}"
+
+
+def _verdicts_with_note(raw_path: str, flag: str) -> str:
+    """The payload for a judge-verdicts flag. An unreadable path is REPORTED, not hidden.
+
+    stdout, the artifact and the exit code are deliberately unchanged — the run continues
+    exactly as it did before, as if no verdicts had been submitted. Only the silence goes
+    away. That narrow scope is the whole point:
+
+    `docs/OUTPUT_SCHEMA.md` §13 promises that "an explicitly empty ``"verdicts": []``, an
+    empty payload, or an unreadable PATH stays quiet: those genuinely are 'no verdicts
+    submitted'", and `adjudication._payload_carries_content` says the same in code. That
+    promise is right for the first two and wrong for the third, and the reason is visible
+    in its own justification: the existing `note:` exists to tell "0 of N applied" apart
+    from "no verdicts submitted", and an unreadable path is a THIRD case that dichotomy
+    has no room for. An empty payload is a statement — the judge submitted nothing. An
+    unreadable path is the ABSENCE of a statement: nothing at all is known about what the
+    judge decided, and the user believes they said something.
+
+    So the fix is to split the two where the difference is actually known. `adjudication`
+    cannot: by the time it sees ``""`` the reason is gone. The CLI can, because it did the
+    read. Its parser's contract ("a genuinely empty payload stays silent") is untouched.
+
+    Reporting is all this does, and it is deliberately less than the first attempt at
+    B-561, which refused to run and exited 1. That broke three tests asserting the
+    documented degradation and would have destroyed the ``--vet`` verdict the user also
+    asked for. `note:` matches `adjudication._note`'s prefix and stream so the three
+    diagnostics a verdicts file can produce read as one family.
+    """
+    payload, problem = _read_verdicts_payload(raw_path)
+    if problem is not None:
+        print(f"note: {flag}: {problem}. Nothing was judged; continuing as if no verdicts "
+              "had been submitted.", file=sys.stderr)
+    return payload
+
+
 def _empty_mode_target(args):
     """The first mode flag given an empty value, or None. Never mutates args."""
     for flag, attr in _VALUE_REQUIRED_MODES:
@@ -2464,13 +2534,7 @@ def _main(argv=None) -> int:
             _emit(render_vet_judge_packet_json(f, target=vet_path, version=__version__))
             return 0
         if args.vet_judged:
-            if args.vet_judged == "-":
-                verdicts_raw = sys.stdin.read()
-            else:
-                try:
-                    verdicts_raw = Path(args.vet_judged).expanduser().read_text(encoding="utf-8")
-                except OSError:
-                    verdicts_raw = ""
+            verdicts_raw = _verdicts_with_note(args.vet_judged, "--vet-judged")
             # Escalate-only: rebuild f's ring_findings so a borderline finding can only
             # rank higher, never lower, than the deterministic engine already ranked it
             # (adjudication._escalated_status). build_profile below is UNCHANGED —
@@ -3137,13 +3201,7 @@ def _main(argv=None) -> int:
         return 0
 
     if _mode == "judged":
-        if args.judged == "-":
-            verdicts_raw = sys.stdin.read()
-        else:
-            try:
-                verdicts_raw = Path(args.judged).expanduser().read_text(encoding="utf-8")
-            except OSError:
-                verdicts_raw = ""
+        verdicts_raw = _verdicts_with_note(args.judged, "--judged")
         # B-355: `paths` (the RISK-* attack-chain data, computed above) was never
         # threaded through, so --judged silently omitted the risk_paths key entirely
         # (not an empty list -- absent) even though plain --json on the same run
@@ -3153,13 +3211,7 @@ def _main(argv=None) -> int:
         return 0
 
     if _mode == "propose_ignore":
-        if args.propose_ignore == "-":
-            verdicts_raw = sys.stdin.read()
-        else:
-            try:
-                verdicts_raw = Path(args.propose_ignore).expanduser().read_text(encoding="utf-8")
-            except OSError:
-                verdicts_raw = ""
+        verdicts_raw = _verdicts_with_note(args.propose_ignore, "--propose-ignore")
         _emit(render_ignore_proposals_json(findings, verdicts_raw=verdicts_raw, version=__version__))
         return 0
 
