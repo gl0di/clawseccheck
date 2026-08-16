@@ -57,6 +57,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .attest import template as attest_template
+from .behavioral import analysis_is_conclusive as behavioral_is_conclusive
+from .behavioral import analyze as behavioral_analyze
 from .behavioral import render_behavioral_analysis
 from .catalog import UNKNOWN
 from .layers import (            # noqa: F401 — re-exported for existing importers
@@ -187,6 +189,15 @@ class PhaseResult:
     detail: str = ""
     #: Every target this phase cannot vouch for, named. No silent caps here.
     not_scanned: list[str] = field(default_factory=list)
+    #: B-558: `Finding` objects this phase evaluated that are NOT in `CHECKS` and so are
+    #: invisible to every roll-up computed from the audit's own findings list. Today that
+    #: is P8's `BEHAVIORAL_CHECK_IDS` (T1/T2/T3/B191), which are in `CATALOG` — hence
+    #: counted in the coverage page's denominator — while living outside `CHECKS` by
+    #: design. Read ONLY by the coverage page; deliberately absent from `to_json` and
+    #: never merged into the audit's findings, because these must not reach the score,
+    #: the inventory or `--exit-code` (F-154 routes them to the grade as a cap-only
+    #: signal, computed elsewhere, and that stays the single path by which they score).
+    evaluated_findings: list = field(default_factory=list)
     #: FAIL-only, mirroring the vet-mcp / skill-sweep contribution to ``--exit-code``.
     has_fail: bool = False
     #: Verbose section body (without the banner, which :func:`render_sections` adds).
@@ -435,7 +446,14 @@ def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
     """
     started = time.monotonic()
     try:
-        rendered = render_behavioral_analysis(ctx, ascii_only=ascii_only)
+        # B-558: analysed here, rather than inside the renderer, so this phase keeps the
+        # detectors' own Finding objects. The coverage page counts T1/T2/T3/B191 in its
+        # denominator (they are in CATALOG) but could never see them in its numerator,
+        # because they are outside CHECKS — so a --full run printed their verdicts and
+        # then listed them as "not scanned" in the same output. One analyse, one render:
+        # `result=` is what keeps this from becoming a second full trajectory glob.
+        analysis = behavioral_analyze(ctx)
+        rendered = render_behavioral_analysis(ctx, ascii_only=ascii_only, result=analysis)
     except Exception as exc:  # noqa: BLE001 — see run_plugin_sweep
         return PhaseResult(
             name=PHASE_BEHAVIORAL, status=STATUS_ERROR, complete=False,
@@ -486,6 +504,14 @@ def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
         detail=detail,
         lines=lines,
         quiet_line=quiet_line,
+        # Only when the replay had complete material to work on — see
+        # `behavioral.analysis_is_conclusive`. T1/T2 return PASS over an empty or
+        # truncated event set, which is fine as a rendered line (the section prints the
+        # counts beside it) and is not a basis for "this subject was scanned".
+        evaluated_findings=(
+            list(analysis.get("findings") or ())
+            if behavioral_is_conclusive(analysis) else []
+        ),
     )
 
 
@@ -1305,8 +1331,15 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
     # locally imports report.py (see build_coverage_page's own docstring), and this
     # module already imports report.py at top level, so a top-level import here would
     # risk a cycle at import time; deferred keeps it safe.
+    # B-558: whatever the phases evaluated OUTSIDE `CHECKS` this run. Collected from the
+    # phase results rather than named here, so a future phase that evaluates catalogued
+    # ids gets counted without this call site having to learn about it.
+    off_check_findings = [
+        f for phase in result.phases for f in phase.evaluated_findings
+    ]
     result.coverage_page = build_coverage_page(
         ctx, findings, skill_sweep=skill_sweep, plugin_sweep=plugin_sweep_obj,
+        extra_findings=off_check_findings,
         # B-473: `fast` is the only reason a --full run reaches here with no sweep, so
         # name it — "needs --full" was being printed to an operator who had passed --full.
         sweep_skip_reason=("not scanned this run (--fast drops the sweep phases)"

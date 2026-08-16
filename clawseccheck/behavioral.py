@@ -1028,6 +1028,37 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
 _B191_STRONG_SUB_SIGNALS = frozenset({"blocked", "evasive"})
 
 
+def analysis_is_conclusive(result: dict) -> bool:
+    """B-558: True only when this :func:`analyze` result may be counted as COVERAGE.
+
+    Lives here, beside the flags it reads, because it is a statement about what this
+    module's own result means — a caller re-deriving it would be a second source of
+    truth that a new incompleteness flag would silently not reach.
+
+    The distinction it draws does not exist for a `CHECKS` member. A check that cannot
+    determine state returns UNKNOWN (Golden Rule #4), so its PASS is always a verdict.
+    T1/T2 gate only on ``meta["present"]``: they return PASS over an EMPTY event set,
+    because "no thread shows an ingress -> sensitive -> egress sequence" is trivially
+    true when there are no threads. That PASS is honest as a rendered line — the section
+    prints the file/event counts beside it — but it cannot support "this subject was
+    scanned", and the first version of B-558 gave it exactly that weight.
+
+    Deliberately conservative, and it under-claims in one known way: B191 reads
+    ``audit_events``, a store the trajectory cap cannot truncate, so on a host whose
+    sidecars are capped its verdict is withheld here along with the rest. Naming the
+    detectors that read which source would put a second map of that in the tree, next to
+    the one :func:`analyze` already is; withholding a provable verdict costs a coverage
+    point, while granting an unprovable one is the defect this exists to close.
+    """
+    return bool(
+        result.get("present")
+        and result.get("event_count")
+        and not result.get("truncated")
+        and not result.get("files_capped")
+        and not result.get("unknown_version")
+    )
+
+
 def grade_cap_signal(result: dict) -> "frozenset[str]":
     """F-154: reduce an `analyze()` result to the set of BEHAVIORAL_CHECK_IDS that
     fired WARN this run — the ONLY intended producer of `scoring.compute`'s
@@ -1075,9 +1106,19 @@ def grade_cap_signal(result: dict) -> "frozenset[str]":
     return frozenset(fired)
 
 
-def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_only: bool = False) -> str:
-    """Human-readable, §8-safe behavioral report for --behavioral."""
-    r = analyze(ctx, explicit_path=explicit_path)
+def render_behavioral_analysis(ctx, *, explicit_path: str | None = None,
+                               ascii_only: bool = False, result: dict | None = None) -> str:
+    """Human-readable, §8-safe behavioral report for --behavioral.
+
+    *result* lets a caller that has ALREADY run :func:`analyze` render from that same
+    run instead of paying for a second one (B-558). Additive and default-preserving:
+    omitted, this analyses as it always has. It exists because `pipeline.run_behavioral`
+    needs the detectors' own `Finding` objects — not just their rendered text — to tell
+    the run's coverage page which of `BEHAVIORAL_CHECK_IDS` actually reached a verdict,
+    and re-deriving that from a second `analyze()` would re-glob every trajectory file
+    to recompute an answer this call already has.
+    """
+    r = analyze(ctx, explicit_path=explicit_path) if result is None else result
     warn = "[!]" if ascii_only else "⚠"
     ok = "[ok]" if ascii_only else "✓"
     q = "[?]" if ascii_only else "?"

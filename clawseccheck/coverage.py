@@ -257,7 +257,8 @@ def _sweep_coverage(sweep, *, skip_reason: str | None = None) -> dict:
 
 
 def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
-                        plugin_sweep=None, sweep_skip_reason: str | None = None) -> dict:
+                        plugin_sweep=None, extra_findings: list | None = None,
+                        sweep_skip_reason: str | None = None) -> dict:
     """The full 8-subject (F-163 taxonomy) "was everything looked at" page: answers a
     different question than the Inventory-by-subject block (`report.build_inventory`,
     "what did we FIND") — this states scanned-vs-total, with every skip named, never
@@ -268,6 +269,12 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
     sweep objects (either may be None when this run never swept that subject); `mcp`
     is always fully scanned (MCP vetting is not sweep-budgeted) — 0 of 0 reads as
     "none configured".
+
+    `extra_findings` (B-558) is how verdicts reached OUTSIDE `CHECKS` reach the bucket
+    counts — today P8's T1/T2/T3/B191, which are catalogued (so they are in `logs`'
+    denominator) but never registered as checks. Omit it and the page reports exactly
+    what the audit's own findings support, which is right for any run that did not run
+    those phases.
 
     V1 scope note (F-165): file/byte-level detail for `logs` ("N of M
     trajectory files, X of Y MB scanned") is intentionally NOT in this page yet — that
@@ -287,7 +294,29 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
     # docstring precedent); keeping both directions deferred avoids the two modules
     # ever needing a load-order guarantee neither currently promises.
 
-    page: dict[str, dict] = dict(subject_coverage(findings))
+    # B-558: `extra_findings` carries verdicts reached OUTSIDE `CHECKS` this run — today
+    # P8's T1/T2/T3/B191. They are in CATALOG, so `subject_coverage` already counts them
+    # in `logs`' denominator; without this merge they could never reach its numerator, and
+    # a `--full` run printed their verdicts and then listed them as "not scanned" twenty
+    # lines below. Merged HERE rather than into the audit's findings list: these must not
+    # reach the score, the inventory or `--exit-code` (F-154 routes them to the grade as a
+    # cap-only signal, computed elsewhere, and that stays their only path to the verdict).
+    #
+    # Merged FIRST so a real check always wins a collision. `subject_coverage` keeps the
+    # LAST finding per id (`{f.id: f for f in findings}`), so this order — not the one an
+    # earlier revision of this comment claimed — is what stops an off-check producer
+    # overriding a registered check's verdict. Nothing collides today, since no member of
+    # `BEHAVIORAL_CHECK_IDS` is in `CHECKS`; the ordering is here because this parameter is
+    # generic over any future phase, and a collision would otherwise be silent.
+    #
+    # Status semantics are `_CHECKED_STATUSES`, unchanged — an UNKNOWN detector stays in
+    # `not_scanned` exactly as an UNKNOWN check does. What is NOT delegated to that rule is
+    # whether these verdicts are admissible at all: a behavioural PASS can be vacuous in a
+    # way no check's can (see `behavioral.analysis_is_conclusive`), so the producer decides
+    # whether to publish them and this function decides only how to count what it is given.
+    page: dict[str, dict] = dict(
+        subject_coverage(list(extra_findings or ()) + list(findings))
+    )
 
     for subject, sweep in (("skills", skill_sweep), ("plugins", plugin_sweep)):
         page[subject] = _sweep_coverage(sweep, skip_reason=sweep_skip_reason)

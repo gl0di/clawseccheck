@@ -194,8 +194,15 @@ def test_the_log_layer_is_not_reported_as_unmined_when_it_ran():
     # dropped "covered it" here for the same reason it dropped it everywhere: B164's
     # own disclosure is "N log/transcript sink(s) not scanned", so the base scan
     # running is not the base scan finishing.
-    assert "this audit's own log/transcript scan ran; the replay analyses did not" in block
+    assert "this audit's own log/transcript scan ran" in block
     assert "covered it" not in block, block
+    # B-558: this line used to pin the note's second clause, "; the replay analyses did
+    # not". That clause was false on any run that DID run them — a `--full` report
+    # printed T1/T2/T3/B191 verdicts a few hundred lines below it — and `ran` proves the
+    # replay was skipped no more than it proves it happened. So the assertion above was
+    # shortened rather than the note being "fixed" to satisfy it: this test had pinned
+    # the successor of the very claim its own docstring exists to guard against.
+    assert "did not" not in block.split("already logged")[1].split("Run `--behavioral`")[0]
 
 
 # ── direction 2: a layer that did NOT run must still be recommended ───────────

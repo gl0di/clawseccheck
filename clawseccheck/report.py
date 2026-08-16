@@ -576,6 +576,14 @@ def _not_fully_covered_line(score: ScoreResult) -> str:
 #     replay modes were invoked, let alone that they exhausted the sinks — B164's own
 #     disclosure is "N log/transcript sink(s) not scanned".
 #
+#     B-558: which is also why that entry may not assert the NEGATIVE. It used to read
+#     "...; the replay analyses did not", and on a `--full` run that is simply false —
+#     the same report prints T1/T2/T3/B191 verdicts a few hundred lines below. `ran` no
+#     more proves the replay was skipped than it proves it happened; the note states the
+#     one thing this layer's status does prove and stops. The reader loses nothing
+#     actionable, because the `advice` clause naming `--behavioral` is unconditional and
+#     is printed either way.
+#
 # Known residual, deliberately not "fixed" with a second discriminator: under
 # `--full --fast` cli.py still runs the MCP vet while the sweep phases do not, so the
 # installed-surface clause fires and its advice names `--vet-mcp` alongside `--full`.
@@ -598,7 +606,7 @@ _SCOPE_CLAUSES = (
      "Run `--behavioral` (proven-by-log verb-sequence trifecta / outcome anomaly /"
      " capability drift) or `--analyze-trajectory` (skill-indicator correlation) to"
      " check whether a trifecta is already recorded in your trajectory sidecar",
-     "this audit's own log/transcript scan ran; the replay analyses did not"),
+     "this audit's own log/transcript scan ran"),
 )
 
 
