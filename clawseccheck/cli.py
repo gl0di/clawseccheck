@@ -1321,6 +1321,47 @@ _VALUE_REQUIRED_MODES = tuple(
 )
 
 
+def _describe_os_error(exc: OSError, *, what: str = "file") -> str:
+    """A short human reason for an ``OSError`` raised reading a user-named path.
+
+    The single classifier for every "you named a file I could not open" message in this
+    module (B-561's three verdicts flags, B-562's ``--judged-bundle`` and
+    ``--apply-ignore-proposals``). It lives here rather than in a leaf because it is
+    presentation — ``pipeline`` hands back the exception and lets the shell word it, which
+    is the same direction every other renderer runs.
+
+    Deliberately no ``FileNotFoundError``-vs-``NotADirectoryError`` split: to a user who
+    mistyped a path they read the same, and inventing a distinction the message cannot act
+    on is noise.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return "no such file or directory"
+    if isinstance(exc, IsADirectoryError):
+        return f"is a directory, not a {what}"
+    return _sanitize(exc.strerror or str(exc))
+
+
+def _path_problem_text(raw_path, exc: OSError, *, what: str) -> str:
+    """``"<path>: <reason>"`` for a user-named path that could not be read.
+
+    An EMPTY argument is its own case, and this is the C-135 finding on B-562 rather than
+    foresight. ``Path("")`` normalizes to ``Path(".")``, so the OS reports on the CURRENT
+    DIRECTORY — something the user never typed — and the composed line read
+
+        note: --judged-bundle: : is a directory, not a bundle file.
+
+    which names nothing and blames the wrong thing. Reachable only for
+    ``--judged-bundle``: an empty value for ``--judged``/``--propose-ignore`` is already
+    rejected up front by ``_VALUE_REQUIRED_MODES`` (rc 2), which that list can do because
+    those two are primary MODES. ``--judged-bundle`` modifies a run rather than being one,
+    so aborting a whole ``--full`` audit over it would be the harsher answer; it is
+    reported and the run continues, as with every other unreadable path here.
+    """
+    if not str(raw_path).strip():
+        return "no path was given"
+    return f"{_sanitize(str(raw_path))}: {_describe_os_error(exc, what=what)}"
+
+
 def _read_verdicts_payload(raw_path: str) -> "tuple[str, str | None]":
     """``(payload, problem)`` for a judge-verdicts path. *problem* is None when it was read.
 
@@ -1346,15 +1387,10 @@ def _read_verdicts_payload(raw_path: str) -> "tuple[str, str | None]":
     """
     if raw_path == "-":
         return sys.stdin.read(), None
-    shown = _sanitize(str(raw_path))
     try:
         return Path(raw_path).expanduser().read_text(encoding="utf-8"), None
-    except FileNotFoundError:
-        return "", f"{shown}: no such file or directory"
-    except IsADirectoryError:
-        return "", f"{shown}: is a directory, not a verdicts file"
     except OSError as exc:
-        return "", f"{shown}: {_sanitize(exc.strerror or str(exc))}"
+        return "", _path_problem_text(raw_path, exc, what="verdicts file")
 
 
 def _verdicts_with_note(raw_path: str, flag: str) -> str:
@@ -1746,7 +1782,13 @@ def _run_apply_ignore_proposals(args) -> int:
     try:
         raw = Path(args.apply_ignore_proposals).expanduser().read_text(encoding="utf-8")
     except OSError as exc:
-        _emit(f"clawseccheck: could not read proposals file ({type(exc).__name__}).")
+        # B-562: this always reported and exited 1, so it was never the silent failure
+        # its two siblings were — but it printed only the exception CLASS
+        # ("could not read proposals file (FileNotFoundError)"), so the user could not
+        # tell WHICH path failed, which is the half of B-561 that actually mattered.
+        _emit(f"clawseccheck: could not read the proposals file "
+              f"{_sanitize(str(args.apply_ignore_proposals))}: "
+              f"{_describe_os_error(exc, what='proposals file')}.")
         return 1
     try:
         data = json.loads(raw)
@@ -1909,7 +1951,19 @@ def _judged_bundle(path: str) -> dict:
     Cleared at the top of every ``_main`` so an in-process second run (the whole test
     suite, and any library caller) never inherits the previous run's bundle."""
     if path not in _JUDGED_BUNDLE_CACHE:
-        _JUDGED_BUNDLE_CACHE[path] = _pipeline.read_judged_bundle(path)
+        bundle, problem = _pipeline.read_judged_bundle_with_problem(path)
+        if problem is not None:
+            # B-562. Inside the cache-miss branch on purpose: three readers ask for this
+            # bundle in one run (see the docstring above), and a diagnostic repeated three
+            # times reads like three separate failures. The buckets are named because
+            # "nothing was applied" understates it — `liveTest` carries a score CAP, so a
+            # bundle that never arrives leaves the run scoring higher than it should.
+            print(f"note: --judged-bundle: "
+                  f"{_path_problem_text(path, problem, what='bundle file')}. Nothing was "
+                  "applied; continuing with no attestation, no judge verdicts and no "
+                  "live-test signal, including any score cap that file carried.",
+                  file=sys.stderr)
+        _JUDGED_BUNDLE_CACHE[path] = bundle
     return _JUDGED_BUNDLE_CACHE[path]
 
 

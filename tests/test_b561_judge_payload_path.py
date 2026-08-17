@@ -81,19 +81,18 @@ def _flags_reading_a_verdicts_path() -> list[str]:
 
     **Not exhaustive, and deliberately so — read this before trusting it.** It enumerates
     what goes through `_verdicts_with_note`, which is not the same question as "every flag
-    that reads a user-named judge file". Two siblings are knowingly outside it:
+    that reads a user-named judge file". Two siblings sit outside it and were fixed
+    separately under B-562, with their own tests in `test_b562_bundle_path.py`:
 
-    * `--judged-bundle` reads through `pipeline.read_judged_bundle`, which has the same
-      `except OSError: raw = ""` shape. Measured: an unreadable path yields rc 0, 237 KB
-      of stdout and a byte-empty stderr, with all four buckets (`judged`, `vetJudged`,
-      `attestation`, `liveTest`) silently empty — and `liveTest` feeds `scoring.compute`'s
-      cap. A separate module, a separate bound, and a score consequence these three do not
-      have, so it is a separate task rather than an append to this one.
-    * `--apply-ignore-proposals` already reports and exits 1, but prints only the exception
-      CLASS (`could not read proposals file (FileNotFoundError)`) and never the path.
+    * `--judged-bundle`, which reads through `pipeline.read_judged_bundle` — a separate
+      module, a separate bound, and a consequence these three do not have (its `liveTest`
+      bucket feeds `scoring.compute`'s cap, so a lost bundle scores HIGHER).
+    * `--apply-ignore-proposals`, which always reported and exited 1 but named only the
+      exception class, never the path.
 
-    Recorded here because this helper returning three flags could otherwise be read as
-    proof that three is all there are.
+    All five now share one classifier (`cli._describe_os_error`), so the wording cannot
+    drift apart — but the derivation below still only sees three, which is why this is
+    written down. A helper returning three flags is not proof that three is all there are.
     """
     source = (REPO_ROOT / "clawseccheck" / "cli.py").read_text(encoding="utf-8")
     found = re.findall(r'_verdicts_with_note\([^,]+,\s*"(--[a-z-]+)"\)', source)

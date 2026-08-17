@@ -696,6 +696,18 @@ recorded, so a random token cannot manufacture drift across runs. Malformed/forg
 entries are dropped per-entry (never a crash), mirroring `judged`/`vetJudged`'s own
 defensive parsing.
 
+**An unreadable `--judged-bundle PATH` is reported (B-562).** A bundle file that cannot
+be opened gets one `note:` line on stderr naming the path and the reason, exactly as the
+three verdicts flags do (§13). It is emitted once per run, not once per reader — three
+separate readers consult the bundle inside one `--full` run. **stdout, the artifact and
+the exit code are unchanged**: an advisory bundle must never be able to perturb the
+audit, so the run continues with all four buckets empty, precisely as it always did. The
+note names them, because "nothing was applied" understates the loss — `liveTest` carries
+a score **cap**, so a bundle that never arrives leaves the run scoring *higher* than it
+should, and `attestation` is resolved before the audit so B43/B44 see different inputs.
+A path that exists but holds garbage stays quiet, as above: that is a statement about the
+payload, not about there being no payload.
+
 Sources folded into the packet:
 
 - every unsuppressed `UNKNOWN` finding from the audit;

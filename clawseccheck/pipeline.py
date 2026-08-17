@@ -818,8 +818,25 @@ def split_judged_bundle(raw: str) -> dict:
     return out
 
 
-def read_judged_bundle(path: str) -> dict:
-    """:func:`split_judged_bundle` over a file (``-`` reads stdin). Never raises."""
+def read_judged_bundle_with_problem(path: str) -> "tuple[dict, OSError | None]":
+    """:func:`read_judged_bundle`, plus the exception when the file could not be read.
+
+    B-562: the bundle read swallowed ``OSError`` into an empty payload, so a mistyped
+    ``--judged-bundle`` path emptied all four buckets at once and said nothing. Measured
+    on the real CLI, that produced ``rc 0``, 237 KB of stdout and a byte-empty stderr with
+    the path named zero times — and because ``liveTest`` feeds ``scoring.compute``'s cap,
+    a lost bundle is a silently HIGHER score, which none of B-561's three flags can do.
+
+    The exception is RETURNED, not raised and not worded here: this function's "never
+    raises, degrade to inert" contract is what lets an advisory bundle be untrusted input,
+    and phrasing belongs to the shell (``cli._describe_os_error``). Callers that only want
+    the bundle keep using :func:`read_judged_bundle` unchanged.
+
+    A path that exists but holds garbage is NOT a problem in this sense — that is
+    :func:`split_judged_bundle`'s "anything malformed yields an absent bucket", a
+    statement about the payload rather than about there being no payload.
+    """
+    problem: "OSError | None" = None
     if path == "-":
         import sys  # noqa: PLC0415 — only needed on this one branch
         try:
@@ -829,9 +846,15 @@ def read_judged_bundle(path: str) -> dict:
     else:
         try:
             raw = Path(path).expanduser().read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as exc:
             raw = ""
-    return split_judged_bundle(raw)
+            problem = exc
+    return split_judged_bundle(raw), problem
+
+
+def read_judged_bundle(path: str) -> dict:
+    """:func:`split_judged_bundle` over a file (``-`` reads stdin). Never raises."""
+    return read_judged_bundle_with_problem(path)[0]
 
 
 # ── liveTest bucket (F-155) ───────────────────────────────────────────────────
