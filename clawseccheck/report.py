@@ -38,6 +38,7 @@ from .layers import (
     describe_layer,
 )
 from .scoring import ScoreResult, assessment_coverage
+from .skillast import capability_families
 from .textnorm import ASCII_MAP, asciify
 
 # Findings, skill names, decoded payload previews and native-audit fields are UNTRUSTED
@@ -4308,26 +4309,37 @@ def render_permission_manifest(ctx, target: str) -> str:
     is looked up here rather than the raw path string.
 
     Never emits a silently-safe manifest: if the skill could not be statically profiled
-    (`ctx` is None, or the skill has no entry in `ctx.effect_profiles`), every capability
-    field is the explicit string `unknown` (never `false`), plus `unprofilable: true`.
+    (`ctx` is None, or the skill has no Python at all), every capability field is the
+    explicit string `unknown` (never `false`), plus `unprofilable: true`.
 
-    KNOWN GAP (tracked separately, not fixed here): `shell.exec` reflects only the effect
-    simulator's own sink coverage — a bare `eval`/`exec`/`compile` call (or a pickle/
-    marshal/dill `load`/`loads`) with a tainted argument. It does NOT track
-    `os.system`/`subprocess.*` invocation, which is not one of the simulator's registered
-    sink categories. A skill that shells out via `subprocess.run(..., shell=True)` will
-    still show `shell.exec: false` here even though B98/B91 may separately flag it. This
-    is a genuine blind spot in the manifest's "shell" section, not a `false`-means-safe
-    guarantee for that field specifically.
+    B-592: the capability fields are `skillast.capability_families` — does this code
+    touch the capability AT ALL — and no longer the effect simulator's *taint*
+    reachability. A permission manifest answers "what does this skill need permission to
+    do", and a constant-URL fetch needs network permission exactly as much as a tainted
+    one does; keying the fields on taint made the document propose DENYING network to a
+    skill whose only statement was `urlopen("https://collector.example.net/ping")`, and
+    made `secrets.reads_credentials` structurally unreachable (the simulator registers
+    `read`/`write`/`network`/`eval` and never a `cred` effect at all, so that field could
+    only ever print `false`). The taint view is not lost — it is exactly what the
+    `analysis:` block's `unshielded_effects` / `guarded_effects` carry, which is where a
+    reader should look for "and is any of it driven by untrusted input".
+
+    That also closes the old KNOWN GAP in this docstring: `shell.exec` covered only
+    `eval`/`exec` with a tainted argument, so a skill shelling out via `subprocess.run`
+    printed `shell.exec: false`. Presence covers `os.system`/`os.popen`/`subprocess.*`
+    through the same `_is_exec_sink_call` predicate the engine's own TT5 rule uses.
     """
     skill_key = Path(target).expanduser().name or str(target)
     name = _sanitize(skill_key)
     header = [
         f"# proposed-permission-manifest for: {name}",
-        "# derived from static analysis (ClawSecCheck effect simulator) "
-        "— NOT a guarantee of completeness",
+        "# derived from static analysis (ClawSecCheck) — NOT a guarantee of completeness",
         "# fields marked 'unknown' mean the script was opaque/unparseable, not that the "
         "capability is absent",
+        "# a yes/no value answers: does the code TOUCH this capability at all "
+        "(presence)?",
+        "# Whether untrusted input reaches it is a different question — see "
+        "analysis.unshielded_effects.",
         "version: 1",
         f"skill: {name}",
     ]
@@ -4336,7 +4348,14 @@ def render_permission_manifest(ctx, target: str) -> str:
     # ctx.effect_profiles is keyed by the skill name vet_skill() assigned (the dir/file
     # name), matching _b62_actual_families' own lookup convention.
     entry_points = (effect_profiles or {}).get(skill_key, []) if effect_profiles else []
-    unprofilable = ctx is None or not entry_points
+    # B-592: "can we say anything about this skill's capabilities" is a question about
+    # its SOURCE, not about the simulator having produced an entry-point profile. A file
+    # of module-level statements parses fine and yields no entry point, and answering
+    # `unknown` for it was the honest-but-blind case; answering from the parsed source is
+    # strictly more informative and keeps `unknown` for what genuinely cannot be read.
+    py_map = getattr(ctx, "installed_skill_py", None) or {} if ctx is not None else {}
+    present = capability_families(py_map.get(skill_key))
+    unprofilable = ctx is None or (not entry_points and not py_map.get(skill_key))
 
     if unprofilable:
         lines = header + [
@@ -4371,7 +4390,11 @@ def render_permission_manifest(ctx, target: str) -> str:
     reachable, unshielded, guarded, n_entry = _manifest_effect_union(ctx, skill_key)
 
     def _b(fam: str) -> str:
-        return "true" if fam in reachable else "false"
+        # Presence, not taint reachability (B-592) — see the docstring. `reachable` is
+        # still read, for the `analysis:` block below: the two answer different questions
+        # and the document now shows both instead of publishing one under the other's
+        # name.
+        return "true" if fam in present else "false"
 
     lines = header + [
         "unprofilable: false",
@@ -4387,8 +4410,8 @@ def render_permission_manifest(ctx, target: str) -> str:
         "shell:",
         f"  exec: {_b('exec')}",
         "memory:",
-        "  read: unknown           # not profiled by the effect sim -> explicit unknown, "
-        "never false",
+        "  read: unknown           # no agent-memory sink is modelled -> explicit "
+        "unknown, never false",
         "  write: unknown",
         "secrets:",
         f"  reads_credentials: {_b('cred')}",

@@ -593,7 +593,7 @@ plus a five-axis roll-up and an overall grade. No full-audit `next_actions` / `c
 |---|---|---|
 | `axis` | `str` | One of `danger`, `build`, `behavior`, `persistence`, `connections`. |
 | `status` | `str` | `"PASS"`, `"WARN"`, `"FAIL"`, `"UNKNOWN"`, or `"N/A"`. |
-| `reason` | `str` | One-line explanation (untrusted text; sanitized). |
+| `reason` | `str` | One-line explanation (untrusted text; sanitized). On a PASS it states what the axis DID, never what the artifact is — B-592: `connections` used to read `"no outbound network surface"` for a skill whose only statement was an outbound call, because it was phrased from taint reachability rather than capability presence. An axis reason never asserts the absence of a capability that was not measured. |
 | `fix` | `str` | One-line remediation, or `""`. |
 | `finding_ids` | `array[str]` | Ids of the findings bucketed to this axis. |
 

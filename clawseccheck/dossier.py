@@ -32,6 +32,7 @@ from dataclasses import replace as dc_replace
 
 from .catalog import BY_ID, FAIL, PASS, UNKNOWN, WARN, ast_for
 from .scoring import grade_for
+from .skillast import capability_families
 
 # Fifth status, local to the dossier (catalog has no "not applicable" concept).
 NA = "N/A"
@@ -363,23 +364,31 @@ def _route_axis_reasons(f, buckets: dict, *, fallback_axis: str | None) -> bool:
 
 
 def _skill_capabilities(ctx) -> tuple[bool, set]:
-    """(has_executable_code, reachable_capability_families) for the vetted skill(s).
+    """(has_executable_code, capability_families_PRESENT) for the vetted skill(s).
 
-    Reads only ctx data populated by the engine (ctx.effect_profiles from F-018,
-    ctx.installed_skill_py) — no re-scan, no checks import. Families are the raw effect
-    names: network / exec / write / read / eval / cred.
+    Reads only ctx data populated by the engine (ctx.installed_skill_py) — no re-scan of
+    disk, no checks import. Families are `skillast.CAPABILITY_FAMILIES`: network / exec /
+    write / read / cred.
+
+    B-592: this used to return the union of `ctx.effect_profiles[*]["reachable_effects"]`,
+    which is TAINT reachability — "did untrusted data reach this sink". The only consumer
+    is `_clean_reason`'s wording choice, and against that question taint is the wrong
+    predicate: a skill whose entire body is
+    `urllib.request.urlopen("https://collector.example.net/ping")` taints nothing, so the
+    axis fell through to "no outbound network surface" — an assertion that the artifact
+    has no network capability, printed on the pre-install gate, about a skill that exists
+    to make an outbound call. Presence is the predicate that sentence needs. The taint
+    view is untouched and still lives where it belongs (the findings themselves, and
+    `--emit-manifest`'s `analysis:` block).
     """
     if ctx is None:
         return (False, set())
     installed = getattr(ctx, "installed_skills", None) or {}
     py_map = getattr(ctx, "installed_skill_py", None) or {}
-    effect_profiles = getattr(ctx, "effect_profiles", None) or {}
     has_py = any(py_map.get(name) for name in installed)
     families: set[str] = set()
     for name in installed:
-        for ep in effect_profiles.get(name, []):
-            for eff in ep.get("reachable_effects", []):
-                families.add(eff)
+        families |= capability_families(py_map.get(name))
     return (has_py, families)
 
 
@@ -589,13 +598,19 @@ def _clean_reason(axis: str, families: set) -> str:
     if axis == "persistence":
         return "no dormant or staged code detected"
     if axis == "connections":
+        # Both branches state what this axis DID, never what the artifact is. E-065/C-322
+        # already removed one such claim here ("reaches the network for its stated
+        # purpose" asserted an alignment check that never ran); B-592 removes the other
+        # two. "no exfiltration signal found" was false whenever the exfil finding fired
+        # and routed to the Danger axis instead — a DO-NOT-INSTALL screen carried it next
+        # to "credential-file contents flow into a network sink". And "no outbound
+        # network surface" asserted the ABSENCE of a capability nothing had measured
+        # (see `_skill_capabilities`), on the screen a user reads to decide whether to
+        # install. Neither sentence can be repaired by widening detection: they were
+        # describing the wrong subject.
         if "network" in families:
-            # E-065/C-322: the prior wording ("reaches the network for its stated
-            # purpose") claimed this axis had verified the network use matches the
-            # skill's declared purpose — it never did; PASS here means only that no
-            # bucketed finding fired, an absence, not a positive alignment check.
-            return "no exfiltration signal found"
-        return "no outbound network surface"
+            return "outbound network calls present; no connection-axis finding fired"
+        return "no outbound network call found in the analysed code"
     return "no issue found"
 
 

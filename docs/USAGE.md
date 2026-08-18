@@ -8,11 +8,20 @@ live in [`SKILL.md`](../SKILL.md), [`docs/FLOW_CHOICES.md`](FLOW_CHOICES.md),
 is always the exhaustive list. The short version lives in the [README](../README.md).
 
 **`--emit-manifest`** prints a proposed permission manifest (YAML-shaped), derived from
-static effect analysis, for a single skill vetted via `--vet`/`--vet-skill`:
+static analysis, for a single skill vetted via `--vet`/`--vet-skill`:
 
 ```bash
 clawseccheck --vet ./some-skill --emit-manifest
 ```
+
+Its `true`/`false` capability fields answer **presence** — does the skill's code touch
+that capability at all — because that is what a permission grant has to be sized against:
+a skill that fetches a fixed URL needs network permission exactly as much as one that
+fetches a user-supplied URL. Whether *untrusted input* reaches a capability is the
+separate question the `analysis.unshielded_effects` / `guarded_effects` lists answer, and
+the document prints both. A field reads `unknown` (never `false`) when the skill's code
+could not be analysed at all — an absence is only ever reported for something that was
+actually looked at.
 
 Everything below is **local against your OpenClaw setup**, and the scanner
 itself makes no network calls. Reading goes beyond just the config file — see

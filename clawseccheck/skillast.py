@@ -5494,6 +5494,193 @@ def _package_tainted_exports(trees: dict) -> dict:
     return exports
 
 
+# ── Capability PRESENCE, as opposed to taint reachability (B-592) ─────────────
+#
+# The effect simulator answers "does UNTRUSTED data reach this sink" — a risk question.
+# Two consumers were asking it a different question and reading the answer as if it were
+# a capability inventory: the vet dossier's Connections axis (which then stated "no
+# outbound network surface" for a skill whose only code posts to an external host) and
+# `--emit-manifest`'s proposed permission fields (which proposed denying network to that
+# same skill). A permission manifest needs "does this code touch the capability at all";
+# a constant-URL fetch needs network permission exactly as much as a tainted one does.
+#
+# Deliberately the SAME call shapes the simulator registers effects for
+# (`EffectSimulator.simulate_call`'s four blocks), minus the taint gate — so the two
+# views can never disagree about what a network/exec/read/write sink IS, only about
+# whether untrusted data reached it. `cred` is the one family the simulator never
+# registers at all, so it is defined here from the credential-path and credential-env
+# vocabularies this module already carries.
+#
+# Error profile, stated because it decides how the callers may use this: a false
+# POSITIVE costs a broader-than-necessary permission proposal and a vaguer axis
+# sentence; a false NEGATIVE leaves the caller exactly where it was before this
+# function existed. Neither direction can create a finding — no check consumes this.
+
+#: Families this function can report. `eval` is folded into `exec` here, matching
+#: `report._MANIFEST_FAMILY_ALIASES`; `network`/`read`/`write` mirror the simulator's.
+CAPABILITY_FAMILIES = frozenset({"network", "exec", "read", "write", "cred"})
+
+_CAP_WRITE_MODE_CHARS = "wax+"
+_CAP_PATHLIB_WRITE_ATTRS = {"write_text", "write_bytes"}
+_CAP_PATHLIB_READ_ATTRS = {"read_text", "read_bytes"}
+_CAP_ENV_READ_ATTRS = {"getenv"}
+
+
+def _cap_open_modes(node: ast.Call) -> str:
+    """The mode string an `open(...)` call was given ("r" when it is implicit)."""
+    mode = "r"
+    if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+        if isinstance(node.args[1].value, str):
+            mode = node.args[1].value
+    for kw in node.keywords:
+        if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+            if isinstance(kw.value.value, str):
+                mode = kw.value.value
+    return mode
+
+
+def _cap_is_secretish_env_read(node: ast.AST) -> bool:
+    """True for `os.environ["API_TOKEN"]` / `os.getenv("API_TOKEN")` / `environ.get(...)`
+    whose key literal carries a credential-shaped NAME. The name gate is what keeps an
+    ordinary `os.environ["HOME"]` out of the credentials family."""
+    if isinstance(node, ast.Subscript):
+        if not _rhs_has_subscript_environ(node):
+            return False
+        key = node.slice
+        return (
+            isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and bool(_CRED_ENV_NAME_RE.fullmatch(key.value))
+        )
+    if isinstance(node, ast.Call):
+        f = node.func
+        is_env_read = (
+            isinstance(f, ast.Attribute)
+            and (
+                (f.attr in _CAP_ENV_READ_ATTRS and _attr_base(f.value) == "os")
+                or (f.attr == "get" and _attr_base(f.value) == "environ")
+            )
+        ) or (isinstance(f, ast.Name) and f.id in _CAP_ENV_READ_ATTRS)
+        if not is_env_read or not node.args:
+            return False
+        first = node.args[0]
+        return (
+            isinstance(first, ast.Constant)
+            and isinstance(first.value, str)
+            and bool(_CRED_ENV_NAME_RE.fullmatch(first.value))
+        )
+    return False
+
+
+def _imported_sink_names(tree: ast.AST) -> tuple:
+    """Local names bound by `from <mod> import <sink> [as alias]`, split (network, exec).
+
+    Found by the adversarial pass on B-592: `from urllib.request import urlopen as u`
+    then `u(url)` is an ORDINARY idiom, not evasion, and a bare-Name call carries no base
+    for `_is_net_sink` to gate on — so the whole family went unreported. Deliberately
+    NOT extended to `getattr(requests, "post")(...)` or
+    `importlib.import_module("os").system(...)`: those are evasion shapes the engine's own
+    rules do not resolve either, and a presence scan that out-detects the finding engine
+    would put capabilities in a permission proposal that no check can corroborate.
+    """
+    net_names: set = set()
+    exec_names: set = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        mod = (node.module or "").split(".")[0]
+        for alias in node.names:
+            local = alias.asname or alias.name
+            if mod in _NET_SINK_BASES or mod in _NET_OUT_SINK_BASES:
+                if alias.name in _NET_SINK_ATTRS_ANY or alias.name in _NET_SINK_ATTRS_BASED:
+                    net_names.add(local)
+                elif alias.name in _NET_OUT_SINK_FETCH_ATTRS:
+                    net_names.add(local)
+            if mod in _EXEC_SINK_BASES_OS and alias.name in _EXEC_SINK_OS_ATTRS:
+                exec_names.add(local)
+            if mod in _EXEC_SINK_BASES_SUBP and alias.name in _EXEC_SINK_SUBP_ATTRS:
+                exec_names.add(local)
+    return net_names, exec_names
+
+
+def _capability_families_in_tree(tree: ast.AST) -> set:
+    fams: set = set()
+    # Same alias resolution the engine's own rules use (B-422/C-348): without it
+    # `s = socket.socket(); s.connect(...)` and `sess = requests.Session(); sess.put(...)`
+    # read as non-network, which is exactly the covert-channel shape B-338 exists for.
+    net_sink_aliases = _net_sink_alias_names(tree)
+    imported_net, imported_exec = _imported_sink_names(tree)
+    for node in ast.walk(tree):
+        if _cap_is_secretish_env_read(node):
+            fams.add("cred")
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if _is_exec_sink_call(func)[0]:
+            fams.add("exec")
+        if (
+            _is_net_sink(func, net_sink_aliases)
+            or _is_ssrf_sink_call(func)[0]
+            or _is_net_out_data_sink(func)[0]
+        ):
+            fams.add("network")
+        name = ""
+        if isinstance(func, ast.Name):
+            name = func.id
+            if name in imported_net:
+                fams.add("network")
+            if name in imported_exec:
+                fams.add("exec")
+        elif isinstance(func, ast.Attribute):
+            name = func.attr
+        if name in _FILE_OPEN_NAMES:
+            mode = _cap_open_modes(node)
+            if any(c in mode for c in _CAP_WRITE_MODE_CHARS):
+                fams.add("write")
+            if "w" not in mode and "x" not in mode and "a" not in mode:
+                fams.add("read")
+        if name in _CAP_PATHLIB_WRITE_ATTRS:
+            fams.add("write")
+        if name in _CAP_PATHLIB_READ_ATTRS:
+            fams.add("read")
+        if _has_cred_path_const(node):
+            fams.add("cred")
+    return fams
+
+
+def capability_families(sources) -> set:
+    """Which capability families a skill's Python *touches at all* — presence, not taint.
+
+    `sources` is what `Context.installed_skill_py` holds: an iterable of
+    ``(relpath, source)`` pairs. A bare source string, an iterable of plain strings, and
+    a ``None`` entry are all tolerated, because that mapping is populated by several
+    collection paths and this function must never be the thing that raises.
+
+    Returns a subset of :data:`CAPABILITY_FAMILIES`. Unparseable source contributes
+    nothing (it is reported as `AST_UNANALYZABLE` by `analyze_python`, and the callers
+    have their own "could not analyze" state) — never a fabricated absence.
+    """
+    if sources is None:
+        return set()
+    if isinstance(sources, str):
+        sources = [("<source>", sources)]
+    fams: set = set()
+    for item in sources:
+        if item is None:
+            continue
+        src = item
+        if isinstance(item, (tuple, list)):
+            src = item[1] if len(item) > 1 else None
+        if not isinstance(src, str) or not src.strip():
+            continue
+        try:
+            tree = ast.parse(src)
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+            continue
+        fams |= _capability_families_in_tree(tree)
+    return fams
+
+
 def analyze_python_package(files) -> list[ASTFinding]:
     """Cross-file / import-graph taint (H1): a decode-derived module-level value defined in
     one skill file, imported and executed (exec/eval/os.system/subprocess) in another. The
@@ -5814,11 +6001,25 @@ _SH_EVAL_REMOTE_RE = re.compile(
 _SH_RAW_SOCKET_RE = re.compile(r"\b(?:ncat|netcat)\b|/dev/tcp/", re.I)
 # a credential-shaped env-var NAME (contains TOKEN/SECRET/API_KEY/…). Gating env->outbound
 # on the name (not any $VAR) is what keeps this zero-FP against authed-API scripts.
+# The credential-shaped NAME vocabulary, shared by the shell rule below and by
+# `capability_families`' Python-side env read (B-592) so the two cannot drift into
+# disagreeing about what "looks like a secret" — the divergent-table failure B-483
+# documented for the ascii folder. `tests/test_b592_capability_presence.py` pins the
+# shell pattern's rendered source, so rebuilding it from this fragment cannot silently
+# change the rule it has always implemented.
+_CRED_NAME_WORDS = (
+    r"API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|ACCESS_?KEY|AUTH"
+)
 _SH_CRED_ENV_RE = re.compile(
     r"\$\{?[A-Za-z0-9_]*"
-    r"(?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|ACCESS_?KEY|AUTH)"
+    r"(?:" + _CRED_NAME_WORDS + r")"
     r"[A-Za-z0-9_]*\}?",
     re.I,
+)
+#: The same vocabulary against a bare identifier — `os.environ["API_TOKEN"]`, which
+#: carries no `$`. Used only for capability PRESENCE, never for a finding.
+_CRED_ENV_NAME_RE = re.compile(
+    r"[A-Za-z0-9_]*(?:" + _CRED_NAME_WORDS + r")[A-Za-z0-9_]*", re.I
 )
 
 # B-430: metacharacters that can glue directly onto a word with no surrounding
