@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from . import brand
 from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding, remediation_for
 from .dossier import axis_for
+from .layers import LAYER_ORDER
 from .report import (
     _sanitize,
     _sanitize_tree,
@@ -45,6 +46,7 @@ def _build_analysis_completeness(
     checks_run: int,
     checks_total: int,
     self_excluded: "list[str] | tuple[str, ...]" = (),
+    score=None,
 ) -> dict:
     """Return the ``analysisCompleteness`` metablock for SARIF run.properties.
 
@@ -62,8 +64,40 @@ def _build_analysis_completeness(
         CI-facing surface that never said so, and a pipeline reading it could not tell
         "scanned and clean" from "not scanned". It belongs here rather than as a
         ``result``: it is a statement about the run's reach, which is what this block is.
+    score:
+        The run's :class:`~clawseccheck.scoring.ScoreResult`, when there is one. Adds the
+        five-layer state (B-585) -- see below. ``None`` on the ``--vet`` paths, and its
+        keys are then ABSENT rather than false: mode C produces no grade by construction,
+        so ``graded: false`` there would imply a letter was withheld when none ever
+        existed. `docs/OUTPUT_SCHEMA.md` documents that absence as a state.
+
+    B-585, the defect this parameter closes. On a home with no OpenClaw config at all
+    this block read::
+
+        {"checksRun": 184, "checksTotal": 184, "failCount": 0,
+         "limitations": ["host-posture checks require --host",
+                         "attestation checks require --attest"]}
+
+    A field named *analysisCompleteness* reporting 184 of 184 checks run, zero failures,
+    and no limitation worth naming -- for an audit that could not read a single byte of
+    configuration. 155 of those 184 were UNKNOWN, which was in the payload, but the
+    headline pair is what a dashboard renders. Meanwhile ``--json`` on the same run
+    carried ``graded: false``, ``missing_layers``, ``config_blind_capped: true`` and
+    ``config_blind_reason: "absent"``, and the dashboard card said it out loud.
+
+    The counts were never wrong -- 184 checks really did run. They answer a question
+    about CHECKS, and the block's name promises one about the ANALYSIS, which since
+    E-077 is the five-layer ledger. So the layer figures are published beside them
+    rather than the counts being changed: "184 of 184" can no longer be read as a
+    complete analysis while ``layersRan`` says 2 of 5.
+
+    Deliberately NOT published here: ``score``/``grade``. They are ``None`` on an
+    ungraded run, and a consumer reading a ``0`` where ``null`` was meant would rank a
+    blind audit as a perfect one -- the leak C-423 closed in ``render_json``'s projection
+    block and C-426 closed in ``_percentile_line``. This publishes the STATE, never a
+    number the report withheld.
     """
-    return {
+    block: dict = {
         "checksRun": checks_run,
         "checksTotal": checks_total,
         "unknownCount": sum(1 for f in findings if f.status == UNKNOWN),
@@ -95,6 +129,45 @@ def _build_analysis_completeness(
             "attestation checks require --attest",
         ] + ([self_excluded_line(sorted(self_excluded))] if self_excluded else []),
     }
+    if score is None:
+        return block
+
+    missing = [
+        {"layer": layer, "status": status}
+        for layer, status in (getattr(score, "missing_layers", ()) or ())
+    ]
+    graded = bool(getattr(score, "graded", True))
+    blind_reason = getattr(score, "config_blind_reason", None)
+    block["graded"] = graded
+    # `missing_layers` is every layer whose status is not "ran" (LayerLedger.missing), so
+    # the arithmetic is exact rather than a second count that could drift from it.
+    block["layersTotal"] = len(LAYER_ORDER)
+    block["layersRan"] = len(LAYER_ORDER) - len(missing)
+    block["missingLayers"] = missing
+    # A layer that RAN but could not exhaust its subject — a different question from a
+    # layer that never ran, and the reason both are published (ScoreResult's own
+    # docstring makes the same distinction).
+    block["notChecked"] = list(getattr(score, "not_checked", ()) or ())
+    # B-166 already surfaced a present-but-unparseable config in the sibling
+    # `analysis_completeness` block; a wholly ABSENT one (B-363) was surfaced nowhere in
+    # SARIF. `config_blind_reason` answers both in one field, exactly as it does for
+    # `--json`, so a consumer never has to re-derive the state from two booleans.
+    block["configBlind"] = {
+        "capped": bool(getattr(score, "config_blind_capped", False)),
+        "reason": blind_reason,
+    }
+    if blind_reason:
+        block["limitations"].append(
+            f"openclaw.json was {blind_reason} this run — findings describe what could "
+            "NOT be checked, not a clean configuration"
+        )
+    if not graded:
+        block["limitations"].append(
+            "no grade: " + ", ".join(
+                f"{m['layer']} ({m['status']})" for m in missing
+            ) + " — this run did not complete the five-layer check"
+        )
+    return block
 
 
 def render_sarif(
@@ -232,6 +305,7 @@ def render_sarif(
     _run["properties"]["analysisCompleteness"] = _build_analysis_completeness(
         findings, _checks_run, _checks_total,
         self_excluded=list(getattr(ctx, "self_excluded_skills", None) or []),
+        score=score,
     )
 
     if ctx is not None:

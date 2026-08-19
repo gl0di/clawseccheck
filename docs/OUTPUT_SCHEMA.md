@@ -485,9 +485,37 @@ Used by the Dashboard to render the "fix this one thing" call-to-action.
 
 Schema: `https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json`
 
-Only `FAIL` and `WARN` findings that are not suppressed appear as `results` entries.
-`PASS`, `UNKNOWN`, and suppressed findings are omitted from `results` but their
-corresponding checks always appear in `rules`.
+Only `FAIL` and `WARN` findings appear as `results` entries; `PASS` and `UNKNOWN` are
+omitted, and their corresponding checks always appear in `rules`.
+
+Suppressed findings are omitted too, **with one exception the rest of this document
+already states and this section used to contradict** (B-585): a suppressed
+score-capping `CRITICAL`/`HIGH` FAIL, or a sensitive check id, is still emitted — carrying
+a SARIF `suppressions` array (`kind: "external"`, with the justification naming
+`.clawseccheckignore`) so a consumer sees both that it fired and that it was suppressed.
+This is the same predicate §2's `fail_counts_by_severity` describes: one
+`.clawseccheckignore` line cannot silently drop a score-capping CRITICAL out of a CI feed.
+
+### `runs[0].properties.analysisCompleteness`
+
+Everything under `runs[0].properties` is outside the frozen contract (§17) and additive.
+The block carries the run's reach: `checksRun`/`checksTotal`, the per-status counts
+(`passCount`/`warnCount`/`failCount`/`unknownCount`/`notApplicableCount`/`suppressedCount`),
+`failCountsBySeverity` (the numbers `--fail-on` gates on), `selfExcludedSkills`, and
+`limitations`.
+
+On an audit run it also carries the **five-layer state** (B-585) — `graded` (bool),
+`layersRan`/`layersTotal`, `missingLayers` (`[{"layer", "status"}]`), `notChecked`, and
+`configBlind` (`{"capped", "reason"}` where reason is `"unreadable"`, `"absent"` or
+`null`). Those keys are **absent** on the `--vet` paths, where there is no
+`ScoreResult`: mode C produces no grade by construction, so `graded: false` there would
+imply a letter was withheld when none ever existed.
+
+`checksRun`/`checksTotal` count **checks**, not the analysis: 184 of 184 checks can run on
+a home whose config was never found. Read `layersRan`/`graded` for whether the analysis
+itself was complete. `score`/`grade` are deliberately never emitted here — they are `null`
+on an ungraded run, and a consumer reading a `0` where `null` was meant would rank a blind
+audit as a perfect one.
 
 ### Top-level structure
 
