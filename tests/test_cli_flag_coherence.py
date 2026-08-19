@@ -59,14 +59,20 @@ def test_risk_paths_with_json_notes_no_effect(capsys):
     assert "{" not in err.out.splitlines()[0]
 
 
-def test_sarif_with_exit_code_notes_no_effect(tmp_path, capsys):
+def test_sarif_now_honors_exit_code_and_says_nothing(tmp_path, capsys):
+    """B-584: this test used to assert the defect. It pinned `rc == 0` on the VULNERABLE
+    fixture with `--exit-code` — i.e. that the documented CI recipe does not gate — and
+    read that as "behavior is unchanged (warn-and-continue)". `--sarif` honors the gate
+    now, so the note would be the lie instead.
+
+    Kept in this file because the coherence contract is what changed: a no-effect note is
+    correct only while the flag genuinely has none."""
     out = tmp_path / "r.sarif"
     rc = main(["--home", VULN, *COMMON, "--sarif", str(out), "--exit-code"])
     err = capsys.readouterr()
-    # Behavior is unchanged (warn-and-continue): --sarif still returns 0 and writes.
-    assert rc == 0
-    assert out.exists()
-    assert "--exit-code has no effect with --sarif" in err.err
+    assert rc == 1                                   # the fixture has unsuppressed FAILs
+    assert out.exists()                              # gate, not abort
+    assert "--exit-code has no effect with --sarif" not in err.err
 
 
 def test_next_with_save_notes_no_effect(tmp_path, capsys):

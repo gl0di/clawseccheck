@@ -1256,12 +1256,17 @@ _MODE_HONORS = {
     "advise": frozenset({"json"}),
     # F-153: --dashboard --full renders the whole combined pipeline report (the
     # phases --full itself runs); --compact only ever modifies THAT combined render.
-    "dashboard": frozenset({"full", "compact"}),
+    # B-584: the artifact-rendering modes honor the CI gate. They all run the base audit
+    # and can answer "did it find an unsuppressed FAIL" exactly as the default report path
+    # does; refusing was never a decision, it was `_MODE_HONORS` being an allowlist that
+    # nobody extended. Same move C-419 made for --monitor, and for the same reason: an
+    # honest refusal on stderr is still a gate that does not gate.
+    "dashboard": frozenset({"full", "compact", "exit_code", "fail_on"}),
     # C-374: --pdf wins the mode race over --dashboard (it is earlier in _PRIMARY_MODES),
     # but both are honored now — and under `--dashboard --full --pdf` the --full phases
     # are what the PDF's pipeline blocks are rendered FROM, so --full genuinely has an
     # effect here. Saying "no effect" was true of the findings-only PDF, not this one.
-    "pdf": frozenset({"full", "compact"}),
+    "pdf": frozenset({"full", "compact", "exit_code", "fail_on"}),
     # F-155 fix (C-135): --judged-bundle's `liveTest` bucket now caps the score
     # reaching --trend/--monitor too (see _apply_live_test_cap) — a SEPARATE honor
     # from "full", deliberately not folded into it the way --dashboard's is: --full/
@@ -1269,6 +1274,12 @@ _MODE_HONORS = {
     # --trend/--monitor), only --judged-bundle does, so the "full"-bundle no_effect
     # check below is given its own "judged_bundle" escape hatch rather than reusing
     # "full" (which would wrongly silence the still-true --full/--quiet/--fast notes).
+    # B-584: --sarif is the documented CI artifact (docs/USAGE.md's "Gate my CI on this"
+    # row names it with --fail-on/--exit-code in the same breath); --badge/--html write
+    # the other two report artifacts on the same audit.
+    "sarif": frozenset({"exit_code", "fail_on"}),
+    "badge": frozenset({"exit_code", "fail_on"}),
+    "html": frozenset({"exit_code", "fail_on"}),
     "trend": frozenset({"judged_bundle"}),
     # C-419: --exit-code / --fail-on were ALREADY flags; --monitor simply refused them and
     # said so via the no-effect note. Honouring them here is what turns that honest refusal
@@ -1965,6 +1976,109 @@ def _judged_bundle(path: str) -> dict:
                   file=sys.stderr)
         _JUDGED_BUNDLE_CACHE[path] = bundle
     return _JUDGED_BUNDLE_CACHE[path]
+
+
+def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int:
+    """The `--fail-on` / `--exit-code` gate: 1 when it trips, 0 otherwise.
+
+    B-584: extracted so the artifact-rendering modes can reach it. It used to live inline
+    at the very end of `_main`, which every early-returning mode branch jumps over — so
+    `--sarif results.sarif --fail-on high`, the invocation `docs/USAGE.md` publishes as
+    THE CI recipe, exited 0 on a config with three CRITICAL FAILs. A stderr note said the
+    flag had no effect, and a green build's stderr is exactly where nobody looks.
+
+    *extra_fail* carries the FAIL sources a caller knows about beyond `findings`
+    (`vm_has_fail` / `sweep_has_fail` / `pipeline_has_fail`). It joins **only**
+    `--exit-code`'s disjunction, never `--fail-on`: those sources are bare booleans with
+    no severity attached, and a severity-gated flag cannot rank what carries no severity.
+    A caller that ran no sweep passes nothing — an ABSENT verdict is not a FAIL, which is
+    the doctrine the disjunction's own comments already state.
+    """
+    # I3/C-426: --fail-on gates on FINDINGS (like --exit-code), never on a score. It
+    # replaced `--fail-under N`, which thresholded the audit score and was removed once
+    # the five-layer rule meant an ordinary run does not produce one — see the argparse
+    # block for why removal beat both alternatives.
+    #
+    # "Unsuppressed" reuses --exit-code's own predicate verbatim (not a parallel one):
+    # a suppressed finding counts only when surfaced_despite_suppression() says a
+    # .clawseccheckignore line must not be able to silently flip the gate for a
+    # score-capping CRITICAL/HIGH FAIL or a SENSITIVE_SUPPRESSED_IDS check.
+    #
+    # Scope: severity is only available per-finding on `findings` (the main audit
+    # list) — vm_findings/sweep/pipeline below contribute to --exit-code's FAIL-only
+    # disjunction as bare booleans (vm_has_fail/sweep_has_fail/pipeline_has_fail) with
+    # no severity attached, so --fail-on (a severity-gated flag) does not join that
+    # disjunction; it reads `findings` only, same as --exit-code's own `has_fail` term.
+    if args.fail_on is not None:
+        _fail_on_rank = _SEVERITY_RANK[args.fail_on.upper()]
+        if any(
+            f.status == "FAIL"
+            and _SEVERITY_RANK.get(f.severity, -1) >= _fail_on_rank
+            and (
+                not getattr(f, "suppressed", False)
+                or surfaced_despite_suppression(f)
+            )
+            for f in findings
+        ):
+            return 1
+        # C-426/B-166/B-363: a config the tool could not read produces only UNKNOWN and
+        # WARN, never a FAIL — so a purely FAIL-driven gate stays GREEN on a run that
+        # audited nothing. `--exit-code` has tripped on this explicitly since B-166
+        # (unreadable) and B-363 (absent); `--fail-on` did not, because until C-426 the
+        # score-based `--fail-under` covered the case for anyone who used it: an
+        # unreadable config caps the score to CONFIG_BLIND_CAP, so any sane threshold
+        # tripped. Removing `--fail-under` without this would have left the replacement
+        # gate strictly weaker than the flag it replaces, in precisely the case B-363
+        # exists to prevent — hiding the evidence turning a gate green.
+        #
+        # Deliberately NOT severity-ranked: "I could not read your config" has no
+        # severity, and gating it on the operator's chosen floor would let
+        # `--fail-on critical` pass a run that read nothing at all.
+        if (getattr(ctx, "config_parse_error", False)
+                or not getattr(ctx, "config_found", True)):
+            return 1
+
+    if args.exit_code:
+        has_fail = any(
+            f.status == "FAIL"
+            and (
+                not getattr(f, "suppressed", False)
+                or surfaced_despite_suppression(f)
+            )
+            for f in findings
+        )
+        # B-166: a present-but-unparseable openclaw.json produces only UNKNOWN/WARN, so a
+        # FAIL-only gate would stay green on a broken config. Trip on it explicitly.
+        #
+        # F-149: sweep_has_fail joins the disjunction on exactly the terms vm_has_fail
+        # already sits on — FAIL-only. A SUSPICIOUS (WARN) skill does not redden the
+        # gate, and neither does an incomplete sweep: the contract this gate keeps is
+        # "a FAIL verdict from any of the six sources below, plus an unreadable
+        # config" — an ABSENT verdict is not a FAIL, and flipping the gate on
+        # truncation would silently redden every CI run that passes today. An
+        # incomplete sweep is reported honestly in its printed section instead.
+        # docs/USAGE.md ("CI / automation") and references/cli-flags.md state all six
+        # sources; keep them in step with this disjunction if a seventh is ever added.
+        #
+        # F-153: pipeline_has_fail joins on identical terms — FAIL-only, aggregated
+        # across the pipeline phases. A phase that was skipped (--fast), never reached
+        # (budget), unavailable in this build or errored contributes nothing: an ABSENT
+        # verdict is not a FAIL. Truncation is reported by the printed section and by
+        # the JSON "complete"/"notScanned" keys, never by reddening a gate that would
+        # otherwise be green.
+        #
+        # B-363: a wholly ABSENT openclaw.json (no target found at all — strictly LESS
+        # information than a present-but-unparseable one) must trip this gate exactly
+        # like config_parse_error already does, or `--exit-code` stays 0 on a run that
+        # never read anything. `config_found` defaults True via getattr so a duck-typed
+        # ScoreResult/ctx stand-in some tests build (which predates this field) stays
+        # inert, same tolerance as the config_parse_error term above.
+        if (has_fail or extra_fail
+                or getattr(ctx, "config_parse_error", False)
+                or not getattr(ctx, "config_found", True)):
+            return 1
+
+    return 0
 
 
 def _main(argv=None) -> int:
@@ -2964,7 +3078,7 @@ def _main(argv=None) -> int:
                 f"(badge written to {args.badge} — attach this SVG file as-is; "
                 "do not redraw, rasterize, or generate your own badge image)"
             )
-            return 0
+            return _findings_exit_gate(args, findings, ctx)
         except OSError as exc:
             _emit(f"(could not write badge: {exc})")
             return 1
@@ -2976,7 +3090,7 @@ def _main(argv=None) -> int:
                 render_html(findings, score, native=ctx.native, ctx=ctx),
             )
             _emit(f"(HTML report written to {args.html})")
-            return 0
+            return _findings_exit_gate(args, findings, ctx)
         except OSError as exc:
             _emit(f"(could not write HTML report: {exc})")
             return 1
@@ -2985,7 +3099,7 @@ def _main(argv=None) -> int:
         try:
             secure_write_text(_report_dest(args.sarif), render_sarif(findings, score, __version__, ctx=ctx))
             _emit(f"(SARIF written to {args.sarif})")
-            return 0
+            return _findings_exit_gate(args, findings, ctx)
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
             return 1
@@ -3066,7 +3180,7 @@ def _main(argv=None) -> int:
                 "chat, do not re-render its contents or paste the path; a mobile client "
                 "opens a PDF inline where an HTML attachment would just be a download)"
             )
-            return 0
+            return _findings_exit_gate(args, findings, ctx)
         if _mode != "dashboard" and pdf_written:
             # B-459: `and pdf_written` — everything in this block SPEAKS ABOUT A FILE. With
             # the fall-through above, a failed write now reaches here with pdf_written
@@ -3140,7 +3254,7 @@ def _main(argv=None) -> int:
             _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
                                    pdf_path=pdf_written))
             _emit_attach_instruction(pdf_written)
-            return 0
+            return _findings_exit_gate(args, findings, ctx)
         # F-153: Dave settled 2026-07-30 that --dashboard must fully render
         # everything --full does, in the fixed order (Skills · Plugins · MCP · RISK
         # chains · Behavioural · "Second opinion (advisory)" · Coverage · "Worth a
@@ -3233,7 +3347,14 @@ def _main(argv=None) -> int:
             adjudication=adjudication_phase, compact=args.compact,
             pdf_path=pdf_written))
         _emit_attach_instruction(pdf_written)
-        return 0
+        # The sweeps this branch ran are FAIL sources the default `--full` path already
+        # feeds the gate; passing them keeps `--dashboard --full --exit-code` exactly as
+        # strong as `--full --exit-code`, instead of quietly weaker on the same depth.
+        return _findings_exit_gate(
+            args, findings, ctx,
+            extra_fail=bool(getattr(plugin_sweep, "has_fail", False))
+            or bool(getattr(skill_sweep, "has_fail", False)),
+        )
 
     if _mode == "dashboard_findings":
         _emit(render_dashboard_findings(findings, ascii_only=ascii_only))
@@ -3944,91 +4065,10 @@ def _main(argv=None) -> int:
     if _save_failed:
         return 1
 
-    # I3/C-426: --fail-on gates on FINDINGS (like --exit-code), never on a score. It
-    # replaced `--fail-under N`, which thresholded the audit score and was removed once
-    # the five-layer rule meant an ordinary run does not produce one — see the argparse
-    # block for why removal beat both alternatives.
-    #
-    # "Unsuppressed" reuses --exit-code's own predicate verbatim (not a parallel one):
-    # a suppressed finding counts only when surfaced_despite_suppression() says a
-    # .clawseccheckignore line must not be able to silently flip the gate for a
-    # score-capping CRITICAL/HIGH FAIL or a SENSITIVE_SUPPRESSED_IDS check.
-    #
-    # Scope: severity is only available per-finding on `findings` (the main audit
-    # list) — vm_findings/sweep/pipeline below contribute to --exit-code's FAIL-only
-    # disjunction as bare booleans (vm_has_fail/sweep_has_fail/pipeline_has_fail) with
-    # no severity attached, so --fail-on (a severity-gated flag) does not join that
-    # disjunction; it reads `findings` only, same as --exit-code's own `has_fail` term.
-    if args.fail_on is not None:
-        _fail_on_rank = _SEVERITY_RANK[args.fail_on.upper()]
-        if any(
-            f.status == "FAIL"
-            and _SEVERITY_RANK.get(f.severity, -1) >= _fail_on_rank
-            and (
-                not getattr(f, "suppressed", False)
-                or surfaced_despite_suppression(f)
-            )
-            for f in findings
-        ):
-            return 1
-        # C-426/B-166/B-363: a config the tool could not read produces only UNKNOWN and
-        # WARN, never a FAIL — so a purely FAIL-driven gate stays GREEN on a run that
-        # audited nothing. `--exit-code` has tripped on this explicitly since B-166
-        # (unreadable) and B-363 (absent); `--fail-on` did not, because until C-426 the
-        # score-based `--fail-under` covered the case for anyone who used it: an
-        # unreadable config caps the score to CONFIG_BLIND_CAP, so any sane threshold
-        # tripped. Removing `--fail-under` without this would have left the replacement
-        # gate strictly weaker than the flag it replaces, in precisely the case B-363
-        # exists to prevent — hiding the evidence turning a gate green.
-        #
-        # Deliberately NOT severity-ranked: "I could not read your config" has no
-        # severity, and gating it on the operator's chosen floor would let
-        # `--fail-on critical` pass a run that read nothing at all.
-        if (getattr(ctx, "config_parse_error", False)
-                or not getattr(ctx, "config_found", True)):
-            return 1
-
-    if args.exit_code:
-        has_fail = any(
-            f.status == "FAIL"
-            and (
-                not getattr(f, "suppressed", False)
-                or surfaced_despite_suppression(f)
-            )
-            for f in findings
-        )
-        # B-166: a present-but-unparseable openclaw.json produces only UNKNOWN/WARN, so a
-        # FAIL-only gate would stay green on a broken config. Trip on it explicitly.
-        #
-        # F-149: sweep_has_fail joins the disjunction on exactly the terms vm_has_fail
-        # already sits on — FAIL-only. A SUSPICIOUS (WARN) skill does not redden the
-        # gate, and neither does an incomplete sweep: the contract this gate keeps is
-        # "a FAIL verdict from any of the six sources below, plus an unreadable
-        # config" — an ABSENT verdict is not a FAIL, and flipping the gate on
-        # truncation would silently redden every CI run that passes today. An
-        # incomplete sweep is reported honestly in its printed section instead.
-        # docs/USAGE.md ("CI / automation") and references/cli-flags.md state all six
-        # sources; keep them in step with this disjunction if a seventh is ever added.
-        #
-        # F-153: pipeline_has_fail joins on identical terms — FAIL-only, aggregated
-        # across the pipeline phases. A phase that was skipped (--fast), never reached
-        # (budget), unavailable in this build or errored contributes nothing: an ABSENT
-        # verdict is not a FAIL. Truncation is reported by the printed section and by
-        # the JSON "complete"/"notScanned" keys, never by reddening a gate that would
-        # otherwise be green.
-        #
-        # B-363: a wholly ABSENT openclaw.json (no target found at all — strictly LESS
-        # information than a present-but-unparseable one) must trip this gate exactly
-        # like config_parse_error already does, or `--exit-code` stays 0 on a run that
-        # never read anything. `config_found` defaults True via getattr so a duck-typed
-        # ScoreResult/ctx stand-in some tests build (which predates this field) stays
-        # inert, same tolerance as the config_parse_error term above.
-        if (has_fail or vm_has_fail or sweep_has_fail or pipeline_has_fail
-                or getattr(ctx, "config_parse_error", False)
-                or not getattr(ctx, "config_found", True)):
-            return 1
-
-    return 0
+    return _findings_exit_gate(
+        args, findings, ctx,
+        extra_fail=vm_has_fail or sweep_has_fail or pipeline_has_fail,
+    )
 
 
 if __name__ == "__main__":

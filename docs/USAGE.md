@@ -846,6 +846,7 @@ The `--risk-paths` output is also appended to the default report when any chain 
 ## CI / automation
 
 ```bash
+python3 audit.py --sarif results.sarif --fail-on high   # write the SARIF **and** fail the job
 python3 audit.py --sarif results.sarif      # write SARIF 2.1.0 locally (for GitHub Code Scanning upload step)
 python3 audit.py --fail-on high             # exit 1 if any unsuppressed FAIL at or above HIGH exists
 python3 audit.py --exit-code                # exit 1 on any FAIL verdict (six sources — see below)
@@ -854,6 +855,22 @@ python3 audit.py --exit-code                # exit 1 on any FAIL verdict (six so
 The SARIF file is written to the path you choose — ClawSecCheck never uploads it anywhere.
 `--fail-on` and `--exit-code` do not change the default exit code (0) when omitted, preserving
 backward compatibility.
+
+**Which modes the gate reaches.** `--fail-on`/`--exit-code` work on the default report path
+(including with `--json` or `--save`) and on every mode that renders that audit as an
+artifact: **`--sarif`, `--html`, `--badge`, `--pdf`, `--dashboard`** (with or without
+`--full`). The gate never aborts the run — the artifact is still written on the run that
+exits 1, because uploading it is usually the step after the one that fails. `--monitor` has
+the gate on its own terms (it ranks drift *alerts*, not findings, and defaults to HIGH).
+
+The derived-view modes — `--next`, `--sbom`, `--risk-paths`, `--incident`, `--judge-packet`,
+`--dashboard-findings`, `--show-suppressed`, `--trend`, `--percentile` — do **not** gate, and
+say so on stderr when you pass one of the flags. The `--vet` family has a separate exit-code
+contract of its own (1 on DO-NOT-INSTALL), described in its own section.
+
+Note that `rc 1` from an artifact mode has two possible causes: the gate tripped, or the
+file could not be written. A failed write always exits non-zero and prints the reason, so a
+non-zero exit can never be read as "the artifact is there and clean".
 
 **`--fail-on SEVERITY` (`critical` / `high` / `medium` / `low`).** Exits 1 when any
 **unsuppressed FAIL finding at or above SEVERITY** exists — inclusive, so `--fail-on high`

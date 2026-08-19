@@ -24,7 +24,10 @@ kept here so the always-loaded playbook stays lean.
 - `--fail-on SEVERITY` (`critical`/`high`/`medium`/`low`) — exit with code 1 if an unsuppressed
   FAIL at or above SEVERITY exists (useful for CI pipelines; needs no score, so it works on a
   bare/default run too).
-- `--exit-code` — exit 1 on a FAIL verdict from any of six sources: (1) an unsuppressed
+- `--exit-code` — exit 1 on a FAIL verdict from any of six sources. Honored on the default
+  report path and on the artifact modes that render the same audit (`--sarif`/`--html`/
+  `--badge`/`--pdf`/`--dashboard`, B-584) — the artifact is still written on the run that
+  exits 1. Sources: (1) an unsuppressed
   `FAIL` audit finding; (2) under `--full`, a `FAIL` MCP server; (3) under `--full`, a
   `DANGEROUS` installed skill from the skill sweep; (4) under `--full` (and not `--fast`), a
   `DANGEROUS` installed plugin from the plugin sweep; (5) on any run, a present-but-unparseable
@@ -94,6 +97,6 @@ kept here so the always-loaded playbook stays lean.
 **Mode precedence.** Most flags above select a single mode; only one runs per invocation
 (resolved in a fixed order, `--json` winning over `--card` on the default report path). If you
 pass a second mode, or a modifier the chosen mode can't use (e.g. `--save` with `--vet`, or
-`--exit-code` with `--sarif`), ClawSecCheck prints a `note: …` to **stderr** naming what was
+`--exit-code` with `--sbom`), ClawSecCheck prints a `note: …` to **stderr** naming what was
 ignored and continues — machine-readable stdout (`--json`/`--sarif`) stays clean. `--no-history`
 is honored everywhere except `--trend`/`--monitor`, which record a score point as part of their job.
