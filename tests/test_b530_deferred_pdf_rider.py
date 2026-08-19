@@ -171,9 +171,19 @@ def test_the_full_pdf_carries_more_than_the_reduced_one(tmp_path, capsys):
     _run(tmp_path, "--dashboard", "--full", "--fast", "--pdf", str(full_dest))
     _run(tmp_path, "--dashboard", "--full", "--fast", "--pdf", str(reduced_dest), "--trend")
     capsys.readouterr()
-    assert full_dest.stat().st_size > reduced_dest.stat().st_size
-    assert "not reached" in _pdf_text(reduced_dest)
-    assert "not reached" not in _pdf_text(full_dest)
+
+    # B-588: this compared `st_size`, which measures zlib, not deferral. The margin was 86
+    # bytes; adding one caption line to BOTH documents moved it to -9 while the full one
+    # still carried three content lines MORE (including the "Second opinion (advisory)"
+    # block the reduced one has no way to produce). A size comparison would also pass on a
+    # full PDF that was merely bigger — a longer error message would satisfy it — so it was
+    # never testing what this docstring says. Compare the content instead.
+    full_text, reduced_text = _pdf_text(full_dest), _pdf_text(reduced_dest)
+    assert "Second opinion" in full_text, "the deferred document carries no pipeline block"
+    assert "Second opinion" not in reduced_text
+    assert len(full_text.splitlines()) > len(reduced_text.splitlines())
+    assert "not reached" in reduced_text
+    assert "not reached" not in full_text
 
 
 # ------------------------------------------------- the same hole without --full

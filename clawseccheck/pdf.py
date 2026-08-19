@@ -48,6 +48,7 @@ from .report import (
     _plugins_inventory_lines, _risk_chain_lines, _sanitize, _second_opinion_item_lines,
     _second_opinion_lines,
     _SEV_ORDER, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
+    issue_population_line,
     _worth_a_glance_lines, build_inventory,
 )
 from .scoring import ScoreResult
@@ -623,6 +624,15 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     flow.spacer(6.0)
     sev_counts = {sev: sum(1 for f in issues if f.severity == sev) for sev in (CRITICAL, HIGH, MEDIUM, LOW)}
     _draw_chips(flow, sev_counts)
+    # B-588: name the population the chips count. `CRITICAL 2` alone reads as two critical
+    # FAILURES, and on one real run the split was 1 FAIL + 1 WARN (and 2 FAIL + 6 WARN of
+    # the eight HIGHs). This is the PDF — the copy that travels furthest from whoever ran
+    # it, and its first page is the part that gets read. Same sentence as the text report,
+    # from the same producer (`report.issue_population_line`), never a second tally here:
+    # a second derivation is how two surfaces start disagreeing about one number.
+    _population = issue_population_line(issues)
+    if _population:
+        flow.wrapped(_population, size=8.5, color="#666666")
 
     # ── Inventory by subject (summary table) ─────────────────────────────────────
     summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)

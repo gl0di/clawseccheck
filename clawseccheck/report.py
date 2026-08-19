@@ -958,6 +958,37 @@ def compute_scan_receipt(findings) -> str:
         return "error-computing-receipt"
 
 
+def issue_population_line(issues: list[Finding]) -> str:
+    """What a severity tally counts: `"3 FAIL, 36 WARN — incl. 2 CRITICAL, 8 HIGH, …"`.
+
+    B-588: the PDF's and the HTML's page-one severity blocks rendered the severity half
+    alone — `CRITICAL 2 / HIGH 8 / MEDIUM 16 / LOW 13` — with nothing saying what those
+    numbers count. A reader takes `CRITICAL 2` for two critical FAILURES. Measured on one
+    real run, the `--json` split was `fail_counts_by_severity = {"critical": 1, "high":
+    2}`: of the two CRITICALs one is a FAIL and the other a WARN, and of the eight HIGHs
+    six are WARNs. The text report has always named the population first; the two
+    rendered-artifact surfaces dropped the clause, and the PDF is the copy that travels
+    furthest from the person who ran it.
+
+    One producer, three consumers, so the wording cannot drift back apart. Returns `""`
+    when there is nothing to describe.
+
+    A severity tally over FAIL+WARN is the right population to show, not FAILs only: a
+    CRITICAL WARN is exactly the finding page one most needs to carry — "we could not
+    prove it, and if it is real it is the worst kind". The fix is to state the
+    population, never to narrow it.
+    """
+    n_fail = sum(1 for f in issues if f.status == FAIL)
+    n_warn = sum(1 for f in issues if f.status == WARN)
+    if not (n_fail or n_warn):
+        return ""
+    counts: dict[str, int] = {}
+    for f in issues:
+        counts[f.severity] = counts.get(f.severity, 0) + 1
+    parts = [f"{counts[sev]} {sev}" for sev in (CRITICAL, HIGH, MEDIUM, LOW) if sev in counts]
+    return f"{n_fail} FAIL, {n_warn} WARN — incl. {', '.join(parts)}"
+
+
 def _trifecta_ratio(findings: list[Finding]) -> str:
     """The Lethal Trifecta sub-score, `"<n>/3"` — or `"?/3"` when it is not a count.
 
@@ -2504,18 +2535,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
     #
     # The "Why" line above deliberately keeps `n_pass`/`n_warn`/`n_fail`: its arithmetic
     # has to reconcile with `raw_score`, and it discloses its own denominator in its text.
-    _issue_fail = sum(1 for f in issues if f.status == FAIL)
-    _issue_warn = sum(1 for f in issues if f.status == WARN)
-    if _issue_fail > 0 or _issue_warn > 0:
-        _sev_counts: dict[str, int] = {}
-        for f in issues:
-            _sev_counts[f.severity] = _sev_counts.get(f.severity, 0) + 1
-        sev_parts = []
-        for sev in (CRITICAL, HIGH, MEDIUM, LOW):
-            if sev in _sev_counts:
-                sev_parts.append(f"{_sev_counts[sev]} {sev}")
-        sev_summary = ", ".join(sev_parts)
-        lines.append(f"({_issue_fail} FAIL, {_issue_warn} WARN — incl. {sev_summary})")
+    # B-588: the wording moved into `issue_population_line` verbatim so the PDF and HTML
+    # can state the same thing; this line's bytes are unchanged.
+    _population = issue_population_line(issues)
+    if _population:
+        lines.append(f"({_population})")
     # B-520: what this run did and did not cover, read off its own layer ledger — see
     # `_scope_note_lines`. This sentence used to be static, and on a `--full` run it told
     # the reader to run five modes whose output was already printed below it.
@@ -4721,7 +4745,14 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         f'<span class="sev-chip" style="--sev:{SEVERITY[sev].hex};">'
         f'<span class="sev-chip-n">{n}</span>{esc(sev)}</span>'
         for sev, n in sev_counts.items() if n)
-    summary_html = f'<div class="summary">{summary_chips}</div>' if summary_chips else ""
+    # B-588: the chips alone said `CRITICAL 2` and left the reader to guess what it
+    # counted. Same sentence the text report prints, from the same producer.
+    _population = issue_population_line(issues)
+    summary_html = (
+        f'<div class="summary">{summary_chips}'
+        f'<span class="summary-population">{esc(_population)}</span></div>'
+        if summary_chips else ""
+    )
 
     # F-131 subject taxonomy, promoted into the HTML export: a compact "Inventory by
     # subject" table above the findings, derived from the SAME build_inventory() the JSON
@@ -4908,6 +4939,12 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         .meta strong {{ color: var(--ink); }}
         .capped {{ margin-top: 0.35rem; color: #d9534f; font-size: 0.9rem; }}
         .summary {{ display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; margin-top: 1.1rem; }}
+        /* B-588: the chips are a severity ramp; this names the population they count,
+           so `CRITICAL 2` cannot be read as two critical FAILURES. Full width so it sits
+           under the chips rather than beside them at any viewport. */
+        .summary-population {{
+            flex-basis: 100%; text-align: center; font-size: 0.78rem; opacity: 0.75;
+        }}
         .sev-chip {{
             display: inline-flex; align-items: center; gap: 0.4rem;
             padding: 0.28rem 0.7rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600;
