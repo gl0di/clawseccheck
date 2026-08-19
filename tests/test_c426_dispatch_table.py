@@ -261,16 +261,36 @@ def test_under_full_a_rider_now_gets_the_pdf_too(rider):
     assert _pdf_is_produced(full, "badge") is False
 
 
-def test_an_earlier_mode_keeps_pdf_in_the_ignored_note(tmp_path, capsys):
-    """End to end, the argv that found this: the badge is written, the PDF is not, and
-    the note has to say so."""
+def test_an_earlier_mode_keeps_the_side_outputs_in_the_ignored_note(tmp_path, capsys):
+    """End to end: a mode that returns before the write site loses the artifacts, and the
+    note has to say so.
+
+    B-586 changed which argv demonstrates it. This was `--badge b.svg --pdf p.pdf
+    --dashboard`, where the badge won the race, returned, and the PDF behind it was
+    lost — the lost half being the point. `--badge`/`--html`/`--sarif` now COMPOSE with
+    `--dashboard` exactly as `--pdf` does, so that argv writes both files and the rule
+    needs a mode that genuinely does return early. `--risk-paths` is one, and it loses
+    both.
+    """
     badge, pdf = tmp_path / "b.svg", tmp_path / "p.pdf"
-    rc = _run(tmp_path, "--badge", str(badge), "--pdf", str(pdf), "--dashboard")
+    rc = _run(tmp_path, "--risk-paths", "--badge", str(badge), "--pdf", str(pdf),
+              "--dashboard")
     err = capsys.readouterr().err
     assert rc == 0
-    assert badge.exists(), "the elected mode did not run"
-    assert not pdf.exists(), "precondition: the badge branch returns before the PDF write"
-    assert "--pdf" in err and "ignored (running --badge)" in err, err
+    assert not badge.exists() and not pdf.exists(), "--risk-paths returns before the write"
+    assert "--pdf" in err and "--badge" in err, err
+    assert "ignored (running --risk-paths)" in err, err
+
+
+def test_the_badge_and_the_pdf_are_now_produced_together(tmp_path, capsys):
+    """The other half of the same change: with `--dashboard` present neither preempts the
+    other, so a run asking for both gets both. Pinned next to the boundary above so the
+    two facts are read together — this is a fixed loss, not a widened exemption."""
+    badge, pdf = tmp_path / "b.svg", tmp_path / "p.pdf"
+    rc = _run(tmp_path, "--badge", str(badge), "--pdf", str(pdf), "--dashboard")
+    capsys.readouterr()
+    assert rc == 0
+    assert badge.exists() and pdf.exists()
 
 
 def test_a_pdf_lost_to_a_rider_is_no_longer_lost(tmp_path, capsys):

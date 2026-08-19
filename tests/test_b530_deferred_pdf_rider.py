@@ -193,15 +193,38 @@ def test_a_rider_without_full_also_stops_writing_in_silence(tmp_path, capsys):
     assert "findings only" not in err, "there is no --full pipeline to be missing"
 
 
-def test_an_earlier_mode_still_loses_the_pdf_and_still_says_so(tmp_path, capsys):
-    """The boundary this change must NOT move: a mode declared before `--pdf` returns
-    before the write site, so no file is produced and `--pdf` stays in the ignored note.
-    Widening B-530's fix into an unconditional 'the PDF is always written' would be
-    B-067 in a new place."""
+def test_an_earlier_mode_still_loses_the_side_outputs_and_still_says_so(tmp_path, capsys):
+    """The boundary this change must NOT move: a mode declared before the side-output
+    write site returns first, so no file is produced and the flag stays in the ignored
+    note. Widening B-530's fix into an unconditional 'the PDF is always written' would be
+    B-067 in a new place.
+
+    B-586 changed the EXAMPLE, not the rule. This case used `--badge` as the earlier
+    mode, because a badge beat `--dashboard` in the race, returned, and the PDF behind it
+    was lost. `--badge`/`--html`/`--sarif` now COMPOSE with `--dashboard` exactly as
+    `--pdf` does, so the badge no longer preempts anything — both files are produced, and
+    the loss this test guards has to be provoked with a mode that genuinely does return
+    early. `--risk-paths` is one, and it loses BOTH artifacts, and says so for both.
+    """
     badge, dest = tmp_path / "b.svg", tmp_path / "never.pdf"
-    rc = _run(tmp_path, "--badge", str(badge), "--pdf", str(dest), "--dashboard", "--trend")
+    rc = _run(tmp_path, "--risk-paths", "--badge", str(badge), "--pdf", str(dest),
+              "--dashboard")
     err = capsys.readouterr().err
     assert rc == 0
-    assert badge.exists()
-    assert not dest.exists(), "the badge branch returns before the PDF write"
-    assert "--pdf" in err and "ignored (running --badge)" in err, err
+    assert not badge.exists(), "--risk-paths returns before the side-output write"
+    assert not dest.exists(), "--risk-paths returns before the PDF write"
+    assert "ignored (running --risk-paths)" in err, err
+    assert "--pdf" in err and "--badge" in err, err
+
+
+def test_the_badge_no_longer_preempts_the_pdf(tmp_path, capsys):
+    """The half B-586 fixed, pinned here because this file is where the lost-PDF rule
+    lives: with `--dashboard` present, `--badge` is a side output rather than a competing
+    mode, so a run asking for both gets both. Before, the badge won the race and returned
+    with the PDF unwritten — disclosed, but still a file the user asked for and did not
+    get."""
+    badge, dest = tmp_path / "b.svg", tmp_path / "both.pdf"
+    rc = _run(tmp_path, "--badge", str(badge), "--pdf", str(dest), "--dashboard", "--trend")
+    capsys.readouterr()
+    assert rc == 0
+    assert badge.exists() and dest.exists()

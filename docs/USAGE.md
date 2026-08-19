@@ -1224,6 +1224,10 @@ python3 audit.py --log audit.log            # also write log to a local file
   history/trend. Without it each harness rolls a fresh random token every run, so the
   agent under test cannot be pre-trained on it — that stays the default deliberately.
 - **`--badge PATH`** writes a shields-style SVG (grade + score only) for your README / posts.
+  Pass it on a complete check — `--dashboard --full … --badge grade.svg` — and the badge
+  carries that run's grade; asked for on its own it renders a bare run, which since the
+  five-layer rule has no grade to show. The same composition applies to `--html` and
+  `--sarif` (B-586), matching what `--pdf` has always done.
 - **`--pdf PATH`** writes the complete audit (every FAIL/WARN finding, paginated, base-14 fonts
   only — no font embedding, no JavaScript, no forms) as a PDF. This is the deliverable-into-chat
   format: a filesystem path is useless from a phone, but a PDF opens inline in a mobile chat

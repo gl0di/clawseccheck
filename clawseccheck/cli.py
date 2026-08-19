@@ -1244,6 +1244,13 @@ _PRIMARY_MODES = [
     ("monitor", "--monitor", "bool"),
 ]
 
+#: Modes that are a SIDE OUTPUT when `--dashboard` also runs, rather than racing it
+#: (C-373/C-374 for `--pdf`; B-586 added the other three). Their file is written from the
+#: dashboard's own audit, which is the only non-default path that actually runs the
+#: installed-skill/plugin sweep — and therefore the only one that can honestly reach a
+#: complete five-layer ledger.
+_DASHBOARD_SIDE_OUTPUTS = frozenset({"pdf", "badge", "html", "sarif"})
+
 # Which tracked global modifiers each primary mode actually honors. The default
 # report path (no primary mode) honors all of them. --sarif additionally rides
 # along as a side output under --vet/--vet-mcp (handled specially below).
@@ -1453,6 +1460,45 @@ _MODE_ORDER = [attr for attr, _flag, _kind in _PRIMARY_MODES]
 _MODE_FLAG = {attr: flag for attr, flag, _kind in _PRIMARY_MODES}
 
 
+def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit) -> None:
+    """B-586: write `--badge`/`--html`/`--sarif` as side outputs of a `--dashboard` run.
+
+    These three used to WIN the mode race against `--dashboard`, run their own bare
+    audit and render that. So the documented complete check —
+    `--dashboard --full --attest a.json --judged-bundle b.json --badge b.svg` — wrote
+    `no grade yet` into the one artifact whose entire purpose is sharing a grade, while
+    `--save`/`--card` on the same command line reported `F 49/100`. `SKILL.md` offers
+    "share grade — `--badge grade.svg` or `--card`" as one line; only half of it could.
+
+    Composition rather than honouring `--full` inside those modes, because
+    `_build_layer_ledger`'s `commit_full_phases` is a promise the caller has to keep: a
+    bare `--badge --full` never runs the installed-skill/plugin sweep, and marking those
+    phases "ran" for it would fabricate a completed sweep (Golden Rule #4). The dashboard
+    path genuinely runs them, so the artifact rides that instead.
+
+    Call this only where *score* is FINAL for the path in question — before
+    `_resolve_runtime_caps`, `score` is still the bare-ledger one and every artifact
+    would report an ungraded run that has since been graded.
+
+    A failed write is reported and does not stop the card: the dashboard is the
+    deliverable and the file is its delivery (B-459's rule, applied to the riders).
+    """
+    for value, label, render in (
+        (getattr(args, "badge", None), "badge", lambda: render_svg(score, findings)),
+        (getattr(args, "html", None), "HTML report",
+         lambda: render_html(findings, score, native=ctx.native, ctx=ctx)),
+        (getattr(args, "sarif", None), "SARIF",
+         lambda: render_sarif(findings, score, __version__, ctx=ctx)),
+    ):
+        if not value:
+            continue
+        try:
+            secure_write_text(report_dest(value), render())
+            emit(f"({label} written to {value})")
+        except OSError as exc:
+            emit(f"(could not write {label}: {exc})")
+
+
 def _pdf_is_produced(args, win_attr) -> bool:
     """Is --pdf's file actually written on this run, alongside *win_attr*'s own output?
 
@@ -1471,7 +1517,22 @@ def _pdf_is_produced(args, win_attr) -> bool:
     by both the document's own C-423 ledger page and a stderr note. So there is no
     `--full` case left to special-case: past the ordering test above, the file is written.
     """
-    if not (getattr(args, "pdf", None) and bool(getattr(args, "dashboard", False))):
+    return _side_output_is_produced(args, "pdf", win_attr)
+
+
+def _side_output_is_produced(args, attr, win_attr) -> bool:
+    """Generalisation of the above for every `_DASHBOARD_SIDE_OUTPUTS` member (B-586).
+
+    All four are written from the same place in the cascade — the block just above
+    `--pdf`'s own write — so the ordering rule `_pdf_is_produced` documents applies to
+    each of them unchanged: a mode declared BEFORE that point wins and returns first, and
+    the file is genuinely never produced. Measured: `--risk-paths --dashboard --badge
+    b.svg --pdf p.pdf` writes neither, and both stay in the ignored note.
+
+    Keyed on `"pdf"`'s index rather than each flag's own, because the index that matters
+    is the WRITE SITE's, not the flag's position in the mode table.
+    """
+    if not (getattr(args, attr, None) and bool(getattr(args, "dashboard", False))):
         return False
     if win_attr not in _MODE_ORDER:
         return False
@@ -1497,18 +1558,32 @@ def _resolve_mode(args):
     27 pairs. Both now read this one function, so "which mode runs" and "which mode the
     note names" cannot differ by construction.
 
-    The one thing the table cannot express is that `--pdf` COMPOSES with `--dashboard`
-    rather than racing it (C-373/C-374): with both flags the PDF is a side output and
-    the dashboard — or `--trend`/`--percentile`/`--next`, when asked for — is what
-    renders. In the cascade that came out of `--pdf`'s branch not returning, so control
-    fell through to whichever branch came next. Resolving it here, once, is what lets
-    every branch below ask a plain `_mode == "..."` question; leaving it implicit is why
-    `--dashboard --pdf out.pdf --trend` printed "note: --trend ignored (running --pdf)"
-    on a run where `--trend` was exactly what ran.
+    The one thing the table cannot express is that the export artifacts COMPOSE with
+    `--dashboard` rather than racing it (C-373/C-374): with both flags the file is a side
+    output and the dashboard — or `--trend`/`--percentile`/`--next`, when asked for — is
+    what renders. In the cascade that came out of `--pdf`'s branch not returning, so
+    control fell through to whichever branch came next. Resolving it here, once, is what
+    lets every branch below ask a plain `_mode == "..."` question; leaving it implicit is
+    why `--dashboard --pdf out.pdf --trend` printed "note: --trend ignored (running
+    --pdf)" on a run where `--trend` was exactly what ran.
+
+    B-586: `--badge`/`--html`/`--sarif` join `--pdf` in that composition, because racing
+    it was what made a graded badge unreachable. Each of them won the race, ran its own
+    BARE audit and rendered that — so `--dashboard --full --attest --judged-bundle
+    --badge b.svg`, the documented complete check, wrote `no grade yet` into the one
+    artifact meant for sharing a grade, while `--save`/`--card` on the same command line
+    reported `F 49/100`.
+
+    Composition is the only sound fix, and `_build_layer_ledger`'s own docstring says
+    why: marking the sweep phases "ran" is a promise the caller must keep, and a bare
+    `--badge --full` never runs them. Honouring `--full` inside those modes would
+    fabricate a completed sweep — Golden Rule #4 — so the artifact instead rides the one
+    path that genuinely runs it. A bare `--badge --full` (no `--dashboard`) therefore
+    still says `--full` has no effect, exactly as C-374 decided for `--pdf`.
     """
     mode = _select_primary_mode(args)
-    if mode == "pdf" and bool(getattr(args, "dashboard", False)):
-        return _select_primary_mode(args, skip={"pdf"})
+    if mode in _DASHBOARD_SIDE_OUTPUTS and bool(getattr(args, "dashboard", False)):
+        return _select_primary_mode(args, skip=_DASHBOARD_SIDE_OUTPUTS)
     return mode
 
 
@@ -1573,6 +1648,11 @@ def _flag_coherence_notes(args) -> list[str]:
         # p.pdf --dashboard` returns from the badge branch having produced no PDF, and
         # would have said nothing about it.
         and not (a == "pdf" and _pdf_is_produced(args, win_attr))
+        # B-586: --badge/--html/--sarif compose with --dashboard on the same terms and
+        # from the same write site, so they take the same predicate — including its
+        # ordering guard, which is what keeps a genuinely-lost file (an earlier mode
+        # returned first) in this list instead of exempting it into silence.
+        and not (a in _DASHBOARD_SIDE_OUTPUTS and _side_output_is_produced(args, a, win_attr))
     ]
     # --card is a default-path output selector; any primary mode supersedes it.
     if bool(getattr(args, "card", False)):
@@ -3146,6 +3226,16 @@ def _main(argv=None) -> int:
     # --trend/--percentile/--next) in that case, so this names the other half explicitly
     # instead of relying on this branch not returning and control falling through.
     _pdf_side_output = bool(args.pdf) and args.dashboard
+    # B-586: --badge/--html/--sarif ride --dashboard on exactly --pdf's terms. Written
+    # HERE when the dashboard is present but is not what renders (a --trend/--percentile/
+    # --next rider beat it) — the artifact is then the bare audit's, which is what it
+    # would have been anyway — and DEFERRED into the dashboard branch when it is, because
+    # only after `_resolve_runtime_caps` there is `score` the phase-aware, possibly-graded
+    # one. Writing them early on that path is what produced a "no grade yet" badge on a
+    # run that had just earned a grade.
+    _defer_side_outputs = args.dashboard and args.full and _mode == "dashboard"
+    if args.dashboard and not _defer_side_outputs:
+        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit)
     if (_mode == "pdf" or _pdf_side_output) and not _defer_pdf:
         try:
             _pdf_dest = _report_dest(args.pdf)
@@ -3281,6 +3371,13 @@ def _main(argv=None) -> int:
         score, full_deadline, judged_bundle, _live_signal, _behavioral_fired_ids, _ledger = (
             _resolve_runtime_caps(ctx, findings, score, args, attestation=attestation)
         )
+        # B-586: AFTER the recompute, never before. `score` above is the phase-aware,
+        # possibly-graded one; the value these renderers see at the `--pdf` write site
+        # further up is still the bare-ledger score computed pre-dispatch, and writing
+        # the badge there produced the very "no grade yet" this task is about — on the
+        # run that had just earned a grade. Same reason `--pdf` defers its own write
+        # under `--full` (`_defer_pdf`), one line of cause apart.
+        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit)
         sweep_home = Path(args.home).expanduser()
         plugin_sweep = None
         # B-405: also swept for adjudication's own-target corpus (below) — NOT for a
