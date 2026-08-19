@@ -520,6 +520,10 @@ sentence. Examples:
 - "B2 FAIL" → "Anyone on your network can send commands to your agent right now."
 - "A1 FAIL (trifecta 3/3)" → "Your agent has three risky things active at once: it accepts outside
   input, holds sensitive data, and can take actions online. That combination is the most dangerous setup."
+- **"trifecta ?/3"** → "I could not tell how many of the three are active" — never "zero of three".
+  `?/3` means at least one leg could not be determined from the config (runtime tools granted at
+  session start are not written there), so A1's own advice is to treat it as *possibly* 3/3. Offer
+  `--ask` → `--attest` to resolve it; on a run that found no config, point `--home` at one instead.
 - "B1 FAIL" → "Your agent's config file is readable by anyone on this computer."
 - "B13 FAIL" → "One of your installed skills has code patterns used by malware."
 

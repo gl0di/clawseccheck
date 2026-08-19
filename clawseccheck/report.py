@@ -959,9 +959,35 @@ def compute_scan_receipt(findings) -> str:
 
 
 def _trifecta_ratio(findings: list[Finding]) -> str:
+    """The Lethal Trifecta sub-score, `"<n>/3"` — or `"?/3"` when it is not a count.
+
+    B-587: `len(f.evidence)` is the number of legs PROVEN ACTIVE, which is a determined
+    count only when A1 determined every leg. It has two states where it is a floor
+    instead, and both used to render as a confident number:
+
+    * A1 `WARN` — the B-033 thin-surface guard. Runtime tools granted at session start
+      (`message`, `exec_command`, `web_*`) are never written to `openclaw.json`, so a leg
+      that looks OFF can be live. A1's own detail says *"Cannot determine from config:
+      untrusted input, outbound actions"* and its fix line ends *"or treat as possible
+      3/3"* — while this function said `0/3`, the best possible result.
+    * A blind config (absent or unparseable), which is the same state arrived at with
+      even less evidence.
+
+    Measured on shipped fixtures: `--home fixtures/bad_b103_ftp --card` printed
+    `Lethal Trifecta: 0/3` on a perfectly READABLE config whose A1 could not determine
+    two of the three legs. So this is not a blind-config bug — the blind config is one
+    instance of A1 not having determined the legs, which is what the ratio must key on.
+
+    The predicate is A1's STATUS, never its prose: `PASS` (every leg determined, ≤2
+    active) and `FAIL` (three active, by construction) are the two states where the count
+    is a determination. Anything else is `"?/3"` — the same token this already returned
+    when A1 did not run at all, so no consumer meets a new shape.
+    """
     for f in findings:
         if f.id == "A1":
-            return f"{len(f.evidence)}/3"
+            if f.status in (PASS, FAIL):
+                return f"{len(f.evidence)}/3"
+            return "?/3"
     return "?/3"
 
 
@@ -3613,7 +3639,15 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
         _total = len(LAYER_ORDER)
         _ran = _total - len(getattr(score, "missing_layers", ()))
         l1 = f"  OpenClaw Security: no grade yet ({_ran}/{_total} layers ran)"
-    l2 = f"  Lethal Trifecta: {_trifecta_ratio(findings)}"
+    _tri = _trifecta_ratio(findings)
+    # B-587: the card is a five-line artifact designed to be PASTED somewhere else, so a
+    # footnote on another surface does not travel with it — the line itself has to carry
+    # why the number is not a number. Kept short enough that the box never widens past
+    # the ungraded `l1` above it (C-428's box-art lesson).
+    # `(unverified)`, not `(legs unverified)`: the longer wording pushed this line to 40
+    # columns and grew the graded card's box past the 39 C-428 fixed it at, which is an
+    # invariant a test pins deliberately — a word is not worth breaking byte-identity for.
+    l2 = f"  Lethal Trifecta: {_tri}" + (" (unverified)" if _tri == "?/3" else "")
     l3 = "  audited by ClawSecCheck" + ("" if ascii_only else f" {brand.MASCOT}")
     # C-428: the width was a hardcoded 39, sized for "A ( 95/100)". The ungraded line is
     # longer than that, and `:<39` pads but never truncates — so the box art broke open

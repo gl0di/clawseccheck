@@ -180,7 +180,7 @@ _EXEMPT = {
                "cycle.",
     "skillast.py": "~6,628 lines — the python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target).",
-    "report.py": "~4,606 lines — the output renderers; grew further with F-131's "
+    "report.py": "~5,139 lines — the output renderers; grew further with F-131's "
                  "Inventory-by-subject block (its own additive presentation layer, not "
                  "branching check logic). Its own split is deferred to a later cycle "
                  "(I-022 secondary target).",
