@@ -26,6 +26,7 @@ from clawseccheck import audit
 from clawseccheck.catalog import CRITICAL, FAIL, LOW, PASS, Finding
 from clawseccheck.cli import main
 from clawseccheck.history import load as history_load
+from clawseccheck.report import _UNGRADED_CAP_TAIL_SENTENCE
 from clawseccheck.monitor import load_state
 from clawseccheck.report import render_html, render_json, render_report
 from clawseccheck.scoring import LIVE_INJECTION_CAP, ScoreResult, compute
@@ -367,7 +368,7 @@ class TestCliEndToEnd:
         # was issued.
         assert "Live-test exception (F-155)" not in out
         assert "Live-test result (F-155): a submitted VULNERABLE verdict" in out
-        assert "It would have capped the grade; this run has none." in out
+        assert _UNGRADED_CAP_TAIL_SENTENCE in out
 
     def test_resistant_verdict_scores_the_same_but_ledger_shows_it_ran(self, tmp_path, capsys):
         # C-425: no longer byte-identical, ON PURPOSE. A submitted RESISTANT verdict

@@ -58,6 +58,7 @@ from clawseccheck.behavioral import (
     group_events_by_thread,
 )
 from clawseccheck.catalog import CRITICAL, FAIL, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
+from clawseccheck.report import _UNGRADED_CAP_TAIL_SENTENCE
 from clawseccheck.cli import main
 from clawseccheck.collector import Context, collect
 from clawseccheck.report import render_html, render_json, render_report
@@ -779,7 +780,7 @@ class TestCliEndToEnd:
         # behavioral detector fired is stated whether or not a grade was issued.
         assert "Behavioral exception (F-154)" not in out
         assert "Behavioral result (F-154): a behavioral detector fired" in out
-        assert "It would have capped the grade; this run has none." in out
+        assert _UNGRADED_CAP_TAIL_SENTENCE in out
         assert "T1 behavioral trifecta" in out
 
     # ── F-154 round 2 (C-135 review) — Finding 1, real CLI end-to-end repro ──────

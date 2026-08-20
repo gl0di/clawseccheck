@@ -408,6 +408,23 @@ def _cap_also_clause(extras: list[str]) -> str:
     return f"; also {', '.join(extras)}" if extras else ""
 
 
+# B-593: the ungraded cap disclosure used to end "... it would have capped the grade;
+# this run has none."  Its intended subject is the GRADE, but the nearest noun phrase --
+# and the grammatical subject of the whole sentence -- is the cap reason itself, which
+# for `_CAP_SEVERITY` is literally "open CRITICAL finding" (see
+# `_cap_primary_reason_text`).  So on a real card the line read as "this run has no open
+# CRITICAL finding", printed directly between a headline naming a CRITICAL and a list of
+# two of them (measured against the live agent, 2026-08-20).  The graded sibling never had
+# this problem because "capped from 86/100" gives the sentence a number to attach to.
+#
+# Naming the grade explicitly removes the ambiguity for every `_cap_cascade` primary at
+# once, rather than rewording the one that was reported.  All three sites that say this --
+# render_report's F-155 and F-154 ungraded paragraphs and render_dashboard's card line --
+# share the constant, so they cannot drift into three different sentences again.
+_UNGRADED_CAP_TAIL = "it would have capped the grade, but this run has no grade to cap."
+_UNGRADED_CAP_TAIL_SENTENCE = _UNGRADED_CAP_TAIL[0].upper() + _UNGRADED_CAP_TAIL[1:]
+
+
 def _cap_primary_reason_text(primary: str, score: ScoreResult, *,
                              audited_path=None) -> str:
     """The middle clause of "(capped from N - <this>...)" for whichever signal
@@ -2631,7 +2648,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
             # report can carry. It is stated whether or not a grade was issued.
             lines.append(
                 "Live-test result (F-155): a submitted VULNERABLE verdict — "
-                f"{_live_phrase}. It would have capped the grade; this run has none."
+                f"{_live_phrase}. {_UNGRADED_CAP_TAIL_SENTENCE}"
             )
     # F-154: a THIRD exception to "this grade never reflects runtime behaviour" — a
     # fired T1/T2/T3/B191 behavioral detector (--behavioral or --full) MAY CAP this
@@ -2654,7 +2671,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         else:
             lines.append(
                 "Behavioral result (F-154): a behavioral detector fired — "
-                f"{_beh_phrase}. It would have capped the grade; this run has none."
+                f"{_beh_phrase}. {_UNGRADED_CAP_TAIL_SENTENCE}"
             )
     # B-306 (C-135 follow-up): openclaw.json itself went dark this run (present but
     # unparseable, or unreadable) — every config-derived check (A1/B41/B1/B11/...)
@@ -3505,8 +3522,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         # Same fix render_report already carries; the card was missed. Golden Rule #4.
         grade_lines.append(
             f"{_mark} {_cap_primary_reason_text(_cap_primary, score)}"
-            f"{_cap_also_clause(_cap_extras)} — it would have capped the grade;"
-            " this run has none."
+            f"{_cap_also_clause(_cap_extras)} — {_UNGRADED_CAP_TAIL}"
         )
     if getattr(score, "config_blind_capped", False):
         # C-426: "This grade reflects…" is incoherent on a run that has no grade — and

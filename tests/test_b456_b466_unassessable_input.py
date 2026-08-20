@@ -29,6 +29,7 @@ from clawseccheck.catalog import FAIL, PASS, UNKNOWN
 from clawseccheck.checks import vet_skill
 from clawseccheck.checks._vet import _looks_like_a_skill_package, _reads_as_html
 from clawseccheck.cli import main
+from clawseccheck.report import _UNGRADED_CAP_TAIL
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 SAFE = str(FIXTURES / "home_safe")
@@ -134,7 +135,7 @@ def test_card_discloses_that_no_openclaw_config_was_found(tmp_path, capsys):
     # the missing config, still says it is not a verdict on the reader's setup, and now
     # says explicitly that the cap would have applied had there been a grade.
     assert "no OpenClaw config found" in out
-    assert "it would have capped the grade; this run has none." in out
+    assert _UNGRADED_CAP_TAIL in out
     assert "not a verdict on your setup" in out
 
 

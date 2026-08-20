@@ -27,7 +27,11 @@ from pathlib import Path
 from clawseccheck import audit, menu
 from clawseccheck.cli import main
 from clawseccheck.palette import render_palette
-from clawseccheck.report import _second_opinion_item_lines, render_dashboard
+from clawseccheck.report import (
+    _UNGRADED_CAP_TAIL,
+    _second_opinion_item_lines,
+    render_dashboard,
+)
 from clawseccheck.scoring import compute
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -59,7 +63,7 @@ def test_live_test_cap_is_disclosed_in_the_card(tmp_path, capsys):
     # NOTHING about a submitted VULNERABLE verdict -- the most serious thing this tool
     # can report -- purely because the sentence around it needed a number.
     assert "VULNERABLE" in out
-    assert "it would have capped the grade; this run has none." in out
+    assert _UNGRADED_CAP_TAIL in out
 
 
 def test_uncapped_card_carries_no_cap_line(capsys):
