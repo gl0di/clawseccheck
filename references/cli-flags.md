@@ -61,6 +61,9 @@ kept here so the always-loaded playbook stays lean.
   score/grade), swept-target verdicts are escalate-only. Its `liveTest` bucket also has
   a separate, narrower effect WITHOUT `--full`: `--trend`/`--monitor`/`--percentile`/
   `--next` each honor it on its own to cap the reported score/percentile.
+  The shape is `{"judged": {"verdicts": [{"finding_id": …, "target": …, "verdict": …}]}}` —
+  two levels, and `--judge-packet` ships it as a ready-to-fill `bundleTemplate` key so it never
+  has to be reconstructed from prose (B-596).
   Nothing recognisable in the file is ever dropped in silence: a `verdicts` array left at
   the file's top level instead of inside `judged` is applied as the judged bucket with a
   `note:` saying so (an explicit `judged` always wins over it), and a file none of whose

@@ -708,12 +708,72 @@ def build_judge_packet(ctx, findings) -> list[dict]:
     return items
 
 
+def build_bundle_template() -> dict:
+    """B-596: the envelope a judge's answers have to arrive in, shipped WITH the packet.
+
+    The packet has always advertised the per-ITEM contract (`verdict_schema`) and never the
+    file that carries the items back. `SKILL.md` said the bundle holds ``{"judged": {...}}``
+    and left the inner shape as literal ellipsis; Step 2 pointed at Step 3 and Step 3 pointed
+    back. Neither end named ``verdicts``. Driving the live agent on 2026-08-20, one host model
+    inferred it and one did not — the one that did not lost its entire 25-verdict panel and a
+    full pipeline run. A documented flow that only completes on the strongest available model
+    is not a documented flow.
+
+    Shipped as data rather than prose because prose is what the agent has already summarised
+    away by the time it needs this: the shape now travels attached to the items it describes.
+
+    **The arrays are empty on purpose.** A pre-filled ``"verdict": "SAFE"`` would round-trip
+    just as well and invite exactly the rubber-stamp the panel exists to prevent — an agent
+    could submit the template unchanged and have declared a finding safe without judging it.
+    Empty arrays are accepted by the parser, apply nothing, and cannot be mistaken for an
+    answer. The filled shapes live beside them as `entryExample`, which is illustrative and
+    goes nowhere near the parser.
+
+    Every value here is derived from the constants the PARSER uses -- `_VERDICT_VALUES` for
+    the adjudication verdicts, `pipeline._LIVE_TEST_VERDICTS` for the live-test ones -- so the
+    template cannot drift from what is actually accepted. That is the whole failure this fixes,
+    and re-spelling the vocabulary by hand would reintroduce it one release later.
+    """
+    from .pipeline import _LIVE_TEST_VERDICTS  # noqa: PLC0415 — see the module note on layering
+
+    return {
+        "_comment": (
+            "Feed this file back with --judged-bundle. Fill judged.verdicts from the "
+            "judgePacket items above, one entry per item you judged; omit the liveTest "
+            "bucket entirely unless you ran --canary/--dryrun/--redteam/--multiturn."
+        ),
+        "judged": {"verdicts": []},
+        "liveTest": {"seed": None, "verdicts": []},
+        "entryExample": {
+            "judged": {
+                "finding_id": "copy the packet item's finding_id",
+                "target": "copy the packet item's target",
+                "verdict": " | ".join(_VERDICT_VALUES),
+                "reason": "free text",
+            },
+            "liveTest": {
+                "seed": (
+                    "the --seed you passed to the harness. Without one the verdict still "
+                    "caps THIS run but is never written to history/trend/baseline, because "
+                    "an unseeded token is not reproducible (F-155)."
+                ),
+                "verdicts": [{
+                    "tool": "canary",
+                    "id": "canary",
+                    "verdict": " | ".join(sorted(_LIVE_TEST_VERDICTS)),
+                }],
+            },
+        },
+    }
+
+
 def render_judge_packet_json(ctx, findings, *, version: str) -> str:
     """Return the standalone ``--judge-packet`` JSON artifact as a string."""
     payload = {
         "tool": "clawseccheck",
         "version": version,
         "judgePacket": build_judge_packet(ctx, findings),
+        "bundleTemplate": build_bundle_template(),
     }
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
 

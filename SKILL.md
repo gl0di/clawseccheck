@@ -510,8 +510,30 @@ can open it themselves**, and offer `--dashboard --full` (everything inline, spl
 messages) instead — the card names the most urgent findings either way, so the user is
 never left with only a grade.
 
-`<verdicts-path-or- ->` is the file (or `-` for stdin) holding `{"judged": {...}}` — the
-verdicts map Step 2's mandatory judge panel just built. Omit `--judged-bundle` entirely only
+`<verdicts-path-or- ->` is the file (or `-` for stdin) carrying the verdicts map Step 2's
+mandatory judge panel just built. **The array lives two levels down, inside `judged`** —
+`--judge-packet` ships this same skeleton as its `bundleTemplate` key, so copy it from there
+rather than from here:
+
+```json
+{
+  "judged": {
+    "verdicts": [
+      {"finding_id": "B101", "target": "B101", "verdict": "SAFE", "reason": "why"}
+    ]
+  },
+  "liveTest": {
+    "seed": "the --seed you gave the harness",
+    "verdicts": [{"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]
+  }
+}
+```
+
+`finding_id`, `target` and `verdict` are required per entry; `verdict` is one of
+`SAFE` / `SUSPICIOUS` / `DANGEROUS`. Omit the `liveTest` bucket entirely unless you ran
+`--canary`/`--dryrun`/`--redteam`/`--multiturn` — and pass those a `--seed`, because an
+unseeded VULNERABLE verdict still caps the run you are looking at but is never written to
+history, trend or the drift baseline (F-155). Omit `--judged-bundle` entirely only
 when Step 2 found `judgePacket` empty (genuinely nothing to judge this run). Frame the whole
 result as an **OpenClaw Security Audit** — not "your setup" or "my agent."
 

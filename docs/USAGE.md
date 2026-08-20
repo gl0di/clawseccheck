@@ -1070,7 +1070,9 @@ python3 audit.py --log audit.log            # also write log to a local file
     and self-report B43/B44's facts in one file — an explicit `--attest` wins if you pass
     both, and says so on stderr),
     a `judged` verdicts object for your own config (advisory — never changes the score or
-    grade), a `vetJudged` array of per-target verdicts for the swept skills/plugins
+    grade; its array lives one level in, as `{"judged": {"verdicts": [{"finding_id": …,
+    "target": …, "verdict": …}]}}`, and `--judge-packet` ships that skeleton ready to fill
+    as its own `bundleTemplate` key), a `vetJudged` array of per-target verdicts for the swept skills/plugins
     (escalate-only — can never downgrade a finding on untrusted content), and a `liveTest`
     object carrying a `--canary`/`--dryrun`/`--redteam`/`--multiturn` verdict (F-155): only
     `VULNERABLE` ever caps the grade — `RESISTANT` or nothing submitted changes nothing — and
