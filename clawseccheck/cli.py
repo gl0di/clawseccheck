@@ -181,6 +181,50 @@ def _record_run(capability: str, args) -> None:
     record_run(capability)
 
 
+def _record_history_point(score, args, live_signal) -> None:
+    """The ONE decision about whether a run's verdict reaches the score history.
+
+    B-598: this guard used to be written out at the tail of the default path and
+    nowhere else, so any ``_mode`` branch that returns before that tail silently
+    recorded nothing. ``--dashboard`` is such a branch — and it is the command
+    ``SKILL.md`` puts in the guided flow, so *every audit a user gets through a chat
+    agent* was invisible to ``--trend``, ``--percentile`` and the pre-scan menu's
+    "last check" line. Measured on the live agent: two complete audits ran on
+    2026-08-20, one of them graded, and the menu still said "Last check: 4 days ago".
+
+    That is the exact shape ``cli.py``'s ``--monitor`` comment already records once
+    ("this branch returned before the liveTest bucket was ever parsed"), so the fix is
+    a shared helper rather than a second copy of the condition: a duplicated guard is
+    how the two would drift apart on the next F-155-shaped change.
+
+    ``live_signal`` may be ``None`` for a caller that never resolved one; that is not a
+    licence to skip the gate, only an admission that there is no signal to gate on.
+
+    **Which modes call this is a decision, not an accident** — and today the answer is
+    still narrower than it should be. Nine ``_mode`` branches run a full audit and
+    return early: ``--dashboard`` (fixed here), plus ``--badge`` / ``--html`` /
+    ``--sarif`` / ``--pdf`` (export modes that produce a verdict artifact and should
+    record, on the same reasoning), and ``--percentile`` / ``--next`` / ``--risk-paths``
+    (readers and analysis views, where recording is genuinely arguable). Only
+    ``--dashboard`` was reproduced against a live agent, so only it is changed here;
+    ``tests/test_b598_dashboard_history.py`` pins the answer for every mode so the rest
+    are visible rather than silent. ``--trend`` and ``--monitor`` do NOT come through
+    here: they record unconditionally as part of their own job, including under
+    ``--no-history`` (C-251), which is why they are excluded below rather than omitted.
+    """
+    if getattr(args, "no_history", False) or args.trend or args.monitor:
+        return
+    # F-155: a live-test verdict that fired the cap but was NOT reproducible (no usable
+    # seed — see LiveTestSignal.reproducible / LIVE_INJECTION_CAP's docstring) still caps
+    # what THIS run reports, but must never be written to history/trend/baseline: those
+    # exist to show drift across runs, and a random, unrepeatable signal recorded there
+    # would manufacture drift where none exists and let the grade oscillate on its own
+    # every time the harness is re-run with a fresh token.
+    if live_signal is not None and live_signal.hit and not live_signal.reproducible:
+        return
+    history_record(score, args.history)
+
+
 # Vet-MCP icon / verdict constants — shared by the standalone --vet-mcp path
 # and the embedded vet-mcp section inside --full.
 _VET_ICON_ASCII: dict[str, str] = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]"}
@@ -3368,9 +3412,20 @@ def _main(argv=None) -> int:
             # Byte-identical to before F-153: the overwhelming majority of callers
             # (every pre-existing test, and every plain `--dashboard` invocation)
             # never asked for the rest of the pipeline, so nothing extra is computed.
+            #
+            # B-598: except that it recorded no history point, so a chat-driven audit
+            # never reached --trend or the menu's "last check" line. Resolving the
+            # liveTest cap first is the same one-liner --percentile/--next already carry
+            # (B-379) and is what gives the history gate a signal to honour. It cannot
+            # move this card's grade: a plain --dashboard never runs the installed-skills
+            # sweep, so the run is ungraded by construction and there is no number for
+            # F-155 to cap — the recorded line carries no score and no letter either way
+            # (docs/USAGE.md's "the timeline stays unbroken", C-426's history rows).
+            score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
             _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
                                    pdf_path=pdf_written))
             _emit_attach_instruction(pdf_written)
+            _record_history_point(score, args, _live_signal)
             return _findings_exit_gate(args, findings, ctx)
         # F-153: Dave settled 2026-07-30 that --dashboard must fully render
         # everything --full does, in the fixed order (Skills · Plugins · MCP · RISK
@@ -3471,6 +3526,12 @@ def _main(argv=None) -> int:
             adjudication=adjudication_phase, compact=args.compact,
             pdf_path=pdf_written))
         _emit_attach_instruction(pdf_written)
+        # B-598: `score` here is the phase-aware, possibly-GRADED one from
+        # `_resolve_runtime_caps` — the same object the card above just rendered — so the
+        # recorded line carries the letter this run actually earned. This is the shape
+        # SKILL.md's guided flow uses, and the one whose absence meant no graded run was
+        # ever recorded by anyone following the documented path.
+        _record_history_point(score, args, _live_signal)
         # The sweeps this branch ran are FAIL sources the default `--full` path already
         # feeds the gate; passing them keeps `--dashboard --full --exit-code` exactly as
         # strong as `--full --exit-code`, instead of quietly weaker on the same depth.
@@ -4175,16 +4236,10 @@ def _main(argv=None) -> int:
             _emit(f"\n(could not save report: {exc})")
             _save_failed = True
 
-    # F-155: a live-test verdict that fired the cap but was NOT reproducible (no usable
-    # seed — see LiveTestSignal.reproducible / LIVE_INJECTION_CAP's docstring) must still
-    # cap THIS run's score/grade above, but must never be written to history.jsonl/trend/
-    # baseline — those exist to show drift across runs, and a random, unrepeatable signal
-    # recorded there would manufacture drift where none exists and let the grade oscillate
-    # on its own every time the harness is re-run with a fresh token. A seeded (or absent)
-    # live-test signal records exactly as before this feature existed.
-    _skip_history_for_live_test = live_signal.hit and not live_signal.reproducible
-    if not args.no_history and not args.trend and not args.monitor and not _skip_history_for_live_test:
-        history_record(score, args.history)
+    # B-598: the guard this used to spell out inline now lives in
+    # `_record_history_point`, which the --dashboard branch calls too. Its docstring
+    # carries the F-155 seed-gate reasoning that was written here.
+    _record_history_point(score, args, live_signal)
 
     if _save_failed:
         return 1
