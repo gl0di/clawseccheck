@@ -192,10 +192,13 @@ _EXEMPT = {
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
                     "+ .pyc/.wasm sniffing); a finer split (byte-format sniffing -> a leaf "
                     "module) is a later cycle.",
-    "cli.py": "~3,806 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
+    "cli.py": "~4,329 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
-              "(--judge-packet); a finer split (e.g. flag registration -> its own module) is "
-              "a later cycle.",
+              "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "
+              "the dispatch cascade: each `_mode` branch that returns early has to repeat "
+              "what the shared tail does, which is precisely the shape those four bugs were. "
+              "That is the argument for the split (flag registration -> its own module, and "
+              "the mode branches -> a dispatch table) rather than a reason to defer it again.",
     "pipeline.py": "~1,314 lines — the --full P7-P10 orchestration. Crossed the budget with "
                    "C-425's PipelineResult.to_ledger(), which projects the run's phases onto "
                    "the five-layer ledger (layers.py). It belongs here and nowhere else: it "

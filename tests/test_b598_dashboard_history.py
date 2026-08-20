@@ -20,8 +20,9 @@ exits call, because a second copy of the condition is how the two would drift on
 F-155-shaped change. `cli.py` already records `--monitor` having had this exact shape of bug.
 
 `test_every_mode_history_behaviour_is_pinned` is the part that matters most in a year: nine
-modes run a full audit and return early, and only `--dashboard` was reproduced against a live
-agent, so only it is changed. The others are pinned as they are — visible, not silent.
+modes run a full audit and return early, and when this was written only `--dashboard` had been
+reproduced against a live agent, so only it was changed. B-601 later came through this pin and
+flipped the remaining seven — which is exactly what a pin like this is for.
 
 Offline, writes nothing outside tmp_path, stdlib only.
 """
@@ -152,17 +153,16 @@ def test_trend_and_the_menu_can_finally_see_a_dashboard_run(tmp_path):
     (["--full"], True),
     (["--dashboard"], True),                     # B-598: fixed here
     (["--dashboard", "--full"], True),           # B-598: the guided flow
-    # Still NOT recording. Each runs a full audit and returns before the tail, exactly as
-    # --dashboard did. Only --dashboard was reproduced against a live agent, so only it was
-    # changed; these are pinned so the remaining holes are a visible decision rather than an
-    # accident, and so a future fix has to come here and say so.
-    (["--percentile"], False),
-    (["--next"], False),
-    (["--risk-paths"], False),
-    (["--badge", "b.svg"], False),
-    (["--html", "h.html"], False),
-    (["--sarif", "s.sarif"], False),
-    (["--pdf", "p.pdf"], False),
+    # B-601 came here and said so, which is what this pin is for. Every mode that measures
+    # a verdict now records one — the principle `cli.py`'s own module docstring and
+    # docs/USAGE.md already stated, finally true of the code.
+    (["--percentile"], True),
+    (["--next"], True),
+    (["--risk-paths"], True),
+    (["--badge", "b.svg"], True),
+    (["--html", "h.html"], True),
+    (["--sarif", "s.sarif"], True),
+    (["--pdf", "p.pdf"], True),
 ])
 def test_every_mode_history_behaviour_is_pinned(tmp_path, flags, records):
     args = [str(tmp_path / f) if f.endswith((".svg", ".html", ".sarif", ".pdf")) else f

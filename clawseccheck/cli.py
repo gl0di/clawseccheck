@@ -227,17 +227,22 @@ def _record_history_point(score, args, live_signal) -> None:
     ``live_signal`` may be ``None`` for a caller that never resolved one; that is not a
     licence to skip the gate, only an admission that there is no signal to gate on.
 
-    **Which modes call this is a decision, not an accident** — and today the answer is
-    still narrower than it should be. Nine ``_mode`` branches run a full audit and
-    return early: ``--dashboard`` (fixed here), plus ``--badge`` / ``--html`` /
-    ``--sarif`` / ``--pdf`` (export modes that produce a verdict artifact and should
-    record, on the same reasoning), and ``--percentile`` / ``--next`` / ``--risk-paths``
-    (readers and analysis views, where recording is genuinely arguable). Only
-    ``--dashboard`` was reproduced against a live agent, so only it is changed here;
-    ``tests/test_b598_dashboard_history.py`` pins the answer for every mode so the rest
-    are visible rather than silent. ``--trend`` and ``--monitor`` do NOT come through
-    here: they record unconditionally as part of their own job, including under
-    ``--no-history`` (C-251), which is why they are excluded below rather than omitted.
+    **Which modes call this is a decision, not an accident.** B-601 settled it: *a run
+    that measured a verdict for this setup records it.* That is what this module's own
+    docstring and ``docs/USAGE.md`` ("the timeline stays unbroken") have always claimed,
+    and it now covers all nine ``_mode`` branches that run a full audit and return early
+    — ``--dashboard``, ``--badge``, ``--html``, ``--sarif``, ``--pdf``, ``--percentile``,
+    ``--next``, ``--risk-paths`` — alongside the default path's tail.
+
+    The principle is about VERDICTS, not invocations: ``--menu``, ``--purge``,
+    ``--verify-*`` and the ``--vet`` family measure nothing about this setup's posture
+    and record nothing. ``--trend`` and ``--monitor`` do NOT come through here either,
+    for the opposite reason: they record unconditionally as part of their own job,
+    including under ``--no-history`` (C-251), which is why they are excluded below
+    rather than omitted.
+
+    ``tests/test_b598_dashboard_history.py`` pins the answer for every mode, so a future
+    change has to come through that test and say so — which is exactly how B-601 arrived.
     """
     if getattr(args, "no_history", False) or args.trend or args.monitor:
         return
@@ -3199,7 +3204,14 @@ def _main(argv=None) -> int:
              if not p.suppressed]
 
     if _mode == "risk_paths":
+        # B-601: an analysis VIEW over findings this run already measured — the verdict is
+        # as real as any other run's, so the timeline carries it. Resolving the liveTest cap
+        # first is what gives `_record_history_point` a signal to honour; without one an
+        # unseeded VULNERABLE verdict would be persisted, which is the single thing the
+        # F-155 gate exists to prevent.
+        score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
         _emit(_risk.render_risk_paths(paths, ascii_only=ascii_only))
+        _record_history_point(score, args, _live_signal)
         return 0
 
     def _report_dest(raw: str) -> Path:
@@ -3225,33 +3237,46 @@ def _main(argv=None) -> int:
         return p
 
     if _mode == "badge":
+        # B-601: the cap is resolved BEFORE the artifact is rendered, not just before the
+        # history write. An exported badge that ignores a submitted VULNERABLE verdict is
+        # the same lying artifact B-600 fixed in the HTML and the PDF — one run, one verdict,
+        # on every surface it reaches.
+        score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
         try:
             secure_write_text(_report_dest(args.badge), render_svg(score, findings))
             _emit(
                 f"(badge written to {args.badge} — attach this SVG file as-is; "
                 "do not redraw, rasterize, or generate your own badge image)"
             )
+            # Recorded on the success path only: a run that returns 1 because the file could
+            # not be written is one the user will repeat, and two lines for one intended
+            # audit is a worse timeline than none.
+            _record_history_point(score, args, _live_signal)
             return _findings_exit_gate(args, findings, ctx)
         except OSError as exc:
             _emit(f"(could not write badge: {exc})")
             return 1
 
     if _mode == "html":
+        score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)   # B-601
         try:
             secure_write_text(
                 _report_dest(args.html),
                 render_html(findings, score, native=ctx.native, ctx=ctx),
             )
             _emit(f"(HTML report written to {args.html})")
+            _record_history_point(score, args, _live_signal)
             return _findings_exit_gate(args, findings, ctx)
         except OSError as exc:
             _emit(f"(could not write HTML report: {exc})")
             return 1
 
     if _mode == "sarif":
+        score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)   # B-601
         try:
             secure_write_text(_report_dest(args.sarif), render_sarif(findings, score, __version__, ctx=ctx))
             _emit(f"(SARIF written to {args.sarif})")
+            _record_history_point(score, args, _live_signal)
             return _findings_exit_gate(args, findings, ctx)
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
@@ -3336,6 +3361,13 @@ def _main(argv=None) -> int:
     _defer_side_outputs = args.dashboard and args.full and _mode == "dashboard"
     if args.dashboard and not _defer_side_outputs:
         _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit)
+    if _mode == "pdf":
+        # B-601: STANDALONE --pdf only. The write below is shared with `--dashboard`'s
+        # riders, and those have their own cap story (B-586's deferral, B-600's follow-up),
+        # so resolving here is scoped to the branch that returns from this block. Guarding
+        # on the mode rather than editing the shared write keeps the rider path byte-for-
+        # byte what it was.
+        score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
     if (_mode == "pdf" or _pdf_side_output) and not _defer_pdf:
         try:
             _pdf_dest = _report_dest(args.pdf)
@@ -3370,6 +3402,7 @@ def _main(argv=None) -> int:
                 "chat, do not re-render its contents or paste the path; a mobile client "
                 "opens a PDF inline where an HTML attachment would just be a download)"
             )
+            _record_history_point(score, args, _live_signal)          # B-601
             return _findings_exit_gate(args, findings, ctx)
         if _mode != "dashboard" and pdf_written:
             # B-459: `and pdf_written` — everything in this block SPEAKS ABOUT A FILE. With
@@ -3426,7 +3459,17 @@ def _main(argv=None) -> int:
         # before any cap resolution ran at all, so a run --full would grade F was
         # ranked against the recorded distribution as though it were an uncapped A.
         score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
+        # B-601: records, like every other mode that measures a verdict.
+        #
+        # The task that asked for this reasoned that recording first would make the run
+        # rank against a distribution containing itself. That premise is wrong, and the
+        # correction is worth leaving here so nobody re-derives it: `percentile.py` ranks
+        # against a BUILT-IN reference CDF and never reads the local history at all (see
+        # its module docstring — "NOT telemetry, NOT collected from real users"). So there
+        # is no ordering dependency to protect. The record still comes after the emit, for
+        # no stronger reason than that every sibling branch reads that way.
         _emit(_percentile_line(score, ascii_only))
+        _record_history_point(score, args, _live_signal)
         return 0
 
     if _mode == "next":
@@ -3434,6 +3477,9 @@ def _main(argv=None) -> int:
         # should reflect the capped grade, not an uncapped one.
         score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
         _emit(render_next_actions(suggest_actions(findings, score), ascii_only))
+        # B-601: advice is what this mode RENDERS, but it measured a full verdict to get
+        # there. The timeline records runs, not renderings.
+        _record_history_point(score, args, _live_signal)
         return 0
 
     if _mode == "dashboard":
