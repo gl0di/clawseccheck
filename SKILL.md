@@ -568,12 +568,22 @@ actually scales with a bad config's FAIL/WARN count), and appends a `--save`/`--
 pointer for the full detail — or fall back to `--card` (grade + score + trifecta only)
 and offer to save the full report via `--save <path>` / `--html <path>`.
 
-**Do not compose the card — paste it.**
+**Do not compose the card — paste it, inside a fenced code block.**
 
 Live testing showed that when the model composes the grade card / findings sections
-itself, the 🦞 header and the per-subject frames silently vanish. So the WHOLE card above is one
-deterministic render — paste its **entire stdout here, verbatim**. It emits, in this fixed
-order (F-153):
+itself, the 🦞 header and the per-subject frames silently vanish. Measured across five live
+sessions (2026-08-20): four of five hosts rebuilt the card as their own bullet list, and three
+of those four dropped even the tool's name from the reply. The one host that relayed it intact
+wrapped it in a fenced block — which is what preserves the header, the score-bar and the
+per-subject frames, since the frame relies on monospace alignment. So the WHOLE card above is
+one deterministic render — paste its **entire stdout here, verbatim, inside a fenced code
+block** (language tag `text`). The CLI repeats this on stderr right next to the card (B-605),
+because a rule that lives only here is one you have already summarised away by the time you
+need it.
+
+This is the one place a fence belongs: the menu (Step 1) and Sections 5-6 stay ordinary text.
+
+It emits, in this fixed order (F-153):
 
 - **Section 1 — Headline card**, in one of two shapes depending on whether all five layers ran:
   - **graded** — `🦞 ClawSecCheck · OpenClaw Security Audit · Grade {grade} · {score}/100`, a

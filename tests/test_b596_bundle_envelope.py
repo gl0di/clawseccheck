@@ -43,6 +43,19 @@ def _run(tmp_path: Path, *args: str, store: str = "state"):
         env={**os.environ, "HOME": str(fake_home)})
 
 
+def _assert_no_bundle_complaint(stderr: str) -> None:
+    """Assert what these tests actually mean: the bundle drew no diagnostic.
+
+    They originally asserted `"note:" not in stderr` — the absence of the whole stderr
+    advice CHANNEL, to check the absence of one message on it. That happened to be true
+    and stopped being true the moment B-605 put the card's relay instruction on the same
+    channel. Narrowed to the two diagnostics a bundle can actually provoke: B-330's
+    "produced no usable entries" and B-597's misplaced-content note (which names the flag).
+    """
+    assert "no usable entries" not in stderr, stderr[:400]
+    assert "--judged-bundle" not in stderr, stderr[:400]
+
+
 def _packet(tmp_path: Path) -> dict:
     proc = _run(tmp_path, "--judge-packet")
     return json.loads(proc.stdout)
@@ -68,7 +81,7 @@ def test_the_template_round_trips_through_the_parser(tmp_path):
 
     proc = _run(tmp_path, "--dashboard", "--full", "--judged-bundle", str(dest), store="s2")
     assert proc.returncode in (0, 1), proc.stderr[:300]
-    assert "note:" not in proc.stderr, proc.stderr[:400]
+    _assert_no_bundle_complaint(proc.stderr)
 
 
 def test_the_template_filled_from_a_real_packet_item_is_applied(tmp_path):
@@ -86,7 +99,7 @@ def test_the_template_filled_from_a_real_packet_item_is_applied(tmp_path):
 
     proc = _run(tmp_path, "--dashboard", "--full", "--judged-bundle", str(dest), store="s3")
     assert "no verdicts submitted" not in proc.stdout
-    assert "note:" not in proc.stderr, proc.stderr[:400]
+    _assert_no_bundle_complaint(proc.stderr)
 
 
 # ------------------------------------------------- it cannot become a rubber stamp

@@ -3331,6 +3331,56 @@ def _main(argv=None) -> int:
               "and any link you write will be broken.\n"
               "      Do not re-render the PDF's contents into the chat.",
               file=sys.stderr)
+
+    def _emit_paste_instruction(pdf_path=None):
+        """B-605: tell the agent HOW to relay the card, in the buffer that carries it.
+
+        `SKILL.md` states the contract as emphatically as prose can -- "Do not compose the
+        card -- paste it ... paste its entire stdout here, verbatim". Measured across five
+        live Control-UI sessions it is obeyed by exactly one host: gpt-5.6-sol pasted the
+        card; gpt-5.6-luna composed its own bullet list 4 times out of 4, and 3 of those 4
+        dropped even the tool's name from the reply. The card is emitted correctly every
+        time -- the loss is entirely between stdout and the screen.
+
+        Two things were wrong with relying on that paragraph, and `_emit_attach_instruction`
+        above already names the mechanism for the first: an instruction placed "at the
+        moment of the decision" beats the document read hundreds of lines earlier -- that
+        is precisely how B-595's flattened note came to override SKILL.md's richer rule.
+        For the card there was no such instruction AT ALL: `--dashboard` without `--pdf`
+        printed nothing to stderr, which is exactly the shape of the session that composed
+        with no note present. So this is not a second copy of the rule; it is the first
+        time the rule reaches the buffer where the choice is made.
+
+        The second is that "paste it verbatim" names an outcome, not an action. The one
+        host that succeeded did something specific -- it wrapped the card in a ```text
+        fenced block, which is what keeps the header, the score-bar and the per-subject
+        frames intact in a markdown chat client. So the note names that action rather than
+        restating the goal. n=1 on the fence, which is why it is offered as the shape
+        observed to work and not asserted as the only one that can.
+
+        stderr, like its sibling, and for the same reason: the agent must read this and the
+        user must never see it. That split does hold in practice -- the host that pasted the
+        card did not paste the attach note (checked in that session's assistant-authored
+        text, isolated from tool output).
+
+        Deliberately called AFTER `_emit_attach_instruction` at each site: both are advice
+        to the same reader, and this is the half that is currently ignored.
+        """
+        lines = [
+            "note: the Dashboard card on stdout is a deterministic render \u2014 paste it "
+            "into your reply verbatim,",
+            "      inside a fenced code block (```text \u2026 ```), exactly as printed.",
+            "      Do not summarise it, do not rebuild it as your own bullet list, do not "
+            "drop its header line:",
+            "      composing it yourself silently loses the header, the score-bar and the "
+            "per-subject frames,",
+            "      which is why it is rendered here rather than described.",
+        ]
+        if pdf_path:
+            lines.append(
+                "      The card is not the PDF's contents \u2014 paste the card AND attach "
+                "the PDF; they are different artifacts.")
+        print("\n".join(lines), file=sys.stderr)
     # C-374: under `--dashboard --full` the PDF must also carry the pipeline blocks, and
     # those phases are computed further down (in the dashboard branch). Defer the write
     # to there rather than emitting a findings-only PDF the card would then describe as
@@ -3500,6 +3550,7 @@ def _main(argv=None) -> int:
             _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
                                    pdf_path=pdf_written))
             _emit_attach_instruction(pdf_written)
+            _emit_paste_instruction(pdf_written)
             _record_history_point(score, args, _live_signal)
             return _findings_exit_gate(args, findings, ctx)
         # F-153: Dave settled 2026-07-30 that --dashboard must fully render
@@ -3601,6 +3652,7 @@ def _main(argv=None) -> int:
             adjudication=adjudication_phase, compact=args.compact,
             pdf_path=pdf_written))
         _emit_attach_instruction(pdf_written)
+        _emit_paste_instruction(pdf_written)
         # B-598: `score` here is the phase-aware, possibly-GRADED one from
         # `_resolve_runtime_caps` — the same object the card above just rendered — so the
         # recorded line carries the letter this run actually earned. This is the shape
@@ -3617,7 +3669,10 @@ def _main(argv=None) -> int:
         )
 
     if _mode == "dashboard_findings":
+        # Same contract as the full card: SKILL.md Step 3 pastes this block verbatim, so
+        # it carries the same relay instruction. No PDF is written on this path.
         _emit(render_dashboard_findings(findings, ascii_only=ascii_only))
+        _emit_paste_instruction()
         return 0
 
     if _mode == "sbom":
