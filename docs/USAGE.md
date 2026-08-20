@@ -683,8 +683,10 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   `~/.clawseccheck/history.jsonl`, so redirecting only the first two leaves a sandboxed or CI
   run appending a real-looking row to your live history. Each history row's `home` field is
   always `null` (no call site populates it with the audited path), so a foreign row is not
-  distinguishable from a genuine one afterwards. `--data-dir` moves all three together; the
-  individual flags still work and still win when given explicitly.
+  distinguishable from a genuine one afterwards. `--data-dir` moves the whole local store
+  together — those three plus the coverage/freshness ledger `coverage.json`, which follows
+  `--history`'s directory (the same place `--purge` looks for it). The individual flags still
+  work and still win when given explicitly.
 - Also worth knowing: `--state`/`--events`/`--history`'s containing directory is created `0700`
   (owner-only) the first time any of them is written (`safeio.secure_dir`) — a silent side effect
   outside the target file itself, with no message printed, from a tool that otherwise promises
@@ -774,8 +776,9 @@ Three things about that:
 `--data-dir DIR` is worth using in any scripted context. `--monitor` writes three files, and
 before this the score history defaulted independently of the other two — so redirecting
 `--state` and `--events` for a scratch run quietly kept appending to your real history.
-`--data-dir` moves all three together; an explicitly given `--state`/`--events`/`--history`
-still wins.
+`--data-dir` moves the whole local store together — those three plus the coverage/freshness
+ledger, which follows `--history`'s directory. An explicitly given
+`--state`/`--events`/`--history` still wins.
 
 Without `--exit-code`, the older gate off the journal still works:
 

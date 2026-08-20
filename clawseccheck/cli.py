@@ -167,6 +167,29 @@ def _tee_emitted(sink: list[str]):
         _EMIT_TEE = prev
 
 
+def _store_dir(args) -> Path:
+    """The directory this run's local state lives in.
+
+    Resolved from ``--history``'s parent, which is where ``--data-dir`` has already
+    placed it. That is not a new convention: ``_run_purge`` has always derived the
+    store this way and ``_PURGE_FILENAMES`` has always listed ``coverage.json``
+    among the files living there — the tree already believed the four move together.
+
+    B-599: only three of them actually did. ``--data-dir``'s help text promises that
+    "the three move together, so a scratch run cannot half-redirect and write into
+    your real history", and the coverage ledger — the fourth file, and the one
+    ``--purge`` deletes from this very directory — ignored it. Deriving both from
+    one helper is what makes the promise structural instead of a list someone has to
+    remember to extend.
+    """
+    return Path(args.history).expanduser().parent
+
+
+def _coverage_path(args) -> str:
+    """This run's coverage/freshness ledger — beside its history, never elsewhere."""
+    return str(_store_dir(args) / "coverage.json")
+
+
 def _record_run(capability: str, args) -> None:
     """Coverage-ledger write, gated by --no-history (B-156).
 
@@ -175,10 +198,14 @@ def _record_run(capability: str, args) -> None:
     ``ledger.record_run`` directly, so ``--no-history`` reliably suppresses
     the ``~/.clawseccheck/coverage.json`` write everywhere, not just on the
     audit-trend path (Golden Rule #2: local-only / no surprise writes).
+
+    B-599: that funnel was the right shape and still wrote to the wrong file —
+    ``record_run`` was called with no path at all, so all nineteen call sites
+    resolved to the real ``~/.clawseccheck`` however the run was redirected.
     """
     if getattr(args, "no_history", False):
         return
-    record_run(capability)
+    record_run(capability, path=_coverage_path(args))
 
 
 def _record_history_point(score, args, live_signal) -> None:
@@ -1854,7 +1881,7 @@ def _run_purge(args) -> int:
     never globs or rmtree's the directory, so an unrelated file the user happens
     to keep there is never at risk. Read-only until the user (or --yes) confirms.
     """
-    store_dir = Path(args.history).expanduser().parent
+    store_dir = _store_dir(args)
     candidates = [store_dir / name for name in _PURGE_FILENAMES]
     candidates += [store_dir / (name + ".lock") for name in _PURGE_FILENAMES]
     existing = [p for p in candidates if p.exists()]
@@ -2440,10 +2467,12 @@ def _main(argv=None) -> int:
                    help="print an OpenClaw cron job that runs the drift check on a "
                         "schedule, for your agent to create — prints only, creates nothing")
     p.add_argument("--data-dir", metavar="DIR", default=None,
-                   help="put the monitor state, the event journal AND the score history "
-                        "under DIR — the three move together, so a scratch run cannot "
-                        "half-redirect and write into your real history. An explicitly "
-                        "given --state/--events/--history still wins.")
+                   help="put this run's whole local store under DIR — the monitor state, "
+                        "the event journal, the score history AND the coverage/freshness "
+                        "ledger. They move together, so a scratch run cannot half-redirect "
+                        "and write into your real store. An explicitly given "
+                        "--state/--events/--history still wins (the ledger follows "
+                        "--history, which is also where --purge looks for it).")
     p.add_argument("--no-history", action="store_true",
                    help="do not record this run to the local score history (default: record) "
                         "— has no effect under --trend/--monitor, which always record one "
@@ -4005,7 +4034,7 @@ def _main(argv=None) -> int:
             # freshness lines here — otherwise the report prints "never run" directly
             # above the sections that run them (the freshness is computed pre-run).
             _refreshed = ("self_test", "vet_mcp") if args.full else ()
-            f_notice = _compute_freshness(load_ledger(), skip=_refreshed)
+            f_notice = _compute_freshness(load_ledger(path=_coverage_path(args)), skip=_refreshed)
             # C-361: the IOC dataset's own age and coverage reached only --vet-source
             # before this, so a normal audit said nothing about how much a clean
             # identity result is worth. Same advisory list render_report already
