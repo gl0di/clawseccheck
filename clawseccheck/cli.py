@@ -141,6 +141,16 @@ def _unicode_ok() -> bool:
 _EMIT_TEE: list[str] | None = None
 
 
+#: B-605: above this many characters the Dashboard card stops being a thing a chat message
+#: can carry, and the note says so. Not a channel limit -- the tool cannot know the
+#: channel's -- but a disclosure threshold, chosen from measured shapes rather than taste:
+#: `--dashboard --full --pdf` renders ~1,643 chars (relayed intact by a live host) while
+#: `--dashboard --full` alone renders ~19,972 (relayed not at all). 8,000 sits above the
+#: ~6,482 `SKILL.md` cites for an ordinary Sections 1-2 render, so the note stays quiet on
+#: the shapes that work, and fires on the one that measurably does not.
+_RELAYABLE_CARD_CHARS = 8000
+
+
 def _emit(text: str) -> None:
     """Print, falling back to ASCII-safe bytes if the console can't encode it."""
     if _EMIT_TEE is not None:
@@ -3332,7 +3342,7 @@ def _main(argv=None) -> int:
               "      Do not re-render the PDF's contents into the chat.",
               file=sys.stderr)
 
-    def _emit_paste_instruction(pdf_path=None):
+    def _emit_paste_instruction(pdf_path=None, card_chars=0):
         """B-605: tell the agent HOW to relay the card, in the buffer that carries it.
 
         `SKILL.md` states the contract as emphatically as prose can -- "Do not compose the
@@ -3363,8 +3373,25 @@ def _main(argv=None) -> int:
         card did not paste the attach note (checked in that session's assistant-authored
         text, isolated from tool output).
 
-        Deliberately called AFTER `_emit_attach_instruction` at each site: both are advice
-        to the same reader, and this is the half that is currently ignored.
+        Emitted BEFORE the card, and that ordering is load-bearing rather than cosmetic.
+        The first version printed it after, and a live run found the consequence: on
+        `--dashboard --full` without `--pdf` the merged stream is 25,686 bytes, the card
+        starts at 0 and the note started at byte 25,265 -- past the ~20 KB cap the host's
+        bash tool truncates at. The instruction to relay the card was the first thing lost,
+        and it was lost exactly on the runs with the biggest card. Printing it first makes
+        that deterministic: stderr is unbuffered and nothing of the card has been written
+        yet, so it cannot be ordered away by stdout's block buffering (which is what made
+        the small-card case look fine).
+
+        `card_chars` drives the second half. With `--pdf` the card collapses to a ~1.6 KB
+        overview that points at the file, and that shape does get relayed. Without it,
+        `--dashboard --full` renders ~20 KB across ~183 lines -- more than a chat message
+        can carry, so no instruction can make it relayable and pretending otherwise just
+        moves the failure. The remedy already exists in the product and in `SKILL.md`
+        (`--pdf` to attach, `--compact` to condense); nothing said so at the moment the
+        oversized card was produced. The size is DISCLOSED rather than a limit asserted:
+        the cap is the channel's, the tool cannot know it, and `SKILL.md`'s own worked
+        example is Telegram's ~4096.
         """
         lines = [
             "note: the Dashboard card on stdout is a deterministic render \u2014 paste it "
@@ -3376,6 +3403,16 @@ def _main(argv=None) -> int:
             "per-subject frames,",
             "      which is why it is rendered here rather than described.",
         ]
+        if card_chars > _RELAYABLE_CARD_CHARS:
+            lines.append(
+                f"      This card is {card_chars:,} characters, which many chat channels "
+                "cannot carry in one message")
+            lines.append(
+                "      (Telegram caps at ~4,096). If yours cannot: re-run with --pdf to "
+                "attach the full report,")
+            lines.append(
+                "      or --compact to condense the card. Do not silently relay part of "
+                "it as if it were the whole.")
         if pdf_path:
             lines.append(
                 "      The card is not the PDF's contents \u2014 paste the card AND attach "
@@ -3547,10 +3584,14 @@ def _main(argv=None) -> int:
             # F-155 to cap — the recorded line carries no score and no letter either way
             # (docs/USAGE.md's "the timeline stays unbroken", C-426's history rows).
             score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
-            _emit(render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
-                                   pdf_path=pdf_written))
+            # B-605: render first, then put the relay instruction out BEFORE the card.
+            # Emitting it after cost the whole fix on a long card -- see
+            # `_emit_paste_instruction`'s docstring for the measured byte offsets.
+            _card = render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
+                                     pdf_path=pdf_written)
+            _emit_paste_instruction(pdf_written, len(_card))
+            _emit(_card)
             _emit_attach_instruction(pdf_written)
-            _emit_paste_instruction(pdf_written)
             _record_history_point(score, args, _live_signal)
             return _findings_exit_gate(args, findings, ctx)
         # F-153: Dave settled 2026-07-30 that --dashboard must fully render
@@ -3646,13 +3687,14 @@ def _main(argv=None) -> int:
                 # pdf_written=None so render_dashboard renders every section inline
                 # instead of collapsing to a card that points at a file we never wrote.
                 _emit(f"(could not write PDF report: {exc} — showing the full report inline)")
-        _emit(render_dashboard(
+        _card = render_dashboard(
             findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
             risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
             adjudication=adjudication_phase, compact=args.compact,
-            pdf_path=pdf_written))
+            pdf_path=pdf_written)
+        _emit_paste_instruction(pdf_written, len(_card))
+        _emit(_card)
         _emit_attach_instruction(pdf_written)
-        _emit_paste_instruction(pdf_written)
         # B-598: `score` here is the phase-aware, possibly-GRADED one from
         # `_resolve_runtime_caps` — the same object the card above just rendered — so the
         # recorded line carries the letter this run actually earned. This is the shape
@@ -3671,8 +3713,9 @@ def _main(argv=None) -> int:
     if _mode == "dashboard_findings":
         # Same contract as the full card: SKILL.md Step 3 pastes this block verbatim, so
         # it carries the same relay instruction. No PDF is written on this path.
-        _emit(render_dashboard_findings(findings, ascii_only=ascii_only))
-        _emit_paste_instruction()
+        _card = render_dashboard_findings(findings, ascii_only=ascii_only)
+        _emit_paste_instruction(card_chars=len(_card))
+        _emit(_card)
         return 0
 
     if _mode == "sbom":

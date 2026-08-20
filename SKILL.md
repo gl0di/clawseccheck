@@ -557,7 +557,10 @@ prints it (see below) because its frame relies on monospace alignment.
 
 **Channel-aware delivery:** the combined card can exceed a chat channel's message limit (e.g.
 Telegram's ~4096-character cap — Sections 1-2 alone can already run to ≈6,482 characters,
-before the pipeline blocks below add more). If the destination channel truncates long
+before the pipeline blocks below add more). You do not have to estimate this: when the rendered
+card is too large to relay whole, the CLI says so on stderr with the measured character count
+and names both remedies (B-605). Relaying part of an oversized card as if it were the whole is
+the one response that is never right. If the destination channel truncates long
 messages, drop `--pdf` and add `--compact` instead — `--compact` has no effect while
 `--pdf` is present (with an attachment the card is already collapsed to an overview;
 the CLI says so on stderr). So the truncation remedy is `--dashboard --full --compact`.

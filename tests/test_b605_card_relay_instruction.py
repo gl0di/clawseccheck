@@ -103,6 +103,56 @@ def test_the_instruction_forbids_the_observed_failure_mode(tmp_path):
     assert "header line" in low
 
 
+# ------------------------------ it survives the truncation that ate the first attempt
+
+def test_the_instruction_precedes_the_card(tmp_path):
+    """The defect that cost the whole first attempt. Emitted after the card, the note sat
+    at byte 25,265 of a 25,686-byte merged stream on `--dashboard --full` -- past the ~20 KB
+    cap the host's bash tool truncates at, so the instruction to relay the card was the
+    first thing lost, on exactly the runs with the biggest card. Ordering by luck is what
+    made the small-card case look fine: stdout is block-buffered, stderr is not."""
+    proc = _run(tmp_path, "--dashboard", "--full", store="o1")
+    merged = proc.stderr + proc.stdout
+    note_at = (proc.stderr).find(MARKER)
+    assert note_at >= 0, proc.stderr[:300]
+    # The real guarantee: nothing of the card is written before the note, so no buffering
+    # or output cap can reorder them.
+    assert note_at < 2000, f"note starts at {note_at}, deep enough to be truncated away"
+    assert merged  # merged stream is what the agent actually reads
+
+
+def test_the_instruction_survives_a_20kb_output_cap(tmp_path):
+    """Reproduces the host's observed behaviour rather than trusting the offset: truncate
+    the merged stream at 20 KB, as the live host did, and the instruction must still be
+    in what is left."""
+    proc = _run(tmp_path, "--dashboard", "--full", store="o2")
+    merged = (proc.stderr + proc.stdout)[:20_000]
+    assert MARKER in merged
+
+
+# ------------------------------------- an unrelayable card says so instead of pretending
+
+def test_an_oversized_card_discloses_its_size_and_the_remedy(tmp_path):
+    """`--dashboard --full` without `--pdf` renders ~25 KB across ~183 lines. No wording
+    makes that relayable into a chat message, and a live host relayed 0 of 183 lines. The
+    remedy already exists in the product; nothing said so where it was needed."""
+    err = _run(tmp_path, "--dashboard", "--full", store="z1").stderr
+    assert "cannot carry in one message" in err, err[:600]
+    assert "--pdf" in err and "--compact" in err
+    assert "Do not silently relay part of it as if it were the whole" in err
+
+
+def test_the_size_clause_is_silent_on_the_shapes_that_work(tmp_path):
+    """It must not nag on the two shapes that ARE relayable -- `--pdf` (measured 1.6-1.9 KB,
+    relayed intact by a live host) and `--compact` (~4.5 KB), which IS the remedy. A warning
+    that fires on the fix is one the reader learns to ignore."""
+    with_pdf = _run(tmp_path, "--dashboard", "--full", "--pdf", str(tmp_path / "s.pdf"),
+                    store="z2").stderr
+    compact = _run(tmp_path, "--dashboard", "--full", "--compact", store="z3").stderr
+    assert "cannot carry in one message" not in with_pdf, with_pdf[:400]
+    assert "cannot carry in one message" not in compact, compact[:400]
+
+
 # ------------------------------------------- the agent's channel is not the user's channel
 
 def test_the_instruction_never_reaches_stdout(tmp_path):
