@@ -1464,6 +1464,58 @@ def _subject_count_text(n_issues: int, n_unassessed: int) -> str:
     return "clear"
 
 
+def _skills_roster_text(inv: dict, ctx) -> str:
+    """How a skill ROSTER's population is described — the one phrase, in one place.
+
+    B-594: B-507 taught `_skills_inventory_lines` (the detail block) that a skill reached
+    through the plugin-skills root is *bundled with a plugin* rather than something the
+    user installed, and that ClawSecCheck's own content-verified copy is *excluded* rather
+    than absent. It did not teach `_subject_summary_rows`, which is the single source of
+    the HTML table, the PDF summary table AND the chat card — so on a real machine the
+    card's header read `Skills — 0 flagged · 2 installed` eight lines above a body reading
+    `Skills (2 bundled with a plugin · 1 self-excluded)`, and the header was the wrong one:
+    the two it called "installed" ship inside OpenClaw's own npm package, while the single
+    skill the user actually installed was the one being left out of the count.
+
+    Note this is the SECOND time a fix to the skills wording landed in one of these two
+    functions and not the other — `_subject_summary_rows`' own comment block records B-506
+    having done it first, in the opposite direction. So the lesson is structural, not a
+    slip: describing a roster has two callers, and the way to keep them honest is to give
+    them nothing to describe it with except this function.
+
+    The self-excluded suffix is appended on the empty-roster branch too. A machine whose
+    ONLY skill is ClawSecCheck itself has an empty roster, and "none installed" there is
+    exactly the sentence B-507 was filed against — true of the list, false about the user.
+    """
+    skills = inv["skills"]
+    n_skills = len(skills)
+    self_excluded = getattr(ctx, "self_excluded_skills", None) or []
+    bundled_names = getattr(ctx, "installed_skill_bundled", None) or set()
+    n_bundled = sum(1 for s in skills if s.get("name") in bundled_names)
+    # B-268: the collector caps discovery at _MAX_SKILLS, and printing the cap as the
+    # inventory total presents a truncated view as a census. Disclosure wins over tidiness.
+    n_skipped = int(getattr(ctx, "skills_capped_count", 0) or 0)
+    if n_skills == 0:
+        text = "none installed"
+    elif n_skipped:
+        text = f"{n_skills} inspected, {n_skipped} NOT inspected — inspection cap reached"
+    elif n_bundled and n_bundled < n_skills:
+        # B-507: mixed roster -- state both counts so neither figure reads as the whole
+        # story (a plain total would imply the user chose all of them; a plain "bundled"
+        # count would hide the genuinely user-installed ones).
+        text = f"{n_skills - n_bundled} installed, {n_bundled} bundled with a plugin"
+    elif n_bundled and n_bundled == n_skills:
+        # B-507: EVERY discovered skill came from the plugin-skills bundled-dir root --
+        # "(N installed)" here would flatly claim the user installed something they did
+        # not; "bundled" is the whole and only truth for this roster.
+        text = f"{n_bundled} bundled with a plugin"
+    else:
+        text = f"{n_skills} installed"
+    if self_excluded:
+        text += f" · {len(self_excluded)} self-excluded"
+    return text
+
+
 def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     """Uniform per-subject summary rows — one `(label, status, count_text)` tuple per
     catalog.SUBJECT_ORDER entry — for the HTML and PDF report headers. Derived entirely
@@ -1513,7 +1565,11 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     sk_flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
     sk_status = _worst_of_statuses(
         [s.get("status") for s in sk_flagged] + [sk_subject.get("status", PASS)])
-    sk_count = f"{len(sk_flagged)} flagged · {len(skills)} installed" if skills else "none installed"
+    # B-594: the roster's population is described by `_skills_roster_text`, never spelled
+    # out here — this row used to hand-roll "N installed" and so kept saying it after
+    # B-507 had corrected the detail block.
+    _sk_roster = _skills_roster_text(inv, ctx)
+    sk_count = f"{len(sk_flagged)} flagged · {_sk_roster}" if skills else _sk_roster
     if sk_subject_text != "clear":
         sk_count += f" · {sk_subject_text}"
     rows.append((SUBJECT_LABEL["skills"], sk_status, sk_count))
@@ -2126,8 +2182,11 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     # the bundled-vs-user-installed split -- see the Context field docstrings in
     # collector.py for what each signal means and why it is scoped the way it is.
     self_excluded = [_sanitize(n) for n in (getattr(ctx, "self_excluded_skills", None) or [])]
-    bundled_names = getattr(ctx, "installed_skill_bundled", None) or set()
-    n_bundled = sum(1 for s in skills if s.get("name") in bundled_names)
+    # B-594: the bundled/self-excluded/cap arithmetic that used to live here now lives in
+    # `_skills_roster_text`, which `_subject_summary_rows` reads too. `n_skipped` stays --
+    # this block also prints a per-roster note about the uninspected tail, which the
+    # one-line roster phrase has no room for.
+    n_skipped = int(getattr(ctx, "skills_capped_count", 0) or 0)
     note_icon = "[i]" if ascii_only else "ℹ️ "
     if n_skills == 0:
         # B-506: an empty roster is not the same as a clean subject — findings can be
@@ -2143,28 +2202,10 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
             lines.append(
                 f"   {note_icon}{self_excluded_line(self_excluded)}")
         return lines
-    # B-268: `inv["skills"]` is built from ctx.installed_skills, which the collector caps at
-    # _MAX_SKILLS. Printing its length as "(N installed)" reported the CAP as the inventory
-    # total — a home with 311 skills on disk rendered "Skills (300 installed)", and the 11
-    # unexamined ones were invisible in the very block whose job is to enumerate what is
-    # installed. Disclose the truncation instead of presenting a capped view as a census.
-    n_skipped = int(getattr(ctx, "skills_capped_count", 0) or 0)
-    if n_skipped:
-        installed_text = f"{n_skills} inspected, {n_skipped} NOT inspected — inspection cap reached"
-    elif n_bundled and n_bundled < n_skills:
-        # B-507: mixed roster -- state both counts so neither figure reads as the whole
-        # story (a plain total would imply the user chose all of them; a plain "bundled"
-        # count would hide the genuinely user-installed ones).
-        installed_text = f"{n_skills - n_bundled} installed, {n_bundled} bundled with a plugin"
-    elif n_bundled and n_bundled == n_skills:
-        # B-507: EVERY discovered skill came from the plugin-skills bundled-dir root --
-        # "(N installed)" here would flatly claim the user installed something they did
-        # not; "bundled" is the whole and only truth for this roster.
-        installed_text = f"{n_bundled} bundled with a plugin"
-    else:
-        installed_text = f"{n_skills} installed"
-    if self_excluded:
-        installed_text += f" · {len(self_excluded)} self-excluded"
+    # B-594: this block used to spell out the B-268 cap wording and B-507's bundled /
+    # self-excluded wording inline. `_subject_summary_rows` spelled out its own, simpler
+    # version of the same sentence and fell behind. Both read it from one place now.
+    installed_text = _skills_roster_text(inv, ctx)
     flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
     flagged_names = {s["name"] for s in flagged}
     # B-506: fold in findings filed against the SUBJECT rather than against one skill.
