@@ -991,7 +991,7 @@ python3 audit.py --redteam                   # a multi-scenario adversarial payl
 python3 audit.py --dryrun                     # runtime behavioral test (fake secret + fake tools; sources: email, web, MCP response, memory, subagent)
 python3 audit.py --badge badge.svg          # write a shareable SVG grade badge
 python3 audit.py --html report.html         # standalone HTML report (private — owner view)
-python3 audit.py --pdf report.pdf           # complete audit as a paginated PDF — attach it into chat, don't paste the path
+python3 audit.py --pdf report.pdf           # complete audit as a paginated PDF — attach the file; never a link; name the path only if you cannot attach
 python3 audit.py --verify-self               # SHA-256 of ClawSecCheck's own source (anti-tamper)
 python3 audit.py --trend                     # print local score trend (stored in ~/.clawseccheck/history.jsonl)
 python3 audit.py --percentile                # show where your score sits vs. an offline reference profile

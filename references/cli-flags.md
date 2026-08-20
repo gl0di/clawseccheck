@@ -13,8 +13,11 @@ kept here so the always-loaded playbook stays lean.
   filesystem path is useless to a user reading from a phone, but a PDF opens inline in a chat
   client's own viewer (unlike `--html`, which most mobile clients hand over as a download). If
   the user is talking from a phone/chat client, attach the PDF file itself into the reply — never
-  paste its path or re-render its contents into the chat text (same doctrine as the `--badge`
-  SVG: attach the artifact, don't redraw it).
+  re-render its contents into the chat text (same doctrine as the `--badge` SVG: attach the
+  artifact, don't redraw it), and never write a link: the tool is local-only, so no URL exists and
+  any link you write will be broken. Only when the channel cannot attach files at all, say so and
+  name the path — useless on a phone, but the one thing a desktop reader can act on, and better
+  than the broken link a host invents when told it may say neither.
 - `--json` with `--vet`/`--vet-mcp` — emits the risk-dossier JSON object (`tool`, `version`,
   `mode`, `target`, `target_type`, `verdict`, `axes[]`, `findings[]`, `unmapped`): the five risk
   axes (danger / build / behavior / persistence / connections) plus a **verdict**. There is no

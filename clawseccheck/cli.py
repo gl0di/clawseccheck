@@ -3200,12 +3200,39 @@ def _main(argv=None) -> int:
         had been ordered to reproduce word for word, resolved it by sending the user a
         link — twice — before ever attaching anything. ClawSecCheck is local-only (Golden
         Rule #1): there is no URL, only a file to send.
+
+        B-595: moving it to stderr was not enough, and the reason is in what it said. The
+        note read "Do not paste its path, do not send a link" — and for a channel that
+        cannot attach a file, those are the only two things it can do, so the note left it
+        with no compliant move at all. Driving the live agent on 2026-08-20 produced both
+        halves of that: one host wrote `<a href="/report.pdf">`, which the Control UI's
+        catch-all answered with its own index page (a link to nothing, on the deliverable
+        the whole `--full` pipeline exists to produce); a second host obeyed the note,
+        said it could not attach, and gave the user nothing to open.
+
+        Worse, the note was stricter than the guidance it implements. `SKILL.md` says
+        never paste the path "as if it were the deliverable" and tells the agent what to
+        do instead when it cannot attach; this note flattened that into an absolute ban
+        and dropped the fallback entirely — and since B-468 put it at the moment of the
+        decision, the flattened version is the one that won. It now carries `SKILL.md`'s
+        own ordering, so the two cannot disagree: attach, else say so and name the path,
+        never a link.
+
+        The anti-link clause is the half that was always right, and it is kept — with the
+        reason attached, because "there is none" did not stop either host from writing one.
         """
         if not path:
             return
         print(f"note: report written to {path} — attach this PDF file itself into the "
-              "chat. Do not paste its path, do not send a link (there is none — the tool "
-              "is local-only), and do not re-render its contents.", file=sys.stderr)
+              "chat; that is the deliverable.\n"
+              "      If your channel cannot attach files: say so plainly, offer the "
+              "inline report (--dashboard --full, split across messages), and name the "
+              "path above so the user can open it themselves — just never as the "
+              "deliverable.\n"
+              "      Never write a link or a URL: the tool is local-only, so none exists "
+              "and any link you write will be broken.\n"
+              "      Do not re-render the PDF's contents into the chat.",
+              file=sys.stderr)
     # C-374: under `--dashboard --full` the PDF must also carry the pipeline blocks, and
     # those phases are computed further down (in the dashboard branch). Defer the write
     # to there rather than emitting a findings-only PDF the card would then describe as

@@ -504,10 +504,11 @@ whole pipeline inline (~11.5 KB), which a channel like Telegram will truncate or
 
 So: **paste the card, then attach `~/.clawseccheck/report.pdf` as a file.** Never paste
 its path at the user as if it were the deliverable, and never present it as a link —
-ClawSecCheck is local-only, so no URL exists. If your channel cannot attach files, say so
-plainly and offer `--dashboard --full` (everything inline, split across messages) instead
-— the card names the most urgent findings either way, so the user is never left with only
-a grade.
+ClawSecCheck is local-only, so no URL exists — and any link you write will simply be
+broken. If your channel cannot attach files, say so plainly, **name the path so the user
+can open it themselves**, and offer `--dashboard --full` (everything inline, split across
+messages) instead — the card names the most urgent findings either way, so the user is
+never left with only a grade.
 
 `<verdicts-path-or- ->` is the file (or `-` for stdin) holding `{"judged": {...}}` — the
 verdicts map Step 2's mandatory judge panel just built. Omit `--judged-bundle` entirely only
