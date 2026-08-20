@@ -836,7 +836,14 @@ def _parse_verdicts(raw: str) -> dict:
         return {}
     entries = data.get("verdicts")
     if not isinstance(entries, list):
-        _note_nothing_applied(raw, 'it has no top-level "verdicts" array')
+        # B-597: this used to say "no top-level 'verdicts' array". Which level is "top"
+        # depends on the caller — for `--judged` the payload IS the file, but for
+        # `--judged-bundle` it is the `judged` object inside it. A host agent read the
+        # sentence the first way, moved its array to the file's top level, and had all 25
+        # verdicts silently discarded (pipeline.split_judged_bundle now catches that
+        # shape). Naming no level at all is true for both callers and teaches neither
+        # mistake; the hint that follows still gives the entry contract.
+        _note_nothing_applied(raw, 'it has no "verdicts" array')
         return {}
     out: dict = {}
     for entry in entries:

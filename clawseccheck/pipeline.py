@@ -815,7 +815,74 @@ def split_judged_bundle(raw: str) -> dict:
         out["vetJudged"] = [e for e in vet_judged if isinstance(e, dict)]
     if isinstance(data.get("liveTest"), dict):
         out["liveTest"] = data["liveTest"]
+    _note_misplaced_bundle_content(data, out)
     return out
+
+
+def _note_misplaced_bundle_content(data: dict, out: dict) -> None:
+    """B-597: never drop recognisable bundle content without saying so.
+
+    B-330 already made a *malformed* verdicts payload loud — "produced no usable entries".
+    The mirror case stayed silent: content that is perfectly well-formed but sits at the
+    wrong level. ``_parse_verdicts`` is only reached when the ``judged`` bucket exists
+    (see the call in :func:`run_full_pipeline`), so a file whose ``verdicts`` array is at
+    the TOP level instead of inside ``judged`` never reaches the diagnostic that would
+    have caught it — every entry is discarded and the report then states "no verdicts
+    submitted", which is a false statement about a file the tool just read.
+
+    That is not hypothetical, and it is not a shape a user would invent unprompted: it is
+    what ``_parse_verdicts``' own error message *taught* a host agent to write. Told its
+    bundle "has no top-level 'verdicts' array" — a sentence describing the inside of the
+    ``judged`` object — the agent moved the array to the file's top level and dropped
+    ``judged``. The second run applied the ``liveTest`` bucket from the same file, printed
+    a grade, and said nothing about the 25 verdicts it had thrown away. (That message is
+    reworded in ``adjudication`` as part of this fix, so it can no longer teach it.)
+
+    **The misplaced array is accepted, not rejected**, and the note says so. The intent is
+    unambiguous — ``verdicts`` is this contract's own key, carrying this contract's own
+    entry shape — and rejecting would cost the caller a second full pipeline run to
+    recover data that was already in its hands. What must never happen is silence, and an
+    explicit ``judged`` bucket always wins over the inferred one: guessing is a last
+    resort, not a peer.
+
+    Notes carry no caller-supplied strings (see ``adjudication._note``'s own contract) —
+    only counts and this contract's own fixed key names — so an unrecognised key is
+    counted, never echoed. A bundle key could otherwise carry a secret-shaped value
+    straight into a diagnostic.
+    """
+    from .adjudication import _note  # noqa: PLC0415 — see the module note on layering
+
+    misplaced = data.get("verdicts")
+    if isinstance(misplaced, list) and misplaced:
+        if out["judged"] is None:
+            out["judged"] = {"verdicts": misplaced}
+            _n = len(misplaced)
+            _entries = "entry" if _n == 1 else "entries"
+            _note(
+                f'--judged-bundle carried a top-level "verdicts" array of {_n} {_entries}'
+                ' with no "judged" bucket around it. Applied it as the judged bucket,'
+                ' since that is the only thing it can mean — but the documented shape is'
+                ' {"judged": {"verdicts": [...]}}, and a future version may stop guessing.'
+            )
+        else:
+            _note(
+                'ignored a top-level "verdicts" array in --judged-bundle: the file also'
+                ' has an explicit "judged" bucket, which wins. Only one of the two was'
+                " applied."
+            )
+        return
+    # A readable object none of whose keys we recognise is the other way to lose a whole
+    # file in silence — B-562 covers the path that could not be READ, not the one that
+    # parsed into nothing.
+    if any(out[k] for k in ("attestation", "judged", "vetJudged", "liveTest")):
+        return
+    unknown = [k for k in data if k not in ("attestation", "judged", "vetJudged", "liveTest")]
+    if unknown:
+        _note(
+            f"--judged-bundle parsed but none of its {len(unknown)} top-level key(s) is a"
+            ' recognised bucket, so nothing was applied. Expected one or more of:'
+            ' "attestation", "judged", "vetJudged", "liveTest".'
+        )
 
 
 def read_judged_bundle_with_problem(path: str) -> "tuple[dict, OSError | None]":
