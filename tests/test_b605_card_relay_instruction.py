@@ -138,8 +138,19 @@ def test_an_oversized_card_discloses_its_size_and_the_remedy(tmp_path):
     remedy already exists in the product; nothing said so where it was needed."""
     err = _run(tmp_path, "--dashboard", "--full", store="z1").stderr
     assert "cannot carry in one message" in err, err[:600]
-    assert "--pdf" in err and "--compact" in err
+    assert "--compact" in err and "--pdf" in err
     assert "Do not silently relay part of it as if it were the whole" in err
+
+
+def test_splitting_is_offered_before_the_pdf(tmp_path):
+    """Order taken from the trajectory, not taste. The live host reached the oversized
+    shape by the documented route -- wrote the PDF, checked it with `ls`, could not attach
+    it in that channel, fell back to the inline report. Leading with "re-run with --pdf"
+    answers a channel that has already proved it cannot use one. Splitting always applies,
+    needs no re-run, and is what SKILL.md's own attach-fallback prescribes."""
+    err = _run(tmp_path, "--dashboard", "--full", store="z4").stderr
+    assert "split it across several messages" in err, err[:600]
+    assert err.index("split it across several messages") < err.index("--pdf and")
 
 
 def test_the_size_clause_is_silent_on_the_shapes_that_work(tmp_path):

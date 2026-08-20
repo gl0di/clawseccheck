@@ -3388,10 +3388,18 @@ def _main(argv=None) -> int:
         `--dashboard --full` renders ~20 KB across ~183 lines -- more than a chat message
         can carry, so no instruction can make it relayable and pretending otherwise just
         moves the failure. The remedy already exists in the product and in `SKILL.md`
-        (`--pdf` to attach, `--compact` to condense); nothing said so at the moment the
-        oversized card was produced. The size is DISCLOSED rather than a limit asserted:
-        the cap is the channel's, the tool cannot know it, and `SKILL.md`'s own worked
-        example is Telegram's ~4096.
+        (`--pdf` to attach, `--compact` to condense, or split across messages); nothing
+        said so at the moment the oversized card was produced. The size is DISCLOSED rather
+        than a limit asserted: the cap is the channel's, the tool cannot know it, and
+        `SKILL.md`'s own worked example is Telegram's ~4096.
+
+        Splitting is named FIRST, and that order came from the trajectory rather than from
+        taste. The live host reached the oversized shape by the documented route: it wrote
+        the PDF, checked with `ls` whether it existed, could not attach it in that channel,
+        and fell back to the inline report exactly as `_emit_attach_instruction` tells it
+        to. Leading with "re-run with --pdf" would answer a channel that has already proved
+        it cannot use one. Splitting is the only remedy that always applies and needs no
+        re-run, and it is what `SKILL.md`'s own attach-fallback already prescribes.
         """
         lines = [
             "note: the Dashboard card on stdout is a deterministic render \u2014 paste it "
@@ -3408,11 +3416,13 @@ def _main(argv=None) -> int:
                 f"      This card is {card_chars:,} characters, which many chat channels "
                 "cannot carry in one message")
             lines.append(
-                "      (Telegram caps at ~4,096). If yours cannot: re-run with --pdf to "
-                "attach the full report,")
+                "      (Telegram caps at ~4,096). If yours cannot, pick one: split it "
+                "across several messages,")
             lines.append(
-                "      or --compact to condense the card. Do not silently relay part of "
-                "it as if it were the whole.")
+                "      re-run with --compact to condense it, or re-run with --pdf and "
+                "attach the file.")
+            lines.append(
+                "      Do not silently relay part of it as if it were the whole.")
         if pdf_path:
             lines.append(
                 "      The card is not the PDF's contents \u2014 paste the card AND attach "
