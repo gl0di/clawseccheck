@@ -47,7 +47,7 @@ from .report import (
     _coverage_lines, _degraded_incomplete_clause, _group_issues_by_subject, _mcp_inventory_lines,
     _plugins_inventory_lines, _risk_chain_lines, _sanitize, _second_opinion_item_lines,
     _second_opinion_lines,
-    _SEV_ORDER, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
+    _SEV_ORDER, _UNGRADED_CAP_TAIL, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
     issue_population_line,
     _worth_a_glance_lines, build_inventory,
 )
@@ -614,11 +614,23 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     # carried this gate since C-423; the PDF was the one site that missed it, which is
     # precisely the failure mode E-077's design note rejected when it refused to let each
     # renderer decide for itself whether a number may be shown.
+    #
+    # B-600: skipping the NUMBER is right; skipping the FACT was the same over-correction
+    # the HTML renderer made. An ungraded run left this page with no trace that anything
+    # had capped the score at all — including a submitted VULNERABLE live-test verdict,
+    # which C-423 calls the most serious thing this tool can report. The PDF is the copy
+    # that travels furthest from whoever ran it, so it is the worst place to lose it.
+    # The sentence is `report._UNGRADED_CAP_TAIL`, shared with the card and the text
+    # report, so this renderer still cannot word it for itself.
     primary, extras = _cap_cascade(score)
-    if getattr(score, "graded", True) and primary is not None:
+    if primary is not None:
         reason = _cap_primary_reason_text(primary, score)
         also = _cap_also_clause(extras)
-        flow.wrapped(f"Capped from {score.raw_score} ({reason}{also})", size=9.5, color="#b94a48")
+        if getattr(score, "graded", True):
+            text = f"Capped from {score.raw_score} ({reason}{also})"
+        else:
+            text = f"{reason}{also} - {_UNGRADED_CAP_TAIL}"
+        flow.wrapped(text, size=9.5, color="#b94a48")
 
     # ── Severity chips ───────────────────────────────────────────────────────────
     flow.spacer(6.0)

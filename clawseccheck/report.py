@@ -2661,8 +2661,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
         else:
             lines.append(
                 "Runtime signal (I-025): a trajectory-indicator match fired — "
-                f"{_runtime_cap_phrase(score.runtime_cap_reason)}. It would have capped"
-                " the grade; this run has none."
+                f"{_runtime_cap_phrase(score.runtime_cap_reason)}. "
+                f"{_UNGRADED_CAP_TAIL_SENTENCE}"
             )
     # F-155: a SECOND exception to "this grade never reflects runtime behaviour" — a
     # submitted VULNERABLE verdict from a live injection-test harness (canary/dryrun/
@@ -4874,16 +4874,37 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     # runtime cap (item 2). Both are structurally impossible now: the primary/extras
     # decision lives in exactly one place. B-399's engine-side-degraded UNKNOWN cause
     # needs no change here either, for the same reason noted in render_report.
-    # C-423: a cap explanation for a number that is not printed is noise — skip it
-    # entirely on an ungraded run, same as render_report's text banner.
+    # C-423: a cap explanation for a number that is not printed is noise — skip the
+    # "capped from N" BANNER on an ungraded run, same as render_report's text banner.
+    #
+    # B-600: skipping the banner is right; skipping the FACT was not. That comment's
+    # "same as render_report" was true of the banner and missed what render_report does
+    # immediately below it — its F-155 and F-154 ungraded paragraphs, which state the cap
+    # without a number. render_dashboard's card does the same. This renderer had neither,
+    # so it emitted the `.capped` CSS rule and never the element: 42 KB of report with no
+    # mention that anything had capped the score. C-423's own reasoning applies here word
+    # for word — an ungraded run disclosed NOTHING about a submitted VULNERABLE live-test
+    # verdict, the most serious thing this tool can report, purely because there was no
+    # number to say it had been capped from. And the HTML is the archivable, shareable
+    # copy, so it is the one most likely to be read long after the run.
+    #
+    # Since B-586 an `--html` riding `--dashboard --full` can be graded, which turned this
+    # into two HTML reports of the same setup disagreeing depending on the flags used.
     _primary, _extras = _cap_cascade(score)
-    if getattr(score, "graded", True) and _primary is not None:
+    if _primary is None:
+        capped_html = ""
+    elif getattr(score, "graded", True):
         _reason_html = esc(_cap_primary_reason_text(_primary, score))
         _also_html = _cap_also_clause([esc(p) for p in _extras])
         capped_html = (f'<p class="capped"><strong>{esc(label_capped)}</strong> '
                        f'from {score.raw_score} ({_reason_html}{_also_html})</p>')
     else:
-        capped_html = ""
+        # Same sentence the card and the text report use — `_UNGRADED_CAP_TAIL` exists so
+        # a fourth wording cannot appear (B-593).
+        _reason_html = esc(_cap_primary_reason_text(_primary, score))
+        _also_html = _cap_also_clause([esc(p) for p in _extras])
+        capped_html = (f'<p class="capped">{_reason_html}{_also_html} — '
+                       f'{esc(_UNGRADED_CAP_TAIL)}</p>')
     capped_html = degraded_html + capped_html
 
     # C-423: mandatory "not fully covered" line — appears on GRADED runs too,

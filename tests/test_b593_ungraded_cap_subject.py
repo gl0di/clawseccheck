@@ -186,10 +186,31 @@ def test_the_three_sites_share_one_constant():
     # No literal re-spelling of the sentence anywhere below the definition. Keyed on the
     # distinctive clause rather than "capped the grade", which also occurs in prose
     # comments about scoring.CONFIG_BLIND_CAP and would make this guard cry wolf.
-    assert "would have capped the grade" not in body, \
+    #
+    # B-600: this guard missed a FOURTH site for a whole release. The I-025 runtime-signal
+    # paragraph split the sentence across two source lines -- `"...It would have capped"`
+    # then `" the grade; this run has none."` -- so the phrase never appeared contiguously
+    # and neither a grep nor this assertion saw it. Whitespace and the string-concatenation
+    # seam are collapsed first, so a line break can no longer hide a copy.
+    flat = re.sub(r'"\s*\n\s*"', "", body)          # adjacent implicit-concat literals
+    flat = " ".join(flat.split())
+    assert "would have capped the grade" not in flat, \
         "a hand-rolled copy of the cap sentence reappeared in report.py"
-    assert body.count("_UNGRADED_CAP_TAIL_SENTENCE") == 2      # F-155 and F-154
-    assert re.search(r"—\s*\{_UNGRADED_CAP_TAIL\}", body), "the card no longer uses it"
+    # Exact counts, not a lower bound: a new consumer has to come here and say so. In
+    # report.py the sentence form serves render_report's three ungraded paragraphs
+    # (F-155 live-test, F-154 behavioural, I-025 runtime signal) and the tail form serves
+    # the two renderers that follow it with an em dash — render_dashboard's card and
+    # render_html's ungraded cap paragraph (B-600). pdf.py is the sixth consumer and is
+    # checked by tests/test_b600_ungraded_cap_reaches_every_surface.py.
+    # Count real INTERPOLATIONS, not occurrences of the name: the derivation line and the
+    # prose comments mention it too, and counting those makes the pin drift for reasons
+    # that have nothing to do with a new consumer appearing.
+    _uses = [ln for ln in body.splitlines()
+             if "_UNGRADED_CAP_TAIL" in ln and ('f"' in ln or "f'" in ln)]
+    _sentence = [ln for ln in _uses if "_UNGRADED_CAP_TAIL_SENTENCE" in ln]
+    _tail = [ln for ln in _uses if ln not in _sentence]
+    assert len(_sentence) == 3, _sentence      # F-155, F-154, I-025 ungraded paragraphs
+    assert len(_tail) == 2, _tail              # render_dashboard's card, render_html (B-600)
 
 
 def test_the_two_forms_differ_only_in_capitalisation():
