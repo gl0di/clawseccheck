@@ -45,6 +45,14 @@ STATUS_RAN = "ran"
 STATUS_SKIPPED = "skipped"  # the operator narrowed the run (e.g. --fast)
 STATUS_REFUSED = "refused"  # the user declined this layer
 STATUS_UNAVAILABLE = "unavailable"  # no live agent / nothing to ask, by construction
+# B-603: the operator did not hand this layer's evidence in. Distinct from UNAVAILABLE,
+# which claims the environment could not supply it -- a stronger statement, and one the
+# tool cannot make about an absent `--attest` or an absent `liveTest` bucket. A live run
+# reported "live behaviour test (not available here)" to an agent that had just executed
+# the canary; the fact was "nothing arrived", the cause was invented. Keeping them apart
+# also keeps the line actionable: "not available" reads as a dead end, "not submitted"
+# names the input that produces a grade.
+STATUS_NOT_SUBMITTED = "not_submitted"
 STATUS_ERROR = "error"  # the layer tried and blew up
 # Kept only so pipeline.py keeps its existing vocabulary (it already used this exact
 # string for a phase that never got its turn before the deadline) — it is a valid
@@ -53,7 +61,7 @@ STATUS_NOT_REACHED = "not_reached"
 
 LAYER_STATUSES = frozenset({
     STATUS_RAN, STATUS_SKIPPED, STATUS_REFUSED, STATUS_UNAVAILABLE,
-    STATUS_ERROR, STATUS_NOT_REACHED,
+    STATUS_NOT_SUBMITTED, STATUS_ERROR, STATUS_NOT_REACHED,
 })
 
 #: Every status except STATUS_RAN — a layer in one of these cannot vouch for its subject.
@@ -86,6 +94,7 @@ STATUS_PHRASE = {
     STATUS_SKIPPED: "skipped by this run's flags",
     STATUS_REFUSED: "declined",
     STATUS_UNAVAILABLE: "not available here",
+    STATUS_NOT_SUBMITTED: "not submitted",
     STATUS_ERROR: "failed",
     STATUS_NOT_REACHED: "not reached",
 }

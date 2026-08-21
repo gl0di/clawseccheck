@@ -81,7 +81,7 @@ no installed-skill sweep, no self-report, no live test) prints:
 ```text
 Nothing failed outright — most serious open item: HIGH — <finding title>  [Bxx]
 No grade yet — 3 of 5 layers did not run: installed skills and plugins (not reached),
-agent self-report (not available here), live behaviour test (not available here).
+agent self-report (not submitted), live behaviour test (not submitted).
 ```
 
 `--full` closes layers 2 and 3 (the installed-skill/plugin sweep and the log/trajectory
@@ -1325,15 +1325,17 @@ installed-skill/plugin sweep, the log/trajectory scan, the agent's own self-repo
 live behaviour test (see [The three modes](#the-three-modes) above). Short of that there
 is no number at all: the report leads with the most urgent finding, in words, followed by
 a mandatory line naming which layers did not run, e.g. `No grade yet — 3 of 5 layers did
-not run: installed skills and plugins (not reached), agent self-report (not available
-here), live behaviour test (not available here).` A bare `clawseccheck` run is always in
+not run: installed skills and plugins (not reached), agent self-report (not
+submitted), live behaviour test (not submitted).` A bare `clawseccheck` run is always in
 this state; `--full` closes the installed-sweep and log-scan gaps (down to "2 of 5") but
 still needs `--ask`/`--attest` and a submitted live-test verdict — typically fed back via
 `--judged-bundle` — before a grade is possible. `--full --fast` widens the gap back out to
 "4 of 5" (it also skips the plugin/skill sweep and the log scan); a layer the run's own
-flags turned off reports `skipped by this run's flags`, a layer that cannot exist on this
-box (no live agent to ask) reports `not available here` — different facts about how much
-the report is worth, worded differently on purpose.
+flags turned off reports `skipped by this run's flags`, a layer whose evidence you simply
+did not hand in reports `not submitted`, and a layer that cannot exist on this box (no live
+agent to ask) reports `not available here` — different facts about how much the report is
+worth, worded differently on purpose. The last two are kept apart deliberately (B-603): only
+one of them is something you can fix.
 
 Two different lines can appear near the grade, and they answer different questions:
 
@@ -1479,7 +1481,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 563 test files and 15,400
+A security tool should be heavily tested — so it is: 591 test files and 15,800
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

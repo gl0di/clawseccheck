@@ -45,7 +45,7 @@ from clawseccheck.layers import (
     STATUS_NOT_REACHED,
     STATUS_RAN,
     STATUS_SKIPPED,
-    STATUS_UNAVAILABLE,
+    STATUS_NOT_SUBMITTED,
 )
 from clawseccheck.scoring import LIVE_INJECTION_CAP
 
@@ -191,16 +191,16 @@ class TestLogsTrajectoriesLayer:
 
 
 class TestSelfReportLayer:
-    def test_unavailable_when_no_attestation(self):
+    def test_not_submitted_when_no_attestation(self):
         ledger = _empty_pipeline().to_ledger([], attestation=None)
-        assert ledger.status(LAYER_SELF_REPORT) == STATUS_UNAVAILABLE
+        assert ledger.status(LAYER_SELF_REPORT) == STATUS_NOT_SUBMITTED
         assert ledger.states[LAYER_SELF_REPORT].not_reached == ()
 
-    def test_unavailable_when_attestation_is_empty_dict(self):
+    def test_not_submitted_when_attestation_is_empty_dict(self):
         # Matches attest.parse_attestation's own "malformed/absent -> {}" contract —
         # an empty dict must read exactly like no attestation at all.
         ledger = _empty_pipeline().to_ledger([], attestation={})
-        assert ledger.status(LAYER_SELF_REPORT) == STATUS_UNAVAILABLE
+        assert ledger.status(LAYER_SELF_REPORT) == STATUS_NOT_SUBMITTED
 
     def test_ran_when_attestation_supplied_but_discloses_no_freshness_claim(self):
         ledger = _empty_pipeline().to_ledger([], attestation={"tools": ["send_email"]})
@@ -214,13 +214,13 @@ class TestSelfReportLayer:
 class TestLiveBehaviourLayerTheTrap:
     """The named regression: RESISTANT-only must still read `ran`."""
 
-    def test_unavailable_when_bucket_absent(self):
+    def test_not_submitted_when_bucket_absent(self):
         ledger = _empty_pipeline().to_ledger([], live_test_bucket=None)
-        assert ledger.status(LAYER_LIVE_BEHAVIOUR) == STATUS_UNAVAILABLE
+        assert ledger.status(LAYER_LIVE_BEHAVIOUR) == STATUS_NOT_SUBMITTED
 
-    def test_unavailable_when_bucket_malformed(self):
+    def test_not_submitted_when_bucket_malformed(self):
         ledger = _empty_pipeline().to_ledger([], live_test_bucket={"verdicts": "not-a-list"})
-        assert ledger.status(LAYER_LIVE_BEHAVIOUR) == STATUS_UNAVAILABLE
+        assert ledger.status(LAYER_LIVE_BEHAVIOUR) == STATUS_NOT_SUBMITTED
 
     def test_ran_on_resistant_only_bucket(self):
         """THE central regression this task exists to close: a RESISTANT-only
@@ -249,7 +249,7 @@ class TestResolveRuntimeCapsWiring:
         assert out_score.graded is True
         assert out_score.missing_layers == ()
 
-    def test_no_bundle_no_attestation_layers_4_5_unavailable_and_ungraded(self):
+    def test_no_bundle_no_attestation_layers_4_5_not_submitted_and_ungraded(self):
         ctx, findings, score = audit(SAFE)
         args = _args(full=True, fast=False)
         out_score, *_rest = cli._resolve_runtime_caps(ctx, findings, score, args,
@@ -259,8 +259,8 @@ class TestResolveRuntimeCapsWiring:
         assert "self_report" in names
         assert "live_behaviour" in names
         statuses = dict(out_score.missing_layers)
-        assert statuses["self_report"] == STATUS_UNAVAILABLE
-        assert statuses["live_behaviour"] == STATUS_UNAVAILABLE
+        assert statuses["self_report"] == STATUS_NOT_SUBMITTED
+        assert statuses["live_behaviour"] == STATUS_NOT_SUBMITTED
         # score/grade values themselves are untouched by "graded" -- this is a
         # DISCLOSURE dimension, not a new cap (report.py's own consumption of
         # `graded` lands on a separate branch -- see this module's docstring).

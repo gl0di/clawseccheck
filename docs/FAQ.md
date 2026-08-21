@@ -87,14 +87,14 @@ line naming exactly which layers did not run and why:
 
 ```text
 Most urgent: CRITICAL — Lethal trifecta reachable  [B1]
-No grade yet — 2 of 5 layers did not run: agent self-report (not available here), live behaviour test (not available here).
+No grade yet — 2 of 5 layers did not run: agent self-report (not submitted), live behaviour test (not submitted).
 ```
 
 This is deliberately stronger than capping the grade. A cap still prints a number, and a number
 gets read as a score; the absence of one cannot be misread as "fine". So a bare run leaves 3 of 5
 untouched, `--full` closes two of those and leaves 2 of 5, and you close the last two yourself.
 
-The five "did not run" phrasings mean different things and are worth reading — collapsing them
+The six "did not run" phrasings mean different things and are worth reading — collapsing them
 into one would be its own small lie about how much the report is worth:
 
 | Phrase | What it means |
@@ -102,6 +102,7 @@ into one would be its own small lie about how much the report is worth:
 | `skipped by this run's flags` | you narrowed the run — e.g. `--full --fast` |
 | `declined` | you were asked and said no |
 | `not available here` | the capability does not exist on this box (CI, for instance, has no live agent) |
+| `not submitted` | the layer's evidence was never handed in — no `--attest`, or no `liveTest` verdict in the bundle. Fixable by you, which is why it is not called "not available" (B-603) |
 | `failed` | the layer broke |
 | `not reached` | the run never got to it — e.g. the installed sweep on a bare run, which needs `--full` |
 

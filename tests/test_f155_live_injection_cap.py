@@ -396,10 +396,10 @@ class TestCliEndToEnd:
         # Different ledger: RESISTANT means live_behaviour ran; nothing submitted
         # means it never got asked.
         assert with_resistant["missing_layers"] == [
-            {"layer": "self_report", "status": "unavailable"}]
+            {"layer": "self_report", "status": "not_submitted"}]
         assert without_bundle["missing_layers"] == [
-            {"layer": "self_report", "status": "unavailable"},
-            {"layer": "live_behaviour", "status": "unavailable"},
+            {"layer": "self_report", "status": "not_submitted"},
+            {"layer": "live_behaviour", "status": "not_submitted"},
         ]
 
     def test_nothing_submitted_byte_identical_across_runs(self, capsys):
@@ -431,7 +431,7 @@ class TestCliEndToEnd:
         # The live-test layer itself DID run (a VULNERABLE verdict was submitted)
         # even though it never became the binding cap -- only self_report is
         # still missing.
-        assert payload["missing_layers"] == [{"layer": "self_report", "status": "unavailable"}]
+        assert payload["missing_layers"] == [{"layer": "self_report", "status": "not_submitted"}]
 
     def test_forged_malformed_payload_rejected_without_moving_grade(self, tmp_path, capsys):
         main(["--home", SAFE] + BASE + ["--full", "--json"])

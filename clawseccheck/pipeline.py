@@ -62,7 +62,8 @@ from .behavioral import analyze as behavioral_analyze
 from .behavioral import render_behavioral_analysis
 from .catalog import UNKNOWN
 from .layers import (            # noqa: F401 — re-exported for existing importers
-    STATUS_ERROR, STATUS_NOT_REACHED, STATUS_RAN, STATUS_SKIPPED, STATUS_UNAVAILABLE,
+    STATUS_ERROR, STATUS_NOT_REACHED, STATUS_NOT_SUBMITTED, STATUS_RAN, STATUS_SKIPPED,
+    STATUS_UNAVAILABLE,
 )
 # C-425: the five-layer ledger names/types themselves — NOT re-exported above (that
 # comment is about the pre-existing STATUS_* vocabulary pipeline.py already used before
@@ -96,7 +97,8 @@ PHASE_ORDER = (
 #: incomplete. ``ran`` is the only status that does not, and even then the phase's own
 #: ``complete`` flag can still be False (a sweep that hit its budget mid-fleet).
 _INCOMPLETE_STATUSES = frozenset({
-    STATUS_SKIPPED, STATUS_NOT_REACHED, STATUS_UNAVAILABLE, STATUS_ERROR,
+    STATUS_SKIPPED, STATUS_NOT_REACHED, STATUS_UNAVAILABLE, STATUS_NOT_SUBMITTED,
+    STATUS_ERROR,
 })
 
 # Section banners. Deliberately distinct strings from the two banners --full already
@@ -1095,6 +1097,14 @@ _STATUS_BADNESS = {
     STATUS_RAN: 0,
     STATUS_SKIPPED: 1,
     STATUS_UNAVAILABLE: 2,
+    # B-603: ranked WITH unavailable, not above or below it. Both are a structural
+    # non-run rather than a failure, and asserting a severity difference between "the
+    # environment could not" and "the operator did not" would be inventing one. The tie
+    # is unreachable today -- `_worse_status` merges only installed_sweep and
+    # logs/behavioral, and neither can carry `not_submitted`, which is assigned solely
+    # to self_report and live_behaviour. Ranked anyway, because `.get(a, 99)` would
+    # otherwise rank an unlisted status worse than `error`.
+    STATUS_NOT_SUBMITTED: 2,
     STATUS_NOT_REACHED: 3,
     STATUS_ERROR: 4,
 }
@@ -1277,11 +1287,14 @@ class PipelineResult:
                 "is recent",
             )
         else:
-            self_report_status = STATUS_UNAVAILABLE
+            # B-603: the attestation did not arrive; whether one COULD have is not
+            # something this run observed.
+            self_report_status = STATUS_NOT_SUBMITTED
             self_report_not_reached = ()
 
         live_status = (
-            STATUS_RAN if _valid_live_test_entries(live_test_bucket) else STATUS_UNAVAILABLE
+            STATUS_RAN if _valid_live_test_entries(live_test_bucket)
+            else STATUS_NOT_SUBMITTED
         )
 
         return LayerLedger(states={

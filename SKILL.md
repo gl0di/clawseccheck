@@ -598,7 +598,7 @@ It emits, in this fixed order (F-153):
     (`⚠️ capped from 70/100 — open CRITICAL finding`).
   - **ungraded** — the most urgent finding in words in that same position, then the mandatory
     missing-layers line: `No grade yet — 2 of 5 layers did not run: agent self-report (not
-    available here), live behaviour test (not available here).` There is no letter, no `/100` and
+    submitted), live behaviour test (not submitted).` There is no letter, no `/100` and
     no score-bar anywhere in this shape. Paste both lines; do not compose a grade, do not treat
     the absence of one as a failure of the tool, and do not offer a number of your own.
   Either shape may be followed by `Not fully covered: …`, which is a layer that ran without

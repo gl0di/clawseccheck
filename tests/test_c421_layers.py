@@ -23,6 +23,7 @@ from clawseccheck.layers import (
     LAYER_STATUSES,
     STATUS_ERROR,
     STATUS_NOT_REACHED,
+    STATUS_NOT_SUBMITTED,
     STATUS_RAN,
     STATUS_REFUSED,
     STATUS_SKIPPED,
@@ -117,7 +118,7 @@ def test_layer_state_with_bogus_status_raises_value_error() -> None:
 def test_layer_statuses_and_incomplete_set_are_consistent() -> None:
     assert LAYER_STATUSES == {
         STATUS_RAN, STATUS_SKIPPED, STATUS_REFUSED, STATUS_UNAVAILABLE,
-        STATUS_ERROR, STATUS_NOT_REACHED,
+        STATUS_NOT_SUBMITTED, STATUS_ERROR, STATUS_NOT_REACHED,
     }
     assert INCOMPLETE_LAYER_STATUSES == LAYER_STATUSES - {STATUS_RAN}
     assert STATUS_RAN not in INCOMPLETE_LAYER_STATUSES

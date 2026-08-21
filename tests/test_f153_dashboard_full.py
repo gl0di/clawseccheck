@@ -470,7 +470,7 @@ class TestCapParity:
         payload = json.loads(capsys.readouterr().out)
         assert payload["graded"] is False
         assert payload["grade"] is None
-        assert payload["missing_layers"] == [{"layer": "self_report", "status": "unavailable"}]
+        assert payload["missing_layers"] == [{"layer": "self_report", "status": "not_submitted"}]
 
         main(["--home", SAFE, *BASE, "--dashboard", "--full",
               "--judged-bundle", bundle_path])
@@ -479,7 +479,7 @@ class TestCapParity:
         assert "Grade" not in first_line
         assert "No grade yet" in second_line
         assert "1 of 5 layers did not run" in second_line
-        assert "agent self-report (not available here)" in second_line
+        assert "agent self-report (not submitted)" in second_line
 
 
 # ─────────────────────────── flag coherence: --compact / --quiet ───────────────────────────
