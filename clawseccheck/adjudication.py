@@ -734,13 +734,30 @@ def build_bundle_template() -> dict:
     template cannot drift from what is actually accepted. That is the whole failure this fixes,
     and re-spelling the vocabulary by hand would reintroduce it one release later.
     """
-    from .pipeline import _LIVE_TEST_VERDICTS  # noqa: PLC0415 — see the module note on layering
+    # noqa: PLC0415 — see the module note on layering
+    from .pipeline import _LIVE_TEST_VERDICTS, LIVE_TEST_TOOLS
+
+    # B-602: this clause is a GATE ("omit ... unless you ran X"), not a suggestion, so an
+    # incomplete list does not merely read oddly -- it tells a user who ran the missing
+    # flag to drop the bucket. A live agent ran `--self-test`, found none of the four flags
+    # named here, omitted `liveTest`, and paid a second full `--dashboard --full` run for
+    # the grade. The tree carries seven hand-written enumerations of this family and they
+    # do not agree with each other; this was the only one that is a gate, and the only one
+    # where being incomplete is a defect rather than a shorter list.
+    #
+    # The four are DERIVED from the parser's own allow-list, so the vocabulary cannot drift
+    # again. `--self-test` is named separately and deliberately: it is not a tool value --
+    # it is the umbrella flag that runs all four harnesses, whose verdicts still arrive
+    # tagged `canary`/`redteam`/`dryrun`/`multiturn`. Deriving it would mean inventing a
+    # tool that the bucket does not accept.
+    _harness_flags = "/".join("--" + t for t in sorted(LIVE_TEST_TOOLS))
 
     return {
         "_comment": (
             "Feed this file back with --judged-bundle. Fill judged.verdicts from the "
             "judgePacket items above, one entry per item you judged; omit the liveTest "
-            "bucket entirely unless you ran --canary/--dryrun/--redteam/--multiturn."
+            f"bucket entirely unless you ran {_harness_flags}, or --self-test, which "
+            "runs all four."
         ),
         "judged": {"verdicts": []},
         "liveTest": {"seed": None, "verdicts": []},

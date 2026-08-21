@@ -26,7 +26,11 @@ import sys
 from pathlib import Path
 
 from clawseccheck.adjudication import build_bundle_template
-from clawseccheck.pipeline import _LIVE_TEST_VERDICTS, split_judged_bundle
+from clawseccheck.pipeline import (
+    _LIVE_TEST_VERDICTS,
+    LIVE_TEST_TOOLS as _LIVE_TEST_TOOLS,
+    split_judged_bundle,
+)
 from clawseccheck.sar import _VERDICT_VALUES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -135,6 +139,39 @@ def test_the_template_quotes_the_parsers_own_vocabularies():
         assert value in ex["judged"]["verdict"]
     for value in _LIVE_TEST_VERDICTS:
         assert value in ex["liveTest"]["verdicts"][0]["verdict"]
+
+
+def test_the_gate_names_every_harness_the_parser_accepts():
+    """B-602. This clause is a GATE ("omit ... unless you ran X"), not a suggestion, so an
+    incomplete list tells a user who ran the missing flag to drop the bucket. A live agent
+    ran `--self-test`, saw four flags none of which was its own, omitted `liveTest`, and
+    paid a second full `--dashboard --full` run for the grade.
+
+    Derived from the parser's own allow-list rather than re-spelled, so the vocabulary
+    cannot drift a second time -- the tree already carries seven hand-written enumerations
+    of this family and they do not agree with each other."""
+    comment = build_bundle_template()["_comment"]
+    for tool in _LIVE_TEST_TOOLS:
+        assert f"--{tool}" in comment, f"gate omits --{tool}"
+
+
+def test_the_gate_names_the_umbrella_flag_too():
+    """`--self-test` is NOT a tool value -- it is the flag that runs all four harnesses,
+    whose verdicts still arrive tagged canary/redteam/dryrun/multiturn. It cannot be derived
+    from `LIVE_TEST_TOOLS` without inventing a tool the bucket would reject, so it is named
+    separately and asserted separately."""
+    comment = build_bundle_template()["_comment"]
+    assert "--self-test" in comment
+    assert "runs all four" in comment
+    assert "--self-test" not in " ".join(_LIVE_TEST_TOOLS)
+
+
+def test_the_skill_doc_states_the_same_gate():
+    """C-125. `SKILL.md` repeated the gate in the same four-flag form, so it carried the
+    same defect."""
+    flat = " ".join((REPO_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
+    assert "Omit the `liveTest` bucket entirely unless you ran" in flat
+    assert "`--self-test`, which runs all four" in flat
 
 
 def test_the_entry_example_names_every_required_key():

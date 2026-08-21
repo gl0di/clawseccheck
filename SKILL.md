@@ -534,7 +534,9 @@ rather than from here:
 
 `finding_id`, `target` and `verdict` are required per entry; `verdict` is one of
 `SAFE` / `SUSPICIOUS` / `DANGEROUS`. Omit the `liveTest` bucket entirely unless you ran
-`--canary`/`--dryrun`/`--redteam`/`--multiturn` — and pass those a `--seed`, because an
+`--canary`/`--dryrun`/`--redteam`/`--multiturn`, or `--self-test`, which runs all four
+(B-602: a live agent ran the umbrella flag, found none of the four named, dropped the
+bucket and paid a second full run for its grade) — and pass those a `--seed`, because an
 unseeded VULNERABLE verdict still caps the run you are looking at but is never written to
 history, trend or the drift baseline (F-155). Omit `--judged-bundle` entirely only
 when Step 2 found `judgePacket` empty (genuinely nothing to judge this run). Frame the whole
