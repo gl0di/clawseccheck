@@ -627,6 +627,13 @@ It emits, in this fixed order (F-153):
   per-item annotations, explicitly advisory, never changing the Grade card above.
 - **Section 3 — Coverage of OpenClaw surfaces** (details below).
 - **Section 4 — "Worth a glance"** (details below).
+- **Section 5 — "What you can do next"** — a short, finding-derived list of the capabilities
+  worth running next (monitoring, the live injection test, trend, badge), each with its exact
+  command. It is **rendered by the tool, not composed by you** (B-604): every item is gated on
+  a finding, so a config where the advice is already done does not get offered it, and the
+  wording adapts to whether this run earned a grade. Paste it with the rest of the card.
+  Under `--compact` it condenses to a one-line pointer (`run --next for the ranked list`) —
+  the compact card exists to fit a message-capped channel and has no room for the full block.
 
 Skills/Plugins/MCP/RISK Chains are each independently **omitted** only when there is
 genuinely nothing to show (no skills/plugins/MCP servers installed, no RISK chain

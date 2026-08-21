@@ -151,6 +151,51 @@ _EMIT_TEE: list[str] | None = None
 _RELAYABLE_CARD_CHARS = 8000
 
 
+def _with_next_actions(card: str, findings, score, ascii_only: bool,
+                       compact: bool = False) -> str:
+    """B-604: the Dashboard was the one verdict surface that offered the user nothing.
+
+    `--next` (`cli.py`) and the default report both render `guide.render_next_actions`;
+    the `--dashboard` branch returned before reaching either, so the mode `SKILL.md` Step 3
+    designates as THE user-facing deliverable ended at its last findings section. Measured
+    on the real config: a card stating Grade F, 49/100 and two open CRITICALs, followed by
+    nothing to do about them. Same shape as the B-379 family -- a mode branch returning
+    early and missing what the main path does.
+
+    `SKILL.md` DOES design an offer here (Step 3's "Section 6 -- Next menu"), but as prose
+    the host agent is asked to compose. Across four live Control-UI runs it reached the user
+    **0 times out of 4** -- no menu, no monitoring offer, no closing question. That is the
+    B-605 family, and B-605's own measurement is why this is wired into the render instead:
+    across those same runs the tool's CONTENT was relayed 4/4 (grade, score, the cap from
+    86, the live verdict) while prose the host was asked to author was not. So an offer that
+    must survive is one the tool prints, not one the document requests.
+
+    Appended INTO the card rather than emitted beside it: it is part of what the user is
+    meant to read, so it belongs inside the payload the relay instruction covers and inside
+    the character count the size disclosure reports. Emitting it separately would make the
+    disclosed size a lie about the thing being disclosed.
+
+    Under ``--compact`` it collapses to a one-line pointer, and that is not a nicety: the
+    compact card exists to fit a message-capped channel, and `home_vuln` already renders
+    3,881 of Telegram's 4,096 there. The full block is 919 chars, so appending it broke the
+    budget outright (`test_compact_home_vuln_fits_telegram_budget`, caught on the first run
+    of the suite). Even one full item leaves 26 chars of slack, which is a budget that
+    depends on the config -- not a budget. Dropping the block instead would recreate this
+    very defect on the one channel where a phone-sized reader most needs the guidance, so it
+    condenses rather than disappears, following the convention the same mode already uses
+    for its pipeline detail ("Full pipeline detail: --save <path> or --html <path>."). The
+    pointer is a fixed string on purpose: naming the top action would make its length vary
+    with the finding, and the whole problem here is a budget with no room to vary.
+    """
+    actions = suggest_actions(findings, score)
+    if not actions:
+        return card
+    if compact:
+        return (card.rstrip("\n")
+                + "\nWhat you can do next: run --next for the ranked list.\n")
+    return card.rstrip("\n") + "\n\n" + render_next_actions(actions, ascii_only)
+
+
 def _relay_floor(card: str, graded: bool) -> tuple:
     """B-605: the smallest part of the card a summarising host must still carry.
 
@@ -3636,8 +3681,10 @@ def _main(argv=None) -> int:
             # B-605: render first, then put the relay instruction out BEFORE the card.
             # Emitting it after cost the whole fix on a long card -- see
             # `_emit_paste_instruction`'s docstring for the measured byte offsets.
-            _card = render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
-                                     pdf_path=pdf_written)
+            _card = _with_next_actions(
+                render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
+                                 pdf_path=pdf_written),
+                findings, score, ascii_only)
             _emit_paste_instruction(pdf_written, len(_card),
                                     _relay_floor(_card, score.graded))
             _emit(_card)
@@ -3737,11 +3784,13 @@ def _main(argv=None) -> int:
                 # pdf_written=None so render_dashboard renders every section inline
                 # instead of collapsing to a card that points at a file we never wrote.
                 _emit(f"(could not write PDF report: {exc} — showing the full report inline)")
-        _card = render_dashboard(
-            findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
-            risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
-            adjudication=adjudication_phase, compact=args.compact,
-            pdf_path=pdf_written)
+        _card = _with_next_actions(
+            render_dashboard(
+                findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
+                risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
+                adjudication=adjudication_phase, compact=args.compact,
+                pdf_path=pdf_written),
+            findings, score, ascii_only, compact=args.compact)
         _emit_paste_instruction(pdf_written, len(_card),
                                 _relay_floor(_card, score.graded))
         _emit(_card)
