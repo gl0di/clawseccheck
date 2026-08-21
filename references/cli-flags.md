@@ -15,7 +15,10 @@ kept here so the always-loaded playbook stays lean.
   the user is talking from a phone/chat client, attach the PDF file itself into the reply — never
   re-render its contents into the chat text (same doctrine as the `--badge` SVG: attach the
   artifact, don't redraw it), and never write a link: the tool is local-only, so no URL exists and
-  any link you write will be broken. Only when the channel cannot attach files at all, say so and
+  any link you write will be broken. Markdown link syntax counts as a link — `[report.pdf](path)`
+  is one, and a chat client strips the href off a local path and leaves a dead one the user can
+  click forever (B-606); write the path as plain text or inline code. Only when the channel cannot
+  attach files at all, say so and
   name the path — useless on a phone, but the one thing a desktop reader can act on, and better
   than the broken link a host invents when told it may say neither.
 - `--json` with `--vet`/`--vet-mcp` — emits the risk-dossier JSON object (`tool`, `version`,

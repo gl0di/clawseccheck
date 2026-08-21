@@ -505,7 +505,10 @@ whole pipeline inline (~11.5 KB), which a channel like Telegram will truncate or
 So: **paste the card, then attach `~/.clawseccheck/report.pdf` as a file.** Never paste
 its path at the user as if it were the deliverable, and never present it as a link —
 ClawSecCheck is local-only, so no URL exists — and any link you write will simply be
-broken. If your channel cannot attach files, say so plainly, **name the path so the user
+broken. **Markdown link syntax counts**: `[report.pdf](path)` is a link, and a chat client
+strips the href off a local path and leaves a dead one the user can click forever (measured:
+3 of 7 live runs did exactly this — B-606). Write the path as plain text or inline code.
+If your channel cannot attach files, say so plainly, **name the path so the user
 can open it themselves**, and offer `--dashboard --full` (everything inline, split across
 messages) instead — the card names the most urgent findings either way, so the user is
 never left with only a grade.

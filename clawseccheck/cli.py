@@ -3373,6 +3373,21 @@ def _main(argv=None) -> int:
 
         The anti-link clause is the half that was always right, and it is kept — with the
         reason attached, because "there is none" did not stop either host from writing one.
+
+        B-606: and it did not stop a third. Dave clicked the PDF in the Control UI and
+        nothing happened; the DOM showed an `<a>` with no href at all, because the host had
+        written `[report.pdf](/…/report.pdf)` — a markdown link around a LOCAL PATH, which
+        the client correctly refuses to give an href and renders inert. The clause said
+        "never write a link or a URL"; what was written has no scheme and no host, so an
+        agent reading "URL" as `scheme://host/…` need not have seen either. The clause named
+        the category and never the syntax, so it now names both, plus the form that works.
+
+        Measured across seven live runs, and the shape of this failure is unlike B-605's:
+        four hosts wrote the path as inline code (which renders and is clickable-to-copy)
+        and three wrote a markdown link. The agent is choosing between two forms with no
+        stated preference and getting it right about half the time — not refusing an
+        instruction, which is why naming the form is expected to work here where eight
+        attempts at the card did not.
         """
         if not path:
             return
@@ -3384,6 +3399,11 @@ def _main(argv=None) -> int:
               "deliverable.\n"
               "      Never write a link or a URL: the tool is local-only, so none exists "
               "and any link you write will be broken.\n"
+              "      Markdown link syntax counts as a link: `[report.pdf](path)` is one, and "
+              "a chat client\n"
+              "      strips the href off a local path and leaves a dead one the user can "
+              "click forever.\n"
+              "      Write the path as plain text or inline code \u2014 never as a link.\n"
               "      Do not re-render the PDF's contents into the chat.",
               file=sys.stderr)
 
