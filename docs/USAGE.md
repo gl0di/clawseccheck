@@ -422,6 +422,33 @@ workflow and hasn't been altered since — not that the CI pipeline itself is un
 This closes the loop against opportunistic tampering of a downloaded copy; it is not a
 guarantee against a targeted adversary who also compromises the CI pipeline.
 
+**What the digest covers, and when the command exits non-zero.** The walk hashes every file
+in the package tree at every depth, *except* the contents of the regenerated-artifact
+directories `__pycache__`, `.ruff_cache`, `.mypy_cache`, `.pytest_cache` and `.git` — those
+vary between a dev checkout and a clean install, so hashing them would make the digest
+irreproducible and useless for comparison.
+
+A **symlink** — file *or* directory, including a symlinked `__pycache__` — is covered by its
+name and target, never by following it: adding, removing, renaming or repointing one changes
+the combined digest and the run prints a `Coverage note` naming it, but whatever it points at
+lies outside the scan.
+
+**The known residual:** a symlink *inside* one of those excluded directories is not seen at
+all, because nothing in them is read. So `--verify-self` does not detect a planted `.pyc` in
+a genuine `__pycache__`. Keep `~/.clawseccheck` and your install directory writable only by
+you; anyone who can write there can do worse than this anyway.
+
+If a file or directory **cannot be read**, the digest necessarily covers less than the tree it
+names: the run prints `INTEGRITY CANNOT BE ESTABLISHED`, names each path and the reason, and
+**exits 1** — that digest must not be compared against a release checksum. A path that simply
+*disappeared* mid-scan is reported separately, neutrally, and still exits 0: that is what an
+update running alongside the scan looks like, not tampering.
+
+A disclosed symlink is worth a look, not an alarm on its own. This project's own installs have
+none (the git index carries no symlink entries, and the ClawHub-installed copy has none), but
+in-package symlinks are legitimate elsewhere in the Python ecosystem — Debian's
+`python3-babel` and `python3-netaddr` both ship them.
+
 **The same principle applies to the host itself.** If a machine is already compromised,
 anything running on it at your own privilege level — ClawSecCheck included — can in
 principle be tampered with so it hides the compromise; `--verify-self` catches lazy
@@ -597,6 +624,24 @@ Verify the event journal's own tamper-evident chain by name (not the score-histo
 clawseccheck --verify-events                       # checks the default ~/.clawseccheck/events.jsonl
 clawseccheck --verify-events --events PATH         # or a specific journal
 ```
+
+Both chain verifiers (`--verify-history` too) have **three** outcomes, not two:
+
+| Outcome | Means | Exit |
+| --- | --- | --- |
+| `chain OK` | there is a chain here and it holds | 0 |
+| `chain BROKEN at entry N` | there is a chain here and it does not | 1 |
+| `chain NOT VERIFIED` | there is **no chain here to verify** — the store is absent, empty, holds nothing parseable, is not a regular file, or could not be read | 1 |
+
+The third one exists because deleting the store is the crudest tampering there is, and it
+used to print `chain OK` with exit 0 over a file that was never opened. It is deliberately
+**not** reported as BROKEN either: a first run has no store yet, and calling that tampering
+would send you hunting an intruder who is not there.
+
+Which follow-up sentence you get is decided by **what is actually at the path**, not by
+whether you typed the flag. Nothing there at all reads as an ordinary first run; something
+there that does not verify — an emptied, overwritten or unreadable store — says so plainly
+and tells you not to re-run the command that would overwrite it.
 
 Every run prints a short reference value for the baseline, and records it in that journal on the
 runs where it actually moved (a quiet machine adds no line). Copy it somewhere the machine cannot

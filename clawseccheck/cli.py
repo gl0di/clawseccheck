@@ -54,7 +54,13 @@ from .iocdb import coverage_notice as _iocdb_coverage_notice
 from .iocdb import freshness_notice as _iocdb_freshness_notice
 from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
-from .integrity import package_digest
+from .integrity import (
+    NOTE_PATH_ESCAPE,
+    NOTE_SYMLINK,
+    NOTE_UNREADABLE,
+    NOTE_VANISHED,
+    package_digest,
+)
 from .report import render_html
 from .report import (
     _sanitize,
@@ -82,7 +88,14 @@ from .baseline import append_entries, is_fingerprint
 from .catalog import CRITICAL, HIGH, LOW, MEDIUM, UNKNOWN, Finding
 from .dossier import build_profile, verdict_for
 from .ansi import should_color, strip_ansi
-from .monitor import DEFAULT_EVENTS, DEFAULT_STATE, verify_chain
+from .monitor import (
+    CHAIN_ABSENT,
+    CHAIN_BAD_PATH,
+    CHAIN_UNREADABLE,
+    DEFAULT_EVENTS,
+    DEFAULT_STATE,
+    verify_chain,
+)
 from .tamperscore import tamper_subgrade
 from .scoring import compute
 from .redteam import make_suite, render_suite
@@ -2098,6 +2111,69 @@ def _run_apply_ignore_proposals(args) -> int:
 _ISSUES_URL = "https://github.com/gl0di/clawseccheck/issues"
 
 
+def _chain_verdict(label: str, path: str, ok: "bool | None", msg: str,
+                   explicit: bool, cause: str = "") -> "tuple[str, int]":
+    """Render one of THREE outcomes for a hash-chain verifier (B-589).
+
+    ``--verify-baseline`` (F-173) reasoned this out first and refused the collapse: "it
+    does not match" and "I could not check" ask the reader for opposite reactions. The two
+    chain verifiers folded the third case into the first, so ``rm history.jsonl`` — the
+    crudest tampering there is — printed "History chain OK (...): OK" with exit 0 over a
+    file that was never opened, and an attacker erasing the event that recorded their own
+    install never had to defeat the hash chain.
+
+    Exit status follows ``--verify-baseline``'s existing convention: 0 only when something
+    was actually verified, 1 for both "broken" and "could not check". Those two read very
+    differently in the text, deliberately, but they mean the same thing to a script - do
+    not proceed as if this was verified. Giving "could not check" its own exit code would
+    just move the collapse into a place no shell idiom looks.
+    """
+    if ok is True:
+        return f"{label} chain OK ({path}): {msg}", 0
+    if ok is False:
+        return f"{label} chain BROKEN ({path}): {msg}", 1
+    lines = [f"{label} chain NOT VERIFIED ({path}): {msg}"]
+    # WHICH sentence follows is decided by whether anything is actually there, not by
+    # whether the user typed the flag. An independent pass caught the first version doing
+    # the latter: a default-location store holding 200 overwritten lines was told
+    # "nothing usable has been written there yet, which is normal" — a sentence that
+    # contradicts the line above it and talks the reader out of the exact tampering the
+    # third outcome exists to expose. Getting that reachable only by passing an explicit
+    # flag made it unreachable for the common invocation.
+    if cause == CHAIN_BAD_PATH:
+        # Never the "check its permissions / someone locked this down" sentence: this
+        # path cannot name a file at all, so there is nobody to suspect. An earlier
+        # version routed ENAMETOOLONG here and accused the user about a file that
+        # cannot exist.
+        lines.append("This path cannot name a journal file at all, so nothing was looked "
+                     "at — check it for a typo. No conclusion about any store follows "
+                     "from this.")
+    elif cause == CHAIN_UNREADABLE:
+        lines.append("Something is at this path and it could not be read. That is not a "
+                     "first-run state: check its permissions. A store made unreadable to "
+                     "the user auditing it is itself worth investigating, and re-running "
+                     "the check that WRITES it would overwrite the evidence \u2014 look "
+                     "first.")
+    elif cause and cause != CHAIN_ABSENT:
+        lines.append("Something is at this path and it is not a usable journal. That is "
+                     "not a first-run state \u2014 a store that existed and no longer "
+                     "verifies is worth investigating on its own; emptying, truncating or "
+                     "overwriting it is the crudest way to erase what it recorded.")
+    elif explicit:
+        lines.append("You named this path and there is nothing at it, so this is not a "
+                     "first-run state: either the path is wrong, or the store it names is "
+                     "gone. Deleting a journal is the crudest way to erase what it "
+                     "recorded.")
+    else:
+        # Not "the default location": --data-dir lands here too, and it is not the default.
+        lines.append("No journal has been written to this location yet, which is normal "
+                     "before the first run that records one. If you have run checks on "
+                     "this machine before, it is missing rather than never written.")
+    lines.append("Nothing was verified here. This is neither a pass nor a tamper finding, "
+                 "and the exit status is non-zero so a script cannot read it as a pass.")
+    return "\n".join(lines), 1
+
+
 def main(argv=None) -> int:
     """Thin top-level guard (B-101): never dump a raw traceback at users.
 
@@ -2634,6 +2710,16 @@ def _main(argv=None) -> int:
     # `~/.clawseccheck/state.json` compares equal to the default and had its named path
     # silently replaced, while `~` resolves against whatever HOME is set — so the two
     # readings do NOT produce the same file, which is what an earlier comment here claimed.
+    # B-589: "you named this file and it is not there" and "nothing has been written to
+    # the default location yet" are different facts that call for opposite reactions, and
+    # the default-resolution below erases the difference — after it every path looks
+    # explicitly given. Captured here, while it is still knowable. A --data-dir-derived
+    # path counts as NOT explicit: choosing a store directory is not naming a journal, and
+    # a fresh data dir legitimately has no journal in it yet.
+    _explicit_paths = {
+        _attr: getattr(args, _attr) is not None
+        for _attr in ("state", "events", "history")
+    }
     if args.data_dir is not None:
         if not str(args.data_dir).strip():
             p.error("--data-dir needs a directory; an empty value would silently target "
@@ -2699,15 +2785,82 @@ def _main(argv=None) -> int:
         return _run_apply_ignore_proposals(args)
 
     if _mode == "verify_self":
-        combined, per_file = package_digest()
+        # B-590: opt into package_digest()'s disclosure channel. Without it a symlink
+        # dropped into the package tree left no trace anywhere in this output, and a
+        # module the user cannot read aborted the whole command with a generic
+        # "unexpected internal error" that named no file.
+        _notes: list = []
+        combined, per_file = package_digest(notes=_notes)
+        # Three kinds, three consequences — matched explicitly rather than by "everything
+        # that is not unreadable", which silently folded a fourth kind into the listing
+        # annotations the moment one was added.
+        _uncovered = {rel: (kind, detail) for kind, rel, detail in _notes
+                      if kind in (NOTE_SYMLINK, NOTE_PATH_ESCAPE)}
+        _unreadable = [(rel, detail) for kind, rel, detail in _notes
+                       if kind == NOTE_UNREADABLE]
+        _vanished = [(rel, detail) for kind, rel, detail in _notes
+                     if kind == NOTE_VANISHED]
         lines = [f"{WORDMARK} {__version__} — engine source digest (SHA-256)",
                  f"combined : {combined}",
                  ""]
         for name, digest in sorted(per_file.items()):
-            lines.append(f"  {digest}  {name}")
+            _note = _uncovered.get(name)
+            if _note is None:
+                lines.append(f"  {digest}  {name}")
+            else:
+                # Say what the row's digest is over. A link's row is a digest of the
+                # link, not of any file's bytes, and printing it like every other row
+                # would be the report claiming it read something it never opened.
+                _kind, _target = _note
+                lines.append(f"  {digest}  {name}  [{_kind} -> {_target}; "
+                             f"name and target hashed, target contents NOT read]")
+        if _uncovered:
+            lines.append("")
+            lines.append(f"Coverage note: {len(_uncovered)} entr"
+                         f"{'y' if len(_uncovered) == 1 else 'ies'} in the package tree "
+                         f"{'is' if len(_uncovered) == 1 else 'are'} a symlink or a path "
+                         f"escape.")
+            lines.append("Only the name and target are hashed, never the target's contents — so")
+            lines.append("adding, removing, renaming or repointing one DOES change the combined")
+            lines.append("digest, but what it points at is outside this scan. A clean install has")
+            lines.append("none of these at all, so any entry listed above is worth investigating.")
+        if _unreadable:
+            lines.append("")
+            lines.append(f"INTEGRITY CANNOT BE ESTABLISHED: {len(_unreadable)} path"
+                         f"{'' if len(_unreadable) == 1 else 's'} in the package tree could")
+            lines.append("not be read, so the digest above covers less than the tree it names:")
+            for _rel, _why in _unreadable:
+                lines.append(f"  {_rel}  —  {_why}")
+            lines.append("A file or directory made unreadable to the auditing user is itself worth")
+            lines.append("investigating; the combined digest above must not be compared against a")
+            lines.append("trusted release digest, because it was computed over a smaller tree.")
+        if _vanished:
+            # Deliberately neutral, and deliberately rc 0. These paths were listed by the
+            # walk and gone by the time it reached them, which is what an update or an
+            # rsync running alongside the scan looks like. Wording it like the block above
+            # would accuse the user of tampering for running two ordinary things at once.
+            lines.append("")
+            lines.append(f"Note: {len(_vanished)} path"
+                         f"{'' if len(_vanished) == 1 else 's'} disappeared while the scan "
+                         f"was running, so the digest")
+            lines.append("does not cover them. This is ordinary if the tree was being updated at the")
+            lines.append("same time; re-run on a quiet tree for a digest you can compare:")
+            for _rel, _why in _vanished:
+                lines.append(f"  {_rel}  —  {_why}")
         lines.append("")
-        lines.append("Compare the 'combined' value against the digest printed by a trusted release.")
-        lines.append("Any mismatch means a source file was modified after that release.")
+        if _unreadable or _vanished:
+            # The footer used to assert "any mismatch means a source file was modified"
+            # five lines under a block saying this digest covers less than the tree — two
+            # sentences in one screen telling the reader opposite things. Whichever they
+            # believed, one of them was wrong.
+            lines.append("The 'combined' value above is NOT comparable against a trusted "
+                         "release digest:")
+            lines.append("it was computed over less than the whole tree, for the reason "
+                         "stated above. Re-run")
+            lines.append("once that is resolved, then compare.")
+        else:
+            lines.append("Compare the 'combined' value against the digest printed by a trusted release.")
+            lines.append("Any mismatch means a source file was modified after that release.")
         lines.append(f"Trusted digest: see SHA256SUMS.txt on the v{__version__} GitHub Release, signed via cosign.")
         lines.append("")
         lines.append("A checksum you just read off a web page or a chat reply proves nothing by")
@@ -2719,16 +2872,21 @@ def _main(argv=None) -> int:
         lines.append('    --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \\')
         lines.append("    --certificate-oidc-issuer https://token.actions.githubusercontent.com \\")
         lines.append("    SHA256SUMS.txt")
-        _emit("\n".join(lines))
-        return 0
+        _self_text = "\n".join(lines)
+        _emit(asciify(_self_text) if ascii_only else _self_text)
+        # Non-zero only when the digest is incomplete. A disclosed symlink still produced a
+        # digest that covers the whole tree (by name and target), so it stays rc 0 and is
+        # reported; an unreadable path means this command could not do its one job.
+        return 1 if _unreadable else 0
 
     if _mode == "verify_history":
-        ok, msg = history_verify(args.history)
-        if ok:
-            _emit(f"History chain OK ({args.history}): {msg}")
-            return 0
-        _emit(f"History chain BROKEN ({args.history}): {msg}")
-        return 1
+        _cause: list = []
+        ok, msg = history_verify(args.history, cause=_cause)
+        text, rc = _chain_verdict("History", args.history, ok, msg,
+                                  explicit=_explicit_paths["history"],
+                                  cause=_cause[0] if _cause else "")
+        _emit(asciify(text) if ascii_only else text)
+        return rc
 
     if _mode == "verify_events":
         # C-250(c): --verify-history --history <events-path> already verified an events
@@ -2736,12 +2894,13 @@ def _main(argv=None) -> int:
         # journals — see history.verify()'s own docstring), but its output always said
         # "History chain" regardless of which journal was actually named. This is the
         # discoverable, correctly-worded entry point --events users were missing.
-        ok, msg = verify_chain(args.events)
-        if ok:
-            _emit(f"Events chain OK ({args.events}): {msg}")
-            return 0
-        _emit(f"Events chain BROKEN ({args.events}): {msg}")
-        return 1
+        _cause = []
+        ok, msg = verify_chain(args.events, cause=_cause)
+        text, rc = _chain_verdict("Events", args.events, ok, msg,
+                                  explicit=_explicit_paths["events"],
+                                  cause=_cause[0] if _cause else "")
+        _emit(asciify(text) if ascii_only else text)
+        return rc
 
     if _mode == "verify_baseline":
         # F-173: three outcomes, never two. "It does not match" and "I could not check"

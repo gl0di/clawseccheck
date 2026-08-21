@@ -256,8 +256,16 @@ clawseccheck --verify-events             # ~/.clawseccheck/events.jsonl (correct
                                           # actually given; --verify-events names it right)
 ```
 
-**C-250: the OK verdict is now per-entry, not whole-file.** An absent or empty file still
-verifies as a bare `OK`. A file that carries LEGACY entries (no `chain_hash` field at all —
+**B-589: three outcomes, never two.** An absent, empty, unreadable, or nothing-parseable
+store is **not** `OK` — it reports `NOT VERIFIED` ("no chain here"), with a non-zero exit
+status, and is neither a pass nor a tamper finding. Until B-589 it verified as a bare `OK`
+with exit 0, which made the crudest possible tampering — deleting the file — pass the check
+that exists to catch deletion, and made `--history /path/that/is/gone` print "OK" about a
+specific file the reader believed held their history. The opposite collapse is refused for
+the same reason `--verify-baseline` refuses it (F-173): reporting absence as BROKEN would
+make a genuine first run look like an intrusion.
+
+**C-250: the OK verdict is per-entry, not whole-file.** A file that carries LEGACY entries (no `chain_hash` field at all —
 graceful backward compatibility) — whether every entry is legacy or only some are, in a
 journal mixing old and new format — verifies `True` but the message now discloses exactly
 how many entries were not chain-verified, e.g. `OK (2 entries not chain-verified (legacy,
@@ -272,7 +280,10 @@ exactly where the chain broke (`False, "broken at entry N"`).
 (HMAC) or externally-anchored one, so it detects *accidental corruption* and *naive edits*
 (editing/reordering/deleting an entry breaks it) — not a knowledgeable attacker who already
 has write access to the file, who can simply recompute the whole chain forward after
-tampering, truncate the tail, or delete the file outright (all three verify "clean"). The
+tampering — that still verifies "clean", and no local chain can do better. Truncating the
+tail is disclosed as an unparseable line, and deleting or emptying the file is reported as
+`NOT VERIFIED` rather than "clean" (B-589); neither is *proof* of tampering, which is why
+both are their own outcome rather than a verdict. The
 chain is therefore a drift/tamper-*evidence* aid, **not** a substitute for filesystem
 permissions on `~/.clawseccheck/`: anyone who can write that file already runs as your
 user and could edit history, patch the engine, or read anything you can. This is the same

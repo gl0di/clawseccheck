@@ -236,12 +236,15 @@ def test_verify_events_tampered_journal_returns_nonzero_and_says_broken(tmp_path
     assert "Events chain BROKEN" in out
 
 
-def test_verify_events_absent_journal_returns_zero(tmp_path, capsys):
-    """No journal yet is not a failure — same graceful contract as --verify-history."""
+def test_verify_events_absent_journal_is_the_third_state(tmp_path, capsys):
+    """B-589: no journal is not a pass either — same three-outcome contract as
+    --verify-history, which this test's earlier form ("returns zero", "Events chain OK")
+    pinned on the wrong side of. Absence is reported as absence."""
     rc = main(["--verify-events", "--events", str(tmp_path / "nope.jsonl")])
     out = capsys.readouterr().out
-    assert rc == 0
-    assert "Events chain OK" in out
+    assert rc == 1
+    assert "Events chain OK" not in out
+    assert "Events chain NOT VERIFIED" in out
 
 
 def test_verify_events_is_distinct_from_verify_history(tmp_path, capsys):

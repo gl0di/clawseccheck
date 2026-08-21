@@ -12,6 +12,7 @@ It is the only part of ClawSecCheck that persists state: a single JSON snapshot
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import re
@@ -168,13 +169,52 @@ def _iter_jsonl(p: Path, *, skipped: "list | None" = None):
                 skipped.append(line)
 
 
-def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
+# The machine-readable causes `verify_chain` reports through its `cause` out-param when it
+# returns the third outcome. Same vocabulary shape as `_verify_baseline`'s `_why`, and for
+# the same reason: the CLI has to pick between sentences that say opposite things, and
+# picking them by parsing the human message is how the sentences drift apart.
+CHAIN_ABSENT = "absent"          # nothing at this path at all
+CHAIN_NOT_A_FILE = "not_a_file"  # something is there, but it is not a regular file
+CHAIN_EMPTY = "empty"            # a regular file of zero length
+CHAIN_NO_ENTRIES = "no_entries"  # a file with content, none of it a parseable entry
+CHAIN_UNREADABLE = "unreadable"  # it is there and could not be opened
+CHAIN_BAD_PATH = "bad_path"      # this string cannot name a file at all
+
+
+def verify_chain(events_path: "str | Path",
+                 cause: "list | None" = None) -> "tuple[bool | None, str]":
     """Verify the hash-chain integrity of an events.jsonl file.
 
-    Returns (True, "OK") when:
-    - the file is absent or empty, or
-    - all entries lack a 'chain_hash' field (legacy graceful mode), or
-    - every 'chain_hash' field matches the recomputed value.
+    THREE outcomes, never two (B-589):
+
+    - ``(True, "OK…")``  — there is a chain here and it is intact. Also covers a
+      journal whose entries all lack a 'chain_hash' (legacy graceful mode): that is a
+      real chain with unverifiable rows, and the count is disclosed in the message.
+    - ``(False, "broken at entry N")`` — there is a chain here and it does not hold.
+    - ``(None, …)`` — there is **no chain here to verify**: the file is absent, empty,
+      holds no parseable entry at all, or could not be read.
+
+    The third outcome used to be folded into the first, and that made the crudest
+    possible tampering pass the tamper check: ``rm history.jsonl`` turned a BROKEN
+    verdict into ``History chain OK (…): OK`` with exit 0, and naming a path that never
+    existed printed "OK" about a specific file the user believed held their history. An
+    attacker erasing the event that recorded their own install did not have to defeat the
+    hash chain at all. Absence is neither intact nor tampered.
+
+    Flipping absence to ``False`` instead would be the opposite error and a worse one —
+    ``--verify-baseline`` (F-173) reasoned it out first: a genuine first run, with no
+    store written yet, would report tampering and send the user hunting an intruder who
+    is not there. Hence a third value rather than the other half of the bool.
+
+    Callers must test ``is True`` / ``is False`` / ``is None`` — a bare ``if ok:`` reads
+    the third outcome as BROKEN, which is exactly the collapse this refuses.
+
+    ``cause``: optional list. On the third outcome, one of the ``CHAIN_*`` codes above is
+    appended to it. A caller that has to choose between "nothing has been written here
+    yet" and "something IS here and it does not verify" needs to know which, and those two
+    sentences say opposite things about the same exit code — an independent pass found the
+    first one being printed over a default-location store holding 200 overwritten lines.
+    Default ``None`` keeps the signature working for callers that only need the verdict.
 
     C-250: a bare "OK" used to also cover two OTHER gaps that C-167 had already fixed for
     unknown-schema entries but left asymmetric here — a mixed/legacy journal (some or all
@@ -192,21 +232,70 @@ def verify_chain(events_path: "str | Path") -> "tuple[bool, str]":
     chain-verified (legacy, no chain_hash); 1 unparseable line skipped)".
 
     Returns (False, "broken at entry N") on the first mismatch.
-    Never raises — any IO/parse error causes (True, "OK") (graceful).
+    Never raises — an IO error yields the third outcome (``None``), not a pass: saying
+    "OK" about a file that could not be opened is the same lie as saying it about one that
+    is not there.
 
     Authenticates every field of every entry (including '_schema', C-162, and any
     entry whose '_schema' is a newer major than this build understands) — the
     unknown-schema skip policy belongs to the *loaders* (load_events/history.load),
     not to chain verification, which must authenticate the whole file regardless.
     """
-    p = Path(events_path).expanduser()
+    def _no_chain(code: str, message: str) -> "tuple[None, str]":
+        if cause is not None:
+            cause.append(code)
+        return None, message
+
+    try:
+        p = Path(events_path).expanduser()
+    except (OSError, RuntimeError) as exc:
+        # `~unknownuser` raises RuntimeError straight out of expanduser(), which sat
+        # outside this try and made the "never raises" contract above false.
+        return _no_chain(CHAIN_BAD_PATH, f"no chain here — this path cannot be resolved "
+                                         f"({exc})")
     try:
         if not p.is_file():
-            return True, "OK"
+            # "It does not exist" and "it is not a regular file" are different facts, and
+            # asserting the first about a directory, a FIFO or a dangling symlink repeats
+            # the very mistake this function was fixed for: naming a cause the evidence
+            # does not establish. Order matters — exists() follows the link, so a dangling
+            # symlink is False there and True at is_symlink().
+            if p.exists():
+                return _no_chain(CHAIN_NOT_A_FILE,
+                                 "no chain here — the path is not a regular file")
+            if p.is_symlink():
+                # Deliberately not "its target does not exist": exists() is also False for
+                # a symlink LOOP, whose target does exist — it is the link. Claim only
+                # what was established, which is that following it does not reach a file.
+                return _no_chain(CHAIN_NOT_A_FILE,
+                                 "no chain here — the path is a symlink that does not "
+                                 "resolve to a readable file")
+            return _no_chain(CHAIN_ABSENT, "no chain here — the file does not exist")
         _skipped: "list[str]" = []
         entries = list(_iter_jsonl(p, skipped=_skipped))
-    except OSError:
-        return True, "OK"
+    except OSError as exc:
+        # A malformed path is not an unreadable store. ENAMETOOLONG / ENOTDIR / ELOOP say
+        # the string cannot name a file at all, and routing them to "unreadable" produced
+        # a sentence telling the user to check the permissions of, and investigate who
+        # locked down, a file that cannot exist.
+        if exc.errno in (errno.ENAMETOOLONG, errno.ENOTDIR, errno.ELOOP):
+            return _no_chain(CHAIN_BAD_PATH, f"no chain here — this path cannot name a "
+                                             f"file ({exc.strerror or exc})")
+        # A present-but-unreadable store is the same third state, not a pass: the one
+        # thing this function must never say about a file it did not open is "OK".
+        return _no_chain(CHAIN_UNREADABLE,
+                         f"no chain could be read — {exc.strerror or exc}")
+
+    if not entries:
+        # No parseable entry at all. "Empty" and "nothing but garbage" are both "there is
+        # no chain here", but they are different facts and the user acts on them
+        # differently, so they get different sentences rather than one hedge.
+        if _skipped:
+            noun = "line" if len(_skipped) == 1 else "lines"
+            return _no_chain(CHAIN_NO_ENTRIES,
+                             f"no chain here — the file holds no readable entry "
+                             f"({len(_skipped)} unparseable {noun})")
+        return _no_chain(CHAIN_EMPTY, "no chain here — the file is empty")
 
     prev_hash = ""
     unknown_schema = 0

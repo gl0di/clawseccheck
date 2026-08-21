@@ -200,14 +200,25 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
         pass
 
 
-def verify(path: str = DEFAULT_HISTORY) -> "tuple[bool, str]":
+def verify(path: str = DEFAULT_HISTORY,
+           cause: "list | None" = None) -> "tuple[bool | None, str]":
     """Verify the hash-chain integrity of the score history file.
 
-    Delegates to monitor.verify_chain (same generic entry-agnostic algorithm).
-    Returns (True, "OK") for an absent/empty/legacy-no-chain-hash file, or
-    (False, "broken at entry N") on the first tampered/reordered/deleted entry.
+    Delegates to monitor.verify_chain (same generic entry-agnostic algorithm), and so
+    has the same THREE outcomes (B-589): (True, "OK…") for a chain that holds — including
+    a legacy file whose rows carry no 'chain_hash', whose count is disclosed —
+    (False, "broken at entry N") on the first tampered/reordered/deleted entry, and
+    (None, …) when there is no chain here to verify at all: absent, empty, holding no
+    parseable row, or unreadable.
+
+    An absent history used to return (True, "OK"), so deleting the store passed the check
+    that exists to catch deletion. See verify_chain's docstring for why the answer is a
+    third value and not (False, …). Test ``is True``/``is False``/``is None``; a bare
+    ``if ok:`` reports "no chain here" as tampering.
+
+    ``cause`` is passed straight through — see verify_chain for the ``CHAIN_*`` codes.
     """
-    return verify_chain(path)
+    return verify_chain(path, cause=cause)
 
 
 def load(path: str = DEFAULT_HISTORY) -> list[dict]:

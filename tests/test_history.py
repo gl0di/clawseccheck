@@ -260,18 +260,23 @@ def test_verify_ok_on_untampered_chain(tmp_path):
     assert msg == "OK"
 
 
-def test_verify_ok_on_missing_file(tmp_path):
+def test_verify_third_state_on_missing_file(tmp_path):
+    """B-589: absent is neither intact nor tampered — it is "no chain here".
+
+    Named ``test_verify_ok_on_missing_file`` until B-589, asserting the lying PASS that
+    let deleting the store defeat the check that exists to catch deletion.
+    """
     ok, msg = verify(str(tmp_path / "nonexistent.jsonl"))
-    assert ok is True
-    assert msg == "OK"
+    assert ok is None
+    assert "OK" not in msg
 
 
-def test_verify_ok_on_empty_file(tmp_path):
+def test_verify_third_state_on_empty_file(tmp_path):
     path = tmp_path / "history.jsonl"
     path.write_text("", encoding="utf-8")
     ok, msg = verify(str(path))
-    assert ok is True
-    assert msg == "OK"
+    assert ok is None
+    assert "OK" not in msg
 
 
 def test_verify_ok_on_legacy_entries_without_chain_hash(tmp_path):
@@ -328,10 +333,20 @@ def test_cli_verify_history_exits_zero_on_untampered_chain(tmp_path, capsys):
     assert "OK" in capsys.readouterr().out
 
 
-def test_cli_verify_history_exits_zero_on_missing_file(tmp_path, capsys):
+def test_cli_verify_history_does_not_exit_zero_on_missing_file(tmp_path, capsys):
+    """B-589: exit 0 over a file that was never opened is a pass a script will believe.
+
+    The named path is explicitly given, so the reader is told this is not a first-run
+    state. rc is 1 — the same non-zero --verify-baseline uses for "I could not check" —
+    while the text keeps it clearly apart from a tamper finding.
+    """
     path = str(tmp_path / "nonexistent.jsonl")
     rc = main(["--verify-history", "--history", path])
-    assert rc == 0
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "NOT VERIFIED" in out
+    assert "chain OK" not in out
+    assert "BROKEN" not in out
 
 
 def test_cli_verify_history_exits_one_on_tampered_chain(tmp_path, capsys):
