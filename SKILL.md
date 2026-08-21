@@ -552,6 +552,12 @@ sentence. Examples:
   `?/3` means at least one leg could not be determined from the config (runtime tools granted at
   session start are not written there), so A1's own advice is to treat it as *possibly* 3/3. Offer
   `--ask` → `--attest` to resolve it; on a run that found no config, point `--home` at one instead.
+- **"A1 WARN naming a resolved default"** → "One of your channels never says who is allowed to
+  message the agent, and leaving that blank does not mean nobody — OpenClaw falls back to letting
+  anyone it has approved once keep messaging." Do NOT report this as a third active leg; the tool
+  deliberately does not count it as one, and the finding says so. If the user asks how to close it,
+  read the `fix` text back rather than inventing a value — the only setting that closes DM ingress
+  is `dmPolicy: "disabled"`, and Feishu and Lark have no closed setting at all.
 - "B1 FAIL" → "Your agent's config file is readable by anyone on this computer."
 - "B13 FAIL" → "One of your installed skills has code patterns used by malware."
 

@@ -847,10 +847,22 @@ def _channels(cfg: dict) -> dict:
 # These helpers read raw node.get("dmPolicy") and compare VALUE LITERALS, which no guard
 # grounds. The same shape can hide in any value-literal comparison.
 #
-# NOT closed here (deliberately out of scope, see B-283): an ABSENT dmPolicy still reads as
-# "no untrusted ingress" even though the product default is "pairing". Treating absent as
-# pairing would flip nearly every enabled-channel config to untrusted-ingress and could
-# cascade into A1 grade changes; it needs its own C-135 pass and remains a separate task.
+# An ABSENT dmPolicy is deliberately NOT a member here, and B-499 settled why. The product
+# default IS "pairing" — grounded against the installed dist (openclaw@2026.7.1-2): 8 schema
+# sites bind `dmPolicy: DmPolicySchema.optional().default("pairing")`, 7 more bind a bare
+# `.optional()` whose absence is resolved by one of 48 runtime `?? "pairing"` fallbacks. So a
+# config that simply omits dmPolicy runs with the same ingress posture as one that writes
+# "pairing" explicitly, and this set treats those two identically ONLY when the value is
+# written.
+#
+# The earlier note here said closing that gap "would flip nearly every enabled-channel config
+# to untrusted-ingress" and deferred it. Measured (B-499), the flip is real but bounded: 15
+# fixture homes gain the signal and 6 move PASS->WARN, with zero A1 FAIL flips across 535
+# findings. Dave's 2026-08-21 call was therefore neither "defer" nor "make it a leg": a
+# resolved default is reported as a WARN-grade signal via _resolved_default_input_channels()
+# below, which A1 discloses without counting it among the three legs. Promoting it to a full
+# leg stays out of scope — that is what would risk the Golden Rule #5 flip, and nothing in
+# this set changes.
 _UNTRUSTED_INPUT_POLICIES = frozenset({"open", "allowlist", "pairing"})
 
 
@@ -1469,6 +1481,54 @@ def _untrusted_input_channels(cfg: dict) -> list[str]:
                     and group_policy in _UNTRUSTED_INPUT_POLICIES
                 )
             ):
+                out.append(name)
+                break
+    return out
+
+
+def _resolved_default_input_channels(cfg: dict) -> list[str]:
+    """Enabled channels whose ``dmPolicy`` is ABSENT, so OpenClaw resolves it to "pairing".
+
+    B-499. This is a WARN-grade signal, NOT a trifecta leg — see the note above
+    ``_UNTRUSTED_INPUT_POLICIES`` for the grounding and for Dave's 2026-08-21 decision.
+    A1 discloses what this returns; ``_trifecta_legs`` never reads it, so the leg count
+    is untouched by construction and B46 is unaffected.
+
+    Two things this deliberately does NOT do:
+
+    * It does not resolve through ``channels.defaults``. Grounded against the installed
+      dist: ``channels.defaults.contextVisibility`` is real (and is read via ``dig()``
+      at ``_channels_with_context_visibility_all``), but there is no defaults-level
+      ``dmPolicy`` anywhere in it — so an absent per-channel value resolves straight to
+      the product default, with no intermediate layer to consult. Inventing one would be
+      a fabricated schema path.
+    * It does not re-report a channel ``_untrusted_input_channels`` already counts. Such
+      a channel is a full leg on its groupPolicy alone; adding a softer signal for the
+      same channel would say the same thing twice and inflate the WARN text.
+
+    Account nodes inherit the channel's value when they do not set their own, matching
+    the account -> channel precedence the dist uses elsewhere; an account that omits
+    ``dmPolicy`` under a channel that sets it is therefore NOT a resolved default.
+    """
+    already = set(_untrusted_input_channels(cfg))
+    out: list[str] = []
+    for name, c in _channels(cfg).items():
+        # "defaults" holds defaults; it is not a channel.
+        if name == "defaults" or not isinstance(c, dict) or c.get("enabled") is False:
+            continue
+        if name in already:
+            continue
+        channel_dm = c.get("dmPolicy")
+        accounts = c.get("accounts")
+        # B-378 idiom: a schema-drifted `accounts` (list/string) degrades to "no
+        # accounts" rather than raising.
+        account_nodes = list(accounts.values()) if isinstance(accounts, dict) else []
+        nodes = [(c, channel_dm)]
+        for a in account_nodes:
+            if isinstance(a, dict):
+                nodes.append((a, a.get("dmPolicy") if "dmPolicy" in a else channel_dm))
+        for _node, effective_dm in nodes:
+            if effective_dm is None:
                 out.append(name)
                 break
     return out

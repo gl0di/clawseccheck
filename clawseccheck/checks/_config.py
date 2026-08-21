@@ -68,6 +68,7 @@ from ._shared import (
     _plugins,
     _profile_is_powerful,
     _resolved_channel_nodes,
+    _resolved_default_input_channels,
     _secret_paths,
     _surface_absent,
     _trifecta_legs,
@@ -483,16 +484,36 @@ def _capabilities_attested(ctx: Context) -> bool:
     return bool(_attest.attested_agents(getattr(ctx, "attestation", {}) or {}))
 
 
-def _distance_note(active: list) -> str:
+def _distance_note(active: list, *, ingress_resolved_by_default: bool = False) -> str:
     """F-036: when exactly 2 of 3 legs are active, return a sentence naming the single
     missing leg and the concrete config toggle that would complete 3/3. Returns '' for
-    any other count, so it is a no-op for already-3/3 (FAIL) and for <2/3."""
+    any other count, so it is a no-op for already-3/3 (FAIL) and for <2/3.
+
+    B-499: *ingress_resolved_by_default* says the untrusted-input leg is not cleanly
+    missing — no channel DECLARED an ingress policy, but OpenClaw resolves the absent
+    ``dmPolicy`` to "pairing", so at runtime that leg may already be live. Without this,
+    the two sentences contradicted each other inside one paragraph: this note told the
+    reader to "avoid enabling a non-owner channel" immediately before
+    ``_resolved_default_note`` reported that a channel is already running on "pairing" —
+    advice to avoid a state the same paragraph says is in force. The imperative is
+    dropped in that case and the consequence kept, because the consequence is still true
+    and is the part the reader needs."""
     if len(active) != 2:
         return ""
     missing = next(k for k in _LEG_KEYS if k not in active)
-    return (
+    lead = (
         f" Two of three lethal-trifecta legs are active ({active[0]} and {active[1]});"
-        f" the missing leg is '{missing}'. Avoid enabling"
+        f" the missing leg is '{missing}'."
+    )
+    if ingress_resolved_by_default and missing == "untrusted input":
+        return (
+            lead + " No channel declares an ingress policy, so this leg is undeclared"
+            " rather than closed — see the resolved-default note below. If it is live at"
+            " runtime this is already 3/3: one injected prompt is enough to exfiltrate"
+            " everything."
+        )
+    return (
+        lead + f" Avoid enabling"
         f" {_MISSING_LEG_ACTIVATORS[missing]}, which would complete 3/3 — if a third leg"
         f" activates it becomes immediately exploitable: one injected prompt is enough"
         f" to exfiltrate everything."
@@ -510,6 +531,24 @@ def _mcp_leg_note(ctx: Context) -> str:
     if not reasons:
         return ""
     return " MCP-granted capability: " + "; ".join(reasons) + "."
+
+
+def _resolved_default_note(ctx: Context) -> str:
+    """B-499: name the channels whose dmPolicy is absent, and say plainly that the
+    resolved default is NOT counted as a leg.
+
+    Without this the reader cannot tell a config that restricts ingress from one that
+    simply never wrote the field — the two look identical in A1's output, while OpenClaw
+    runs the second one on "pairing". Disclosing the reading is what the leg count
+    deliberately does not do; see _resolved_default_input_channels."""
+    names = _resolved_default_input_channels(ctx.config)
+    if not names:
+        return ""
+    return (
+        f" Resolved default: {', '.join(sorted(names))} set no dmPolicy, so OpenClaw"
+        ' runs them on its default "pairing" — a sender it has approved once can send'
+        " again. Not counted as a leg above, because the config never asked for it."
+    )
 
 
 def _meaningful_tool_surface(ctx: Context) -> bool:
@@ -2748,9 +2787,11 @@ def check_trifecta(ctx: Context) -> Finding:
             " sensitive data, and can act outbound; one injected prompt is enough to"
             " exfiltrate everything."
         )
-    detail += _distance_note(active)
+    resolved_default = _resolved_default_input_channels(ctx.config)
+    detail += _distance_note(active, ingress_resolved_by_default=bool(resolved_default))
     detail += _mcp_leg_note(ctx)
     detail += _multi_agent_note(ctx)
+    detail += _resolved_default_note(ctx)
 
     if len(active) >= 3:
         return _finding(
@@ -2784,6 +2825,26 @@ def check_trifecta(ctx: Context) -> Finding:
             ),
             "Run `clawseccheck --ask` to generate an attestation template, then re-run"
             " with `--attest <file>` so these legs resolve — or treat as possible 3/3.",
+            evidence=active,
+        )
+
+    # B-499: a config that never wrote dmPolicy is not the same as one that restricted
+    # ingress, but A1 reported them identically. Mirrors the runtime_unknown guard just
+    # above — same shape, same reason: do not hand back a confident PASS for a posture the
+    # config never actually stated. Deliberately WARN and not a leg: promoting a resolved
+    # default to a full leg would move `active`, which is the one thing this change
+    # forbids (measured: 0 A1 FAIL flips across 535 findings, 6 fixtures PASS->WARN).
+    # `active` and `evidence` are untouched, so the leg count a reader sees is unchanged.
+    if resolved_default:
+        return _finding(
+            "A1",
+            WARN,
+            detail,
+            'Set `dmPolicy: "disabled"` on those channels to close DM ingress. Leaving it'
+            ' unset is not a restriction — OpenClaw resolves it to "pairing". Do not invent'
+            " a value: `DmPolicySchema` accepts only open / pairing / allowlist / disabled"
+            " (Feishu and Lark accept the first three only, so they have no closed"
+            " setting), and the first three all admit a non-owner sender.",
             evidence=active,
         )
 
