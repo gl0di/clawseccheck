@@ -586,6 +586,14 @@ need it.
 
 This is the one place a fence belongs: the menu (Step 1) and Sections 5-6 stay ordinary text.
 
+**And if you write your own summary anyway, there is a floor.** Measured across six live
+sessions, an ordinary host model relays the whole card roughly never — so the CLI also names,
+on stderr, the minimum that must appear in your reply exactly as printed: the card's headline
+line, plus its `No grade yet — N of 5 layers did not run` line whenever the run is ungraded.
+That is a floor under the card, never a substitute for it — the card is still what you paste.
+Dropping the second line on an ungraded run is the one variation that is never acceptable: it
+would let a partial check reach the user looking like a whole one.
+
 It emits, in this fixed order (F-153):
 
 - **Section 1 — Headline card**, in one of two shapes depending on whether all five layers ran:

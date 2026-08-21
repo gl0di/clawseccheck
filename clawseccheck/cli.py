@@ -151,6 +151,33 @@ _EMIT_TEE: list[str] | None = None
 _RELAYABLE_CARD_CHARS = 8000
 
 
+def _relay_floor(card: str, graded: bool) -> tuple:
+    """B-605: the smallest part of the card a summarising host must still carry.
+
+    Six live runs established that telling the model to relay the whole card does not
+    work -- first line of its own output, imperative, naming the exact action, and the
+    relay rate stayed ~0. So this stops asking for the big action and asks for a trivial
+    one: an ordinary host WILL write its own summary, and one line survives any
+    summarising strategy in a way twenty-five do not. The floor turns the worst case from
+    "no brand, no verdict, no tool name" into "brand and verdict, plus the model's prose".
+
+    Taken FROM the rendered card, never re-composed. A second renderer for the same
+    headline is how a document comes to disagree with its code one release later -- the
+    defect B-596 was filed for. It also inherits `--ascii` folding for free, so no second
+    folding site appears (B-483).
+
+    One line when graded: line 1 already carries mascot, wordmark, grade and score. TWO
+    when not, because line 2 is where "No grade yet -- N of 5 layers did not run" lives,
+    and a floor that carried the brand while dropping the incompleteness would let a
+    partial check reach the user looking like a whole one. That is the precise thing
+    E-077 exists to prevent, so the honest minimum is two lines there, not one.
+    """
+    lines = [ln for ln in card.splitlines() if ln.strip()]
+    if not lines:
+        return ()
+    return (lines[0],) if graded else tuple(lines[:2])
+
+
 def _emit(text: str) -> None:
     """Print, falling back to ASCII-safe bytes if the console can't encode it."""
     if _EMIT_TEE is not None:
@@ -3342,7 +3369,7 @@ def _main(argv=None) -> int:
               "      Do not re-render the PDF's contents into the chat.",
               file=sys.stderr)
 
-    def _emit_paste_instruction(pdf_path=None, card_chars=0):
+    def _emit_paste_instruction(pdf_path=None, card_chars=0, floor=()):
         """B-605: tell the agent HOW to relay the card, in the buffer that carries it.
 
         `SKILL.md` states the contract as emphatically as prose can -- "Do not compose the
@@ -3427,6 +3454,18 @@ def _main(argv=None) -> int:
             lines.append(
                 "      The card is not the PDF's contents \u2014 paste the card AND attach "
                 "the PDF; they are different artifacts.")
+        if floor:
+            plural = len(floor) > 1
+            these = "these lines" if plural else "this line"
+            they = "They are" if plural else "It is"
+            lines.append(
+                f"      If you relay nothing else \u2014 even if you write your own summary "
+                f"instead \u2014 {these} must")
+            lines.append(
+                f"      appear in your reply exactly as printed. {they} the floor under "
+                "the card, never a")
+            lines.append("      substitute for it:")
+            lines.extend("        " + ln for ln in floor)
         print("\n".join(lines), file=sys.stderr)
     # C-374: under `--dashboard --full` the PDF must also carry the pipeline blocks, and
     # those phases are computed further down (in the dashboard branch). Defer the write
@@ -3599,7 +3638,8 @@ def _main(argv=None) -> int:
             # `_emit_paste_instruction`'s docstring for the measured byte offsets.
             _card = render_dashboard(findings, score, ascii_only=ascii_only, ctx=ctx,
                                      pdf_path=pdf_written)
-            _emit_paste_instruction(pdf_written, len(_card))
+            _emit_paste_instruction(pdf_written, len(_card),
+                                    _relay_floor(_card, score.graded))
             _emit(_card)
             _emit_attach_instruction(pdf_written)
             _record_history_point(score, args, _live_signal)
@@ -3702,7 +3742,8 @@ def _main(argv=None) -> int:
             risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
             adjudication=adjudication_phase, compact=args.compact,
             pdf_path=pdf_written)
-        _emit_paste_instruction(pdf_written, len(_card))
+        _emit_paste_instruction(pdf_written, len(_card),
+                                _relay_floor(_card, score.graded))
         _emit(_card)
         _emit_attach_instruction(pdf_written)
         # B-598: `score` here is the phase-aware, possibly-GRADED one from
@@ -3722,7 +3763,10 @@ def _main(argv=None) -> int:
 
     if _mode == "dashboard_findings":
         # Same contract as the full card: SKILL.md Step 3 pastes this block verbatim, so
-        # it carries the same relay instruction. No PDF is written on this path.
+        # it carries the same relay instruction. No PDF is written on this path, and no
+        # relay floor either: this render starts at a family frame, not the headline, so
+        # there is no brand-and-verdict line to fall back to. Passing its first line as a
+        # "floor" would guarantee the user a box-drawing character and nothing else.
         _card = render_dashboard_findings(findings, ascii_only=ascii_only)
         _emit_paste_instruction(card_chars=len(_card))
         _emit(_card)

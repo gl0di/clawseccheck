@@ -164,6 +164,86 @@ def test_the_size_clause_is_silent_on_the_shapes_that_work(tmp_path):
     assert "cannot carry in one message" not in compact, compact[:400]
 
 
+# ---------------------------------------- the floor a summarising host must still carry
+
+def test_a_graded_card_names_a_one_line_floor(tmp_path):
+    """Six live runs established that asking for the whole card does not work -- first line
+    of the tool's own output, imperative, naming the action, relay rate ~0. So the note also
+    names the minimum: one line an ordinary host keeps even while writing its own summary."""
+    att = tmp_path / "a.json"
+    att.write_text('{"schema":"clawseccheck-attest/1","tools":["exec_command"],'
+                   '"proven_tools":[],"approval_gates":{"exec":"auto","send":"auto",'
+                   '"write":"auto"},"approval_bypass_actors":[],'
+                   '"untrusted_to_action":"ungated","host_monitors":[],'
+                   '"paths":{"bootstrap":[],"openclaw_install":"/x"},"agents":[],'
+                   '"delegation":[],"notes":"t"}', encoding="utf-8")
+    bun = tmp_path / "b.json"
+    bun.write_text('{"judged":{"verdicts":[]},"liveTest":{"seed":"s","verdicts":'
+                   '[{"tool":"canary","id":"canary","verdict":"RESISTANT"}]}}', encoding="utf-8")
+    proc = _run(tmp_path, "--dashboard", "--full", "--attest", str(att),
+                "--judged-bundle", str(bun), "--pdf", str(tmp_path / "f.pdf"), store="fl1")
+    err = proc.stderr
+    assert "floor under the card" in err, err[:700]
+    quoted = [ln.strip() for ln in err.splitlines() if ln.startswith("        ")]
+    assert len(quoted) == 1, quoted
+    assert "ClawSecCheck" in quoted[0] and "Grade" in quoted[0]
+
+
+def test_an_ungraded_card_keeps_the_no_grade_line_in_the_floor(tmp_path):
+    """TWO lines when ungraded, and this is the assertion that makes the floor honest. Line
+    2 is where "No grade yet -- N of 5 layers did not run" lives; a floor carrying the brand
+    while dropping the incompleteness would let a partial check reach the user looking whole,
+    which is the precise thing E-077 exists to prevent."""
+    err = _run(tmp_path, "--dashboard", store="fl2").stderr
+    quoted = [ln.strip() for ln in err.splitlines() if ln.startswith("        ")]
+    assert len(quoted) == 2, quoted
+    assert "ClawSecCheck" in quoted[0]
+    assert "No grade yet" in quoted[1], quoted[1]
+
+
+def test_the_floor_is_taken_from_the_card_not_recomposed(tmp_path):
+    """A second renderer for the same headline is how a document comes to disagree with its
+    code one release later -- the defect B-596 was filed for. Asserted structurally: every
+    floor line must appear verbatim in the card the same run printed."""
+    proc = _run(tmp_path, "--dashboard", store="fl3")
+    quoted = [ln.strip() for ln in proc.stderr.splitlines() if ln.startswith("        ")]
+    assert quoted
+    card_lines = {ln.strip() for ln in proc.stdout.splitlines()}
+    for q in quoted:
+        assert q in card_lines, f"floor line not found in the card: {q[:80]}"
+
+
+def test_the_floor_folds_with_ascii(tmp_path):
+    """Taking it from the rendered card means `--ascii` is inherited rather than re-derived,
+    so no second folding table appears (B-483 found seven folding sites and three divergent
+    tables; a floor that folded on its own would be an eighth)."""
+    proc = _run(tmp_path, "--dashboard", "--ascii", store="fl4")
+    quoted = [ln.strip() for ln in proc.stderr.splitlines() if ln.startswith("        ")]
+    assert quoted
+    assert "\U0001f99e" not in "".join(quoted)
+    card_lines = {ln.strip() for ln in proc.stdout.splitlines()}
+    for q in quoted:
+        assert q in card_lines
+
+
+def test_the_floor_is_framed_as_a_minimum_not_an_alternative(tmp_path):
+    """The wording risk this clause carries: "include this line" can read as permission to
+    summarise, which would weaken the paste instruction it sits under. It has to say floor,
+    not option."""
+    err = _run(tmp_path, "--dashboard", store="fl5").stderr
+    assert "never a" in err and "substitute for it" in err
+    assert err.index("paste it into your reply verbatim") < err.index("floor under the card")
+
+
+def test_dashboard_findings_gets_no_floor(tmp_path):
+    """That render starts at a family frame, not the headline -- it has no brand-and-verdict
+    line to fall back to. Passing its first line as a "floor" would guarantee the user a
+    box-drawing character and nothing else."""
+    err = _run(tmp_path, "--dashboard-findings", store="fl6").stderr
+    assert MARKER in err
+    assert "floor under the card" not in err, err[:500]
+
+
 # ------------------------------------------- the agent's channel is not the user's channel
 
 def test_the_instruction_never_reaches_stdout(tmp_path):
