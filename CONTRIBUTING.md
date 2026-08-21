@@ -51,6 +51,22 @@ python3 scripts/monitor_fp_gate.py check   # after a --monitor change
   a recorded baseline. A FAIL that is new is a hard blocker until diagnosed,
   whatever a benchmark number did. Run it for any change to a check, and
   re-record on a version bump.
+
+  When a new FAIL turns out to be a **true** positive you cannot remove — your
+  machine really is in that state — record why, rather than absorbing it:
+
+  ```bash
+  python3 scripts/fleet_fp_gate.py acknowledge --id B181 --scope audit \
+      --note "why this is expected on this machine"
+  ```
+
+  That entry stops the FAIL blocking and makes every later `compare` print it
+  back with its reason. Use it instead of `record`, which absorbs the entire
+  current FAIL set at once and leaves no trace of which entries you actually
+  investigated. `acknowledge` refuses unless the FAIL is live in a fresh scan, a
+  blank `--note` is rejected, and the entry is scoped to one check on one target —
+  acknowledging `B181` for your own skill does not acknowledge it for someone
+  else's.
 - **`monitor_fp_gate.py`** takes two snapshots of an unchanged home and asserts
   the diff raises no alert — anything it reports is a false positive by
   construction, because nothing moved between them. Run it for any change to
