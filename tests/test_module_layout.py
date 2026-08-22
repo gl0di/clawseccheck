@@ -187,11 +187,13 @@ _EXEMPT = {
     "catalog.py": "~3,404 lines — the CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~4,415 lines — the read-only collection layer (config / bootstrap / skill "
+    "collector.py": "~4,999 lines — the read-only collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
-                    "+ .pyc/.wasm sniffing); a finer split (byte-format sniffing -> a leaf "
-                    "module) is a later cycle.",
+                    "+ .pyc/.wasm sniffing), and grew again with B-610 (deriving the workspace "
+                    "directories OpenClaw builds from an agent id, instead of hardcoding three "
+                    "names). A finer split (byte-format sniffing -> a leaf module; the "
+                    "workspace/agent-id resolution -> another) is a later cycle.",
     "cli.py": "~4,329 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -203,6 +204,135 @@ def _root_identity(home: Path, root: Path) -> str:
         return "x" + hashlib.sha256(str(root).encode("utf-8", "replace")).hexdigest()[:16]
 
 
+# OpenClaw's `DEFAULT_AGENT_ID`, and its `normalizeAgentId` / `resolveDefaultAgentId` /
+# `resolveAgentWorkspaceDir` rules. Duplicated from `collector.py` rather than imported, for
+# the same reason `WORKSPACE_DIRS` is: this module is a LEAF and importing the collector would
+# invert the layering. `tests/test_b610_derived_agent_workspaces.py` pins the two derivations equal on
+# a battery of configs, not just the constant — a duplicated *rule* rots more quietly than a
+# duplicated list.
+DEFAULT_AGENT_ID = "main"
+
+
+# Spelled with BOTH cases instead of `re.IGNORECASE`, deliberately. JS's `/i` without
+# the `u` flag does not case-fold non-ASCII, while Python's IGNORECASE does — so
+# `re.IGNORECASE` accepted U+0130 `İ`, U+0131 `ı` and U+017F `ſ` as valid ASCII
+# letters and returned them unsanitised. Measured against the real dist function over a
+# 65,504-codepoint BMP sweep: those three were the ONLY divergences, and an id like
+# `İstanbul` is a perfectly ordinary Turkish agent name whose workspace we would then
+# have kept looking for in the wrong directory.
+_JS_TRIM_CHARS = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007"
+    "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+_VALID_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_INVALID_AGENT_ID_CHARS_RE = re.compile(r"[^a-z0-9_-]+")
+
+
+def _normalize_agent_id(value) -> str:
+    """OpenClaw's `normalizeAgentId`, transcribed from the copy the workspace resolver binds.
+
+    ```js
+    /** Normalize user or config agent ids to the filesystem-safe canonical form. */
+    function normalizeAgentId(value) {
+        const trimmed = (value ?? "").trim();
+        if (!trimmed) return DEFAULT_AGENT_ID;
+        const normalized = normalizeLowercaseStringOrEmpty(trimmed);
+        if (VALID_ID_RE.test(trimmed)) return normalized;
+        return normalized.replace(INVALID_CHARS_RE, "-").replace(LEADING_DASH_RE, "")
+                         .replace(TRAILING_DASH_RE, "").slice(0, 64) || DEFAULT_AGENT_ID;
+    }
+    ```
+
+    with `VALID_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i` and `INVALID_CHARS_RE = /[^a-z0-9_-]+/g`.
+
+    **There are SIX copies of this function in the dist and they do not agree.** Two
+    (`monitor.account-*.js`, `telegram-ingress-spool-*.js`) are a bare
+    `trim().toLowerCase() || DEFAULT_AGENT_ID`; the other four sanitise. The first version of
+    this port transcribed a bare one — found by grepping for the first definition rather than
+    by following what the caller binds — and asserted in its own docstring that the product
+    "does not sanitise the value as a path segment". The opposite is true, and the function's
+    own comment says so. The copy that matters is the one in the same module as
+    `resolveAgentWorkspaceDir` (`config-utils-*.js`), which is the sanitising one.
+
+    Getting this wrong left the hole open for ordinary ids: `Work Laptop` becomes
+    `work-laptop`, so OpenClaw uses `workspace-work-laptop` while we derived
+    `workspace-work laptop` and read nothing. Measured end to end — `installed_skills == {}`
+    against a control of `{'evil': ...}`. It also closed a hazard by accident: a sanitised id
+    can no longer contain a path separator, so a derived root cannot escape the state dir
+    through the id at all.
+
+    Note `VALID_ID_RE` is tested against the TRIMMED original (case-insensitively) while the
+    value returned is the lowercased one — an id that is already valid is never sliced.
+    """
+    # `String.trim()`, not `str.strip()`: Python strips \x1c-\x1f and \x85 which JS keeps,
+    # and keeps \ufeff which JS strips. Only observable when the difference exposes an
+    # outer dash to VALID_ID_RE, but "only observable sometimes" is how a transcription
+    # bug hides.
+    trimmed = (value if isinstance(value, str) else "").strip(_JS_TRIM_CHARS)
+    if not trimmed:
+        return DEFAULT_AGENT_ID
+    normalized = trimmed.lower()
+    if _VALID_AGENT_ID_RE.match(trimmed):
+        return normalized
+    normalized = _INVALID_AGENT_ID_CHARS_RE.sub("-", normalized)
+    return normalized.strip("-")[:64] or DEFAULT_AGENT_ID
+
+
+def _default_agent_id(agents_list) -> str:
+    """The entry flagged `default`, else the FIRST entry, else `main`.
+
+    The "else the first entry" half matters: with one entry in `agents.list`, that entry IS
+    the default agent and its workspace is the plain `workspace` directory, so nothing is
+    derived for it at all.
+    """
+    chosen = None
+    for entry in agents_list:
+        if isinstance(entry, dict) and entry.get("default"):
+            chosen = entry
+            break
+    if chosen is None and agents_list:
+        # `agents[0]` unconditionally, NOT the first dict. A truthy non-object entry survives
+        # JS's own `listAgentEntries` filter (it drops only falsy ones), and `"junk"?.id` is
+        # `undefined`, which normalises to the default id. Skipping to the first dict picked a
+        # different default agent than the product does, and therefore derived a different set
+        # of workspaces.
+        chosen = agents_list[0]
+    return _normalize_agent_id(chosen.get("id") if isinstance(chosen, dict) else None)
+
+
+def _derived_agent_workspaces(config: dict) -> "list[str]":
+    """Workspaces OpenClaw derives for agents that declare no `workspace` of their own (B-610).
+
+    Rules 3 and 4 of `resolveAgentWorkspaceDir`: ``join(agents.defaults.workspace, id)`` when
+    that default is set, else ``workspace-<id>`` under the state dir. Neither was constructed
+    before, so a non-default agent's install records were not read at all.
+    """
+    agents = config.get("agents")
+    if not isinstance(agents, dict):
+        return []
+    listed = agents.get("list")
+    if not isinstance(listed, list) or not listed:
+        return []
+    defaults = agents.get("defaults")
+    fallback = ""
+    if isinstance(defaults, dict) and isinstance(defaults.get("workspace"), str):
+        fallback = defaults["workspace"].strip()
+    default_id = _default_agent_id(listed)
+    out: list[str] = []
+    for entry in listed:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        own = entry.get("workspace")
+        if isinstance(own, str) and own.strip():
+            continue
+        agent_id = _normalize_agent_id(entry.get("id"))
+        if agent_id == default_id:
+            continue
+        out.append(str(Path(fallback) / agent_id) if fallback else f"workspace-{agent_id}")
+    return out
+
+
 def workspace_roots(home: Path, config: "dict | None" = None) -> "list[Path]":
     """Every workspace directory to look in, deduplicated, existing ones only.
 
@@ -225,6 +355,8 @@ def workspace_roots(home: Path, config: "dict | None" = None) -> "list[Path]":
                 for entry in listed:
                     if isinstance(entry, dict) and isinstance(entry.get("workspace"), str):
                         extra.append(Path(entry["workspace"]).expanduser())
+        # B-610: the two rules OpenClaw applies to an agent with no explicit workspace.
+        extra.extend(Path(w).expanduser() for w in _derived_agent_workspaces(config))
     # A RELATIVE workspace string is resolved against *home*, never against the process's
     # working directory — matching `collector._config_workspace_dirs` (B-161), which is the
     # established precedent for exactly this key and says so in its own docstring. The first

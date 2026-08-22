@@ -722,7 +722,24 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   `agents.list[].workspace` override) is followed even when it resolves OUTSIDE the `--home`
   directory you pointed ClawSecCheck at — by design (OpenClaw's own loader has no home-check, so
   rejecting it would be a false-negative skip, not a safety win). A test/staging `--home` can
-  therefore still read your real workspace if the config says so.
+  therefore still read your real workspace if the config says so. The same applies to a *derived*
+  workspace built on `agents.defaults.workspace` — it inherits that path and escapes with it.
+  Only the `workspace-<agent id>` form is confined to the state dir, because the id itself is
+  canonicalised to a filesystem-safe form and cannot carry a path separator.
+- **Which workspaces are scanned.** OpenClaw gives every configured agent its own workspace, and
+  works out where it is by four rules: the agent's own `workspace`; for the default agent,
+  `agents.defaults.workspace` or the plain `workspace` directory; otherwise
+  `<agents.defaults.workspace>/<agent id>`; otherwise `workspace-<agent id>` under the state dir.
+  ClawSecCheck follows all four, plus the three names OpenClaw's own documentation uses in its
+  worked multi-agent example (`workspace`, `workspace-home`, `workspace-work`) so that a run
+  which cannot read your config still scans something rather than nothing. Agent ids are
+  canonicalised the way OpenClaw canonicalises them — lowercased, invalid characters collapsed
+  to `-`, capped at 64 characters — so an agent called `Work Laptop` is looked for in
+  `workspace-work-laptop`, which is where OpenClaw puts it. **The default agent is the one flagged `default`, or else the
+  FIRST entry in `agents.list`** — so a config with a single agent has no derived workspace at
+  all. One case is deliberately not covered: `OPENCLAW_PROFILE` moves the default agent's
+  workspace to `workspace-<profile>`, and the environment an agent runs under cannot be read from
+  a config file. If you use a profile, pass that workspace explicitly.
 - **`--monitor` writes THREE files — use `--data-dir DIR` to isolate a run.** `--state` and
   `--events` alone do not: `--history` defaults independently to
   `~/.clawseccheck/history.jsonl`, so redirecting only the first two leaves a sandboxed or CI

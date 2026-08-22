@@ -349,7 +349,15 @@ of compromise, until corroborated another way.
 **`--home` is not hermetic.** OpenClaw's own config loader applies no home-check to
 `agents.defaults.workspace` (or a per-agent `agents.list[].workspace` override), so an
 absolute path there is followed even when it resolves OUTSIDE the `--home` directory named
-on the command line — by design (rejecting it would be a false-negative skip, not a safety
+on the command line. The workspaces ClawSecCheck **derives** rather than
+reads split on this, and the split is worth stating exactly. A `workspace-<agent id>` under the
+state dir is confined: the id goes through `normalizeAgentId`, which the product's own comment
+calls "the filesystem-safe canonical form" (invalid characters collapse to `-`, capped at 64),
+so that name can never contain a path separator. A `<agents.defaults.workspace>/<agent id>`
+is **not** confined — it inherits whatever that value says, so it points outside `--home`
+exactly as often as the value it is built from does. Measured: with
+`agents.defaults.workspace: "../../../../etc"`, a non-default agent's derived root resolves to
+`/etc/<id>`, and is scanned and disclosed like any other out-of-scope workspace — by design (rejecting it would be a false-negative skip, not a safety
 win; see `collector._config_workspace_dirs`). A test/staging `--home` can therefore still
 read the real workspace if the config says so — `--home` scopes where ClawSecCheck STARTS
 looking, not a sandbox boundary it enforces.
