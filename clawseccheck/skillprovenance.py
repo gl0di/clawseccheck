@@ -19,11 +19,20 @@ series: `installedVersion` moving, `installedAt` moving, `artifact.sha256` chang
 how an update is *detected* — the tier of the pre-update story that works with no
 cooperation from the user, because it needs nothing but the next scheduled run.
 
-**Why both files, when they agree.** Measured on the real machine they agree exactly —
-`3.61.0`, the same `installedAt`, the same two digests. That is the expected state, and it
-is precisely what makes a DISAGREEMENT worth recording: the two are written by the same
-installer at the same moment, so one of them moving alone is not something an ordinary
-update produces. Same reasoning as F-170's config journal — a second witness earns its keep
+**Why both files, when a second one is there at all.** `origin.json` is a real and
+documented artifact — `openclaw skills verify` reads it to check an installed version against
+the registry it came from — but the docs describe it as present only "when origin metadata
+exists", and it is **optional**. Measured on this machine, 2026-08-22: the workspace lock
+holds 19 skills, exactly one of them has a `skills/<name>/` directory at all, and **zero**
+`origin.json` files exist anywhere under `~/.openclaw`. So `_corroborate` returns None for
+every skill here and there is no second witness to disagree with.
+
+An earlier version of this paragraph claimed the two files had been "measured on the real
+machine" agreeing exactly, version and both digests. That is not the state of this machine and
+the sentence is not repeated. The field stays, because when the file IS there the reasoning
+holds — the two are written by the same installer at the same moment, so one of them moving
+alone is not something an ordinary update produces — and because `corroborated` is already
+three-state, so "no second witness" and "the witnesses disagree" never collapse into one. Same reasoning as F-170's config journal — a second witness earns its keep
 by agreeing until it does not. The corroboration is recorded as a flag, never as a verdict:
 this module says the two sources differ, and nothing about why.
 
@@ -31,8 +40,12 @@ this module says the two sources differ, and nothing about why.
 the snapshot and the on-disk location does not, because a drift baseline reaches the event
 journal and any report a user pastes into an issue. That holds for `winner_root` too — it
 identifies WHICH root's record won, so a later run can tell "the same record" from "a
-different one", and it does so through `_root_identity`, which names roots under *home* by
-OpenClaw's own fixed directory names and reduces anything else to a digest.
+different one", and it does so through `_root_identity`, which returns a literal name for the
+three `WORKSPACE_DIRS` constants and a digest for everything else — **including anything else
+under home**. The earlier rule was "literal for anything under home, digest otherwise", on the
+reasoning that a path under home is one of OpenClaw's own fixed names. It is not: a
+config-declared `~/.openclaw/client-acme-private`, and every `workspace-<agent id>` B-610
+made a scan target, are user-chosen.
 """
 from __future__ import annotations
 
@@ -191,17 +204,58 @@ def _int_or_zero(value) -> int:
 def _root_identity(home: Path, root: Path) -> str:
     """A stable, location-free name for one workspace root.
 
-    Roots under *home* are named by their relative path — those are OpenClaw's own fixed
-    directory names (`workspace`, `workspace-home`, …), already public constants in this
-    module, and they carry nothing personal. A root declared elsewhere in the config is
-    reduced to a short digest instead of its path, because the identity list below feeds a
-    field that reaches the drift baseline, the event journal and any report a user pastes
-    into an issue — and an install location does not belong in any of them.
+    "Location-free" is meant literally, and the first version was not. It returned the raw
+    relative path for ANY root under *home*, on the reasoning that those "are OpenClaw's own
+    fixed directory names, already public constants in this module, and they carry nothing
+    personal". That is true of the three `WORKSPACE_DIRS` entries and of nothing else — a
+    config-declared `~/.openclaw/client-acme-private` put its user-chosen directory name into
+    `winner_root`, which reaches the drift baseline, the event journal, and any report a user
+    pastes into an issue. So the literal form is now allowed only for the names that really
+    are public constants; everything else is digested, inside home or not.
+
+    **Resolved first.** `workspace_roots` de-duplicates on the resolved path — its comment
+    explains why: "a config workspace that is a symlink to a default one is the same
+    directory" — while this digested the unresolved string, so the same directory reached
+    through a symlink produced two identities. `_prov_comparable` keys its stand-down on this
+    field, so that disagreement manufactured the disclosed-but-blind state out of an edit that
+    changed nothing real. Reproduce it by digesting a directory and a symlink to it: before the
+    fix the two strings differed, because only one of them had been through `resolve()`. The
+    specific hex is deliberately not quoted — it is a digest of an absolute path and no later
+    reader could re-derive it.
+
+    The digest is per-machine by construction (it is taken over an absolute path) and needs to
+    be nothing more: it is only ever compared against the same machine's previous run. It hides
+    the name, not the directory: against a guessed candidate it is a confirmation oracle, since
+    the input space is small. That is enough for the property claimed here — the string carries
+    no location — and is not claimed to be more.
+
+    **The migration cost, stated as what it is.** Changing this changes `winner_root`, which
+    `_prov_comparable` keys its stand-down on. Non-ambiguous records never reach that
+    comparison and the three literals do not move, so the only affected shape is an ambiguous
+    record whose winner is a config-declared root. For that shape the first run after the
+    change stands down — and a stand-down is **not a deferred alert**: the arm `continue`s past
+    all three alert branches, and by the next run the baseline already holds the new record, so
+    a content swap landing inside that window is never reported at all. `monitor.py` spells the
+    same shape out for the case it was written for. The window is one run, except after a
+    BLIND run, which carries the legacy value forward through `_degrade_snapshot`'s merge, so
+    it lasts until the first sighted run that sees the root again.
+
+    A one-time migration — accepting a baseline's legacy literal as matching its digest — was
+    considered and not done here: the obvious encoding of it puts the raw name back into the
+    record this change exists to keep it out of. Left as a decision rather than a silent
+    trade-off.
     """
     try:
-        return root.resolve().relative_to(home.resolve()).as_posix() or "."
+        resolved = root.resolve()
     except (OSError, ValueError, RuntimeError):
-        return "x" + hashlib.sha256(str(root).encode("utf-8", "replace")).hexdigest()[:16]
+        resolved = root
+    try:
+        rel = resolved.relative_to(home.resolve()).as_posix()
+    except (OSError, ValueError, RuntimeError):
+        rel = ""
+    if rel in WORKSPACE_DIRS:
+        return rel
+    return "x" + hashlib.sha256(str(resolved).encode("utf-8", "replace")).hexdigest()[:16]
 
 
 # OpenClaw's `DEFAULT_AGENT_ID`, and its `normalizeAgentId` / `resolveDefaultAgentId` /
