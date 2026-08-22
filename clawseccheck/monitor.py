@@ -24,6 +24,14 @@ from .configjournal import find_by_hash as _journal_find_by_hash
 from .configjournal import newest_hash as _journal_newest_hash
 from .configjournal import read_writes as _journal_read
 from .logsafe import redact_urls_in_text, sanitize_url_host_only
+# B-541: the key vocabulary of the provenance dimension, imported rather than restated.
+# `skillprovenance` is a documented LEAF (it imports nothing from this package), so a
+# top-level import cannot create a cycle — and a second copy of a rule is exactly what
+# went wrong the last three times this area was repaired.
+from .skillprovenance import KEY_SEP as PROV_KEY_SEP
+from .skillprovenance import ROOT_MARK as PROV_ROOT_MARK
+from .skillprovenance import _is_record_key as _prov_is_record_key
+from .skillprovenance import _is_root_key as _prov_is_root_key
 # F-174: the ordering helper only — this module never LOCATES an install (that reads PATH
 # and belongs in the shell, like the behavioural layer), it only compares two recorded
 # versions. Same leaf-import shape as configjournal above.
@@ -2151,6 +2159,134 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     return snap
 
 
+def _prov_searched_roots(dim: dict) -> set:
+    """Which workspace roots a stored run looked in, from its per-root marker keys."""
+    return {k[len(PROV_ROOT_MARK):] for k in dim if _prov_is_root_key(k)}
+
+
+def _prov_legacy_names(dim: dict) -> set:
+    """The skill-name keys of the provenance dimension, without the B-541 additions.
+
+    `(root, skill)` entries and the `::roots` list share the map with them, so every arm that
+    used to treat "a key of this dimension" as "a skill" has to say which it means now. The
+    installed/removed arms did not, and reported the same skill once per workspace and a skill
+    called `::roots`.
+    """
+    names = {k for k in dim if not _prov_is_root_key(k)}
+    return {k for k in names if not _prov_is_record_key(k, names)}
+
+
+def _prov_compare_records(prev: dict, curr: dict, p_keys: set, c_keys: set,
+                          alerts: list, note, trust_removals: bool,
+                          prev_names: set) -> None:
+    """Compare every install record with ITSELF across runs (B-541).
+
+    The election this replaces asked "which of these records is the one the agent loads?" —
+    a question `skillprovenance.py`'s own comment said could not be answered, and which
+    grounding against the installed dist showed is the wrong question anyway: OpenClaw gives
+    each configured agent its own workspace, so two records under one skill name are two
+    agents that each have it installed, and BOTH are live.
+
+    Three previous repairs all kept the election and argued about *when* the elected record
+    may be compared — stand down on `ambiguous`, on the witness set, on the winner's identity.
+    Each was broken by the next adversarial pass, and the last one left the filed defect fully
+    open: a decoy that always wins is stable, so the guard never closes and the comparison runs
+    forever against the wrong record. There is nothing to stand down from here, because no
+    record's comparison depends on which one is authoritative.
+
+    A record that APPEARED in a root we searched last run and found nothing in is reported: that
+    is the planted-decoy shape, and it is why `roots_searched` lists every root considered
+    rather than every root that existed. A record that appeared in a root we had NOT searched
+    before is an ordinary config edit adding a workspace. A record that VANISHED is only
+    reported when this run actually looked in that root — "we looked and it is gone", never "we
+    stopped looking".
+    """
+    p_roots = _prov_searched_roots(prev)
+    c_roots = _prov_searched_roots(curr)
+    # How many roots hold each name THIS run, so the wording can stay truthful without naming
+    # a location: `_root_identity` deliberately does not publish one (B-611).
+    spread: dict = {}
+    for key in c_keys:
+        spread[key.split(PROV_KEY_SEP, 1)[1]] = spread.get(key.split(PROV_KEY_SEP, 1)[1], 0) + 1
+
+    appeared: list = []
+    vanished: list = []
+    unsearched: list = []
+    revealed: list = []
+    for key in sorted(p_keys | c_keys):
+        root, _, name = key.partition(PROV_KEY_SEP)
+        a, b = prev.get(key), curr.get(key)
+        if isinstance(a, dict) and isinstance(b, dict):
+            where = "" if spread.get(name, 1) < 2 else (
+                f" (that skill is installed in {spread[name]} of your agent workspaces; this "
+                f"is the one that moved)")
+            av, bv = a.get("version", ""), b.get("version", "")
+            ad, bd = a.get("artifact_sha256", ""), b.get("artifact_sha256", "")
+            if av and bv and av != bv:
+                alerts.append((
+                    "INFO",
+                    f"The skill '{name}' was updated, from {av} to {bv}{where}. Run "
+                    f"--vet-skill on it if you did not expect that."))
+            elif av and bv and av == bv and ad and bd and ad != bd:
+                alerts.append((
+                    "HIGH",
+                    f"The skill '{name}' was replaced with different content while its "
+                    f"version number stayed at {bv}{where}. A normal update moves both. Run "
+                    f"--vet-skill on it."))
+            if b.get("corroborated") is False and a.get("corroborated") is not False:
+                alerts.append((
+                    "MEDIUM",
+                    f"The two install records for the skill '{name}' no longer agree with "
+                    f"each other. They are written together by the installer, so one "
+                    f"changing alone is not something an ordinary update produces."))
+        elif isinstance(b, dict) and name in prev_names:
+            # ONLY for a name the user already had. The alert says "a second record under a
+            # name you already have", and the first version never checked that half — so an
+            # ordinary `clawhub install` of a brand-new skill was told, in a MEDIUM, that its
+            # arrival "is how an install is made to look unchanged". A false accusation on the
+            # most ordinary action there is, found by an independent pass and exactly the
+            # class Golden Rule #5 calls a hard blocker.
+            (appeared if root in p_roots else revealed).append(name)
+        elif isinstance(a, dict) and root not in c_roots:
+            # Aggregated, not one line per skill. A workspace leaving the config takes every
+            # record in it, and on a real setup that is a screen of identical sentences —
+            # which is how a disclosure becomes something the reader scrolls past.
+            unsearched.append(name)
+        elif isinstance(a, dict) and trust_removals:
+            vanished.append(name)
+
+    if appeared:
+        alerts.append((
+            "MEDIUM",
+            f"An install record for {len(appeared)} skill(s) appeared in a workspace that "
+            f"held none at the last check: {', '.join(sorted(set(appeared))[:5])}. A second "
+            f"record under a name you already have is how an install is made to look "
+            f"unchanged. Run --vet-skill on it."))
+    if revealed:
+        # A second record under a known name, in a root this run searched for the FIRST time.
+        # Adding an agent and installing the same skill for it looks exactly like this, and so
+        # does a plant that arrives with its own workspace. Undeterminable, so it is stated and
+        # not charged: the loud sentence stays on the case where the root was already watched.
+        note(NOTE_UNDETERMINED,
+             f"A second install record appeared for {len(set(revealed))} skill(s) you already "
+             f"have, in a workspace this check looked in for the first time: "
+             f"{', '.join(sorted(set(revealed))[:5])}. That is what adding an agent looks "
+             f"like, and also what a planted record looks like; this run cannot tell them "
+             f"apart.")
+    if unsearched:
+        _n = len(set(unsearched))
+        note(NOTE_UNDETERMINED,
+             f"The install records for {_n} skill(s) were not compared: this run did not look "
+             f"in the workspace that held them. That is what a workspace leaving your config "
+             f"looks like — it is not the same as a record being deleted, which this run "
+             f"cannot tell apart from it without looking.")
+    if vanished:
+        alerts.append((
+            "INFO",
+            f"The install record for {len(vanished)} skill(s) is gone from a workspace this "
+            f"run did look in: {', '.join(sorted(set(vanished))[:5])}."))
+
+
 def _prov_comparable(a: dict, b: dict) -> bool:
     """May these two install records for one skill be compared as the same subject?
 
@@ -2256,8 +2392,42 @@ def changed_skills(prev: "dict | None", curr: "dict | None") -> "list[str]":
         return []
     before, after = pair
     out: list[str] = []
+
+    # B-541: when both snapshots carry per-root records, THEY are the subject — a record is
+    # compared with itself and no election is involved, so the two exclusions built on
+    # `_prov_comparable` have nothing left to exclude. Two things this arm must get right and
+    # a naive port would not: the keys are `(root, skill)` and the caller re-vets NAMES, so
+    # they are stripped and de-duplicated; and a record appearing in a root that was NOT
+    # searched last run is a config edit revealing an existing install, not a new one, so it
+    # is not re-vetted merely for having become visible.
+    p_names, c_names = _prov_legacy_names(before), _prov_legacy_names(after)
+    p_rec = {k for k in before if _prov_is_record_key(k, p_names)}
+    c_rec = {k for k in after if _prov_is_record_key(k, c_names)}
+    if p_rec and c_rec:
+        p_roots = _prov_searched_roots(before)
+        seen: set = set()
+        for key in sorted(c_rec):
+            root, _, name = key.partition(PROV_KEY_SEP)
+            rec, old = after.get(key), before.get(key)
+            if not isinstance(rec, dict) or name in seen:
+                continue
+            if not isinstance(old, dict):
+                # A SECOND record under a name already present, in a root already watched.
+                # A brand-new skill is handled by the arm below, and re-vetting it merely for
+                # arriving in a workspace we already searched would re-vet every install.
+                if root in p_roots and name in p_names:
+                    seen.add(name)
+                    out.append(name)
+                continue
+            if (old.get("version"), old.get("artifact_sha256")) != (
+                    rec.get("version"), rec.get("artifact_sha256")):
+                seen.add(name)
+                out.append(name)
+        return out
+
     for name, rec in sorted(after.items()):
-        if not isinstance(rec, dict):
+        if (not isinstance(rec, dict) or _prov_is_record_key(name, c_names)
+                or _prov_is_root_key(name)):
             continue
         old = before.get(name)
         if not isinstance(old, dict):
@@ -3532,7 +3702,18 @@ def diff_with_notes(prev: dict | None, curr: dict
                  "them is damaged. Delete the monitor state file to start a fresh baseline.")
     if _prov is not None:
         _pp, _cp = _prov
-        for name in sorted(set(_cp) & set(_pp)):
+        # B-541: the dimension now carries a `(root, skill)` entry per record alongside the
+        # legacy name-keyed ones. When BOTH sides have them the per-root pass below is the
+        # verdict and this legacy pass is skipped entirely; on the transition run — a baseline
+        # written before this release — the legacy pass still runs, so nothing is lost and no
+        # user gets a one-run blind spot out of the schema move.
+        _p_names, _c_names = _prov_legacy_names(_pp), _prov_legacy_names(_cp)
+        _p_rec = {k for k in _pp if _prov_is_record_key(k, _p_names)}
+        _c_rec = {k for k in _cp if _prov_is_record_key(k, _c_names)}
+        _per_root = bool(_p_rec) and bool(_c_rec)
+        for name in sorted(_prov_legacy_names(_cp) & _prov_legacy_names(_pp)):
+            if _per_root:
+                break
             _a, _b = _pp.get(name), _cp.get(name)
             if not isinstance(_a, dict) or not isinstance(_b, dict):
                 continue
@@ -3583,18 +3764,23 @@ def diff_with_notes(prev: dict | None, curr: dict
                     f"The two install records for the skill '{name}' no longer agree with "
                     f"each other. They are written together by the installer, so one "
                     f"changing alone is not something an ordinary update produces."))
-        _new = sorted(set(_cp) - set(_pp))
+        # Names only. A `(root, skill)` key entering this arm would report the same skill as
+        # "installed" once per workspace, and `::roots` as a skill called `::roots`.
+        _new = sorted(_prov_legacy_names(_cp) - _prov_legacy_names(_pp))
         if _new:
             alerts.append((
                 "INFO",
                 f"{len(_new)} skill(s) were installed since the last check: "
                 f"{', '.join(_new[:5])}."))
-        _gone = sorted(set(_pp) - set(_cp))
+        _gone = sorted(_prov_legacy_names(_pp) - _prov_legacy_names(_cp))
         if _gone and trust_removals:
             alerts.append((
                 "INFO",
                 f"{len(_gone)} skill(s) are no longer in your install records: "
                 f"{', '.join(_gone[:5])}."))
+        if _per_root:
+            _prov_compare_records(_pp, _cp, _p_rec, _c_rec, alerts, note, trust_removals,
+                                  _p_names)
 
     # ---- F-170: OpenClaw's own config-write journal, as a second witness ---------------
     #

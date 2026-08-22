@@ -355,8 +355,13 @@ def test_adding_a_workspace_to_the_config_does_not_report_a_replaced_skill(tmp_p
                                     _snap(skill_provenance=with_cfg))
     assert alerts == [], f"a config edit produced {alerts}"
     assert not any("was updated, from" in m for _, m in alerts)
-    assert not any("clawseccheck" in m for _, m in notes), (
-        f"nothing was declined here — the winning record was compared: {notes}")
+    # B-541: "declined" is the thing to assert the absence of, not "mentioned". Nothing is
+    # stood down here — each record is compared with itself — and the alerts above stay empty,
+    # which is the property this test exists for. What DOES appear now is a different fact: a
+    # second record under a name already present showed up in a workspace this run looked in
+    # for the first time. Adding an agent looks exactly like that, and so does a plant that
+    # brings its own workspace; the note says both and charges neither.
+    assert not any("was not compared" in m and "clawseccheck" in m for _, m in notes), notes
 
 
 def test_the_first_run_after_this_release_does_not_tell_users_to_delete_anything():
@@ -514,7 +519,17 @@ def test_repro_2_two_workspaces_agreeing_on_the_lock_and_not_on_origin(tmp_path)
                                     _snap(skill_provenance=after))
     assert not any("no longer agree with each other" in m for _, m in alerts)
     assert alerts == []
-    assert any("more than one of your workspaces" in m.lower() for _, m in notes)
+    # B-541 note: this used to also require a stand-down note ("more than one of your
+    # workspaces … was not compared"). There is no stand-down left to assert — each record is
+    # now compared with ITSELF across runs, so adding a workspace does not make anything
+    # undeterminable. The property this test exists for is unchanged and is the line above:
+    # a config edit that brings a second, disagreeing record must not produce an accusation.
+    # It now holds because nothing was compared across two different records, rather than
+    # because a guard noticed in time and closed.
+    # Scoped to the skill: unrelated dimensions have their own "was not compared" notes
+    # (the score, the gateway address), and a bare substring match quietly asserts
+    # something about those instead.
+    assert not any("was not compared" in m and "clawseccheck" in m for _, m in notes)
 
 
 def test_a_stable_winner_still_gets_its_content_compared(tmp_path):
@@ -592,7 +607,7 @@ def test_a_losing_root_leaving_does_not_stop_the_comparison(tmp_path):
                           {"skill_provenance": after}) == ["clawseccheck"]
 
 
-def test_the_winner_genuinely_flipping_is_what_stands_the_comparison_down(tmp_path):
+def test_a_config_edit_that_adds_a_workspace_raises_no_alarm(tmp_path):
     """The other half of the predicate, built so the winner really does move.
 
     No default workspace directory exists here, so the only roots are the config-declared
@@ -617,10 +632,17 @@ def test_the_winner_genuinely_flipping_is_what_stands_the_comparison_down(tmp_pa
     alerts, notes = diff_with_notes(_snap(skill_provenance=before),
                                     _snap(skill_provenance=after))
     assert alerts == [], f"a config edit that flips the winner produced {alerts}"
-    mine = [m for c, m in notes if c == NOTE_UNDETERMINED and "clawseccheck" in m]
-    assert len(mine) == 1, notes
-    assert "was not compared" in mine[0]
-    assert "(2 records found)" in mine[0], "the count comes off whichever side saw them"
+    # B-541: "the winner flipped" is no longer a thing that can happen to a verdict, because
+    # no verdict rests on a winner. `zeta`'s record is compared with `zeta`'s record and has
+    # not moved; `alpha`'s is new, in a root this run searched for the first time, which is a
+    # config edit revealing an existing install rather than an install changing. So the false
+    # alarm this test guards against is still absent — and the stand-down it used to require
+    # is gone, along with the blindness that came with it. The test's own name now describes
+    # a mechanism that no longer exists; the behaviour it protects is asserted above.
+    # Scoped to the skill: unrelated dimensions have their own "was not compared" notes
+    # (the score, the gateway address), and a bare substring match quietly asserts
+    # something about those instead.
+    assert not any("was not compared" in m and "clawseccheck" in m for _, m in notes)
 
 
 def test_a_baseline_written_before_the_winner_field_stands_an_ambiguous_record_down():

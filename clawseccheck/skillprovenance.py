@@ -81,6 +81,57 @@ MAX_LOCK_BYTES = 4 * 1024 * 1024
 # the consumer renders a verdict on it, so including it would only widen the stand-down.
 CONFLICT_FIELDS = ("version", "artifact_sha256", "skill_file_sha256", "corroborated")
 
+# B-541: the dimension carries one entry per (skill, workspace root) alongside the legacy
+# name-keyed entries, so the consumer can compare every record against ITSELF across runs
+# instead of comparing whichever record an election happened to pick.
+#
+# Flat keys rather than a `records` map nested inside each name, because
+# `monitor._degrade_snapshot` merges this dimension with `{**prev, **curr}` over its TOP-LEVEL
+# keys: a nested map is invisible to that merge, so a blind run's shrunken record set would
+# overwrite a sighted one wholesale. Flat keys get the blind-run protection that already
+# exists, for free and correctly.
+#
+# `::` is safe as a separator against the real data — none of the 19 skill names in this
+# machine's lock file contains `@`, `/` or `:` — and `_is_record_key` additionally requires the
+# prefix to be a `WORKSPACE_DIRS` literal or a `_root_identity` digest, so an ordinary name can
+# never be mistaken for one. A skill literally named `workspace::foo` could collide with the
+# real `foo` in `workspace`; that is absurd enough to state rather than defend against.
+KEY_SEP = "::"
+# One key PER searched root, not a single `::roots` list. `monitor._degrade_snapshot` carries a
+# blind run's dimension forward with `{**prev, **curr}` over top-level keys: a dict entry is
+# unioned, a LIST VALUE under one key is replaced wholesale. With a single list, one blind run
+# erased every config-derived root from the searched set while the records it guards survived —
+# and the guard that reports a planted record ("was this root searched last time?") silently
+# stopped firing. Measured by an independent pass: control alerts MEDIUM, after one blind run
+# it is silent. The first version of this claimed flat keys got that protection "for free and
+# correctly"; that was true of the records and false of the list beside them.
+ROOT_MARK = "::root::"
+_DIGEST_ID_RE = re.compile(r"^x[0-9a-f]{16}$")
+
+
+def _is_root_key(key: str) -> bool:
+    """Is this dimension key the marker for one searched workspace root?"""
+    return isinstance(key, str) and key.startswith(ROOT_MARK)
+
+
+def _is_record_key(key: str, names=None) -> bool:
+    """Is this dimension key a `(root, skill)` record rather than a legacy name?
+
+    `names`, when given, is the set of real skill names in the same dimension, and it is what
+    stops a SKILL called `workspace::evil` from being read as the record of a skill called
+    `evil`. Without it an attacker-chosen name made the tool invent a subject: an independent
+    pass got `changed_skills` to return `evil`, a skill that exists nowhere, and the same
+    phantom into an alert's text. An earlier comment here called the collision "absurd enough
+    to state rather than defend against" — that was the wrong call, because the failure is not
+    a collision between two real things, it is a fabricated one.
+    """
+    if not isinstance(key, str) or KEY_SEP not in key or key.startswith(ROOT_MARK):
+        return False
+    prefix, _, name = key.partition(KEY_SEP)
+    if not (prefix in WORKSPACE_DIRS or _DIGEST_ID_RE.match(prefix)):
+        return False
+    return names is None or name in names
+
 
 @dataclass
 class SkillOrigin:
@@ -160,13 +211,29 @@ class ProvenanceScan:
     skills: dict = None
     capped: bool = False
     notes: tuple = ()
+    # (skill name, root identity) -> SkillOrigin, for EVERY root that held a record — not just
+    # the elected winner. This is what lets the consumer compare a record with itself.
+    records: dict = None
+    # Every root this run looked in, as identities, INCLUDING ones that do not exist. A root
+    # that was searched and found absent is not the same fact as a root that was never
+    # searched, and the consumer needs the difference: without it, a decoy planted in a
+    # workspace directory that did not exist last run reads as "somewhere we had not looked"
+    # — benign — when it is exactly the thing worth reporting.
+    roots_searched: tuple = ()
 
     def __post_init__(self):
         if self.skills is None:
             self.skills = {}
+        if self.records is None:
+            self.records = {}
 
     def as_dimension(self) -> dict:
-        return {name: o.as_dimension() for name, o in sorted(self.skills.items())}
+        out = {name: o.as_dimension() for name, o in sorted(self.skills.items())}
+        for (name, root_id), origin in sorted(self.records.items()):
+            out[f"{root_id}{KEY_SEP}{name}"] = origin.as_dimension()
+        for root_id in sorted(self.roots_searched):
+            out[f"{ROOT_MARK}{root_id}"] = True
+        return out
 
 
 def _load_json(p: Path, *, max_bytes: int) -> "dict | None":
@@ -387,7 +454,8 @@ def _derived_agent_workspaces(config: dict) -> "list[str]":
     return out
 
 
-def workspace_roots(home: Path, config: "dict | None" = None) -> "list[Path]":
+def workspace_roots(home: Path, config: "dict | None" = None, *,
+                    searched: "list | None" = None) -> "list[Path]":
     """Every workspace directory to look in, deduplicated, existing ones only.
 
     *config* may add roots (`agents.defaults.workspace`, `agents.list[].workspace`) and can
@@ -395,6 +463,12 @@ def workspace_roots(home: Path, config: "dict | None" = None) -> "list[Path]":
     depends on. That is why this dimension belongs in the shrinkable group: a run that could
     not read the config sees a SUBSET, never a superset, so a disappearance on a blind run
     is untrustworthy while an addition or a content change is still real evidence.
+
+    `searched` (a list) receives the identity of every root this call CONSIDERED, whether or
+    not it exists on disk — the return value carries only the ones that do. The difference is
+    load-bearing for B-541: a lock file appearing in a directory that did not exist last run
+    must read as "a record appeared where we looked and found none", not as "somewhere new we
+    had not searched before", or a decoy is bought with one `mkdir`.
     """
     roots: list[Path] = [home / name for name in WORKSPACE_DIRS]
     extra: list[Path] = []
@@ -425,6 +499,11 @@ def workspace_roots(home: Path, config: "dict | None" = None) -> "list[Path]":
     roots.extend(sorted((home / p if not p.is_absolute() else p) for p in extra))
     seen: set = set()
     out: list[Path] = []
+    if searched is not None:
+        for r in roots:
+            ident = _root_identity(home, r)
+            if ident not in searched:
+                searched.append(ident)
     for r in roots:
         try:
             # RESOLVED for de-duplication, again matching the collector: a config workspace
@@ -455,7 +534,13 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
     present = False
     capped = False
 
-    for root in workspace_roots(home, config):
+    searched: "list[str]" = []
+    # NOT `records` — that name is already the lock file's own skills map further down,
+    # and the collision silently merged the two, putting bare skill names into what is
+    # supposed to be a (name, root)-keyed map.
+    per_root: dict = {}
+    for root in workspace_roots(home, config, searched=searched):
+        root_id = _root_identity(home, root)
         lock = _load_json(root / ".clawhub" / "lock.json", max_bytes=MAX_LOCK_BYTES)
         if lock is None:
             continue
@@ -486,7 +571,11 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
                 # and disagreeing origin.json files pass as one unambiguous subject.
                 corroborated=_corroborate(root, name, rec),
             )
-            witnesses.setdefault(name, []).append(_root_identity(home, root))
+            # B-541: EVERY root's record is kept, keyed by (name, root). The election below
+            # still fills `skills` for the legacy view, but no verdict depends on it any
+            # more: the consumer compares this record with the same record last run.
+            per_root[(name, root_id)] = entry
+            witnesses.setdefault(name, []).append(root_id)
             won = skills.get(name)
             if won is None:
                 skills[name] = entry
@@ -525,7 +614,8 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
     if capped:
         notes.append("more installed skills than this run records")
     return ProvenanceScan(present=present, skills=skills, capped=capped,
-                          notes=tuple(notes))
+                          notes=tuple(notes), records=per_root,
+                          roots_searched=tuple(searched))
 
 
 def _corroborate(root: Path, name: str, rec: dict) -> "bool | None":
