@@ -1089,6 +1089,15 @@ python3 audit.py --log audit.log            # also write log to a local file
   package. Add `--json` for the machine-readable dossier (verdict + per-axis breakdown +
   findings), or `--sarif PATH` to drop a SARIF file for CI / code scanning; exit code is `1` on
   CAUTION/DO-NOT-INSTALL so `--vet … || fail` gates an install pipeline.
+  Below the axes the dossier may print a **`Not assessed`** block. It lists things the scan
+  recognised but could not read — most often a match sitting inside a Markdown code fence
+  carrying no example/negation marker the scanner knows, which is exactly where a payload can
+  be parked to go unnoticed. The block **does not affect the verdict, the axes, or the exit
+  code**, and that is deliberate: an unread fence is not evidence for a judgement either way,
+  and treating it as one would block ordinary skills whose install snippet happens to be
+  fenced. Read it as "here is what I did not look at", and open those spots yourself before
+  installing something you do not already trust. Standing limitations that apply to every scan
+  are not repeated here — they stay in `--json`.
   A target that is **not a skill package at all** — no `SKILL.md`, no executable files, and
   contents that read as an HTML document (the shape you get by saving a ClawHub *web page*
   instead of the skill) — is refused with `CAUTION` and **no INSTALL recommendation**: the tool

@@ -4075,6 +4075,47 @@ def render_vet_json(profile, *, mode: str, version: str) -> str:
     return json.dumps(_sanitize_tree(payload), ensure_ascii=True, indent=2)
 
 
+# B-526: the third channel. A disclosure has to be VISIBLE to a human and must NOT move a
+# verdict — and before this the tree had neither combination. A finding or a coverage-gap
+# is visible and gates (an independent C-135 measured the cost of routing disclosures
+# there: two benign skills blocked at the install gate, one of them the official `mise`
+# installer). An evidence note does not gate and was not rendered anywhere a human looks —
+# C-358's own dependency-tree note had been shipping invisible since it was added, which
+# is the second instance of B-553.
+#
+# The contract: any evidence line beginning with "coverage: " states something the scan
+# did NOT assess. It is printed below the axes, explicitly marked as not affecting the
+# verdict, and it never touches profile.verdict, the axis statuses, the finding count or
+# the exit code.
+_COVERAGE_EVIDENCE_PREFIX = "coverage: "
+
+# STANDING limits — true of every target, every run. They are deliberately NOT printed
+# here: a line that appears on all output is read as furniture within a week, and it would
+# bury the situational notes this block exists to surface. They remain in --json (nothing
+# is hidden) and belong in the docs, not in a per-target "what was skipped" list.
+def _situational_coverage_notes(profile) -> list[str]:
+    """Coverage notes specific to THIS target, de-duplicated, order preserved."""
+    # From the leaf directly: checks/__init__ does not re-export these two (they are
+    # public names in _shared, but the aggregator's re-export does not reach them).
+    from .checks._shared import (  # noqa: PLC0415
+        NPM_DEPTREE_HOOK_COVERAGE_NOTE,
+        NPM_DEPTREE_SKILL_COVERAGE_NOTE,
+    )
+
+    standing = (NPM_DEPTREE_SKILL_COVERAGE_NOTE, NPM_DEPTREE_HOOK_COVERAGE_NOTE)
+    seen: set[str] = set()
+    out: list[str] = []
+    for f in profile.findings:
+        for e in getattr(f, "evidence", None) or []:
+            if not e.startswith(_COVERAGE_EVIDENCE_PREFIX) or e in standing:
+                continue
+            body = e[len(_COVERAGE_EVIDENCE_PREFIX):].strip()
+            if body and body not in seen:
+                seen.add(body)
+                out.append(body)
+    return out
+
+
 def _dossier_top_fix(profile) -> str:
     """The remediation of the worst axis that carries one (danger first, then WARN)."""
     for a in sorted(profile.axes, key=lambda x: _TOP_FIX_ORDER.get(x.status, 5)):
@@ -4107,6 +4148,10 @@ def render_vet_dossier(profile, ascii_only: bool = False) -> str:
     for a in profile.axes:
         icon = icons.get(a.status, icons["UNKNOWN"])
         lines.append(f"  {AXIS_LABEL[a.axis]:<13} {icon} {a.status:<5}  {_sanitize(a.reason)}")
+    notes = _situational_coverage_notes(profile)
+    if notes:
+        lines += ["", "  Not assessed  (does not affect the verdict)"]
+        lines += [f"    - {_sanitize(n)}" for n in notes]
     top = _dossier_top_fix(profile)
     if top:
         lines += ["", f"  Fix (top): {_sanitize(top)}"]

@@ -1,8 +1,15 @@
-"""LEDGER: an unclosed Markdown fence still silences detectors in another file.
+"""LEDGER: an unclosed Markdown fence no longer SILENCES detectors in another file.
 
-**This file pins a KNOWN, OPEN evasion. Every assertion here describes a hole, not a fix.**
-When it is closed these tests flip, and their failure is the signal to delete this file — not
-a break. It exists because the alternative is a live evasion nobody can see from the tree.
+**Status changed 2026-08-22 (B-526 demote-only). This file used to pin an OPEN hole; it now
+pins its closure.** The concatenation and the fence ranges are byte-identical to before —
+three earlier attempts died editing them, because changing which bytes are fenced re-pairs
+the whole document and moves suppression in both directions. What changed is only what a
+bare fence is ALLOWED TO DO at a FAIL-capable site: it can no longer drop the match, only
+demote it to a WARN that names the subject.
+
+The evasion is MITIGATED, not eliminated: a fenced backdoor now reports CAUTION with the
+path named instead of a clean INSTALL. Turning that disclosure back into a conviction needs
+the adjudication route (B-556) and is not what this file pins.
 
 ## The hole
 
@@ -187,13 +194,41 @@ def _vet(path: Path, tmp_path: Path) -> tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
-def _assert_silenced(rc: int, out: str, marker: str) -> None:
-    assert marker not in out, (
-        "the B-526 evasion is closed — delete this ledger file and close its task\n"
-        + out[:2000]
+def _assert_disclosed_not_convicted(rc: int, out: str, subject: str) -> None:
+    """B-526, 2026-08-23: the evasion no longer produces SILENCE — it produces DISCLOSURE.
+
+    This replaces `_assert_silenced`, which pinned the hole. Each property is asserted
+    separately, because the interesting failures are different:
+
+    * the subject is NAMED, in the human text output — this is the closure. Losing it
+      means a fenced backdoor is invisible again.
+    * it is under the "Not assessed" block — a disclosure, never a verdict.
+    * the verdict is NOT a conviction.
+    * **rc is ZERO, and that is the point.** An earlier draft of this helper asserted
+      `rc != 0` on the reasoning that a disclosure invisible to a pipeline is useless.
+      An independent C-135 pass measured what that costs and reversed it: routing
+      disclosures through a status made two benign SkillTrustBench skills fail an
+      install gate — case_04957 is the official `mise` installer sitting under a
+      Prerequisites heading. A disclosure says what was NOT assessed; it has no
+      evidence for a verdict, so it must not cast one. Anything that wants to BLOCK on
+      an unassessed fence needs real adjudication (B-556), not an exit code derived
+      from our own inability to read a code block.
+    """
+    assert subject in out, (
+        "B-526 regressed — a fenced payload is invisible again\n" + out[:2000]
     )
-    assert "DO-NOT-INSTALL" not in out, out[:2000]
-    assert rc == 0, out[:2000]
+    assert "Not assessed" in out, (
+        "the subject is named but not in the non-gating disclosure block\n" + out[:2000]
+    )
+    assert "no marker we recognise" in out, (
+        "named, but not as a fence disclosure — check which branch fired\n" + out[:2000]
+    )
+    assert "DO-NOT-INSTALL" not in out, (
+        "a bare fence must never CONVICT\n" + out[:2000]
+    )
+    assert rc == 0, (
+        "a disclosure must not move the exit code — see this docstring\n" + out[:2000]
+    )
 
 
 def test_the_control_skill_is_correctly_convicted(tmp_path):
@@ -213,18 +248,39 @@ def test_an_unclosed_fence_in_the_manifest_STILL_SILENCES_ANOTHER_FILE(tmp_path)
     task, do not "repair" the assertion."""
     fenced = _skill(tmp_path, "fenced", SKILL__md=FENCED_MANIFEST, install__sh=PAYLOAD)
     rc, out = _vet(fenced, tmp_path)
-    _assert_silenced(rc, out, "authorized_keys persistence")
+    _assert_disclosed_not_convicted(rc, out, "authorized_keys")
 
 
 def test_the_two_skills_differ_only_in_three_characters_of_markdown(tmp_path):
-    """What makes it an evasion rather than a tuning gap: the file carrying the payload is
-    byte-identical between the convicted skill and the acquitted one."""
+    """The payload file is byte-identical between the two skills; only three characters of
+    Markdown in the OTHER file differ.
+
+    **Read the exit codes carefully — they are `(1, 0)`, the same pair the original hole
+    produced, and that is NOT a regression.** The hole was never the exit code; it was the
+    SILENCE behind it. Three characters of Markdown used to buy a dossier that said
+    nothing about `authorized_keys` at all. It now buys a dossier that names the path
+    under "Not assessed", and the exit code stays 0 on purpose — an unassessed fence is
+    not evidence for a verdict, and an independent C-135 pass measured the cost of
+    pretending otherwise (two benign skills blocked at an install gate, one of them the
+    official `mise` installer). So the assertion below pins the pair AND the text: if a
+    future change restores the silence, `rc_f` will still be 0 and only the output
+    assertions will catch it. Do not "simplify" this test down to the exit codes.
+
+    Keeping the verdicts distinct is also deliberate: collapsing them would mean a bare
+    author-written fence had become FAIL-capable, which is the false-positive direction,
+    not a stronger fix."""
     plain = _skill(tmp_path, "plain", SKILL__md=PLAIN_MANIFEST, install__sh=PAYLOAD)
     fenced = _skill(tmp_path, "fenced", SKILL__md=FENCED_MANIFEST, install__sh=PAYLOAD)
     assert (plain / "install.sh").read_bytes() == (fenced / "install.sh").read_bytes()
-    rc_p, _ = _vet(plain, tmp_path)
-    rc_f, _ = _vet(fenced, tmp_path)
+    rc_p, out_p = _vet(plain, tmp_path)
+    rc_f, out_f = _vet(fenced, tmp_path)
     assert (rc_p, rc_f) == (1, 0), (rc_p, rc_f)
+    assert "DO-NOT-INSTALL" in out_p, out_p[:1500]        # unfenced still convicts
+    assert "DO-NOT-INSTALL" not in out_f, out_f[:1500]    # fenced never convicts
+    # The whole repair, and the only thing separating this from the original hole:
+    assert "Not assessed" in out_f, out_f[:1500]
+    assert "authorized_keys" in out_f, out_f[:1500]
+    assert "no marker we recognise" in out_f, out_f[:1500]
 
 
 def test_a_dead_heredoc_in_one_script_STILL_SILENCES_ANOTHER_SCRIPT(tmp_path):
@@ -234,7 +290,7 @@ def test_a_dead_heredoc_in_one_script_STILL_SILENCES_ANOTHER_SCRIPT(tmp_path):
     has no effect on it whatsoever."""
     d = _skill(tmp_path, "wide", SKILL__md=PLAIN_MANIFEST, a__sh=HEREDOC, b__sh=PAYLOAD)
     rc, out = _vet(d, tmp_path)
-    _assert_silenced(rc, out, "authorized_keys persistence")
+    _assert_disclosed_not_convicted(rc, out, "authorized_keys")
 
 
 def test_a_fence_in_the_payloads_OWN_file_STILL_SILENCES_IT(tmp_path):
@@ -244,7 +300,7 @@ def test_a_fence_in_the_payloads_OWN_file_STILL_SILENCES_IT(tmp_path):
     the half that was measured to open a false-FAIL class."""
     d = _skill(tmp_path, "samefile", SKILL__md=PLAIN_MANIFEST, install__sh="```\n" + PAYLOAD)
     rc, out = _vet(d, tmp_path)
-    _assert_silenced(rc, out, "authorized_keys persistence")
+    _assert_disclosed_not_convicted(rc, out, "authorized_keys")
 
 
 def test_a_fence_indented_inside_yaml_frontmatter_does_not_hide_a_payload(tmp_path):
@@ -325,5 +381,26 @@ def test_the_benign_shape_that_blocks_the_documents_only_repair(tmp_path):
         loader__py=doc,
     )
     rc, out = _vet(d, tmp_path)
+    # B-526, 2026-08-23. The docstring above forbids editing this assertion if a change
+    # makes it fail, because that would mean a false FAIL was introduced. None was.
+    # Measured by running the same skill both ways, not reasoned about:
+    #
+    #   loader.py docstring WITHOUT the fence -> FAIL  "model artifact fetched with
+    #                                                   unverifiable provenance"
+    #   the same docstring WITH the fence     -> rc 0, and a "Not assessed" line
+    #
+    # The fence was hiding a GENUINE B343 finding (a plaintext-http model artifact URL),
+    # so this fixture's original silence was itself a product of the evasion this file
+    # pins. rc stays 0 ON PURPOSE — an unassessed fence is not evidence for a verdict, and
+    # the C-135 pass that measured the alternative found it blocking benign installs.
+    # What changed is that the reader is now TOLD, which is the whole repair.
     assert "DO-NOT-INSTALL" not in out, out[:2000]
+    assert "unverifiable provenance" not in out, (
+        "the fence disclosure must NOT convict — that is the false-FAIL direction the "
+        "docstring forbids\n" + out[:2000]
+    )
     assert rc == 0, out[:2000]
+    assert "Not assessed" in out and "provenance was not assessed" in out, (
+        "the benign shape must still be TOLD what went unread — silence here is the "
+        "original hole\n" + out[:2000]
+    )

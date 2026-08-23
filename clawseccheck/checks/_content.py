@@ -6214,6 +6214,45 @@ def _is_code_example(
     return True
 
 
+def _fence_only_suppression(
+    blob: str, pos: int, fence_ranges: list[tuple[int, int]]
+) -> bool:
+    """True when the ONLY thing suppressing the match at *pos* is a bare, unannotated
+    Markdown fence.
+
+    B-526. A FAIL-capable check may not let an author-written fence silently DROP a
+    match — the skill's author chooses where fences open, so "inside a fence" is a
+    suppression signal the attacker writes for us. This predicate is what lets such a
+    site DEMOTE instead: the match becomes a WARN the reader can see, rather than
+    nothing at all.
+
+    Deliberately narrow, and each exclusion is an older signal this does not override:
+
+    * a negation / example marker in the lookback (``_negation_context``) — the author
+      labelled it as documentation in prose, which is what every content-ring check has
+      always honoured;
+    * not in a fence at all — then nothing was suppressed and the caller already has a
+      live finding;
+    * an ANNOTATED fence (``_fence_is_annotated``) — B-097's rule already demands that
+      second marker at the sites it governs, and where the benign population writes it
+      anyway, demanding it costs nothing.
+
+    So this returns True only for the bare case, which is precisely the population
+    B-526 measured: 16 of the 31 ``_is_code_example`` call sites are both FAIL-capable
+    and bare-fence.
+
+    **It cannot make a finding disappear.** It is a pure predicate, read only AFTER
+    ``_is_code_example`` has already said "suppressed"; every match that fires today
+    still fires. That monotonicity is the whole reason this shape survived where three
+    earlier attempts did not — all of them edited fence RANGES, which re-pairs the
+    document and moves suppression in both directions."""
+    if _negation_context(blob, pos):
+        return False
+    if not _in_fence(pos, fence_ranges):
+        return False
+    return not _fence_is_annotated(blob, pos, fence_ranges)
+
+
 def _levenshtein(a: str, b: str) -> int:
     """Optimal String Alignment distance (Levenshtein + adjacent transposition).
 
@@ -6818,7 +6857,9 @@ _MODEL_PIN_WINDOW = 200
 _MODEL_LOCAL_PATH_RE = re.compile(r'^(?:\.{1,2}/|/|~|[A-Za-z]:[\\/])')
 
 
-def _model_provenance_hits(name: str, blob: str) -> tuple[list[str], list[str], int]:
+def _model_provenance_hits(
+    name: str, blob: str, coverage: list[str] | None = None
+) -> tuple[list[str], list[str], int]:
     """(fails, warns, hits) evidence for B343. `hits` counts every recognized
     model-loader call site regardless of verdict — a clean/pinned reference still
     counts as inspected, so the caller doesn't misread "found and clean" as "found
@@ -6846,6 +6887,20 @@ def _model_provenance_hits(name: str, blob: str) -> tuple[list[str], list[str], 
         # fenced code block quoting someone else's snippet is not this skill's own
         # fetch — same dampening every other content-ring check already applies.
         if _is_code_example(blob, m.start(), fr):
+            # B-526: a BARE fence no longer drops this silently — but the disclosure is
+            # COVERAGE, not a verdict. It does NOT go in `warns`, because that bucket's
+            # own template reads "Model reference has no provenance pin", and wrapping
+            # "we did not assess its provenance" in a sentence asserting there IS no pin
+            # states a fact and its own negation at once (a C-135 pass caught exactly
+            # that). It does NOT increment `hits` either: `hits` feeds the PASS line
+            # "Inspected N model reference(s): all pinned ...", so counting a reference
+            # we declined to read would make that sentence claim it was verified.
+            if coverage is not None and _fence_only_suppression(blob, m.start(), fr):
+                coverage.append(
+                    f"coverage: {name}: a model artifact reference sits in a fence"
+                    " carrying no marker we recognise, so its provenance was not"
+                    f" assessed ({_obf_clip(m.group(0))})"
+                )
             continue
         hits += 1
         url = m.group(0)
@@ -6867,6 +6922,21 @@ def _model_provenance_hits(name: str, blob: str) -> tuple[list[str], list[str], 
             # ("e.g. model = AutoModel.from_pretrained(...)") is documentation, not a
             # live call this skill makes.
             if _is_code_example(blob, m.start(), fr):
+                # B-526, same reasoning as the artifact-URL loop above: a bare fence
+                # discloses instead of dropping. The LOCAL-path exclusion below is
+                # applied first, because a vendored path has no provenance question
+                # whether or not it sits in a fence — demoting it would be noise, not
+                # disclosure.
+                if (
+                    coverage is not None
+                    and _fence_only_suppression(blob, m.start(), fr)
+                    and not _MODEL_LOCAL_PATH_RE.match(ref)
+                ):
+                    coverage.append(
+                        f"coverage: {name}: a model loader reference sits in a fence"
+                        " carrying no marker we recognise, so its provenance was not"
+                        f" assessed ({_obf_clip(ref)})"
+                    )
                 continue
             # C-135: an already-vendored LOCAL model path has no remote provenance
             # question to pin — "add revision=" is meaningless advice for a path the
@@ -6917,13 +6987,32 @@ def check_model_artifact_provenance(ctx: Context) -> Finding:
         )
     fails: list[str] = []
     warns: list[str] = []
+    # B-526: fence COVERAGE notes — evidence-only. They ride along on whatever verdict
+    # this check reaches and never choose it: not in `fails`, not in `warns`, not in
+    # `inspected`. See _model_provenance_hits for why each of those three would lie.
+    coverage: list[str] = []
     inspected = 0
     for name, blob in skills.items():
-        f, w, hits = _model_provenance_hits(name, blob)
+        f, w, hits = _model_provenance_hits(name, blob, coverage)
         inspected += hits
         fails.extend(f)
         warns.extend(w)
     if inspected == 0:
+        # B-526: "none found" and "none I could read" are different statements. A
+        # reference that exists only inside a bare fence is no longer counted in
+        # `inspected`, so without this split the check would report having found
+        # nothing about a file where it demonstrably found something.
+        if coverage:
+            return _custom(
+                "B343",
+                HIGH,
+                UNKNOWN,
+                "Model reference(s) found, but every one sits in a code fence that was "
+                "not assessed — no provenance verdict is given.",
+                "Annotate the fence as an example, or move the live call out of it, so "
+                "the reference can be assessed.",
+                coverage,
+            )
         return _custom(
             "B343",
             HIGH,
@@ -6940,7 +7029,7 @@ def check_model_artifact_provenance(ctx: Context) -> Finding:
             "Model artifact fetched with unverifiable provenance: " + "; ".join(fails[:6]) + extra,
             "Fetch model artifacts over HTTPS from a named host, or remove the direct fetch "
             "and use the provider's own pinned loader.",
-            fails + warns,
+            fails + warns + coverage,
         )
     if warns:
         extra = f" (+{len(warns) - 6} more)" if len(warns) > 6 else ""
@@ -6953,7 +7042,7 @@ def check_model_artifact_provenance(ctx: Context) -> Finding:
             "Pin model references to an exact revision/commit hash or content digest "
             "(e.g. revision=\"<sha>\" or model:tag@sha256:...) so an update to the "
             "upstream repo cannot silently swap what the skill loads.",
-            warns,
+            warns + coverage,
         )
     return _custom(
         "B343",
@@ -6962,6 +7051,7 @@ def check_model_artifact_provenance(ctx: Context) -> Finding:
         f"Inspected {inspected} model reference(s): all pinned to a revision/digest or "
         "fetched from a named host.",
         "Keep model references pinned to an exact revision/commit hash or content digest.",
+        coverage or None,
     )
 
 

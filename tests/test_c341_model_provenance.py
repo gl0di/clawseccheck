@@ -169,7 +169,23 @@ def test_b343_does_not_flag_docstring_example():
     assert check_model_artifact_provenance(c).status == UNKNOWN
 
 
-def test_b343_does_not_flag_fenced_documentation_example():
+def test_b343_says_it_did_not_look_rather_than_that_it_found_nothing():
+    """B-526 (2026-08-23). Three statements are possible about a fenced model reference,
+    and only one of them is true:
+
+        "no model-loader call sites found"   <- FALSE. The reference is right there.
+        "this reference has no provenance pin" <- FALSE. We never read it to find out.
+        "a reference exists and was not assessed" <- what this now pins.
+
+    The first was the shipped behaviour. The second was an intermediate draft of this
+    change, and an independent C-135 pass caught it: it routed the disclosure into the
+    WARN bucket, whose own template opens "Model reference has no provenance pin
+    (review before trusting)" — so the composite sentence asserted a fact and then
+    disclosed that the fact was never checked.
+
+    Hence UNKNOWN plus a coverage note, not WARN. UNKNOWN is the honest status for
+    "there is something here I could not read", and the note carries the detail without
+    moving a verdict."""
     c = _ctx({"skill": (
         "# file: README.md\n"
         "Our skill does not actually download any models itself; it calls a remote API.\n\n"
@@ -177,7 +193,13 @@ def test_b343_does_not_flag_fenced_documentation_example():
         "model = AutoModel.from_pretrained('bert-base-uncased')\n"
         "```\n"
     )})
-    assert check_model_artifact_provenance(c).status == UNKNOWN
+    f = check_model_artifact_provenance(c)
+    assert f.status == UNKNOWN, f.status
+    joined = " ".join(f.evidence or [])
+    assert "no marker we recognise" in joined, f.evidence
+    # The two false statements this replaced must not come back in any form.
+    assert "No model-loader call sites" not in f.detail, f.detail
+    assert "has no provenance pin" not in f.detail, f.detail
 
 
 def test_b343_does_not_flag_local_relative_path():

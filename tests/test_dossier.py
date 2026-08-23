@@ -81,6 +81,10 @@ def _clean_skill_dirs() -> list[Path]:
 
 @pytest.mark.parametrize("skill_dir", _clean_skill_dirs(), ids=lambda p: str(p.relative_to(_FIX)))
 def test_clean_skill_profile_has_no_failing_axis(skill_dir):
+    """B-526 (2026-08-23): no fixture is exempt here, deliberately — the mirror of the
+    note in tests/test_vet_content_ring.py. Wiring the fence-disclosure demote briefly
+    made clean_b100_fetch_no_imperative warn on an invented `get.example.com`; the
+    fixture was pointed at the canonical bare `example.com` instead of being exempted."""
     p = build_profile(vet_skill(str(skill_dir)), str(skill_dir), "skill")
     failing = [a.axis for a in p.axes if a.status in (FAIL, WARN)]
     assert not failing, f"{skill_dir.relative_to(_FIX)} → failing axes {failing} (grade {p.overall_grade})"

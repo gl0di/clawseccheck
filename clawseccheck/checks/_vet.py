@@ -86,6 +86,7 @@ from ._content import (
     _b62_extract_declaration,
     _b63_decoded_actionable,
     _dep_names_in_skill,
+    _fence_only_suppression,
     _fence_ranges,
     _frontmatter_name,
     _in_fence,
@@ -247,7 +248,11 @@ def _notify_host_window(blob: str, pos: int, window: int = 200) -> str:
     return blob[start:end]
 
 
-def _notify_host_hits(blob: str, fence_ranges: list[tuple[int, int]]) -> tuple[list[str], list[str]]:
+def _notify_host_hits(
+    blob: str,
+    fence_ranges: list[tuple[int, int]],
+    coverage: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
     """Split Telegram/Discord notify-host matches into (crit_hits, warn_hits).
 
     A match escalates to CRITICAL only when a credential/secret UNRELATED to the
@@ -255,6 +260,16 @@ def _notify_host_hits(blob: str, fence_ranges: list[tuple[int, int]]) -> tuple[l
     window (B-122 taint discriminator) — evidence the "self-notification" is actually
     shipping secret/file data to the host. A bare mention, or one that only carries the
     channel's own bot/webhook token, is WARN.
+    
+
+    B-526: *coverage* is an optional append-only sink for fence COVERAGE notes. Pass a
+    list to receive them; pass nothing (the default) and they are simply not produced.
+    It is deliberately NOT a third return value — these notes must never join the
+    (crit/high, warn) verdict tuple, because anything in that tuple moves a status, and
+    a measured C-135 pass showed what that costs: two benign skills blocked at the
+    install gate, and named findings evicted from the render by the tie the new WARN
+    created. A disclosure states what was NOT assessed; it may not carry a verdict.
+    Keeping the arity at 2 also leaves every existing caller and test untouched.
     """
     # C-259 (D6, docs/design/severity-separability.md): measured net-correct, not
     # just assumed — over the 2,052-case WARN corpus this gate fires on malicious
@@ -268,6 +283,17 @@ def _notify_host_hits(blob: str, fence_ranges: list[tuple[int, int]]) -> tuple[l
     warn_hits: list[str] = []
     for m in _SKILL_NOTIFY_HOST_RE.finditer(blob):
         if _is_code_example(blob, m.start(), fence_ranges):
+            # B-526: a bare fence discloses instead of dropping. It lands in the WARN
+            # band unconditionally — never `crit_hits` — so the taint split above is
+            # untouched and no fenced match can convict.
+            if coverage is not None and _fence_only_suppression(
+                blob, m.start(), fence_ranges
+            ):
+                coverage.append(
+                    f"coverage: a self-notification to Telegram/Discord ({m.group(0)})"
+                    " sits in a fence carrying no marker we recognise, so its payload"
+                    " was not assessed"
+                )
             continue
         window = _notify_host_window(blob, m.start())
         if _NOTIFY_UNRELATED_CRED_VAR_RE.search(window) or _NOTIFY_FILE_READ_RE.search(window):
@@ -700,7 +726,11 @@ _CRON_DISCLOSURE_WINDOW = 200  # chars around the cron/persistence match
 # or a reputable daemon name — an accepted false-negative gap, not a false-positive FAIL.
 
 
-def _cron_persistence_hits(blob: str, fence_ranges: list[tuple[int, int]]) -> tuple[list[str], list[str]]:
+def _cron_persistence_hits(
+    blob: str,
+    fence_ranges: list[tuple[int, int]],
+    coverage: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
     """B-144/B-203: split cron/startup-persistence matches into (high_hits, warn_hits).
 
     B-203: evaluates EVERY distinct match (not just the first) — the original loop
@@ -710,6 +740,16 @@ def _cron_persistence_hits(blob: str, fence_ranges: list[tuple[int, int]]) -> tu
     daemon (_REPUTABLE_DAEMON_NAMES) still down-ranks to WARN; otherwise a match stays
     HIGH unless nearby text discloses a documented watchdog/monitoring job
     (_CRON_DISCLOSURE_RE). Down-rank-not-drop: a genuinely covert job still surfaces.
+    
+
+    B-526: *coverage* is an optional append-only sink for fence COVERAGE notes. Pass a
+    list to receive them; pass nothing (the default) and they are simply not produced.
+    It is deliberately NOT a third return value — these notes must never join the
+    (crit/high, warn) verdict tuple, because anything in that tuple moves a status, and
+    a measured C-135 pass showed what that costs: two benign skills blocked at the
+    install gate, and named findings evicted from the render by the tie the new WARN
+    created. A disclosure states what was NOT assessed; it may not carry a verdict.
+    Keeping the arity at 2 also leaves every existing caller and test untouched.
     """
     high_hits: list[str] = []
     warn_hits: list[str] = []
@@ -723,6 +763,19 @@ def _cron_persistence_hits(blob: str, fence_ranges: list[tuple[int, int]]) -> tu
     _header_matches = _manifest_header_matches(blob)
     for m in _CRON_PERSIST_RE.finditer(blob):
         if _is_code_example(blob, m.start(), fence_ranges):
+            # B-526: a bare fence discloses instead of dropping — into the WARN band,
+            # never `high_hits`. The B-199 test-fixture exclusion below is applied
+            # first: a match inside the skill's own test file is not a live directive
+            # whether or not a fence also covers it, so demoting it would be noise.
+            if (
+                coverage is not None
+                and _fence_only_suppression(blob, m.start(), fence_ranges)
+                and not _pos_in_test_fixture_file(blob, m.start(), _header_matches)
+            ):
+                coverage.append(
+                    "coverage: a cron/startup persistence pattern sits in a fence carrying"
+                    f" no marker we recognise, so it was not assessed: {m.group(0)[:80]}"
+                )
             continue
         # B-199: attack-shaped cron content inside the skill's OWN test fixture is not
         # a live directive. Keep scanning past it — a genuine match elsewhere must still fire.
@@ -1140,7 +1193,7 @@ def _write_target_is_backup_artifact(blob: str, m: "re.Match[str]") -> bool:
 
 def _agent_config_write_hits(
     name: str, blob: str, fence_ranges: list[tuple[int, int]]
-) -> list[tuple[str, str]]:
+) -> tuple[list[tuple[str, str]], list[str]]:
     """Return (evidence string, matched agent-context filename) pairs for agent-config-file
     write patterns in *blob*.
 
@@ -1175,6 +1228,17 @@ def _agent_config_write_hits(
     grounded per-agent context-path model, NOT another regex round.
     """
     hits: list[tuple[str, str]] = []
+    # B-526: this detector is DELIBERATELY NOT fence-demoted, and the reason is
+    # structural rather than a tuning preference. It is a TWO-STEP detector — step 1
+    # finds an agent-context filename, step 2 requires a write verb bound to it within a
+    # window. The fence guard sits at step 1, so demoting there reports filename matches
+    # that would never have become findings even unfenced. Measured: it fired on
+    # fixtures/clean_b335_skill_md_doc_example, where `# ~/.bashrc` is a COMMENT HEADER
+    # inside a block showing the user what to add, and the surrounding prose says "never
+    # edit their shell rc yourself". A correct demote here has to re-run both steps
+    # admitting fenced positions, the way _destructive_autonomy_hit does — not hook the
+    # step-1 guard. Left out until that is built and measured.
+    fenced: list[str] = []
     seen_skills: set[str] = set()
     _headers = _manifest_header_matches(blob)
     for m in _AGENT_CONTEXT_FILES_RE.finditer(blob):
@@ -1216,7 +1280,7 @@ def _agent_config_write_hits(
         indirect = _var_indirected_agent_file_hit(name, blob, fence_ranges)
         if indirect:
             hits.append(indirect)
-    return hits
+    return hits, fenced
 
 
 def _var_indirected_agent_file_hit(
@@ -1353,7 +1417,9 @@ def _authkey_open_calls_bind_write(bound_region: str) -> bool:
 
 
 def _authkey_persistence_hits(
-    blob: str, fence_ranges: list[tuple[int, int]]
+    blob: str,
+    fence_ranges: list[tuple[int, int]],
+    coverage: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """C-204/T1098.004: split ~/.ssh/authorized_keys write matches into (high, warn).
 
@@ -1366,6 +1432,16 @@ def _authkey_persistence_hits(
     escalates to HIGH (near-unforgeable: essentially no legitimate skill injects a
     brand-new key); a bound write whose key content is a variable/computed value (not a
     literal) down-ranks to WARN rather than a silent PASS.
+    
+
+    B-526: *coverage* is an optional append-only sink for fence COVERAGE notes. Pass a
+    list to receive them; pass nothing (the default) and they are simply not produced.
+    It is deliberately NOT a third return value — these notes must never join the
+    (crit/high, warn) verdict tuple, because anything in that tuple moves a status, and
+    a measured C-135 pass showed what that costs: two benign skills blocked at the
+    install gate, and named findings evicted from the render by the tie the new WARN
+    created. A disclosure states what was NOT assessed; it may not carry a verdict.
+    Keeping the arity at 2 also leaves every existing caller and test untouched.
     """
     high_hits: list[str] = []
     warn_hits: list[str] = []
@@ -1384,6 +1460,20 @@ def _authkey_persistence_hits(
     _header_matches = _manifest_header_matches(blob)
     for m in _AUTHKEY_PATH_RE.finditer(blob):
         if _is_code_example(blob, m.start(), fence_ranges):
+            # B-526, and this is the site the task was filed over: an unclosed fence in
+            # SKILL.md silenced a real authorized_keys backdoor in another file, and the
+            # scan reported a clean INSTALL. It can no longer go silent. WARN, never
+            # `high_hits` — disclosure, not conviction; closing the evasion properly
+            # still needs the adjudication route (B-556).
+            if (
+                coverage is not None
+                and _fence_only_suppression(blob, m.start(), fence_ranges)
+                and not _pos_in_test_fixture_file(blob, m.start(), _header_matches)
+            ):
+                coverage.append(
+                    "coverage: an ~/.ssh/authorized_keys path sits in a fence carrying no"
+                    " marker we recognise, so whether it is written to was not assessed"
+                )
             continue
         if _pos_in_test_fixture_file(blob, m.start(), _header_matches):
             continue
@@ -2634,6 +2724,27 @@ def _runtime_fetch_scan(
     line_spans: list[tuple[int, int]] | None = None
     for m in _RUNTIME_FETCH_URL_RE.finditer(blob):
         if _is_code_example(blob, m.start(), fence_ranges):
+            # B-526: this site is DELIBERATELY EXCLUDED from the fence-demote applied at
+            # the other FAIL-capable bare-fence sites. Do not "restore consistency" here
+            # without redoing the measurement below — the exclusion is the measurement.
+            #
+            # It was wired, measured, and taken back out (Dave's call, 2026-08-22). A bare
+            # URL inside a fence is the single most common shape in ordinary skill
+            # documentation, so demoting it here is high volume and near-zero information:
+            #
+            #   6 of our own 134 clean_* fixtures stopped being silent — 5 of those 6 from
+            #     THIS site alone;
+            #   15 of 150 benign SkillTrustBench skills moved INSTALL -> CAUTION, i.e. 10%
+            #     newly failed the documented `--vet … || fail` install gate.
+            #
+            # The band this would demote into says so itself: `adjacent` already means
+            # "structure present, binding unproven, and equally the shape of ordinary
+            # documentation — advisory only". Pushing fenced URLs there adds volume to a
+            # band that already admits it cannot discriminate.
+            #
+            # The evasion this task exists to close (an authorized_keys write hidden by a
+            # fence) is closed at _authkey_persistence_hits and the _SKILL_CRIT /
+            # _SKILL_HIGH / persistence loops, none of which depend on this site.
             continue
         url = m.group(0)
         # B-194: loopback/localhost/private-range is never real egress.
@@ -2721,7 +2832,9 @@ _AUTONOMY_RE = re.compile(
 _DESTRUCTIVE_AUTONOMY_WINDOW = 200  # chars between a destructive cmd and an autonomy marker
 
 
-def _destructive_autonomy_hit(blob: str, fence_ranges: list[tuple[int, int]]) -> bool:
+def _destructive_autonomy_hit(
+    blob: str, fence_ranges: list[tuple[int, int]]
+) -> tuple[bool, bool]:
     """B-193: the destructive command and the autonomy marker must co-occur within
     _DESTRUCTIVE_AUTONOMY_WINDOW chars of each other — the prior whole-blob co-occurrence
     check (merely both existing SOMEWHERE) false-fired on a devtool git migration helper
@@ -2734,19 +2847,35 @@ def _destructive_autonomy_hit(blob: str, fence_ranges: list[tuple[int, int]]) ->
         for m in _DESTRUCTIVE_CMD_RE.finditer(blob)
         if not _is_code_example(blob, m.start(), fence_ranges)
     ]
-    if not destructive_spans:
-        return False
     autonomy_spans = [
         m.start()
         for m in _AUTONOMY_RE.finditer(blob)
         if not _is_code_example(blob, m.start(), fence_ranges)
     ]
-    if not autonomy_spans:
-        return False
-    return any(
+    hit = any(
         abs(d - a) <= _DESTRUCTIVE_AUTONOMY_WINDOW
         for d in destructive_spans
         for a in autonomy_spans
+    )
+    if hit:
+        return True, False
+    # B-526: returns (hit, fence_only). The second element is True when the SAME
+    # co-occurrence exists once bare-fence-hidden positions are admitted — i.e. the
+    # pair is there and only an author-written fence kept it out of the scan. It is
+    # computed ONLY when `hit` is False, so a real conviction never pays for it and
+    # can never be replaced by it.
+    d_fenced = destructive_spans + [
+        m.start()
+        for m in _DESTRUCTIVE_CMD_RE.finditer(blob)
+        if _fence_only_suppression(blob, m.start(), fence_ranges)
+    ]
+    a_fenced = autonomy_spans + [
+        m.start()
+        for m in _AUTONOMY_RE.finditer(blob)
+        if _fence_only_suppression(blob, m.start(), fence_ranges)
+    ]
+    return False, any(
+        abs(d - a) <= _DESTRUCTIVE_AUTONOMY_WINDOW for d in d_fenced for a in a_fenced
     )
 
 
@@ -2886,6 +3015,24 @@ def _in_example_context(blob: str, pos: int, fence_ranges: list[tuple[int, int]]
     return bool(_SAFETY_EXAMPLE_RE.search(seg))
 
 
+def _example_context_is_fence_only(
+    blob: str, pos: int, fence_ranges: list[tuple[int, int]]
+) -> bool:
+    """B-526: of the two reasons `_in_example_context` suppresses, is it ONLY the bare fence?
+
+    A sibling rather than a signature change, so the three existing consumers keep their
+    control flow and only the FAIL-capable two consult this. Security-doc vocabulary
+    (`_SAFETY_EXAMPLE_RE`) is left alone deliberately: a skill discussing prompt injection
+    in prose is the documented benign case those windows exist for, and demoting it would
+    reintroduce exactly the false positive `_SAFETY_EXAMPLE_RE` was added to remove."""
+    if not _is_code_example(blob, pos, fence_ranges):
+        return False
+    seg = blob[max(0, pos - _SAFETY_EXAMPLE_WINDOW) : pos + _SAFETY_EXAMPLE_WINDOW]
+    if _SAFETY_EXAMPLE_RE.search(seg):
+        return False
+    return _fence_only_suppression(blob, pos, fence_ranges)
+
+
 # B-132/_skill_own_host/_url_matches_own_host/_FM_HOMEPAGE_RE/_URL_HOST_RE/
 # _JSON_MANIFEST_BASENAME_RE/_JSON_MANIFEST_HOST_RE moved to _content.py (C-210):
 # a second topic (the C-210 prose-intent bulk-exfil check) now needs the same
@@ -2960,8 +3107,28 @@ _REPUTABLE_INSTALL_HOSTS = (
 # no endswith/suffix check) — a suffix match would let a crafted
 # "evil-example.com" or "example.com.attacker.io" slip through as if it were
 # the reserved domain itself.
+#
+# EXTENDING THIS TO SUBDOMAINS WAS TRIED AND REVERTED (2026-08-23). The
+# argument for it is sound on its face: RFC 6761 §6.5 covers "any names falling
+# within those domains", the zone is IANA's so no attacker can obtain a name
+# inside it, and `h == d or h.endswith("." + d)` is already the idiom every
+# sibling host test at this site uses. It was reverted because it buys nothing
+# measurable. Counting pipe-to-shell hosts with this file's own _PIPE_SHELL_RE:
+#
+#     surface                      bare example.*   subdomain of it
+#     SkillTrustBench, 5,520 cases      19 benign                 0
+#     OASB corpus                              0                 0
+#     multi-file attack corpus                 0                 0
+#     the real installed fleet                 0                 0
+#
+# Those 19 benign cases ARE the I-032 justification above; the subdomain column
+# is empty everywhere, malicious and benign alike. So the widening fixes no
+# observed false positive, while it costs a C-135 pin
+# (test_pipe_to_shell_from_evil_subdomain_of_example_com_still_fails), 28 tests,
+# and — because this repo ships no real IOCs — the five malicious fixtures that
+# use *.example.com as their attacker host. Reopen only with a benign case that
+# actually cites a subdomain here.
 _RESERVED_EXAMPLE_DOMAINS = frozenset({"example.com", "example.net", "example.org"})
-
 
 # Bounded quantifiers ({0,256}) instead of unbounded [^\n|]* — two adjacent
 # unbounded same-class runs split by a tail that fails on no-pipe lines caused
@@ -3255,9 +3422,21 @@ def _b13_verdict(
     # C-358: coverage disclosure only, appended to evidence (never detail) — every
     # check_installed_skills verdict routed through this helper carries it, so it can
     # never be mistaken for a clean "the dependency tree was looked at and is fine".
-    fx.evidence = fx.evidence + [NPM_DEPTREE_SKILL_COVERAGE_NOTE]
+    #
+    # B-526 rides the same channel, for the same reason and under the same contract:
+    # keys starting with "_" are COVERAGE, not signal. They reach `evidence` and
+    # nothing else — not `detail`, not `status`, not the cascade that picks the winner,
+    # and not `corroborating_buckets` (a coverage note is not a corroborating signal;
+    # letting it in there would leak "we declined to look" into a field that means
+    # "something else also fired"). This is what keeps a fence disclosure off the
+    # install gate: `status` is decided before we get here and is never revised.
+    _coverage = [n for key, bucket in signal_buckets.items() if key.startswith("_")
+                 for n in bucket]
+    fx.evidence = fx.evidence + _coverage + [NPM_DEPTREE_SKILL_COVERAGE_NOTE]
     fx.corroborating_buckets = [
-        name for name, bucket in signal_buckets.items() if bucket and name != winner
+        name
+        for name, bucket in signal_buckets.items()
+        if bucket and name != winner and not name.startswith("_")
     ]
     return fx
 
@@ -3307,6 +3486,18 @@ def check_installed_skills(ctx: Context) -> Finding:
         str
     ] = []  # F-051/F-060/F-062 soft content signals (broad trigger, local chain, IOCs)
     warns_notify_host: list[str] = []  # B-122: bare Telegram/Discord self-notify (no taint)
+    # B-526: fence COVERAGE notes — "a match sat in a fence carrying no marker we
+    # recognise, so it was not assessed". Deliberately NOT one of the verdict buckets
+    # above and never read by the `if <bucket>: return` cascade below. An independent
+    # C-135 pass measured what happens when a disclosure is given a finding's weight:
+    # two benign SkillTrustBench skills went INSTALL -> CAUTION (case_04957 is the
+    # official `mise` installer under a Prerequisites heading), two fixtures lost their
+    # named finding out of the default render because the new WARN tied with it and won
+    # `max()` on position, and three verdict templates began wrapping "we did not look"
+    # in prose that asserts we did. All three follow from the same mistake, so the fix
+    # is one rule: a disclosure must not move a verdict, a grade, or a finding id
+    # (the same contract C-358 states for NPM_DEPTREE_SKILL_COVERAGE_NOTE).
+    coverage_fence: list[str] = []
     # B-556: destination hosts backing the "crit" bucket's "paste / exfiltration host"
     # label below, so adjudication.py can be handed a real destination instead of
     # `safe_facts: {}`. See Finding.destination_hosts.
@@ -3338,6 +3529,13 @@ def check_installed_skills(ctx: Context) -> Finding:
 
         # CRIT patterns: iterate all matches; drop those that are code examples.
         for label, rx in _SKILL_CRIT:
+            # B-526: a match hidden by a bare fence is remembered, not acted on inside
+            # the loop. Emitting it here and breaking would be a FALSE NEGATIVE: a
+            # fenced match early in the blob would end the scan and swallow a genuine
+            # unfenced match later in the same file. So the WARN is emitted only by the
+            # `else` clause below, which runs exactly when no `break` happened — i.e.
+            # when nothing convicted.
+            _fenced_only = False
             for m in rx.finditer(blob):
                 if not _is_code_example(blob, m.start(), _fr):
                     crit.append(f"{name}: {label}")
@@ -3347,11 +3545,19 @@ def check_installed_skills(ctx: Context) -> Finding:
                     if rx is _KNOWN_EXFIL_HOST_RE:
                         crit_hosts_by_skill.setdefault(name, set()).add(m.group(0))
                     break  # one finding per label per skill is enough
+                if not _fenced_only and _fence_only_suppression(blob, m.start(), _fr):
+                    _fenced_only = True
+            else:
+                if _fenced_only:
+                    coverage_fence.append(
+                        f"coverage: {name}: {label} sits in a fence carrying no marker we"
+                        " recognise, so it was not assessed"
+                    )
 
         # B-122: Telegram/Discord are dual-use notification hosts, not unambiguous
         # exfil sinks — CRITICAL only when a secret/file-read taint reaches the same
         # request; a bare self-notification hit is WARN (down-rank, not drop).
-        _notify_crit, _notify_warn = _notify_host_hits(blob, _fr)
+        _notify_crit, _notify_warn = _notify_host_hits(blob, _fr, coverage_fence)
         for h in _notify_crit:
             crit.append(f"{name}: {h}")
         for h in _notify_warn:
@@ -3373,8 +3579,21 @@ def check_installed_skills(ctx: Context) -> Finding:
         for label, rx in _SKILL_HIGH:
             _test_fixture_only = False  # B-193: saw ONLY test-fixture-scoped live matches
             _agency_prohibited_only = False  # B-197: saw ONLY prohibition-governed matches
+            _fence_only = False  # B-526: saw ONLY bare-fence-hidden matches
             for m in rx.finditer(blob):
-                if not _is_code_example(blob, m.start(), _fr):
+                # C-135 (performance): _is_code_example is computed ONCE per match —
+                # this file's own notes record a 1 MB skill turning into a 107s check
+                # when a per-match helper was re-run.
+                _suppressed = _is_code_example(blob, m.start(), _fr)
+                if _suppressed:
+                    # B-526: recorded, never acted on inside the loop — this loop's
+                    # `break` means "one finding per label", so emitting here would let
+                    # a fenced match end the scan and swallow a real one further down.
+                    # The else clause below already exists for exactly this pattern
+                    # (B-193 / B-197), so this is a third flag in an established shape.
+                    if not _fence_only:
+                        _fence_only = _fence_only_suppression(blob, m.start(), _fr)
+                else:
                     # C-259 (D2, docs/design/severity-separability.md): measured net-correct,
                     # not just assumed — over the 2,052-case WARN corpus this gate fires on
                     # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
@@ -3435,6 +3654,13 @@ def check_installed_skills(ctx: Context) -> Finding:
             else:
                 if _test_fixture_only:
                     warns_content.append(f"{name}: {label} (inside the skill's own test fixture)")
+                elif _fence_only:
+                    # B-526: reached only when NOTHING convicted for this label, so a
+                    # real match later in the blob can never be hidden by this note.
+                    coverage_fence.append(
+                        f"coverage: {name}: {label} sits in a fence carrying no marker we"
+                        " recognise, so it was not assessed"
+                    )
                 elif _agency_prohibited_only:
                     warns_content.append(f"{name}: {label} (prohibition/safety-constraint phrasing)")
 
@@ -3511,34 +3737,51 @@ def check_installed_skills(ctx: Context) -> Finding:
             h = host.lower()
             if any(h == r or h.endswith("." + r) for r in _REPUTABLE_INSTALL_HOSTS):
                 continue
-            if not _is_code_example(blob, pm.start(), _fr):
-                msg = f"{name}: pipe-to-shell from non-reputable host {host}"
-                # C-259 (D5, docs/design/severity-separability.md): measured net-correct,
-                # not just assumed — over the 2,052-case WARN corpus this gate fires on
-                # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
-                # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
-                # design doc's refuted option O2) trades benign FAILs for negligible
-                # recall — do not reopen on recall grounds. The other 97.32% of
-                # malicious WARN-only cases never had a FAIL-capable signal at all;
-                # that gap is evidence-accumulation/E-038 work (design doc §7), not
-                # this gate.
-                # F-097: pipe-to-shell to the skill's own host or under an install/setup
-                # heading is a documented installer -> WARN; else it stays FAIL.
-                _own = _own_host is not None and (h == _own_host or h.endswith("." + _own_host))
-                # I-032: an RFC 2606 reserved example domain (exact match only — see
-                # _RESERVED_EXAMPLE_DOMAINS above) can never be a live dropper host,
-                # so it downgrades the same as an own-host/install-heading match. This
-                # never suppresses the finding outright, only downgrades HIGH -> WARN.
-                _reserved_example = h in _RESERVED_EXAMPLE_DOMAINS
-                # B-193: same test-fixture FP driver as the base64/exec label above
-                # (case_01472) — a live pipe-to-shell string inside the skill's own
-                # tests/test_*.py is a fixture, not a directive.
-                if _own or _under_install_heading(blob, pm.start()) or _reserved_example:
-                    warns_install_curl.append(msg)
-                elif _pos_in_test_fixture_file(blob, pm.start()):
-                    warns_content.append(msg + " (inside the skill's own test fixture)")
-                else:
-                    high.append(msg)
+            if _is_code_example(blob, pm.start(), _fr):
+                # B-526: no label loop here, so no for/else is needed — each match is
+                # independent and a demote cannot swallow a later one.
+                # B-194 / I-032: a loopback-or-private host is never real egress, and an
+                # RFC 2606 reserved example domain can never be a live dropper host. Both
+                # are true whether or not a fence hides the line, so demoting them would
+                # be pure noise — these are the site's OWN exclusions, applied to the
+                # demote path as well as the conviction path.
+                if (
+                    _fence_only_suppression(blob, pm.start(), _fr)
+                    and not _url_host_is_local("http://" + host)
+                    and h not in _RESERVED_EXAMPLE_DOMAINS
+                ):
+                    coverage_fence.append(
+                        f"coverage: {name}: a pipe-to-shell from {host} sits in a fence"
+                        " carrying no marker we recognise, so it was not assessed"
+                    )
+                continue
+            msg = f"{name}: pipe-to-shell from non-reputable host {host}"
+            # C-259 (D5, docs/design/severity-separability.md): measured net-correct,
+            # not just assumed — over the 2,052-case WARN corpus this gate fires on
+            # malicious WARN-only skills at 2.68% (33/1,230) vs benign WARN-only
+            # skills at 5.32% (24/451), ~2x the malicious rate. Loosening it (the
+            # design doc's refuted option O2) trades benign FAILs for negligible
+            # recall — do not reopen on recall grounds. The other 97.32% of
+            # malicious WARN-only cases never had a FAIL-capable signal at all;
+            # that gap is evidence-accumulation/E-038 work (design doc §7), not
+            # this gate.
+            # F-097: pipe-to-shell to the skill's own host or under an install/setup
+            # heading is a documented installer -> WARN; else it stays FAIL.
+            _own = _own_host is not None and (h == _own_host or h.endswith("." + _own_host))
+            # I-032: an RFC 2606 reserved example domain (exact match only — see
+            # _RESERVED_EXAMPLE_DOMAINS above) can never be a live dropper host,
+            # so it downgrades the same as an own-host/install-heading match. This
+            # never suppresses the finding outright, only downgrades HIGH -> WARN.
+            _reserved_example = h in _RESERVED_EXAMPLE_DOMAINS
+            # B-193: same test-fixture FP driver as the base64/exec label above
+            # (case_01472) — a live pipe-to-shell string inside the skill's own
+            # tests/test_*.py is a fixture, not a directive.
+            if _own or _under_install_heading(blob, pm.start()) or _reserved_example:
+                warns_install_curl.append(msg)
+            elif _pos_in_test_fixture_file(blob, pm.start()):
+                warns_content.append(msg + " (inside the skill's own test fixture)")
+            else:
+                high.append(msg)
 
         # Cross-skill cred+exfil: run against the blob with fenced spans blanked so
         # a credential path that only appears inside a documentation example does not
@@ -3566,9 +3809,15 @@ def check_installed_skills(ctx: Context) -> Finding:
         # already CRITICAL via _SKILL_CRIT; this catches the broader class that only becomes
         # dangerous when the agent is instructed to act on it without asking. Fence-aware:
         # skip matches inside documented code-example blocks.
-        if _destructive_autonomy_hit(blob, _fr):
+        _da_hit, _da_fenced = _destructive_autonomy_hit(blob, _fr)
+        if _da_hit:
             high.append(
                 f"{name}: destructive command with autonomy marker (no-confirmation destructive action)"
+            )
+        elif _da_fenced:
+            coverage_fence.append(
+                f"coverage: {name}: a destructive command with an autonomy marker sits in a"
+                " fence carrying no marker we recognise, so it was not assessed"
             )
 
         # Dual-use directives only fire alongside a real cred/exfil signal (zero-FP);
@@ -3595,20 +3844,42 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if rx.search(_blob_norm) and cred_exfil_signal:
                     high.append(f"{name}: injection directive — {label}")
                 continue
+            _inj_fence_only = False
             for m in rx.finditer(_blob_norm):
                 if _in_example_context(_blob_norm, m.start(), _fr_norm):
+                    # B-526: remembered, not emitted here — see the _SKILL_CRIT loop for
+                    # why acting inside the loop would swallow a real later match.
+                    if not _inj_fence_only:
+                        _inj_fence_only = _example_context_is_fence_only(
+                            _blob_norm, m.start(), _fr_norm
+                        )
                     continue
                 high.append(f"{name}: injection directive — {label}")
                 break
+            else:
+                if _inj_fence_only:
+                    coverage_fence.append(
+                        f"coverage: {name}: an injection directive ({label}) sits in a fence"
+                        " carrying no marker we recognise, so it was not assessed"
+                    )
 
         # F-052: anti-refusal + system-prompt/tool-definition leak directives. Malicious on
         # their own (no co-signal), but dampened by _in_example_context so a security skill
         # that quotes them as examples stays clean. Fence-position-aware -> search raw blob.
         for label, rx in _SKILL_SAFETY_SUBVERSION:
+            _sub_fence_only = False
             for m in rx.finditer(blob):
                 if not _in_example_context(blob, m.start(), _fr):
                     high.append(f"{name}: injection directive — {label}")
                     break
+                if not _sub_fence_only:
+                    _sub_fence_only = _example_context_is_fence_only(blob, m.start(), _fr)
+            else:
+                if _sub_fence_only:
+                    coverage_fence.append(
+                        f"coverage: {name}: an injection directive ({label}) sits in a fence"
+                        " carrying no marker we recognise, so it was not assessed"
+                    )
 
         # F-051 / F-060 / F-062: soft content signals -> WARN (never FAIL on their own).
         for m in _SKILL_BROAD_TRIGGER_RE.finditer(blob):
@@ -3644,15 +3915,26 @@ def check_installed_skills(ctx: Context) -> Finding:
         # C-040: persistence / rogue-agent patterns — HIGH (self-mod)
         # and WARN (backgrounding/daemonize). Fence-aware via _is_code_example.
         for p_label, p_rx in _SKILL_PERSISTENCE_HIGH:
+            # B-526: same for/else shape as the _SKILL_CRIT loop above — a fenced match
+            # must never end the scan, or it swallows a genuine unfenced one later.
+            _p_fenced_only = False
             for pm in p_rx.finditer(blob):
                 if not _is_code_example(blob, pm.start(), _fr):
                     high.append(f"{name}: {p_label}")
                     break  # one finding per label per skill
+                if not _p_fenced_only and _fence_only_suppression(blob, pm.start(), _fr):
+                    _p_fenced_only = True
+            else:
+                if _p_fenced_only:
+                    coverage_fence.append(
+                        f"coverage: {name}: {p_label} sits in a fence carrying no marker we"
+                        " recognise, so it was not assessed"
+                    )
 
         # B-144: cron/startup persistence — dual-use, disclosure-aware (see
         # _cron_persistence_hits docstring). A disclosed watchdog/monitoring job
         # down-ranks to WARN instead of HIGH.
-        _cron_high, _cron_warn = _cron_persistence_hits(blob, _fr)
+        _cron_high, _cron_warn = _cron_persistence_hits(blob, _fr, coverage_fence)
         for h in _cron_high:
             high.append(f"{name}: {h}")
         for h in _cron_warn:
@@ -3660,7 +3942,7 @@ def check_installed_skills(ctx: Context) -> Finding:
 
         # C-204: authorized_keys persistence — write-verb + key-literal HIGH/WARN split
         # (see _authkey_persistence_hits docstring). Same shape as the cron block above.
-        _authkey_high, _authkey_warn = _authkey_persistence_hits(blob, _fr)
+        _authkey_high, _authkey_warn = _authkey_persistence_hits(blob, _fr, coverage_fence)
         for h in _authkey_high:
             high.append(f"{name}: {h}")
         for h in _authkey_warn:
@@ -3679,7 +3961,13 @@ def check_installed_skills(ctx: Context) -> Finding:
         # exact target as its purpose (_skill_declares_config_target), AND nothing else
         # has already flagged this skill crit/high — a declared config-writer that also
         # trips any other signal still FAILs (case_01826 mitigation, architect design).
-        for evidence, fname in _agent_config_write_hits(name, blob, _fr):
+        _acw_hits, _acw_fenced = _agent_config_write_hits(name, blob, _fr)
+        for _f in _acw_fenced:
+            warns_content.append(
+                f"{name}: write to an agent-context file ({_f}) inside a fence with no"
+                " marker we recognise, so it was not assessed"
+            )
+        for evidence, fname in _acw_hits:
             _prefix = f"{name}:"
             _has_other_signal = any(e.startswith(_prefix) for e in crit) or any(
                 e.startswith(_prefix) for e in high
@@ -3863,6 +4151,9 @@ def check_installed_skills(ctx: Context) -> Finding:
         "persist_warn": _persist_warn,
         "warns_local_exfil": warns_local_exfil,
         "warns_unpinned": warns_unpinned,
+        # Reserved (leading underscore): carried to _b13_verdict as EVIDENCE, never
+        # counted as a corroborating signal. See the declaration above.
+        "_coverage_fence": coverage_fence,
     }
     if crit:
         extra = f" (+{len(crit) - 6} more)" if len(crit) > 6 else ""
@@ -4418,7 +4709,12 @@ def check_installed_skills(ctx: Context) -> Finding:
         f"Scanned {n} installed skill(s); no shell-exec / exfiltration / obfuscation "
         "patterns found.",
         "Keep installing only skills whose source you've reviewed — trust no one.",
-        [NPM_DEPTREE_SKILL_COVERAGE_NOTE],
+        # B-526: the clean return is the one case the fence disclosure exists FOR — a
+        # skill reads clean precisely BECAUSE a fence hid the match. This return does not
+        # route through _b13_verdict (it has no winning bucket), so the coverage notes are
+        # appended here by hand. Order matches _b13_verdict: fence notes, then the
+        # standing dependency-tree note. Still evidence-only: `status` stays PASS.
+        coverage_fence + [NPM_DEPTREE_SKILL_COVERAGE_NOTE],
     )
 
 
@@ -4459,6 +4755,10 @@ def _run_content_ring(
     FAIL. A ring check must never break --vet, so a failing check is skipped.
     """
     out: list[Finding] = []
+    # B-526: coverage notes harvested off ring findings that are dropped below. Attached
+    # to the function so the caller can read them without changing the return contract
+    # this docstring pins ("only the actionable (FAIL/WARN) findings").
+    ring_coverage: list[str] = []
     seen: set[tuple[str, str]] = set()
     # F-148: the ring runs OUTSIDE run_all, so until now nothing bounded it at all.
     #
@@ -4583,6 +4883,17 @@ def _run_content_ring(
                 # unit tests.
                 continue
             if fx.status not in (FAIL, WARN):
+                # B-526: the finding is dropped, its COVERAGE is not. The drop rule
+                # exists because "an UNKNOWN would wrongly outrank a clean PASS" (see
+                # this function's docstring) — that is about the finding's STATUS, and a
+                # coverage note has none. B343 is the case that made this visible: a
+                # model reference reachable only inside a bare fence leaves B343 UNKNOWN,
+                # so without this the disclosure died here and --vet reported a clean
+                # skill with nothing said about the part it never read. The notes are
+                # collected and handed to the surviving primary by vet_skill.
+                ring_coverage.extend(
+                    e for e in (fx.evidence or []) if e.startswith("coverage: ")
+                )
                 continue
             key = (fx.id, fx.detail)
             if key in seen:
@@ -4605,6 +4916,9 @@ def _run_content_ring(
         # … AND emitted as a finding (see coverage_gap_finding for why ctx alone is not
         # enough).
         out.append(coverage_gap_finding(gap))
+    # B-526: side-channel, deliberately not a second return value — the FAIL/WARN-only
+    # return contract above is depended on by several callers and tests.
+    ctx.ring_coverage_notes = ring_coverage
     return out
 
 
@@ -4889,9 +5203,25 @@ def vet_skill(path: str | Path) -> Finding:
             )
         ]
         primary.ctx = ctx
+        _attach_ring_coverage(primary, ctx)
         return primary
     finding.ctx = ctx
+    _attach_ring_coverage(finding, ctx)
     return finding
+
+
+def _attach_ring_coverage(fx: Finding, ctx: Context) -> None:
+    """B-526: carry coverage notes off ring findings that _run_content_ring dropped.
+
+    Evidence only — never `detail`, never `status`. The whole reason the disclosure sits
+    on this channel is that an independent C-135 pass measured what happens when it sits
+    anywhere else: two benign skills blocked at an install gate, named findings evicted
+    from the render by the status tie, and verdict templates wrapping "we did not look"
+    in prose asserting we did.
+    """
+    notes = [n for n in getattr(ctx, "ring_coverage_notes", None) or [] if n not in (fx.evidence or [])]
+    if notes:
+        fx.evidence = (fx.evidence or []) + notes
 
 
 _PLUGIN_MANIFEST = "openclaw.plugin.json"
