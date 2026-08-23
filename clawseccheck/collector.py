@@ -29,7 +29,7 @@ import bz2
 import lzma
 import unicodedata
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from .configloader import (
     ConfigLoadError as _ConfigLoadError,
     load_openclaw_config as _load_openclaw_config,
@@ -2229,6 +2229,144 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
     return "\n".join(parts)
 
 
+# ── B-548: which analyzer owns a file ────────────────────────────────────────
+# The three readers below used to answer this from the file NAME alone, so an
+# executable script with no extension — `urlgo`, `install`, `scripts/post_install`
+# — landed in no bucket at all. That is not silence: every downstream coverage
+# predicate short-circuits on an empty bucket and dossier.py then prints the
+# POSITIVE claim "no executable code to analyze". Our own bad fixture shows the
+# contradiction it produces — `fixtures/bad_b335_no_extension_installer` prints a
+# WARN saying its `install` file writes auto-execution persistence, and one line
+# below, that there was no executable code to analyse.
+#
+# Extension stays the fast path AND keeps priority: a file whose suffix any reader
+# already claims is routed exactly as before, so this change cannot move a single
+# file that is collected today. Only files claimed by NOTHING reach the shebang.
+#
+# Why the shebang and not the executable bit, counted over `fixtures/` plus the
+# installed skills on the author's machine (1,298 files, 1,115 uncollected today):
+#
+#   uncollected files carrying a shebang        1   (the b335 fixture)
+#   uncollected files with +x and no shebang    0
+#
+# Read that second row as "this machine has no subject", NOT as a fleet result:
+# the installed-skills directory here holds two entries, so the corpus is really
+# `fixtures/`. The exec bit is rejected on a stronger argument than the count —
+# it does not survive a git checkout or a tarball, so a payload loses it in
+# transit and a benign file gains one by accident.
+#
+# WHAT THIS DELIBERATELY DOES NOT CLOSE (independent C-135, 2026-08-23). A file
+# with NEITHER an extension nor a shebang is still collected by nothing, and
+# skills name the interpreter in SKILL.md prose (`Run `python3 bin/lint``), so
+# that shape is the common one, not the exotic one. Measured: a bundled
+# `bin/lint` that reads ~/.openclaw/credentials.json and posts it to a remote
+# host still renders INSTALL with Danger PASS. The same holds for a payload
+# given a data suffix (`setup.json` carrying `#!/bin/bash`), which the
+# _NON_CODE_SUFFIXES gate below excludes before the shebang is read. Both are
+# exactly as invisible as they were before this change — neither is a regression
+# — and both are B-612, which routes on the interpreter the SKILL.md names.
+# `tests/test_b548_language_by_content.py` pins both as open, so this fix cannot
+# be read as broader than it is.
+#
+# A DISCLOSURE ARM WAS BUILT HERE AND RETRACTED, same review. It recorded a
+# `note_limit` for a shebang naming an interpreter we do not parse (perl, ruby).
+# Three independent defects, any one fatal: (a) LIMIT_DOMAIN_SKILL's only
+# renderer is the size/file-cap verdict, so a two-line Ruby CSV formatter printed
+# "Content beyond the size/file cap was not scanned ... split oversized files" —
+# a fabricated cause, and it moved a benign skill from `1 safe`/rc 0 to
+# `1 partially scanned`/rc 1 (Golden Rule #5); (b) the same text was printed for
+# a `.md` excluded by suffix, calling python3 "an interpreter this scanner does
+# not analyze"; (c) it never reached the screen at all when a real FAIL outranked
+# it. The scanner did not read ruby before this change either, so coverage never
+# moved — only the claim did. `ctx.limit_hits` carries verdict weight
+# (dossier._danger_coverage_gap leg 2); it is not a notepad. If this disclosure
+# is wanted, it needs its own non-verdict channel, the precedent being
+# NPM_DEPTREE_SKILL_COVERAGE_NOTE (C-358: evidence only, never detail).
+_PY_SUFFIXES = (".py", ".ipynb")
+_SH_SUFFIXES = (".sh", ".bash", ".zsh")
+_JS_SUFFIXES = (".js", ".ts", ".mjs", ".cjs")
+
+# Interpreter stems, after the basename is lowercased and a trailing version
+# ("3", "3.11", "20") is stripped. Deliberately strict: an interpreter we do not
+# model is NOT guessed into a bucket — a `#!/usr/bin/env ruby` file handed to
+# analyze_shell would produce findings about a language nobody parsed. It is
+# disclosed instead (see read_skill_python).
+# Suffixes that name DATA or PROSE. A file with one of these never reaches the
+# shebang route, however its first bytes read. Two reasons, and the second is the
+# load-bearing one: a `README.md` opening with `#!` is a Markdown heading, not a
+# script — `#` starts a comment or a heading in a dozen formats — and the prose
+# surface is already scanned by the content ring, so routing it to the AST layer
+# would double-count it under a language nobody wrote it in. Measured count of
+# such files across fixtures + the real fleet: zero. The rule is here because a
+# discriminator with no subject today is still the wrong discriminator.
+_NON_CODE_SUFFIXES = (
+    ".md", ".markdown", ".rst", ".txt", ".json", ".jsonl", ".yaml", ".yml",
+    ".toml", ".ini", ".cfg", ".csv", ".tsv", ".xml", ".html", ".htm", ".css",
+    ".lock", ".log", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico",
+    ".pdf", ".zip", ".gz", ".bz2", ".xz", ".tar", ".whl", ".so", ".dylib",
+    ".dll", ".exe", ".class", ".pyc", ".pyi",
+)
+
+_SHEBANG_SH_STEMS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash"})
+_SHEBANG_JS_STEMS = frozenset({"node", "nodejs", "deno", "bun"})
+_VERSION_TAIL_RE = re.compile(r"[0-9.]+$")
+
+
+def _shebang_language(text: str) -> str | None:
+    """The analyzer a `#!` line names: "py", "sh", "js", or None.
+
+    None covers both "no shebang" and "an interpreter we do not model", and callers do
+    NOT distinguish them. An earlier revision did, to disclose the second as a coverage
+    gap; that arm was retracted (see the block comment above) because the scanner never
+    read those languages either way, so the disclosure moved the claim without moving
+    the coverage — and it moved a benign skill's exit code with it.
+    """
+    if not text.startswith("#!"):
+        return None
+    line = text.splitlines()[0][:256] if text else ""
+    tokens = line[2:].strip().split()
+    if not tokens:
+        return None
+    interp = tokens[0]
+    if PurePosixPath(interp).name.lower() == "env":
+        # `#!/usr/bin/env python3`, and its two real variants: `env -S python3 -u`
+        # (a flag) and `env VAR=1 python3` (an assignment). Skip both to reach the
+        # interpreter; anything else is the interpreter.
+        interp = ""
+        for tok in tokens[1:]:
+            if tok.startswith("-") or ("=" in tok and "/" not in tok):
+                continue
+            interp = tok
+            break
+        if not interp:
+            return None
+    stem = PurePosixPath(interp).name.lower()
+    if stem.startswith("python"):
+        return "py"
+    stem = _VERSION_TAIL_RE.sub("", stem) or stem
+    if stem == "pypy":
+        return "py"
+    if stem in _SHEBANG_SH_STEMS:
+        return "sh"
+    if stem in _SHEBANG_JS_STEMS:
+        return "js"
+    return None
+
+
+def _file_language(relpath: str, text: str) -> str | None:
+    """Which of the three readers owns *relpath*, extension first then shebang."""
+    rel = relpath.lower()
+    if rel.endswith(_PY_SUFFIXES):
+        return "py"
+    if rel.endswith(_SH_SUFFIXES):
+        return "sh"
+    if rel.endswith(_JS_SUFFIXES):
+        return "js"
+    if rel.endswith(_NON_CODE_SUFFIXES):
+        return None
+    return _shebang_language(text)
+
+
 def read_skill_python(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str, str]]:
     """Collect the Python source files of one skill for read-only AST analysis.
 
@@ -2248,10 +2386,10 @@ def read_skill_python(skill_dir: Path, ctx: Context | None = None) -> list[tuple
         if item["classification"] != "TEXT":
             continue
         rel = item["relpath"].lower()
-        if not rel.endswith((".py", ".ipynb")):
+        text = _collected_text(item)
+        if _file_language(item["relpath"], text) != "py":
             continue
 
-        text = _collected_text(item)
         if rel.endswith(".ipynb"):
             # F-116: route the notebook's code cells through the same AST/taint engine as .py.
             src = _ipynb_code_source(text, skill_dir.name, ctx)
@@ -2290,9 +2428,9 @@ def read_skill_shell(skill_dir: Path, ctx: Context | None = None) -> list[tuple[
             break
         if item["classification"] != "TEXT":
             continue
-        if not item["relpath"].lower().endswith((".sh", ".bash", ".zsh")):
-            continue
         text = _collected_text(item)
+        if _file_language(item["relpath"], text) != "sh":
+            continue
         out.append((item["relpath"], text))
         total += len(text)
         file_count += 1
@@ -2325,9 +2463,9 @@ def read_skill_js(skill_dir: Path, ctx: Context | None = None) -> list[tuple[str
             break
         if item["classification"] != "TEXT":
             continue
-        if not item["relpath"].lower().endswith((".js", ".ts", ".mjs", ".cjs")):
-            continue
         text = _collected_text(item)
+        if _file_language(item["relpath"], text) != "js":
+            continue
         out.append((item["relpath"], text))
         total += len(text)
         file_count += 1

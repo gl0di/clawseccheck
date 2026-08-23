@@ -377,16 +377,38 @@ def _vet_coverage_incomplete(f) -> bool:
     cause. Callers must therefore describe the STATE ("partially scanned") and let the
     finding itself carry the reason.
 
-    Mirrors dossier.py's ``_danger_coverage_gap`` detection: the signal is an UNKNOWN
-    finding whose ``.detail`` contains the literal substring "coverage is incomplete".
-    It can either BE the primary finding `f`, or ride along on ``f.ring_findings`` when
-    a worse WARN/FAIL outranked it as primary (``checks/_vet.py:vet_skill``'s
-    ``_VET_MERGE_RANK``) — so both must be checked, or a partially scanned target that
-    also tripped a real WARN/FAIL would read as an ordinary, complete result.
+    Shares dossier.py's ``_danger_coverage_gap`` legs, minus the one it cannot reach.
+    That function has three: (1) ``Finding.engine_degraded``, (2) ``ctx.limit_hits``,
+    (3) the literal substring "coverage is incomplete". This helper is handed a
+    ``vet_skill()`` result and no ``ctx``, so leg 2 is structurally unavailable here —
+    it keys on 1 and 3, and callers that DO hold a ctx should prefer the dossier
+    predicate.
+
+    B-548: it used to key on leg 3 ALONE while claiming in this docstring to mirror the
+    dossier predicate — a claim ``3fe2554`` made false when it added leg 1 there and not
+    here. Leg 3 is documented in dossier.py as a fallback for hand-built ``Finding``
+    objects precisely because matching English prose loses the signal the moment a
+    producer rewords its detail, and never had it for a producer that used other words.
+    B13's parse-error branch is exactly such a producer: it sets ``engine_degraded=True``
+    and says "could not analyze <file> — parse error(s)". So
+    ``--vet-all --home fixtures/unknown_b347_deaddrop_unparseable`` printed
+    ``[?] 'broken-sync': could not assess`` and then ``1 skill(s) checked | 1 safe``,
+    counting a target it could not read as safe — contradicting its own line above and
+    docs/USAGE.md's promise that such a target is kept out of the "safe" tally.
+
+    The signal can either BE the primary finding `f`, or ride along on
+    ``f.ring_findings`` when a worse WARN/FAIL outranked it as primary
+    (``checks/_vet.py:vet_skill``'s ``_VET_MERGE_RANK``) — so both must be checked, or a
+    partially scanned target that also tripped a real WARN/FAIL would read as an
+    ordinary, complete result.
     """
     pool = [f, *getattr(f, "ring_findings", [])]
     return any(
-        fx.status == "UNKNOWN" and _VET_COVERAGE_GAP_SUBSTRING in (fx.detail or "")
+        fx.status == "UNKNOWN"
+        and (
+            getattr(fx, "engine_degraded", False)
+            or _VET_COVERAGE_GAP_SUBSTRING in (fx.detail or "")
+        )
         for fx in pool
     )
 
