@@ -50,7 +50,7 @@ _EXEMPT = {
                           "prompt-injection checks + the fence/decode/typosquat machinery). "
                           "Kept as ONE unit on purpose (SKILL_CONTENT_RING is the single "
                           "source consumed by both the full audit and --vet); do not split.",
-    "checks/_vet.py": "~5,346 lines — the --vet entry engine (vet_skill/vet_source/"
+    "checks/_vet.py": "~5,890 lines — the --vet entry engine (vet_skill/vet_source/"
                       "detect_vet_type/check_installed_skills + SKILL_CONTENT_RING + the "
                       "shared effect/sink analysis); consumes the content ring. Over budget "
                       "by design; a finer split is a later cycle.",

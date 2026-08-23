@@ -1749,6 +1749,7 @@ def _custom(
     not_applicable=False,
     engine_degraded=False,
     destination_hosts=None,
+    sub_signals=None,
 ) -> Finding:
     """Build a finding with an explicit severity (for dynamic-severity checks).
 
@@ -1763,6 +1764,12 @@ def _custom(
     marking its own engine-side UNKNOWN, so it silently dropped out of
     ``scoring.compute()``'s denominator instead of hard-capping the grade like
     ``_config_unreadable()``'s ``_finding()``-built UNKNOWN already does.
+
+    *sub_signals* (B-556): same contract as ``_finding()``'s own parameter — see
+    Finding.sub_signals. ``_custom`` could not set it before, which is why the field was
+    dead for every dynamic-severity check, B13 included: the judge packet's
+    `safe_facts["sub_signals"]` had exactly one producer and that producer is never
+    borderline, so the field shipped unreachable.
 
     *destination_hosts* (B-556): same contract as ``_finding()``'s own parameter — see
     Finding.destination_hosts. Defaults to an empty frozenset when omitted; every
@@ -1783,6 +1790,7 @@ def _custom(
         not_applicable=not_applicable,
         engine_degraded=engine_degraded,
         destination_hosts=frozenset(destination_hosts) if destination_hosts else frozenset(),
+        sub_signals=frozenset(sub_signals) if sub_signals else frozenset(),
     )
 
 

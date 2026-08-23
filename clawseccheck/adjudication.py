@@ -158,15 +158,28 @@ _ID_QUESTIONS = {
 # `destination_host`), never by parsing the finding's text, so the packet cannot be
 # steered into the specific wording by anything a skill author writes.
 #
-# REACHABILITY, stated plainly because a green suite would otherwise imply more: today
-# the only producer of `destination_hosts` is B13's crit winner, which returns FAIL, and
-# `_is_borderline` admits only UNKNOWN or WARN. So on the shipped tree no real run
-# reaches this wording — it is infrastructure, verified against the real
-# `build_judge_packet` with a WARN-band finding, not a measured change in output. It
-# becomes live the moment the paste-host demotion lands, which is precisely what
-# that task was blocked on: its demotion was a silencer while this packet was empty.
-# The two must be reviewed together, because B-555 is also what first exposes this
-# question text to a real judge.
+# REACHABILITY — THIS IS NOW LIVE, and the paragraph that used to sit here said the
+# opposite. It read: "the only producer of `destination_hosts` is B13's crit winner,
+# which returns FAIL, and `_is_borderline` admits only UNKNOWN or WARN, so on the shipped
+# tree no real run reaches this wording". True when written. Two WARN branches
+# (`warns_notify_host`, `warns_install_curl`) now publish a destination, so an ordinary
+# skill reaches this on an ordinary run.
+#
+# That matters beyond bookkeeping, because the paragraph BELOW accepts an attacker-chosen
+# hostname on the reasoning that the gate bounds it — and that acceptance was written for
+# a path nothing could travel. An independent C-135 measured the difference: 9 of 20
+# hostile hosts now reach `safe_facts.destination_host` on a real run, including a
+# 97-char three-clause imperative under an attacker's own TLD, needing nothing but an
+# `## Installation` heading the skill's author writes. The old producer required a
+# known-bad suffix (ngrok/pipedream), which trips CRITICAL FAIL and is therefore never
+# borderline; `_PIPE_SHELL_RE`'s captured host has no such constraint.
+#
+# Shipped deliberately (Dave, 2026-08-23) on the structural mitigation below: the value
+# lives in a JSON field named `destination_host` and the question POINTS at that field
+# rather than interpolating it, so a judge reads it as data, not as instructions.
+# `tests/test_b556_live_warn_band.py` pins that the host never appears in the question
+# text — if a later edit inlines it, the mitigation is gone and the guard fails.
+# What the gate does NOT bound: meaning. LDH and `_MAX_HOST_LEN` = 100 admit a sentence.
 #
 # They deliberately POINT AT `safe_facts.destination_host` rather than interpolating it.
 # The host is already charset- and length-gated, but `_question_for`'s own contract is
@@ -175,6 +188,15 @@ _ID_QUESTIONS = {
 # a syntactically valid host — see `_safe_destination_host`). Inside a JSON field named
 # `destination_host` that reads as data; spliced into the question a judge is reading as
 # its instructions, it reads as instructions.
+#
+# B-556 round 2: the wording no longer asserts "the scan matched the host name only" as
+# a flat fact. That was true while the ONLY producer was the crit bare-name match; two
+# WARN branches now publish a destination as well, and for `warns_install_curl` the
+# engine matched an entire `curl <url> | bash` construct. Telling a judge the scan saw
+# only a name there would UNDERSTATE what was established — the mirror image of the
+# overclaim below, and equally a fabricated fact. The question now points at
+# `safe_facts.sub_signals` for what fired and keeps the name-only caveat as a case,
+# which is true for every producer.
 #
 # The wording says NAMES, not "sends data to", and that distinction is not pedantry —
 # the first draft said "sends data to" and an independent C-135 caught it. The crit entry
@@ -185,12 +207,38 @@ _ID_QUESTIONS = {
 # pastebin.com is a data flow the engine never established — a fabricated fact handed to
 # the one reader whose job is to weigh the facts (Golden Rule #4). What the engine knows
 # is that the host was NAMED, and the question must not claim more than that.
+# B-556 round 2: asked when `safe_facts.sub_signals` names which branch fired.
+#
+# `_ID_QUESTIONS["B13"]` lists four possible sub-signals and says which fired: none of
+# them. The engine knew all along — `check_installed_skills` is a cascade of
+# `if <bucket>: return _b13_verdict(..., winner)` and `winner` IS the answer; it was
+# computed on every branch and used only to exclude that bucket from
+# `corroborating_buckets`. So this is not new information crossing the firewall, it is
+# information the packet was discarding.
+#
+# Same discipline as the destination variant below: the wording POINTS AT the
+# `safe_facts` field instead of interpolating it. The label is a static engine string
+# (see `_B13_WINNER_SUBSIGNAL` in checks/_vet.py, every entry lifted from that branch's
+# own verdict headline) so interpolation would in fact be safe here — but `_question_for`
+# has one rule, "never inline finding-derived text", and a rule with a case-by-case
+# exemption is a rule that erodes. Pointing costs nothing.
+_ID_QUESTIONS_WITH_SUBSIGNAL = {
+    "B13": "The installed-skill scan flagged this skill for the specific sub-signal "
+           "recorded in this item's `safe_facts.sub_signals` — that is what fired, not "
+           "the others B13 can report. It is a WARN: the engine considers it worth a "
+           "human look, not proof of anything. Did you configure this skill to behave "
+           "that way, and is that behaviour appropriate for what the skill is for? "
+           "[SAFE / SUSPICIOUS / DANGEROUS + reason]",
+}
+
 _ID_QUESTIONS_WITH_DESTINATION = {
     "B13": "This installed skill's content references the external destination recorded "
-           "in this item's `safe_facts.destination_host`. The scan matched the host "
-           "name only: it did NOT establish that any data flows there, and the "
-           "reference may be documentation rather than behaviour. Given what this skill "
-           "is for, does it have any business reaching that destination at all? "
+           "in this item's `safe_facts.destination_host`. What the scan actually matched "
+           "is recorded in `safe_facts.sub_signals` — read it before deciding how much "
+           "that establishes. For some sub-signals the scan matched the host NAME only "
+           "and did NOT establish that any data flows there, so the reference may be "
+           "documentation rather than behaviour. Given what this skill is for, does it "
+           "have any business reaching that destination at all? "
            "[SAFE / SUSPICIOUS / DANGEROUS + reason]",
 }
 
@@ -223,7 +271,9 @@ _RULE_QUESTIONS = {
 
 # --------------------------------------------------------------------------- helpers
 
-def _question_for(finding_id: str, *, has_destination: bool = False) -> str:
+def _question_for(
+    finding_id: str, *, has_destination: bool = False, has_sub_signal: bool = False
+) -> str:
     """Plain-language attestation question for a finding id or ASTFinding rule.
 
     Falls back to a generic, finding-id-only question for anything not in the
@@ -241,10 +291,17 @@ def _question_for(finding_id: str, *, has_destination: bool = False) -> str:
     question — the flag is a BOOLEAN, so no finding-derived text reaches the wording
     here and the no-interpolation rule above is unchanged. Falls back to the generic
     question whenever no variant exists for the id, so every id but B13 is unaffected.
+
+    *has_sub_signal* (B-556 round 2): True when `safe_facts.sub_signals` is populated.
+    Also a BOOLEAN, for the same reason. Ranked BELOW *has_destination*: a named
+    destination is the more specific thing to ask about, and asking both at once would
+    produce a compound question with two answers and one verdict slot.
     """
     q = None
     if has_destination:
         q = _ID_QUESTIONS_WITH_DESTINATION.get(finding_id)
+    if q is None and has_sub_signal:
+        q = _ID_QUESTIONS_WITH_SUBSIGNAL.get(finding_id)
     q = q or _ID_QUESTIONS.get(finding_id) or _RULE_QUESTIONS.get(finding_id)
     if q is None:
         q = (
@@ -559,7 +616,11 @@ def _item_from_finding(f) -> dict:
         "target": _target_from_evidence(f),
         "redacted_evidence": _evidence_locations(f),
         "engine_disposition": f.status,
-        "question": _question_for(f.id, has_destination=bool(host)),
+        "question": _question_for(
+            f.id,
+            has_destination=bool(host),
+            has_sub_signal=bool(safe_facts.get("sub_signals")),
+        ),
         "verdict_schema": _VERDICT_SCHEMA,
         "safe_facts": safe_facts,
     }

