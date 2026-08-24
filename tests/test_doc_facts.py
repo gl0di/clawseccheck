@@ -830,3 +830,71 @@ def test_no_spawn_site_starts_a_network_client():
         if Path(word).name in _NETWORK_CLIENT_BINARIES
     ]
     assert len(planted) == 1, planted
+
+
+# `_TEST_COUNT_RE` and friends above cover the countable claims that were rotting at the
+# time they were written -- check counts, test counts, the RISK range, the release stamp.
+# They are not a general rule, and a claim outside the shapes they know is exactly as
+# unguarded as those were. This one was: OUTPUT_SCHEMA.md said "the five not-ran statuses"
+# while `layers.INCOMPLETE_LAYER_STATUSES` held six.
+#
+# The drift is worth reading, because it is not the usual kind. The row's own TABLE CELL
+# enumerated all seven statuses correctly; only the prose beside it undercounted, so the
+# figure and the list it summarises disagreed inside one sentence. And it was not the last
+# commit's mistake either: `aa68205^` already said "the four not-ran statuses" while
+# `STATUS_NOT_REACHED` already existed, so B-603 added one for the status it introduced and
+# inherited an off-by-one that was older than it.
+_NUMBER_WORDS = {
+    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+_NOT_RAN_COUNT_RE = re.compile(r"\bthe\s+([a-z]+)\s+not-ran statuses\b", re.IGNORECASE)
+
+
+def test_not_ran_status_counts_match_the_layer_ledger():
+    """Any doc that counts the not-ran layer statuses must agree with `layers.py`.
+
+    Derived, not pinned: the truth is `len(INCOMPLETE_LAYER_STATUSES)`, so adding a seventh
+    status reddens the prose that undercounts it instead of leaving the doc to be corrected
+    by whoever next happens to read both.
+    """
+    from clawseccheck.layers import INCOMPLETE_LAYER_STATUSES
+
+    truth = len(INCOMPLETE_LAYER_STATUSES)
+    wrong = []
+    for path in _shipped_files():
+        text = path.read_text(encoding="utf-8")
+        for m in _NOT_RAN_COUNT_RE.finditer(text):
+            word = m.group(1).lower()
+            claimed = _NUMBER_WORDS.get(word)
+            line = text[: m.start()].count("\n") + 1
+            where = f"{path.relative_to(REPO)}:{line}"
+            if claimed is None:
+                wrong.append(f"{where} counts the not-ran statuses as {word!r}, not a number")
+            elif claimed != truth:
+                wrong.append(f"{where} says {word} ({claimed}) not-ran statuses, code has {truth}")
+    assert not wrong, "not-ran status counts drifted:\n  " + "\n  ".join(wrong)
+
+
+def test_every_layer_status_is_named_in_the_output_schema():
+    """A count alone is half a claim -- six is still wrong if it summarises the wrong six.
+
+    So the names are pinned too: a consumer reading OUTPUT_SCHEMA.md to build against
+    `missing_layers[].status` must find every value the code can actually emit.
+    """
+    from clawseccheck.layers import LAYER_STATUSES
+
+    schema = (REPO / "docs" / "OUTPUT_SCHEMA.md").read_text(encoding="utf-8")
+    missing = sorted(s for s in LAYER_STATUSES if f"`{s}`" not in schema)
+    assert not missing, f"layer statuses the output schema never names: {missing}"
+
+
+def test_the_not_ran_count_guard_bites():
+    """Guard the guard, on the exact sentence that was wrong."""
+    truth = 6
+    assert _NUMBER_WORDS["six"] == truth, "update this control if the ledger grows"
+    m = _NOT_RAN_COUNT_RE.search("…and the five not-ran statuses are deliberately distinct:")
+    assert m is not None and _NUMBER_WORDS[m.group(1)] != truth
+    m = _NOT_RAN_COUNT_RE.search("…and the six not-ran statuses are deliberately distinct:")
+    assert m is not None and _NUMBER_WORDS[m.group(1)] == truth
+    assert _NOT_RAN_COUNT_RE.search("statuses that did not run are listed above") is None
