@@ -2454,12 +2454,32 @@ def render_report(findings: list[Finding], score: ScoreResult,
     if _degraded_n:
         warn_icon = "[!]" if ascii_only else "⚠️ "
         _plural = "check" if _degraded_n == 1 else "checks"
+        # B-624: the old sentence ended "…or review the affected finding(s) below for an
+        # unreadable-input detail." Nothing below was marked, and nothing could be: every
+        # degraded finding is UNKNOWN, and the default render does not print UNKNOWN
+        # findings at all. Measured on a config-blind run: 33 degraded checks, and
+        # `grep -c unparseable` on that same report returned 0. The reader was sent to look
+        # for something this view never shows.
+        #
+        # So the banner names them instead of pointing at them. Capped and disclosed, the
+        # same discipline as every other truncated list here — a silent cut would recreate
+        # the defect one level down.
+        _degraded_ids = sorted(
+            f.id for f in findings if getattr(f, "engine_degraded", False)
+        )
+        _shown_ids = _degraded_ids[:6]
+        _which = ""
+        if _shown_ids:
+            _which = " Affected: " + ", ".join(_shown_ids)
+            if len(_degraded_ids) > len(_shown_ids):
+                _which += f", +{len(_degraded_ids) - len(_shown_ids)} more"
+            _which += " (all carry `engine_degraded` in --json)."
         lines.append(
             f"{warn_icon}{_degraded_n} {_plural} could not reach a reliable verdict this"
             " run (crashed, timed out, or hit unreadable/corrupted input) — "
             + _degraded_incomplete_clause(score)
-            + " Re-run with --debug for a crash/timeout traceback, or review the"
-            " affected finding(s) below for an unreadable-input detail."
+            + " Re-run with --debug for a crash/timeout traceback."
+            + _which
         )
     # C-423: `score.graded is False` means no letter/number for this run, anywhere —
     # the "Most urgent" finding leads (a result, never an error), followed by which
@@ -4080,6 +4100,12 @@ def _finding_to_dict(f: Finding) -> dict:
             "remediation": remediation_for(f.id),
             "evidence": [_sanitize(e) for e in (f.evidence or [])],
             "surface": _meta.surface if _meta is not None else "",
+            # B-624: without this a consumer sees two aggregate numbers it cannot
+            # reconcile or attribute — `degraded_count` counts EVERY degraded finding,
+            # `undetermined.engine_degraded` only the scored subset (33 vs 16 on a
+            # config-blind run). Neither could name a single member. This is the flag the
+            # engine already sets; publishing it is what turns a count into a list.
+            "engine_degraded": bool(getattr(f, "engine_degraded", False)),
             "not_applicable": bool(getattr(f, "not_applicable", False))}
 
 
