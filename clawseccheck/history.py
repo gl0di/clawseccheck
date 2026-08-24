@@ -257,7 +257,7 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
     if not p.is_file():
         return []
 
-    rows: list[dict] = []
+    rows = HistoryRows()
     try:
         # C-164: stream line-by-line via _iter_jsonl (not read_text().splitlines())
         # so memory stays flat even on a large history file. _iter_jsonl already
@@ -266,6 +266,16 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
             if not _schema_ok(obj):
                 continue
             if "date" not in obj:
+                # B-580: still not a row — but the retention marker is the file's own
+                # record of what it no longer contains, and dropping it here is what let
+                # `--trend` claim completeness over a pruned history. Carried on the list,
+                # never in it.
+                if "retention_pruned" in obj:
+                    rows.retention_notice = str(obj.get("message") or "") or None
+                    try:
+                        rows.retention_pruned = int(obj.get("retention_pruned") or 0)
+                    except (TypeError, ValueError):
+                        rows.retention_pruned = 0
                 continue                      # retention marker / non-history entry
             has_score = obj.get("score") is not None
             has_grade = obj.get("grade") is not None
@@ -286,6 +296,38 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
         return []
 
     return rows
+
+
+class HistoryRows(list):
+    """The rows `load()` returns, carrying what the file said about what is NOT in them.
+
+    B-580. `--trend` rendered every row it was given and said so — "Every row is shown,
+    always, in the order recorded" — while the retention marker sitting on the file's first
+    line, announcing that 1,001 older runs had been pruned, was dropped by `load()` before
+    any renderer could see it. The oldest quarter of the history was gone and the trend, a
+    claim about a shape over time, started silently mid-history.
+
+    Why the notice rides as an ATTRIBUTE rather than as an element: `monitor._rotate_journal`
+    shapes the marker deliberately without `date`/`score`/`grade` so that `load()`'s row
+    guard skips it, and its own docstring gives the reason — "a marker meant for a human
+    reading the events journal must not corrupt the trend". Making it a row would do exactly
+    that, and would also be counted in "N of M runs". An attribute cannot be mistaken for a
+    run by any consumer: `load()`'s other two callers read `rows[-1]["date"]` and pass the
+    list on, and neither can see this.
+
+    The events side solved the same problem by keeping the marker as `events[0]` and letting
+    `render_events` lift it into the header. That works there because an events journal row
+    and the marker are the same shape. Here they are not, on purpose.
+    """
+
+    #: The marker's own sentence, verbatim, or None when the file records no pruning.
+    retention_notice: "str | None" = None
+
+    #: Count of runs the marker says were evicted, or 0. This is the count for THAT
+    #: rotation, not a cumulative total: rotation keeps `entries[-keep:]`, so a previous
+    #: marker — being the oldest line — is itself evicted by the next one. Reported as the
+    #: file records it rather than summed into a number no file ever stated.
+    retention_pruned: int = 0
 
 
 def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
@@ -383,6 +425,17 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
             "complete for them, so no letter or score was recorded. They are shown "
             "above in order; the arrows compare each graded run to the previous "
             "GRADED run."
+        )
+
+    # B-580: what this trend does NOT cover. Said after the rows, because it qualifies the
+    # shape the reader has just looked at — the pruned runs are the OLDEST, i.e. the
+    # baseline against which "improving" would be judged.
+    notice = getattr(rows, "retention_notice", None)
+    if notice:
+        lines.append("")
+        lines.append(
+            "Not every recorded run is above: " + notice.strip()
+            + " The trend therefore starts mid-history; the pruned runs are the oldest."
         )
 
     return "\n".join(lines)
