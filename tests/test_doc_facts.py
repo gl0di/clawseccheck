@@ -76,15 +76,53 @@ _OPEN_CLAIM_SLACK = 10
 # test count, and the full suite went red with "docs/USAGE.md says 561 while the suite has
 # 15,594 — restate it (drifted by 15,033)". It passed review because the value guard skips
 # below `_FULL_SUITE_FLOOR`, so a partial run — the only kind anyone runs while editing this
-# file — never exercised it. Seeing a claim and knowing what it claims are two jobs.
+# file — never exercised it (the skip is now file-based; see below). Seeing a claim and
+# knowing what it claims are two jobs.
 _TEST_COUNT_RE = re.compile(
     r"(\d{1,3}(?:,\d{3})+|\d{3,6})\+?\s*(?:automated\s+)?test(?:s|(?P<files>\s+files))\b",
     re.IGNORECASE,
 )
 
-# Below this, the run is a subset rather than the suite, so the collected count says
-# nothing about the true total.
-_FULL_SUITE_FLOOR = 3000
+def _run_narrowing(config) -> str:
+    """Name what narrowed this pytest run, or "" if nothing did (a whole-suite run).
+
+    Read off the INVOCATION, never off the filesystem or the collected count. Two earlier
+    versions of this decision were wrong in the two available directions:
+
+    * An absolute `_FULL_SUITE_FLOOR = 3000` item count. Set when the suite held ~3,500
+      tests; the suite now holds over 16,000, so every subset above 3,000 looked whole and
+      the guard compared a doc claim against a partial count — a 152-file selection
+      reported "README.md claims 16,100 tests but only 4,541 exist" about a correct README.
+      An absolute threshold against a growing quantity is a claim with an expiry date.
+
+    * Comparing the test FILES collected against the files on disk. Exact in principle and
+      wrong in practice: pytest collects once at session start, this runs at the END, and
+      a 20-minute suite gives a concurrent session ample time to add a file. That is not
+      hypothetical — it is what happened on the run that produced this function (626
+      collected, 627 on disk, one file created three minutes in), and the guard skipped on
+      a genuinely whole suite. Silently disabling itself on CI is the one failure this
+      guard must not have.
+
+    The invocation is a single snapshot and cannot drift underneath the run. If a future
+    pytest grows a narrowing flag not listed here, the guard runs on a partial suite and
+    goes RED — noise, which is the safe direction for a guard to fail in.
+    """
+    o = config.option
+    for attr, label in (
+        ("file_or_dir", "explicit paths"),
+        ("keyword", "-k"),
+        ("markexpr", "-m"),
+        ("deselect", "--deselect"),
+        ("lf", "--lf"),
+        ("failedfirst", "--ff"),
+        ("last_failed", "--lf"),
+    ):
+        if getattr(o, attr, None):
+            return label
+    return ""
+
+
+# Whether this run is the whole suite is decided by the shape of the INVOCATION
 
 # How far the stated figure may fall behind before it stops informing the reader. Wide
 # enough that ordinary commits do not redden CI, narrow enough that a stale claim cannot
@@ -339,15 +377,18 @@ def test_test_count_claims_are_true_and_not_badly_stale(request):
     a lie. So the rule is the one that actually protects a reader: never claim more tests
     than exist, and restate once the gap gets wide enough to mislead.
 
-    Skips on a partial run, where the collected count is not the suite total. CI runs the
+    Skips on a partial run, where the collected count is not the suite total — detected by
+    comparing the test FILES this run collected from against the files on disk, which is
+    exact and scales with the suite instead of expiring like an absolute floor. CI runs the
     whole suite, so the guard is live exactly where a release is cut.
     """
     actual = len(request.session.items)
     file_total = len(list((REPO / "tests").glob("test_*.py")))
-    if actual < _FULL_SUITE_FLOOR:
+    narrowing = _run_narrowing(request.config)
+    if narrowing:
         import pytest
 
-        pytest.skip(f"partial run ({actual} collected) — count claims need the full suite")
+        pytest.skip(f"partial run ({narrowing}) — count claims need the full suite")
 
     wrong = []
     for path in _shipped_files():
@@ -1007,3 +1048,85 @@ def test_the_countable_claim_guard_bites_on_each_rule():
         m = rx.search(literal)
         assert m is not None, f"rule {label!r} cannot read its own phrasing: {literal!r}"
         assert int(m.group(1)) != truth, f"rule {label!r} negative control did not differ"
+
+
+# ---------------------------------------------------------------------------
+# `_run_narrowing` — the whole-suite decision, tested directly
+# ---------------------------------------------------------------------------
+# The guard it gates can only be observed on a 20-minute whole-suite run, and every
+# scoped run skips it by design — so the decision itself is what gets tested here.
+# Without this, "the guard is live on CI" would be a claim with no control behind it,
+# which is exactly how the previous two versions of it shipped broken.
+
+class _FakeOption:
+    def __init__(self, **kw):
+        self.file_or_dir = kw.get("file_or_dir", [])
+        self.keyword = kw.get("keyword", "")
+        self.markexpr = kw.get("markexpr", "")
+        self.deselect = kw.get("deselect", None)
+        self.lf = kw.get("lf", False)
+        self.failedfirst = kw.get("failedfirst", False)
+
+
+class _FakeConfig:
+    def __init__(self, **kw):
+        self.option = _FakeOption(**kw)
+
+
+def test_run_narrowing_reports_nothing_for_a_whole_suite_run():
+    """The values are not invented: they were read off real invocations before this was
+    written (`pytest -q` leaves file_or_dir empty and keyword/markexpr as '')."""
+    assert _run_narrowing(_FakeConfig()) == ""
+
+
+def test_run_narrowing_detects_every_narrowing_form():
+    cases = [
+        ({"file_or_dir": ["tests/test_doc_facts.py"]}, "explicit paths"),
+        ({"keyword": "coverage"}, "-k"),
+        ({"markexpr": "slow"}, "-m"),
+        ({"deselect": ["tests/test_x.py::test_y"]}, "--deselect"),
+        ({"lf": True}, "--lf"),
+        ({"failedfirst": True}, "--ff"),
+    ]
+    for kwargs, expected in cases:
+        assert _run_narrowing(_FakeConfig(**kwargs)) == expected, kwargs
+
+
+def test_run_narrowing_ignores_the_filesystem():
+    """THE regression pin. The previous version compared the test files pytest collected
+    from against the files on disk. pytest collects once at session start; the guard runs
+    at the end. On a real 20-minute run a concurrent session created one test file three
+    minutes in, so the comparison read 626 against 627 and the guard SKIPPED on a whole
+    suite — disabling itself precisely where a release is cut.
+
+    A decision that reads the filesystem cannot be immune to that. This asserts the
+    decision is a pure function of the invocation: same config, same answer, no matter
+    what appears in tests/ afterwards.
+    """
+    cfg = _FakeConfig()
+    before = _run_narrowing(cfg)
+    marker = REPO / "tests" / "test_zz_transient_probe_file.py"
+    assert not marker.exists(), "control: the probe name must not already be taken"
+    marker.write_text("def test_placeholder():\n    pass\n")
+    try:
+        assert _run_narrowing(cfg) == before == ""
+    finally:
+        marker.unlink()
+
+
+def test_the_whole_suite_decision_reads_no_filesystem_state():
+    """Staleness control: keeps the decision from drifting back to a directory read.
+
+    `_run_narrowing`'s source must not touch the tests directory or the collected-item
+    count. Both earlier versions failed by consulting exactly those, and both looked
+    correct in review.
+    """
+    import inspect
+
+    body = inspect.getsource(_run_narrowing)
+    body = body.split('"""')[2] if body.count('"""') >= 2 else body
+    for forbidden in ("glob", "iterdir", "REPO", "session", "items", "listdir"):
+        assert forbidden not in body, (
+            f"_run_narrowing consults {forbidden!r} — the decision must depend only on "
+            f"the invocation, or a mid-run tree change can silence the guard again"
+        )
