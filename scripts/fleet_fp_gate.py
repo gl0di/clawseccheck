@@ -79,6 +79,15 @@ from clawseccheck.safeio import secure_dir, secure_write_text  # noqa: E402
 
 SCHEMA = 1
 
+# The engines a complete snapshot runs. B-627: `build_snapshot` had a `vet_kind` keyword
+# selecting `vet_skill` or `vet_plugin`, and NO subcommand ever set it -- so `compare`
+# imported an engine it could never call and reported "no new real-fleet FAIL" for code
+# paths it had not entered. The same file's own docstring already recorded that mistake
+# once, for `include_deptree`; a second parameter went the same way, so the fix is not a
+# third flag but a snapshot that STATES which engines produced it and a comparison that
+# refuses a baseline built from fewer.
+ENGINES = ("audit", "vet", "vet-plugin")
+
 DEFAULT_HOME = "~/.openclaw"
 DEFAULT_BASELINE = "~/.clawseccheck/fleet-fp-baseline.json"
 
@@ -100,6 +109,59 @@ _DEGRADED_ID_PREFIX = "ERR:"
 
 # --------------------------------------------------------------------------- discovery
 
+def _dedupe_by_name(pairs):
+    """``(name, path)`` pairs -> ``(sorted unique pairs, names that lost a directory)``.
+
+    Keying targets by basename silently drops the second directory sharing a name, so the
+    gate would vet one of them and report its target count as if it had vetted both.
+    Nothing collides on this machine today -- measured, 0 of 3 skill basenames and 0 of 70
+    plugin basenames -- which is exactly why the drop has never been noticed. "Not reached
+    on this fleet today" is not "cannot happen", and a gate that covers less than it
+    reports is the failure this task exists to close, so a drop is now COUNTED and printed.
+
+    The dedupe POLICY is deliberately unchanged: vetting both would move the target set and
+    therefore the FAIL set, which is a different decision from disclosing that a target was
+    dropped. Disclosure first; the policy can follow with its own diagnosis.
+    """
+    found = {}
+    dropped = set()
+    for name, path in pairs:
+        if name in found and found[name] != path:
+            dropped.add(name)
+            continue
+        found.setdefault(name, path)
+    return sorted(found.items()), sorted(dropped)
+
+
+def discover_plugin_roots(ctx):
+    """Every installed plugin root the audit itself already saw, as ``(name, path)``.
+
+    Reads ``ctx.plugin_index_records`` -- the SAME source ``checks/_mcp.sweep_plugins``
+    uses, where each record's ``root_dir`` IS the directory OpenClaw loads that plugin
+    from and the directory ``vet_plugin`` expects. Taking it off the ctx the audit already
+    collected means no second scan and no second definition of "installed plugin" that
+    could drift from the product's.
+    """
+    pairs = []
+    seen = set()
+    for rec in (getattr(ctx, "plugin_index_records", None) or []):
+        root = rec.get("root_dir") if isinstance(rec, dict) else None
+        if not root:
+            continue
+        path = Path(str(root)).expanduser()
+        if not path.is_dir():
+            continue
+        try:
+            key = path.resolve()
+        except (OSError, ValueError, RuntimeError):
+            key = path
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append((path.name, path))
+    return _dedupe_by_name(pairs)
+
+
 def discover_targets(home):
     """Every real installed-skill directory the audit itself can see, as sorted
     ``(name, path)`` pairs.
@@ -110,7 +172,7 @@ def discover_targets(home):
     even when two roots alias it); dot-directories and build/vendor dirs are skipped.
     """
     home = Path(home).expanduser()
-    found = {}
+    pairs = []
     seen_resolved = set()
     for root, _tier in skill_load_roots(home, {}, user_home=Path.home()):
         if not root.is_dir():
@@ -131,8 +193,8 @@ def discover_targets(home):
             if key in seen_resolved:
                 continue
             seen_resolved.add(key)
-            found.setdefault(child.name, child)
-    return sorted(found.items())
+            pairs.append((child.name, child))
+    return _dedupe_by_name(pairs)
 
 
 # --------------------------------------------------------------------------- FAIL set
@@ -234,7 +296,7 @@ def _home_label(home):
     return hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()[:12]
 
 
-def build_snapshot(home=DEFAULT_HOME, *, vet_kind="skill"):
+def build_snapshot(home=DEFAULT_HOME):
     """Run the audit over the real config and ``--vet`` over every discovered installed
     skill; return the snapshot dict.
 
@@ -266,12 +328,30 @@ def build_snapshot(home=DEFAULT_HOME, *, vet_kind="skill"):
     degraded = list(degraded_checks(findings))
 
     targets = []
-    for name, path in discover_targets(home_path):
-        engine_output = vet_plugin(str(path)) if vet_kind == "plugin" else vet_skill(str(path))
-        pool = _vet_pool(engine_output)
+    skill_targets, dropped_skill_names = discover_targets(home_path)
+    for name, path in skill_targets:
+        pool = _vet_pool(vet_skill(str(path)))
         rows.extend(fail_rows(pool, scope="vet", target=name))
         degraded.extend(degraded_checks(pool))
         targets.append(name)
+
+    # B-627: the plugin engine, which no subcommand could previously reach. Same ctx the
+    # audit above already collected, so this is not a second scan.
+    plugin_targets, dropped_plugin_names = discover_plugin_roots(_ctx)
+    plugins_with_bundled_findings = 0
+    for name, path in plugin_targets:
+        pool = _vet_pool(vet_plugin(str(path)))
+        rows.extend(fail_rows(pool, scope="vet-plugin", target=name))
+        degraded.extend(degraded_checks(pool))
+        targets.append(name)
+        # Reach, not coverage. A plugin with no `skills:` manifest entry never enters the
+        # bundled-skill dispatch at all, so "70 plugins scanned" would read as coverage of
+        # code most of them cannot execute. Measured when this landed: 70 roots, 6 with a
+        # bundled skill, 2 producing an attributed finding. This counts the last of those
+        # three -- the narrowest and the only one derived from the engine's own answer
+        # rather than from a second reading of the manifest, which could drift from it.
+        if any(str(getattr(f, "detail", "")).startswith("[bundled skill '") for f in pool):
+            plugins_with_bundled_findings += 1
 
     rows.sort(key=fail_key)
     return {
@@ -280,6 +360,17 @@ def build_snapshot(home=DEFAULT_HOME, *, vet_kind="skill"):
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "home_label": _home_label(home_path),
         "targets": targets,
+        # Which engines produced this snapshot. Compared, and able to make a run
+        # unmeasurable: a baseline built from fewer engines is silent about the ones it
+        # never ran, and that silence must never read as "nothing was wrong there".
+        "engines": list(ENGINES),
+        # Reported, never compared. The honest bound on what a clean result means.
+        "reach": {
+            "skill_targets": len(skill_targets),
+            "plugin_targets": len(plugin_targets),
+            "plugins_with_bundled_skill_findings": plugins_with_bundled_findings,
+            "dropped_duplicate_names": sorted(dropped_skill_names + dropped_plugin_names),
+        },
         # Any entry here means a check produced no verdict, so this snapshot cannot be
         # compared (see compare()). Not context -- a validity precondition.
         "degraded_checks": sorted(set(degraded)),
@@ -333,14 +424,30 @@ def compare(snapshot, baseline):
     stale = [diagnosed[k] for k in sorted(diagnosed.keys() - now.keys())]
     degraded = sorted(set(snapshot.get("degraded_checks") or [])
                       | set(baseline.get("degraded_checks") or []))
+    # B-627: an engine the BASELINE never ran is one it can say nothing about, and its
+    # silence would otherwise read as "no FAIL there". Fail closed, exactly as
+    # `_load_baseline` does for a missing baseline: a narrower baseline makes the run
+    # unmeasurable rather than passing. An absent `engines` key counts as narrower, not
+    # as equal -- every baseline written before this change was in fact built without the
+    # plugin engine, so treating its silence as agreement is the very bug being fixed.
+    # Two synthetic snapshots that both omit the key still compare, which keeps
+    # hand-built test fixtures working without weakening the real path.
+    missing_engines = sorted(set(snapshot.get("engines") or [])
+                             - set(baseline.get("engines") or []))
     return {
         "new_fails": new,
         "resolved_fails": resolved,
         "known_fails": known,
         "stale_diagnoses": stale,
         "blocked": bool(new),
-        "comparable": not degraded,
+        "comparable": not degraded and not missing_engines,
         "degraded_checks": degraded,
+        "missing_engines": missing_engines,
+        # Distinguishes "this baseline ran fewer engines" from "this baseline predates
+        # engine recording, so what it ran is unknown". Both make the run unmeasurable,
+        # but naming engines as missing when the baseline demonstrably ran them (audit,
+        # vet) would be a false statement in the message that reports a false statement.
+        "baseline_states_engines": bool(baseline.get("engines")),
         "baseline_version": baseline.get("tool_version"),
         "snapshot_version": snapshot.get("tool_version"),
         "baseline_home_label": baseline.get("home_label"),
@@ -476,7 +583,18 @@ def _write_json(path, payload):
 
 def render_compare(result):
     lines = []
-    if not result["comparable"]:
+    if result.get("missing_engines"):
+        if result.get("baseline_states_engines"):
+            what = ("was built without " + ", ".join(result["missing_engines"]))
+        else:
+            what = ("does not record which engines produced it, and it predates the "
+                    "plugin engine being reachable at all")
+        lines.append(
+            f"CANNOT COMPARE: the recorded baseline {what}.\n"
+            "Silence about an engine is not a clean result from it. Re-record on a "
+            "machine with the real fleet, then compare again."
+        )
+    if result["degraded_checks"]:
         lines.append(
             "CANNOT COMPARE: a check produced no verdict (crash or wall-clock budget) in "
             "the snapshot or the baseline: " + ", ".join(result["degraded_checks"])
@@ -515,6 +633,16 @@ def render_compare(result):
             "diagnose each one before shipping. A corpus metric improving does not "
             "excuse a new FAIL here."
         )
+    elif not result["comparable"]:
+        # B-627: this branch used to print OK whenever nothing was newly failing, even on
+        # a run the same function had just declared uncomparable. "No new FAIL" is a
+        # claim about a comparison that did not happen -- the exit code was already
+        # EXIT_CANNOT_RUN, so the number and the words disagreed, and the words are what
+        # a reader takes away. Same shape as every defect this gate exists to catch.
+        lines.append(
+            "\nNOT MEASURED: nothing above is a pass. The diff is printed for reading "
+            "only; re-run once the blocker named at the top is resolved."
+        )
     else:
         known = len(result.get("known_fails") or [])
         tail = (
@@ -533,6 +661,24 @@ def render_snapshot(snap):
         f"suppressed_fails={snap['context']['suppressed_fail_count']} (never compared)",
         f"unsuppressed FAILs: {len(snap['fails'])}",
     ]
+    reach = snap.get("reach") or {}
+    if reach:
+        # Printed because the bare counts overstate what a clean result covers: most
+        # installed plugins carry no bundled skill and so never enter the dispatch that
+        # the plugin engine's interesting code lives in. A reader who sees only "70
+        # plugins" will take this for coverage it is not.
+        lines.append(
+            f"engines: {', '.join(snap.get('engines') or ['(unstated)'])}  |  "
+            f"reach: {reach.get('skill_targets', 0)} skill(s), "
+            f"{reach.get('plugin_targets', 0)} plugin(s) of which "
+            f"{reach.get('plugins_with_bundled_skill_findings', 0)} produced a "
+            "bundled-skill finding"
+        )
+        if reach.get("dropped_duplicate_names"):
+            lines.append(
+                "DROPPED (a second directory shares the name, so it was not scanned): "
+                + ", ".join(reach["dropped_duplicate_names"])
+            )
     if snap.get("degraded_checks"):
         lines.append(
             "DEGRADED (no verdict -- snapshot is incomplete): "
@@ -578,9 +724,10 @@ def main(argv=None):
     p_ack.add_argument("--snapshot", default=None,
                        help="reuse a snapshot JSON instead of running a fresh scan")
     p_ack.add_argument("--id", required=True, help="check id, e.g. B181")
-    p_ack.add_argument("--scope", default="audit", choices=("audit", "vet"))
+    p_ack.add_argument("--scope", default="audit", choices=("audit", "vet", "vet-plugin"))
     p_ack.add_argument("--target", default="",
-                       help="skill name for a vet-scope FAIL; empty for the audit itself")
+                       help="skill name for a vet-scope FAIL, plugin name for vet-plugin; "
+                            "empty for the audit itself")
     p_ack.add_argument("--note", required=True,
                        help="why this FAIL is expected -- printed on every later run")
 

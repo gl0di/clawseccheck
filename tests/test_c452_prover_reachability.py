@@ -44,15 +44,14 @@ _ENGINES = frozenset({"audit", "vet_skill", "vet_plugin", "vet_mcp", "vet_source
 #: a recorded decision, never a silencer: `test_no_exemption_outlives_its_reason` fails the
 #: build once the gap it describes is gone, so the list cannot rot into a permanent excuse.
 #: An empty dict is the goal state.
-_ACCEPTED_UNREACHABLE: dict[tuple[str, str, str], str] = {
-    ("fleet_fp_gate.py", "build_snapshot", "vet_plugin"): (
-        "CLAWSECCHECK-B-627 — `vet_kind` has no CLI path, so `compare` has never run the "
-        "plugin engine. Not silenced here because the repair is larger than the flag: "
-        "`discover_targets()` enumerates SKILL directories, so passing vet_kind='plugin' "
-        "would hand skill dirs to vet_plugin. Owned by the session holding "
-        "scripts/fleet_fp_gate.py."
-    ),
-}
+# Empty on purpose, and worth leaving in place empty: its one entry was removed by the
+# repair it named, which is exactly what `test_no_exemption_outlives_its_reason` is for.
+# The entry recorded that `build_snapshot`'s `vet_kind` had no CLI path, so `compare`
+# never ran the plugin engine; that gap is closed — `build_snapshot` runs both vet
+# engines, the parameter is gone, and the snapshot now states which engines produced it.
+# The staleness half fired on the very next full run and named the entry, so nothing had
+# to be remembered.
+_ACCEPTED_UNREACHABLE: dict[tuple[str, str, str], str] = {}
 
 
 def _prover_scripts():
