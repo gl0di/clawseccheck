@@ -148,9 +148,24 @@ def test_the_json_surface_carries_the_new_status(tmp_path):
 
 
 def test_the_output_schema_doc_names_it():
-    """C-125. The doc enumerated the statuses explicitly and counted them in prose, so both
-    the list and the count go stale together."""
+    """C-125. The doc must name the status this task added.
+
+    The COUNT assertions that used to live here are gone, and their removal is the point.
+    They hard-coded the number of not-ran statuses as a literal — first `"four"`, then
+    `"five"` — so each correction of the prose had to be mirrored here by hand, and the
+    second time it was not: the doc was corrected to `"six"` (the true
+    `len(INCOMPLETE_LAYER_STATUSES)`) and this pin kept demanding `"five"`, which turned the
+    whole suite red on an accurate document.
+
+    `tests/test_doc_facts.py::test_not_ran_status_counts_match_the_ledger` now DERIVES that
+    number from `layers.INCOMPLETE_LAYER_STATUSES` and checks every doc that states it, so
+    the count has one owner and cannot drift again. Re-pinning it here would be a second
+    hand-written copy of a fact the code already owns — which is the defect, not the fix.
+
+    What stays is what B-603 actually owns: the status it introduced is documented."""
     flat = " ".join((REPO_ROOT / "docs" / "OUTPUT_SCHEMA.md").read_text(encoding="utf-8").split())
     assert "`not_submitted`" in flat
-    assert "five not-ran statuses" in flat
-    assert "four not-ran statuses" not in flat
+    assert "`unavailable`" in flat, (
+        "the doc must keep naming the status not_submitted was split OUT of, or a reader "
+        "cannot tell which case each one covers"
+    )
