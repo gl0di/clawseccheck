@@ -4319,6 +4319,55 @@ _ADVISE_PLAIN_WORDS = {
 }
 
 
+def _restatements_of_other_findings(pool) -> set:
+    """`id()` of every finding whose `detail` verbatim contains another pool member's.
+
+    B-631. On a plugin, `PLUGIN-VET`'s FAIL detail is built as
+    ``f"dangerous bundled content in {summary}: {worst.detail}"`` — it quotes, word for
+    word, a sub-finding that is standing right beside it in the same pool. In a five-line
+    window titled "what drove it" that costs a slot to say the same thing twice: measured
+    on a plugin with one dominant skill, distinct bundled skills named in the window
+    dropped 5 -> 2.
+
+    **Why the predicate is structural rather than a list.** Two shorter routes were
+    measured and rejected:
+
+    * *Exclude ids whose `dossier` axis is `None`.* Three ids map to `None` for three
+      different reasons, and only one is a container: `B339` is a real finding routed
+      per-axis, and `MCP-VET` IS the finding on the mcp path. That rule trades one
+      duplicated line for two disappeared findings.
+    * *Exclude ids absent from `CATALOG`.* Measured: `MCP-VET`, `VET-COVERAGE` and
+      `ATTEST-PROSE-INJECTION` are all absent from it too. Not a container marker, just a
+      field that happened to be true for the one case in hand.
+
+    A hand-kept id list was rejected on precedent: that is the shape that lost three times
+    in one day in `_BUNDLED_EVIDENCE_SEPARATORS` (see `tests/test_c453_*`).
+
+    So the rule is the relationship the duplication actually consists of, which needs no
+    registry and no new field: quoting another member of the same pool in full. The
+    minimum length keeps two findings that merely share a phrase from matching — verified
+    against a pair differing only in "readable"/"writable", and against `MCP-VET` and
+    `B339` standing beside unrelated findings.
+
+    Only the container is dropped, never the finding it quotes, and only from THIS window:
+    `profile.axes` is built from the whole pool by `build_profile`, so the container's own
+    manifest/packaging signal (its `axis_reasons` build-axis entries, B-149) is untouched.
+    """
+    _MIN = 20
+    details = [((f.detail or "").strip(), f) for f in pool]
+    out = set()
+    for text, f in details:
+        if not text:
+            continue
+        for other_text, other in details:
+            if other is f or len(other_text) < _MIN:
+                continue
+            if other_text in text:
+                out.add(id(f))
+                break
+    return out
+
+
 def _advise_reasons(profile, limit: int = 5) -> "tuple[list[str], int]":
     """The FAIL/WARN findings behind the verdict, worst-first, plus how many were cut.
 
@@ -4365,8 +4414,10 @@ def _advise_reasons(profile, limit: int = 5) -> "tuple[list[str], int]":
     a disagreement: it answers "what is most urgent", where severity legitimately leads.
     Two questions, two keys.)
     """
+    qualifying = [f for f in profile.findings if f.status in (FAIL, WARN)]
+    restated = _restatements_of_other_findings(qualifying)
     worst_first = sorted(
-        (f for f in profile.findings if f.status in (FAIL, WARN)),
+        (f for f in qualifying if id(f) not in restated),
         key=lambda f: (
             _STATUS_ORDER.get(f.status, 9),
             _SEV_ORDER.get(f.severity, 9),
