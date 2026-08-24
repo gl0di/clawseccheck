@@ -609,12 +609,20 @@ plus a five-axis roll-up and an overall grade. No full-audit `next_actions` / `c
 | `mode` | `str` | `"vet"` (skill), `"vet-plugin"`, `"vet-mcp"`, `"vet-source"`, or `"advise"`. |
 | `target` | `str` | Path, name, slug, or URL of the vetted artifact. |
 | `target_type` | `str` | `"skill"`, `"plugin"`, `"mcp"`, or `"source"`. |
-| `verdict` | `str` | `"NO KNOWN ISSUE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, or `"UNKNOWN"` (derived from the overall status). |
-| `grade` | `str` | Overall letter grade `A`–`F`, or `"N/A"` when nothing is assessable. |
-| `score` | `int` | 0–100 axis pass-rate behind the grade (0 when not assessable). |
+| `verdict` | `str` | `"INSTALL"`, `"CAUTION"`, or `"DO-NOT-INSTALL"` — the single Mode C verdict word, computed once (`dossier.verdict_for`) and read by every Mode C surface rather than each recomputing its own mapping. |
 | `axes` | `array[Axis]` | The five risk axes, in fixed order (below). |
 | `findings` | `array[Finding]` | All check results. Same Finding shape as §2. |
 | `unmapped` | `array[str]` | Finding ids that resolved to no axis (coverage diagnostic; normally empty). |
+
+**There is deliberately no `grade` or `score` here, and there never will be by accident.**
+Mode C answers "should I install this one package"; Mode A's A–F letter answers a different
+question on a different scale, and it additionally certifies that every layer of the audit
+ran — a claim a single `--vet` never makes about one package. So the two must not share a
+vocabulary. `VetProfile` does carry `overall_grade` and `score`, and a reader who finds them
+should not conclude they are publishable: `dossier.py` marks them INTERNAL ONLY, kept solely
+because the coverage-gap cap machinery and existing unit tests key off them, with "no renderer
+may print either field" stated at the definition. This table used to list both; that was the
+schema contradicting `SKILL.md` and `docs/USAGE.md`, which both state the rule to users.
 
 ### Axis object
 
