@@ -93,6 +93,50 @@ def _redact_home_paths(text: str) -> str:
     return _HOME_PATH_RE.sub("~", text)
 
 
+def _evidence_bullets(
+    evidence,
+    *,
+    limit: int,
+    indent: str,
+    bullet: str = "-",
+    already_shown: str = "",
+) -> "list[str]":
+    """Render up to `limit` evidence entries, and SAY SO when the cap hid the rest.
+
+    B-629. The decision "print at most N evidence bullets" was made in three places and
+    announced in one: `sweep_installed_skills` (cli.py) emitted `(+N more)`, while
+    `_render_finding` here and the `--vet-mcp` render in cli.py cut silently. A reader of
+    the silent two saw N bullets with nothing to suggest there had been more. The correct
+    behaviour was already in the tree, so this is that one implementation, shared, rather
+    than a third opinion about the right number.
+
+    **What counts as hidden is the CAP, and only the cap.** An entry dropped by
+    `already_shown` is not hidden: that filter exists because many checks build `detail`
+    by joining their own evidence (the B-078 note at the call site), so the reader has
+    already read those words on the "why" line — counting them would promise information
+    the reader could go looking for and not find. An entry whose sanitized form is empty
+    carried nothing renderable, so it is not promised either. This is deliberately
+    narrower than the "count what was printed" first sketch of the fix: that number would
+    be honest about the bullet count and dishonest about what is retrievable.
+
+    The consequence is worth stating plainly, because it is the interesting case: a
+    finding with 40 entries, 12 surviving the cap and 9 of those already quoted in the why
+    line, renders 3 bullets and `(+28 more)`. Three bullets is not a claim that there were
+    three; the 28 is the only number that says anything a reader can act on.
+    """
+    entries = list(evidence or [])
+    out: "list[str]" = []
+    for ev in entries[:limit]:
+        text = _sanitize(ev)
+        if not text or (already_shown and text in already_shown):
+            continue
+        out.append(f"{indent}{bullet} {text}")
+    hidden = max(0, len(entries) - limit)
+    if hidden:
+        out.append(f"{indent}{bullet} (+{hidden} more)")
+    return out
+
+
 def _sanitize_tree(value):
     """Recursively sanitize untrusted strings in machine-readable output trees."""
     if isinstance(value, str):
@@ -1719,11 +1763,14 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
     # B-381: --compact drops evidence bullets entirely -- the same "headline only"
     # trim already applied to Plugins/MCP/RISK-chain detail under --compact.
     if f.evidence and f.status in (FAIL, WARN) and not compact:
-        for ev in f.evidence[:12]:
-            ev_s = _sanitize(ev)
-            if ev_s and ev_s not in why_text:
-                # Evidence is emitted verbatim (already bidi-stripped by _sanitize).
-                lines.append(f"      - {ev_s}")
+        # Evidence is emitted verbatim (already bidi-stripped by _sanitize). B-629: the
+        # cap is announced now — this site used to end the list silently, so a finding
+        # with 40 entries could render three bullets and look complete.
+        lines.extend(
+            _evidence_bullets(
+                f.evidence, limit=12, indent="      ", already_shown=why_text
+            )
+        )
     # Blast-radius summary: only emitted when the caller supplies cfg (verbose mode).
     if f.status == FAIL and cfg is not None:
         br = compute_blast_radius(cfg, f.id)

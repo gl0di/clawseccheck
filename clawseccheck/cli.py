@@ -63,6 +63,7 @@ from .integrity import (
 )
 from .report import render_html
 from .report import (
+    _evidence_bullets,
     _sanitize,
     render_advise,
     render_advise_json,
@@ -778,12 +779,14 @@ def sweep_installed_skills(
             f"    {_sanitize(f.detail)}",
         ]
         if f.evidence:
+            # B-629: this site is where the disclosure was invented; it now shares one
+            # implementation with the two that used to cut silently, so a fourth site
+            # cannot inherit the cut without the notice.
             bullet = "*" if ascii_only else "•"
             lines.append("    Evidence:")
-            for ev in f.evidence[:12]:
-                lines.append(f"      {bullet} {_sanitize(ev)}")
-            if len(f.evidence) > 12:
-                lines.append(f"      {bullet} (+{len(f.evidence) - 12} more)")
+            lines.extend(
+                _evidence_bullets(f.evidence, limit=12, indent="      ", bullet=bullet)
+            )
         lines.append(f"    {_sanitize(f.fix)}")
 
         # Adversarial-review blocker: vet_skill()'s OWN per-target CPU ceiling
@@ -4578,8 +4581,11 @@ def _main(argv=None) -> int:
                         vm_verdict = _VET_VERDICT[vmf.status]
                         _emit(f"{vm_icon} {vm_verdict}: {_sanitize(vmf.title)}")
                         if vmf.evidence:
-                            for vm_ev in vmf.evidence[:4]:
-                                _emit(f"    - {_sanitize(vm_ev)}")
+                            # B-629: cap of 4 here, and it used to end silently.
+                            for line in _evidence_bullets(
+                                vmf.evidence, limit=4, indent="    "
+                            ):
+                                _emit(line)
                         _emit(f"    fix: {_sanitize(vmf.fix)}")
                         _emit("")
                 _record_run("vet_mcp", args)
