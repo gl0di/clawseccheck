@@ -5022,17 +5022,52 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         color = sev_style.hex if sev_style else "#999"
         icon_char = "✕" if f.status == FAIL else "⚠"
         f_title = esc(_sanitize(f.title))
-        f_detail = esc(_sanitize(f.detail)) if f.detail else ""
+        detail_plain = _sanitize(f.detail) if f.detail else ""
+        f_detail = esc(detail_plain)
         why_html = (f'<p class="finding-line"><span class="finding-key">{esc(label_why)}</span> '
                     f'{f_detail}</p>') if f.detail else ""
+
+        # B-622: this renderer contained ZERO references to `.evidence`, so no finding's
+        # evidence reached the page through the evidence channel at all. Measured on a
+        # deliberately-bad config: of 24 entries, 12 appeared anyway — every one of them
+        # only because its check had inlined the same words into `detail` — and 12 never
+        # appeared, including the evidence behind a FAIL. That is worse than a clean
+        # absence: the page looks like it carries evidence, and which half a reader gets
+        # depends on how each check happened to build its `detail`.
+        #
+        # Same gate as the text report (FAIL/WARN only) and the SAME cap decision, taken
+        # by the shared helper rather than re-decided here. `indent`/`bullet` are emptied
+        # because the markup supplies the bullet; the value of the call is the SELECTION
+        # and the "(+N more)" disclosure, which must not exist in two places — B-629 is
+        # the record of what three independent copies of that decision cost.
+        ev_rows = [
+            line.lstrip()
+            for line in _evidence_bullets(
+                f.evidence, limit=12, indent="", bullet="", already_shown=detail_plain,
+            )
+        ] if (f.evidence and f.status in (FAIL, WARN)) else []
+        ev_html = ("" if not ev_rows else
+                   '<ul class="finding-evidence">'
+                   + "".join(f"<li>{esc(r)}</li>" for r in ev_rows)
+                   + "</ul>")
+
+        # B-622: the same condition the text report applies (`report.py`'s _render_finding)
+        # — a hedged FAIL and a certain one rendered identically here, with nothing on the
+        # page to tell them apart.
+        conf = getattr(f, "confidence", "HIGH")
+        conf_html = (f'<span class="conf-pill">confidence: {esc(str(conf).lower())}</span>'
+                     if conf != "HIGH" and f.status in (FAIL, WARN) else "")
+
         return f'''
                 <article class="finding" style="--sev:{color};">
                     <div class="finding-head">
                         <span class="finding-icon" aria-hidden="true">{esc(icon_char)}</span>
                         <span class="finding-title">{f_title}</span>
+                        {conf_html}
                         <span class="sev-pill">{esc(f.severity)}</span>
                     </div>
                     {why_html}
+                    {ev_html}
                 </article>'''
 
     # Build the findings body: grouped by Inventory subject so a long list (dozens of
@@ -5339,6 +5374,15 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         }}
         .finding-line {{ margin-top: 0.5rem; color: var(--muted); font-size: 0.94rem; }}
         .finding-key {{ color: var(--key); font-weight: 700; }}
+        .finding-evidence {{
+            margin: 0.5rem 0 0; padding-left: 1.15rem; color: var(--muted);
+            font-size: 0.9rem; line-height: 1.5;
+        }}
+        .finding-evidence li {{ margin-top: 0.2rem; }}
+        .conf-pill {{
+            border: 1px solid var(--muted); color: var(--muted); padding: 0.1rem 0.5rem;
+            border-radius: 999px; font-size: 0.68rem; font-weight: 600; letter-spacing: 0.02em;
+        }}
         .all-clear {{
             padding: 1.1rem 1.25rem; border-radius: 12px; font-weight: 600;
             color: #1a7f37; background: color-mix(in srgb, #1a7f37 12%, transparent);
