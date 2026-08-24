@@ -171,6 +171,135 @@ def _weak_allowlist_entries(allowlist) -> list[str]:
     return weak
 
 
+# B-515 follow-up: an allowlist entry can grant a REAL exception from OpenClaw's
+# private-network gate, or merely be a config-hygiene red flag the runtime still
+# blocks today — these are two different mechanisms and a single "bypasses the guard"
+# claim is false for one of them. Verified against the real installed OpenClaw engine
+# offline (a stub resolver — no live DNS), not assumed from source alone:
+#
+#   allowedHostnames  169.254.169.254  -> BLOCKED (link-local / cloud-metadata)
+#   allowedHostnames  100.100.100.200  -> BLOCKED (Alibaba cloud-metadata carve-out)
+#   hostnameAllowlist 169.254.169.254  -> BLOCKED (legacy key grants no exemption)
+#   allowedHostnames  10.0.0.5         -> REACHABLE
+#   allowedHostnames  127.0.0.1        -> REACHABLE
+#   allowedHostnames  fd00::1          -> REACHABLE
+#   allowedHostnames  100.64.0.7       -> REACHABLE
+#
+# Mechanism (dist/ssrf-BayeDjCv.js): being on `allowedHostnames` sets
+# `skipPrivateNetworkChecks` (:264-270), which routes into a SECOND, narrower gate --
+# `assertAllowedTrustedHostnameResolvedAddressesOrThrow` (:207-209) -- that
+# unconditionally throws on link-local and cloud-metadata addresses regardless of the
+# allowlist. So the exemption genuinely reaches loopback / RFC1918 / CGNAT / IPv6-ULA
+# (BYPASS below: reachable today, dangerouslyAllowPrivateNetwork still false) but NEVER
+# reaches link-local or the well-known cloud-metadata addresses/hostname (LATENT below:
+# still blocked today by the second gate, but a genuine red flag on INTENT grounds --
+# it is a config mistake or a deliberate attempt to reach the metadata service, and it
+# goes live the instant dangerouslyAllowPrivateNetwork is separately set to true, which
+# is already this check's own FAIL condition). Both stay WARN, not FAIL: matches this
+# module's calibration for an ambiguous, possibly-deliberate shape (an internal
+# deployment MAY legitimately want the browser to reach a fixed internal host, and this
+# static check cannot tell that apart from a mistake) -- the same ambiguity
+# check_provider_baseurl/B178 already resolves to WARN.
+#
+# `hostnameAllowlist` (the legacy sibling key) never feeds `skipPrivateNetworkChecks`
+# at all (ssrf-BayeDjCv.js:105-107) -- an entry placed there grants NO exemption from
+# either gate, ever, so it is always treated as LATENT (red-flag, not-currently-live)
+# regardless of shape, never BYPASS.
+#
+# 100.100.100.200 (Alibaba ECS metadata) sits inside the ordinary 100.64.0.0/10 CGNAT
+# range yet is BLOCKED where an otherwise-ordinary CGNAT address in the same /10 is not
+# (100.64.0.7, verified REACHABLE) -- an explicit carve-out rather than range math alone.
+#
+# JUDGED as BYPASS: loopback (127.0.0.0/8, ::1, "localhost" and the other LOOPBACK
+# literals, including IPv4-mapped-IPv6 loopback forms -- see _loopback_ip); RFC1918/
+# CGNAT/IPv6-ULA (10/8, 172.16/12, 192.168/16, 100.64.0.0/10 minus the Alibaba
+# carve-out, fc00::/7); and "0.0.0.0"/"::" -- the 2024 "0.0.0.0 day" browser-routes-to-
+# localhost primitive, verified REACHABLE and neither link-local nor a metadata literal
+# (already modelled as local by _B178_LOCAL_MODEL_HOSTNAMES elsewhere in this file).
+# JUDGED as LATENT: link-local (169.254.0.0/16 -- the AWS/Azure/GCP metadata range --
+# and fe80::/10, extrapolated from the same "link-local" wording, not independently
+# reachability-probed for the IPv6 form), the Alibaba metadata IP, the grounded
+# metadata.google.internal hostname, and ANY otherwise-BYPASS-shaped entry that came
+# from the legacy hostnameAllowlist key only. Bracketed IPv6 ("[fd00::1]") is unwrapped
+# via the same `parse_bind_host` helper the gateway-bind checks use, and IPv4-mapped-
+# IPv6 forms ("::ffff:10.0.0.5") are folded to their IPv4 form before classification,
+# mirroring _loopback_ip's own fold.
+#
+# NOT judged, deliberately: any other bare/dotted hostname (e.g. "metadata.goog" --
+# GCP's short alias, not independently grounded here; an internal DNS name like
+# "db.corp.internal"; a Docker-Compose sibling service name) -- this is a local,
+# network-free check that cannot resolve DNS, and a plain hostname gives no static
+# signal that it is internal at all. Also not judged: decimal/octal-encoded IPv4
+# literals (e.g. "2130706433", "0177.0.0.1") -- NOT because OpenClaw's own matcher
+# might treat them as a different host (it does not: `looksLikeUnsupportedIpv4Literal`,
+# ssrf-BayeDjCv.js:145-150, recognizes and BLOCKS this exact shape independently of
+# this check), but because Python's `ipaddress` module rejects them as non-canonical,
+# and this scanner leaves that shape to the real engine's own, already-verified block
+# rather than hand-rolling a second parser for it.
+_CLOUD_METADATA_HOSTNAMES = frozenset({"metadata.google.internal"})
+_CLOUD_METADATA_IP_CARVEOUTS = frozenset({"100.100.100.200"})
+_ZERO_ROUTE_HOSTS = frozenset({"0.0.0.0", "::"})
+_LATENT_NETS = (
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("fe80::/10"),
+)
+_BYPASS_NETS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("fc00::/7"),
+)
+
+
+def _private_allowlist_entries(allowlist, *, allow_bypass: bool = True):
+    """Return (bypass, latent) subsets of an allowlist -- see the block comment above
+    for the mechanism split and exactly which shapes are judged.
+
+    ``allow_bypass=False`` (pass the legacy hostnameAllowlist key here) forces every
+    otherwise-BYPASS-shaped entry into ``latent`` instead: that key never feeds
+    `skipPrivateNetworkChecks`, so it never grants the real exemption.
+    """
+    bypass: list[str] = []
+    latent: list[str] = []
+    if not isinstance(allowlist, list):
+        return bypass, latent
+    for entry in allowlist:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        raw = entry.strip().lower()
+        if raw == "*" or raw.startswith("*."):
+            # Already reported by _weak_allowlist_entries as a wildcard; never a
+            # parseable IP literal or bare metadata hostname.
+            continue
+        host = parse_bind_host(raw).rstrip(".")
+        if host in _CLOUD_METADATA_HOSTNAMES:
+            latent.append(entry)
+            continue
+        if host in _ZERO_ROUTE_HOSTS:
+            (bypass if allow_bypass else latent).append(entry)
+            continue
+        if host in LOOPBACK:
+            (bypass if allow_bypass else latent).append(entry)
+            continue
+        try:
+            addr = ipaddress.ip_address(host)
+        except ValueError:
+            continue
+        mapped = getattr(addr, "ipv4_mapped", None)
+        if mapped is not None:
+            addr = mapped
+        if str(addr) in _CLOUD_METADATA_IP_CARVEOUTS:
+            latent.append(entry)
+            continue
+        if any(addr.version == net.version and addr in net for net in _LATENT_NETS):
+            latent.append(entry)
+            continue
+        if any(addr.version == net.version and addr in net for net in _BYPASS_NETS):
+            (bypass if allow_bypass else latent).append(entry)
+    return bypass, latent
+
+
 # B-362: shared not_applicable gate for the "no browser config" UNKNOWN branch that
 # B38/B195/B196/B321/B322/B330 all share verbatim (one locus, `ctx.config["browser"]`,
 # checked the same way by every one of them). Grounded against the installed dist
@@ -201,12 +330,24 @@ def check_browser_ssrf(ctx: Context) -> Finding:
               ssrfPolicy.hostnameAllowlist (the runtime merges both into one combined
               allowlist -- B-515) are both absent/empty (open egress surface — the
               browser can reach any external host); OR the combined allowlist is
-              present but contains a wildcard entry or a known user-content/
-              anonymous-paste/webhook host — a weak mitigation an attacker could stage
-              payloads on despite the host being "trusted".
+              present but contains a wildcard entry, a known user-content/
+              anonymous-paste/webhook host, or a URL-rewriting proxy — a weak
+              mitigation an attacker could stage payloads on despite the host being
+              "trusted"; OR an allowedHostnames entry that is itself loopback/
+              RFC1918-private/CGNAT/IPv6-ULA/0.0.0.0/:: — OpenClaw's own allowlist
+              exemption genuinely lets the browser reach that host TODAY even with
+              dangerouslyAllowPrivateNetwork=false (verified against the installed
+              engine); OR an allowedHostnames/hostnameAllowlist entry that is
+              link-local (incl. 169.254.169.254) or the grounded
+              metadata.google.internal/100.100.100.200 cloud-metadata literals — these
+              stay blocked TODAY by a separate, unconditional gate regardless of the
+              allowlist, but naming them is a config-hygiene/intent red flag that goes
+              live the moment dangerouslyAllowPrivateNetwork is set to true (the
+              legacy hostnameAllowlist key never grants the real exemption at all, so
+              every otherwise-bypass-shaped entry placed there is judged this way too).
     PASS    — browser is configured AND sandboxed AND private network is blocked
               AND the combined allowlist (allowedHostnames + hostnameAllowlist) is
-              non-empty with no weak entries.
+              non-empty with no weak or private-network entries.
     UNKNOWN — no browser config (not applicable).
     """
     cfg = ctx.config
@@ -274,36 +415,84 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false.",
         )
 
-    # QUALITY: allowlist present but contains a wildcard, known user-content host, or
-    # known URL-rewriting proxy — downgrade PASS to WARN. Still additive/advisory: does
-    # not touch FAIL behaviour.
+    # QUALITY: allowlist present but contains a wildcard, known user-content host,
+    # known URL-rewriting proxy, or a loopback/private/link-local/CGNAT/IPv6-ULA/
+    # cloud-metadata entry — downgrade PASS to WARN. Still additive/advisory: does not
+    # touch FAIL behaviour. All legs are computed and reported together (one Finding)
+    # so an allowlist mixing several reasons names all of them, instead of only the
+    # first one a sequential check would have found. BYPASS/LATENT are computed
+    # per-key (see _private_allowlist_entries) because the legacy hostnameAllowlist
+    # key never grants the real private-network exemption the current allowedHostnames
+    # key does — see the block comment above _private_allowlist_entries.
     weak_entries = _weak_allowlist_entries(allowlist)
-    if weak_entries:
+    bypass_current, latent_current = _private_allowlist_entries(
+        allowed_hostnames if isinstance(allowed_hostnames, list) else []
+    )
+    _, latent_legacy = _private_allowlist_entries(
+        legacy_allowlist if isinstance(legacy_allowlist, list) else [], allow_bypass=False
+    )
+    bypass_entries = bypass_current
+    latent_entries = list(dict.fromkeys(latent_current + latent_legacy))
+    if weak_entries or bypass_entries or latent_entries:
+        sentences = [
+            "Browser allowedHostnames/hostnameAllowlist is present, but:"
+        ]
+        evidence: list[str] = []
+        if weak_entries:
+            sentences.append(
+                "it contains weak entries (wildcard, known user-content/paste/"
+                "webhook host, and/or URL-rewriting image/CDN proxy) an attacker "
+                f"could stage a payload on or relay through despite the allowlist: "
+                f"{', '.join(weak_entries)}."
+            )
+            evidence.extend(weak_entries)
+        if bypass_entries:
+            sentences.append(
+                "it also allowlists loopback/RFC1918/CGNAT/IPv6-ULA/0.0.0.0/:: "
+                "host(s) that OpenClaw's own allowlist exemption genuinely lets the "
+                "browser reach TODAY even though dangerouslyAllowPrivateNetwork is "
+                f"false: {', '.join(bypass_entries)}."
+            )
+            evidence.extend(e for e in bypass_entries if e not in evidence)
+        if latent_entries:
+            sentences.append(
+                "it also names link-local/cloud-metadata host(s) — e.g. "
+                "169.254.169.254, the AWS/Azure/GCP instance-metadata IP that hands "
+                "out cloud credentials — that OpenClaw's own engine still blocks "
+                "today via a separate, unconditional gate; this is a config-hygiene "
+                "red flag on intent grounds and becomes live the moment "
+                f"dangerouslyAllowPrivateNetwork is set to true: {', '.join(latent_entries)}."
+            )
+            evidence.extend(e for e in latent_entries if e not in evidence)
         return _finding(
             "B38",
             WARN,
-            "Browser allowedHostnames/hostnameAllowlist is present but contains weak entries "
-            "(wildcard, known user-content/paste/webhook host, and/or URL-rewriting "
-            f"image/CDN proxy): {', '.join(weak_entries)} — an attacker could stage a "
-            "payload on a wildcard match, an anonymous content host, or relay "
-            "exfiltrated data through a proxy host despite the allowlist.",
+            " ".join(sentences),
             "Replace wildcard entries with explicit hostnames, and avoid allowlisting "
             "anonymous paste/gist/webhook hosts (e.g. pastebin.com, gist.github.com, "
             "raw.githubusercontent.com, webhook.site) or URL-rewriting image/CDN "
             "proxies (e.g. images.weserv.nl, i0-i3.wp.com, slack-imgs.com) — an "
             "attacker-controlled target can be reached through them even though the "
-            "proxy host itself is 'trusted'.",
-            evidence=weak_entries,
+            "proxy host itself is 'trusted'. Remove any loopback (127.0.0.1, "
+            "localhost, 0.0.0.0, ::), private (10/8, 172.16/12, 192.168/16), "
+            "link-local (169.254.0.0/16), CGNAT (100.64.0.0/10), IPv6-ULA (fc00::/7), "
+            "or cloud-metadata (metadata.google.internal, 100.100.100.200) entry from "
+            "allowedHostnames/hostnameAllowlist — the ones OpenClaw's engine still "
+            "blocks today are still a config mistake or a live risk the moment "
+            "dangerouslyAllowPrivateNetwork flips to true.",
+            evidence=evidence,
         )
 
     return _finding(
         "B38",
         PASS,
-        "Browser is configured: sandboxed, private-network access blocked, "
-        "and allowedHostnames/hostnameAllowlist is present.",
+        "Browser is configured: sandboxed, allowedHostnames/hostnameAllowlist is "
+        "present with no weak or private-network entries, so private-network access "
+        "is blocked for every host not explicitly allowlisted.",
         "Keep browser.noSandbox unset/false, "
         "dangerouslyAllowPrivateNetwork=false, and maintain a tight "
-        "browser.ssrfPolicy.allowedHostnames allowlist.",
+        "browser.ssrfPolicy.allowedHostnames allowlist with no loopback/private/"
+        "link-local/cloud-metadata entries.",
     )
 
 
