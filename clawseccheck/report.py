@@ -4431,6 +4431,15 @@ def render_advise(profile, ascii_only: bool = False) -> str:
 
     dash = "-" if ascii_only else "—"
     plain = _ADVISE_PLAIN_WORDS.get(verdict, _ADVISE_PLAIN_WORDS["CAUTION"]).format(d=dash)
+    # B-621: the INSTALL wording is a clearance, and a clearance must not be issued over a
+    # region nobody read. The verdict itself does NOT move — an unassessed region is not
+    # evidence of harm, and inventing one would be the opposite error — but the sentence a
+    # reader acts on has to stop implying the scan was complete. Same discipline the UNKNOWN
+    # convention states for verdicts, applied to the sentence.
+    coverage_notes = _situational_coverage_notes(profile)
+    if coverage_notes and verdict == "INSTALL":
+        plain += (f" Part of it was not assessed {dash} see \"Not assessed\" below "
+                  "before you treat this as cleared.")
     lines.append(f"In plain words: {plain}")
     lines.append("How I decided: the verdict is the worst signal found across all checks. "
                   "What drove it:")
@@ -4451,6 +4460,21 @@ def render_advise(profile, ascii_only: bool = False) -> str:
         lines.append("")
     else:
         lines.append("No FAIL/WARN findings across every assessable axis.")
+        lines.append("")
+
+    # B-621: --advise is the surface whose entire job is the install decision, and it was
+    # the one surface that dropped this. The dossier printed "an ~/.ssh/authorized_keys path
+    # sits in a fence ... was not assessed" while --advise, on the same bytes, printed
+    # "Nothing dangerous found - this looks safe to install". Rendered through the SAME
+    # helper as the dossier, so the two can never word it differently (see its docstring on
+    # why a second renderer is the failure mode here).
+    note_block = _inert_note_block("Not assessed", coverage_notes)
+    if note_block:
+        # The block brings its own leading blank (one spelling, one helper), so drop the
+        # separator the branch above already appended rather than emitting two.
+        if lines and lines[-1] == "":
+            lines.pop()
+        lines += note_block
         lines.append("")
 
     lines.append("Next steps:")
