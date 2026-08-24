@@ -4246,13 +4246,62 @@ _ADVISE_PLAIN_WORDS = {
 }
 
 
-def _advise_reasons(profile, limit: int = 5) -> list[str]:
-    """Top FAIL/WARN findings' detail text, worst-first, deduplicated by id."""
+def _advise_reasons(profile, limit: int = 5) -> "tuple[list[str], int]":
+    """The FAIL/WARN findings behind the verdict, worst-first, plus how many were cut.
+
+    B-630. This is printed under "the verdict is the worst signal found across all checks.
+    What drove it:", and until now it could not keep that promise, in three ways:
+
+    * **The sort key had no severity** -- it was ``(status_is_fail, f.id)``, so inside FAIL
+      the order was lexicographic on the id STRING. ``"B103" < "B13"``, so a HIGH sorted
+      ahead of a CRITICAL and evicted it from the window. Measured on a plugin bundling
+      five skills: five HIGH B103 lines under that heading, and the CRITICAL B13 that
+      actually set the verdict absent. ``_SEV_ORDER`` was already right here in this
+      module and used by eight other sorts; this one had simply been written without it.
+    * **The cut was silent.** No "+N more", so five lines read as the whole story.
+    * **The docstring claimed "deduplicated by id"**, which the body never did.
+
+    The dedup claim is REMOVED rather than implemented, and that is the deliberate call:
+    on the plugin path, N lines sharing an id are N different bundled skills, each named
+    in its own ``detail`` (``[bundled skill 'x'] ...``). Collapsing by id would delete
+    exactly the information the reader needs to know which one to look at -- a fix that
+    made the docstring true by making the output worse.
+
+    If dedup is ever wanted here, ``id`` is not the key -- and neither is ``(id, target)``
+    on its own. A "target" derived from ``detail`` collides today, because ``detail`` is
+    stamped with the bundled skill's BARE name (``[bundled skill 'x']``) while only its
+    ``evidence`` carries the plugin-relative path. So two bundled skills sharing a
+    basename would be merged by exactly the key meant to keep them apart -- the same
+    assumption ``_attribute_to_bundled_skill`` and ``checks/_vet.py``'s
+    ``_has_other_signal`` already depend on, which would make this its third consumer.
+    Settle that before choosing a key, not after.
+
+    Returns ``(lines, omitted)`` so the caller can disclose the cut; a bare list cannot say
+    what it dropped, which is how the silent version stayed silent.
+
+    **Status leads the key, severity only breaks its ties, and that order is deliberate.**
+    ``dossier._MODE_C_VERDICT`` maps STATUS alone to the verdict -- severity is not an
+    input to it at all -- so the heading's "what drove it" is answered by status. The
+    discriminating case is a LOW FAIL against a CRITICAL WARN: the LOW FAIL is what made
+    the verdict DO-NOT-INSTALL and the CRITICAL WARN did not, so leading with severity
+    would head the list with a finding that decided nothing -- the same false heading this
+    fix exists to remove, rotated onto the other axis.
+    ``test_fail_still_outranks_warn_regardless_of_severity`` pins it.
+
+    (``report.py`` does contain the other order, at ``_card_top_urgent_lines``. That is not
+    a disagreement: it answers "what is most urgent", where severity legitimately leads.
+    Two questions, two keys.)
+    """
     worst_first = sorted(
         (f for f in profile.findings if f.status in (FAIL, WARN)),
-        key=lambda f: (0 if f.status == FAIL else 1, f.id),
+        key=lambda f: (
+            _STATUS_ORDER.get(f.status, 9),
+            _SEV_ORDER.get(f.severity, 9),
+            f.id,
+        ),
     )
-    return [f"{f.id} ({f.status}): {_sanitize(f.detail)}" for f in worst_first[:limit]]
+    shown = [f"{f.id} ({f.status}): {_sanitize(f.detail)}" for f in worst_first[:limit]]
+    return shown, max(0, len(worst_first) - len(shown))
 
 
 # B-487, second round: `shlex.quote` is necessary but NOT sufficient here, because these
@@ -4340,10 +4389,14 @@ def render_advise(profile, ascii_only: bool = False) -> str:
                   "What drove it:")
     lines.append("")
 
-    reasons = _advise_reasons(profile)
+    reasons, omitted = _advise_reasons(profile)
     if reasons:
         lines.append("Reasons:")
         lines.extend(f"  - {r}" for r in reasons)
+        if omitted:
+            # B-630: the heading above promises what drove the verdict. A window that
+            # silently ends is a claim that this was all of it.
+            lines.append(f"  - (+{omitted} more FAIL/WARN finding(s) not shown)")
         lines.append("")
     elif verdict == "CAUTION":
         lines.append("Reasons: assessment is inconclusive (UNKNOWN) — not enough signal "
@@ -4395,7 +4448,7 @@ def render_advise_json(profile, *, version: str) -> str:
     is_quarantine = _looks_like_quarantine(profile.target)
     payload = json.loads(render_vet_json(profile, mode="advise", version=version))
     payload["advise_verdict"] = profile.verdict
-    payload["reasons"] = _advise_reasons(profile)
+    payload["reasons"], payload["reasons_omitted"] = _advise_reasons(profile)
     payload["is_quarantine_path"] = is_quarantine
     if _CONTROL_CHAR_RE.search(str(profile.target)):
         # B-487: no command for a path that would break the line it is printed on.

@@ -606,7 +606,7 @@ plus a five-axis roll-up and an overall grade. No full-audit `next_actions` / `c
 |---|---|---|
 | `tool` | `str` | Always `"clawseccheck"`. |
 | `version` | `str` | Tool version string. |
-| `mode` | `str` | `"vet"` (skill), `"vet-plugin"`, `"vet-mcp"`, or `"vet-source"`. |
+| `mode` | `str` | `"vet"` (skill), `"vet-plugin"`, `"vet-mcp"`, `"vet-source"`, or `"advise"`. |
 | `target` | `str` | Path, name, slug, or URL of the vetted artifact. |
 | `target_type` | `str` | `"skill"`, `"plugin"`, `"mcp"`, or `"source"`. |
 | `verdict` | `str` | `"NO KNOWN ISSUE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, or `"UNKNOWN"` (derived from the overall status). |
@@ -688,6 +688,26 @@ SARIF: the vetting modes additionally carry the dossier roll-up on
 (the per-finding `results` stay finding-oriented).
 
 ---
+
+### `--advise` keys (mode `"advise"`)
+
+`--advise --json` is the §11 envelope plus the install-decision keys below. It is the same
+`VetProfile`, framed as a recommendation — never a second analysis pass.
+
+(No count in that sentence on purpose. A numeral beside the list it summarises is a fact
+with two homes, and the one nobody edits goes stale. This document carried exactly that
+defect in §7, undercounting the layer-ledger statuses by one until a guard was pointed at
+it; `tests/test_doc_facts.py` now derives that number from `layers.py` rather than trusting
+the prose.)
+
+| Field | Type | Description |
+|---|---|---|
+| `advise_verdict` | `str` | `"INSTALL"`, `"CAUTION"`, or `"DO-NOT-INSTALL"`. Reads `profile.verdict` directly, so it can never disagree with `verdict` above. |
+| `reasons` | `array[str]` | Up to five `"<id> (<status>): <detail>"` lines for the FAIL/WARN findings behind the verdict, worst-first (status, then severity, then id). **Not** deduplicated by id: on the plugin path several lines can share an id and name different bundled skills, each identified in its own detail. |
+| `reasons_omitted` | `int` | How many qualifying FAIL/WARN findings did not fit in `reasons`. Always present; `0` when nothing was cut. Added because the window used to end silently, so five lines read as the whole story. |
+| `is_quarantine_path` | `bool` | Whether the target sits under the system temp dir, i.e. looks like a `--vet-plan` quarantine copy. |
+| `cleanup` | `str` | A `rm -rf` command for a quarantine copy, or a `#`-prefixed note explaining why none is offered. Never a bare command for a path that is not a quarantine copy. |
+| `coverage` | `object` | Surface/family coverage map over the vetted target's findings (§8's shape). Emitted by `--advise` only — a plain `--vet --json` does not carry it. |
 
 ## 12. `--judge-packet` Output (F-113)
 
