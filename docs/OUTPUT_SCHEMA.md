@@ -1317,8 +1317,9 @@ One entry per subject in the 8-subject taxonomy (§18):
 | Field | Type | Description |
 |---|---|---|
 | `total` | `int \| null` | How many things this subject owns (checks for a bucket subject, installed targets for a sweep subject). `null` means this run never swept the subject at all (`skills`/`plugins` on a run without `--full` or under `--fast`) — distinct from `0` (swept, and there was nothing to scan). |
-| `scanned` | `int \| null` | How many of `total` reached a conclusive verdict. For `openclaw`/`host`/`agents`/`channels`/`logs` (bucket subjects): checks that returned `PASS`/`FAIL`/`WARN` rather than `UNKNOWN`. For `skills`/`plugins`: installed targets the sweep fully scanned (neither `SKIPPED` nor `TRUNCATED`). `mcp` is always fully scanned (`scanned == total`) — MCP vetting is not sweep-budgeted. `null` mirrors `total`'s `null`. |
+| `scanned` | `int \| null` | How many of `total` reached a conclusive verdict. For `openclaw`/`host`/`agents`/`channels`/`logs` (bucket subjects): checks that returned `PASS`/`FAIL`/`WARN` rather than `UNKNOWN`. For `skills`/`plugins`: installed targets the sweep fully scanned (neither `SKIPPED` nor `TRUNCATED`). For `mcp`: configured servers the inventory enumerated — always `== total`, because enumerating a server cannot fail partway. That is a statement about the **inventory**, not about MCP coverage; the MCP *checks* are in `checks` below, and before B-565 this row was the only MCP number on the page, which made it read as full coverage while MCP checks were `UNKNOWN`. `null` mirrors `total`'s `null`. |
 | `not_scanned` | `array[str]` | Every gap, named — check ids (bucket subjects) or target names (`skills`/`plugins`), never merely a count. Empty when `scanned == total`. |
+| `checks` | `object` | **Present only on `skills` and `mcp`** (B-565). Those two subjects lead with a per-*instance* tally above, but they also own catalog entries — 55 routed to `skills`, 13 to `mcp` — and an instance count cannot speak for those. Same `{total, scanned, not_scanned}` shape as a bucket subject, at CHECK granularity. Absent on `plugins`, which routes no catalog check at all, and on the five bucket subjects, whose top-level row already *is* the check tally. Emitted even when the sweep did not run (`total: null`), because the checks still ran. |
 | `note` | `str \| null` | Present only for the `null`/`0` cases above, one of four strings: `"not scanned this run (needs --full)"` (a run WITHOUT `--full` at all — `skills`/`plugins` only); `"not scanned this run (--fast drops the sweep phases)"` (`--full --fast --json` — the sweep phases ran, so naming `--full` again would be telling the operator to pass a flag they already passed); `"none installed"` (`skills`/`plugins` swept, nothing found); or `"none configured"` (`mcp` with zero configured servers). `null` for every ordinary scanned-vs-total entry. |
 
 ### Skeleton
@@ -1329,8 +1330,10 @@ One entry per subject in the 8-subject taxonomy (§18):
     "openclaw": {"total": 68, "scanned": 33, "not_scanned": ["B17", "B31", "..."]},
     "host": {"total": 8, "scanned": 6, "not_scanned": ["B101", "B150"]},
     "agents": {"total": 34, "scanned": 24, "not_scanned": ["B18", "B22", "..."]},
-    "skills": {"total": 0, "scanned": 0, "not_scanned": [], "note": "none installed"},
-    "mcp": {"total": 0, "scanned": 0, "not_scanned": [], "note": "none configured"},
+    "skills": {"total": 2, "scanned": 2, "not_scanned": [], "note": null,
+               "checks": {"total": 55, "scanned": 42, "not_scanned": ["B103", "B5", "..."]}},
+    "mcp": {"total": 3, "scanned": 3, "not_scanned": [], "note": null,
+            "checks": {"total": 13, "scanned": 4, "not_scanned": ["B331", "B185", "..."]}},
     "plugins": {"total": 0, "scanned": 0, "not_scanned": [], "note": "none installed"},
     "channels": {"total": 3, "scanned": 3, "not_scanned": []},
     "logs": {"total": 7, "scanned": 0, "not_scanned": ["B164", "B180", "..."]}
@@ -1349,6 +1352,15 @@ One entry per subject in the 8-subject taxonomy (§18):
   page's `scanned` only counts `PASS`/`FAIL`/`WARN`, so a `not_applicable` `UNKNOWN`
   still counts as a gap here, while `inventory.unassessed` deliberately excludes it
   (that surface WAS assessed — it just resolved to "nothing there"). Not a bug.
+- **Two units per subject, and both are named (B-565).** `skills`/`mcp`/`plugins` count
+  instances; every other subject counts checks. Until B-565 the page rendered both in one
+  identically-formatted unlabelled list, so `Skills: 2 of 2 scanned` read as full coverage
+  of the 55 catalog entries routed to that subject — 13 of which were `UNKNOWN` in that same
+  run. 68 of the catalog's 188 entries (skills 55 + mcp 13) appeared in neither the numerator
+  nor the denominator of any row. The text renderer now names the unit on every line
+  (`MCP servers: 3 of 3 servers inventoried; 4 of 13 checks scanned` — a real line from a
+  config with three servers) and the JSON carries the second
+  tally under `checks`.
 - Presentation-only, same as `inventory` — never alters `score`/`grade`/`findings`.
 - **V1 scope**: `logs` is CHECK-granularity here (same as the other bucket subjects),
   not the file/byte-level detail ("N of M trajectory files, X of Y MB scanned") a

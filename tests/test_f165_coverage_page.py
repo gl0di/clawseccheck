@@ -25,11 +25,21 @@ def _finding(id_: str, status: str = "PASS") -> Finding:
 # subject_coverage
 # ---------------------------------------------------------------------------
 
-def test_subject_coverage_only_covers_the_five_bucket_subjects():
-    """skills/mcp/plugins get PER-INSTANCE coverage elsewhere (build_coverage_page) —
-    subject_coverage must not invent bucket entries for them."""
+def test_subject_coverage_covers_every_check_owning_subject():
+    """SUPERSEDES `..._only_covers_the_five_bucket_subjects` (B-565).
+
+    The old pin said skills/mcp/plugins must get no bucket entry here, because they get
+    a PER-INSTANCE count in `build_coverage_page` instead. The premise was wrong: an
+    instance count answers "did we look at each installed thing", never "did every check
+    about it resolve", and treating the two as alternatives put 68 of the catalog's ids
+    (skills 55 + mcp 13) in neither tally on the page. `subject_coverage` now reports
+    every subject the catalog routes; `build_coverage_page` decides where each one is
+    rendered. The narrowing still exists, but as an explicit `subjects=` argument."""
     result = cov.subject_coverage([])
-    assert set(result) == set(_BUCKET_SUBJECTS)
+    expected = {SUBJECT_OF[s] for s in SUBJECT_OF}
+    assert set(result) == expected
+    assert {"skills", "mcp"} <= set(result)
+    assert set(cov.subject_coverage([], subjects=_BUCKET_SUBJECTS)) == set(_BUCKET_SUBJECTS)
 
 
 def test_subject_coverage_empty_findings_reports_everything_not_scanned():
@@ -108,7 +118,13 @@ def test_build_coverage_page_no_roots_reports_none_installed():
     ctx = collect(FIXTURES / "clean_full")
     sweep = _FakeSweep(no_roots=True)
     page = cov.build_coverage_page(ctx, [], skill_sweep=sweep)
-    assert page["skills"] == {"total": 0, "scanned": 0, "not_scanned": [], "note": "none installed"}
+    instance = {k: v for k, v in page["skills"].items() if k != "checks"}
+    assert instance == {"total": 0, "scanned": 0, "not_scanned": [], "note": "none installed"}
+    # B-565: "no skills installed" says nothing about the skill CHECKS, which still ran.
+    # Asserting the whole dict used to be the point of this test; now it would silently
+    # forbid the second tally, so the instance fields are compared exactly and the tally
+    # is asserted present rather than dropped from the comparison and forgotten.
+    assert page["skills"]["checks"]["total"] > 0
 
 
 def test_build_coverage_page_truncated_targets_count_as_not_scanned():
@@ -150,7 +166,9 @@ def test_coverage_page_lines_formats_scanned_of_total():
     page = {"openclaw": {"total": 10, "scanned": 7, "not_scanned": []}}
     # fill the rest so SUBJECT_ORDER iteration doesn't KeyError on .get (None-safe)
     lines = cov.coverage_page_lines(page)
-    assert any("7 of 10 scanned" in line for line in lines)
+    # B-565: the unit is named. "7 of 10 scanned" was ambiguous on every row and actively
+    # misleading on the three that count instances rather than checks.
+    assert any("7 of 10 checks scanned" in line for line in lines)
 
 
 def test_coverage_page_lines_names_gaps_not_just_a_count():
