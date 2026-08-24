@@ -18,6 +18,7 @@ from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding
 from .dossier import axis_for
 from .layers import LAYER_ORDER
 from .report import (
+    _redact_home_paths,
     _sanitize,
     _sanitize_tree,
     finding_counts_by_severity,
@@ -312,7 +313,17 @@ def render_sarif(
         total_files_inspected = getattr(ctx, "total_files_inspected", 0)
         excluded_binary_files_count = getattr(ctx, "excluded_binary_files_count", 0)
         archives_unpacked = getattr(ctx, "archives_unpacked", 0)
-        limit_hits = list(getattr(ctx, "limit_hits", []))
+        # B-620: at least one `limit_hits` producer (collector._config_workspace_dirs,
+        # for a `workspace` value resolved via `~` expansion) interpolates a resolved
+        # ABSOLUTE path, and this block used to copy the list verbatim -- so a SARIF file
+        # could carry the operator's real `/home/<user>/...`. Reuse
+        # `report._redact_home_paths` (B-381's precedent for this exact shape, already
+        # applied to the --dashboard card) rather than reimplementing path folding a
+        # second time -- this repo has been burned by divergent redaction tables before.
+        # A NEW list of plain strings is built here; `ctx.limit_hits` (its `LimitHit`
+        # objects, read verbatim by B13/dossier.py leg 2/cli.sweep_installed_skills) is
+        # never touched.
+        limit_hits = [_redact_home_paths(str(h)) for h in (getattr(ctx, "limit_hits", None) or [])]
         path_traversal_violations = list(getattr(ctx, "path_traversal_violations", []))
         file_manifest = dict(getattr(ctx, "file_manifest", {}))
         disclosures = [
