@@ -337,6 +337,48 @@ def limit_hits_for(ctx, *domains: str) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class Disclosure:
+    """One inert fact about how far THIS run reached. Never a verdict, never a gap.
+
+    B-617. Three qualifiers were each computed honestly and each read by exactly one
+    renderer, so the surfaces a human and a CI consumer actually read never saw them.
+    This is the single channel they share.
+
+    Deliberately NOT a ``str`` subclass, and that is the whole design. ``limit_hits`` is
+    one (see ``LimitHit``) and it was a notepad until ``dossier.py`` read its truthiness
+    into a verdict leg; a plain string can be ``"; ".join``-ed into a finding detail or
+    truth-tested into a gate by any future edit, and ``_MODE_C_VERDICT`` turns any status
+    it acquires into an install gate — the exact defect B-526 was filed to fix. A record
+    that is not a string cannot be spliced into prose by accident, and
+    ``tests/test_b617_disclosure_channel.py`` fails the build if anything outside the
+    renderers reads ``ctx.disclosures`` at all.
+
+    ``subject`` is a NAME, never a path. ``collector`` knows the absolute path and must
+    not hand it on: an absolute path carries the username, the mount points and the
+    directory layout, and these records reach SARIF and a report a user pastes into an
+    issue. This follows ``report._credential_surface_rel``'s precedent — say WHAT was
+    found, never WHERE on disk.
+    """
+
+    kind: str      # stable machine key, e.g. "workspace_outside_home"
+    subject: str   # the thing this is about, as a bare name
+    detail: str    # one plain-English sentence; no absolute path, ever
+
+
+def note_disclosure(sink, kind: str, subject: str, detail: str) -> None:
+    """Append a `Disclosure` to *sink* (a ``ctx.disclosures``-shaped list), de-duplicated.
+
+    De-duplication is on the whole record: two agents can resolve to the same out-of-home
+    workspace, and one fact stated twice reads as two findings.
+    """
+    if sink is None:
+        return
+    rec = Disclosure(kind=kind, subject=subject, detail=detail)
+    if rec not in sink:
+        sink.append(rec)
+
+
 class _ScopedLimitSink:
     """A ``limit_hits``-shaped view that stamps a fixed domain on everything appended.
 
@@ -707,6 +749,10 @@ class Context:
 
     # Integrity & analysis metadata blocks
     limit_hits: list[str] = field(default_factory=list)
+    # B-617: inert run-level disclosures (see `Disclosure`). Read ONLY by the
+    # renderers; never by a check, never by scoring. Kept beside limit_hits because
+    # they are neighbours in meaning and opposites in weight.
+    disclosures: list = field(default_factory=list)
     mismatches: list[str] = field(default_factory=list)
     polyglots: list[str] = field(default_factory=list)
     binary_files: list[str] = field(default_factory=list)
@@ -2635,7 +2681,8 @@ def _derived_agent_workspaces(cfg: dict) -> "list[str]":
 
 
 def _config_workspace_dirs(
-    home: Path, cfg: dict, limit_hits: list[str] | None = None
+    home: Path, cfg: dict, limit_hits: list[str] | None = None,
+    disclosures: list | None = None,
 ) -> list[Path]:
     """Absolute workspace dir(s) declared in openclaw.json (B-161).
 
@@ -2690,22 +2737,38 @@ def _config_workspace_dirs(
         if resolved in seen:
             continue
         seen.add(resolved)
-        if limit_hits is not None:
+        if limit_hits is not None or disclosures is not None:
             try:
                 in_home = resolved.is_relative_to(resolved_home)
             except (OSError, ValueError):
                 in_home = False
             if not in_home:
-                msg = (
-                    f"custom workspace '{resolved.name}' resolves outside the audited "
-                    f"--home ({resolved}) — bootstrap/skills read from there are outside "
-                    "the scoped audit"
-                )
-                if msg not in limit_hits:
-                    note_limit(
-                        limit_hits, LIMIT_DOMAIN_SKILL,
-                        msg,
+                if limit_hits is not None:
+                    msg = (
+                        f"custom workspace '{resolved.name}' resolves outside the audited "
+                        f"--home ({resolved}) — bootstrap/skills read from there are outside "
+                        "the scoped audit"
                     )
+                    if msg not in limit_hits:
+                        note_limit(
+                            limit_hits, LIMIT_DOMAIN_SKILL,
+                            msg,
+                        )
+                # B-617: DUAL-WRITE, and the two sinks say deliberately different things.
+                # The limit_hits entry above is left byte-identical because three
+                # consumers already depend on its exact text and truthiness — B13's
+                # UNKNOWN (checks/_vet.py), dossier leg 2, and cli.sweep_installed_skills
+                # — so changing it would move verdicts. It also interpolates the ABSOLUTE
+                # path, which is why it must never be rendered into human text (sarif.py
+                # copies limit_hits verbatim and already carries `/home/<user>/...`).
+                # The disclosure below is the renderable half: a bare name, no path.
+                note_disclosure(
+                    disclosures,
+                    "workspace_outside_home",
+                    resolved.name,
+                    f"the workspace '{resolved.name}' resolves outside the audited "
+                    "--home, and this run read bootstrap files and skills from it",
+                )
         out.append(resolved)
     return out
 
@@ -2844,7 +2907,8 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         and audited_home.name.startswith(".openclaw")
     ):
         roots.append((user_home / ".agents" / "skills", False))
-    for cw in _config_workspace_dirs(home, ctx.config, limit_hits=ctx.limit_hits):
+    for cw in _config_workspace_dirs(home, ctx.config, limit_hits=ctx.limit_hits,
+                                    disclosures=ctx.disclosures):
         roots.append((cw / "skills", False))
     roots.extend((path, False) for path in _config_extra_skill_dirs(home, ctx.config))
     # F-119: plugins.load.paths (a real dist key) — a path-loaded plugin bundles skills under
@@ -5059,7 +5123,8 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     # SOUL.md/AGENTS.md living outside the hardcoded names is not invisible. The
     # resolved-path de-dup below keeps a file that also lives under a hardcoded dir from
     # being read (or counted) twice.
-    for _cw in _config_workspace_dirs(home, ctx.config, limit_hits=ctx.limit_hits):
+    for _cw in _config_workspace_dirs(home, ctx.config, limit_hits=ctx.limit_hits,
+                                    disclosures=ctx.disclosures):
         _ws_dirs.append((_cw.name or "workspace", _cw))
     for _ws, wdir in _ws_dirs:
         # B-303: wdir == home for the first entry, so a non-traversable *home* (e.g.

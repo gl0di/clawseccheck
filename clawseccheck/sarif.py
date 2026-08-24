@@ -315,6 +315,10 @@ def render_sarif(
         limit_hits = list(getattr(ctx, "limit_hits", []))
         path_traversal_violations = list(getattr(ctx, "path_traversal_violations", []))
         file_manifest = dict(getattr(ctx, "file_manifest", {}))
+        disclosures = [
+            {"kind": d.kind, "subject": d.subject, "detail": d.detail}
+            for d in (getattr(ctx, "disclosures", None) or [])
+        ]
 
         simulated_effects = []
         installed_skill_py = getattr(ctx, "installed_skill_py", None)
@@ -344,6 +348,7 @@ def render_sarif(
             "limit_hits": limit_hits,
             "path_traversal_violations": path_traversal_violations,
             "file_manifest": file_manifest,
+            "disclosures": disclosures,
             "simulated_effects": simulated_effects,
             # B-166: surface a present-but-unparseable openclaw.json so a SARIF consumer
             # doesn't read an UNKNOWN-only run over a broken config as a clean scan.

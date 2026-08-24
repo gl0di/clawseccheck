@@ -2890,6 +2890,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.extend(_coverage_lines(findings, ascii_only=ascii_only, color=color))
         lines.append("")
 
+    # B-617: what this run reached, stated before the capability/credential sections so a
+    # reader learns the SCOPE of the run before reading its contents.
+    lines.extend(_disclosure_lines(ctx))
+
     cap_lines = _capability_graph_lines(ctx) if ctx is not None else []
     if cap_lines:
         lines.append("")
@@ -4087,6 +4091,62 @@ def render_vet_json(profile, *, mode: str, version: str) -> str:
 # did NOT assess. It is printed below the axes, explicitly marked as not affecting the
 # verdict, and it never touches profile.verdict, the axis statuses, the finding count or
 # the exit code.
+# B-617: headings for the inert disclosure channel, keyed by `Disclosure.kind`.
+#
+# One heading per kind, NOT one fixed string, and that is the whole reason this is a map.
+# The obvious shortcut is to reuse "Not assessed" for everything, and for this first kind it
+# would be a LIE: the out-of-home workspace WAS read — its skills are in `ctx.installed_skills`
+# and a malicious one produces a B13 FAIL naming it. The fact to disclose is that the run
+# reached FURTHER than the user scoped, not that it reached less. B-616 and B-553 will add
+# kinds that genuinely are "we did not look"; they get their own heading rather than bending
+# this one, because a disclosure that misstates its own direction is worse than silence — a
+# reader concludes those files went unexamined.
+_DISCLOSURE_HEADINGS = {
+    "workspace_outside_home": "Read outside the audited scope",
+}
+_DISCLOSURE_FALLBACK_HEADING = "Worth knowing about this run"
+
+
+def _inert_note_block(heading: str, notes: "list[str]") -> "list[str]":
+    """The single renderer for a fact that is VISIBLE and POWERLESS over the verdict.
+
+    B-526 established this shape for `--vet`; B-617 made it shared so the audit path could
+    not grow a second, divergent one. `_situational_coverage_notes` and `_disclosure_lines`
+    are its only callers, so "(does not affect the verdict)" has one spelling and one
+    meaning. B-483 is the precedent for why that matters: seven asciify sites and three
+    divergent tables, all sincerely written.
+    """
+    if not notes:
+        return []
+    out = ["", f"  {heading}  (does not affect the verdict)"]
+    out += [f"    - {_sanitize(n)}" for n in notes]
+    return out
+
+
+def _disclosure_lines(ctx) -> "list[str]":
+    """Render `ctx.disclosures` for the AUDIT path, grouped by kind.
+
+    Reads the channel and nothing else. It must never consult a status, a score or an exit
+    code, and nothing here may write back — `tests/test_b617_disclosure_channel.py` fails the
+    build if `.disclosures` is read anywhere outside this module and `sarif.py`, because
+    `ctx.limit_hits` was a notepad too until `dossier.py` read its truthiness into a verdict
+    leg, and `_MODE_C_VERDICT` turns any status a channel acquires into an install gate.
+    """
+    records = list(getattr(ctx, "disclosures", None) or []) if ctx is not None else []
+    if not records:
+        return []
+    by_kind: dict = {}
+    for rec in records:
+        by_kind.setdefault(getattr(rec, "kind", ""), []).append(rec)
+    lines: list[str] = []
+    for kind in sorted(by_kind):
+        heading = _DISCLOSURE_HEADINGS.get(kind, _DISCLOSURE_FALLBACK_HEADING)
+        lines += _inert_note_block(
+            heading, [getattr(r, "detail", "") for r in by_kind[kind]]
+        )
+    return lines
+
+
 _COVERAGE_EVIDENCE_PREFIX = "coverage: "
 
 # STANDING limits — true of every target, every run. They are deliberately NOT printed
@@ -4148,10 +4208,7 @@ def render_vet_dossier(profile, ascii_only: bool = False) -> str:
     for a in profile.axes:
         icon = icons.get(a.status, icons["UNKNOWN"])
         lines.append(f"  {AXIS_LABEL[a.axis]:<13} {icon} {a.status:<5}  {_sanitize(a.reason)}")
-    notes = _situational_coverage_notes(profile)
-    if notes:
-        lines += ["", "  Not assessed  (does not affect the verdict)"]
-        lines += [f"    - {_sanitize(n)}" for n in notes]
+    lines += _inert_note_block("Not assessed", _situational_coverage_notes(profile))
     top = _dossier_top_fix(profile)
     if top:
         lines += ["", f"  Fix (top): {_sanitize(top)}"]
@@ -4620,6 +4677,17 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
         # that ran but didn't exhaust its subject, vs. a layer that never ran at all.
         "graded": _graded,
         "not_checked": list(getattr(score, "not_checked", ())),
+        # B-617: inert facts about how far THIS run reached. ALWAYS PRESENT, empty when
+        # there is nothing to say — B-560's lesson, that an absent key cannot be told
+        # apart from "nothing to report" by a consumer. Deliberately its own key rather
+        # than folded into `not_checked`: that field means "a layer ran and did not
+        # exhaust its subject", and the first kind here says the opposite (the run read
+        # MORE than the user scoped). `subject` is a bare name; no absolute path is ever
+        # published here (report._credential_surface_rel's precedent).
+        "disclosures": [
+            {"kind": d.kind, "subject": _sanitize(d.subject), "detail": _sanitize(d.detail)}
+            for d in (getattr(ctx, "disclosures", None) or [])
+        ],
         "missing_layers": [
             {"layer": layer, "status": status}
             for layer, status in getattr(score, "missing_layers", ())
