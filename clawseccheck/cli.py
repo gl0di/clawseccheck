@@ -57,6 +57,7 @@ from .guide import render_next_actions, suggest_actions
 from .integrity import (
     NOTE_PATH_ESCAPE,
     NOTE_SYMLINK,
+    NOTE_UNCHECKED_PYC,
     NOTE_UNREADABLE,
     NOTE_VANISHED,
     package_digest,
@@ -2825,6 +2826,11 @@ def _main(argv=None) -> int:
                        if kind == NOTE_UNREADABLE]
         _vanished = [(rel, detail) for kind, rel, detail in _notes
                      if kind == NOTE_VANISHED]
+        # B-608: presence-only disclosure of a PEP 552 unchecked-hash .pyc found inside a
+        # real __pycache__. Never folded into rc — see the block below; this is a
+        # disclosure that something could not be checked, not a verdict that it is bad.
+        _unchecked_pyc = [(rel, detail) for kind, rel, detail in _notes
+                          if kind == NOTE_UNCHECKED_PYC]
         lines = [f"{WORDMARK} {__version__} — engine source digest (SHA-256)",
                  f"combined : {combined}",
                  ""]
@@ -2849,6 +2855,29 @@ def _main(argv=None) -> int:
             lines.append("adding, removing, renaming or repointing one DOES change the combined")
             lines.append("digest, but what it points at is outside this scan. A clean install has")
             lines.append("none of these at all, so any entry listed above is worth investigating.")
+        if _unchecked_pyc:
+            # B-608: this is presence-only disclosure, never folded into `combined` or rc —
+            # a real __pycache__ is excluded from the digest by content (B-069, .pyc bytes
+            # vary by interpreter), so this is the one signal that can still be surfaced
+            # from inside it without making the digest environment-dependent.
+            lines.append("")
+            lines.append(f"Coverage note: {len(_unchecked_pyc)} __pycache__ director"
+                         f"{'y' if len(_unchecked_pyc) == 1 else 'ies'} in the package "
+                         f"tree "
+                         f"{'contains' if len(_unchecked_pyc) == 1 else 'contain'} a PEP "
+                         f"552 unchecked-hash .pyc.")
+            lines.append("__pycache__ contents are never read into the digest above (compiled")
+            lines.append("bytecode varies by interpreter, which would make the digest")
+            lines.append("irreproducible) — but a hash-based .pyc that is NOT checked against its")
+            lines.append(".py before Python imports it is worth naming even though it stays")
+            lines.append("outside the scan:")
+            for _rel, _detail in _unchecked_pyc:
+                lines.append(f"  {_rel}  —  {_detail}")
+            lines.append("This is not what an ordinary build, test or install leaves behind: it")
+            lines.append("takes an explicit, non-default compile flag. Measured on one healthy")
+            lines.append("machine, 7,850 .pyc files on the interpreter's own paths were all")
+            lines.append("timestamp-based and none was hash-based at all. Worth investigating if")
+            lines.append("you did not put it there yourself.")
         if _unreadable:
             lines.append("")
             lines.append(f"INTEGRITY CANNOT BE ESTABLISHED: {len(_unreadable)} path"

@@ -434,9 +434,22 @@ the combined digest and the run prints a `Coverage note` naming it, but whatever
 lies outside the scan.
 
 **The known residual:** a symlink *inside* one of those excluded directories is not seen at
-all, because nothing in them is read. So `--verify-self` does not detect a planted `.pyc` in
-a genuine `__pycache__`. Keep `~/.clawseccheck` and your install directory writable only by
-you; anyone who can write there can do worse than this anyway.
+all, because nothing in them is read. That includes a symlinked `.pyc` planted inside a real
+`__pycache__` — the entry is not classified either way, matching the "never follow a symlink
+to content" rule used everywhere else in this scan. Keep `~/.clawseccheck` and your install
+directory writable only by you; anyone who can write there can do worse than this anyway.
+
+**A narrower case is disclosed, not silently missed.** A real (non-symlinked) `.pyc` dropped
+directly inside a real `__pycache__` is still never hashed into `combined` — compiled
+bytecode varies by interpreter, so folding it in would make the digest irreproducible
+between a dev checkout and a clean install. But if that file is a PEP 552 *hash-based,
+unchecked* `.pyc` — the kind Python imports without validating against the `.py` it claims
+to come from — `--verify-self` now names its mere presence under a `Coverage note` in the
+printed output (the `__pycache__` directory and the filename(s)), without moving `combined`
+and without changing the exit code: this is a disclosure, not a verdict. An ordinary
+timestamp-based `.pyc` — what a default `py_compile.compile()` call or a normal `import`
+always produces — never triggers it; the unchecked-hash form requires an explicit,
+non-default compile flag that no ordinary build/test/install step uses.
 
 If a file or directory **cannot be read**, the digest necessarily covers less than the tree it
 names: the run prints `INTEGRITY CANNOT BE ESTABLISHED`, names each path and the reason, and

@@ -47,6 +47,72 @@ NOTE_SYMLINK = "symlink"
 NOTE_PATH_ESCAPE = "path-escape"
 NOTE_UNREADABLE = "unreadable"
 NOTE_VANISHED = "vanished"
+# B-608: presence-only disclosure of a PEP 552 *unchecked-hash* .pyc found directly
+# inside a real (non-symlink) ``__pycache__``. Never enters `per_file`/`combined` — see
+# `_pyc_header_flags` and `_scan_for_unchecked_hash_pycs` below for why this is safe to
+# report without becoming environment-dependent (B-069).
+NOTE_UNCHECKED_PYC = "unchecked-pyc"
+
+# The first 8 bytes of a PEP 552 .pyc: a 4-byte magic number (interpreter/version
+# dependent — never read here) followed by a 4-byte little-endian bit field. Bit 0 set
+# means "hash-based" rather than the default "timestamp-based"; bit 1, meaningful only
+# when bit 0 is set, means "check the hash against source on import". flags == 0b01 is
+# therefore the *unchecked*-hash pyc: hash-based, but NOT checked against source before
+# Python imports it — the PEP 552 surface this note exists to disclose. Verified against
+# this box's own interpreter: a default `py_compile.compile()` call and a normal
+# `import` both always write flags == 0 (timestamp-based); producing flags == 1 requires
+# passing `invalidation_mode=PycInvalidationMode.UNCHECKED_HASH` explicitly, which no
+# ordinary build/test/install step does.
+_PYC_HEADER_LEN = 8
+_PYC_UNCHECKED_HASH_FLAGS = 0b01
+
+
+def _pyc_header_flags(path: Path) -> int | None:
+    """Return the PEP 552 flags field of a ``.pyc``, or ``None`` if it can't be read.
+
+    Reads only the first 8 bytes (magic + flags) — never the code object, and never the
+    trailing mtime/size-or-source-hash field either — so nothing content- or
+    interpreter-dependent from this file ever reaches a caller. A file too short to hold
+    a flags field, or one that cannot be opened, is simply unclassifiable: this is a
+    best-effort signal, not a pyc validator.
+    """
+    try:
+        with path.open("rb") as fh:
+            header = fh.read(_PYC_HEADER_LEN)
+    except OSError:
+        return None
+    if len(header) < _PYC_HEADER_LEN:
+        return None
+    return int.from_bytes(header[4:8], "little")
+
+
+def _scan_for_unchecked_hash_pycs(cache_dir: Path, rel: str, found: dict) -> None:
+    """Record PEP 552 unchecked-hash ``.pyc`` filenames found directly inside cache_dir.
+
+    Only the immediate contents of ``cache_dir`` are listed — a real ``__pycache__``
+    never nests subdirectories, so there is nothing to recurse into. Entries are
+    followed for classification but never for listing (``is_file(follow_symlinks=False)``
+    excludes a symlinked ``.pyc``, matching the walk's own no-follow rule elsewhere in
+    this module) — a symlink pointing here is a separate, already-covered surface
+    (``NOTE_SYMLINK`` on the directory itself, or on the link if it names a file).
+    """
+    try:
+        entries = list(os.scandir(cache_dir))
+    except OSError:
+        return
+    names = []
+    for entry in entries:
+        if not entry.name.endswith(".pyc"):
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        if _pyc_header_flags(Path(entry.path)) == _PYC_UNCHECKED_HASH_FLAGS:
+            names.append(entry.name)
+    if names:
+        found[rel] = sorted(names)
 
 
 def _link_target(path: Path) -> str:
@@ -98,6 +164,21 @@ def package_digest(
     what B-069 reverted, because ``.pyc`` bytes vary by interpreter and a dev checkout
     would stop matching a clean install.
 
+    **B-608: presence of an unchecked-hash ``.pyc`` is disclosed, without reading it into
+    the digest.** A real ``__pycache__`` is scanned (never descended into by the digest
+    walk, only peeked at) for ``.pyc`` files whose PEP 552 flags field is exactly
+    ``0b01`` — hash-based but *not* checked against source on import, i.e. code Python
+    will run without comparing it to the ``.py`` it claims to come from. Only the 4-byte
+    flags field is read (never the interpreter-dependent magic number, never the code
+    object), so this cannot make ``combined`` vary by interpreter or toolchain the way
+    hashing ``.pyc`` bytes did (B-069) — the finding is reported via ``notes`` as
+    ``NOTE_UNCHECKED_PYC`` and never enters ``per_file``. An ordinary stale or
+    cross-version ``.pyc`` is timestamp-based (flags ``0``) and never trips this: a
+    default ``py_compile.compile()`` call and a normal ``import`` both always write
+    flags ``0``; an unchecked-hash pyc requires an explicit
+    ``invalidation_mode=PycInvalidationMode.UNCHECKED_HASH`` opt-in that no ordinary
+    build/test/install step performs.
+
     **Symlinks are covered by name and target, never by followed content** (B-590).
     Until then the walk dropped them silently — ``walk_dir_safely`` skips a symlink,
     and with no ``skips`` list passed the drop left no trace, so ``ln -s
@@ -146,12 +227,18 @@ def package_digest(
         Optional list. When provided, every entry the digest could not cover as
         ordinary file content is appended to it as a ``(kind, relpath, detail)``
         triple, where `kind` is one of ``NOTE_SYMLINK`` / ``NOTE_PATH_ESCAPE`` /
-        ``NOTE_UNREADABLE`` / ``NOTE_VANISHED``. Default ``None`` keeps the previous
-        signature working for existing callers, except that an unreadable path now raises
-        a message that names it instead of an unnamed ``PermissionError``.
+        ``NOTE_UNREADABLE`` / ``NOTE_VANISHED`` / ``NOTE_UNCHECKED_PYC``. Default ``None``
+        keeps the previous signature working for existing callers, except that an
+        unreadable path now raises a message that names it instead of an unnamed
+        ``PermissionError``.
         ``NOTE_PATH_ESCAPE`` is defensive: ``walk_dir_safely`` can emit a path escape, but
         reaching one here requires a symlinked parent, which ``_observe_dir`` now prunes
         first, so it is handled rather than relied upon.
+        ``NOTE_UNCHECKED_PYC`` (B-608) is a pure disclosure: unlike the other four kinds
+        it never enters ``per_file`` at all, so it cannot move ``combined`` — it names the
+        ``__pycache__`` directory and the unchecked-hash ``.pyc`` filenames found inside
+        it, for a caller that wants to surface the signal without affecting
+        reproducibility.
 
     Returns
     -------
@@ -186,6 +273,11 @@ def package_digest(
     # non-zero exit. An accusation on a benign race is exactly the false alarm Golden
     # Rule #5 forbids.
     vanished: list[tuple[str, str]] = []
+    # relpath of a real (non-symlink) __pycache__ dir -> sorted unchecked-hash .pyc
+    # filenames found directly inside it (B-608). Deliberately separate from `uncovered`:
+    # entries in `uncovered` are hashed into `per_file` (that is what moves `combined`
+    # for a symlink), and this must NOT — it is presence-only disclosure, never digested.
+    unchecked_pyc: dict[str, list[str]] = {}
 
     def _observe_dir(rel_parts) -> bool:
         """Record a symlinked subdirectory, which no other channel of the walk sees.
@@ -217,6 +309,12 @@ def package_digest(
         if is_link:
             uncovered[Path(*rel_parts).as_posix()] = (NOTE_SYMLINK, _link_target(d))
             return True
+        if rel_parts[-1] == "__pycache__":
+            # B-608: a real __pycache__ is about to be pruned (its contents are never
+            # read into the digest — B-069). Before pruning, peek at just the PEP 552
+            # flags byte of each .pyc directly inside it, so a planted unchecked-hash
+            # pyc is at least disclosed even though it stays outside `combined`.
+            _scan_for_unchecked_hash_pycs(d, Path(*rel_parts).as_posix(), unchecked_pyc)
         return bool(_NON_SOURCE_DIRS.intersection(rel_parts))
 
     skips: list = []
@@ -298,6 +396,13 @@ def package_digest(
             notes.append((NOTE_UNREADABLE, rel, reason))
         for rel, reason in sorted(vanished):
             notes.append((NOTE_VANISHED, rel, reason))
+        # B-608: disclosure only — never folded into `uncovered`/`per_file` above, so it
+        # cannot move `combined`.
+        for rel, names in sorted(unchecked_pyc.items()):
+            shown = ", ".join(names[:3])
+            more = "" if len(names) <= 3 else f" (and {len(names) - 3} more)"
+            detail = f"{len(names)} unchecked-hash .pyc: {shown}{more}"
+            notes.append((NOTE_UNCHECKED_PYC, rel, detail))
 
     # Combine: hash the sorted sequence of "relpath:digest\n" lines for stability.
     combined = hashlib.sha256(
