@@ -403,7 +403,7 @@ to render the coverage heat-map.
 
 ### `surfaces` map
 
-Each key is a surface slug (one of the 13 bucket surfaces; `"trifecta"` is excluded — it
+Each key is a surface slug (one of the 14 bucket surfaces; `"trifecta"` is excluded — it
 is a cross-cutting headline chip, not a coverage bucket). Value fields:
 
 | Field | Type | Description |

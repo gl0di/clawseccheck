@@ -898,3 +898,112 @@ def test_the_not_ran_count_guard_bites():
     m = _NOT_RAN_COUNT_RE.search("…and the six not-ran statuses are deliberately distinct:")
     assert m is not None and _NUMBER_WORDS[m.group(1)] == truth
     assert _NOT_RAN_COUNT_RE.search("statuses that did not run are listed above") is None
+
+
+# --- Countable claims that no guard had ever been pointed at -------------------------
+#
+# The guards above were each written the day a specific claim was caught rotting. That
+# leaves a standing hole with no name: a countable claim is unguarded until someone thinks
+# to guard it, and nothing tells you which ones those are. Enumerated 2026-08-24 by listing
+# every number-bearing phrase in the shipped docs and subtracting what the guards above
+# actually assert — 13 claims asserted, 65 numbers not. Most of the 65 are prose thresholds
+# ("3 chars", "30 days") and guarding them would be noise. Four were real claims derived
+# from a named constant, and two of those were already wrong:
+#
+#   THREAT_COVERAGE.md  "179 catalogued, of which 175 run in a default audit"  -> 188 / 184
+#   OUTPUT_SCHEMA.md    "one of the 13 bucket surfaces"                        -> 14
+#
+# Both had drifted invisibly. `179 catalogued` is the same figure as the guarded
+# `184 checks` badge in a different phrasing, so the docs contradicted each other by nine
+# with one side pinned and the other free — which is the exact shape the check-count guard
+# was written to prevent, reappearing one synonym away from it.
+#
+# Table-driven on purpose: adding a claim is one row, not another copy of the loop.
+def _countable_claim_rules():
+    """`(label, regex, truth)` per countable claim, truth DERIVED from the code."""
+    from clawseccheck.coverage import _BUCKET_SURFACES, _FAMILY_ORDER
+    from clawseccheck.layers import LAYER_ORDER
+
+    return [
+        # "…— 188 catalogued," — the whole catalog, including checks a default run skips.
+        ("catalogued checks",
+         re.compile(r"(\d{2,4})\s+catalogued\b"), len(CATALOG)),
+        # "of which 184 run in a default audit" — the runnable subset, same truth the
+        # bare-count guard uses, so the two phrasings can never drift apart again.
+        ("checks a default audit runs",
+         re.compile(r"(\d{2,4})\s+run in a default audit\b"), _runnable_check_count()),
+        # "one of the 14 bucket surfaces" — trifecta excluded, per coverage.py.
+        ("bucket surfaces",
+         re.compile(r"(\d{1,3})\s+bucket surfaces\b"), len(_BUCKET_SURFACES)),
+        # "the 7 security family slugs"
+        ("security family slugs",
+         re.compile(r"(\d{1,3})\s+security family slugs\b"), len(_FAMILY_ORDER)),
+        # The five-layer ledger's DENOMINATOR only: "2 of 5 layers did not run" and
+        # "the 5 audit layers". The numerator is an example in prose, never a claim about
+        # the product, so it is deliberately not matched.
+        ("layers in the ledger",
+         re.compile(r"\bof\s+(?:the\s+)?(\d{1,2})\s+(?:audit\s+)?layers\b"), len(LAYER_ORDER)),
+        ("layers in the ledger",
+         re.compile(r"\bthe\s+(\d{1,2})\s+audit\s+layers\b"), len(LAYER_ORDER)),
+    ]
+
+
+def test_countable_claims_derived_from_a_named_constant_are_true():
+    """Each claim is compared against the constant it is about, not against a pinned number.
+
+    Equality, not a band: unlike the test count these do not move on ordinary commits, so a
+    change here is a real change to the product's shape and the doc should move with it.
+    """
+    wrong = []
+    for label, rx, truth in _countable_claim_rules():
+        for path in _shipped_files():
+            text = path.read_text(encoding="utf-8")
+            for m in rx.finditer(text):
+                claimed = int(m.group(1))
+                if claimed != truth:
+                    line = text[: m.start()].count("\n") + 1
+                    wrong.append(
+                        f"{path.relative_to(REPO)}:{line} claims {claimed} {label}, code has {truth}"
+                    )
+    assert not wrong, "countable claims drifted from the code:\n  " + "\n  ".join(wrong)
+
+
+def test_every_countable_claim_rule_actually_matches_something():
+    """Guard the guard, and the one that matters most here.
+
+    A rule whose regex matches nothing is indistinguishable from a rule that passes. Six of
+    these were written against phrasings found in the docs on 2026-08-24; if a doc is
+    reworded, the rule must fail loudly rather than quietly stop guarding. Rules that share
+    a label are alternates for one claim and only need a hit between them.
+    """
+    hits = {}
+    for label, rx, _ in _countable_claim_rules():
+        hits.setdefault(label, 0)
+        for path in _shipped_files():
+            hits[label] += len(rx.findall(path.read_text(encoding="utf-8")))
+    dead = sorted(label for label, n in hits.items() if n == 0)
+    assert not dead, (
+        "these claim rules no longer match any shipped doc — the wording changed and the "
+        f"claim is now unguarded: {dead}"
+    )
+
+
+def test_the_countable_claim_guard_bites_on_each_rule():
+    """Every rule must be shown to reject a wrong number, not merely accept the right one."""
+    for label, rx, truth in _countable_claim_rules():
+        sample = rx.pattern.replace(r"(\d{2,4})", str(truth + 1)) \
+                           .replace(r"(\d{1,3})", str(truth + 1)) \
+                           .replace(r"(\d{1,2})", str(truth + 1))
+        # build a concrete phrase from the pattern's literal tail rather than trusting it
+        literal = re.sub(r"\\b|\\s\+|\(\?:[^)]*\)\?|[()\\]", " ", sample)
+        literal = re.sub(r"\s+", " ", literal).strip()
+        # The phrase is derived from the pattern so a reworded rule gets a matching
+        # control for free. That only holds while the derivation yields a real sentence,
+        # so say it out loud: any surviving metacharacter means this test is exercising
+        # garbage rather than a claim, and should fail here rather than pass quietly.
+        assert not set(literal) & set(r"\\[]{}|^$*+?"), (
+            f"rule {label!r} no longer reduces to a plain phrase: {literal!r}"
+        )
+        m = rx.search(literal)
+        assert m is not None, f"rule {label!r} cannot read its own phrasing: {literal!r}"
+        assert int(m.group(1)) != truth, f"rule {label!r} negative control did not differ"
