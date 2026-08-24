@@ -133,6 +133,95 @@ def _plugin_finding(severity, status, detail, fix, ev=None) -> Finding:
     )
 
 
+# The separators an evidence line puts between the producing skill's name and the rest.
+# Measured across checks/*.py by walking every f-string whose first substitution is a
+# name-like variable: 176 sites use `": "`, 6 use `" ("`, 3 use `" ["`. None can both
+# match one entry, since they differ at the first character after the name.
+#
+#   ": "  the general convention, every check's evidence list
+#   " ("  checks/_content.py's B66/B156 prose scanners, as
+#         f"{skill_name} ({relpath} docstring/comment): ..."
+#   " ["  checks/_content.py's B64 multilingual scanner, as
+#         f'{source_name} [{lang}]: "{snippet}"'
+#
+# THIS LIST IS HAND-MAINTAINED AND HAS LOST THREE TIMES — the second and third entries
+# were each found by an adversarial pass, not by the tests, and the third was found by the
+# pass reviewing the fix for the second. A fourth producer will fail the same way and
+# nothing here will notice. The durable fix is a structural guard over the producers (see
+# the note in _attribute_to_bundled_skill); until it exists, treat this list as known-
+# incomplete rather than as the answer.
+_BUNDLED_EVIDENCE_SEPARATORS = (": ", " (", " [")
+
+
+def _reprefix_bundled_evidence(entry: str, name: str, rel_label: str) -> str:
+    """Swap a leading bare skill-name token for its plugin-relative path, or pass through."""
+    for sep in _BUNDLED_EVIDENCE_SEPARATORS:
+        head = f"{name}{sep}"
+        if entry.startswith(head):
+            return f"{rel_label}{sep}{entry[len(head):]}"
+    return entry
+
+
+def _attribute_to_bundled_skill(f: Finding, name: str, rel_label: str) -> Finding:
+    """Stamp one finding dispatched from a bundled skill with the skill it came from.
+
+    C-135 (2026-07-22): disambiguate a bundled skill's OWN evidence entries by its
+    plugin-relative path, not just its bare directory name — two bundled skills sharing
+    a basename (e.g. skills/a/tool, skills/b/tool) would otherwise produce IDENTICAL
+    evidence-line prefixes ("tool: ..."). adjudication.py's judge-packet/--vet-judged
+    matching keys on exactly that prefix (_target_from_evidence), so without this a
+    verdict meant for one bundled skill could silently escalate a DIFFERENT one sharing
+    the same bare name.
+
+    B-614 turned this from inline code into a named helper. The attribution used to be
+    applied to the dispatched primary alone; the primary and every finding riding on its
+    `.ring_findings` now go through the SAME function, so a later edit cannot hand one of
+    them the disambiguation and the other only the append — which is the exact mistake
+    the C-135 note above was written about.
+
+    B-614's own C-135 then found that the rewrite was reading ONE evidence convention and
+    the tree has two. `checks/_content.py`'s B66/B156 prose scanners emit
+    `f"{skill_name} ({relpath} docstring/comment): ..."`, which `startswith(f"{name}: ")`
+    rejects, so those lines passed through unattributed and
+    `_target_from_evidence`'s `partition(": ")` returned the shared
+    `"helper (scripts/x.py docstring/comment)"` for BOTH colliding skills. Reproduced end
+    to end through the real CLI: one DANGEROUS judge verdict escalated two different
+    bundled skills, WARN->FAIL, each tagged `[escalated by host-agent judge: DANGEROUS]`.
+    B66 and B156 are both in `adjudication._FN_PRONE_WARN_IDS`, so they are exactly the
+    band that reaches a judge. The gap pre-dates B-614 (it reproduces with either finding
+    as the primary), but B-614 is what makes those two reachable on the plugin path at
+    all, so it is fixed here rather than deferred.
+
+    A SECOND adversarial round, on this very fix, then found a third convention: B64's
+    multilingual scanner emits `f'{source_name} [{lang}]: "{snippet}"'`, and B64 is on
+    SKILL_CONTENT_RING, so B-614 makes it reachable on the plugin path the same way. Its
+    path to harm is narrower than B66/B156's and this is deliberately not overstated: B64
+    is NOT in `adjudication._FN_PRONE_WARN_IDS`, so a B64 **WARN** never reaches a judge
+    packet; only a B64 UNKNOWN would. The target collision is real either way.
+
+    What that second round actually proves is about the SHAPE of this fix, not about the
+    entry it added. The list is hand-maintained and has now lost three times, and the
+    tests cannot save it: an audit of all 292 fixture skill directories produced 734
+    evidence lines, 209 name-prefixed — 207 `": "`, 2 `" ("`, and **zero** `" ["`. The
+    corpus cannot exercise a convention nobody wrote a fixture for, so the property test
+    below only covers forms someone already thought to construct. Do not read it as
+    "a new format is caught by what it does".
+
+    The durable fix is a structural guard over the PRODUCERS — statically require the
+    literal following a name-like substitution to start with a known separator — which
+    would have reddened all three on the day they were written, with no fixture at all.
+    That needs its own design (a naive predicate reds on 20 unrelated sites: `name + "/"`
+    path joins, `name + " is on ("` config prose), so it is tracked separately rather than
+    bolted on here.
+    """
+    if rel_label != name:
+        f.evidence = [
+            _reprefix_bundled_evidence(e, name, rel_label) for e in (f.evidence or [])
+        ]
+    f.detail = f"[bundled skill {name!r}] {f.detail}"
+    return f
+
+
 def vet_plugin(
     path: str | Path, target_budget_s: float = DEFAULT_VET_TARGET_BUDGET_S
 ) -> Finding:
@@ -393,27 +482,41 @@ def vet_plugin(
         except Exception:  # noqa: BLE001 — a dispatched engine must never break the vet
             warns.append(f"bundled skill {sd.name!r} could not be vetted")
             continue
-        # C-135 (2026-07-22): disambiguate this bundled skill's OWN evidence entries
-        # by its plugin-relative path, not just its bare directory name — two bundled
-        # skills sharing a basename (e.g. skills/a/tool, skills/b/tool) would otherwise
-        # produce IDENTICAL evidence-line prefixes ("tool: ..."). adjudication.py's
-        # judge-packet/--vet-judged matching keys on exactly that prefix
-        # (_target_from_evidence), so without this a verdict meant for one bundled
-        # skill could silently escalate a DIFFERENT one sharing the same bare name.
-        # vet_skill's own evidence convention prefixes each line with sd.name (its
-        # `name = p.name`), so replacing just that leading segment is safe and exact.
         try:
             rel_label = str(sd.resolve().relative_to(root_res))
         except (OSError, ValueError):
             rel_label = sd.name
-        if rel_label != sd.name:
-            bare_prefix = f"{sd.name}: "
-            sf.evidence = [
-                f"{rel_label}: {e[len(bare_prefix):]}" if e.startswith(bare_prefix) else e
-                for e in (sf.evidence or [])
-            ]
-        sf.detail = f"[bundled skill {sd.name!r}] {sf.detail}"
-        subs.append(sf)
+        # B-614: carry the LOSERS, not just the dispatched primary.
+        #
+        # vet_skill collapses its content ring into ONE primary
+        # (`primary = max(pool, key=_VET_MERGE_RANK...)`, checks/_vet.py) and hangs every
+        # other finding worth keeping on `.ring_findings`. This loop used to append the
+        # primary alone, so those were dropped right here — and every consumer downstream
+        # flattens exactly ONE level (`[f, *f.ring_findings]`: dossier._normalize_pool,
+        # cli.py's vet paths, adjudication._vet_pool), so a ring left nested under `sf`
+        # is invisible to all of them. They have to become members of `subs` themselves.
+        #
+        # The loss was never a quiet omission, which is why this is a security bug and
+        # not a reporting nicety: dossier.build_profile buckets findings by axis and
+        # prints a bucket's DEFAULT CLEAN text when nothing lands in it, so a dropped
+        # finding left an affirmative claim rather than a gap. Measured on byte-identical
+        # content, `--vet-skill` reported `Behavior FAIL` (B61 cross-agent config
+        # snooping) and `Build quality WARN` (B98 undeclared capabilities) where
+        # `--vet-plugin` reported `PASS` for both, and `--vet-plugin --json` carried
+        # neither id at all.
+        #
+        # What this deliberately does NOT change: the plugin's overall status. `subs`
+        # already contained the worst-ranked finding of each dispatched skill (that IS
+        # what `max` picks), so `sub_rank` below is unmoved by definition — this widens
+        # what is reported, never how bad the verdict is.
+        #
+        # `sf.ring_findings` is emptied so each finding has exactly one home. That is a
+        # no-op today (nothing recurses); it means a consumer that starts recursing
+        # tomorrow cannot count these twice.
+        ring = list(sf.ring_findings or [])
+        sf.ring_findings = []
+        subs.append(_attribute_to_bundled_skill(sf, sd.name, rel_label))
+        subs.extend(_attribute_to_bundled_skill(rf, sd.name, rel_label) for rf in ring)
 
     # -- capped tree sweep (skips node_modules; symlinks never followed) for embedded
     #    MCP specs and native-executable stowaways outside the dispatched skill dirs

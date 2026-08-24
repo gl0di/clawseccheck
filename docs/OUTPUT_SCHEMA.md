@@ -657,8 +657,10 @@ the catalog will not find an entry for it. Its `detail` always contains the subs
 `"coverage is incomplete"`; that wording is load-bearing — it is what caps the `danger`
 axis (and therefore `grade`) below what the checks that did complete would otherwise
 earn. Read a `VET-COVERAGE` `UNKNOWN` as "this scan is partial," never as a clean
-result — it appears on the `--vet`/`--vet-skill` path, and the same gap can also
-surface as a reason string in a full audit's per-skill inventory (§18).
+result — it appears on the `--vet`/`--vet-skill` path, on `--vet-plugin` (both from the
+plugin's own scan budget and, since the bundled-skill dispatch stopped dropping non-primary
+findings, from a bundled skill whose ring was cut short), and the same gap can also surface
+as a reason string in a full audit's per-skill inventory (§18).
 
 ### Skeleton
 
