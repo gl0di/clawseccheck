@@ -20,7 +20,11 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
+import ast
+import importlib.util
 import re
+import sys
+import sysconfig
 from pathlib import Path
 
 from clawseccheck import __released__, __version__
@@ -394,3 +398,435 @@ def test_test_count_guard_reads_three_digit_counts_and_the_test_files_phrasing()
         assert _TEST_COUNT_RE.search(not_a_claim) is None, (
             f"{not_a_claim!r} is not a test-count claim, but the guard reads one"
         )
+
+
+# --- The two badge figures that nothing derived -------------------------------------
+#
+# `_svg_self_disagreements` above pins that the badge agrees with ITSELF, and it caught a
+# real 600-unit drift. But self-consistency is not truth. Three of the badge's five figures
+# are checked against code elsewhere in this file -- the check count against CATALOG, the
+# attack-chain count against the RISK engine, the test count against the collected suite --
+# and two were checked against nothing at all:
+#
+#     "0 dependencies"    "0 network calls"
+#
+# Those two are the badge's load-bearing claims. They restate CLAUDE.md's stdlib-only
+# constraint and Golden Rule #1 (local-only, forever), which is the whole reason a reader
+# is asked to run a security tool against their own agent config. Until this section they
+# rested on someone having typed a zero and never revisited it: one `import requests`, or
+# one `urllib.request`, and every guard in this file would still have gone green while the
+# badge went on promising zero.
+#
+# Same direction as the rest of the module: truth is DERIVED FROM THE TREE, the badge is
+# asserted against it. Each guard has a negative control that feeds it synthetic sources,
+# so nothing here needs to mutate the repository to prove it bites.
+
+_PACKAGE = REPO / "clawseccheck"
+
+# Stdlib modules that only EXIST on another platform, so `find_spec` cannot resolve them
+# here. Naming them beats letting the running platform decide what counts as a dependency:
+# on a Linux CI leg `winreg` (imported twice, for the Windows host checks) is unresolvable
+# and would be reported as third-party; on Windows the same would happen to fcntl/grp/pwd.
+_PLATFORM_STDLIB = frozenset({
+    "winreg", "msvcrt", "fcntl", "grp", "pwd", "termios", "posix", "nt",
+})
+
+# Modules that perform network I/O. `urllib.parse` is deliberately ABSENT -- it parses
+# strings and opens nothing, and it is the only urllib this package imports (ten files).
+# `socket` is absent for a different reason: it is imported once, purely for inet_aton /
+# inet_ntoa address conversion, so it is policed by ATTRIBUTE below rather than by import.
+_NETWORK_MODULES = frozenset({
+    "aiohttp", "asyncio", "ftplib", "http", "httplib2", "httpx", "imaplib", "nntplib",
+    "poplib", "requests", "smtplib", "socketserver", "ssl", "telnetlib", "urllib3",
+    "urllib.error", "urllib.request", "webbrowser", "xmlrpc",
+})
+
+# The only `socket` names that convert an address. Anything else -- socket(), connect(),
+# create_connection(), getaddrinfo() -- reaches the network or a resolver and must not
+# appear in a tool whose badge says zero.
+_SOCKET_ADDRESS_ONLY = frozenset({
+    "inet_aton", "inet_ntoa", "inet_pton", "inet_ntop",
+    "htons", "htonl", "ntohs", "ntohl",
+    "AF_INET", "AF_INET6", "error",
+})
+
+_SPAWN_ATTRS = {
+    "subprocess": {"run", "Popen", "call", "check_call", "check_output", "getoutput",
+                   "getstatusoutput"},
+    "os": {"system", "popen", "execv", "execve", "execvp", "execvpe", "spawnv", "spawnve",
+           "spawnl", "spawnlp", "posix_spawn", "posix_spawnp", "fork", "forkpty"},
+}
+
+
+def _package_sources():
+    """`(repo-relative path, source)` for every shipped module.
+
+    Returned rather than walked in place so each guard below can be pointed at synthetic
+    sources by its own negative control, instead of mutating the tree to prove it bites.
+    """
+    return [
+        (str(p.relative_to(REPO)), p.read_text(encoding="utf-8"))
+        for p in sorted(_PACKAGE.rglob("*.py"))
+    ]
+
+
+def _imported_modules(sources):
+    """`[(dotted module, file)]` for every ABSOLUTE import in *sources*.
+
+    A relative import is this package importing itself and is skipped. `from urllib.parse
+    import urlparse` yields both `urllib.parse` and `urllib.parse.urlparse`, so a ban list
+    can name a submodule (`urllib.request`) without also banning its parent.
+    """
+    out = []
+    for name, text in sources:
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    out.append((alias.name, name))
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    continue
+                module = node.module or ""
+                if not module:
+                    continue
+                out.append((module, name))
+                for alias in node.names:
+                    out.append((f"{module}.{alias.name}", name))
+    return out
+
+
+def _is_stdlib(top: str) -> bool:
+    if top in _PLATFORM_STDLIB or top in sys.builtin_module_names or top == "__future__":
+        return True
+    try:
+        spec = importlib.util.find_spec(top)
+    except (ImportError, ValueError):
+        return False
+    if spec is None:
+        return False
+    origin = spec.origin or ""
+    if origin in ("built-in", "frozen"):
+        return True
+    if not origin:
+        return False
+    paths = sysconfig.get_paths()
+    where = Path(origin).resolve()
+    # site-packages lives UNDER the stdlib prefix, so it has to be excluded first or every
+    # third-party package would answer "yes, I am stdlib".
+    for key in ("purelib", "platlib"):
+        if key in paths and where.is_relative_to(Path(paths[key]).resolve()):
+            return False
+    return where.is_relative_to(Path(paths["stdlib"]).resolve())
+
+
+def _third_party_imports(sources=None):
+    """Top-level module names this package imports that are not in the standard library."""
+    sources = _package_sources() if sources is None else sources
+    tops = {m.split(".")[0] for m, _ in _imported_modules(sources) if m != "clawseccheck"}
+    return sorted(t for t in tops if t and not _is_stdlib(t))
+
+
+def _declared_runtime_dependencies():
+    """The `[project] dependencies` array from pyproject.toml.
+
+    Parsed by hand because `tomllib` is 3.11+ and the CI floor is 3.9 -- and adding a TOML
+    library to read the file that proves there are no libraries would be its own joke.
+    """
+    text = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    body = re.search(r"^\[project\]\s*$(.*?)^\[", text, re.S | re.M)
+    section = body.group(1) if body else text
+    array = re.search(r"^dependencies\s*=\s*\[(.*?)\]", section, re.S | re.M)
+    if not array:
+        return []
+    return [item for item in re.findall(r'"([^"]+)"', array.group(1)) if item.strip()]
+
+
+def _network_surfaces(sources=None):
+    """Every construct in *sources* through which this package could reach the network."""
+    sources = _package_sources() if sources is None else sources
+    out = []
+    for module, where in _imported_modules(sources):
+        for banned in _NETWORK_MODULES:
+            if module == banned or module.startswith(banned + "."):
+                out.append(f"{where} imports {module}")
+                break
+    for name, text in sources:
+        tree = ast.parse(text)
+        imported_socket = any(
+            isinstance(n, ast.Import) and any(a.name == "socket" for a in n.names)
+            for n in ast.walk(tree)
+        )
+        for node in ast.walk(tree):
+            if (
+                imported_socket
+                and isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "socket"
+                and node.attr not in _SOCKET_ADDRESS_ONLY
+            ):
+                out.append(f"{name}:{node.lineno} uses socket.{node.attr}")
+            elif isinstance(node, ast.ImportFrom) and node.module == "socket":
+                for alias in node.names:
+                    if alias.name not in _SOCKET_ADDRESS_ONLY:
+                        out.append(f"{name}:{node.lineno} imports socket.{alias.name}")
+    return sorted(set(out))
+
+
+def _spawn_sites(sources=None):
+    """`(file, line, [literal argv strings])` for every place this package starts a program."""
+    sources = _package_sources() if sources is None else sources
+    out = []
+    for name, text in sources:
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)):
+                continue
+            if func.attr not in _SPAWN_ATTRS.get(func.value.id, ()):
+                continue
+            argv = []
+            for arg in node.args:
+                if isinstance(arg, (ast.List, ast.Tuple)):
+                    argv += [e.value for e in arg.elts
+                             if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+                elif isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    argv.append(arg.value)
+            out.append((name, node.lineno, argv))
+    return sorted(out)
+
+
+def _badge_figures():
+    """`{stat phrase: figure}` read off a badge's aria-label."""
+    svg = (REPO / "docs" / "assets" / "stats-light.svg").read_text(encoding="utf-8")
+    label = _SVG_LABEL_RE.search(svg)
+    assert label, "badge has no aria-label"
+    out = {}
+    for segment in label.group(1).split(" - "):
+        m = re.match(r"([\d,]+)\s+(.+)", segment.strip())
+        if m:
+            out[m.group(2).strip().lower()] = int(m.group(1).replace(",", ""))
+    return out
+
+
+def test_the_zero_dependencies_figure_is_derived_from_the_tree():
+    """The badge's dependency count must equal what the tree actually pulls in.
+
+    Two independent sources, because either alone can lie: `pyproject.toml` can declare
+    nothing while a module imports a package the developer happens to have installed, and
+    an import audit alone would miss a dependency declared for the installer's benefit.
+    """
+    declared = _declared_runtime_dependencies()
+    third_party = _third_party_imports()
+    real = len(declared) + len(third_party)
+    figure = _badge_figures().get("dependencies")
+    assert figure is not None, "badge no longer states a dependency count"
+    assert real == figure, (
+        f"badge claims {figure} dependencies but the tree has {real}: "
+        f"declared={declared}, imported={third_party}"
+    )
+
+
+def test_the_dependency_guard_bites_on_a_third_party_import():
+    """Guard the guard. A zero that cannot go non-zero is decoration, not a check."""
+    assert _third_party_imports() == [], "the real package must start clean"
+    planted = _third_party_imports([
+        ("clawseccheck/_synthetic.py", "import requests\nfrom yaml import safe_load\n"),
+    ])
+    assert planted == ["requests", "yaml"], planted
+    # …and a stdlib-only file of the same shape must stay silent, or the guard is just
+    # reporting every import it sees.
+    assert _third_party_imports([
+        ("clawseccheck/_synthetic.py", "import json\nfrom urllib.parse import urlparse\n"),
+    ]) == []
+
+
+def test_the_zero_network_calls_figure_is_derived_from_the_tree():
+    """The badge's network-call count must equal the reachable network surfaces.
+
+    Scope, stated rather than implied: this is an audit of what the PACKAGE does. It cannot
+    speak for a program the package spawns, which is why the single spawn site is pinned
+    separately below.
+    """
+    surfaces = _network_surfaces()
+    figure = _badge_figures().get("network calls")
+    assert figure is not None, "badge no longer states a network-call count"
+    assert len(surfaces) == figure, (
+        f"badge claims {figure} network calls but the tree has {len(surfaces)}:\n  "
+        + "\n  ".join(surfaces)
+    )
+
+
+def test_the_network_guard_bites_on_an_import_and_on_a_socket_that_connects():
+    """Guard the guard, in both directions.
+
+    The socket half matters most: `socket` IS imported by this package, for inet_aton and
+    inet_ntoa, so a ban on the import would have to be lifted and the whole module would go
+    unwatched. Policing the attribute keeps the address conversion and still catches a
+    connect() added beside it.
+    """
+    assert _network_surfaces() == [], "the real package must start clean"
+
+    by_import = _network_surfaces([
+        ("clawseccheck/_synthetic.py",
+         "import urllib.request\nfrom http.client import HTTPSConnection\n"),
+    ])
+    assert len(by_import) == 3, by_import
+
+    by_attribute = _network_surfaces([
+        ("clawseccheck/_synthetic.py",
+         "import socket\n"
+         "def f(host):\n"
+         "    s = socket.socket(socket.AF_INET)\n"
+         "    s.connect((host, 443))\n"
+         "    return socket.inet_ntoa(socket.inet_aton(host))\n"),
+    ])
+    assert any("socket.socket" in s for s in by_attribute), by_attribute
+    assert not any("inet_aton" in s or "inet_ntoa" in s or "AF_INET" in s
+                   for s in by_attribute), by_attribute
+
+    assert _network_surfaces([
+        ("clawseccheck/_synthetic.py",
+         "import socket\nfrom urllib.parse import urlparse\n"
+         "def f(x):\n    return socket.inet_aton(x)\n"),
+    ]) == []
+
+
+def test_the_only_program_this_package_spawns_is_the_users_own_openclaw_cli():
+    """"0 network calls" is an import-level claim, and an import audit cannot see a network
+    call made by a program we START. So the one place this package starts anything is pinned
+    by argv shape: `openclaw security audit --json`, the user's own already-installed CLI
+    reading their own machine.
+
+    A second spawn site, or a changed argv, reddens the build -- which is the point. It
+    forces whoever adds it to re-examine the badge's promise rather than inherit it.
+    """
+    sites = _spawn_sites()
+    assert len(sites) == 1, "\n".join(f"{f}:{ln} argv={argv}" for f, ln, argv in sites)
+    where, _, argv = sites[0]
+    assert where == "clawseccheck/native.py", where
+    assert argv == ["security", "audit", "--json"], argv
+
+
+def test_the_spawn_guard_bites_on_a_second_call_site():
+    """Guard the guard: the assertion above is `== 1`, so it must be shown to reach 2."""
+    planted = _spawn_sites([
+        ("clawseccheck/_synthetic.py",
+         "import subprocess, os\n"
+         "def f():\n"
+         "    subprocess.run(['curl', 'https://example.invalid'])\n"
+         "    os.system('wget https://example.invalid')\n"),
+    ])
+    assert len(planted) == 2, planted
+    assert planted[0][2] == ["curl", "https://example.invalid"], planted
+
+
+# A static import audit is only as complete as the absence of a dynamic one. `_is_stdlib`
+# can classify every name it is handed and still miss a dependency loaded by string.
+_DYNAMIC_IMPORT_CALLS = {"import_module", "__import__", "find_spec", "module_from_spec"}
+
+# Programs whose whole job is to reach the network. This package spawns exactly one thing
+# today; the ban exists for the site nobody has added yet, so that adding it collides with
+# the badge instead of quietly outdating it.
+_NETWORK_CLIENT_BINARIES = frozenset({
+    "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp", "ftp",
+    "telnet", "rsync", "git", "pip", "npm", "npx", "openssl",
+})
+
+
+def _dynamic_import_sites(sources=None):
+    """Every construct that could load a module whose name is not in the source text.
+
+    Written against the AST rather than by grep on purpose: this package is a scanner, so
+    `"importlib"` and `exec(...)` appear all over it as DETECTION SIGNATURES -- string
+    literals naming what a malicious skill does. A grep reports those and is useless; an
+    AST walk sees that a string constant is not an import.
+    """
+    sources = _package_sources() if sources is None else sources
+    out = []
+    for name, text in sources:
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0] == "importlib":
+                        out.append(f"{name}:{node.lineno} imports {alias.name}")
+            elif isinstance(node, ast.ImportFrom) and not node.level:
+                if (node.module or "").split(".")[0] == "importlib":
+                    out.append(f"{name}:{node.lineno} imports from {node.module}")
+            elif isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id == "__import__":
+                    out.append(f"{name}:{node.lineno} calls __import__()")
+                elif isinstance(func, ast.Attribute) and func.attr in _DYNAMIC_IMPORT_CALLS:
+                    out.append(f"{name}:{node.lineno} calls .{func.attr}()")
+    return sorted(set(out))
+
+
+def test_the_import_audit_is_complete_because_nothing_imports_by_string():
+    """What makes the two guards above trustworthy, rather than merely green.
+
+    `_imported_modules` walks the whole AST, so a lazy import inside a function is already
+    covered -- and that is not academic here: `report.py` alone carries 27 of them. What a
+    static walk genuinely cannot see is a module named by a runtime string. So the claim is
+    closed from the other end: this package contains no dynamic-import construct at all,
+    which makes the static list exhaustive rather than merely long.
+    """
+    assert _dynamic_import_sites() == [], (
+        "a dynamic import makes the dependency audit incomplete:\n  "
+        + "\n  ".join(_dynamic_import_sites())
+    )
+
+
+def test_the_dynamic_import_guard_bites_and_ignores_detection_signatures():
+    """Guard the guard, in both directions -- the second half is the load-bearing one.
+
+    This module lists `"importlib"` as a dangerous name a scanned skill might use, and
+    `catalog.py` describes `exec()/eval()` payload loaders in plain prose. A guard that
+    reported those would be untrustworthy noise on day one and would be deleted by day two.
+    """
+    planted = _dynamic_import_sites([
+        ("clawseccheck/_synthetic.py",
+         "import importlib\n"
+         "def f(name):\n"
+         "    __import__(name)\n"
+         "    return importlib.import_module(name)\n"),
+    ])
+    assert len(planted) == 3, planted
+
+    assert _dynamic_import_sites([
+        ("clawseccheck/_synthetic.py",
+         '_DANGEROUS = ["importlib", "__import__", "marshal"]\n'
+         'NOTE = "payload executed via exec()/eval() after import_module()"\n'),
+    ]) == []
+
+
+def test_no_spawn_site_starts_a_network_client():
+    """The other half of the spawn claim: not just how many, but WHAT.
+
+    "subprocess is imported" is not "there is a network call" -- the same distinction that
+    makes `socket` in `_egress.py` harmless, since it only converts addresses. So the
+    binaries are named. Today the single site runs the user's own `openclaw`; a future site
+    running `curl` would be the badge's claim going false, not this guard being incomplete.
+    """
+    offenders = []
+    for where, line, argv in _spawn_sites():
+        for word in argv:
+            if Path(word).name in _NETWORK_CLIENT_BINARIES:
+                offenders.append(f"{where}:{line} runs {word}")
+    assert not offenders, "\n  ".join(offenders)
+
+    planted = [
+        f"{w}:{ln} runs {word}"
+        for w, ln, argv in _spawn_sites([
+            ("clawseccheck/_synthetic.py",
+             "import subprocess\n"
+             "def f():\n"
+             "    subprocess.run(['/usr/bin/curl', '-fsSL', 'https://example.invalid'])\n"),
+        ])
+        for word in argv
+        if Path(word).name in _NETWORK_CLIENT_BINARIES
+    ]
+    assert len(planted) == 1, planted
