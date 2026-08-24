@@ -3933,7 +3933,7 @@ def _main(argv=None) -> int:
         adjudication_phase = _pipeline.run_adjudication(
             ctx, findings,
             vet_targets=_dashboard_vet_targets,
-            version=__version__, bundle=judged_bundle)
+            version=__version__, bundle=judged_bundle, score=score)
         if _defer_pdf:
             try:
                 _pdf_dest = _report_dest(args.pdf)
@@ -3993,7 +3993,7 @@ def _main(argv=None) -> int:
         return 0
 
     if _mode == "judge_packet":
-        _emit(render_judge_packet_json(ctx, findings, version=__version__))
+        _emit(render_judge_packet_json(ctx, findings, version=__version__, score=score))
         return 0
 
     if _mode == "judged":
@@ -4406,7 +4406,7 @@ def _main(argv=None) -> int:
                 vet_targets=sweep.vet_targets() if sweep is not None else (),
                 deadline=full_deadline, budget_s=DEFAULT_FULL_BUDGET_S,
                 fast=args.fast, ascii_only=ascii_only, version=__version__,
-                bundle=judged_bundle)
+                bundle=judged_bundle, score=score)
             pipeline_has_fail = full_pipeline.has_fail
             if not args.fast:
                 _record_run("behavioral", args)
@@ -4643,7 +4643,7 @@ def _main(argv=None) -> int:
                 vet_targets=sweep.vet_targets() if sweep is not None else (),
                 deadline=full_deadline, budget_s=DEFAULT_FULL_BUDGET_S,
                 fast=args.fast, ascii_only=ascii_only, version=__version__,
-                bundle=judged_bundle)
+                bundle=judged_bundle, score=score)
             # C5: read from the SAME PipelineResult on both branches, so --exit-code cannot
             # diverge between quiet and verbose — the property the sweep already guarantees.
             pipeline_has_fail = full_pipeline.has_fail

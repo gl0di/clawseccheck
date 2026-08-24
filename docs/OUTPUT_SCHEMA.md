@@ -790,6 +790,7 @@ Sources folded into the packet:
 | `tool` | `str` | Always `"clawseccheck"`. |
 | `version` | `str` | Tool version string. |
 | `judgePacket` | `array[JudgePacketItem]` | The packet items. May be an empty array. |
+| `runState` | `object` | B-623: the state of the RUN that produced the packet, as opposed to any one item. `{"stated": false}` when the caller supplied no score — silence and health are different claims, and the packet must not make the second by omission. Otherwise `stated: true` plus `graded` (bool), `missingLayers` (`[{layer, status}]`), `notChecked` (`array[str]`, the running layers' own plain-English limits), `capsFired` (`[{cap, what, reason?}]`) and `degradedChecks` (int). Only STATE crosses this boundary — never config content, since the packet is pasted into a possibly third-party host agent. Rides the envelope rather than each item because it is per-run: a config-blind audit produces ~174 items that are ALL `UNKNOWN`, and repeating the one fact that explains all of them on every item would be noise. |
 
 ### JudgePacketItem fields
 

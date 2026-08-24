@@ -845,12 +845,66 @@ def build_bundle_template() -> dict:
     }
 
 
-def render_judge_packet_json(ctx, findings, *, version: str) -> str:
+def run_state(score) -> dict:
+    """What a judge needs to know about the RUN, as opposed to any one finding.
+
+    B-623. The packet is a per-item array, so it had nowhere to say anything about the
+    audit that produced it. On a config-blind run that is the difference between an
+    answerable question and an unanswerable one: every item comes back ``UNKNOWN``, and
+    the single fact explaining why every item is ``UNKNOWN`` -- ``openclaw.json`` could
+    not be read -- appeared nowhere. An adjudicator handed that could only answer from
+    check titles.
+
+    Deliberately NOT threaded into ``build_judge_packet``: the state is per-run, so
+    repeating it on every item would be noise, and the item builder does not need it to
+    do its job. It rides the envelope instead, beside ``judgePacket``.
+
+    Only STATE crosses this boundary, never config content -- the packet is pasted into a
+    possibly third-party host agent (Golden Rule #1). ``graded``/``missingLayers`` are
+    facts about which layers ran, ``notChecked`` is the engine's own plain-English list of
+    limits, and a cap reason is a stable label like ``"unreadable"``. None is user data.
+
+    ``getattr`` throughout, mirroring ``report.render_json``: a packet must never fail to
+    assemble because a caller passed something unexpected -- an unassembled packet is the
+    very silence this exists to end.
+    """
+    if score is None:
+        return {"stated": False}
+    caps = []
+    for flag, reason_attr, label in (
+        ("config_blind_capped", "config_blind_reason", "config could not be read"),
+        ("runtime_capped", "runtime_cap_reason", "corroborated runtime signal"),
+        ("behavioral_capped", "behavioral_cap_reason", "behavioral detector fired"),
+        ("degraded_capped", None, "checks broke rather than concluded"),
+        ("live_injection_capped", None, "live injection test"),
+    ):
+        if not getattr(score, flag, False):
+            continue
+        entry = {"cap": flag, "what": label}
+        reason = getattr(score, reason_attr, None) if reason_attr else None
+        if reason:
+            entry["reason"] = reason
+        caps.append(entry)
+    return {
+        "stated": True,
+        "graded": bool(getattr(score, "graded", True)),
+        "missingLayers": [
+            {"layer": layer, "status": status}
+            for layer, status in (getattr(score, "missing_layers", ()) or ())
+        ],
+        "notChecked": list(getattr(score, "not_checked", ()) or ()),
+        "capsFired": caps,
+        "degradedChecks": int(getattr(score, "degraded_count", 0) or 0),
+    }
+
+
+def render_judge_packet_json(ctx, findings, *, version: str, score=None) -> str:
     """Return the standalone ``--judge-packet`` JSON artifact as a string."""
     payload = {
         "tool": "clawseccheck",
         "version": version,
         "judgePacket": build_judge_packet(ctx, findings),
+        "runState": run_state(score),
         "bundleTemplate": build_bundle_template(),
     }
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)

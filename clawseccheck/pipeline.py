@@ -646,7 +646,7 @@ def _vet_second_opinion(vet_targets, vet_judged: list) -> list[dict]:
 
 
 def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
-                     bundle: dict | None = None) -> PhaseResult:
+                     bundle: dict | None = None, score=None) -> PhaseResult:
     """P9 — assemble the judge packet, and fold in a submitted bundle if there is one.
 
     Emit-and-return: this phase never waits for an answer. With no bundle it reports
@@ -658,7 +658,7 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
     there would be nothing to opt out of.
     """
     from .adjudication import (  # noqa: PLC0415 — see the module note on layering
-        _parse_verdicts, _second_opinion, build_judge_packet,
+        _parse_verdicts, _second_opinion, build_judge_packet, run_state,
     )
     started = time.monotonic()
     try:
@@ -675,6 +675,10 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
 
     data: dict = {
         "judgePacket": packet,
+        # B-623: the same run-level frame the standalone --judge-packet carries. Without
+        # it a --full adjudication phase hands a judge a band of UNKNOWNs and no way to
+        # see that the run itself was blind, capped or ungraded.
+        "runState": run_state(score),
         "vetPackets": packets,
         "attestTemplate": attest_template(),
         "verdictsSubmitted": False,
@@ -1364,7 +1368,7 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
                  skill_sweep_elapsed_s: float = 0.0, vet_targets=(),
                  deadline: float | None = None, budget_s: float = DEFAULT_FULL_BUDGET_S,
                  fast: bool = False, ascii_only: bool = False, version: str = "",
-                 bundle: dict | None = None) -> PipelineResult:
+                 bundle: dict | None = None, score=None) -> PipelineResult:
     """Run P7-P9 and roll them up with the already-executed P6.
 
     ``deadline`` is injectable so a test can pin the budget's behaviour without
@@ -1429,7 +1433,7 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
     combined_vet_targets = list(vet_targets) + (
         list(plugin_sweep_obj.vet_targets()) if plugin_sweep_obj is not None else [])
     result.add(run_adjudication(ctx, findings, vet_targets=combined_vet_targets,
-                                version=version, bundle=bundle))
+                                version=version, bundle=bundle, score=score))
     from .coverage import build_coverage_page  # noqa: PLC0415 — deferred: coverage.py
     # locally imports report.py (see build_coverage_page's own docstring), and this
     # module already imports report.py at top level, so a top-level import here would
