@@ -113,6 +113,11 @@ _PLUGIN_SNIFF_BYTES = 512
 # can't blow memory; a JS signal raises the plugin verdict to WARN (never FAIL — a
 # minified-bundle false-positive must not force a FAIL), fixing the old false-clean PASS.
 _PLUGIN_JS_EXT = (".js", ".mjs", ".cjs", ".ts")
+# B-628: executable source the plugin sweep has NO reader for. Python is analysed only
+# through bundled-skill dispatch, so any .py outside a dispatched skill dir is code that
+# nothing opens. Kept separate from _PLUGIN_JS_EXT because those ARE lexically scanned;
+# this list is "we can see the file and cannot say anything about it".
+_PLUGIN_UNREAD_SOURCE_EXT = (".py", ".pyw")
 _PLUGIN_JS_MAX_BYTES = 2_000_000
 
 
@@ -426,6 +431,7 @@ def vet_plugin(
 
     # -- bundled skills -> vet_skill (the plugin-skills auto-load surface, recon §11.1)
     skill_dirs: list[Path] = []
+    bundled_contexts: list = []  # B-628: each dispatched skill's engine Context
     try:
         root_res = root.resolve()
     except OSError:
@@ -515,6 +521,16 @@ def vet_plugin(
         # tomorrow cannot count these twice.
         ring = list(sf.ring_findings or [])
         sf.ring_findings = []
+        # B-628: keep the dispatched skill's Context reachable from the CONTAINER, not
+        # only from whichever finding happens to survive into the pool. `vet_skill` sets
+        # `.ctx` on its primary alone, and the `actionable` filter below drops every
+        # PASS sub-finding — so for a plugin whose bundled skills are all clean, no pool
+        # member carries a ctx at all and the dossier concluded the plugin had no code.
+        # Recording it here is what makes the CLEAN case answerable; without it the fix
+        # only ever reached plugins that were already convicted of something.
+        sctx = getattr(sf, "ctx", None)
+        if sctx is not None:
+            bundled_contexts.append(sctx)
         subs.append(_attribute_to_bundled_skill(sf, sd.name, rel_label))
         subs.extend(_attribute_to_bundled_skill(rf, sd.name, rel_label) for rf in ring)
 
@@ -523,6 +539,14 @@ def vet_plugin(
     truncated = False
     js_capped: list[str] = []  # B-344: runtime JS/TS files skipped for exceeding the cap
     swept: list[Path] = []
+    # B-628 (C-135 round 3): Python reached by NOTHING. The sweep below analyses .json
+    # (embedded MCP specs), sniffs for native stowaways, and lexically scans
+    # _PLUGIN_JS_EXT -- `.py` is analysed only when it sits inside a dispatched skill
+    # dir. A plugin shipping fetch-to-exec as a root-level install.py, or beside a skill
+    # dir rather than inside one, is therefore never opened by any reader. Recorded so
+    # the dossier cannot mistake "one bundled skill had Python" for "this plugin's code
+    # was measured" -- exactly the affirmative claim the reviewer reproduced.
+    unanalysed_code: list[str] = []
     if cpu_exceeded(deadline):
         budget_hit = True
     else:
@@ -560,7 +584,18 @@ def vet_plugin(
     def _under_skills(fp: Path) -> bool:
         return any(sd in fp.parents for sd in skill_dirs)
 
+    dispatched_dirs = [d.resolve() for d in skill_dirs]
     for fp in swept:
+        if fp.suffix.lower() in _PLUGIN_UNREAD_SOURCE_EXT:
+            try:
+                fp_res = fp.resolve()
+                inside = any(
+                    fp_res == d or d in fp_res.parents for d in dispatched_dirs
+                )
+            except OSError:
+                inside = False
+            if not inside:
+                unanalysed_code.append(str(fp.relative_to(root)))
         if cpu_exceeded(deadline):
             budget_hit = True
             break
@@ -757,6 +792,11 @@ def vet_plugin(
             evidence,
         )
     finding.ring_findings = actionable
+    # B-628: the container is the only member guaranteed to be in the pool, so it is
+    # where the bundled contexts belong. Read by dossier._pool_capabilities; carries no
+    # verdict of its own and no consumer treats it as a finding.
+    finding.bundled_contexts = bundled_contexts
+    finding.unanalysed_code = unanalysed_code
     if warns:
         # Container-native signals (manifest sanity, npm lifecycle scripts, floating
         # dependency versions, skills-entry path escape, native-executable stowaways)

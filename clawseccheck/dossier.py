@@ -392,6 +392,54 @@ def _skill_capabilities(ctx) -> tuple[bool, set]:
     return (has_py, families)
 
 
+def _pool_capabilities(pool) -> tuple[bool, set]:
+    """(has_executable_code, capability_families) folded over every Context in ``pool``.
+
+    B-628: ``build_profile`` used to ask this of ``pool[0].ctx`` alone. On the skill path
+    that is the whole story -- ``pool[0]`` is ``vet_skill``'s primary and ``_vet.py`` sets
+    ``primary.ctx = ctx`` on it. On the PLUGIN path ``pool[0]`` is the ``PLUGIN-VET``
+    container built by ``_plugin_finding``, which never sets ``.ctx``, so ``has_code`` was
+    ``False`` **by construction for every plugin ever vetted** -- and the Persistence and
+    Connections axes printed "no executable code to analyze" about plugins whose bundled
+    Python the same dossier convicted on the danger axis four lines above.
+
+    Two sources, because one is not enough and an earlier version of this function
+    claimed otherwise:
+
+    * ``f.ctx`` on any pool member. Note that ``_vet.py`` sets this on the PRIMARY only --
+      ring findings are pool members since B-614 but carry no ctx of their own.
+    * ``f.bundled_contexts`` on the plugin container. This is the one that matters for the
+      COMMON case: ``vet_plugin``'s ``actionable`` filter keeps only FAIL/WARN/UNKNOWN
+      sub-findings, so a bundled skill that vets **PASS is dropped from the pool entirely**
+      and takes its ctx with it. Reading only ``.ctx`` therefore fixed the dirty plugin and
+      left the clean one exactly as broken -- found by C-135 adversarial review, not by
+      the tests, which had paired a dirty positive with a prose-only negative and so could
+      not tell "no code" apart from "code we dropped".
+
+    A plugin bundling only prose contributes no context from either source and still folds
+    to ``False``, so the honest UNKNOWN is preserved -- that is the negative control this
+    must never break.
+
+    Deliberately narrow: the ``ctx`` variable in ``build_profile`` is left pointing at
+    ``pool[0]`` for its two other consumers (``assessed`` and ``_danger_coverage_gap``).
+    Those are blind on the plugin path for the same missing-attribute reason, and fixing
+    them moves a score cap rather than a sentence -- a separate change with its own
+    measurement.
+    """
+    has_code = False
+    families: set = set()
+    seen: list = []
+    for f in pool:
+        for ctx in [getattr(f, "ctx", None), *(getattr(f, "bundled_contexts", None) or [])]:
+            if ctx is None or any(ctx is s for s in seen):
+                continue
+            seen.append(ctx)
+            code, fams = _skill_capabilities(ctx)
+            has_code = has_code or code
+            families |= fams
+    return (has_code, families)
+
+
 def _reason_and_fix(bucket: list, axis: str, *, empty_reason: str) -> tuple[str, str]:
     worst = _worst(bucket)
     # B-160: "SKILL_ARCHIVE_PATH_TRAVERSAL" carries a real detail/fix like FAIL does —
@@ -480,8 +528,42 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     # Per-type capability signal (skill/plugin code analysis) enriches connections /
     # persistence: it decides PASS ("looked, clean") vs UNKNOWN ("no code to measure").
     ctx = getattr(pool[0], "ctx", None) if pool else None
-    has_code, families = _skill_capabilities(ctx)
-    code_measurable = has_code or target_type not in ("skill", "plugin")
+    # B-628: folded over the WHOLE pool, not pool[0] -- a plugin container carries no ctx
+    # of its own, so asking it alone made every plugin answer "no executable code".
+    has_code, families = _pool_capabilities(pool)
+    # B-628 / C-135: finding code in ONE bundled skill must not license an affirmative
+    # "no dormant or staged code detected" over content the scan never opened.
+    #
+    # The predicate is the synthetic `VET-COVERAGE` id -- `coverage_gap_finding`'s, whose
+    # whole purpose is to say "part of this target was never inspected" (both its legs:
+    # the ring's budget ceiling and vet_plugin's tree-sweep file cap). Round 2 of C-135
+    # killed two weaker predicates, and both failures are worth keeping written down:
+    #
+    #   * `engine_degraded` alone is too WIDE. B13's parse-error branch sets it per FILE
+    #     on a scan that otherwise COMPLETED, so a skill shipping one unparseable file
+    #     read "the scan was cut short" -- a fresh false sentence, on the skill path this
+    #     change claimed not to touch. Measured across all 292 shipped fixture skill
+    #     roots, exactly one flipped that way.
+    #   * gating the WORDING on `has_code` is backwards. `has_code` is precisely what a
+    #     truncated scan fails to establish, so the corner the wording was added for --
+    #     scan truncated, code present but unseen -- still printed "no executable code to
+    #     analyze". Reviewer's repro reached it at the DEFAULT 900s budget through the
+    #     file cap, with no clock pressure at all.
+    scan_truncated = any(
+        getattr(f, "id", None) == "VET-COVERAGE" and f.status == UNKNOWN for f in pool
+    )
+    # C-135 round 3: `has_code` answers "did any analysed context contain Python", which
+    # is NOT authority to assert PASS over the whole artifact. On the plugin path the
+    # sweep has no reader for .py outside a dispatched skill dir, so a plugin whose only
+    # dangerous file is a root-level install.py had `has_code=True` (from a clean bundled
+    # skill), nothing truncated, and printed "no dormant or staged code detected" over
+    # fetch-to-exec. Measured against the pre-change tree: those axes read UNKNOWN before
+    # and PASS after, so this was introduced here, not inherited.
+    unread_code = [f for fx in pool for f in (getattr(fx, "unanalysed_code", None) or [])]
+    code_measurable = (
+        (has_code and not scan_truncated and not unread_code)
+        or target_type not in ("skill", "plugin")
+    )
     # Was anything actually assessed? A definite finding (PASS/WARN/FAIL) anywhere, or —
     # for a skill/plugin — content that was read. If the artifact is missing / unreadable /
     # empty (only UNKNOWN findings, e.g. "no MCP servers"), the empty axes must read
@@ -506,7 +588,8 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
         elif status == PASS:
             reason, fix = _clean_reason(axis, families), ""
         elif status == UNKNOWN and not bucket:
-            reason, fix = _unmeasurable_reason(axis), ""
+            reason, fix = _unmeasurable_reason(
+                axis, truncated=scan_truncated, unanalysed=bool(unread_code)), ""
         else:
             reason, fix = _reason_and_fix(bucket, axis, empty_reason=_clean_reason(axis, families))
         axes.append(AxisResult(axis=axis, status=status, reason=reason, fix=fix, findings=list(bucket)))
@@ -614,7 +697,37 @@ def _clean_reason(axis: str, families: set) -> str:
     return "no issue found"
 
 
-def _unmeasurable_reason(axis: str) -> str:
+def _unmeasurable_reason(axis: str, *, truncated: bool = False,
+                        unanalysed: bool = False) -> str:
+    """Why an axis could not be measured -- and the three reasons are not one reason.
+
+    B-628: "no executable code to analyze" is a claim about the ARTIFACT, and it is false
+    whenever code is present. Two distinct ways it can be present and still unmeasured:
+
+    * ``truncated`` -- the scan started and stopped early (budget, file cap, JS size cap).
+    * ``unanalysed`` -- the scan ran to completion and there was simply no reader for the
+      file. C-135 round 3: `vet_plugin` analyses .json, native headers and JS/TS, while
+      Python is analysed only inside a dispatched skill dir. A plugin shipping
+      fetch-to-exec as a root-level `install.py` is opened by nobody, and the reviewer
+      measured this axis printing an affirmative PASS over exactly that.
+
+    Truncation wins the wording when both hold: "we stopped early" already implies the
+    rest is unknown, while naming an unread file would suggest the rest WAS read.
+    """
+    if truncated:
+        if axis == "connections":
+            return "the scan was cut short before the outbound surface could be measured"
+        if axis == "persistence":
+            return "the scan was cut short before staged / persistent behavior could be measured"
+        return "the scan was cut short before this could be measured"
+    if unanalysed:
+        if axis == "connections":
+            return ("executable code is present that this scan has no reader for, so the "
+                    "outbound surface was not measured")
+        if axis == "persistence":
+            return ("executable code is present that this scan has no reader for, so "
+                    "staged / persistent behavior was not measured")
+        return "executable code is present that this scan has no reader for"
     if axis == "connections":
         return "no executable code to analyze for outbound connections"
     if axis == "persistence":
