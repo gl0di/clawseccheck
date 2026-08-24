@@ -28,8 +28,11 @@ Offline, read-only, stdlib only.
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 
 from clawseccheck.catalog import Finding
+
+REPO = Path(__file__).resolve().parents[1]
 
 #: What a surface tier means. `docs/CHECK_AUTHORING.md` is the prose; this is the vocabulary.
 _TIERS = {
@@ -38,7 +41,18 @@ _TIERS = {
     "both": "machine + human",
     "judge": "carried as structured data in the adjudication packet",
     "vet": "a vet-path channel; the audit surfaces have nothing to attach it to",
+    "internal": (
+        "deliberately not user-facing: kept for the engine's own use, with the reason "
+        "recorded at the field's definition. Requires that record — see "
+        "test_an_internal_channel_states_its_reason_at_the_definition"
+    ),
 }
+
+#: The phrase `catalog.py` uses when a field is kept but not rendered. Prose-keyed on
+#: purpose: rewording the justification SHOULD fail this build, because the wording is the
+#: decision. A tier of "internal" with nothing behind it is how "internal" becomes the
+#: silencer that `gap` was built to avoid.
+_INTERNAL_MARKERS = ("not rendered by", "internal bookkeeping", "internal to dossier")
 
 #: The finding itself, not a channel riding on it.
 _CORE_FIELDS = frozenset({"id", "title", "severity", "status", "detail", "fix"})
@@ -63,15 +77,20 @@ _CHANNELS = {
         "the content ring's non-primary findings",
         "B-614 fixed the plugin path; --vet-plugin dropped them entirely before that",
     ),
-    "axis_reasons": (
-        "vet",
-        "per-axis rationale behind a dossier verdict",
-        "B-626 — read only by dossier.py, so no audit surface can show it",
-    ),
+    # B-626 measured both of these and found the debt it recorded was not real.
+    # Producers: checks/_mcp.py:769,:2282, checks/_content.py:11503, checks/_vet.py:3538 —
+    # every one on the VET path. On a real audit run, zero findings carry either field, so
+    # "no audit surface shows it" describes a channel that is never lit there rather than
+    # one that is dropped. `axis_reasons` reaches the dossier, which IS its declared tier.
+    "axis_reasons": ("vet", "per-axis rationale behind a dossier verdict", None),
+    # Declared retention-only at its definition: kept for a future corroborating-check FAIL
+    # rule, explicitly "not rendered by report.py/sarif.py". That is the third outcome the
+    # authoring rule allows — documented as internal — already taken, and recorded where a
+    # reader meets the field.
     "corroborating_buckets": (
-        "machine",
-        "which other buckets agreed with a first-match-wins verdict",
-        "B-626 — no reader anywhere; render, delete, or document as internal",
+        "internal",
+        "which other buckets agreed with a first-match-wins verdict; retention only",
+        None,
     ),
     "sub_signals": ("judge", "which sub-signal of a multi-signal check fired", None),
     "destination_hosts": ("judge", "the external destination a finding names", None),
@@ -137,3 +156,58 @@ def test_the_guard_bites_on_an_unregistered_channel():
     pretend_fields = _side_channels() | {"provenance_chain"}
     undeclared = sorted(pretend_fields - set(_CHANNELS))
     assert undeclared == ["provenance_chain"], undeclared
+
+
+def test_an_internal_channel_states_its_reason_at_the_definition():
+    """`internal` must cost something, or it becomes the silencer `gap` was built to avoid.
+
+    A tier of "internal" is a claim that someone decided this field is not user-facing. The
+    claim is only worth anything if the reasoning sits where the next author meets it — at
+    the field, not in a task nobody will open. So the definition's own comment block has to
+    say it.
+
+    Keyed on `catalog.py`'s own phrasing, and that is deliberate rather than lazy: rewording
+    the justification should fail this build, because the wording IS the decision. What must
+    NOT be used as the marker is "not part of the frozen public JSON shape" — measured,
+    three fields carry that phrase and one of them (`sub_signals`) reaches the judge packet.
+    It means "outside the frozen envelope", not "rendered nowhere", and keying on it would
+    have mis-tiered a live channel as internal.
+    """
+    source = (REPO / "clawseccheck" / "catalog.py").read_text(encoding="utf-8")
+    lines = source.splitlines()
+    unjustified = []
+    for name, (tier, _why, _gap) in _CHANNELS.items():
+        if tier != "internal":
+            continue
+        idx = next((i for i, ln in enumerate(lines)
+                    if ln.strip().startswith(f"{name}:")), None)
+        assert idx is not None, f"{name} is not defined in catalog.py"
+        block, j = [], idx - 1
+        while j >= 0 and lines[j].strip().startswith("#"):
+            block.append(lines[j])
+            j -= 1
+        comment = " ".join(reversed(block))
+        if not any(marker in comment for marker in _INTERNAL_MARKERS):
+            unjustified.append(name)
+    assert not unjustified, (
+        "channels tiered `internal` with no reason recorded at their definition — write it "
+        f"where a reader meets the field, or pick a real tier: {unjustified}"
+    )
+
+
+def test_the_internal_justification_control_is_not_vacuous():
+    """Guard the guard: at least one channel must actually be tiered `internal`, or the
+    test above passes over an empty loop and stops meaning anything."""
+    internal = [n for n, (tier, _w, _g) in _CHANNELS.items() if tier == "internal"]
+    assert internal, "no channel is tiered internal — the justification control is inert"
+
+
+def test_the_frozen_shape_phrase_is_not_used_as_an_internal_marker():
+    """Pinned because it was the first predicate tried and it is wrong.
+
+    `not part of the frozen public JSON shape` appears on `axis_reasons`,
+    `corroborating_buckets` AND `sub_signals`. The third is carried as structured data in
+    the adjudication packet, so the phrase cannot mean "internal".
+    """
+    assert not any("frozen public JSON shape" in m for m in _INTERNAL_MARKERS)
+    assert _CHANNELS["sub_signals"][0] == "judge"
