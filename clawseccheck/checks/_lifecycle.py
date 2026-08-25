@@ -1173,6 +1173,18 @@ def check_cron_scheduler(ctx: Context) -> Finding:
     The presence of `cron` confirms a recurring scheduler surface, but static config
     cannot tell legitimate schedules from attacker-planted persistence. This check is
     therefore UNKNOWN-only on presence and PASS when the field is absent.
+
+    B-496: this check ONLY reads OpenClaw's own internal scheduler
+    (``dig(ctx.config, "cron")`` / the cron job store B168/B189 read). It has no
+    visibility into the HOST's scheduler — a user crontab, a systemd (user or
+    system) timer, or a Windows Scheduled Task — which is a different subject
+    (the host, not the agent's own config) and is genuinely out of scope for a
+    config-only static check. The one publicly demonstrated OpenClaw persistence
+    attack (Zenity Labs, 2026-02-04) used exactly that host path: a cron entry
+    outside `openclaw.json` re-wrote SOUL.md every two minutes. So a PASS here
+    must not read as "no scheduled persistence" — it only means OpenClaw's own
+    `cron` field is empty; the text below says so explicitly rather than staying
+    silent about the gap (the false-clean shape Golden Rule #4 exists to prevent).
     """
     unreadable = _config_unreadable("C048", ctx)
     if unreadable is not None:
@@ -1184,17 +1196,27 @@ def check_cron_scheduler(ctx: Context) -> Finding:
             UNKNOWN,
             "Top-level `cron` scheduler is configured. Recurring scheduled tasks can "
             "become a persistence surface, but static config cannot distinguish a "
-            "legitimate schedule from attacker-planted automation — manual review required.",
+            "legitimate schedule from attacker-planted automation — manual review required. "
+            "This only covers OpenClaw's own scheduler; host-level schedulers (crontab, "
+            "systemd timers, Windows Task Scheduler) are a separate surface this check "
+            "does not read.",
             "Review each scheduled cron task and confirm it was intentionally configured. "
             "Treat cron as a persistence surface and verify scheduled actions cannot run "
-            "untrusted instructions unattended.",
+            "untrusted instructions unattended. Separately, check the host's own scheduler "
+            "(crontab -l, systemd timers, Task Scheduler) for entries referencing this agent.",
             evidence=["top-level `cron` field is present"],
         )
     return _finding(
         "C048",
         PASS,
-        "No top-level `cron` scheduler is configured.",
-        "Keep recurring schedules disabled unless they are explicitly required and reviewed.",
+        "No top-level `cron` scheduler is configured in OpenClaw itself. This check "
+        "covers OpenClaw's own scheduler only — host-level scheduled persistence "
+        "(crontab, systemd timers, Windows Task Scheduler) is a different subject and "
+        "is out of scope here, so this PASS says nothing about it.",
+        "Keep recurring schedules disabled unless they are explicitly required and "
+        "reviewed. Separately, check the host's own scheduler (crontab -l, systemd "
+        "timers, Task Scheduler) for entries referencing this agent — persistence "
+        "installed there is invisible to this check.",
     )
 
 
