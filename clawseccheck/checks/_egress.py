@@ -3011,6 +3011,31 @@ def _log_hunt_corroborated(nonzero_classes: set, world_readable: bool) -> bool:
     return strong_single or len(nonzero_classes) >= 2
 
 
+def _log_hunt_budget_remedy(lim) -> str:
+    """The tail clause for a "N sink(s) not scanned" disclosure — which remedy is true
+    depends on whether the run being disclosed was already `--exhaustive`.
+
+    B-486: before this, both call sites unconditionally pointed at `--exhaustive`, which
+    was fine while `EXHAUSTIVE_LIMITS.log_max_total_bytes` was unbounded (a truncated
+    default run really was helped by it, and a truncated *exhaustive* run could only
+    happen via the clock, so a re-run under different load genuinely could land
+    differently). Once `--exhaustive` itself got a finite, deterministically-planned
+    budget (the fix this function exists for), a run already under `--exhaustive` that
+    still has sinks left out will skip the SAME ones on a re-run — telling it to
+    "re-run with --exhaustive" would be advice to do the thing it already did and get
+    the identical result. So this branches on `lim.exhaustive` instead of assuming it.
+    """
+    if lim.exhaustive:
+        return (
+            " — even --exhaustive's own (much larger) scan budget could not cover "
+            "this fleet; a re-run with the same flag will skip the same sinks."
+        )
+    return (
+        " — re-run with --exhaustive for a much larger budget; it states "
+        "its own coverage either way."
+    )
+
+
 def check_log_threat_hunt(ctx: Context) -> Finding:
     """B164 — threats surfaced in the agent's own log corpus (content scan, advisory).
 
@@ -3183,15 +3208,8 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         # out reports "none were readable", blaming permissions for what was actually a
         # scan-budget decision, and discloses no truncation at all (Golden Rule #4).
         unread = (
-            # B-486: this said "to include them", which promises completeness --exhaustive
-            # does not deliver. Measured on the real 135-sink corpus, two consecutive
-            # --exhaustive runs scanned all of it and then 130 of it: the flag raises the
-            # budget a lot but still lands near its own ceiling, so whether it finishes is
-            # load-dependent. It remains the right remedy; the wording now says what it
-            # actually buys, and points at its own disclosure rather than at a guarantee.
             f" {skipped_for_time} of them were not offered to the scan (scan budget "
-            "reached) — re-run with --exhaustive for a much larger budget; it states "
-            "its own coverage either way."
+            f"reached){_log_hunt_budget_remedy(lim)}"
             if skipped_for_time
             else ""
         )
@@ -3213,17 +3231,14 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         plural = "sink" if skipped_for_time == 1 else "sinks"
         # B-484: the old sentence ended "— re-run to include them", which was true only
         # while the cutoff was the wall clock and a second run could land differently.
-        # Now that the set is planned deterministically, a plain re-run skips exactly the
-        # same sinks, so that remedy would be a lie; --exhaustive is the real one. The
+        # Now that the set is planned deterministically (B-486 extended this to
+        # --exhaustive too — see EXHAUSTIVE_LIMITS.log_max_total_bytes in scanbudget.py),
+        # a plain re-run skips exactly the same sinks, so that remedy would be a lie. The
         # oldest-first phrasing tells the reader WHICH sinks they are missing — the point
         # of ordering them in the first place.
         note += (
-            # B-486: "to include them" overclaimed — see the note on the sibling sentence
-            # above. --exhaustive raises the budget substantially but can still run short,
-            # and it discloses that when it does; say that instead of promising coverage.
             f" {skipped_for_time} log/transcript {plural} not scanned (scan budget "
-            "reached; the oldest are left out first) — re-run with --exhaustive for a "
-            "much larger budget; it states its own coverage either way."
+            f"reached; the oldest are left out first){_log_hunt_budget_remedy(lim)}"
         )
     elif lim.exhaustive:
         # F-164 SC-5: under --exhaustive, completeness must be stated affirmatively —

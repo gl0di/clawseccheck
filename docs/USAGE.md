@@ -237,7 +237,7 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 | "Did a suspicious skill's instruction actually run?" | Post-hoc correlation: checks whether the credential/exfil/secret-path indicators an installed skill names show up in real `tool.call` arguments in your OpenClaw trajectory sidecars — "acted on" vs "present but not acted on". Reads args in memory only; never echoes them. | `--analyze-trajectory` |
 | "What did my agent actually DO, not just what it could do?" | Reconstructs observed tool-call sequences from your OpenClaw trajectory sidecars and flags a proven-by-log ingress→sensitive→egress verb order, or a repeated-failure-then-success pattern on a sensitive-data call. Also reads OpenClaw's OWN runtime `audit_events` trail (a separate, metadata-only record: `tool_name` alone, no argv/command/path/host) for a runtime tool-block, an evasive/malformed tool name, or a session your trajectory sidecar no longer has (it was disabled or rotated out while `audit_events` still retained it). Metadata-only throughout — verb identity and sequencing, never call/return payloads. WARN-only, never scored. When every detector returns UNKNOWN (no trajectory sidecar, no `audit_events`), the run reports **no verdict** rather than a clean tick — nothing was assessed. An explicit `PATH` that does not resolve is named and exits non-zero, instead of being reported as "this host has no trajectories". | `--behavioral` |
 | "Gate my CI on this" | Machine-readable output plus a non-zero exit when an unsuppressed finding at or above a chosen severity exists, or when any unsuppressed FAIL exists — wire straight into a pipeline. Needs no score, so it works on a default (ungraded) run too. | `--json` · `--sarif results.sarif` · `--fail-on high` · `--exit-code` |
-| "Don't skip anything — scan everything" | Raises the trajectory-file / log-sink / per-line scan caps a normal run keeps small for speed: every trajectory file (not just the most recent 60), a much larger log/transcript-sink time budget (raised, not removed — a sink still skipped for time is disclosed, never silently dropped), and the full byte range of an over-length log line (not just its head and tail). Slower — a normal run already discloses exactly what it skipped, so this narrows that gap rather than being a default. | `--exhaustive` (composes with `--full`; has effect on its own too) |
+| "Don't skip anything — scan everything" | Raises the trajectory-file / log-sink / per-line scan caps a normal run keeps small for speed: every trajectory file (not just the most recent 60), a 16x larger per-sink byte cap, and a log/transcript-sink **byte** budget that is raised only modestly (9 MiB to 12 MiB) but is now what decides the set — chosen up front from each sink's age and size rather than by the clock, so two runs over an unchanged corpus scan the same sinks (raised, not removed — a sink still left out is disclosed, never silently dropped), and the full byte range of an over-length log line (not just its head and tail). Slower, and still not a guarantee of the whole corpus on a large fleet — a normal run already discloses exactly what it skipped, and `--exhaustive` states its own coverage the same way, so this narrows the gap rather than closing it outright. | `--exhaustive` (composes with `--full`; has effect on its own too) |
 
 ## What it checks
 
@@ -1353,14 +1353,21 @@ python3 audit.py --log audit.log            # also write log to a local file
   rather than accepting it silently — a script that thinks it disabled a gate it never
   reached is exactly the failure that note exists to prevent.
 - **`--exhaustive`** raises the trajectory-file / log-sink / per-line scan caps a normal run
-  keeps small for speed: every trajectory file instead of the most recent 60, a much larger
-  log/transcript-sink time budget (raised, not removed — a sink still skipped for time is
-  disclosed, not silently dropped), and the full byte range of an over-length log line (via
-  overlapping windows) instead of only its head and tail. It applies
+  keeps small for speed: every trajectory file instead of the most recent 60, a 16x larger
+  per-sink byte cap (2 MiB to 32 MiB), and a log/transcript-sink **byte** budget raised only
+  modestly (9 MiB to 12 MiB) — the size is not where the gain is; what changed is that this
+  budget, not the wall clock, now decides the set. Like the default path it is chosen up front
+  from each sink's age and size, so two `--exhaustive` runs over an unchanged corpus scan the
+  same sinks (raised, not removed — a sink still left out is disclosed, not
+  silently dropped); plus the full byte range of an over-length log line (via overlapping
+  windows) instead of only its head and tail. It applies
   to B164/B180, which run on **every** audit, so it has effect with or without `--full`. The
-  per-check and whole-audit wall-clock budgets are raised in the same step, so the wider scan
-  cannot degrade a check into a capped `UNKNOWN`. Slower — a normal run already discloses
-  exactly what it skipped, so this is for closing that specific gap, not a default.
+  per-check and whole-audit wall-clock budgets are unchanged — the byte plan, not the clock,
+  is what widened, so a bigger scan cannot degrade a check into a capped `UNKNOWN`. Slower, and
+  it still does not guarantee the whole corpus on a large fleet — a normal run already
+  discloses exactly what it skipped, and `--exhaustive` states its own coverage the same way
+  when it, too, has to leave sinks out; it narrows that gap substantially rather than closing
+  it outright.
 - **`--no-deptree`** skips the OpenClaw dependency-tree walk that feeds **B349** (a package in
   `node_modules` whose install-time target — a lifecycle hook or a `binding.gyp`
   command-expansion — carries a code-execution signal). The walk is on by default, read-only
