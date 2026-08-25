@@ -7,8 +7,19 @@ Teaches `scoring.py` about the five-layer ledger already defined in `layers.py`
 The single most important property under test: **`ledger=None` means graded**. Every
 existing call site (including `clawseccheck.__init__.audit()`) omits `ledger` and must
 see byte-identical behaviour to before this argument existed — that is what keeps the
-rest of the suite green. A COMPLETE ledger (every layer `"ran"`) must be
-indistinguishable from no ledger at all.
+rest of the suite green.
+
+B-547 REVISION: the original version of this module additionally asserted that a
+COMPLETE ledger (every layer `"ran"`) was fully indistinguishable from no ledger at
+all. That was itself the defect: a `ScoreResult` that cannot tell "every layer proved
+it ran" from "nothing was ever tracked" cannot let a renderer state coverage from
+evidence (see `ScoreResult.ledger_present`'s own docstring, and
+`tests/test_b547_ledger_present.py` for the dedicated three-state coverage). `score`/
+`grade`/`graded`/`not_checked`/`missing_layers` — every field that feeds a verdict —
+still agree exactly between the two; only `ledger_present` differs. That is
+deliberate, not a regression of the "byte-identical for every existing call site"
+promise above: no existing call site ever read `ledger_present` (it did not exist),
+so every one of them still sees byte-identical behaviour.
 
 Stdlib-only, offline, no network, nothing written outside pytest's own machinery.
 """
@@ -79,14 +90,42 @@ def test_no_ledger_is_graded_with_no_missing_layers(name: str) -> None:
     assert r.graded is True
     assert r.not_checked == ()
     assert r.missing_layers == ()
+    # B-547: the "absent" state — no evidence a ledger was ever tracked.
+    assert r.ledger_present is False
 
 
 @pytest.mark.parametrize("name", sorted(_SCENARIOS))
-def test_complete_ledger_equals_no_ledger(name: str) -> None:
+def test_complete_ledger_agrees_with_no_ledger_on_every_scoring_field(name: str) -> None:
+    """B-547 REVISION of the old `test_complete_ledger_equals_no_ledger`: a complete
+    ledger and no ledger must still agree on every field that feeds a verdict (score,
+    grade, graded, not_checked, missing_layers, every cap) — that half of the original
+    C-422 guarantee stands. They must NOT agree on `ledger_present`: that was the
+    defect (B-547) — a complete ledger is now provably distinguishable from no ledger
+    at all, which `test_no_ledger_and_complete_ledger_are_distinguishable` below pins
+    directly."""
+    import dataclasses
+
     findings = _SCENARIOS[name]
     without = compute(findings)
     with_complete = compute(findings, ledger=_all_ran_ledger())
-    assert with_complete == without
+    without_fields = dataclasses.asdict(without)
+    complete_fields = dataclasses.asdict(with_complete)
+    del without_fields["ledger_present"]
+    del complete_fields["ledger_present"]
+    assert without_fields == complete_fields
+
+
+def test_no_ledger_and_complete_ledger_are_distinguishable() -> None:
+    """The B-547 fix, pinned directly: `ledger=None` ("absent") and a complete ledger
+    ("complete") must no longer be `==` as whole `ScoreResult`s — a consumer holding
+    only a `ScoreResult` must be able to tell them apart. Non-vacuity: both branches
+    are asserted, so a broken `__eq__`/an always-True comparison cannot pass this."""
+    findings = _SCENARIOS["all_pass"]
+    without = compute(findings)
+    with_complete = compute(findings, ledger=_all_ran_ledger())
+    assert without.ledger_present is False
+    assert with_complete.ledger_present is True
+    assert without != with_complete
 
 
 # ── 2. each incomplete status on one layer -> graded False, and it shows up in
@@ -101,6 +140,8 @@ def test_each_incomplete_status_ungrades_and_is_named_in_missing_layers(status: 
     r = compute([_f(HIGH, PASS)], ledger=ledger)
     assert r.graded is False
     assert r.missing_layers == ((LAYER_SELF_REPORT, status),)
+    # B-547: "partial" — a ledger was supplied, it just proves incompleteness.
+    assert r.ledger_present is True
 
 
 # ── 3. central subtlety: all five ran, some carry not_reached -> graded True AND
@@ -158,6 +199,10 @@ def test_positional_score_result_construction_defaults_graded_true() -> None:
     assert r.graded is True
     assert r.not_checked == ()
     assert r.missing_layers == ()
+    # B-547: a caller predating this field (or the many positional-construction call
+    # sites this test exists to protect) gets the "absent" reading, tail-appended
+    # exactly like `graded`/`not_checked`/`missing_layers` above.
+    assert r.ledger_present is False
 
 
 # ── 7. the generalisation: project()'s _cap_kwargs carries every keyword-only

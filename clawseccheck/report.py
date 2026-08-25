@@ -792,7 +792,13 @@ def _scope_note_lines(score: ScoreResult) -> tuple[list[str], bool]:
         else "This audit reflects your configuration."
     ]
     missing = dict(getattr(score, "missing_layers", ()) or ())
-    have_ledger = bool(missing) or bool(getattr(score, "not_checked", ()) or ())
+    # B-547: the real signal, not a proxy. This used to infer "a ledger reached this
+    # render" from `missing_layers` or `not_checked` being non-empty, which is exactly
+    # backwards on the case that matters: a COMPLETE ledger has neither, so every layer
+    # having RUN read as "no ledger", and all three clauses below told the operator to
+    # run the modes that had just run. `ScoreResult.ledger_present` records the fact
+    # itself, so a complete ledger and an absent one are no longer the same input here.
+    have_ledger = bool(getattr(score, "ledger_present", False))
     clauses: list[str] = []
     for layer, subject, advice, ran_note in _SCOPE_CLAUSES:
         status = missing.get(layer)

@@ -437,6 +437,33 @@ class ScoreResult:
     # bare layer names would throw away the only thing that makes that sentence honest.
     # `()` whenever `ledger is None`.
     missing_layers: tuple[tuple[str, str], ...] = ()
+    # B-547: whether an actual `layers.LayerLedger` was ever handed to `compute()`,
+    # vs. the caller never building one (`ledger=None`). C-422 made `graded`/
+    # `not_checked`/`missing_layers` read IDENTICALLY for "every layer ran" and "no
+    # ledger tracked" — costing a renderer the ability to tell them apart:
+    # `report._scope_note_lines`'s `have_ledger = bool(missing) or bool(not_checked)`
+    # reads False on a genuinely complete ledger with no `not_reached` entries, which
+    # is how a Grade-A `--full` run got told to go run modes it had just finished
+    # (B-547).
+    #
+    # `ledger_present` answers a THIRD question — "was there evidence at all", not
+    # "was it complete" (`graded`/`missing_layers` answer that). `False` iff
+    # `ledger is None`; `True` for ANY supplied ledger, complete or not:
+    #
+    #     ledger=None          -> ledger_present=False, graded=True   ("absent")
+    #     ledger=<complete>    -> ledger_present=True,  graded=True   ("complete")
+    #     ledger=<incomplete>  -> ledger_present=True,  graded=False  ("partial")
+    #
+    # Defaults False for the tail-append reason `graded`/`not_checked`/
+    # `missing_layers` do above (~17 positional `ScoreResult(...)` sites must not
+    # shift a field) — an unaware caller gets "absent", matching `ledger=None`.
+    #
+    # Does NOT change `graded`'s contract: Rule 1 above still holds unconditionally.
+    # `graded=True` is no longer, by itself, proof coverage was tracked — a renderer
+    # asserting "confirmed: every layer ran" must read this alongside `graded`.
+    # `report.py`'s `_scope_note_lines` is the consumer; wiring its `have_ledger`
+    # proxy to this field is the follow-up this addition makes possible.
+    ledger_present: bool = False
 
 
 def _degraded_signal(findings: list[Finding]) -> tuple[bool, int]:
@@ -681,14 +708,13 @@ def compute(findings: list[Finding], ctx=None, *,
     `missing_layers` is populated from `ledger.missing` (already `LAYER_ORDER`-sorted)
     paired with `ledger.status(layer)` for each, and is `()` whenever `ledger is None`.
 
-    A COMPLETE ledger (`ledger.complete` True — every layer `"ran"`) must therefore
-    produce a `ScoreResult` equal to calling `compute()` with no ledger at all — see
-    `ScoreResult.graded`'s own docstring for the "graded=False must suppress every
-    letter/number downstream" invariant this enforces, and
-    `tests/test_c422_ledger_scoring.py` for the regression that pins it. Note
-    `graded`/`not_checked`/`missing_layers` are set on EVERY return path below,
-    including the `total == 0` early return — an ungraded run that also has nothing
-    scorable is still ungraded.
+    B-547 REVISION: a COMPLETE ledger no longer equals no ledger bit-for-bit.
+    `graded`/`not_checked`/`missing_layers`/`score`/`grade`/every cap still agree
+    exactly (call sites stay byte-identical) — only `ledger_present` (`ledger is not
+    None`; own docstring) differs, so a renderer can tell "every layer proved it ran"
+    from "nothing was tracked". `graded`'s suppress-when-False invariant is UNCHANGED.
+    See `tests/test_c422_ledger_scoring.py` (updated) + `tests/test_b547_ledger_present.py`.
+    All four are set on EVERY return path below, including `total == 0`.
     """
     # Suppression is a reporting/triage decision, not proof that a real FAIL stopped
     # existing. Keep suppressed FAILs in the score so an ignore entry cannot turn a
@@ -746,18 +772,19 @@ def compute(findings: list[Finding], ctx=None, *,
         () if ledger is None
         else tuple((layer, ledger.status(layer)) for layer in ledger.missing)
     )
+    # B-547: fourth ledger-derived value — see `ScoreResult.ledger_present`.
+    ledger_present = ledger is not None
 
     if total == 0:
         if (not config_blind and not runtime_hit and not degraded_hit and not live_hit
                 and not behavioral_hit):
             # Nothing measurable and no cap signal fired either — the honest "not
             # assessable" result (B-014), completely unchanged from before B-306.
-            # C-422: still tag graded/not_checked/missing_layers — an ungraded run
-            # that also has nothing scorable is still ungraded (do not let this path
-            # silently return graded=True).
+            # C-422/B-547: still tag graded/not_checked/missing_layers/ledger_present.
             return ScoreResult(
                 0, "N/A", False, 0, 0, 0, assessable=False,
                 graded=graded, not_checked=not_checked, missing_layers=missing_layers,
+                ledger_present=ledger_present,
             )
         # B-306 (C-135 follow-up #2) / B-313 / F-155 / F-154: nothing else scored this
         # run, BUT a blind config (ctx.config_parse_error), a corroborated runtime
@@ -797,6 +824,7 @@ def compute(findings: list[Finding], ctx=None, *,
             graded=graded,
             not_checked=not_checked,
             missing_layers=missing_layers,
+            ledger_present=ledger_present,
         )
 
     earned = 0.0
@@ -914,6 +942,7 @@ def compute(findings: list[Finding], ctx=None, *,
         graded=graded,
         not_checked=not_checked,
         missing_layers=missing_layers,
+        ledger_present=ledger_present,
     )
 
 

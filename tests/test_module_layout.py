@@ -180,10 +180,18 @@ _EXEMPT = {
                "cycle.",
     "skillast.py": "~6,628 lines — the python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target).",
-    "report.py": "~5,139 lines — the output renderers; grew further with F-131's "
+    "report.py": "~5,641 lines — the output renderers; grew further with F-131's "
                  "Inventory-by-subject block (its own additive presentation layer, not "
-                 "branching check logic). Its own split is deferred to a later cycle "
-                 "(I-022 secondary target).",
+                 "branching check logic), then with the B-617 inert-disclosure channel "
+                 "and the B-547 scope-note rewiring. The +10% that tripped the staleness "
+                 "guard is mostly explanatory comment, not new branching — but the "
+                 "pattern is worth naming: this file now hosts the scope note, the "
+                 "disclosure block, the inventory, the coverage page's text half and "
+                 "every renderer, and each honesty fix lands here because it is where "
+                 "claims are phrased. The split (renderers vs the disclosure/scope "
+                 "layer they share) is still deferred, but it is no longer only an "
+                 "I-022 secondary target — it is the second-largest structural debt "
+                 "after checks/_content.py.",
     "catalog.py": "~3,404 lines — the CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",

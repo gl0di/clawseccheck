@@ -232,20 +232,44 @@ def test_monitor_graded_with_not_checked_shows_not_covered_line():
     assert EXPECTED_NOT_COVERED_LINE in out
 
 
-# ── 4. regression: graded=True, empty not_checked -> byte-identical rendering ───
+# ── 4. no ledger vs a COMPLETE ledger — the two are no longer the same input ────
 #
-# The comparison C-422 itself guarantees: `compute(findings)` with no ledger at all
-# versus `compute(findings, ledger=<all-five-ran ledger>)` must produce an EQUAL
-# ScoreResult (tests/test_c422_ledger_scoring.py already pins that at the scoring
-# layer) — this pins the SAME equality one layer up, at every renderer this task
-# touched, as a real string comparison rather than a smoke test.
+# This block used to pin the opposite: that `compute(findings)` and
+# `compute(findings, ledger=<all-five-ran>)` were EQUAL, and rendered byte-identically.
+# B-547 established that the equality WAS the defect. A complete ledger means every
+# layer ran; no ledger means nothing is known. Reporting them identically made
+# `report._scope_note_lines` tell an operator whose five layers had just run to go
+# "Run `--canary` / `--redteam`" — advice to repeat the work it was describing.
+#
+# What survives is the part that was always right: nothing OTHER than the ledger's
+# presence may differ, so the score, the grade and every finding-derived field still
+# have to agree. That is asserted field-wise below, rather than by an `==` that would
+# also re-pin the bug.
 
 @pytest.mark.parametrize("findings", [FINDINGS_WITH_FAIL, FINDINGS_ALL_CLEAN, []])
-def test_render_report_byte_identical_no_ledger_vs_complete_ledger(findings):
+def test_no_ledger_and_complete_ledger_agree_on_every_field_but_presence(findings):
     without_ledger = compute(findings)
     with_complete_ledger = compute(findings, ledger=_all_ran_ledger())
-    assert without_ledger == with_complete_ledger
-    assert render_report(findings, without_ledger) == render_report(findings, with_complete_ledger)
+    a = {k: v for k, v in vars(without_ledger).items() if k != "ledger_present"}
+    b = {k: v for k, v in vars(with_complete_ledger).items() if k != "ledger_present"}
+    assert a == b, "a complete ledger changed a scoring field other than its own presence"
+    # Non-vacuity: the one field that MUST differ actually does, so the comparison above
+    # is not passing because both sides are trivially identical.
+    assert without_ledger.ledger_present is False
+    assert with_complete_ledger.ledger_present is True
+
+
+@pytest.mark.parametrize("findings", [FINDINGS_WITH_FAIL, FINDINGS_ALL_CLEAN, []])
+def test_the_scope_note_distinguishes_no_ledger_from_a_complete_one(findings):
+    """The user-visible half. Without a ledger the only honest scope is the audit's own;
+    with a complete one the layers demonstrably ran, and saying otherwise sent the reader
+    to re-run modes that had just finished."""
+    bare = render_report(findings, compute(findings))
+    full = render_report(findings, compute(findings, ledger=_all_ran_ledger()))
+    assert "not covered by the static audit" in bare
+    assert "from its own ledger" not in bare
+    assert "from its own ledger" in full
+    assert "not covered by the static audit" not in full
 
 
 @pytest.mark.parametrize("findings", [FINDINGS_WITH_FAIL, FINDINGS_ALL_CLEAN, []])
