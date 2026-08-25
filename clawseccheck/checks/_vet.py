@@ -3072,7 +3072,17 @@ _SKILL_BROAD_TRIGGER_RE = re.compile(
 # F-060 (H6): prose telling the agent to RUN a bundled relative script — local instruction
 # chain (the payload lives one hop away in a file the prose never quotes). Narrow to run/exec
 # verbs + a bundled dir prefix + a script extension so reading a doc (references/x.md) is NOT
-# flagged; WARN-first (delegation is common).
+# flagged.
+#
+# B-544: demoted from a WARN-driving signal to an evidence-only advisory. Measured over the
+# 342-case corpus slice where B13 was the sole warning check: P(H6 fires | benign) = 0.425 vs
+# P(H6 fires | non-benign) = 0.385 — a likelihood ratio of 0.906, i.e. an H6 hit is very
+# slightly evidence of BENIGNITY, not of risk. It was the single largest false-positive
+# source in the static engine (90 sole-cause false WARNs). Its information content is low by
+# construction: the finding says "review the referenced file", and when that file ships it is
+# already scanned by the checks that own executable content. See `h6_advisory` below — the
+# observation is kept verbatim in `Finding.evidence` on every path (including the clean PASS),
+# it just never drives `status` or counts as a corroborating signal.
 _SKILL_LOCAL_CHAIN_RE = re.compile(
     r"\b(?:run|execute|exec|source|bash|sh|invoke|launch)\s+(?:the\s+)?(?:file\s+|script\s+)?"
     r"[`'\"]?(?:\./|scripts?/|bin/|lib/|tools?/)[\w./-]*\.(?:sh|bash|zsh|py|pl|rb)\b",
@@ -3603,7 +3613,13 @@ def check_installed_skills(ctx: Context) -> Finding:
     warns_js: list[str] = []  # F-064: soft JS/TS signals (child_process template, dynamic require)
     warns_content: list[
         str
-    ] = []  # F-051/F-060/F-062 soft content signals (broad trigger, local chain, IOCs)
+    ] = []  # F-051/F-062 soft content signals (broad trigger, Tor/IP IOCs)
+    # B-544: F-060 (H6) — "run this bundled script" prose. Deliberately NOT one of the
+    # verdict buckets above (see the doc comment on _SKILL_LOCAL_CHAIN_RE): a leading
+    # underscore, same carve-out as `_coverage_fence`, so `_b13_verdict` lifts it into
+    # `fx.evidence` and excludes it from `corroborating_buckets` — it can state a fact
+    # without ever winning a verdict or corroborating another bucket's WARN.
+    h6_advisory: list[str] = []
     warns_notify_host: list[str] = []  # B-122: bare Telegram/Discord self-notify (no taint)
     # B-526: fence COVERAGE notes — "a match sat in a fence carrying no marker we
     # recognise, so it was not assessed". Deliberately NOT one of the verdict buckets
@@ -4047,7 +4063,9 @@ def check_installed_skills(ctx: Context) -> Finding:
                 break
         for m in _SKILL_LOCAL_CHAIN_RE.finditer(blob):
             if not _is_code_example(blob, m.start(), _fr):
-                warns_content.append(
+                # B-544: advisory only — see h6_advisory's declaration above. Does not
+                # join warns_content, so it can never drive a WARN on its own.
+                h6_advisory.append(
                     f"{name}: prose instructs running a bundled script "
                     f"({m.group(0)[:60]}) — review the referenced file (H6)"
                 )
@@ -4322,6 +4340,9 @@ def check_installed_skills(ctx: Context) -> Finding:
         # Reserved (leading underscore): carried to _b13_verdict as EVIDENCE, never
         # counted as a corroborating signal. See the declaration above.
         "_coverage_fence": coverage_fence,
+        # B-544: same carve-out, for the H6 advisory — see h6_advisory's declaration
+        # above. Never a winner (nothing calls _b13_verdict with this key).
+        "_h6_advisory": h6_advisory,
     }
     if crit:
         extra = f" (+{len(crit) - 6} more)" if len(crit) > 6 else ""
@@ -4895,7 +4916,11 @@ def check_installed_skills(ctx: Context) -> Finding:
         # route through _b13_verdict (it has no winning bucket), so the coverage notes are
         # appended here by hand. Order matches _b13_verdict: fence notes, then the
         # standing dependency-tree note. Still evidence-only: `status` stays PASS.
-        coverage_fence + [NPM_DEPTREE_SKILL_COVERAGE_NOTE],
+        #
+        # B-544: h6_advisory rides the same by-hand channel, for the same reason — this
+        # is the path H6-alone now reaches (it no longer feeds warns_content), so without
+        # this the fact would disappear on exactly the case the demotion cares about.
+        coverage_fence + h6_advisory + [NPM_DEPTREE_SKILL_COVERAGE_NOTE],
     )
 
 

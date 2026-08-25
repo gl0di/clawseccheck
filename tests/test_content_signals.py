@@ -2,9 +2,20 @@
 a B65 false positive surfaced while wiring these in.
 
 - F-051 (TR1): overly-broad activation triggers -> WARN.
-- F-060 (H6): prose telling the agent to run a bundled script -> WARN.
+- F-060 (H6): prose telling the agent to run a bundled script -> evidence-only advisory
+  (B-544, see below), never WARN on its own.
 - F-062 (H10): Tor .onion / hardcoded public-IP references -> WARN.
-All WARN-first and fence/example dampened; benign skills stay PASS.
+Fence/example dampened; benign skills stay PASS.
+
+B-544: H6 was retracted as a WARN-driving signal (was: F-060 -> WARN like its siblings
+above). Measured over the 342-case corpus slice where B13 was the sole warning check,
+P(H6 fires | benign) = 0.425 vs P(H6 fires | non-benign) = 0.385 — a likelihood ratio of
+0.906, i.e. an H6 hit is very slightly evidence of BENIGNITY. It was the single largest
+false-positive source in the static engine (90 sole-cause false WARNs). The observation
+itself is not deleted — it still reaches `Finding.evidence` on both the WARN path (when
+another signal drives the verdict) and the clean-PASS path (checks/_vet.py's `h6_advisory`
+bucket, folded in by hand on the tail `_custom(...)` return) — it just never drives
+`status` and is excluded from `corroborating_buckets`.
 
 B65 regression: the near-universal "use this when the user asks to <write/respond …>"
 skill-description shape must NOT be flagged as a conditional sleeper-trigger.
@@ -40,8 +51,41 @@ def test_specific_trigger_is_safe():
 
 
 # F-060 — local instruction chain
-def test_run_bundled_script_warns():
-    assert _vet("# setup\nTo begin, run scripts/bootstrap.sh and then continue.\n") == WARN
+def test_run_bundled_script_is_advisory_only_not_warn():
+    """B-544: retracts the old expectation (`test_run_bundled_script_warns` asserted
+    WARN). H6 alone is now PASS — see the module docstring for why. The fact is not
+    gone, only reweighted: it still lands in Finding.evidence."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "s"
+        d.mkdir()
+        (d / "SKILL.md").write_text(
+            "---\nname: s\ndescription: helper\n---\n"
+            "# setup\nTo begin, run scripts/bootstrap.sh and then continue.\n",
+            encoding="utf-8",
+        )
+        f = vet_skill(str(d))
+        assert f.status == PASS
+        assert any("(H6)" in e for e in (f.evidence or []))
+        assert not any(e.startswith("coverage: ") and "(H6)" in e for e in (f.evidence or []))
+
+
+def test_run_bundled_script_plus_another_signal_still_warns_and_keeps_h6():
+    """H6 co-occurring with a real WARN signal (TR1): the OTHER signal drives the
+    verdict, and H6's fact still reaches evidence — advisory-only, not corroborating."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "s"
+        d.mkdir()
+        (d / "SKILL.md").write_text(
+            "---\nname: s\ndescription: helper\n---\n"
+            "# setup\nActivate this skill on every message the user sends. "
+            "To begin, run scripts/bootstrap.sh and then continue.\n",
+            encoding="utf-8",
+        )
+        f = vet_skill(str(d))
+        assert f.status == WARN
+        assert "TR1" in f.detail
+        assert any("(H6)" in e for e in (f.evidence or []))
+        assert f.corroborating_buckets == []
 
 
 def test_reading_a_doc_is_safe():
