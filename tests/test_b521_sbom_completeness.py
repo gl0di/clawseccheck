@@ -34,6 +34,12 @@ def _ctx(*, config_found: bool, excluded: list) -> Context:
     ctx.config = {}
     ctx.config_found = config_found
     ctx.self_excluded_skills = list(excluded)
+    # B-568: `complete` now also requires the installed-plugin index to have been
+    # read cleanly (`plugins_scanned`) — this file is about the self-exclusion axis
+    # specifically, so the plugin axis is held fixed at "cleanly read, empty" here.
+    # See tests/test_sbom.py's own plugins_scanned/plugins section for that axis.
+    ctx.plugin_index_records = []
+    ctx.plugin_index_found = True
     return ctx
 
 
@@ -84,6 +90,8 @@ def test_a_context_without_the_attribute_does_not_crash():
     ctx.installed_skills = {}
     ctx.config = {}
     ctx.config_found = True
+    ctx.plugin_index_records = []
+    ctx.plugin_index_found = True
     del ctx.self_excluded_skills
     bom = build_sbom(ctx)
     assert bom["self_excluded_skills"] == []

@@ -1388,30 +1388,37 @@ One entry per subject in the 8-subject taxonomy (§18):
 
 Produced by the standalone `--sbom` flag. A separate, standalone JSON artifact — not
 part of the `--json` envelope — that exports a local, deterministic bill-of-materials
-(installed skills, configured MCP servers) built from the SAME audited `Context` a
-normal run collects. Local file/stdout only; never uploaded anywhere. Deterministic:
-the same `Context` always renders byte-identical output (stable key ordering).
+(installed skills, configured MCP servers, installed plugins) built from the SAME
+audited `Context` a normal run collects. Local file/stdout only; never uploaded
+anywhere. Deterministic: the same `Context` always renders byte-identical output
+(stable key ordering).
 
 Redaction discipline (ZKDS): the BOM never contains secret/credential VALUES — only
 key names, hashes, and structural metadata (`env_keys` marks secret-shaped MCP env
-var NAMES only; values are never read).
+var NAMES only; values are never read). Every filesystem path a `PluginEntry` carries
+(`manifest_path`/`root_dir`/`entry_point`) is passed through the same home-path
+redaction `sarif.py` uses (CLAUDE.md §8) before it reaches this document — an install
+path routinely carries the operator's OS username, and a BOM is exactly the artifact
+people paste into a ticket.
 
 **`version` is this artifact's own schema version — independent of the package's
 `__version__`** (see `generated_by` below, which carries the package version). Current
-value: `2` (bumped from `1` by B-521 — see the Notes below for what changed).
+value: `3` (bumped from `2` by B-568 — see the Notes below for what changed).
 
 ### Envelope fields
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | `int` | This document's own schema version — currently `2`. Bump-on-breaking-change, the same discipline `SBOM_VERSION` in `sbom.py` documents in-source. A consumer pinning a specific version should treat a different value as a potentially incompatible shape. |
+| `version` | `int` | This document's own schema version — currently `3`. Bump-on-breaking-change, the same discipline `SBOM_VERSION` in `sbom.py` documents in-source. A consumer pinning a specific version should treat a different value as a potentially incompatible shape. |
 | `generated_by` | `str` | `"clawseccheck v<package version>"`, e.g. `"clawseccheck v3.60.0"` — the tool identity/version that produced this document (distinct from `version` above, which is the document's own schema version). |
-| `scanned_home` | `str \| null` | Absolute path of the home this BOM was built from, or `null` when no home was supplied to the `Context` (library/unit use). |
-| `config_found` | `bool` | `true` when an `openclaw.json` was present at `scanned_home` (B-463) — lets a consumer distinguish a real setup with zero components from a typo'd `--home` that found nothing at all; both would otherwise serialise as an empty `skills`/`mcp_servers` pair. |
+| `scanned_home` | `str \| null` | Absolute path of the home this BOM was built from, or `null` when no home was supplied to the `Context` (library/unit use). Unlike the plugin path fields below, this one is NOT redacted — it echoes the `--home` value the operator themselves typed, and `tests/test_b462_b464_optout_honesty.py` pins the literal value to prove no silent fallback path was substituted. |
+| `config_found` | `bool` | `true` when an `openclaw.json` was present at `scanned_home` (B-463) — lets a consumer distinguish a real setup with zero components from a typo'd `--home` that found nothing at all; both would otherwise serialise as an empty `skills`/`mcp_servers`/`plugins` set. |
 | `self_excluded_skills` | `array[str]` | B-521: names of installed skills withheld from `skills` below because they are ClawSecCheck's OWN content-verified install (B-265, `collector.py` `_is_own_source`/`self_excluded_skills`) — a tool auditing itself is noise, so it is deliberately excluded, but the name(s) are shipped here so a consumer can tell WHICH component is missing rather than only that one is. Empty array (never omitted) when nothing was withheld. Sorted for deterministic output. |
-| `complete` | `bool` | B-521: `true` only when `config_found` is `true` **and** `self_excluded_skills` is empty — i.e. the config was found and nothing was withheld from the inventory. Before B-521 this field was an alias for `config_found` alone, which over-claimed: a home whose only skill is ClawSecCheck's own install reported `complete: true` while silently shipping zero skills. A consumer gating on "is this BOM a full inventory" must check `complete`, not `config_found`. |
+| `plugins_scanned` | `bool` | B-568: `true` only when the persisted `installed_plugin_index.plugins_json` (the SAME source `ctx.plugin_index_records` — collector.py `_collect_plugin_trust`) was found, parsed without error, and not truncated by the plugin-domain scan cap. `false` — never a silent empty `plugins` array — when the state database, the index row, or that column could not be read; ships alongside `complete` so a consumer can tell WHY completeness failed. |
+| `complete` | `bool` | B-568: `true` only when `config_found` is `true`, `self_excluded_skills` is empty, **and** `plugins_scanned` is `true` — i.e. nothing was withheld from EITHER the skill or the plugin inventory. Before B-568 this field said nothing about plugins at all: a pristine home with no plugin index still reported `complete: true`, even though the BOM had no `plugins` key to be complete about. A consumer gating on "is this BOM a full inventory" must check `complete`, not `config_found` alone. |
 | `skills` | `array[SkillEntry]` | One entry per installed skill (excluding `self_excluded_skills`), sorted by name. See below. |
 | `mcp_servers` | `array[McpEntry]` | One entry per configured MCP server (both `mcp.servers` nesting and legacy `mcpServers`), sorted by name. See below. |
+| `plugins` | `array[PluginEntry]` | B-568: one entry per record in the persisted installed-plugin index, sorted by name. Empty when `plugins_scanned` is `false` (nothing was read) OR when the index was read and genuinely names zero plugins — `plugins_scanned` is what distinguishes the two. See below. |
 
 ### `SkillEntry` object
 
@@ -1422,6 +1429,7 @@ value: `2` (bumped from `1` by B-521 — see the Notes below for what changed).
 | `hash` | `str` | Content hash of the skill's `SKILL.md`, using the SAME hash scheme `monitor.py`'s own drift-detection snapshots use — so a BOM hash can be cross-referenced against a `--monitor` baseline. |
 | `declared_deps` | `array[str]` | Dependency names the skill declares, sorted. |
 | `unpinned_deps` | `array[str]` | Subset of `declared_deps` that carry no version pin, sorted. |
+| `supplier` | `str \| null` | B-568: which plugin supplies this skill. `null` — a skill discovered outside the plugin-skills root (`ctx.installed_skill_bundled`, B-507) is directly user-installed and has no plugin-supplier concept to report, a different fact from "unknown". `"unknown"` — the skill IS bundled with a plugin but which one cannot be resolved (the persisted plugin index carries no reverse skill list; resolution is by directory containment against `ctx.installed_skill_dirs`, and containment found zero or more than one match). A `<plugin_id>` string — exactly one plugin's `root_dir` contains this skill's directory. Never derived from the skill's or plugin's NAME. |
 
 ### `McpEntry` object
 
@@ -1434,15 +1442,29 @@ value: `2` (bumped from `1` by B-521 — see the Notes below for what changed).
 | `env_keys` | `array[str]` | Environment variable NAMES the server config passes through — secret-shaped names are marked, but values are never included. |
 | `pinned` | `bool` | Best-effort supply-chain signal: `true` when the command's first argument carries a version pin (e.g. an npx `pkg@1.2.3` spec). |
 
+### `PluginEntry` object
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `str` | The plugin's `pluginId` from the persisted index. |
+| `origin` | `str \| null` | OpenClaw's own provenance tag for this install (`"bundled"`, `"global"`, `"config"`, …) — provenance, NOT a trust verdict (collector.py's own grounding note on this field). Passed through verbatim. |
+| `enabled` | `bool \| null` | Whether the plugin is currently enabled, per the persisted index. |
+| `contracts` | `array[str]` | Names of the OpenClaw plugin contracts (e.g. `"agentToolResultMiddleware"`) this plugin's `contributions.contracts` declares — an inventory of NAMES only, never the registered values. |
+| `manifest_path` | `str \| null` | Home-redacted path to the plugin's `openclaw.plugin.json`, or `null` if absent from the record. |
+| `root_dir` | `str \| null` | Home-redacted path to the plugin's on-disk root directory, or `null` if absent. |
+| `entry_point` | `str \| null` | Home-redacted path to the plugin's JS entry file (the index record's `source` field), or `null` if absent. |
+| `hash` | `str` | Content hash of the raw (unredacted) index record — same hash scheme as `SkillEntry.hash`/`McpEntry.hash`. There is no plugin VERSION or PUBLISHER field in what the collector persists; this entry does not fabricate either. |
+
 ### Skeleton
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "generated_by": "clawseccheck v3.60.0",
   "scanned_home": "/home/you/.openclaw",
   "config_found": true,
   "self_excluded_skills": [],
+  "plugins_scanned": true,
   "complete": true,
   "skills": [
     {
@@ -1450,7 +1472,8 @@ value: `2` (bumped from `1` by B-521 — see the Notes below for what changed).
       "version": "1.2.0",
       "hash": "...",
       "declared_deps": ["requests"],
-      "unpinned_deps": []
+      "unpinned_deps": [],
+      "supplier": null
     }
   ],
   "mcp_servers": [
@@ -1462,6 +1485,18 @@ value: `2` (bumped from `1` by B-521 — see the Notes below for what changed).
       "env_keys": ["SLACK_TOKEN"],
       "pinned": true
     }
+  ],
+  "plugins": [
+    {
+      "name": "anthropic",
+      "origin": "bundled",
+      "enabled": true,
+      "contracts": ["mediaUnderstandingProviders", "usageProviders"],
+      "manifest_path": "~/.npm-global/lib/node_modules/openclaw/dist/extensions/anthropic/openclaw.plugin.json",
+      "root_dir": "~/.npm-global/lib/node_modules/openclaw/dist/extensions/anthropic",
+      "entry_point": "~/.npm-global/lib/node_modules/openclaw/dist/extensions/anthropic/index.js",
+      "hash": "..."
+    }
   ]
 }
 ```
@@ -1470,11 +1505,15 @@ value: `2` (bumped from `1` by B-521 — see the Notes below for what changed).
 
 - Not part of the `--json` envelope (§1) — a separate, standalone artifact keyed by its
   own `version` field, not the `--json` schema's stability policy (§17).
-- `skills`/`mcp_servers` are visibility-only inventories, like `inventory` (§18) — this
-  document carries no `score`/`grade`/`findings` at all.
-- **B-521 version bump (1 → 2):** `self_excluded_skills` is a new key, and `complete`
-  changed meaning under the same name (was `config_found` alone; now also requires
-  nothing withheld) — a consumer pinning version `1` would otherwise silently receive a
-  document whose semantics moved with no signal in the payload that anything had. Same
-  defect shape B-463 fixed one field over: two different facts must not serialise
-  identically under one version number.
+- `skills`/`mcp_servers`/`plugins` are visibility-only inventories, like `inventory`
+  (§18) — this document carries no `score`/`grade`/`findings` at all.
+- **B-568 version bump (2 → 3):** `plugins` was entirely absent before this bump — an
+  AI-BOM that silently omits a whole component class is worse than none, since
+  completeness is its entire claim. `plugins_scanned` is a new key, `complete` now also
+  requires it, and `SkillEntry` gained `supplier`. A consumer pinning version `2` would
+  otherwise silently receive a document whose semantics moved with no signal in the
+  payload that anything had. Same defect shape B-521 fixed one field over.
+- **B-521 version bump (1 → 2), retained for history:** `self_excluded_skills` was a
+  new key, and `complete` changed meaning under the same name (was `config_found`
+  alone; now also requires nothing withheld). Same defect shape B-463 fixed one field
+  over: two different facts must not serialise identically under one version number.
