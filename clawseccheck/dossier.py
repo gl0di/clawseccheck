@@ -39,6 +39,14 @@ NA = "N/A"
 
 # Fixed render / iteration order.
 AXES: tuple[str, ...] = ("danger", "build", "behavior", "persistence", "connections")
+
+# B-616: the axes whose "nothing fired" PASS is evidence read FROM PROSE — the content
+# ring's own text blob (SKILL.md + bundled docs), which is exactly what a file decoded
+# under `_decode_ladder`'s assumed rung was never reliably converted into characters at
+# all. `connections`/`persistence` are excluded: their "no signal" already resolves via
+# `code_measurable` (AST/capability reads, not the prose blob), and widening this to them
+# would claim an encoding problem grounds a code-analysis gap it never touched.
+_PROSE_AXES: tuple[str, ...] = ("danger", "build", "behavior")
 AXIS_LABEL: dict[str, str] = {
     "danger": "Danger",
     "build": "Build quality",
@@ -582,15 +590,27 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     assessed = any(f.status in (PASS, WARN, FAIL) for f in pool) or (
         target_type in ("skill", "plugin") and bool(getattr(ctx, "installed_skills", None))
     )
+    # B-616: relpaths this run could only decode by ASSUMING a codepage (`_decode_ladder`'s
+    # latin-1 rung — collector.py's ctx.assumed_encoding_files). A single-byte codepage is
+    # undecidable from the bytes alone (b"\xee" is cp1251 "о" or latin-1 "î" with nothing
+    # to break the tie — see `_decode_ladder`'s own docstring), so the honest move is not a
+    # smarter guess: it is refusing to let the prose axes claim they read text they did not.
+    assumed_encoding = tuple(sorted(set(getattr(ctx, "assumed_encoding_files", None) or [])))
 
     axes: list[AxisResult] = []
     for axis in AXES:
         applicable = applicability.get(axis, True)
         bucket = buckets[axis]
+        prose_gap = axis in _PROSE_AXES and bool(assumed_encoding)
         if not assessed:
             no_signal = UNKNOWN
         elif axis in ("connections", "persistence"):
             no_signal = PASS if code_measurable else UNKNOWN
+        elif prose_gap:
+            # Only an axis whose PASS would come from "nothing fired in the misread
+            # text" flips — a bucket that already carries a real finding (something DID
+            # fire, from content this scan understood) is left exactly alone.
+            no_signal = UNKNOWN
         else:
             no_signal = PASS
         status = _axis_status(bucket, applicable, no_signal_status=no_signal)
@@ -601,10 +621,31 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
         elif status == UNKNOWN and not bucket:
             reason, fix = _unmeasurable_reason(
                 axis, truncated=scan_truncated, unanalysed=bool(unread_code),
-                danger_only=bool(danger_only_code)), ""
+                danger_only=bool(danger_only_code),
+                assumed_encoding=assumed_encoding if prose_gap else ()), ""
         else:
             reason, fix = _reason_and_fix(bucket, axis, empty_reason=_clean_reason(axis, families))
         axes.append(AxisResult(axis=axis, status=status, reason=reason, fix=fix, findings=list(bucket)))
+
+    # B-616: the axis line above already says the text could not be decoded (limb 1); this
+    # is limb 2 — the same fact, on the channel `_situational_coverage_notes` (report.py)
+    # already walks and the vet dossier + `--vet --json` already render, so a reader is not
+    # left to infer an assumed encoding from a status flip alone. Attached to the pool's
+    # primary finding (always present — see `_normalize_pool`) since evidence lives on a
+    # Finding, not on the profile. Fired independent of whether any axis actually flipped
+    # (e.g. a real finding already occupied the bucket) — the fact that this run guessed a
+    # codepage is true regardless of what else was found.
+    if assumed_encoding and pool:
+        names = ", ".join(assumed_encoding[:2])
+        more = f" and {len(assumed_encoding) - 2} more file(s)" if len(assumed_encoding) > 2 else ""
+        note = (
+            f"coverage: {names}{more} could not be decoded in a determined encoding and "
+            "was read under an assumed codepage (latin-1); non-ASCII text in it may not "
+            "have been understood"
+        )
+        primary = pool[0]
+        if note not in (primary.evidence or []):
+            primary.evidence = list(primary.evidence or []) + [note]
 
     danger_coverage_gap = _danger_coverage_gap(buckets["danger"], ctx)
     overall_status, score, grade = _grade_profile(axes, danger_coverage_gap=danger_coverage_gap)
@@ -710,8 +751,15 @@ def _clean_reason(axis: str, families: set) -> str:
 
 
 def _unmeasurable_reason(axis: str, *, truncated: bool = False,
-                        unanalysed: bool = False, danger_only: bool = False) -> str:
-    """Why an axis could not be measured -- and the four reasons are not one reason.
+                        unanalysed: bool = False, danger_only: bool = False,
+                        assumed_encoding: tuple = ()) -> str:
+    """Why an axis could not be measured -- and the five reasons are not one reason.
+
+    ``assumed_encoding`` (B-616) checked first: it names the actual file(s) and is the
+    most specific of the five, and the caller (`build_profile`) only ever passes it
+    non-empty for the axis it genuinely caused -- it is never set alongside a `truncated`/
+    `unanalysed`/`danger_only` state for the SAME axis by construction (those three key off
+    `connections`/`persistence`'s code-measurability; this keys off the prose axes).
 
     B-628: "no executable code to analyze" is a claim about the ARTIFACT, and it is false
     whenever code is present. Two distinct ways it can be present and still unmeasured:
@@ -735,6 +783,13 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
     ``unanalysed`` in turn wins over ``danger_only``: if some file had no reader at all,
     saying the code was "read for dangerous patterns" would overstate the coverage.
     """
+    if assumed_encoding:
+        names = ", ".join(assumed_encoding[:2])
+        more = f" (+{len(assumed_encoding) - 2} more)" if len(assumed_encoding) > 2 else ""
+        return (
+            f"{names}{more} could not be decoded in a determined encoding and was read "
+            "under an assumed codepage, so this could not be reliably assessed"
+        )
     if truncated:
         if axis == "connections":
             return "the scan was cut short before the outbound surface could be measured"

@@ -762,6 +762,14 @@ class Context:
     archives_unpacked: int = 0
     path_traversal_violations: list[str] = field(default_factory=list)
     file_manifest: dict[str, str] = field(default_factory=dict)  # file relpath -> status
+    # B-616: relpaths whose text came from the decode ladder's ASSUMED rung (`latin-1`,
+    # `_decode_ladder`) rather than a self-identifying encoding (utf-8, BOM/shape-confirmed
+    # utf-16). `file_manifest`'s "(latin-1-assumed)" qualifier records the same fact per
+    # file but had exactly one reader (sarif.py); this is the ctx-level signal dossier.py
+    # reads to keep a prose-dependent axis from reading PASS over text nobody actually
+    # understood. Never the `(lossy)` (None-encoding) rung — that one keeps a UTF-8
+    # reading and pays only per bad character, which is a different, much weaker claim.
+    assumed_encoding_files: list[str] = field(default_factory=list)
     symlink_skips: list[str] = field(default_factory=list)        # F-061: skipped symlinks / path-escapes
     # B-458: files that are PRESENT in the skill but could not be opened (permissions,
     # a dangling target, an I/O error). Distinct from every cap channel: nothing was
@@ -2138,6 +2146,12 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     qualifier = "(lossy)"
                 elif sub_enc == "latin-1":
                     qualifier = "(latin-1-assumed)"
+                    # B-616: ctx-level twin of the manifest qualifier above — the manifest
+                    # string had exactly one reader (sarif.py); this is what lets
+                    # dossier.py keep a prose-dependent axis from reading PASS over text
+                    # this run never actually understood.
+                    if ctx is not None and sub_relpath not in ctx.assumed_encoding_files:
+                        ctx.assumed_encoding_files.append(sub_relpath)
 
             # Map statuses here!
             if ctx is not None:
