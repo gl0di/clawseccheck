@@ -4215,10 +4215,25 @@ def load_events(path: str | Path = DEFAULT_EVENTS, limit: int | None = None) -> 
 
     C-162: a line whose '_schema' is a newer major than this build understands is
     skipped (siblings still load); absent/legacy or current '_schema' loads normally.
+
+    Silently returns [] on any read problem, same as always — a caller that needs to
+    know WHY (B-581) wants ``load_events_with_problem`` instead, which this delegates to.
+    """
+    out, _problem = load_events_with_problem(path, limit=limit)
+    return out
+
+
+def load_events_with_problem(
+    path: str | Path = DEFAULT_EVENTS, limit: int | None = None,
+) -> "tuple[list[dict], OSError | None]":
+    """Same entries as ``load_events()``, plus the ``OSError`` that made the read fail.
+
+    B-581: mirrors ``history.load_with_problem`` — see there for why there is no
+    ``Path.is_file()`` pre-check (it can itself raise ``PermissionError`` on Python
+    3.12 for a stat-inaccessible path) and why classifying "did this fail" is split
+    from "should this be shown" (the latter is cli.py's ``_explicit_paths`` call).
     """
     p = Path(path).expanduser()
-    if not p.is_file():
-        return []
     out: list[dict] = []
     try:
         # C-164: stream line-by-line via _iter_jsonl (not read_text().splitlines())
@@ -4227,6 +4242,6 @@ def load_events(path: str | Path = DEFAULT_EVENTS, limit: int | None = None) -> 
             if not _schema_ok(entry):
                 continue
             out.append(entry)
-    except OSError:
-        return []
-    return out[-limit:] if limit else out
+    except OSError as exc:
+        return [], exc
+    return (out[-limit:] if limit else out), None

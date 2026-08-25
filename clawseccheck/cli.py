@@ -65,6 +65,7 @@ from .integrity import (
 from .report import render_html
 from .report import (
     _evidence_bullets,
+    _redact_home_paths,
     _sanitize,
     render_advise,
     render_advise_json,
@@ -96,6 +97,7 @@ from .monitor import (
     CHAIN_UNREADABLE,
     DEFAULT_EVENTS,
     DEFAULT_STATE,
+    load_events_with_problem,
     verify_chain,
 )
 from .tamperscore import tamper_subgrade
@@ -108,6 +110,7 @@ from .pdf import render_pdf
 from .history import (
     DEFAULT_HISTORY,
     load as history_load,
+    load_with_problem as history_load_with_problem,
     record as history_record,
     render_trend,
     verify as history_verify,
@@ -1544,10 +1547,20 @@ def _path_problem_text(raw_path, exc: OSError, *, what: str) -> str:
     those two are primary MODES. ``--judged-bundle`` modifies a run rather than being one,
     so aborting a whole ``--full`` audit over it would be the harsher answer; it is
     reported and the run continues, as with every other unreadable path here.
+
+    B-581: also runs the composed line through ``report._redact_home_paths``. A path a
+    user types on the command line routinely embeds their OS username (``/home/dave/…``,
+    ``~dave/…`` post-expanduser) and this text reaches stderr on every call site that
+    uses it — CLAUDE.md §8 ("No PII... in logs") is not scoped to the dashboard card
+    ``_redact_home_paths`` was first written for; that scope note describes its first
+    caller, not a limit on the function. Widening the classifier closes the hole at
+    ALL of its call sites at once (this file's five pre-existing ones plus B-581's two
+    new ones) instead of folding redaction in only at the new sites, which would leave
+    the old ones still leaking and duplicate the redaction decision per call site.
     """
     if not str(raw_path).strip():
         return "no path was given"
-    return f"{_sanitize(str(raw_path))}: {_describe_os_error(exc, what=what)}"
+    return _redact_home_paths(f"{_sanitize(str(raw_path))}: {_describe_os_error(exc, what=what)}")
 
 
 def _read_verdicts_payload(raw_path: str) -> "tuple[str, str | None]":
@@ -3331,7 +3344,18 @@ def _main(argv=None) -> int:
         return 0
 
     if _mode == "watch_log":
-        _emit(render_events(load_events(args.events), ascii_only))
+        # B-581: load_events() alone can't tell "no journal at the default location yet
+        # (a genuine first run)" apart from "you named a path I could not open" — both
+        # returned [] and "No recorded change events yet." lied about the second case.
+        # Attempt the real read via load_events_with_problem and only report the OSError
+        # when the user actually NAMED this path (_explicit_paths) — an absent default
+        # store stays silent, exactly as before.
+        _events_rows, _events_problem = load_events_with_problem(args.events)
+        if _events_problem is not None and _explicit_paths["events"]:
+            print(f"note: --events: {_path_problem_text(args.events, _events_problem, what='events file')}. "
+                  "Showing no events for this run; your real event journal (if any) is "
+                  "unaffected.", file=sys.stderr)
+        _emit(render_events(_events_rows, ascii_only))
         return 0
 
     # B-476: read the bundle's attestation bucket at most once — `--judged-bundle -` reads
@@ -3825,9 +3849,35 @@ def _main(argv=None) -> int:
         # --trend's job is to record the point AND show the trend, so it records even
         # under --no-history (a documented, tested contract). The conflict is surfaced
         # as a stderr note by _flag_coherence_notes rather than silently honored (B-066).
+        #
+        # B-581: history_record() now REPORTS a dropped write instead of swallowing it
+        # (history.record, B-278's shape). Surfaced unconditionally, not gated on
+        # _explicit_paths like the read note below — a write failure is never a "normal
+        # first run" state the way an absent file is, at the default location or not, and
+        # this is the more serious of the two failures this task exists to catch: a cron
+        # running `--trend --history /mnt/backup/hist.jsonl` after the mount drops loses
+        # the point forever while "No history yet" looks like nothing is wrong.
         if not _skip_live_test_history:
-            history_record(score, args.history)
-        rows = history_load(args.history)
+            _write_err = history_record(score, args.history)
+            if _write_err is not None:
+                # B-581: history.record() hands back the raw OSError text (e.g.
+                # "[Errno 13] Permission denied: '/home/dave/...'"), which — unlike
+                # _path_problem_text's composed line — has NOT been through
+                # _redact_home_paths yet; apply it here too, or this is the one message
+                # in the pair that still leaks the OS username.
+                print(f"note: --trend: this run's score could not be recorded to "
+                      f"{_redact_home_paths(_sanitize(str(args.history)))}: "
+                      f"{_redact_home_paths(_sanitize(_write_err))}. The point was NOT "
+                      "saved; your existing history (if any) is unaffected.",
+                      file=sys.stderr)
+        # Same "attempt, then classify" read as --watch-log above: an unreadable path the
+        # user actually NAMED is reported, an absent default-location file stays silent
+        # (a genuine first run).
+        rows, _read_problem = history_load_with_problem(args.history)
+        if _read_problem is not None and _explicit_paths["history"]:
+            print(f"note: --history: {_path_problem_text(args.history, _read_problem, what='history file')}. "
+                  "Showing no history for this run; your real history (if any) is "
+                  "unaffected.", file=sys.stderr)
         _emit(render_trend(rows, ascii_only))
         _emit(_percentile_line(score, ascii_only))
         return 0

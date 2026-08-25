@@ -75,9 +75,19 @@ def _sanitize_home(value: str | None) -> str | None:
 
 
 def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
-           home: str | None = None, source: str | None = None) -> None:
+           home: str | None = None, source: str | None = None) -> "str | None":
     """Append one JSON line {date, ts, score, grade, home, source, chain_hash}
     to the history file.
+
+    Returns None on success, the OSError text when the append FAILED (B-581, same
+    shape as monitor.record_events under B-278). Still never RAISES — this is called
+    on every default audit, so a planted symlink or an unwritable directory must not
+    take the run down — but the failure is no longer invisible to a caller that asks.
+    The default audit path (``_record_history_point``, cli.py) still discards the
+    return value on purpose: it degrades quietly there, exactly as before. ``--trend``
+    (cli.py) is the one caller that reports it, because ``--trend``'s whole job is to
+    record this run's point — a dropped write there is the more serious of the two
+    failures this task exists to surface (see the module the caller lives in).
 
     Parameters
     ----------
@@ -196,8 +206,9 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
             row = {**base, "chain_hash": _chain_hash(prev_hash, base)}
             secure_append_text(p, json.dumps(row) + "\n")
             _rotate_journal(p)
-    except OSError:
-        pass
+    except OSError as exc:
+        return str(exc)
+    return None
 
 
 def verify(path: str = DEFAULT_HISTORY,
@@ -224,6 +235,9 @@ def verify(path: str = DEFAULT_HISTORY,
 def load(path: str = DEFAULT_HISTORY) -> list[dict]:
     """Read the JSONL history file and return a list of
     {date, score, grade, ts, home, source, graded} dicts.
+
+    Silently returns [] on any read problem, same as always — a caller that needs to
+    know WHY (B-581) wants ``load_with_problem`` instead, which this delegates to.
 
     Blank lines and malformed JSON lines are skipped gracefully. A line whose
     '_schema' (C-162) is a newer major than this build understands is skipped too
@@ -253,10 +267,33 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
     since a legacy entry predates the real-vs-dev/test distinction entirely
     and must not silently masquerade as a verified real-audit run.
     """
-    p = Path(path).expanduser()
-    if not p.is_file():
-        return []
+    rows, _problem = load_with_problem(path)
+    return rows
 
+
+def load_with_problem(path: str = DEFAULT_HISTORY) -> "tuple[HistoryRows, OSError | None]":
+    """Same rows as ``load()``, plus the ``OSError`` that made the read fail — if any.
+
+    B-581: ``load()`` alone cannot tell a genuine first run (no history has ever been
+    written at the caller's own default path) apart from a user-NAMED path that could
+    not be opened; both produced an empty list and neither carried an exception object
+    a caller could act on. This is ``cli._read_verdicts_payload``'s shape (B-561)
+    applied to a loader that already exists, so the classification lives here once
+    instead of being duplicated at each call site.
+
+    Deliberately no ``Path.is_file()`` pre-check (the previous shape): on Python 3.12
+    ``is_file()`` itself raises ``PermissionError`` for a stat-inaccessible path rather
+    than returning False, so a pre-check made outside a try/except would crash on
+    exactly the case this function exists to report instead of catching it. Attempting
+    the read directly and letting ``_iter_jsonl``'s own ``p.open(...)`` raise means
+    every OSError shape — missing, a directory, unreadable — is caught by the single
+    ``except OSError`` below, the same as ``_read_verdicts_payload``.
+
+    Whether a caller SHOWS the returned OSError is a decision cli.py makes from
+    ``_explicit_paths`` — an absence at the default location is a genuine first run and
+    must stay silent; this function reports what happened, not what it means.
+    """
+    p = Path(path).expanduser()
     rows = HistoryRows()
     try:
         # C-164: stream line-by-line via _iter_jsonl (not read_text().splitlines())
@@ -292,10 +329,10 @@ def load(path: str = DEFAULT_HISTORY) -> list[dict]:
             row["home"] = obj.get("home")
             row["source"] = obj.get("source", "legacy")
             rows.append(row)
-    except OSError:
-        return []
+    except OSError as exc:
+        return HistoryRows(), exc
 
-    return rows
+    return rows, None
 
 
 class HistoryRows(list):

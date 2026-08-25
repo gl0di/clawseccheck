@@ -82,11 +82,34 @@ _HOME_PATH_RE = re.compile(
 def _redact_home_paths(text: str) -> str:
     """Collapse a leading user-home path segment to '~' (B-381).
 
-    Applied only to the --dashboard --full "Worth a glance" card section (the
-    MEDIUM/ATTESTED-confidence findings render_dashboard_findings's own HIGH-confidence
-    filter deliberately excludes) -- the rest of the report/--save/--html output keeps
-    full paths, which is correct there: those stay on the owner's own machine and a
-    real path is exactly what an owner debugging their own config needs to see.
+    First written for one caller only: the --dashboard --full "Worth a glance" card
+    section (the MEDIUM/ATTESTED-confidence findings render_dashboard_findings's own
+    HIGH-confidence filter deliberately excludes), because that card is explicitly
+    designed to be pasted into chat -- the rest of report/--save/--html keeps full
+    paths, correctly: those stay on the owner's own machine and a real path is exactly
+    what an owner debugging their own config needs to see. This docstring used to say
+    "applied only to" that card, describing the first caller as if it were a scope
+    limit. It is not one, and by now several callers outside this module have found
+    the same shape independently -- an error message or a finding's `detail` is
+    exactly where an operator's OS username escapes, and CLAUDE.md §8 ("No PII... in
+    logs") is not scoped to one card:
+
+    * `sarif.py`'s `_sarif_text` (B-620) wraps every string that reaches SARIF
+      `results[]` -- `message.text`, `properties.evidence`,
+      `fixes[].description.text`, and `vetProfile.axes[].reason` -- because that
+      artifact is handed to CI dashboards and pasted into public issues, a wider
+      audience than the dashboard card ever had. See its own docstring for the traced
+      producers (`checks/_capability.py`'s C5 among them).
+    * `cli.py`'s `_path_problem_text` (B-581) wraps the "you named a file I could not
+      open" line that five verdicts/bundle flags and, since B-581, `--trend`'s history
+      read and `--watch-log`'s events read all share -- a path a user types on the
+      command line routinely embeds their own username, and this text reaches stderr
+      unconditionally, not just inside `--dashboard`.
+
+    Each caller applies this function itself, at its own render boundary, rather than
+    this module reaching out to redact on their behalf -- there is no single choke
+    point all of report/sarif/cli output passes through, so the alternative would be
+    re-deciding the redaction (and the regex) per call site instead of sharing it.
     """
     if not text:
         return text
