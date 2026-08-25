@@ -4933,16 +4933,22 @@ def check_installed_skills(ctx: Context) -> Finding:
         f"Scanned {n} installed skill(s); no shell-exec / exfiltration / obfuscation "
         "patterns found.",
         "Keep installing only skills whose source you've reviewed — trust no one.",
-        # B-526: the clean return is the one case the fence disclosure exists FOR — a
-        # skill reads clean precisely BECAUSE a fence hid the match. This return does not
-        # route through _b13_verdict (it has no winning bucket), so the coverage notes are
-        # appended here by hand. Order matches _b13_verdict: fence notes, then the
-        # standing dependency-tree note. Still evidence-only: `status` stays PASS.
+        # B-526: the clean return is the one case the coverage disclosures exist FOR — a
+        # skill reads clean precisely BECAUSE a fence hid the match, or because part of it
+        # was never read. This return does not route through `_b13_verdict` (it has no
+        # winning bucket), so the notes have to be gathered here too.
         #
-        # B-544: h6_advisory rides the same by-hand channel, for the same reason — this
-        # is the path H6-alone now reaches (it no longer feeds warns_content), so without
-        # this the fact would disappear on exactly the case the demotion cares about.
-        coverage_fence + h6_advisory + [NPM_DEPTREE_SKILL_COVERAGE_NOTE],
+        # Gathered the SAME generic way `_b13_verdict` gathers them — every "_"-prefixed
+        # bucket — rather than by naming them. This used to be a hand-written list
+        # (`coverage_fence + h6_advisory + [...]`), and a hand-written list of the ways a
+        # thing can be true goes stale behind whichever bucket is added next: B-552 added
+        # `_skill_read_gaps` to `_signal_buckets`, it rode every other branch through
+        # `_b13_verdict`, and it was silently dropped HERE — on the one branch that tells
+        # the reader everything is clean, which is the worst place to lose a "part of this
+        # was never read" note. Reading the buckets means a future one cannot repeat that.
+        # Still evidence-only: `status` stays PASS and is never revised.
+        [n for key, bucket in _signal_buckets.items() if key.startswith("_")
+         for n in bucket] + [NPM_DEPTREE_SKILL_COVERAGE_NOTE],
     )
 
 
@@ -5319,6 +5325,59 @@ def _looks_like_a_skill_package(p: Path, text, py, sh, js, ctx=None) -> bool:
     return "SKILL.md" in blob or blob.lstrip().startswith("---")
 
 
+# B-523: suffixes that mark a sibling as ordinary personal/downloaded content rather
+# than plausible skill material. Checked by SUFFIX ONLY (`Path.iterdir()` + `.suffix`,
+# never a byte of the file opened) — a DENYLIST of ubiquitous non-code formats, not an
+# allowlist of code, so a real skill's doc/config/whatever-extension sibling is never
+# wrongly excluded just for being unrecognized. Media/binary formats are also never
+# what B13's python/shell/js/content-ring signatures fire on, so excluding them from
+# widening loses no real detection surface — it only stops them being opened at all.
+_GENERIC_DOWNLOAD_EXTS = frozenset({
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", ".ico", ".heic",
+    ".mp4", ".mov", ".avi", ".mkv", ".webm",
+    ".mp3", ".wav", ".flac", ".ogg", ".m4a",
+    ".pdf", ".docx", ".xlsx", ".pptx", ".odt", ".rtf",
+    ".exe", ".msi", ".dmg", ".deb", ".rpm", ".appimage", ".iso", ".torrent",
+})
+
+
+def _resolved_parent_is_plausible_skill_root(parent: Path) -> bool:
+    """Metadata-only bound on B-460's manifest->directory widening (B-523).
+
+    B-460 made a loose ``SKILL.md`` resolve to its containing folder so a bundled
+    ``run.sh`` beside it is never hidden from the scan — correct when the folder IS the
+    skill's own dedicated directory. It is wrong when the manifest is loose in a
+    general-purpose folder (``~/Downloads/SKILL.md``): the same widening then reads
+    whatever else happens to be sitting there and verdicts on it under the folder's name.
+
+    No STRUCTURAL signal can perfectly tell those apart — a minimal genuine skill
+    (manifest + one script) is byte-for-byte the same shape as a manifest coincidentally
+    dropped beside one unrelated script (proven by this file's own C-135 pass: the B-460
+    fixture IS that shape). So this bound does not try to catch that minimal case; it
+    catches the realistic, common one instead — a folder that already holds ordinary
+    downloaded content (photos, PDFs, archives, installers) has no business being read
+    as a skill's private source tree, however few or many files it holds. A single
+    co-located file (``SKILL.md`` + one sibling, whatever its kind) always still widens,
+    so a real one-script skill is never narrowed — see the callers' fixtures.
+    """
+    try:
+        siblings = [
+            e for e in parent.iterdir()
+            if not e.name.startswith(".") and e.name.lower() != "skill.md"
+        ]
+    except OSError:
+        # Can't even list it — not our call to make; let the normal engine run and
+        # report its own gap, same posture as _looks_like_a_skill_package's OSError arm.
+        return True
+    if len(siblings) <= 1:
+        return True
+    return not any(
+        e.suffix.lower() in _GENERIC_DOWNLOAD_EXTS
+        for e in siblings
+        if not e.is_dir()
+    )
+
+
 def resolve_skill_target(path: str | Path) -> Path:
     """The directory a --vet skill target actually refers to.
 
@@ -5336,11 +5395,22 @@ def resolve_skill_target(path: str | Path) -> Path:
     exists for (B-152: ``--vet skill.tar.gz``) is untouched, and so an arbitrary file can
     never widen the scan to whatever else happens to sit beside it.
 
+    B-523: also bounded by ``_resolved_parent_is_plausible_skill_root`` — a loose manifest
+    sitting in a folder that already looks like a general-purpose download drop is left
+    UNWIDENED (this function returns the manifest path unchanged, same as any other bare
+    file target). ``vet_skill`` discloses either outcome — widened or held back — so the
+    reader can always see what was actually scanned.
+
     Shared by ``vet_skill`` and the CLI's dossier label so the two cannot drift: the report
     must name what was actually scanned, not what was typed.
     """
     p = Path(path).expanduser()
-    if p.is_file() and p.name.lower() == "skill.md" and p.parent.is_dir():
+    if (
+        p.is_file()
+        and p.name.lower() == "skill.md"
+        and p.parent.is_dir()
+        and _resolved_parent_is_plausible_skill_root(p.parent)
+    ):
         return p.parent
     return p
 
@@ -5386,9 +5456,66 @@ def ast_finding_is_fail_capable(af) -> bool:
     return af.severity == "crit" and af.rule not in _AST_NEVER_FAIL_RULES
 
 
+def _widened_scope_note(finding: Finding, root: Path) -> str:
+    """B-523: the sentence disclosing that a loose manifest widened the scan.
+
+    Read outside the audited scope IS a named disclosure kind elsewhere (``ctx.
+    disclosures`` / ``report._DISCLOSURE_HEADINGS``), but that channel is rendered only
+    for the full-audit path (``report._disclosure_lines``) — never for ``render_vet_
+    dossier``/``render_vet_json``, which take a ``VetProfile``, not a ``ctx``. Splicing
+    the fact into the ONE Finding vet_skill returns is what actually reaches both the
+    text dossier (its ``detail`` becomes the axis's ``reason``) and ``--json``
+    (``findings[].detail``) without a change to report.py. The file count comes from
+    ``ctx.file_manifest`` — what was ACTUALLY scanned, not a raw listing — so a capped
+    or partially-unreadable widen still reports honestly.
+    """
+    n = len(getattr(getattr(finding, "ctx", None), "file_manifest", None) or {})
+    return (
+        f"Scope note: 'SKILL.md' is a manifest, not a whole skill — nothing else in "
+        f"'{root.name}' was named on the command line, so this run widened the scan to "
+        f"that whole folder ({n} file{'s' if n != 1 else ''} read). If '{root.name}' "
+        "holds more than this one skill, point --vet-skill at the skill's own "
+        "subdirectory instead."
+    )
+
+
+def _narrowed_scope_note(root: Path) -> str:
+    """B-523: the sentence disclosing that widening was deliberately withheld.
+
+    Fires when ``resolve_skill_target`` found the manifest's folder but
+    ``_resolved_parent_is_plausible_skill_root`` judged it a general-purpose folder
+    (personal/downloaded files beside the manifest) rather than the skill's own
+    directory — so only the manifest text itself was scanned.
+    """
+    return (
+        f"Scope note: 'SKILL.md' sits in '{root.name}' alongside files that don't look "
+        "like they belong to one skill package, so the scan was kept to the manifest "
+        "file alone — nothing else in that folder was read. If this skill ships its own "
+        "code, point --vet-skill at the skill's own dedicated directory instead."
+    )
+
+
 def vet_skill(path: str | Path) -> Finding:
-    """Vet a skill BEFORE installing it: run the B13 scan on a local skill dir or SKILL.md."""
+    """Vet a skill BEFORE installing it: run the B13 scan on a local skill dir or SKILL.md.
+
+    B-523: a loose ``SKILL.md`` target is resolved (and bounded) by
+    ``resolve_skill_target``; this wrapper discloses the outcome — widened to the
+    containing folder, or deliberately held to the manifest alone — directly on the
+    returned Finding, so the reader can see what was actually scanned either way.
+    """
+    original = Path(path).expanduser()
+    is_loose_manifest = original.is_file() and original.name.lower() == "skill.md"
     p = resolve_skill_target(path)
+    finding = _vet_resolved_skill(p)
+    if is_loose_manifest and p != original:
+        finding.detail = f"{finding.detail} {_widened_scope_note(finding, p)}".strip()
+    elif is_loose_manifest and p == original and original.parent.is_dir():
+        finding.detail = f"{finding.detail} {_narrowed_scope_note(original.parent)}".strip()
+    return finding
+
+
+def _vet_resolved_skill(p: Path) -> Finding:
+    """The B13 scan itself, over an ALREADY-RESOLVED target (see ``vet_skill``)."""
     ctx = Context(home=p)
     if p.is_dir():
         if _is_own_source(p):

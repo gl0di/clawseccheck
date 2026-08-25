@@ -27,6 +27,10 @@ from pathlib import Path
 
 import pytest
 
+from clawseccheck.catalog import PASS
+from clawseccheck.checks import check_installed_skills
+from clawseccheck.collector import collect
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -120,3 +124,46 @@ def test_loud_alone_keeps_its_verdict_and_gains_no_phantom_gap(tmp_path):
     assert b13["status"] == "FAIL", b13["detail"]
     evidence = b13.get("evidence") or []
     assert not any("coverage: " in e and "locked" in e for e in evidence), evidence
+
+
+def test_the_clean_verdict_carries_the_gap_too(tmp_path):
+    """The branch B-552's first cut missed, and the worst one to miss.
+
+    `check_installed_skills`' PASS return does not route through `_b13_verdict`, so it
+    gathered the coverage disclosures separately. That gathering was a hand-written list
+    naming two buckets, and `_skill_read_gaps` was not in it — so a skill whose content
+    was partly unread produced "Scanned N installed skill(s); no shell-exec /
+    exfiltration / obfuscation patterns found" with no trace of the gap. A disclosure
+    whose stated purpose is to survive a verdict is worth least on the crit branches and
+    most here, on the one that tells the reader there is nothing to see.
+
+    The fix reads every "_"-prefixed bucket the way `_b13_verdict` does, so a bucket
+    added later cannot repeat this. The control below is what proves that: it asserts the
+    clean case really is clean first, so the positive assertion cannot pass on a fixture
+    that was carrying the note all along.
+    """
+    home = tmp_path / "home"
+    skills = home / "workspace" / "skills"
+    (skills / "clean").mkdir(parents=True)
+    (home / "openclaw.json").write_text('{"gateway": {"bind": "127.0.0.1"}}', encoding="utf-8")
+    (skills / "clean" / "SKILL.md").write_text(
+        "---\nname: clean\ndescription: A helper skill.\n---\nHelper.\n", encoding="utf-8")
+    (skills / "clean" / "lib.py").write_text("def ok():\n    return 1\n", encoding="utf-8")
+
+    ctx = collect(str(home))
+    before = check_installed_skills(ctx)
+    assert before.status == PASS, before.detail
+    assert not any("coverage: clean" in e for e in (before.evidence or [])), (
+        "control failed: the fixture already carried the note, so the assertion below "
+        f"would prove nothing: {before.evidence}"
+    )
+
+    ctx.skill_coverage_gaps["clean"] = ["locked/ (directory not entered): Permission denied"]
+    after = check_installed_skills(ctx)
+    assert after.status == PASS, (
+        "the gap is a coverage disclosure, not a signal — it must never revise the "
+        f"verdict: {after.detail}"
+    )
+    assert any("coverage: clean" in e and "locked" in e for e in (after.evidence or [])), (
+        f"the clean verdict dropped the coverage gap: {after.evidence}"
+    )
