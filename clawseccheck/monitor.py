@@ -1935,6 +1935,40 @@ def _config_file_digest(ctx) -> str:
     return getattr(ctx, "config_sha256", None) or ""
 
 
+def _config_resolved_digest(ctx) -> str:
+    """sha256 of the FULLY RESOLVED config — root plus every ``$include`` fragment.
+
+    B-527: ``_config_file_digest`` above covers the root file's bytes only, so a config
+    whose security posture lives in an ``$include`` fragment (bind address, gateway, MCP
+    servers, ...) can have a byte-stable root digest across a total posture change — the
+    fragment is merged into ``ctx.config`` but never hashed. Measured: editing a fragment's
+    ``"bind": "127.0.0.1"`` to ``"0.0.0.0"`` left ``config_file_sha256`` unchanged.
+
+    This closes that gap WITHOUT a second file read: it hashes ``ctx.config``, the dict
+    ``configloader.load_openclaw_config`` already produced by resolving and deep-merging
+    every fragment on the SAME read that captured the root digest. Re-reading the fragments
+    here to hash their raw bytes would reopen the exact race ``_config_file_digest``'s
+    docstring documents — a fragment edited between that read and this one would pair one
+    moment's digest with another moment's parsed values (``mcp``, ``gateway_bind``, ...) in
+    the same snapshot. Hashing the already-resolved dict has no second read to race.
+
+    ``json.dumps(..., sort_keys=True)`` makes the digest depend only on the resolved
+    VALUES, never on which fragment contributed a key or the order fragments were merged
+    in — the "path ordering must not move the digest" property, translated from paths to
+    keys. The trade is the mirror of ``_config_file_digest``'s: a comment-only or
+    key-order-only edit to the ROOT file can leave this digest unchanged (parsing already
+    normalized that away), which is exactly what the root byte digest still covers.
+
+    Returns ``""`` when there is nothing to hash (config never loaded), matching
+    ``_config_file_digest``'s convention so both digests are absent together on a blind run.
+    """
+    config = getattr(ctx, "config", None)
+    if not isinstance(config, dict):
+        return ""
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def snapshot(ctx, findings, score, prev: "dict | None" = None,
              behavioral: "dict | None" = None, install: "dict | None" = None,
              provenance: "dict | None" = None) -> dict:
@@ -2120,6 +2154,14 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         digest = _config_file_digest(ctx)
         if digest:
             snap["config_file_sha256"] = digest
+        # B-527: the resolved-config digest, store-only like config_file_sha256 was at
+        # C-417 — no diff() arm reads it yet, so it cannot alert. It closes the gap this
+        # task exists for on its own (an $include fragment edit moves it even when the
+        # root file's bytes do not), and a later phase can wire a comparison in once one
+        # is wanted, the same staged shape C-417 used for config_file_sha256 itself.
+        resolved_digest = _config_resolved_digest(ctx)
+        if resolved_digest:
+            snap["config_resolved_sha256"] = resolved_digest
         # F-170: OpenClaw's own config-write journal, captured HERE rather than compared
         # live in diff(), for two reasons. It keeps `diff` a pure function of two stored
         # snapshots — everything it concludes stays reproducible from the state file
