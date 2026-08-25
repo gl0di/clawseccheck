@@ -4473,6 +4473,37 @@ def _advise_reasons(profile, limit: int = 5) -> "tuple[list[str], int]":
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
+def _breaks_the_line_it_is_printed_on(text: str) -> bool:
+    """True when *text* cannot be rendered inside a copy-and-run block on one line.
+
+    B-577: B-487 established the hazard — a shell-quoted token carrying a newline is ONE
+    correct shell argument but TWO rendered lines, and in the `#`-commented branch the
+    second line carries no `#`, so its text sits in command position. B-487 refused via
+    `_CONTROL_CHAR_RE`, reasoning that no legitimate target holds a control character.
+
+    That class is ASCII-only, and three characters outside it are line boundaries to the
+    consumers this output is written for: U+0085 NEL, U+2028 LINE SEPARATOR, U+2029
+    PARAGRAPH SEPARATOR. All three are split by `str.splitlines()`, which is how an agent
+    or a tool reads a printed block line by line — and `docs/FLOW_CHOICES.md` tells the
+    agent to do exactly that. Measured before this change: all seven ASCII separators were
+    refused, while each of those three rendered a full plan with three command-position
+    lines, and `--advise` printed `rm -rf <payload>` on a line of its own.
+
+    The gap is NOT closed by adding those three. An enumerated class that looked
+    exhaustive is what produced the gap, and a fourth separator would reopen it. The
+    predicate is derived from the medium instead: whatever `str.splitlines()` treats as a
+    boundary IS the hazard, by definition of how the block is read. `!= [text]` rather
+    than `len(...) > 1` because a TRAILING separator splits to a single element and would
+    otherwise slip through.
+
+    The regex stays as the first clause: it covers control characters `splitlines()` does
+    NOT split on (NUL, BEL, DEL), which B-487's own reasoning still refuses.
+    """
+    if _CONTROL_CHAR_RE.search(text):
+        return True
+    return bool(text) and text.splitlines() != [text]
+
+
 def _refuse_command_plan(target: str) -> str:
     """The --vet-plan output for a target carrying a control character: no commands.
 
@@ -4586,11 +4617,11 @@ def render_advise(profile, ascii_only: bool = False) -> str:
     lines.append("Next steps:")
     if verdict != "INSTALL":
         lines.append("  Review the reasons above before proceeding; when you're done:")
-    if _CONTROL_CHAR_RE.search(str(profile.target)):
+    if _breaks_the_line_it_is_printed_on(str(profile.target)):
         # B-487: same line-structure hazard as --vet-plan. A quoted token carrying a
         # newline spans two rendered lines, so the path's own text would land on a line of
         # its own inside a copy-and-run block. Name the path escaped and emit no command.
-        lines.append(f"  This path contains a control character: {str(profile.target)!r}")
+        lines.append(f"  This path would break the line it is printed on: {str(profile.target)!r}")
         lines.append("  No cleanup command is printed for it — a `rm -rf` spanning two lines")
         lines.append("  is not safe to copy. Remove it by hand if it is a quarantine copy.")
     elif _looks_like_quarantine(profile.target):
@@ -4627,10 +4658,10 @@ def render_advise_json(profile, *, version: str) -> str:
     payload["advise_verdict"] = profile.verdict
     payload["reasons"], payload["reasons_omitted"] = _advise_reasons(profile)
     payload["is_quarantine_path"] = is_quarantine
-    if _CONTROL_CHAR_RE.search(str(profile.target)):
+    if _breaks_the_line_it_is_printed_on(str(profile.target)):
         # B-487: no command for a path that would break the line it is printed on.
         payload["cleanup"] = (
-            f"# path contains a control character ({str(profile.target)!r}) — no cleanup "
+            f"# path would break the line it is printed on ({str(profile.target)!r}) — no cleanup "
             "command is emitted; remove it by hand if it is a quarantine copy"
         )
     else:
@@ -4660,7 +4691,7 @@ def render_advise_json(profile, *, version: str) -> str:
 def render_vet_plan(target: str) -> str:
     from .checks import _parse_source_target  # noqa: PLC0415
 
-    if _CONTROL_CHAR_RE.search(target):
+    if _breaks_the_line_it_is_printed_on(target):
         return _refuse_command_plan(target)
 
     info = _parse_source_target(target)
