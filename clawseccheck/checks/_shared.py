@@ -912,6 +912,82 @@ def _norm_group_policy(channel_name, value):
     return "open" if channel_name == "feishu" and value == "allowall" else value
 
 
+# B-609: the dmPolicy sibling of _norm_group_policy above, and the fix for the gap that
+# function's own docstring names ("GROUNDING CORRECTION (item 4)") and B-499 explicitly
+# left open (test_an_unmodeled_dmpolicy_is_not_reported_as_a_resolved_default).
+#
+# Grounded against the installed dist (openclaw@2026.7.1-2), reading the RUNTIME
+# normalizer functions, not just the zod validation schemas — a schema rejection does
+# NOT stop a config from running: validateConfigObjectRaw uses safeParse and RETURNS
+# {ok:false, issues} rather than throwing (io-By0s-a_s.js:3900-3903), and the snapshot
+# read path on !validated.ok still returns runtimeConfig: coerceConfig(effectiveConfigRaw)
+# — the raw, unvalidated config (io-By0s-a_s.js:5676-5695). So an unmodeled dmPolicy
+# literal reaches the runtime, and what happens to it there is a per-channel fact, not a
+# schema fact.
+#
+# Exactly two channels have a dist-confirmed per-channel dmPolicy normalizer that maps
+# ANY literal outside its own recognized set to "pairing":
+#   Feishu   normalizeFeishuDmPolicy   policy-hydoYQvK.js:52-54
+#            `policy === "open" || policy === "pairing" || policy === "allowlist" ||
+#             policy === "disabled" ? policy : "pairing"`
+#            NOTE: this whitelists "disabled" even though Feishu's own DmPolicySchema
+#            (channel-PR3XHV0V.js:84-88) does NOT include "disabled" as a schema member —
+#            the runtime normalizer and the validation schema disagree with each other.
+#            So `dmPolicy: "disabled"` on Feishu is NOT the substitution case: it passes
+#            this normalizer unchanged and senderGateForDirect's own
+#            `if (dmPolicy === "disabled") return block("dm_policy_disabled")`
+#            (message-access-DucCKzfO.js:146) blocks all DMs — the user's stated intent
+#            IS what runs. Only a literal outside {open,pairing,allowlist,disabled} (a
+#            typo, or a value from a different channel's vocabulary, e.g. "owner") falls
+#            back to "pairing" for Feishu.
+#   iMessage normalizeDmPolicy         monitor-i23HdnNo.js:1216-1218
+#            `policy === "open" || policy === "allowlist" || policy === "disabled" ?
+#             policy : "pairing"` — any literal outside {open,allowlist,disabled}
+#            (including a stray "pairing" typo-variant, which is harmless since it lands
+#            on "pairing" anyway) falls back to "pairing".
+#
+# Every OTHER channel is deliberately left untouched, matching _norm_group_policy's own
+# "unmodeled channel -> unmodeled literal passes through unchanged" default. This was
+# checked, not assumed: the generic ingress resolver every other channel goes through
+# (resolveResolverPolicy, message-access-DucCKzfO.js:1028-1035) only substitutes
+# "pairing" via `??` when dmPolicy is ABSENT (null/undefined) — a DEFINED-but-invalid
+# string is not touched by it — and senderGateForDirect's own fallthrough for such a
+# value (message-access-DucCKzfO.js:164) is NOT the "pairing" branch: it evaluates
+# `allowlistFailureReason(dm) ?? "dm_policy_not_allowlisted"`, i.e. the sender is judged
+# against the configured allowlist, same shape as dmPolicy="allowlist" — not proven more
+# permissive than a genuine PASS reading, and in the common case (no allowFrom
+# configured) it blocks every sender outright. Claiming "pairing" there would be a
+# fabricated fact this project's Golden Rule #4 forbids; Synology Chat's
+# `authorizeUserForDmWithIngress` (channel-Dxc6BJwP.js:445) confirms the same
+# raw-passthrough shape on a channel that isn't even in the "core" schema family, so this
+# is not a Feishu/iMessage-only quirk of language, it is the DEFAULT for every channel
+# without its own bespoke normalizer.
+_DM_POLICY_UNMODELED_FALLBACK = {
+    "feishu": frozenset({"open", "pairing", "allowlist", "disabled"}),
+    "imessage": frozenset({"open", "allowlist", "disabled"}),
+}
+
+
+def _norm_dm_policy(channel_name, value):
+    """Normalize a raw ``dmPolicy`` literal to the value OpenClaw resolves it to, for the
+    two channels whose runtime normalizer is dist-confirmed to fall back to "pairing" on
+    any unrecognized literal. See the grounding comment above
+    ``_DM_POLICY_UNMODELED_FALLBACK`` for the citations and for why every other channel
+    (including LINE and the shared "core" schema family — telegram/discord/slack/...)
+    is deliberately excluded rather than defaulted to the same behavior: that fallback is
+    NOT what the dist does for them, and asserting otherwise would be an ungrounded claim,
+    not a conservative one.
+
+    Only a non-empty string is ever transformed — a schema-drifted dmPolicy (list/dict/
+    int) is never a genuine policy member either way (B-378 idiom) and is returned
+    unchanged, matching every sibling helper's degrade-don't-raise contract.
+    """
+    known = _DM_POLICY_UNMODELED_FALLBACK.get(channel_name)
+    if known is None or not isinstance(value, str) or value in known:
+        return value
+    return "pairing"
+
+
 # B-389 (C-135 review of the fix below): a channel-level credential does not stop
 # governing traffic once `accounts` is added — OpenClaw runs it as an extra IMPLICIT
 # default account alongside the explicitly configured ones (`hasImplicitDefaultAccount`,
@@ -1651,6 +1727,67 @@ def _resolved_default_input_channels(cfg: dict) -> list[str]:
         for _node, effective_dm in nodes:
             if effective_dm is None:
                 out.append(name)
+                break
+    return out
+
+
+def _substituted_dm_policy_channels(cfg: dict) -> dict:
+    """Enabled channels whose WRITTEN ``dmPolicy`` is a literal OpenClaw does not
+    recognize for that channel, on a channel where the dist confirms what it actually
+    runs on instead — see ``_norm_dm_policy``'s grounding comment for the citations.
+
+    B-609. Sibling of ``_resolved_default_input_channels`` (B-499) for the ABSENT case;
+    this is the WRITTEN-but-unmodeled case, which that helper's own docstring explicitly
+    left open (see ``test_an_unmodeled_dmpolicy_is_not_reported_as_a_resolved_default``).
+    Same WARN-grade-signal-not-a-leg doctrine, same reason: promoting an unmodeled write
+    to a leg would move ``active`` on a config this project has not measured at fleet
+    scale, which is the exact Golden Rule #5 risk B-499's own deferral was written to
+    avoid. A1 discloses what this returns; ``_trifecta_legs``/``_untrusted_input_channels``
+    never read it, so the leg count is untouched by construction.
+
+    Only reports a channel when THREE things all hold: the written value is a non-empty
+    string (a schema-drifted list/dict never was a genuine policy choice — B-378 idiom),
+    ``_norm_dm_policy`` actually transforms it for that channel (i.e. the channel is one
+    of the two with a dist-confirmed fallback — every other channel returns unchanged and
+    so never qualifies here, deliberately: see ``_norm_dm_policy``'s docstring for why
+    guessing at the rest would be a fabricated fact, not a conservative one), and the
+    resolved value lands in ``_UNTRUSTED_INPUT_POLICIES`` (true for every case this can
+    currently produce, since both grounded fallbacks resolve to "pairing" — checked
+    explicitly rather than assumed, so a future third grounded channel with a different
+    fallback target does not silently start reporting a restriction as an exposure).
+
+    Does not re-report a channel ``_untrusted_input_channels`` already counts (same
+    dedup ``_resolved_default_input_channels`` applies, same reason: that channel is
+    already a full leg on its own written policy). Account nodes inherit the channel's
+    written value when they do not set their own — same account -> channel precedence
+    as ``_resolved_default_input_channels``.
+
+    Returns ``{channel_name: (written_literal, resolved_value)}`` so a caller can name
+    both — naming only the unrecognised string would leave a reader knowing we were
+    confused without knowing what is actually running.
+    """
+    already = set(_untrusted_input_channels(cfg))
+    out: dict = {}
+    for name, c in _channels(cfg).items():
+        if name == "defaults" or not isinstance(c, dict) or c.get("enabled") is False:
+            continue
+        if name in already:
+            continue
+        channel_dm = c.get("dmPolicy")
+        accounts = c.get("accounts")
+        # B-378 idiom: a schema-drifted `accounts` (list/string) degrades to "no
+        # accounts" rather than raising.
+        account_nodes = list(accounts.values()) if isinstance(accounts, dict) else []
+        nodes = [(c, channel_dm)]
+        for a in account_nodes:
+            if isinstance(a, dict):
+                nodes.append((a, a.get("dmPolicy") if "dmPolicy" in a else channel_dm))
+        for _node, written in nodes:
+            if not isinstance(written, str) or not written:
+                continue
+            resolved = _norm_dm_policy(name, written)
+            if resolved != written and resolved in _UNTRUSTED_INPUT_POLICIES:
+                out[name] = (written, resolved)
                 break
     return out
 

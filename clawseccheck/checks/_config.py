@@ -70,6 +70,7 @@ from ._shared import (
     _resolved_channel_nodes,
     _resolved_default_input_channels,
     _secret_paths,
+    _substituted_dm_policy_channels,
     _surface_absent,
     _trifecta_leg_sources,
     _trifecta_legs,
@@ -572,6 +573,32 @@ def _resolved_default_note(ctx: Context) -> str:
         f" Resolved default: {', '.join(sorted(names))} set no dmPolicy, so OpenClaw"
         ' runs them on its default "pairing" — a sender it has approved once can send'
         " again. Not counted as a leg above, because the config never asked for it."
+    )
+
+
+def _substituted_dm_policy_note(ctx: Context) -> str:
+    """B-609: name the channels whose WRITTEN dmPolicy is not a value OpenClaw
+    recognizes for them, AND the value it actually runs on instead.
+
+    Without this the reader cannot tell a config that wrote an unrecognized dmPolicy
+    from one that restricted ingress correctly — both looked identical (PASS) in A1's
+    output, while OpenClaw silently substitutes "pairing" for the two channels this can
+    currently be grounded on (see ``_norm_dm_policy``). Naming only the string the user
+    wrote, without naming what is in effect instead, would leave them knowing this tool
+    was confused without knowing they are exposed — so both are always named together.
+    """
+    subs = _substituted_dm_policy_channels(ctx.config)
+    if not subs:
+        return ""
+    parts = [
+        f"{name!r} wrote dmPolicy={written!r}, which {name} does not accept — OpenClaw"
+        f' runs it on "{resolved}" instead'
+        for name, (written, resolved) in sorted(subs.items())
+    ]
+    return (
+        " Unmodeled dmPolicy: " + "; ".join(parts) + ". Not counted as a leg above,"
+        " because a typo is not a deliberate choice — but the effective posture is not"
+        " the one written; a sender it has approved once can send again."
     )
 
 
@@ -2812,11 +2839,15 @@ def check_trifecta(ctx: Context) -> Finding:
             " exfiltrate everything."
         )
     resolved_default = _resolved_default_input_channels(ctx.config)
-    detail += _distance_note(active, ingress_resolved_by_default=bool(resolved_default))
+    substituted_dm = _substituted_dm_policy_channels(ctx.config)  # B-609
+    detail += _distance_note(
+        active, ingress_resolved_by_default=bool(resolved_default or substituted_dm)
+    )
     detail += _mcp_leg_note(ctx)
     detail += _leg_attribution_note(active, _trifecta_leg_sources(ctx))  # B-493
     detail += _multi_agent_note(ctx)
     detail += _resolved_default_note(ctx)
+    detail += _substituted_dm_policy_note(ctx)  # B-609
 
     if len(active) >= 3:
         return _finding(
@@ -2868,8 +2899,24 @@ def check_trifecta(ctx: Context) -> Finding:
             'Set `dmPolicy: "disabled"` on those channels to close DM ingress. Leaving it'
             ' unset is not a restriction — OpenClaw resolves it to "pairing". Do not invent'
             " a value: `DmPolicySchema` accepts only open / pairing / allowlist / disabled"
-            " (Feishu and Lark accept the first three only, so they have no closed"
-            " setting), and the first three all admit a non-owner sender.",
+            " (Feishu and Lark's own schema defines only the first three — but `dmPolicy:"
+            ' "disabled"` is still honored by their runtime and blocks DMs, so it is the'
+            " correct value to write there too), and the other three all admit a"
+            " non-owner sender.",
+            evidence=active,
+        )
+
+    # B-609: a WRITTEN dmPolicy that OpenClaw does not recognize for its channel is not
+    # the same as one that restricted ingress, either — see _substituted_dm_policy_note.
+    if substituted_dm:
+        return _finding(
+            "A1",
+            WARN,
+            detail,
+            "Fix the typo: write one of the values `DmPolicySchema` actually accepts for"
+            ' that channel (open / pairing / allowlist / disabled; Feishu and Lark accept'
+            " the first, second, and third — see the note above for how `disabled` is"
+            " still honored there). An unrecognized literal is not read as a restriction.",
             evidence=active,
         )
 
