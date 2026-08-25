@@ -443,12 +443,55 @@ def _writable_identity_files(ctx: Context) -> list[str]:
     and openclaw.json — so a user-private-group / umask-002 box never false-FAILs.
     """
     writable: list[str] = []
-    from ..collector import SKILL_DIRS, WORKSPACE_DIRS
+    from ..collector import (
+        SKILL_DIRS, WORKSPACE_DIRS, _config_workspace_dirs, _safe_is_dir,
+    )
+
+    # B-564: keep this re-scan in sync with B20's. B20 (check_bootstrap_write_protection)
+    # scans the hardcoded WORKSPACE_DIRS *plus* any `agents.defaults.workspace` /
+    # `agents.list[].workspace` the config declares *plus* the paths the agent attested,
+    # and its own B-161 comment states the rule: "Using the same helper keeps the two
+    # scans in sync." This function was never brought into sync with either extra source,
+    # so one run could report B20 FAIL on a world-writable SOUL.md and, about the same
+    # file, B22 "no group/world-writable identity/skill targets found" -- a check
+    # asserting a negative about a file its sibling had just convicted. B22 is HIGH and
+    # scored, so the contradiction reached the grade, not just the text.
+    # Label convention is B20's: the workspace dir's basename, never an absolute path.
+    scan_dirs = [(ws, ctx.home / ws) for ws in WORKSPACE_DIRS]
+    scan_dirs += [
+        (cw.name or "workspace", cw)
+        for cw in _config_workspace_dirs(ctx.home, ctx.config)
+    ]
+
+    # ONE resolved-path ledger for BOTH loops below (dirs and attested files). B20 keeps
+    # its own `seen` set for exactly this reason; the first cut of B-564 copied B20's
+    # attested loop and left its de-dup behind, which is not cosmetic: the rendered
+    # evidence is `"; ".join(writable[:6])`, so repeated entries push real ones out of
+    # the report. Attesting one SOUL.md eight times evicted a 777 skills/ dir and a 666
+    # openclaw.json -- the two most actionable items -- from a finding that still said
+    # WARN. `attestation.paths.bootstrap` is authored by the agent, so a prompt-injected
+    # one could aim that eviction; a symlink or attesting a file already inside a scanned
+    # workspace reaches the same state with no adversary at all.
+    seen: set = set()
+
+    def _first_time(path: Path) -> bool:
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen:
+            return False
+        seen.add(key)
+        return True
 
     # Check SOUL.md (and the workspace dir that contains it)
-    for ws in WORKSPACE_DIRS:
-        ws_dir = ctx.home / ws
-        if not ws_dir.is_dir():
+    for ws, ws_dir in scan_dirs:
+        # B-303 via _safe_is_dir: a bare is_dir() raises PermissionError when the parent
+        # is non-traversable, and run_all would turn this HIGH scored check into a silent
+        # UNKNOWN -- a clean-looking degrade on a config we simply could not walk.
+        if not _safe_is_dir(ws_dir):
+            continue
+        if not _first_time(ws_dir):
             continue
         # Workspace dir itself writable-by-others gives write to all files inside
         try:
@@ -466,10 +509,33 @@ def _writable_identity_files(ctx: Context) -> list[str]:
                 continue
             try:
                 st = f.stat()
-                if _writable_by_others(st):
+                if _writable_by_others(st) and _first_time(f):
                     writable.append(f"{ws}/{fname} (mode {oct(st.st_mode & 0o777)[-3:]})")
             except OSError:
                 pass
+
+    # B-564: the paths the agent itself attested (`--ask` invites it to say where its
+    # identity/memory files REALLY live, at any path and any name). B20 already stat()s
+    # these; B22 did not, which is the reported half of this bug -- plant a world-writable
+    # SOUL.md outside every known workspace, attest it, and B20 named the file while B22
+    # said no such target existed. The engine still stat()s the file itself, so this stays
+    # an authoritative permission check rather than a self-report. Labelled by BASENAME,
+    # not the absolute path the attestation supplied: this string is rendered, and an
+    # absolute path carries the user's login name (§8).
+    for raw in _attest.attested_paths(ctx.attestation)["bootstrap"]:
+        f = Path(raw).expanduser()
+        if f.name not in _IDENTITY_TARGETS:
+            continue
+        try:
+            if not f.is_file():
+                continue
+            st = f.stat()
+        except OSError:
+            continue
+        if _writable_by_others(st) and _first_time(f):
+            writable.append(
+                f"{f.name} [attested] (mode {oct(st.st_mode & 0o777)[-3:]})"
+            )
 
     # Check the skills directories (writing here installs new skills)
     for rel in SKILL_DIRS:
