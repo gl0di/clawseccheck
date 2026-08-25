@@ -1041,6 +1041,17 @@ the deterministic engine, raised it — `overall_status`/`overall_grade`/`score`
 then re-derived from that pool the same way a plain `--vet` run always derives
 them (no separate rollup logic; `build_profile` is unchanged).
 
+**Vote-breakdown disclosure (B-406).** When a verdicts entry also carries the same
+optional `votes` object §13 documents (e.g. `{"SAFE": 1, "SUSPICIOUS": 0,
+"DANGEROUS": 2}`) and the breakdown shows the 3-lens panel did **not** agree
+unanimously, the prefix grows a trailing note: `"[escalated by host-agent judge:
+DANGEROUS (panel split: 2/3 DANGEROUS)] "`. A unanimous breakdown (or no `votes`
+field at all) leaves the prefix unchanged. This does not alter whether an
+escalation happens — only whether a reader can tell a disputed panel escalation
+from a unanimous one; it cannot make two wholly separate judge invocations of
+byte-identical prose agree with each other — nothing offline and stdlib-only can
+compel that.
+
 **`targetFingerprint` is mandatory (C-135, 2026-07-22).** An independent
 adversarial review confirmed that matching verdicts purely by `(finding_id,
 target)` — where `target` is only ever a bare name — let a verdicts file

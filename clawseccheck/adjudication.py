@@ -1091,6 +1091,25 @@ def _parse_verdicts(raw: str) -> dict:
     return out
 
 
+def _vote_tally(verdict: str, votes) -> "tuple[int, int]":
+    """``(hit, total)`` vote counts for *verdict* out of *votes*, or ``(0, 0)``
+    when *votes* is missing/malformed/empty. Extracted from what used to be
+    ``_annotate``'s own inline arithmetic (B-406) so ``_escalate_finding``
+    below reads the exact same numbers instead of a second, independently-
+    rotting copy of this loop -- this codebase has already grown three
+    hand-written readers of one field twice this week for exactly that
+    reason.
+    """
+    if not isinstance(votes, dict):
+        return 0, 0
+    try:
+        total = sum(int(v) for v in votes.values())
+        hit = int(votes.get(verdict, 0))
+    except (TypeError, ValueError):
+        return 0, 0
+    return (hit, total) if total > 0 else (0, 0)
+
+
 def _annotate(engine_disposition: str, entry: dict | None) -> str:
     """Plain-language re-rank line for one packet item, e.g. "engine: WARN
     ... judges: 3/3 DANGEROUS -> treat as high priority". ``entry`` is None
@@ -1099,16 +1118,8 @@ def _annotate(engine_disposition: str, entry: dict | None) -> str:
     if entry is None:
         return "not yet reviewed by a judge"
     verdict = entry["verdict"]
-    votes = entry.get("votes")
-    judges_desc = f"judge: {verdict}"
-    if isinstance(votes, dict):
-        try:
-            total = sum(int(v) for v in votes.values())
-            hit = int(votes.get(verdict, 0))
-        except (TypeError, ValueError):
-            total = 0
-        if total > 0:
-            judges_desc = f"judges: {hit}/{total} {verdict}"
+    hit, total = _vote_tally(verdict, entry.get("votes"))
+    judges_desc = f"judges: {hit}/{total} {verdict}" if total else f"judge: {verdict}"
     priority = _PRIORITY_BY_VERDICT.get(verdict, "worth a closer look")
     return f"engine: {engine_disposition} · {judges_desc} → {priority}"
 
@@ -1394,6 +1405,25 @@ def _escalate_finding(f, verdicts_map: dict):
     status escalated per ``_escalated_status``. Nothing is mutated in place.
     The escalation is attributed in ``detail`` so a reader can tell a judge,
     not the deterministic engine, raised it.
+
+    B-406: the "vet path has no consistency mechanism" gap this closes is
+    narrower than it may sound -- ``_parse_verdicts``'s duplicate-key handling
+    already guarantees ONE parse call resolves the same regardless of array
+    order (see that function's own B-406 note), and this codebase cannot make
+    two wholly separate host-agent judge invocations agree with each other --
+    nothing offline and stdlib-only can compel that. What WAS still silently
+    dropped here: SKILL.md's documented 3-lens panel asks the host to submit an
+    optional ``votes`` breakdown alongside the reduced ``verdict`` (the SAME
+    field ``_annotate``/``_vote_tally`` already read for the audit-path second
+    opinion), and this function threw it away -- a 2-1 split escalation and a
+    3-0 unanimous one produced byte-identical ``detail`` text. On an
+    escalate-only, score-capping path over untrusted content, that is exactly
+    the "inconsistent response treated as silently authoritative" case: the one
+    piece of the submitted payload that could tell a reader the panel actually
+    disagreed was accepted and then discarded at the one place it mattered
+    most. This does not change WHETHER an escalation happens -- still governed
+    solely by ``verdict``, per ``_escalated_status`` -- only whether a reader
+    can tell a disputed escalation from a unanimous one.
     """
     if not _is_borderline(f):
         return f
@@ -1402,9 +1432,11 @@ def _escalate_finding(f, verdicts_map: dict):
     new_status = _escalated_status(f.status, verdict)
     if new_status is None:
         return f
+    hit, total = _vote_tally(verdict, entry.get("votes"))
+    split = f" (panel split: {hit}/{total} {verdict})" if total and hit < total else ""
     return dc_replace(
         f, status=new_status,
-        detail=f"[escalated by host-agent judge: {verdict}] {f.detail}",
+        detail=f"[escalated by host-agent judge: {verdict}{split}] {f.detail}",
     )
 
 
