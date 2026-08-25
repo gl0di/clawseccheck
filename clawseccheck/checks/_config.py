@@ -54,6 +54,7 @@ from ._shared import (
     _channel_has_implicit_default_account,
     _channels,
     _config_unreadable,
+    _DM_POLICY_NESTED_ONLY_CHANNELS,
     _enabled_tools,
     _external_input_channels,
     _finding,
@@ -556,6 +557,38 @@ def _leg_attribution_note(active: list, leg_sources: dict) -> str:
     if not parts:
         return ""
     return " Sources: " + ". ".join(parts) + "."
+
+
+def _resolved_default_fix(names: list) -> str:
+    """B-619: the remediation for ``_resolved_default_note`` must recommend a key the
+    TARGET channel's own schema actually accepts — googlechat and matrix are ``.strict()``
+    with no flat ``dmPolicy`` field at all (see ``_DM_POLICY_NESTED_ONLY_CHANNELS``'s
+    grounding comment in ``_shared.py``), so recommending flat `dmPolicy: "disabled"` to
+    them is advice the config loader itself rejects — the exact "advice OpenClaw rejects"
+    defect ``test_the_remediation_never_recommends_a_value_the_schema_rejects`` (B-499)
+    already pins for the *value* axis (``"owner"``), now applied to the *path* axis.
+    """
+    nested_only = sorted(n for n in names if n in _DM_POLICY_NESTED_ONLY_CHANNELS)
+    other = sorted(n for n in names if n not in _DM_POLICY_NESTED_ONLY_CHANNELS)
+    parts = []
+    if other:
+        parts.append(
+            f'Set `dmPolicy: "disabled"` on {", ".join(other)} to close DM ingress.'
+        )
+    if nested_only:
+        parts.append(
+            f'On {", ".join(nested_only)}, set the nested `dm.policy: "disabled"`'
+            " instead — those schemas have no flat `dmPolicy` field at all, so that"
+            " key is rejected there."
+        )
+    return (
+        " ".join(parts) + ' Leaving it unset is not a restriction — OpenClaw resolves'
+        ' it to "pairing". Do not invent a value: `DmPolicySchema` accepts only open /'
+        " pairing / allowlist / disabled (Feishu and Lark's own schema defines only the"
+        ' first three — but `dmPolicy: "disabled"` is still honored by their runtime and'
+        " blocks DMs, so it is the correct value to write there too), and the other"
+        " three all admit a non-owner sender."
+    )
 
 
 def _resolved_default_note(ctx: Context) -> str:
@@ -2896,13 +2929,7 @@ def check_trifecta(ctx: Context) -> Finding:
             "A1",
             WARN,
             detail,
-            'Set `dmPolicy: "disabled"` on those channels to close DM ingress. Leaving it'
-            ' unset is not a restriction — OpenClaw resolves it to "pairing". Do not invent'
-            " a value: `DmPolicySchema` accepts only open / pairing / allowlist / disabled"
-            " (Feishu and Lark's own schema defines only the first three — but `dmPolicy:"
-            ' "disabled"` is still honored by their runtime and blocks DMs, so it is the'
-            " correct value to write there too), and the other three all admit a"
-            " non-owner sender.",
+            _resolved_default_fix(resolved_default),
             evidence=active,
         )
 

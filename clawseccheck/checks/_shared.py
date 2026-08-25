@@ -1643,6 +1643,101 @@ def _active_channels(cfg: dict) -> dict:
     }
 
 
+# B-619: a written ``dmPolicy`` is not always the flat key. Grounded against the
+# installed dist (openclaw@2026.7.1-2) by reading the RUNTIME resolvers that actually
+# gate message dispatch, not just the zod schema — the same three-place check (schema /
+# normalizer / consumer gate) B-609 already required, because they can disagree (Feishu's
+# schema omits "disabled" while its normalizer honors it — see _norm_dm_policy above).
+#
+# Exactly 4 channels define a nested `dm` config object ANYWHERE in the installed dist —
+# verified exhaustively with `grep -rn '^\tdm: [A-Za-z]'` across every dist/*.js file, not
+# assumed:
+#   discord     dm: DiscordDmSchema     bundled-channel-config-schema-CkfMA6sO.js:578
+#   slack       dm: SlackDmSchema       bundled-channel-config-schema-CkfMA6sO.js:859
+#   googlechat  dm: GoogleChatDmSchema  bundled-channel-config-schema-CkfMA6sO.js:1526
+#   matrix      dm: buildNestedDmConfigSchema(...)  config-schema-D6CA0P8M.js:247
+# Every other channel (telegram/feishu/imessage/msteams/whatsapp/nostr/line/zalo/...) has
+# no `dm` object in its schema at all, so a `dm.policy`/`dm.enabled` key on one of them is
+# never read by anything and inventing a closure there would be fabricated, not
+# conservative — same reasoning _norm_dm_policy's docstring already gives for scoping.
+#
+# Precedence differs by channel and is grounded at the REAL per-account resolver, not the
+# schema alone (dm-access-j6yOoNfd.js:81-85 `resolveChannelDmPolicy`, called with a `mode`
+# of "topOnly" (flat canonical, `dm.policy` legacy) or "nestedOnly" (reversed)):
+#   discord  topOnly:  resolveDiscordAccountDmPolicy (accounts-B2tNBeEr.js:39-48) calls
+#            resolveChannelDmPolicy with the default "topOnly" mode; consumed at the real
+#            DM dispatch gate (provider-DNXfDOia.js:3747-3754 `if (!dmEnabled ||
+#            dmPolicy === "disabled") ... "Discord DMs are disabled."`).
+#   slack    topOnly, by the same schema shape as discord (`dmPolicy ?? dm?.policy ??
+#            "pairing"` in the identical superRefine cross-check,
+#            bundled-channel-config-schema-CkfMA6sO.js:881) — the dedicated runtime file
+#            for Slack's own DM gate was not independently located within this task's
+#            grounding budget, so slack is scoped to the VALUE check only below, matching
+#            discord's grounded order, and explicitly NOT given a dm.enabled gate (next
+#            paragraph) since that specific consumer behavior is unconfirmed for Slack.
+#   googlechat  nestedOnly, and more than that: the real dispatch gate reads ONLY
+#            `dm.policy`, never falls back to flat at all — `const dmPolicy =
+#            account.config.dm?.policy ?? "pairing"` (channel2.runtime-Bb6oxd87.js:213).
+#            Consistent with the schema: GoogleChatAccountSchema is `.strict()` with no
+#            `dmPolicy` field whatsoever (bundled-channel-config-schema-CkfMA6sO.js:
+#            1490-1534) — a flat `dmPolicy` written there is rejected at validation AND
+#            silently ignored by the resolver that matters, so it must never be treated
+#            as a declaration for googlechat.
+#   matrix   nestedOnly, no flat field exists in the schema at all (grep for "dmPolicy"
+#            over config-schema-D6CA0P8M.js returns nothing); the real per-account
+#            resolver is `resolveMatrixDmPolicy = createScopedDmSecurityResolver({
+#            resolvePolicy: (account) => account.config.dm?.policy, ...})`
+#            (channel-DVVz3Nzd.js:774-778) — a "Security" resolver, i.e. the one that
+#            actually gates sender authorization, not a setup-wizard convenience reader.
+#
+# `dm.enabled === false` is a SEPARATE, higher-priority closure, independently grounded
+# at the dist's own generic ingress-registry helper (`channelDmPolicy`,
+# register-CvPzWKo8.js:2853-2870 — checked BEFORE the flat/nested value, returns
+# "disabled") and confirmed at two real consumer gates:
+#   googlechat  channel2.runtime-Bb6oxd87.js:325 `if (account.config.dm?.enabled ===
+#               false) { ...; return {ok:false}; }` — blocks BEFORE any policy check.
+#   discord     provider-DNXfDOia.js:1222,3747 `const dmEnabled = discordConfig?.dm?.
+#               enabled ?? true;` then `if (!dmEnabled || dmPolicy === "disabled") ...`.
+# Slack and Matrix are deliberately excluded from the dm.enabled set for the same reason
+# as Slack's value-order above: not independently confirmed at a consumer gate within
+# this task's grounding budget, and a false "enabled:false closes it" claim there would
+# risk the false-negative direction this fix exists to avoid, not just the false-positive
+# one it fixes.
+_DM_POLICY_NESTED_ONLY_CHANNELS = frozenset({"googlechat", "matrix"})
+_DM_POLICY_FLAT_PRIMARY_CHANNELS = frozenset({"discord", "slack"})
+_DM_POLICY_ENABLED_GATE_CHANNELS = frozenset({"googlechat", "discord"})
+
+
+def _declared_dm_policy(channel_name: str, node) -> str | None:
+    """The dmPolicy value *node* declares for *channel_name*, reading every form the
+    installed dist actually resolves — not just the flat ``dmPolicy`` key. See the
+    grounding comment above ``_DM_POLICY_NESTED_ONLY_CHANNELS`` for the per-channel
+    citations. Returns ``None`` when nothing is declared (the config is silent and
+    OpenClaw falls back to its product default, "pairing", elsewhere) — never raises on a
+    schema-drifted value (B-378 idiom: a list/dict/int at either key is never a genuine
+    policy literal either way).
+    """
+    if not isinstance(node, dict):
+        return None
+    dm = node.get("dm")
+    dm = dm if isinstance(dm, dict) else {}
+    if channel_name in _DM_POLICY_ENABLED_GATE_CHANNELS and dm.get("enabled") is False:
+        return "disabled"
+    nested = dm.get("policy")
+    nested = nested if isinstance(nested, str) and nested else None
+    if channel_name in _DM_POLICY_NESTED_ONLY_CHANNELS:
+        return nested
+    flat = node.get("dmPolicy")
+    flat = flat if isinstance(flat, str) and flat else None
+    if channel_name in _DM_POLICY_FLAT_PRIMARY_CHANNELS:
+        return flat if flat is not None else nested
+    # Every other channel: flat only, matching every dedicated per-channel resolver
+    # grepped for this fix (telegramCfg.dmPolicy / feishuCfg?.dmPolicy /
+    # imessageCfg.dmPolicy / msteamsCfg?.dmPolicy, all `?? "pairing"`, none consult a
+    # `dm` object because their schema doesn't define one — see the module comment).
+    return flat
+
+
 def _untrusted_input_channels(cfg: dict) -> list[str]:
     """Enabled channels that can receive non-owner (untrusted) input.
 
@@ -1655,6 +1750,19 @@ def _untrusted_input_channels(cfg: dict) -> list[str]:
     as untrusted, consistent with the leg doctrine at _UNTRUSTED_INPUT_POLICIES: a
     groups-present denylist would FAIL a safe owner-approved group bot ("ask") — a §5
     false positive — so we key off the untrusted-policy allowlist only.
+
+    B-619: ``dmPolicy`` is read via ``_declared_dm_policy`` rather than the raw flat key
+    directly, so a channel written only via a nested ``dm.policy`` (discord/slack/
+    googlechat/matrix — see ``_declared_dm_policy``'s grounding comment) is no longer
+    invisible to leg-counting. Before this fix a nested `dm.policy: "open"` was silently
+    dropped here, which could under-count the trifecta's untrusted-input leg entirely on
+    a config where no other source supplied it — a false negative, not just a wrong WARN
+    string. This is a per-node, unmerged read (same shallow walk as before this fix,
+    intentionally NOT inherited from the channel to an account that omits its own): a
+    node that writes nothing itself still resolves to the product default ("pairing")
+    at runtime, but that resolved-default case is a WARN-only signal
+    (``_resolved_default_input_channels``), never promoted to a leg — unchanged by this
+    fix.
     """
     out = []
     for name, c in _channels(cfg).items():
@@ -1667,7 +1775,7 @@ def _untrusted_input_channels(cfg: dict) -> list[str]:
         for node in nodes:
             if not isinstance(node, dict):
                 continue
-            dm_policy = node.get("dmPolicy")
+            dm_policy = _declared_dm_policy(name, node)
             group_policy = _norm_group_policy(name, node.get("groupPolicy"))
             # B-378: an unmodeled dmPolicy/groupPolicy (e.g. a list) is never a
             # genuine policy member — only a hashable value even needs the `in` test.
@@ -1706,6 +1814,20 @@ def _resolved_default_input_channels(cfg: dict) -> list[str]:
     Account nodes inherit the channel's value when they do not set their own, matching
     the account -> channel precedence the dist uses elsewhere; an account that omits
     ``dmPolicy`` under a channel that sets it is therefore NOT a resolved default.
+
+    B-619: the presence check now goes through ``_declared_dm_policy`` (flat OR nested OR
+    ``dm.enabled``, per its grounding comment) instead of the raw flat ``dmPolicy`` key —
+    a nested-only channel (googlechat/matrix) or a hybrid one written via its nested form
+    (discord/slack) used to look identical to a channel that wrote nothing at all.
+
+    B-619 also fixes the base-channel-node handling for the accounts case: the old code
+    unconditionally treated the raw channel node as an always-live sibling of every
+    account, so a flat-key channel (e.g. telegram) whose ONLY declared policy sat on its
+    one configured account was still reported, because the untouched base node's own
+    absence was enough to trigger it. The base node is only evaluated on its own when it
+    is actually live — no ``accounts`` at all, or ``_channel_has_implicit_default_account``
+    confirms a credential still spawns it alongside the configured ones (same doctrine
+    ``_open_channels`` already applies for groups/allowFrom, B-389).
     """
     already = set(_untrusted_input_channels(cfg))
     out: list[str] = []
@@ -1715,19 +1837,24 @@ def _resolved_default_input_channels(cfg: dict) -> list[str]:
             continue
         if name in already:
             continue
-        channel_dm = c.get("dmPolicy")
+        channel_declared = _declared_dm_policy(name, c)
         accounts = c.get("accounts")
         # B-378 idiom: a schema-drifted `accounts` (list/string) degrades to "no
         # accounts" rather than raising.
         account_nodes = list(accounts.values()) if isinstance(accounts, dict) else []
-        nodes = [(c, channel_dm)]
-        for a in account_nodes:
-            if isinstance(a, dict):
-                nodes.append((a, a.get("dmPolicy") if "dmPolicy" in a else channel_dm))
-        for _node, effective_dm in nodes:
-            if effective_dm is None:
-                out.append(name)
-                break
+        live_declared: list = []
+        if account_nodes:
+            for a in account_nodes:
+                if not isinstance(a, dict):
+                    continue
+                own = _declared_dm_policy(name, a)
+                live_declared.append(own if own is not None else channel_declared)
+            if _channel_has_implicit_default_account(name, c):
+                live_declared.append(channel_declared)
+        else:
+            live_declared.append(channel_declared)
+        if any(d is None for d in live_declared):
+            out.append(name)
     return out
 
 
