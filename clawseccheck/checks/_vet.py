@@ -4317,7 +4317,27 @@ def check_installed_skills(ctx: Context) -> Finding:
     # chain — see _b13_verdict's docstring above. Buckets computed lazily further
     # down (skill_limit_hits, path_traversal, the mismatch/polyglot/binary
     # `warnings` list, warns_squat) are registered at their own point of
-    # computation, never eagerly.
+    # computation, never eagerly. ONE exception: `_skill_read_gaps` immediately
+    # below, which is deliberately eager — see its own comment.
+    #
+    # B-552: a skill's own unreadable-content gap must survive a DIFFERENT skill
+    # winning the crit/high verdict below (crit/high `return` before
+    # `skill_limit_hits`/`unreadable` are ever computed, further down this
+    # function) — otherwise a loudly-bad sibling skill silently erases the honest
+    # disclosure that another skill was never fully read. `ctx.skill_coverage_gaps`
+    # (collector.py's `_note_skill_gap`) is keyed by skill name STRUCTURALLY: a flat
+    # `ctx.unreadable_files`/`ctx.limit_hits` string such as "lib/ (directory not
+    # entered): Permission denied" cannot say whose skill it is on its own (see
+    # `_note_skill_gap`'s own docstring) — this reads the per-skill dict instead of
+    # re-deriving identity by parsing path text. Registered under a "_"-prefixed key
+    # (C-358 contract, `_b13_verdict` above): rides into `fx.evidence` on EVERY
+    # branch, never becomes a corroborating signal, never wins the ladder — the
+    # crit/high/skill_limit_hits/unreadable branches below are unchanged.
+    _skill_read_gaps = [
+        f"coverage: {name}: {entry}"
+        for name, entries in sorted(ctx.skill_coverage_gaps.items())
+        for entry in entries
+    ]
     _signal_buckets: dict[str, list] = {
         "crit": crit,
         "high": high,
@@ -4343,6 +4363,8 @@ def check_installed_skills(ctx: Context) -> Finding:
         # B-544: same carve-out, for the H6 advisory — see h6_advisory's declaration
         # above. Never a winner (nothing calls _b13_verdict with this key).
         "_h6_advisory": h6_advisory,
+        # B-552: same carve-out — see _skill_read_gaps' declaration above.
+        "_skill_read_gaps": _skill_read_gaps,
     }
     if crit:
         extra = f" (+{len(crit) - 6} more)" if len(crit) > 6 else ""
