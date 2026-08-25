@@ -203,6 +203,93 @@ _CRED_FAMILY_FALLBACK = "credential-store"
 _MAX_CRED_MATCHES_PER_BLOB = 256
 
 
+# B-573 — OpenClaw's OWN credential store, added to the SKILL-INDICATOR vocabulary
+# (skill_indicators() below), local to this module because `_CRED_RE`/`_SECRET_PATH_RE`/
+# `_EXFIL_RE` live in checks/_shared.py, a file this task does not own.
+#
+# GROUNDED against the installed dist (openclaw@2026.7.1-2), never guessed:
+#   * `paths-BMBAvkNf.js:213-215` — `resolveOAuthDir()` returns
+#     `path.join(stateDir, "credentials")` (stateDir defaults to `homedir()/.openclaw`),
+#     doc-commented there as "OAuth credentials storage directory".
+#   * `security-audit-qcqYJtzk.js:42` — OpenClaw's OWN security-audit code cites the
+#     literal path `"~/.openclaw/credentials/discord-allowFrom.json"` as a finding source.
+#   * `pairing-store-D-135J6T.js:80-81` — `resolveAllowFromFilePath()` writes
+#     `<channel>-allowFrom.json` / `<channel>-<accountKey>-allowFrom.json` under that same
+#     dir (`resolvePairingCredentialsDir()` == `resolveOAuthDir()`, same file :40-42).
+#   * `pairing-store-D-135J6T.js:276` — `resolvePairingPath()` writes
+#     `<channel>-pairing.json` under the same dir.
+#   * Confirmed present on a real host: `~/.openclaw/credentials/` exists, mode 0700,
+#     holding `telegram-default-allowFrom.json` and `telegram-pairing.json` — an exact
+#     match for the grounded naming convention (channel=telegram, account=default).
+#
+# TWO REJECTIONS RECORDED HERE, both from measurement, not intuition — do not
+# "helpfully" re-add either without redoing the measurement that dropped it:
+#
+# (1) `openclaw.json` (the config file itself) is DELIBERATELY NOT an anchor, and
+# neither is its `.bak`/`.bak.N`/`.pre-update`/`.last-good` backup ring (every one of
+# those names contains the literal substring "openclaw.json", so anchoring the bare
+# filename would have caught them for free — that is precisely why it is rejected, not
+# despite it). Adversarial pass, this task: a real installed skill on the author's own
+# machine ("canvas", nothing to do with credentials) documents
+# "Active config: `$OPENCLAW_CONFIG_PATH` or `~/.openclaw/openclaw.json`" in ordinary
+# prose. Unlike `.ssh/id_rsa` or the filenames below, there is a completely benign,
+# common reason for a skill to name the config path, so it fails the discriminator that
+# makes the other anchors safe: "a skill's text naming it is itself suspicious." `hits`
+# (what this vocabulary feeds) is grade-cap-eligible (`grade_cap_signal` below), so this
+# would have been a real, scored false positive, not just a noisy report line.
+#
+# (2) The credentials DIRECTORY itself (`\.openclaw/credentials\b`) was implemented,
+# measured, and then DROPPED as unconditionally redundant — not merely FP-prone like (1).
+# Before/after comparison (this task) on a skill naming the real path
+# (`~/.openclaw/credentials/discord-allowFrom.json`) showed `_SECRET_PATH_RE`
+# (checks/_shared.py) ALREADY produces a hit and an INCIDENT SIGNAL with this module
+# UNCHANGED: `credentials` structurally contains the substring `credential`, one of
+# `_SECRET_PATH_RE`'s five trigger words, and the B-157 "/"-required filter always passes
+# too since a real directory mention always carries a path separator. There is no
+# phrasing of the real directory path that can escape the existing regex, so a dedicated
+# anchor for it adds matched surface (and grade-cap exposure) for zero incremental
+# coverage. Only the FILENAME shapes below survive that redundancy check: a skill can
+# name `discord-allowFrom.json` or `telegram-pairing.json` bare, with none of
+# `_SECRET_PATH_RE`'s trigger words anywhere nearby, and that phrasing produces zero
+# indicators without this anchor (measured, this task) — mirroring how `_CRED_RE`
+# already treats other product-specific bare filenames (`wallet.dat`, `keystore.json`,
+# `.npmrc`) as sufficiently distinctive on their own.
+#
+# (3) OVER-BROAD PREFIX, found by an independent C-135 pass and fixed here.
+# `[\w.-]*-(?:allowFrom|pairing)\.json` alone also matches `config-pairing.json`,
+# `test-pairing.json`, `my-pairing.json`, `user-allowFrom.json` — generic filenames any
+# product could use, with nothing tying them to OpenClaw. Swept the real corpus (615
+# SKILL.md files under `~/.openclaw`, this task): zero live hits on the bare regex today,
+# so the over-breadth was theoretical, not an active false positive — but `hits` is the
+# only remaining source `scoring._runtime_cap_signal` caps the grade on (catalog.py:1248),
+# so a false positive here is not just a stray report line, it downgrades a user's score.
+# Fixed by requiring an OpenClaw CONTEXT TOKEN (the literal word "openclaw") to appear
+# ANYWHERE in the same skill's text before a filename-shape match counts — gated in
+# skill_indicators() below, not in this regex, since the token can legitimately be
+# anywhere in the skill (a different sentence/section), not adjacent to the filename.
+# This kills all four FP shapes above (an unrelated product's docs have no reason to say
+# "openclaw") without reintroducing the redundancy from (2): unlike `_SECRET_PATH_RE`,
+# which needs the trigger word inside the SAME contiguous path-shaped token, this gate
+# only needs "openclaw" anywhere in the skill text, so the genuine gap this anchor closes
+# — "back up your pairing state, copy telegram-pairing.json" with no trigger word near
+# the filename — still correlates as long as "openclaw" is mentioned anywhere else in the
+# same skill (pinned in tests/test_b573_openclaw_cred_store.py).
+#
+# Deliberately NOT a channel-name enumeration (`telegram|discord|slack|...`): that list
+# goes stale behind the next channel OpenClaw adds. The context-token gate is a
+# channel-agnostic replacement for that same specificity, and is now the ONLY thing this
+# anchor's precision depends on.
+_OPENCLAW_CRED_STORE_RE = re.compile(
+    r"[\w.-]*-(?:allowFrom|pairing)\.json\b",
+    re.I,
+)
+# B-573 part (3): the OpenClaw context-token gate `_OPENCLAW_CRED_STORE_RE` needs — see
+# the comment above. Deliberately just the bare product name, not a path fragment: it
+# must match a skill saying "for OpenClaw agents" in prose just as well as one that also
+# spells out a `.openclaw` path.
+_OPENCLAW_CONTEXT_TOKEN_RE = re.compile(r"openclaw", re.I)
+
+
 def _cred_family(match_text: str) -> str:
     """Map one `_CRED_RE` match to a closed-vocabulary family label (§8, B-299 Part A).
 
@@ -221,26 +308,43 @@ def _cred_family(match_text: str) -> str:
 def skill_indicators(installed_skills: dict | None) -> dict[str, str]:
     """Map each concrete indicator an installed skill NAMES -> the skill that named it.
 
-    Indicators: credential-shaped paths (_CRED_RE), exfil hosts (_EXFIL_RE), and
-    secret-named file paths (_SECRET_PATH_RE). These are already visible in the skill's own
-    text (nothing secret is invented), and are the tokens whose appearance in a runtime
-    tool.call argument is strong evidence the skill's instruction was acted on.
+    Indicators: credential-shaped paths (_CRED_RE), exfil hosts (_EXFIL_RE), secret-named
+    file paths (_SECRET_PATH_RE), and OpenClaw's OWN OAuth/pairing credential FILENAMES
+    (_OPENCLAW_CRED_STORE_RE, B-573 — `<channel>-allowFrom.json` / `<channel>-pairing.json`
+    only; see its own definition for dist grounding and for why both the credentials
+    DIRECTORY and `openclaw.json` itself were tried and deliberately excluded). The
+    filename-shape anchor additionally requires the skill's text to mention "openclaw"
+    somewhere (`_OPENCLAW_CONTEXT_TOKEN_RE`, B-573 part 3) — an independent C-135 pass
+    found the bare filename regex also matches generic, product-agnostic names like
+    `config-pairing.json`; see the regex's own comment for the full record. These are
+    already visible in the skill's own text (nothing secret is invented), and are the
+    tokens whose appearance in a runtime tool.call argument is strong evidence the skill's
+    instruction was acted on.
     """
     out: dict[str, str] = {}
     for name, text in (installed_skills or {}).items():
         if not isinstance(text, str):
             continue
-        for rx in (_CRED_RE, _EXFIL_RE, _SECRET_PATH_RE):
+        # B-573 part 3: computed once per skill, not per match — the context token can be
+        # anywhere in the skill's text, not adjacent to the filename it gates.
+        has_openclaw_context = _OPENCLAW_CONTEXT_TOKEN_RE.search(text) is not None
+        for rx in (_CRED_RE, _EXFIL_RE, _SECRET_PATH_RE, _OPENCLAW_CRED_STORE_RE):
             for m in rx.finditer(text):
                 tok = m.group(0).strip().strip(".,;:\"'`)(")
                 if len(tok) < _MIN_INDICATOR_LEN or tok in out:
                     continue
                 # B-157: a _SECRET_PATH_RE hit with no path separator at all is a bare
                 # English word ("secret", "password", "tokens" as prose), not a path a
-                # skill named — drop it. _CRED_RE / _EXFIL_RE tokens are always
-                # path/host-shaped by construction, so this only constrains
-                # _SECRET_PATH_RE.
+                # skill named — drop it. _CRED_RE / _EXFIL_RE / _OPENCLAW_CRED_STORE_RE
+                # tokens are always path/host/filename-shaped by construction, so this
+                # only constrains _SECRET_PATH_RE.
                 if rx is _SECRET_PATH_RE and "/" not in tok and not tok.startswith("~"):
+                    continue
+                # B-573 part 3: a generic `<word>-allowFrom.json`/`<word>-pairing.json`
+                # match is not OpenClaw-specific on its own (config-pairing.json,
+                # test-pairing.json, ...) — only count it when the skill's own text also
+                # names the product.
+                if rx is _OPENCLAW_CRED_STORE_RE and not has_openclaw_context:
                     continue
                 out[tok] = str(name)
     return out
