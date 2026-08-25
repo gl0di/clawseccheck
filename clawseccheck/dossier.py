@@ -115,6 +115,15 @@ _AXIS_BY_ID: dict[str, str | None] = {
     "B59": "connections",  # markdown-image data-exfil = outbound channel
     "B338": "connections",  # covert tunnel / mesh-VPN enrollment = outbound channel (E-065)
     "B339": None,  # cloud IMDS credential fetch — dual-axis via axis_reasons (E-065/C-322)
+    # B-613: B335 (runtime-computed sitecustomize/usercustomize/PYTHONSTARTUP
+    # auto-execution persistence install) was surface-routed to "build" only — its own
+    # finding text says "persistence install", so the Persistence axis silently read an
+    # empty bucket and printed "no dormant or staged code detected" over the same file
+    # Build quality WARNs on. Dual-axis like B339, but B335's producer (checks/_content.py)
+    # never populates .axis_reasons, so it cannot go through _route_axis_reasons — routed
+    # to None here and bucketed into BOTH "build" and "persistence" directly at the call
+    # site below.
+    "B335": None,
     "SOURCE-VET": "danger",  # reputation gate is a pure danger/identity verdict
     # F-148: the content ring was cut short by the scan budget, so part of the skill was
     # never assessed. Mapped to danger deliberately — the ring feeds several axes, but
@@ -549,6 +558,19 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
             # signal found" — never onto "danger", which would misfile an ordinary clean
             # result under the malware-verdict axis.
             _route_axis_reasons(f, buckets, fallback_axis="connections")
+        elif f.id == "B335":
+            # B-613: same underlying fact is genuinely both a build-quality/authoring-
+            # hygiene issue (an installer that self-modifies the interpreter's
+            # auto-execution surface) and a persistence issue (what it stores for the
+            # future) — bucket the SAME finding object into both so neither axis loses
+            # the signal. Deliberately no `dc_replace`: both axes want the identical
+            # status/detail/fix text, so there is nothing per-axis to fabricate. That
+            # also makes this a pure re-routing change — `f.detail` (what the fingerprint
+            # manifest hashes) is the same object, unmutated, in both buckets, so this
+            # moves no fingerprint and needs no manifest re-stamp; only WHICH axis
+            # renders that text is new.
+            buckets["build"].append(f)
+            buckets["persistence"].append(f)
         else:
             # A real finding that maps nowhere is a coverage gap we surface, never swallow.
             unmapped.append(f.id)
