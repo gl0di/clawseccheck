@@ -2367,10 +2367,9 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Pattern: CRITICAL: public/group sender + exec/write/elevated tool.
 - Chain: channel_label -> tool_label -> host / filesystem
 - Why:
-  The channel '{channel_label}' accepts messages from anyone (dmPolicy or groupPolicy is
-  'open'). The agent also has {tool_label} enabled. Any anonymous actor can craft a
-  message that causes the agent to execute code or mutate files on the host — no
-  additional privilege escalation required.
+  The channel '{channel_label}' {open_reason}. The agent also has {tool_label} enabled.
+  Any anonymous actor can craft a message that causes the agent to execute code or mutate
+  files on the host — no additional privilege escalation required.
 - Fix:
   Lock every channel's dmPolicy and groupPolicy to 'allowlist' so only known, trusted
   senders can reach the agent. If open channels are required, remove or gate
