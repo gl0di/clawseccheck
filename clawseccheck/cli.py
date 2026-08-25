@@ -2448,6 +2448,10 @@ def _main(argv=None) -> int:
                         "binding.gyp command-expansion — carries a code-execution signal). "
                         "The walk is read-only and offline, but traverses the whole installed "
                         "tree, so this is the escape hatch on a very large one")
+    p.add_argument("--no-dist", action="store_true",
+                   help="skip reading the installed OpenClaw package's own version "
+                        "(C4 corroborates it against meta.lastTouchedVersion to "
+                        "surface a version rollback). Read-only PATH lookup, no subprocess")
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")
     p.add_argument("--monitor", action="store_true",
                    help="monitor mode: alert on what changed since the last check")
@@ -3310,6 +3314,7 @@ def _main(argv=None) -> int:
                                      include_host=not args.no_host,
                                      include_sockets=not args.no_sockets,
                                      include_deptree=not args.no_deptree,
+                                     include_dist=not args.no_dist,
                                      exhaustive=args.exhaustive)
             suppressed = [f for f in findings if getattr(f, "suppressed", False)]
             # B-154: a bare "RISK-NN" entry matches a RiskPath.id, not any Finding —
@@ -3470,6 +3475,7 @@ def _main(argv=None) -> int:
                                      include_host=not args.no_host,
                                      include_sockets=not args.no_sockets,
                                      include_deptree=not args.no_deptree,
+                                     include_dist=not args.no_dist,
                                      attestation=attestation,
                                      exhaustive=args.exhaustive)
     except (PermissionError, OSError) as exc:

@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 from .. import attest as _attest
+from .. import openclawdist as _openclawdist  # B-502: C4 single-run version-rollback signal
 from .. import trajectory as _trajectory  # B-294/B189: session pivot for erased cron jobs
 from ..catalog import (
     BY_ID,
@@ -5221,23 +5222,128 @@ def check_update_pinning(ctx: Context) -> Finding:
 
 
 # ---------- C4: version / update hygiene (advisory) ----------
+#
+# B-502: the previous version of this check printed `meta.lastTouchedVersion` and PASSed
+# UNCONDITIONALLY whenever it was present -- so a rollback onto an older, potentially
+# vulnerable build (2026.7.1 -> 2026.3.0) stayed PASS. Fixed WITHOUT any cross-run memory:
+# `meta.lastTouchedVersion` is which build last WROTE the config, and comparing it against
+# which build is INSTALLED NOW, in the SAME run, already reveals a rollback --
+# openclawdist.self_reported_version's own docstring: "a downgrade leaves the config
+# stamped with the newer version -- and neither one alone can show it, which is the whole
+# reason both are recorded." No monitor snapshot / prior audit run is needed.
+#
+# Deliberately calls `deptree.find_package_root` + the private `openclawdist._read_version`
+# rather than `openclawdist.describe_install` -- the latter also digests the installed
+# package's whole executable surface (~0.3s on a real install) for an integrity check this
+# advisory does not need; the two calls used here cost ~0.005s combined (measured).
+#
+# C-135: a "down" result here is NOT proof of tampering. Two benign, real-world causes
+# produce it and neither is distinguishable from a genuine rollback by a single read-only,
+# offline pass: (1) two OpenClaw installs on one machine (e.g. a project-local install
+# alongside a global npm one) -- PATH resolves whichever comes first, which need not be the
+# one that last wrote this config; (2) a config synced from another machine (dotfiles-style)
+# that ran a newer build than this one has installed. The WARN text below states the fact
+# and asks for confirmation; it never asserts an attack, and it is LOW/advisory (scored=
+# False), same as every other verdict this check has ever produced.
 def check_version(ctx: Context) -> Finding:
+    """C4 -- OpenClaw version / update hygiene.
+
+    PASS    -- self-reported and installed versions agree, or the installed build is
+               newer than the self-reported one (a normal upgrade) -- no rollback signal.
+    WARN    -- the installed build is OLDER than the version that last wrote the config --
+               a rollback signature (see the C-135 note above this function). Never a
+               vulnerability claim -- B33 is the grounded gate against real advisories.
+    UNKNOWN -- the self-reported version is absent, the installed package could not be
+               located on PATH, or the two version strings cannot be reliably ordered
+               (non-numeric / pre-release build) -- never guessed as PASS.
+
+    The installed version comes from ``ctx.installed_dist_version``, which ``audit()``
+    populates only under ``include_dist=True`` (the CLI passes it; ``--no-dist`` opts
+    out). A test drives every branch by setting that field, so no verdict here depends on
+    whatever OpenClaw happens to be installed on the machine running the suite.
+    """
     ver = dig(ctx.config, "meta.lastTouchedVersion") or dig(ctx.config, "lastTouchedVersion")
     if not ver:
         return _custom(
             "C4", BY_ID["C4"].severity, UNKNOWN, "OpenClaw version not recorded in config.", "—"
         )
+    ver = str(ver)
+
+    # Read the installed version from the Context, never from the host directly. That is
+    # what keeps this check hermetic: `audit()` resolves it once behind `include_dist`
+    # (default False), exactly as `sockets`/`dep_tree` are gated. A check that walked PATH
+    # itself would make C4's detail a function of whatever OpenClaw happens to be on the
+    # machine running the scan -- and since the fixture corpus goes through `audit()`, that
+    # would move committed finding fingerprints between a dev box and CI.
+    installed = getattr(ctx, "installed_dist_version", None) or ""
+    if not installed:
+        # Hermetic default, and also "the lookup ran but PATH did not resolve openclaw".
+        # Both fall back to the ORIGINAL presence-only verdict, byte-identical, so no
+        # pre-existing test or manifest entry moves. Deliberately not UNKNOWN: this branch
+        # is the normal state for every hermetic caller, and turning the common case into
+        # UNKNOWN would be a louder lie than the quiet PASS it replaced.
+        return _custom(
+            "C4",
+            BY_ID["C4"].severity,
+            PASS,
+            f"OpenClaw config last touched by version {ver}. Known-vulnerable releases "
+            "are gated by B33; this is an update-hygiene reminder, not a vulnerability claim.",
+            "Keep OpenClaw updated and re-run the checks after upgrading.",
+        )
+
     # Advisory only — do NOT claim a vulnerability here. The grounded known-vulnerable
     # version gate is B33 (check_known_vulns), which compares against real advisories.
     # C4 stays a neutral update-hygiene reminder; it must not name a CVE it can't ground
     # or imply a current/patched version is outdated (it has no offline "latest" to judge).
+    if ver == installed:
+        return _custom(
+            "C4",
+            BY_ID["C4"].severity,
+            PASS,
+            f"OpenClaw config last touched by version {ver}, matching the installed "
+            "build. Known-vulnerable releases are gated by B33; this is an "
+            "update-hygiene reminder, not a vulnerability claim.",
+            "Keep OpenClaw updated and re-run the checks after upgrading.",
+        )
+
+    order = _openclawdist.compare_versions(ver, installed)
+    if order == "down":
+        return _custom(
+            "C4",
+            BY_ID["C4"].severity,
+            WARN,
+            f"The installed OpenClaw build ({installed}) is OLDER than the version that "
+            f"last wrote this config ({ver}) — a version-rollback signature. Not "
+            "necessarily tampering: a deliberate pin-back after a bad release, a dev "
+            "switching branches, two OpenClaw installs on this machine (PATH resolving a "
+            "different one than whichever last wrote the config), or a config synced from "
+            "another machine that ran a newer build can all produce this. This is not a "
+            "vulnerability claim — B33 checks the installed version against real "
+            "advisories.",
+            "Confirm this rollback was intentional; if not, reinstall the OpenClaw "
+            "version you expect and re-run the checks.",
+        )
+    if order == "up":
+        return _custom(
+            "C4",
+            BY_ID["C4"].severity,
+            PASS,
+            f"OpenClaw config last touched by version {ver}; the installed build "
+            f"({installed}) is newer. Known-vulnerable releases are gated by B33; this "
+            "is an update-hygiene reminder, not a vulnerability claim.",
+            "Keep OpenClaw updated and re-run the checks after upgrading.",
+        )
+    # order == "unknown": the two strings differ but cannot be reliably ordered (a
+    # non-numeric or pre-release build on either side) — reporting PASS here would be the
+    # same fabricated-confidence bug this check existed to fix, just moved one level down.
     return _custom(
         "C4",
         BY_ID["C4"].severity,
-        PASS,
-        f"OpenClaw config last touched by version {ver}. Known-vulnerable releases "
-        "are gated by B33; this is an update-hygiene reminder, not a vulnerability claim.",
-        "Keep OpenClaw updated and re-run the checks after upgrading.",
+        UNKNOWN,
+        f"OpenClaw config last touched by version {ver} and the installed build is "
+        f"{installed}, but the two could not be reliably ordered (non-numeric or "
+        "pre-release version string), so a version rollback cannot be checked.",
+        "—",
     )
 
 

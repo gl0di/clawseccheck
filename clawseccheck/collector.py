@@ -631,6 +631,17 @@ class Context:
     # (deptree.find_package_root); tests and fixtures set a synthetic tree, exactly as
     # proc_root lets a test drive B340 without a real /proc.
     openclaw_pkg_root: "Path | None" = None
+    # B-502: the INSTALLED OpenClaw package's own version string (openclawdist, via
+    # deptree.find_package_root("openclaw")); set by audit(include_dist=True), exactly as
+    # `dep_tree` above is set by include_deptree. None is the hermetic default AND covers
+    # "the lookup ran but PATH did not resolve openclaw" -- check_version (C4) cannot tell
+    # those two apart from this field alone, and by design does not need to: both fall
+    # back to the SAME presence-only verdict C4 has always produced, so a Context built
+    # without opting in (every pre-existing test, and the fixture-corpus fingerprint
+    # manifest) stays byte-identical. Only a REAL version string here unlocks the
+    # rollback-direction comparison against `meta.lastTouchedVersion`.
+    installed_dist_version: "str | None" = None
+    include_dist: bool = False  # installed OpenClaw package version lookup enabled
     # B-231 sub-item 1: normalized cron jobs (from ~/.openclaw/cron/jobs.json, or the
     # SQLite-backed cron_jobs table when the JSON file is absent). Each entry is a plain
     # dict: id, name, enabled, delete_after_run, trigger_script, payload_kind,
