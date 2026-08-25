@@ -1380,6 +1380,76 @@ def _hint(names, hints) -> bool:
     return any(h in blob for h in hints)
 
 
+def _hint_matches(names, hints) -> list:
+    """Like ``_hint()``, but returns the entries of *names* that matched instead of a
+    bool — B-493's attribution primitive needs to say WHICH tool name triggered a leg,
+    not just that one did.
+
+    Same substring-in-lowercased-blob semantics as ``_hint()``: each entry is checked
+    independently. That is equivalent to ``_hint()``'s single ``" ".join(names)`` blob
+    because a hint (none of which contain a space) can only ever match *within* one
+    joined entry, never span the join space between two — so
+    ``bool(_hint_matches(names, hints)) == _hint(names, hints)`` always holds (pinned by
+    ``test_b493_trifecta_leg_sources.py``).
+    """
+    return [n for n in names if any(h in str(n).lower() for h in hints)]
+
+
+def _enabled_tools_sources(cfg: dict) -> dict:
+    """Field path behind each synthetic tag ``_enabled_tools()`` injects, keyed by that
+    tag string ("elevated" / "exec").
+
+    Mirrors ``_enabled_tools()``'s own conditions exactly (same fields, same order) —
+    see that function. "exec" here is the BROADER signal it uses (includes
+    ``agents.defaults.sandbox.mode`` != "off"), which is why B-064's own comment on
+    ``_trifecta_legs`` says the outbound leg's ``_hint(tools, OUTBOUND_TOOL_HINTS)`` term
+    is "intentionally left unchanged" — narrower ``_real_exec_enabled()`` (see
+    ``_exec_enabled_sources`` below) is what feeds the sensitive leg instead.
+    """
+    out = {}
+    if dig(cfg, "tools.elevated.allowFrom"):
+        out["elevated"] = "tools.elevated.allowFrom is set"
+    exec_security = dig(cfg, "tools.exec.security")
+    exec_host = dig(cfg, "tools.exec.host")
+    exec_mode = dig(cfg, "tools.exec.mode")
+    profile = dig(cfg, "tools.profile")
+    sandbox_mode = dig(cfg, "agents.defaults.sandbox.mode")
+    if exec_security is not None:
+        out["exec"] = f"tools.exec.security={exec_security!r}"
+    elif exec_host is not None:
+        out["exec"] = f"tools.exec.host={exec_host!r}"
+    elif exec_mode is not None:
+        out["exec"] = f"tools.exec.mode={exec_mode!r}"
+    elif _profile_is_powerful(profile):
+        out["exec"] = f"tools.profile={profile!r} (a powerful profile)"
+    elif sandbox_mode is not None and sandbox_mode != "off":
+        out["exec"] = f"agents.defaults.sandbox.mode={sandbox_mode!r}"
+    return out
+
+
+def _tool_hint_sources(cfg: dict, hints) -> list:
+    """``_enabled_tools(cfg)`` entries that satisfy *hints*, attributed to their actual
+    config field instead of collapsed to a bool.
+
+    Mirrors ``_hint(_enabled_tools(cfg), hints)`` exactly: the same
+    ``tools.allow OR gateway.tools.allow`` precedence ``_enabled_tools()`` uses (never
+    both — an "or", not a merge), plus the synthetic "elevated"/"exec" tags it injects
+    (see ``_enabled_tools_sources``). So
+    ``bool(_tool_hint_sources(cfg, hints)) == _hint(_enabled_tools(cfg), hints)`` always
+    holds (pinned by ``test_b493_trifecta_leg_sources.py``).
+    """
+    out = []
+    for tag, source in _enabled_tools_sources(cfg).items():
+        if any(h in tag for h in hints):
+            out.append(source)
+    listed = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
+    if isinstance(listed, list):
+        field = "tools.allow" if dig(cfg, "tools.allow") else "gateway.tools.allow"
+        for name in _hint_matches([str(t) for t in listed], hints):
+            out.append(f"{field} entry {name!r}")
+    return out
+
+
 # Tool profiles that grant exec / filesystem-write capability (outbound leg).
 # "minimal"/"readonly"/"chat" stay safe; an unknown-but-powerful profile name is
 # still caught by the "exec"/"code" substring fallback in _profile_is_powerful().
@@ -1426,6 +1496,39 @@ def _real_exec_enabled(cfg: dict) -> bool:
     return isinstance(listed, list) and _hint([str(t) for t in listed], ("exec", "shell"))
 
 
+def _exec_enabled_sources(cfg: dict) -> list:
+    """Every field that makes ``_real_exec_enabled()`` True, attributed instead of
+    collapsed to a bool. Same fields, same order as that function's own docstring —
+    ``tools.exec.security`` / ``.host`` / ``.mode`` grounded against the installed dist's
+    Zod schema (see ``_has_approval_gate``'s docstring, same three fields), then a
+    powerful ``tools.profile``, then an "exec"/"shell" ``tools.allow``/
+    ``gateway.tools.allow`` entry. Unlike ``_real_exec_enabled()`` (bool, first match
+    wins), this reports EVERY contributing field — a leg can be over-determined (B-493),
+    so a user removing only the first-listed one may not clear it.
+    ``bool(_exec_enabled_sources(cfg)) == _real_exec_enabled(cfg)`` always holds (pinned
+    by ``test_b493_trifecta_leg_sources.py``).
+    """
+    out = []
+    exec_security = dig(cfg, "tools.exec.security")
+    exec_host = dig(cfg, "tools.exec.host")
+    exec_mode = dig(cfg, "tools.exec.mode")
+    if exec_security is not None:
+        out.append(f"tools.exec.security={exec_security!r}")
+    if exec_host is not None:
+        out.append(f"tools.exec.host={exec_host!r}")
+    if exec_mode is not None:
+        out.append(f"tools.exec.mode={exec_mode!r}")
+    profile = dig(cfg, "tools.profile")
+    if _profile_is_powerful(profile):
+        out.append(f"tools.profile={profile!r} (a powerful profile)")
+    listed = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
+    if isinstance(listed, list):
+        field = "tools.allow" if dig(cfg, "tools.allow") else "gateway.tools.allow"
+        for name in _hint_matches([str(t) for t in listed], ("exec", "shell")):
+            out.append(f"{field} entry {name!r}")
+    return out
+
+
 def _web_fetch_enabled(cfg: dict) -> bool:
     """An enabled web fetch/browse tool: pulls arbitrary remote content into the
     agent (untrusted input) and can exfiltrate via request URLs (outbound)."""
@@ -1435,6 +1538,24 @@ def _web_fetch_enabled(cfg: dict) -> bool:
     if web.get("enabled"):
         return True
     return any(isinstance(sub, dict) and sub.get("enabled") for sub in web.values())
+
+
+def _web_fetch_source(cfg: dict) -> str:
+    """The specific ``tools.web.*`` field that makes ``_web_fetch_enabled()`` True, else
+    ``""``. Mirrors that function's own logic exactly (same ``tools.web`` dig, same
+    top-level-then-sub-key check), just naming the field instead of returning a bool —
+    ``bool(_web_fetch_source(cfg)) == _web_fetch_enabled(cfg)`` always holds (pinned by
+    ``test_b493_trifecta_leg_sources.py``).
+    """
+    web = dig(cfg, "tools.web")
+    if not isinstance(web, dict):
+        return ""
+    if web.get("enabled"):
+        return "tools.web.enabled"
+    for key, sub in web.items():
+        if isinstance(sub, dict) and sub.get("enabled"):
+            return f"tools.web.{key}.enabled"
+    return ""
 
 
 def _active_channels(cfg: dict) -> dict:
@@ -2196,12 +2317,108 @@ def _unpolicied_open_wildcard_group_channels(cfg: dict) -> dict:
 
 
 # ---------------------------------------------------------------- Block A
+def _trifecta_leg_sources(ctx: Context) -> dict:
+    """The three lethal-trifecta legs, each mapped to the SPECIFIC config entries that
+    make it active (B-493) — every OR-disjunct `_trifecta_legs` (below) used to collapse
+    to a bare bool, now named. Same three keys, same insertion order (input → sensitive
+    → outbound) as `_trifecta_legs`; `_trifecta_legs(ctx) == {k: bool(v) for k, v in
+    _trifecta_leg_sources(ctx).items()}` always holds — pinned by
+    `test_b493_trifecta_leg_sources.py`, which also checks every fixture home, so a
+    future disjunct added to one function without a matching source in the other is
+    caught as a leg going True with an empty `[]`, not silently.
+
+    A leg is frequently OVER-DETERMINED — several independent suppliers each sufficient
+    alone (e.g. `web` in `tools.allow` AND an open channel both raise "untrusted
+    input") — so a value here can hold more than one entry. Naming ALL of them, not
+    just the first, is the point: a user who removes one entry from an over-determined
+    leg and re-runs sees the leg still active, and needs to know that going in rather
+    than discover it by trial and error (see the CLAWSECCHECK-B-493 task).
+
+    Reuses `_trifecta_legs`'s exact predicates as the ground truth for what fires —
+    `_tool_hint_sources`/`_exec_enabled_sources`/`_web_fetch_source` are the attributed
+    siblings of `_hint`/`_real_exec_enabled`/`_web_fetch_enabled` (see each's own
+    docstring for the bool-parity invariant), so this cannot drift into naming a
+    source that would not actually have raised the leg.
+    """
+    cfg = ctx.config
+    mcp_legs = _mcp_leg_contributions(cfg)
+    web_fetch_source = _web_fetch_source(cfg)
+
+    untrusted: list = []
+    for name in _untrusted_input_channels(cfg):
+        untrusted.append(f"channel {name!r} allows untrusted senders (dmPolicy/groupPolicy)")
+    for name, gap in _unpolicied_open_wildcard_group_channels(cfg).items():  # B-371
+        untrusted.append(
+            f'channel {name!r} groups["*"] is open ({gap}) with no dmPolicy/groupPolicy set'
+        )
+    untrusted.extend(_tool_hint_sources(cfg, INPUT_TOOL_HINTS))
+    if web_fetch_source:
+        untrusted.append(web_fetch_source)
+    untrusted.extend(mcp_legs["untrusted input"])  # B-247: fetch/web-search/inbox/... MCP
+
+    # Agent-readable private data: a data tool (db/credential/vault/fs_read/...), a
+    # credentials/ dir under the home, or ungated exec (NOT gateway.auth.password —
+    # that is the gateway's own auth secret, not agent-readable data; B1 flags it).
+    sensitive: list = []
+    sensitive.extend(_tool_hint_sources(cfg, SENSITIVE_TOOL_HINTS))
+    # getattr, not ctx.home directly: a few tests build Context via __new__ without
+    # setting .home, relying on _trifecta_legs' original `or`-chain never reaching this
+    # term once an earlier one is already True (test_b283_shallow_reads.py's
+    # TestTrifectaPayoff). This primitive evaluates every term unconditionally (it must,
+    # to list ALL suppliers of an over-determined leg — B-493), so it has to tolerate
+    # the same test double the lazy `or` used to protect by construction. Production
+    # Context.home is a required dataclass field (collector.py) and is always set.
+    home = getattr(ctx, "home", None)
+    if home is not None and (home / "credentials").is_dir():
+        sensitive.append("credentials/ directory present under the agent home")
+    # B-061: ungated exec/shell can read any private file. Approval-gated exec (see
+    # _has_approval_gate) is NOT autonomous, so it must not raise this leg — matches
+    # _trifecta_legs' exec_enabled = _real_exec_enabled(cfg) and not _has_approval_gate(cfg).
+    if not _has_approval_gate(cfg):
+        sensitive.extend(
+            f"{s} — ungated (tools.exec.mode/security/ask absent or not gating)"
+            for s in _exec_enabled_sources(cfg)
+        )
+    sensitive.extend(mcp_legs["sensitive data"])  # B-229: fs-at-broad-root / db / secret MCP
+
+    outbound: list = []
+    outbound.extend(_tool_hint_sources(cfg, OUTBOUND_TOOL_HINTS))
+    if dig(cfg, "tools.elevated.allowFrom"):
+        outbound.append("tools.elevated.allowFrom is set")
+    profile = dig(cfg, "tools.profile")
+    if _profile_is_powerful(profile):
+        outbound.append(f"tools.profile={profile!r} (a powerful profile)")
+    if web_fetch_source:
+        outbound.append(web_fetch_source)
+    for name in _active_channels(cfg):  # enabled channels are bidirectional
+        outbound.append(f"channel {name!r} is enabled (bidirectional read/write)")
+    outbound.extend(mcp_legs["outbound actions"])  # B-229: remote/network MCP endpoint
+
+    # dict.fromkeys de-dups while preserving order: the same source string can be
+    # reached two ways for outbound ("exec" via _enabled_tools_sources' synthetic tag
+    # AND the separate _profile_is_powerful() OR-term below both name tools.profile
+    # when no explicit tools.exec.* is set) — a literal duplicate would misread as two
+    # independent suppliers instead of one.
+    return {
+        "untrusted input": list(dict.fromkeys(untrusted)),
+        "sensitive data": list(dict.fromkeys(sensitive)),
+        "outbound actions": list(dict.fromkeys(outbound)),
+    }
+
+
 def _trifecta_legs(ctx: Context) -> dict:
-    """The three lethal-trifecta legs computed from the GLOBAL config surface.
+    """The three lethal-trifecta legs computed from the GLOBAL config surface — a thin
+    bool wrapper over `_trifecta_leg_sources` (B-493).
 
     Shared by A1 (check_trifecta) and B46 (check_multiagent_exposure) so both read
     one definition of the legs. Keys are the human-facing labels A1 emits; insertion
     order is preserved (input → sensitive → outbound).
+
+    Kept as its own function rather than inlining `bool(...)` at every call site
+    because two existing tests pin `_trifecta_legs(...)["leg"] is False` as a C-135
+    false-positive guard (`tests/test_b297_wildcard_group_ingress_leg.py`,
+    `tests/test_b371_a1_b41_ingress_agreement.py`) — `[]` is not `False`, so returning
+    `_trifecta_leg_sources`'s lists directly at those call sites would break both pins.
 
     B-371 (2026-07-31): the untrusted-input leg now ALSO counts
     `_unpolicied_open_wildcard_group_channels` — a B-297 open `groups["*"]` entry with
@@ -2222,60 +2439,7 @@ def _trifecta_legs(ctx: Context) -> dict:
     `test_a1_owner_only_group_bot_not_untrusted_input`, would otherwise regress).
     `_untrusted_input_channels` itself is unchanged.
     """
-    cfg = ctx.config
-    tools = _enabled_tools(cfg)
-    untrusted_ch = _untrusted_input_channels(cfg)
-    unpolicied_wildcard = _unpolicied_open_wildcard_group_channels(cfg)  # B-371
-    web_fetch = _web_fetch_enabled(cfg)
-    # B-061: ungated exec/shell can read any private file (sensitive) AND exfiltrate
-    # (outbound). Approval-gated exec — tools.exec.mode is deny/allowlist/ask/auto,
-    # security=deny/allowlist, ask=on-miss/always — see _has_approval_gate) is NOT autonomous:
-    # a human signs each call, so it must NOT raise the sensitive leg. Without this guard
-    # §5 breaks — home_safe + clean_b55/b68/b69/c014/c6 pair an untrusted channel with
-    # mode='ask' exec and would flip to a spurious 3/3. Only ungated exec at mode='full'
-    # reaches sensitive. Outbound already counts exec via OUTBOUND_TOOL_HINTS (gated or
-    # not), so the outbound leg below is intentionally left unchanged.
-    # B-064: use _real_exec_enabled (declared exec signals) NOT _hint(tools, ...) — the
-    # latter matches the synthetic "exec" _enabled_tools infers from a configured sandbox
-    # (a hardening control, not an exec grant), which produced a spurious 3/3 FAIL.
-    exec_enabled = _real_exec_enabled(cfg) and not _has_approval_gate(cfg)
-    # B-229: MCP is OpenClaw's primary capability-extension surface. A server granting
-    # broad fs/db/secret access raises the sensitive leg; a remote (non-loopback) endpoint
-    # raises the outbound leg. Deliberately conservative (see _mcp_leg_contributions) so a
-    # benign read-only / localhost MCP cannot manufacture a spurious 3/3 FAIL (§5).
-    # B-247 (a B-229 residual): a fetch/web-search/browser/scraper/mailbox/feed/chat/
-    # issue-tracker MCP server raises the untrusted-input leg too — B-229 only wired the
-    # sensitive-data and outbound legs, leaving a semantically identical MCP intake
-    # source (e.g. @modelcontextprotocol/server-fetch) invisible next to tools.web.fetch.
-    mcp_legs = _mcp_leg_contributions(cfg)
-    return {
-        "untrusted input": (
-            bool(untrusted_ch)
-            or bool(unpolicied_wildcard)  # B-371: unpolicied open groups["*"] (B-297)
-            or _hint(tools, INPUT_TOOL_HINTS)
-            or web_fetch
-            or bool(mcp_legs["untrusted input"])  # B-247: fetch/web-search/inbox/... MCP
-        ),
-        "sensitive data": (
-            # Agent-readable private data: a data tool (db/credential/vault/fs_read/...)
-            # or a credentials/ dir under the home. NOT gateway.auth.password — that is
-            # the gateway's own auth secret, not data the agent can read/exfiltrate
-            # (B1 flags it as a plaintext secret, which is its proper home). Counting it
-            # here let "web fetch + a gateway password" reach a spurious 3/3 (§5).
-            _hint(tools, SENSITIVE_TOOL_HINTS)
-            or (ctx.home / "credentials").is_dir()
-            or exec_enabled  # B-061: ungated arbitrary code can read private files
-            or bool(mcp_legs["sensitive data"])  # B-229: fs-at-broad-root / db / secret MCP
-        ),
-        "outbound actions": (
-            _hint(tools, OUTBOUND_TOOL_HINTS)
-            or bool(dig(cfg, "tools.elevated.allowFrom"))
-            or _profile_is_powerful(dig(cfg, "tools.profile"))
-            or web_fetch
-            or bool(_active_channels(cfg))  # enabled channels are bidirectional
-            or bool(mcp_legs["outbound actions"])  # B-229: remote/network MCP endpoint
-        ),
-    }
+    return {k: bool(v) for k, v in _trifecta_leg_sources(ctx).items()}
 
 
 INJECTION_PATTERNS = [

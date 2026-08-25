@@ -71,6 +71,7 @@ from ._shared import (
     _resolved_default_input_channels,
     _secret_paths,
     _surface_absent,
+    _trifecta_leg_sources,
     _trifecta_legs,
     _web_fetch_enabled,
     parse_bind_host,
@@ -327,7 +328,8 @@ _MISSING_LEG_ACTIVATORS = {
     ),
     "sensitive data": (
         "a private-data tool (tools.allow: fs_read/db/sql/vault/credential), "
-        "ungated exec, i.e. tools.exec.mode='full', or a readable credentials/ dir"
+        "ungated exec — tools.exec.mode/security/ask absent, or set to a non-gating "
+        "value (e.g. mode='full') — or a readable credentials/ dir"
     ),
     "outbound actions": (
         "an outbound tool (tools.allow: send/webhook/http_post/fs_write/deploy), "
@@ -531,6 +533,28 @@ def _mcp_leg_note(ctx: Context) -> str:
     if not reasons:
         return ""
     return " MCP-granted capability: " + "; ".join(reasons) + "."
+
+
+def _leg_attribution_note(active: list, leg_sources: dict) -> str:
+    """B-493: name the SPECIFIC config entries behind each active leg. `evidence` stays
+    the fixed leg-name keys (see `_trifecta_legs`/`_LEG_KEYS`, and `_mcp_leg_note`'s own
+    note above for why — `report.py`'s trifecta-ratio card reads `len(finding.evidence)`
+    as the leg COUNT, and a dozen tests pin its exact leg-name membership, so it cannot
+    become a per-entry list without corrupting both), so the per-entry attribution lives
+    here instead, same idiom as `_mcp_leg_note`/`_resolved_default_note`.
+
+    A leg can be OVER-DETERMINED — several independent suppliers, each sufficient alone
+    — so every contributing entry is named, not just the first: removing only one from
+    an over-determined leg leaves it active, and a reader needs to know that up front.
+    """
+    parts = []
+    for leg in active:
+        sources = leg_sources.get(leg) or []
+        if sources:
+            parts.append(f"{leg} — {'; '.join(sources)}")
+    if not parts:
+        return ""
+    return " Sources: " + ". ".join(parts) + "."
 
 
 def _resolved_default_note(ctx: Context) -> str:
@@ -2790,6 +2814,7 @@ def check_trifecta(ctx: Context) -> Finding:
     resolved_default = _resolved_default_input_channels(ctx.config)
     detail += _distance_note(active, ingress_resolved_by_default=bool(resolved_default))
     detail += _mcp_leg_note(ctx)
+    detail += _leg_attribution_note(active, _trifecta_leg_sources(ctx))  # B-493
     detail += _multi_agent_note(ctx)
     detail += _resolved_default_note(ctx)
 
