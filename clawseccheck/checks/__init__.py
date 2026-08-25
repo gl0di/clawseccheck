@@ -1216,6 +1216,8 @@ _B26_SAFE_VALUES = frozenset({"allowlist", "allowlist_quote"})
 
 # ---------------------------------------------------------------------------
 # SKILL_CONTENT_RING — single source of truth for content-security ring checks.
+# Defined in checks/_vet.py, imported above, spliced into CHECKS below. This block
+# explains it; the tuple itself is not here.
 #
 # Most of these read ctx.installed_skills (and optionally ctx.bootstrap,
 # ctx.installed_skill_py, ctx.effect_profiles) and are therefore meaningful
@@ -1318,8 +1320,11 @@ CHECKS = [
     check_cron_run_log_orphans,  # B189 — cron run log without a surviving job definition (B-294)
     check_exec_approvals_grants,  # B172 — standing exec-approvals.json allow-always grant inventory (B-236)
     # Content-security ring — single source of truth (also consumed by vet_skill).
-    # SKILL_CONTENT_RING is defined just above; changing it updates both the full audit
-    # and the --vet path so they can never drift apart.
+    # SKILL_CONTENT_RING is DEFINED in checks/_vet.py and imported at the top of this
+    # file; the block above documents it, it does not declare it. Splicing it here is
+    # what keeps the full audit and the --vet path from drifting apart.
+    # (Said precisely because the earlier wording — "defined just above" — sent a reader
+    # looking for the tuple in this file, where it is not.)
     *SKILL_CONTENT_RING,
     # B105 — cross-skill Signal-A/Signal-B combined effect (B-096). Deliberately OUTSIDE
     # SKILL_CONTENT_RING: it correlates across ctx.installed_skills, which only ever has
