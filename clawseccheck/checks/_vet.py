@@ -3586,7 +3586,29 @@ def check_installed_skills(ctx: Context) -> Finding:
         # Make it readable and re-run" on a healthy machine, and routed an absolute
         # filesystem path into `Finding.detail`, which `baseline.fingerprint()` hashes.
         # Closing this needs a signal that means "a subject was not assessed", not one that
-        # means "some limit was hit"; tracked separately.
+        # means "some limit was hit". B-554: that signal now exists. `ctx.skill_coverage_gaps`
+        # is populated per SUBJECT by collector's `_note_skill_gap` -- one entry per directory
+        # that declared itself a skill and could not be assessed -- so it carries exactly the
+        # fact the retracted attempt lacked. Measured against the case that killed that
+        # attempt: 2,100 ordinary readable empty directories under a skills root produce one
+        # LIMIT_DOMAIN_SKILL hit and leave `skill_coverage_gaps` EMPTY, so gating here cannot
+        # reproduce the false "part of the skill area could not be read" on a healthy machine.
+        # Names only, never paths (`_note_skill_gap`'s own contract), so nothing absolute
+        # reaches `Finding.detail` and its fingerprint.
+        unassessed = sorted(ctx.skill_coverage_gaps or {})
+        if unassessed:
+            shown = ", ".join(unassessed[:6])
+            extra = f" (+{len(unassessed) - 6} more)" if len(unassessed) > 6 else ""
+            return _custom(
+                "B13",
+                HIGH,
+                UNKNOWN,
+                f"No installed third-party skill could be inspected, and "
+                f"{len(unassessed)} director{'y' if len(unassessed) == 1 else 'ies'} that "
+                f"declared itself a skill could not be assessed: {shown}{extra}. This is "
+                f"not the same as having no skills installed.",
+                "Check that each skill's SKILL.md is a readable regular file, then re-run.",
+            )
         return _custom(
             "B13",
             HIGH,
