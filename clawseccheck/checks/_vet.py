@@ -4980,7 +4980,10 @@ def _run_content_ring(
     no signal, and an UNKNOWN would wrongly outrank a clean PASS (flipping a safe skill to
     "could not assess"). Every ring check is defensive — it returns PASS/UNKNOWN when its
     inputs are absent — so a skill-only ctx (no bootstrap/config) never yields a spurious
-    FAIL. A ring check must never break --vet, so a failing check is skipped.
+    FAIL. A ring check must never break --vet, so a failing check is skipped — but (B-485,
+    R1) "skipped" is disclosed, not silent: it is folded into the same coverage-gap
+    finding `skipped` (budget/deadline) uses, so the crash still shows up as data rather
+    than as an empty bucket a clean-verdict predicate cannot see.
     """
     out: list[Finding] = []
     # B-526: coverage notes harvested off ring findings that are dropped below. Attached
@@ -5027,6 +5030,13 @@ def _run_content_ring(
     deadline = cpu_deadline(target_budget_s)
     skipped: list[str] = []
     own_deadline_hit = False
+    # B-485 (R1 close): names of checks that raised something other than the ring's own
+    # deadline — tracked separately from `skipped` (budget/deadline) so the coverage
+    # message below can say WHY a check didn't run, honestly, rather than blaming a
+    # crash on the budget or vice versa. See the bare `except Exception` below for why
+    # this exists and the two prior attempts (retracted, then landed by a different
+    # route) it follows.
+    crashed: list[str] = []
     with check_deadline(target_budget_s) as own_frame:
         for idx, check in enumerate(SKILL_CONTENT_RING):
             try:
@@ -5077,38 +5087,68 @@ def _run_content_ring(
                 )
                 break
             except Exception:  # noqa: BLE001 — a ring check must never break --vet
-                # B-485: still silent, and that is now SAFE rather than a known gap. The
-                # note here used to say the opposite; it was written on 2026-08-08 when
-                # the obvious fix had just been retracted, and `3fe2554` closed the defect
-                # two weeks later by a different route. Corrected rather than deleted, so
-                # nobody re-derives the retracted path from a stale warning.
+                # B-485 (R1, closed): this used to `continue` with no `note_limit`, no
+                # `skipped` entry and no finding at all — an EMPTY bucket, not an UNKNOWN
+                # one, so no predicate over the bucket (however it was keyed) could ever
+                # see that anything had gone wrong. `dossier._danger_coverage_gap` only
+                # inspects the *danger* bucket, and this loop's ring checks span every
+                # axis, so a crashed `check_persona_jailbreak` (behavior) or
+                # `check_overt_secret_exfil` (behavior/connections) left no trace for it
+                # to read regardless of which leg it used. The one NATURAL trigger this
+                # project has (`skillast.ScriptProseCoverageIncomplete` on an unparseable
+                # `.py` file) happened to be safe in practice — `check_installed_skills`
+                # parses the same source via `analyze_python`, whose `except` clause is a
+                # strict superset of this exception's, so B13 (danger) independently
+                # floors the same target — but that was luck, not a guarantee: any check
+                # added to this ring that raises something `analyze_python` does not also
+                # catch reopens the exact "--vet said INSTALL over a crash" bug B-485 was
+                # filed for, and a hand-built minimal ring check (`RuntimeError` — no
+                # parse involved at all) proves the pool is empty and the verdict reads
+                # INSTALL/PASS today even where the flag never has a chance to fire.
                 #
-                # What was true then: a raising check returns no verdict, so this handler
-                # set nothing, and `dossier._danger_coverage_gap` keyed on the literal
-                # phrase "coverage is incomplete" in a finding's detail. Neither fired for
-                # a parse failure, so `--vet` answered INSTALL about a package whose Danger
-                # scan could not read a bundled file. Routing this handler through
-                # `note_limit()` fixed that and was RETRACTED: whether a file parses depends
-                # on the interpreter WE run under, so a benign `match` statement (3.10+)
-                # made the same bytes read INSTALL on 3.12 and CAUTION on the 3.9 floor.
+                # Fixed by reusing the SAME kind of disclosure the two handlers above
+                # already use — not a second predicate, not a second `note_limit` idiom —
+                # but a DISTINCT finding id from `coverage_gap_finding()`'s `VET-COVERAGE`
+                # (see the `if crashed:` block after the loop). That distinction matters
+                # and is not decoration: `dossier.build_profile`'s `scan_truncated` flag
+                # (guarding "no dormant/staged code" on persistence/connections) keys
+                # SPECIFICALLY on the `VET-COVERAGE` id, on purpose — C-135 already found
+                # that keying it on `engine_degraded` alone was "too WIDE" (B13's own
+                # per-file parse error, on a scan that otherwise COMPLETED, wrongly read
+                # "the scan was cut short"). A single ring check crashing on one file is
+                # the exact same shape: OTHER checks and OTHER files still got read, so it
+                # must floor *danger* (this check answered nothing) without also claiming
+                # persistence/connections were "cut short" — they were never fed by this
+                # check to begin with. `tests/test_b628_plugin_code_measurable.py::
+                # test_i_a_single_unparseable_file_does_not_read_as_a_truncated_scan` is
+                # the existing pin for exactly this distinction; reusing `VET-COVERAGE`
+                # broke it (measured while building this fix). `crashed` is recorded
+                # separately from `skipped` for that reason, not merely for the message
+                # wording.
                 #
-                # What is true now: `_danger_coverage_gap`'s primary leg is
-                # `Finding.engine_degraded` — a STRUCTURAL flag the producer sets — and
-                # B13's own parse-error branch sets it. So the coverage gap is detected
-                # whether or not this handler speaks, and the verdict is CAUTION / rc=1.
-                # Verified end to end on both interpreters: an unparseable `.py` gives
-                # CAUTION on 3.12 and 3.9 alike, a valid one INSTALL.
-                #
-                # The version skew was not solved — it was ACCEPTED, bounded and pinned
-                # (`tests/test_b485_vet_coverage_gap.py::test_version_skew_on_a_modern_
-                # syntax_skill_is_bounded`): a skill using syntax newer than the running
-                # interpreter still reads CAUTION on 3.9. The bound is what makes that
-                # tolerable — the gap can only WITHHOLD a clean verdict, never manufacture
-                # DO-NOT-INSTALL — and it is an honest statement about our own scanner
-                # rather than a laundered INSTALL. Do not "fix" it by matching prose:
-                # `Finding.detail` is hashed by `baseline.fingerprint()`, and the phrase
-                # leg survives only as a documented fallback for hand-built Findings in
-                # unit tests.
+                # First attempted 2026-08-08 (`f3c7025`) as a five-line `note_limit()` call
+                # and RETRACTED: at the time, `_danger_coverage_gap` had only two legs —
+                # `ctx.limit_hits` and a literal `"coverage is incomplete"` string match —
+                # so ANY disclosure here tripped the cap unconditionally, and a benign
+                # skill using a `match` statement (3.10+) read INSTALL on 3.12 but CAUTION
+                # on the 3.9 CI floor: "no narrow variant exists" (that commit's own words)
+                # because there was no way to tell "unparseable because hostile" apart from
+                # "unparseable because newer than the scanner" from inside the handler.
+                # That objection is about the CONSEQUENCE (any gap here forces CAUTION),
+                # not about routing through `note_limit()` itself — and the consequence
+                # changed under it, not because of this fix: `3fe2554` (2026-08-14) closed
+                # B13's own parse-error instance of the identical version-skew shape the
+                # same way, and it did NOT try to avoid the skew — it accepted it as
+                # BOUNDED (`tests/test_b485_vet_coverage_gap.py::
+                # test_version_skew_on_a_modern_syntax_skill_is_bounded`): the gap can only
+                # withhold a clean verdict (CAUTION), never manufacture DO-NOT-INSTALL, so
+                # a benign modern-syntax skill on the 3.9 floor gets an honest "we could
+                # not read this on this interpreter", never a false accusation. This fix
+                # produces exactly that same bounded shape for a ring-check crash —
+                # UNKNOWN-only severity, same bound — so the 2026-08-08 objection is
+                # superseded by the precedent the project has since accepted for the
+                # identical underlying phenomenon, not re-litigated.
+                crashed.append(name)
                 continue
             if fx.status not in (FAIL, WARN):
                 # B-526: the finding is dropped, its COVERAGE is not. The drop rule
@@ -5144,6 +5184,37 @@ def _run_content_ring(
         # … AND emitted as a finding (see coverage_gap_finding for why ctx alone is not
         # enough).
         out.append(coverage_gap_finding(gap))
+    if crashed:
+        # B-485 (R1): deliberately a SEPARATE disclosure from `skipped` above, not folded
+        # into the same `coverage_gap_finding()` call — see the long comment at the
+        # `except Exception` handler for why the id must differ from `VET-COVERAGE`
+        # (`scan_truncated` in dossier.py keys on that exact id to mean "a scan-wide
+        # truncation", which a single check's crash on one file is not). Same shape as
+        # `coverage_gap_finding()` otherwise: HIGH/UNKNOWN, `engine_degraded=True`, routed
+        # to the danger bucket by `dossier._AXIS_BY_ID["VET-RING-CHECK-ERROR"]` — so
+        # `_danger_coverage_gap` still floors the headline the same way.
+        names = ", ".join(crashed[:3]) + (", …" if len(crashed) > 3 else "")
+        gap2 = (
+            f"content-ring check(s) could not complete: {len(crashed)} of "
+            f"{len(SKILL_CONTENT_RING)} content-security check(s) raised an unexpected "
+            f"error instead of returning a verdict ({names})"
+        )
+        note_limit(ctx.limit_hits, LIMIT_DOMAIN_SKILL, gap2)
+        out.append(
+            Finding(
+                "VET-RING-CHECK-ERROR",
+                "Content-ring check error",
+                HIGH,
+                UNKNOWN,
+                gap2,
+                "Part of this skill was never assessed by the content-security ring — a "
+                "check raised instead of returning a verdict. Review the skill's largest "
+                "or most complex bundled files by hand before trusting it.",
+                "Skill Trust",
+                False,
+                engine_degraded=True,
+            )
+        )
     # B-526: side-channel, deliberately not a second return value — the FAIL/WARN-only
     # return contract above is depended on by several callers and tests.
     ctx.ring_coverage_notes = ring_coverage
@@ -5477,6 +5548,31 @@ def vet_skill(path: str | Path) -> Finding:
                 # the pool, and build_profile loses the danger-axis coverage signal.
                 or (fx.status == UNKNOWN
                     and "coverage is incomplete" in (fx.detail or ""))
+                # B-485 (R1): the substring leg above is deliberate, documented, load-
+                # bearing legacy (checks/_vet.py's coverage_gap_finding docstring says so
+                # outright) — kept, not replaced, per the neighbouring comment's own
+                # standard ("a pure widening — nothing carried before stops being
+                # carried"). Added alongside it: `dossier._danger_coverage_gap` has grown
+                # a STRUCTURAL leg since that wording was written (`Finding.
+                # engine_degraded`, keyed the same way `3fe2554` fixed the predicate
+                # itself), but this retention filter sits UPSTREAM of that predicate and
+                # was never updated to match — an engine-degraded UNKNOWN whose wording
+                # doesn't happen to contain the magic phrase was silently dropped here
+                # and never reached the bucket for leg 1 to read at all. Confirmed two
+                # real, pre-existing producers hit exactly this hole (neither was
+                # invented for this fix): check_installed_skills' own parse-error branch
+                # ("could not analyze ... parse error(s) ...", B-455) and its unreadable-
+                # file branch (B-458) — both set engine_degraded=True and neither wording
+                # contains "coverage is incomplete", so either was already lost whenever
+                # a ring WARN/FAIL outranked B13 as primary, independent of R1. This
+                # widening closes that too, plus lets the new VET-RING-CHECK-ERROR
+                # disclosure (R1) survive the same way. Verified this is a pure OR: every
+                # producer that matched the substring leg still matches (untouched), and
+                # the one intentionally-excluded case — check_installed_skills' "no
+                # installed skills" / "not a skill package" UNKNOWNs, genuinely nothing
+                # to scan — stays excluded because those are built with
+                # engine_degraded's default (False) and never touch the substring either.
+                or (fx.status == UNKNOWN and fx.engine_degraded)
             )
         ]
         primary.ctx = ctx

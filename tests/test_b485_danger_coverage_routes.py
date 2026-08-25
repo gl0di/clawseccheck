@@ -44,14 +44,44 @@ two controls that hold the line in the other direction:
 * R6 content-ring budget exhaustion (``VET-COVERAGE``) — already CAUTION, must stay.
 * R7 native stowaway / opaque binary blob — reaches CAUTION via a stowaway WARN, not via
   a coverage disclosure; pinned so the difference stays visible.
+* R1 a raising ring check (any axis, not just danger) — was silently swallowed with no
+  finding at all, now floors the headline; see the CLOSED section below for the history.
 * Control A: a skill with genuinely nothing to scan stays INSTALL (B-092's distinction —
   "nothing to scan" is a legitimately clean result and must not be swallowed).
 * Control B: a clean, fully-readable skill stays INSTALL (the regression direction).
 
-R1 (a ring check that raises is swallowed by ``_run_content_ring``'s bare ``except``,
-producing no finding at all) is a KNOWN, UNCLOSED residual: an empty bucket carries no
-signal for any predicate to read, so it needs a producer change, not this one. It is
-pinned below as unclosed so nobody reads this module as having fixed it.
+## R1's history (closed)
+
+R1 — a ring check that raises is swallowed by ``_run_content_ring``'s bare ``except``,
+producing no finding at all — stayed a KNOWN, UNCLOSED residual through two prior
+attempts:
+
+1. 2026-08-08 (``f3c7025``): routed through ``note_limit()`` directly and RETRACTED. At
+   the time ``_danger_coverage_gap`` had only the two legs described above, so ANY
+   disclosure here forced ``CAUTION`` unconditionally — a benign skill whose only script
+   used a ``match`` statement (3.10+) read ``INSTALL`` on 3.12 but ``CAUTION`` on the 3.9
+   CI floor, with "no narrow variant" able to tell "unparseable because hostile" apart
+   from "unparseable because newer than the scanner".
+2. 2026-08-14 (``3fe2554``): closed the *reported* route (B13's own parse-error branch,
+   R2 above) by keying on ``Finding.engine_degraded`` instead — but left this ring-level
+   ``except`` exactly as retracted, because an empty bucket carries no flag for that leg
+   to read either. A hand-built ring check that raises a bare ``RuntimeError`` (no parse
+   involved, so B13 has no coincident reason to also flag it) proved the overall verdict
+   could still read ``INSTALL``/PASS with a crashed check and zero disclosure.
+3. This change closes it: the crash is folded into the SAME ``coverage_gap_finding()`` /
+   ``note_limit()`` disclosure R2 and R6 already use (no second channel), which is
+   already ``engine_degraded=True`` and already routed to the *danger* bucket by
+   ``dossier._AXIS_BY_ID`` on purpose. That makes the 2026-08-08 objection apply again in
+   principle (a crash on ANY axis now floors the headline unconditionally, same as a
+   parse error does) — but the objection's own conclusion has since been superseded, not
+   avoided: ``3fe2554`` already accepted the identical version-skew shape for B13 as
+   BOUNDED (the gap can only withhold a clean verdict, never manufacture
+   ``DO-NOT-INSTALL`` — see ``test_version_skew_on_a_modern_syntax_skill_is_bounded`` in
+   ``test_b485_vet_coverage_gap.py``), and this fix produces the exact same bounded shape
+   for a ring-check crash. What does NOT close here: the crashed check's own axis line
+   (e.g. "Behavior: PASS") still reads clean — only the headline is floored, because
+   danger is still the only axis with a coverage-gap lever, and giving every axis one is
+   a separate, undecided change.
 
 Stdlib-only, offline, writes only under pytest's ``tmp_path``.
 """
@@ -242,17 +272,22 @@ def test_r7_binary_content_does_not_read_as_install(tmp_path, capsys, name, blob
     _assert_floored(capsys, sk)
 
 
-# ── R1: the known, unclosed residual ────────────────────────────────────────────
+# ── R1: closed — a raising ring check now floors the headline ───────────────────
+#
+# History (kept, not deleted — see the module docstring's "R1's history" section for
+# the two prior attempts): this test used to be named ...is_still_an_open_residual and
+# asserted the ABSENCE of a fix ("must not produce an UNKNOWN in the danger bucket").
+# It now asserts the fix's presence, through the real CLI entry points, the same way
+# R2–R7 above do.
 
-def test_r1_a_raising_ring_check_is_still_an_open_residual(tmp_path, monkeypatch):
-    """NOT fixed here, pinned so nobody believes it is.
-
-    ``_run_content_ring``'s bare ``except Exception: continue`` swallows a raising ring
-    check with no finding, no ``note_limit`` and no ``skipped`` entry — so the danger
-    bucket carries no UNKNOWN at all. No predicate over that bucket can see an absence;
-    closing R1 requires the handler to emit a disclosure, which lives in
-    ``checks/_vet.py``. The bare ``except`` itself must keep holding: a hostile skill
-    must never be able to crash the vet.
+def test_r1_a_raising_ring_check_now_floors_the_headline(tmp_path, capsys, monkeypatch):
+    """``_run_content_ring``'s bare ``except Exception: continue`` used to swallow a
+    raising ring check with no finding, no ``note_limit`` and no ``skipped`` entry — an
+    empty bucket no predicate could see, on ANY axis (not only danger, unlike R2–R6).
+    Proven via a bare ``RuntimeError`` rather than the one natural trigger
+    (``ScriptProseCoverageIncomplete``) specifically because it has NO coincident B13
+    parse failure to lean on — this is the case that showed the overall verdict, not
+    just one axis line, could still read clean.
     """
     from clawseccheck.checks import _vet as vet_mod
 
@@ -264,12 +299,57 @@ def test_r1_a_raising_ring_check_is_still_an_open_residual(tmp_path, monkeypatch
     monkeypatch.setattr(vet_mod, "SKILL_CONTENT_RING", [_explode] + ring[1:])
 
     sk = _skill(tmp_path, "r1", {"scripts/ok.py": "x = 1\n"})
-    p = _profile(sk)                     # must not raise
-    assert p.verdict in {"INSTALL", "CAUTION", "DO-NOT-INSTALL"}
-    assert not any(f.status == UNKNOWN for f in _danger(p).findings), (
-        "R1 now produces an UNKNOWN in the danger bucket — the residual is closed; "
-        "delete this pin and assert the floor instead"
+    p = _profile(sk)                     # must not raise — the bare except still holds
+    danger_unknowns = [f for f in _danger(p).findings if f.status == UNKNOWN]
+    assert danger_unknowns, (
+        "R1 regressed — a raising ring check produced no UNKNOWN in the danger bucket "
+        "again; the bare except in _run_content_ring is silent"
     )
+    assert danger_unknowns[0].engine_degraded is True
+    assert "raised an unexpected error" in (danger_unknowns[0].detail or "")
+    assert p.verdict == "CAUTION"
+    assert p.overall_status == WARN
+    _assert_floored(capsys, sk)
+
+
+def test_r1_crash_is_bounded_never_do_not_install(tmp_path, monkeypatch):
+    """The same bound B-092/B-485 hold everywhere else: a coverage gap may only WITHHOLD
+    a clean verdict, never manufacture a DO-NOT-INSTALL. A crash alone must read
+    CAUTION, not the FAIL-equivalent — matching the precedent this fix relies on
+    (``test_version_skew_on_a_modern_syntax_skill_is_bounded`` in
+    ``test_b485_vet_coverage_gap.py``)."""
+    from clawseccheck.checks import _vet as vet_mod
+
+    def _explode(ctx):
+        raise RuntimeError("ring check blew up")
+
+    ring = list(vet_mod.SKILL_CONTENT_RING)
+    monkeypatch.setattr(vet_mod, "SKILL_CONTENT_RING", [_explode] + ring[1:])
+
+    sk = _skill(tmp_path, "r1bound", {"scripts/ok.py": "x = 1\n"})
+    p = _profile(sk)
+    assert p.verdict == "CAUTION"
+    assert p.overall_status == WARN
+
+
+def test_r1_a_hostile_ring_check_still_cannot_crash_vet(tmp_path, monkeypatch):
+    """The bare ``except`` contract this fix must not weaken: a ring check raising
+    something exotic (not just ``RuntimeError``) still degrades to a disclosure, never
+    an unhandled exception reaching the caller."""
+    from clawseccheck.checks import _vet as vet_mod
+
+    class _Exotic(Exception):
+        pass
+
+    def _explode(ctx):
+        raise _Exotic("still not allowed to break --vet")
+
+    ring = list(vet_mod.SKILL_CONTENT_RING)
+    monkeypatch.setattr(vet_mod, "SKILL_CONTENT_RING", [_explode] + ring[1:])
+
+    sk = _skill(tmp_path, "r1hostile", {"scripts/ok.py": "x = 1\n"})
+    p = _profile(sk)                     # must not raise
+    assert p.verdict == "CAUTION"
 
 
 # ── Controls: the distinction the check exists for must survive ─────────────────

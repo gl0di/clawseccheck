@@ -364,6 +364,14 @@ def test_ordinary_check_failure_is_still_contained(tmp_path, monkeypatch):
 
     The surviving FAIL is the point: asserting only "no exception" would pass even if the
     patch never took effect, since a benign skill yields an empty ring anyway.
+
+    Until B-485 (R1) this asserted ``out`` held ONLY the surviving FAIL — the crash was
+    swallowed by the bare ``except`` with no finding, no ``note_limit`` and no ``skipped``
+    entry at all, which is the exact bug B-485 was filed for (a headline that cannot tell
+    "clean" apart from "one check crashed and told nobody"). The crash is now disclosed
+    as its own ``VET-RING-CHECK-ERROR`` UNKNOWN alongside the real FAIL — see
+    ``tests/test_b485_danger_coverage_routes.py``'s "R1's history" section for the two
+    prior attempts this fix follows.
     """
     def _explodes(_ctx):
         raise ValueError("boom")
@@ -375,4 +383,13 @@ def test_ordinary_check_failure_is_still_contained(tmp_path, monkeypatch):
         "clawseccheck.checks._vet.SKILL_CONTENT_RING", [_explodes, _reports], raising=True
     )
     out = _run_content_ring(_skill_ctx(tmp_path))
-    assert [f.detail for f in out] == ["planted finding"]
+    fails = [f for f in out if f.status == FAIL]
+    crashes = [f for f in out if f.id == "VET-RING-CHECK-ERROR"]
+    assert [f.detail for f in fails] == ["planted finding"], (
+        "the real FAIL must still surface — a crashing check must not bury it"
+    )
+    assert len(crashes) == 1, f"expected exactly one crash disclosure; out={out!r}"
+    assert crashes[0].status == UNKNOWN
+    assert crashes[0].engine_degraded is True
+    assert "_explodes" in crashes[0].detail
+    assert len(out) == 2, f"expected FAIL + crash disclosure only; out={out!r}"

@@ -123,6 +123,21 @@ _AXIS_BY_ID: dict[str, str | None] = {
     # this exists to prevent. Unmapped, it would land in `unmapped`, which is cosmetic
     # and never reaches _grade_profile — a truncated scan would keep grading A.
     "VET-COVERAGE": "danger",
+    # B-485 (R1): a single content-ring check crashed on one file/skill and was skipped
+    # — `checks/_vet.py::_run_content_ring`'s bare `except Exception`. Routed to danger
+    # for the same coverage-gap-lever reason as VET-COVERAGE just above, but kept as a
+    # DISTINCT id on purpose: `build_profile`'s `scan_truncated` flag (guards "no
+    # dormant/staged code" on persistence/connections) keys specifically on the
+    # `VET-COVERAGE` id, because C-135 already found keying that flag on
+    # `engine_degraded` alone was too WIDE (B13's own per-file parse error, on a scan
+    # that otherwise completed, wrongly read as "the scan was cut short" — see the block
+    # above `scan_truncated`'s definition). One ring check crashing on one file is the
+    # same shape as that already-rejected case: other checks and other files were still
+    # read, so persistence/connections must not read "cut short" over a check that never
+    # fed them to begin with — only danger, which this check actually failed to answer
+    # for. Sharing the `VET-COVERAGE` id would silently re-widen `scan_truncated`; kept
+    # separate so it can't.
+    "VET-RING-CHECK-ERROR": "danger",
     "PLUGIN-VET": None,  # container aggregate — decomposed into its sub-findings
     "MCP-VET": None,  # multi-reason verdict — routed per-reason via axis_reasons
     # C-255: pre-install prose-attestation findings (adjudication.py) — a declared-
@@ -306,11 +321,16 @@ def _danger_coverage_gap(danger_bucket: list, ctx) -> bool:
     UNKNOWN. No narrower trigger and no WARN-instead-of-floor variant is warranted at
     that rate, so this floors like the other legs.
 
-    Known residual, NOT closed here (both need a producer change, not a predicate one):
-    a ring check that raises is swallowed by ``_run_content_ring``'s bare ``except``,
-    which emits no finding at all — an empty bucket carries no signal for any predicate
-    to read; and a binary blob excluded from scanning discloses no coverage gap (it
-    reaches the headline only via the separate stowaway WARN).
+    R1 — a ring check that raises was swallowed by ``_run_content_ring``'s bare
+    ``except``, emitting no finding at all (an empty bucket carries no signal for any
+    predicate here to read) — is now CLOSED, by a producer change, not a change to this
+    predicate: the handler now records the crash and emits a ``VET-RING-CHECK-ERROR``
+    finding (deliberately not ``VET-COVERAGE`` — see ``_AXIS_BY_ID``'s comment on that id
+    for why), so leg 1 above fires on it the same as any other engine-side UNKNOWN.
+
+    R7 remains open: a binary blob excluded from scanning discloses no coverage gap (it
+    reaches the headline only via the separate stowaway WARN, not through this
+    predicate) — a producer-side gap this predicate structurally cannot see either way.
     """
     if not danger_bucket:
         return False
