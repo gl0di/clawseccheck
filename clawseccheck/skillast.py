@@ -4039,6 +4039,128 @@ def _is_writable_import_path(node: ast.AST) -> bool:
     return False
 
 
+# B-640: OBFUSCATED_EXEC (below) treats `_subtree_has_decode` alone as proof of a
+# hidden payload. That is right for a real content-hiding primitive (base64/hex/b85/
+# zlib/... in _DECODE_FUNCS) or an XOR-built sequence, but `_subtree_has_decode` ALSO
+# matches the bare `.decode(...)` method -- and `exec(fh.read().decode("utf-8"), ns)`
+# is exactly how `setup.py` reads a sibling `__version__.py` in requests/urllib3/
+# hundreds of real packages, and how a migrations runner reads its own migration
+# files. `.decode("utf-8")` over a LOCAL file read is not obfuscation; it is a
+# bytes->str conversion of the artifact's own bundled content.
+#
+# Reuses the SAME proxy `_is_writable_import_path` above already accepts for sys.path:
+# presence of `__file__` anywhere in the path expression is treated as proof the path
+# resolves relative to the scanned file's own location. One hop of local-variable
+# resolution is added (`_scope_own_assigns`) because the real-world shape splits the
+# anchor across two statements -- `here = os.path.dirname(__file__)` then
+# `open(os.path.join(here, "x.py"))` -- so a single-expression check misses it
+# entirely (confirmed against this exact shape before shipping). Deliberately capped
+# at one hop, mirroring `_remote_code_load_findings`'s own one-hop discipline
+# elsewhere in this module -- a general propagation is a bigger, riskier change than
+# this narrow proxy needs.
+#
+# This is a PROXY, not the real signal, and is scoped ONLY to the OBFUSCATED_EXEC call
+# site below -- `_subtree_has_decode` itself is left untouched for its other two
+# callers (decode-composing function detection, TT4's file-tainted rule). It has no
+# way to confirm the referenced path actually stays inside the artifact being scanned
+# (`os.path.join(os.path.dirname(__file__), "..", "..", "/etc/passwd")` still passes),
+# and no way to confirm the resolved path is really a file present in the artifact at
+# all -- the caller (checks/_vet.py's `installed_skill_py`) already enumerates every
+# path in the artifact but that set is never threaded into `analyze_python()`. The
+# stronger, precise version would add an optional artifact-relpath-set parameter to
+# `analyze_python()` and check the resolved path against it -- deferred: it widens
+# `analyze_python()`'s signature and both of its call sites (checks/_vet.py,
+# checks/_mcp.py), a bigger change than this narrow FP fix justifies on its own. A
+# literal or env/argv-derived path (the dropper shape: `open("/tmp/x.py", "rb")`)
+# never contains `__file__` and is therefore never exempted by this proxy.
+def _scope_own_assigns(scope: ast.AST) -> dict:
+    """name -> RHS expr for every single-Name-target `x = <expr>` in `scope`'s own
+    body (via `_scope_own_nodes`, so it does not descend into nested functions) --
+    the one-hop lookup table `_path_expr_is_dunder_file_relative` uses."""
+    out: dict = {}
+    for n in _scope_own_nodes(scope):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            out[n.targets[0].id] = n.value
+    return out
+
+
+def _path_expr_is_dunder_file_relative(node: ast.AST, scope_assigns: dict) -> bool:
+    """True when *node* (an open()-style path argument) is built from `__file__`,
+    directly or through one hop of local assignment resolved via *scope_assigns*."""
+    if any(isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(node)):
+        return True
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name) and n.id in scope_assigns:
+            rhs = scope_assigns[n.id]
+            if any(isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(rhs)):
+                return True
+    return False
+
+
+def _decode_call_reads_artifact_relative_file(node: ast.Call, scope: ast.AST) -> bool:
+    """True when *node* is `<expr>.decode(...)` and <expr>'s receiver chain resolves
+    to a LOCAL file opened at a `__file__`-relative path -- either the direct chain
+    `open(<path>).read().decode(...)`, or through a handle bound in *scope*'s own body
+    (`with open(<path>) as h: ... h.read().decode(...)` / `h = open(<path>); ...`)."""
+    receiver = node.func.value
+    scope_assigns = _scope_own_assigns(scope)
+    for n in ast.walk(receiver):
+        if (
+            _is_open_call(n)
+            and n.args
+            and _path_expr_is_dunder_file_relative(n.args[0], scope_assigns)
+        ):
+            return True
+    handle_names = {n.id for n in ast.walk(receiver) if isinstance(n, ast.Name)}
+    if not handle_names:
+        return False
+    for stmt in _scope_own_nodes(scope):
+        if isinstance(stmt, ast.With):
+            for item in stmt.items:
+                if (
+                    _is_open_call(item.context_expr)
+                    and isinstance(item.optional_vars, ast.Name)
+                    and item.optional_vars.id in handle_names
+                    and item.context_expr.args
+                    and _path_expr_is_dunder_file_relative(item.context_expr.args[0], scope_assigns)
+                ):
+                    return True
+        elif isinstance(stmt, ast.Assign) and _is_open_call(stmt.value):
+            if stmt.value.args and _path_expr_is_dunder_file_relative(
+                stmt.value.args[0], scope_assigns
+            ):
+                for t in stmt.targets:
+                    if isinstance(t, ast.Name) and t.id in handle_names:
+                        return True
+    return False
+
+
+def _decode_signal_is_only_artifact_relative_reads(node: ast.AST, scope: ast.AST) -> bool:
+    """True when EVERY decode-shaped call `_subtree_has_decode` would match inside
+    *node* is a bare `.decode(...)` on a local sibling-file read anchored on
+    `__file__` (see `_decode_call_reads_artifact_relative_file`), and nothing
+    stronger -- a real content-hiding primitive (base64/hex/b85/zlib/... in
+    _DECODE_FUNCS), an XOR-built sequence, or a `.fromhex(...)`/`.join(...)` call --
+    is present anywhere in the subtree. False (never exempt) if no decode-shaped call
+    is found at all, so this must only be consulted when `_subtree_has_decode` is
+    already True."""
+    if _has_xor_decode(node):
+        return False
+    found_any = False
+    for n in ast.walk(node):
+        if not _is_decode_call(n):
+            continue
+        found_any = True
+        nf = n.func
+        if isinstance(nf, ast.Name):
+            return False  # a real _DECODE_FUNCS primitive called bare, e.g. b64decode(x)
+        if not (isinstance(nf, ast.Attribute) and nf.attr == "de" + "code"):
+            return False  # fromhex/join, or a _DECODE_FUNCS primitive as a method
+        if not _decode_call_reads_artifact_relative_file(n, scope):
+            return False
+    return found_any
+
+
 def analyze_python(
     source: str, filename: str = "<skill>", own_host: str | None = None
 ) -> list[ASTFinding]:
@@ -4148,8 +4270,18 @@ def analyze_python(
             visible_tainted = _tainted_names_visible(
                 node, tainted, owner_map, parent_scope, shadow_cache
             )
+            has_decode_signal = _subtree_has_decode(arg)
+            # B-640: `.decode("utf-8")` reading a __file__-relative sibling file (the
+            # canonical setup.py idiom -- see the module comment above
+            # `_scope_own_assigns`) is not obfuscation on its own. Only un-arms the
+            # bare-decode signal; a real content-hiding primitive elsewhere in the
+            # same expression still convicts.
+            if has_decode_signal and _decode_signal_is_only_artifact_relative_reads(
+                arg, owner_map.get(node, tree)
+            ):
+                has_decode_signal = False
             if (
-                _subtree_has_decode(arg)
+                has_decode_signal
                 or (_names_in(arg) & visible_tainted)
                 or _subtree_calls_decode_composing(arg, visible_composing)
             ):
@@ -4164,17 +4296,25 @@ def analyze_python(
             continue
 
         # getattr(obj, name)(...) — obfuscated call.
-        # crit only for a dangerous attribute literal, OR a dynamic attr on a dangerous
-        # module (os/subprocess/...). A dynamic attr on an ordinary object is normal
-        # dynamic dispatch (plugin frameworks) -> info, so it never FAILs on its own.
+        # B-639: crit REQUIRES the base object resolve to a known-dangerous module
+        # (os/subprocess/...) -- for BOTH a dangerous attribute literal and a dynamic
+        # attr. A dangerous-shaped attribute NAME alone ("run"/"call" -- also real
+        # subprocess.run/call names) on an ordinary object is normal dynamic dispatch
+        # (a plugin registry's `getattr(handler, "run")()`) -> never flagged, matching
+        # the sibling "dynamic attr on an ordinary object" case just below it. Before
+        # this fix the literal branch matched on the attribute name alone, with no
+        # base-object check at all -- unlike the dynamic branch, which already required
+        # `base_obj in _DANGEROUS_OBJ` -- so `getattr(handler, "run")(x)` in a plugin
+        # dispatcher FAILed identically to `getattr(os, "system")(x)`.
         if isinstance(f, ast.Call) and isinstance(f.func, ast.Name) and f.func.id == "getattr":
             first = f.args[0] if f.args else None
             second = f.args[1] if len(f.args) >= 2 else None
             literal_str = isinstance(second, ast.Constant) and isinstance(second.value, str)
             dynamic = second is not None and not literal_str
-            dangerous_literal = literal_str and second.value in _DANGEROUS_ATTRS
             base_obj = _attr_base(first) if first is not None else ""
-            if dangerous_literal or (dynamic and base_obj in _DANGEROUS_OBJ):
+            dangerous_obj = base_obj in _DANGEROUS_OBJ
+            dangerous_literal = literal_str and second.value in _DANGEROUS_ATTRS and dangerous_obj
+            if dangerous_literal or (dynamic and dangerous_obj):
                 add(
                     "GETATTR_INDIRECTION",
                     "crit",
@@ -4186,18 +4326,49 @@ def analyze_python(
             continue
 
         # __import__("os").system(...) / importlib.import_module("os").system(...)
+        # B-639: the SAME defect as the getattr rule above, on the module-name side --
+        # crit REQUIRES the imported module to be a literal that resolves to a
+        # known-dangerous module. Before this fix the code never inspected the
+        # __import__/import_module argument at all: ANY dynamically-imported module
+        # combined with a dangerous-shaped attribute name FAILed, so
+        # `importlib.import_module(plugin_name).run(x)` (a dynamic plugin loader) or
+        # `importlib.import_module("a.b").run(1)` (an ordinary, non-dangerous target)
+        # convicted identically to `importlib.import_module("os").system(x)`. A
+        # computed/unresolvable module name is the same ambiguity as getattr's dynamic
+        # branch -- downgraded to info (still visible, escalates only alongside a
+        # cred/exfil signal), not silenced.
         if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Call):
             inner = f.value.func
             is_dyn_import = (isinstance(inner, ast.Name) and inner.id == "__import__") or (
                 isinstance(inner, ast.Attribute) and inner.attr == "import_module"
             )
             if is_dyn_import and f.attr in _DANGEROUS_ATTRS:
-                add(
-                    "DYNAMIC_IMPORT_EXEC",
-                    "crit",
-                    ln,
-                    f"__import__(...).{f.attr}() — dynamic import to evade static scan",
+                mod_arg = f.value.args[0] if f.value.args else None
+                mod_literal = (
+                    mod_arg.value
+                    if isinstance(mod_arg, ast.Constant) and isinstance(mod_arg.value, str)
+                    else None
                 )
+                mod_base = mod_literal.split(".")[0].lower() if mod_literal else None
+                if mod_base in _DANGEROUS_OBJ:
+                    add(
+                        "DYNAMIC_IMPORT_EXEC",
+                        "crit",
+                        ln,
+                        f"__import__(...).{f.attr}() — dynamic import to evade static scan",
+                    )
+                else:
+                    reason_target = (
+                        f"a non-dangerous module ({mod_literal!r})"
+                        if mod_literal is not None
+                        else "a computed/unresolvable module name"
+                    )
+                    add(
+                        "DYNAMIC_IMPORT_EXEC",
+                        "info",
+                        ln,
+                        f"__import__(...).{f.attr}() — dynamic import to {reason_target}",
+                    )
                 continue
 
         # D1 (defensibility): sys.path.insert/append to a relative / writable / env-derived
