@@ -187,13 +187,18 @@ _EXEMPT = {
     "catalog.py": "~3,404 lines — the CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~4,999 lines — the read-only collection layer (config / bootstrap / skill "
+    "collector.py": "~5,549 lines — the read-only collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
-                    "+ .pyc/.wasm sniffing), and grew again with B-610 (deriving the workspace "
+                    "+ .pyc/.wasm sniffing), grew again with B-610 (deriving the workspace "
                     "directories OpenClaw builds from an agent id, instead of hardcoding three "
-                    "names). A finer split (byte-format sniffing -> a leaf module; the "
-                    "workspace/agent-id resolution -> another) is a later cycle.",
+                    "names), and again with B-537 (a validating legacy-multibyte rung in the "
+                    "decode ladder, +116). That third growth is what tripped this staleness "
+                    "guard, which is the guard working: the byte-format half is now roughly a "
+                    "module's worth on its own and every encoding fix lands in it. Splitting "
+                    "byte-format sniffing + the decode ladder out to a leaf (the "
+                    "workspace/agent-id resolution to another) has moved from 'a later cycle' "
+                    "to the next structural task on this file.",
     "cli.py": "~4,329 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "

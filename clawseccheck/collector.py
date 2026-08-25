@@ -762,13 +762,15 @@ class Context:
     archives_unpacked: int = 0
     path_traversal_violations: list[str] = field(default_factory=list)
     file_manifest: dict[str, str] = field(default_factory=dict)  # file relpath -> status
-    # B-616: relpaths whose text came from the decode ladder's ASSUMED rung (`latin-1`,
-    # `_decode_ladder`) rather than a self-identifying encoding (utf-8, BOM/shape-confirmed
-    # utf-16). `file_manifest`'s "(latin-1-assumed)" qualifier records the same fact per
-    # file but had exactly one reader (sarif.py); this is the ctx-level signal dossier.py
-    # reads to keep a prose-dependent axis from reading PASS over text nobody actually
-    # understood. Never the `(lossy)` (None-encoding) rung — that one keeps a UTF-8
-    # reading and pays only per bad character, which is a different, much weaker claim.
+    # B-616: relpaths whose text came from one of the decode ladder's ASSUMED rungs
+    # (`latin-1`, or — B-537 — a guessed legacy multi-byte codec such as `shift_jis`;
+    # see `_decode_ladder`) rather than a self-identifying encoding (utf-8, BOM/shape-
+    # confirmed utf-16). `file_manifest`'s "(<codec>-assumed)" qualifier records the same
+    # fact per file but had exactly one reader (sarif.py); this is the ctx-level signal
+    # dossier.py reads to keep a prose-dependent axis from reading PASS over text nobody
+    # actually understood. Never the `(lossy)` (None-encoding) rung — that one keeps a
+    # UTF-8 reading and pays only per bad character, which is a different, much weaker
+    # claim.
     assumed_encoding_files: list[str] = field(default_factory=list)
     symlink_skips: list[str] = field(default_factory=list)        # F-061: skipped symlinks / path-escapes
     # B-458: files that are PRESENT in the skill but could not be opened (permissions,
@@ -895,6 +897,92 @@ def _looks_like_utf16(chunk: bytes) -> bool:
 _LEGACY_DAMAGE_RATIO = 0.5
 
 
+# Share of non-control characters a decoded sample must clear to be judged text rather
+# than binary. Shared by `classify_bytes` and `_try_structured_multibyte` so the
+# classifier's verdict and the ladder's rung acceptance are the same decision, not two
+# thresholds that can drift apart.
+_PRINTABLE_RATIO_THRESHOLD = 0.85
+
+
+def _printable_ratio(decoded: str) -> float:
+    """Share of `decoded` that is not a Unicode control/format/surrogate/private/
+    unassigned character (categories Cc, Cf, Cs, Co, Cn) — the same gate
+    `classify_bytes` applies to its whole-sample decode, factored out so
+    `_try_structured_multibyte` (B-537) can apply it per-candidate before a rung is
+    trusted. An empty string has nothing to be binary about, so it scores 1.0."""
+    if not decoded:
+        return 1.0
+    printable = 0
+    for char in decoded:
+        if char in ("\t", "\n", "\r"):
+            printable += 1
+        else:
+            if unicodedata.category(char) not in ("Cc", "Cf", "Cs", "Co", "Cn"):
+                printable += 1
+    return printable / len(decoded)
+
+
+# B-537: shift-jis/cp932 Japanese (and, incidentally, other CJK legacy multi-byte
+# codepages) reintroduced the exact defect B-533 fixed for UTF-8 CJK. Root cause: shift-jis
+# lead bytes occupy 0x81-0x9F, which is precisely latin-1's C1 control block (Unicode
+# category Cc) — decoding a shift-jis document as latin-1 (the single-byte rung below)
+# therefore scores roughly half its characters Cc, well under `_PRINTABLE_RATIO_THRESHOLD`,
+# and the file classifies BINARY and drops out of content scanning entirely. Every other
+# legacy CJK encoding this ladder already read correctly (big5, gb2312, euc_kr,
+# iso2022_jp) escapes only because ITS lead bytes happen to sit above 0xA0 and so score
+# high under latin-1 by the same accident the UTF-16 fallback relied on before B-533 — not
+# because the ladder recognised the encoding.
+#
+# These are the codecs Python's stdlib ships incremental decoders for that can plausibly
+# carry a legacy CJK document; tried in this order because shift_jis/cp932 are the
+# regression this bug is about and a wrong-but-structurally-valid match earlier in the
+# list (e.g. cp932 reading euc_jp bytes as half-width-katakana mojibake) still lands on
+# TEXT, which is the only thing `classify_bytes` needs from this rung — the specific
+# label is best-effort disclosure, not a claim of correctness (same status as the
+# existing `latin-1` rung's guess).
+_LEGACY_MULTIBYTE_CODECS = ("shift_jis", "cp932", "euc_jp", "big5", "gb18030", "euc_kr")
+
+# Below this many bytes, a structural "the codec did not raise" decode is not enough
+# evidence: gb18030 in particular is a near-total mapping (built to cover almost all of
+# Unicode), so a short run of random bytes has a real chance of both decoding cleanly
+# AND scoring above the printable gate by chance alone -- a risk latin-1 (which never
+# raises regardless of length) does not add, but a validating codec inherits if its
+# valid-sequence space is wide enough. Measured (Monte Carlo, NUL-free uniform random
+# bytes, 20,000 trials per length): below 128 bytes this rung newly admits blobs latin-1
+# alone would have correctly rejected as BINARY (0.24% at 64 bytes, mostly via gb18030);
+# at 128 bytes and above, across 20,000 trials each up to 8192 bytes, it adds ZERO cases
+# latin-1 did not already accept. This floor sits with a wide margin above that boundary,
+# not on it, and below the size of any realistic prose file this rung exists to recover.
+_MULTIBYTE_MIN_SAMPLE_BYTES = 256
+
+
+def _try_structured_multibyte(data: bytes) -> "tuple[str, str] | None":
+    """The first `_LEGACY_MULTIBYTE_CODECS` candidate that both decodes `data` without
+    raising and scores >= `_PRINTABLE_RATIO_THRESHOLD`, or None if no candidate clears
+    both bars.
+
+    Unlike the latin-1 rung below (which never raises and so is not itself evidence of
+    anything), a structured multi-byte codec's byte-sequence rules CAN reject — lead and
+    trail bytes must pair up correctly — so "it decoded" is real, if imperfect, positive
+    evidence the bytes are that encoding's shape. That is why this rung is tried BEFORE
+    latin-1: latin-1 would otherwise always accept first and this rung would never run.
+
+    Only called from the NUL-free branch of `_decode_ladder`, on data already found not
+    to be predominantly UTF-8 — i.e. exactly the population that would otherwise fall to
+    the unconditional latin-1 guess.
+    """
+    if len(data) < _MULTIBYTE_MIN_SAMPLE_BYTES:
+        return None
+    for name in _LEGACY_MULTIBYTE_CODECS:
+        try:
+            decoded = codecs.getincrementaldecoder(name)().decode(data, False)
+        except UnicodeDecodeError:
+            continue
+        if _printable_ratio(decoded) >= _PRINTABLE_RATIO_THRESHOLD:
+            return decoded, name
+    return None
+
+
 def _is_predominantly_utf8(data: bytes) -> bool:
     """Is this a UTF-8 document with a few bad bytes, or is it a legacy single-byte file?
 
@@ -1009,6 +1097,15 @@ def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
         # See `_is_predominantly_utf8` for the two conditions and the measurements.
         if _is_predominantly_utf8(data):
             return data.decode("utf-8", errors="replace"), None
+
+        # B-537: a legacy MULTI-byte codepage (shift-jis, cp932, euc-jp, big5, gb18030,
+        # euc-kr) gets one rung of its own, ahead of the single-byte guess below. See
+        # `_try_structured_multibyte` for why a validating codec is real evidence and the
+        # latin-1 rung's blind accept is not, and for the C1-control-block mechanism that
+        # made shift-jis specifically score BINARY under latin-1.
+        structured = _try_structured_multibyte(data)
+        if structured is not None:
+            return structured
 
         # Legacy single-byte encodings (latin-1, cp1251, iso-8859-*): valid prose that is
         # not valid UTF-8. Found by the B-533 real-file sweep — /usr/bin/pygettext3.12
@@ -1136,19 +1233,10 @@ def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
     if not decoded:
         return "TEXT", None
 
-    # Calculate printable ratio
-    printable_count = 0
-    for char in decoded:
-        if char in ("\t", "\n", "\r"):
-            printable_count += 1
-        else:
-            cat = unicodedata.category(char)
-            # Cc, Cf, Cs, Co, Cn are Unicode categories for control/format/surrogates/etc.
-            if cat not in ("Cc", "Cf", "Cs", "Co", "Cn"):
-                printable_count += 1
-
-    ratio = printable_count / len(decoded)
-    if ratio >= 0.85:
+    # B-537: shares `_printable_ratio`/`_PRINTABLE_RATIO_THRESHOLD` with
+    # `_try_structured_multibyte` so the classifier's verdict and the decode ladder's
+    # rung-acceptance gate are one decision, not two thresholds that can drift apart.
+    if _printable_ratio(decoded) >= _PRINTABLE_RATIO_THRESHOLD:
         return "TEXT", None
     else:
         return "BINARY", _pyc_fmt(data)
@@ -2144,8 +2232,14 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
             if sub_class == "TEXT":
                 if sub_enc is None:
                     qualifier = "(lossy)"
-                elif sub_enc == "latin-1":
-                    qualifier = "(latin-1-assumed)"
+                elif sub_enc == "latin-1" or sub_enc in _LEGACY_MULTIBYTE_CODECS:
+                    # B-537: a guessed multi-byte codec is the SAME epistemic status as
+                    # latin-1 -- validated structurally, never confirmed -- so it gets its
+                    # own named qualifier rather than falling through to the bare
+                    # `scanned-text` claim (which would say "read" without saying
+                    # "assumed") or silently borrowing latin-1's label for a different
+                    # codec (which would misname the assumption actually made).
+                    qualifier = f"({sub_enc}-assumed)"
                     # B-616: ctx-level twin of the manifest qualifier above — the manifest
                     # string had exactly one reader (sarif.py); this is what lets
                     # dossier.py keep a prose-dependent axis from reading PASS over text
