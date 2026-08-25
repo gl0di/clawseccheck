@@ -2332,7 +2332,7 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     input") — so a value here can hold more than one entry. Naming ALL of them, not
     just the first, is the point: a user who removes one entry from an over-determined
     leg and re-runs sees the leg still active, and needs to know that going in rather
-    than discover it by trial and error (see the CLAWSECCHECK-B-493 task).
+    than discover it by trial and error.
 
     Reuses `_trifecta_legs`'s exact predicates as the ground truth for what fires —
     `_tool_hint_sources`/`_exec_enabled_sources`/`_web_fetch_source` are the attributed
