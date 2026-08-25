@@ -9,11 +9,15 @@ anything, and it never touches the network.
 Every piece is reused from an existing, already-shipped producer rather than
 reinvented: the findings snapshot is the same `_finding_to_dict` shape every other
 JSON export uses; the skill/MCP inventory is `sbom.build_sbom()` (F-085) verbatim;
-the credential rotation list is B41's own (already PII-safe) evidence list; the
-trajectory-sidecar hashes reuse `trajectory.find_trajectory_files()` (B85's own
+the trajectory-sidecar hashes reuse `trajectory.find_trajectory_files()` (B85's own
 file-discovery, still never reading `data.arguments`/output — only whole-file
 bytes for hashing, which never exposes call contents); monitor event history is
-`monitor.load_events()` verbatim.
+`monitor.load_events()` verbatim. The credential rotation list (B-569) is
+inventory-driven rather than any single check's evidence — see
+`_credential_rotation_list`'s docstring for the producer-by-producer coverage —
+so it survives independent of which check passed, failed, or was asked at all;
+it is still PII-safe: config paths, provider names, and file names only, never
+a secret value.
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import trajectory as _trajectory
+from .checks import SECRET_PATTERNS, _pattern_hits_real_secret, _secret_paths
 from .monitor import DEFAULT_EVENTS, load_events
 from .sbom import build_sbom
 from .scanbudget import limits_for
@@ -70,11 +75,71 @@ def _trajectory_hash_entries(home, *, max_files: int | None = None) -> list[dict
     return entries
 
 
-def _credential_rotation_list(findings) -> list[str]:
-    """B41's own evidence — provider names + a gateway-token marker, never
-    account/email fragments or token values (B41 already enforces this)."""
+def _credential_rotation_list(ctx, findings) -> list[str]:
+    """Inventory-driven, not verdict-driven (B-569). The old version returned
+    B41's evidence verbatim; B41's scope is "credentials reachable by untrusted
+    ingress", so a channel secret like a Telegram bot token — which never SENDS
+    anything itself, so B41 never counts it — could be live in config and never
+    reach this pack. Sourcing from any check's finding also inherits that
+    check's verdict logic: B1 only publishes its bootstrap-secret evidence on
+    FAIL, so a config secret behind tight file perms (B1 PASS, correctly — the
+    permissions ARE fine) stayed invisible here even though B1's own detail
+    string counts it ("N token(s) in config"). Post-compromise, "the
+    permissions were fine" is irrelevant: rotation must not depend on whether a
+    hardening check happened to be happy.
+
+    Every producer of a credential-shaped finding, and whether it feeds this
+    list (checked B-569 — start here, don't re-derive):
+      * B41 (checks/_config.py check_credential_blast_radius) — COVERED.
+        Provider names (auth.profiles) + a gateway-token marker. Kept for its
+        blast-radius framing; unioned in rather than replaced.
+      * checks/_shared.py _secret_paths(ctx.config) — NOW COVERED, this is the
+        fix. Every SECRET_KEY_RE-matching config path holding a real inline
+        value (password/secret/token/apiKey/botToken) — the same inventory B1
+        counts but does not always surface — independent of file permissions
+        or any check's PASS/FAIL. Paths only, never values (§8).
+      * B1's bootstrap-file pattern hits (ctx.bootstrap, SECRET_PATTERNS) — NOW
+        COVERED, marked uncertain. A free-text regex match against prose, not a
+        structured key: this can name the FILE but not confirm the string is a
+        live credential rather than an example/placeholder, so it is listed
+        with that caveat rather than silently dropped — an unconfirmed
+        suspicion must never read as "nothing here".
+      * C015 (checks/_config.py check_secrets_at_rest_home) — NOT covered.
+        It sweeps arbitrary files across the whole home (env files, workspace
+        content, anything user-owned) — a materially broader, already-capped
+        surface. Folding a whole-home sweep into the rotation list is a
+        separate design call, not a fix to the enumeration bug closed here.
+      * checks/_mcp.py's per-MCP-server env/header SECRET_KEY_RE scan —
+        ALREADY COVERED, transitively. MCP server env/headers live under
+        ``mcp.servers.<name>.{env,headers}`` inside the same ``ctx.config``
+        dict, so ``_secret_paths(ctx.config)`` above already walks into them;
+        no separate union needed.
+      * checks/_lifecycle.py's exec-passEnv SECRET_KEY_RE scan — NOT
+        applicable, different risk class. It flags secret-SHAPED ENV VAR
+        *NAMES* declared for passthrough to exec tooling (e.g.
+        ``tools.exec.passEnv: ["AWS_SECRET_ACCESS_KEY"]``); the credential
+        VALUE lives in the OS environment, not in this config, so there is no
+        config path here to rotate against — same reasoning B41 already
+        applies to `_gateway_env_credential`.
+    """
+    seen: dict[str, None] = {}  # insertion-ordered de-dup, no external dep
+
     b41 = next((f for f in findings if f.id == "B41"), None)
-    return list(b41.evidence) if b41 is not None and b41.evidence else []
+    if b41 is not None and b41.evidence:
+        for line in b41.evidence:
+            seen.setdefault(line, None)
+
+    for path in _secret_paths(ctx.config if isinstance(ctx.config, dict) else {}):
+        seen.setdefault(f"config: {path}", None)
+
+    for fname, text in (ctx.bootstrap or {}).items():
+        if _pattern_hits_real_secret(SECRET_PATTERNS, text):
+            seen.setdefault(
+                f"bootstrap: {fname} (possible secret-like string, unconfirmed)",
+                None,
+            )
+
+    return list(seen)
 
 
 def build_incident(ctx, findings, score, *, when: str | None = None,
@@ -139,7 +204,7 @@ def build_incident(ctx, findings, score, *, when: str | None = None,
         "sbom": build_sbom(ctx),
         "trajectory_hashes": _trajectory_hash_entries(
             ctx.home, max_files=limits_for(ctx).traj_max_files),
-        "credential_rotation_list": _credential_rotation_list(findings),
+        "credential_rotation_list": _credential_rotation_list(ctx, findings),
         "monitor_events": load_events(events_path),
         # B-277: provenance. An evidence pack that quotes a journal must say WHICH
         # journal, or a reader cannot tell an empty history from the wrong host's
