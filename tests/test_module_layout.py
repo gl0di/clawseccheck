@@ -50,10 +50,15 @@ _EXEMPT = {
                           "prompt-injection checks + the fence/decode/typosquat machinery). "
                           "Kept as ONE unit on purpose (SKILL_CONTENT_RING is the single "
                           "source consumed by both the full audit and --vet); do not split.",
-    "checks/_vet.py": "~5,890 lines — the --vet entry engine (vet_skill/vet_source/"
+    "checks/_vet.py": "~6,606 lines — the --vet entry engine (vet_skill/vet_source/"
                       "detect_vet_type/check_installed_skills + SKILL_CONTENT_RING + the "
                       "shared effect/sink analysis); consumes the content ring. Over budget "
-                      "by design; a finer split is a later cycle.",
+                      "by design; a finer split is a later cycle. Grew ~716 lines over "
+                      "B-555/B-550/B-525, all three of them narrowing a suppression or a "
+                      "corroborator inside the same fence/verb machinery — which is the "
+                      "argument FOR that split rather than against it: three independent "
+                      "false-positive and false-negative fixes all had to reach into one "
+                      "file, so none of them could be reviewed in isolation.",
     "checks/_host.py": "~1,324 lines — the host-monitor / incident-readiness topic "
                        "(B10/B16/B50-B54 + the attestation helpers). Sat at EXACTLY 1,200 "
                        "for a while, i.e. one line under a tripwire, and crossed it with "

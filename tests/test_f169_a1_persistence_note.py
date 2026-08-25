@@ -40,11 +40,19 @@ def test_the_note_fires_when_identity_files_and_a_write_path_are_both_present():
     assert "SOUL.md" in note
 
 
-def test_it_names_the_content_ring_not_more_config():
-    """The whole point: config hardening cannot clear a content finding."""
+def test_it_points_at_the_file_contents_not_more_config():
+    """The whole point: config hardening cannot clear a content finding.
+
+    It must say so WITHOUT naming check ids. F-169's wording ("point at the content ring
+    (B6/B161)") meant the concept, and the first version printed those ids straight into
+    owner-facing output — tests/test_brand_consistency.py rejects that, and rightly: a
+    reader is owed what to look at, not our internal numbering.
+    """
     note = _persistence_note(_ctx({"workspace/SOUL.md": "x"}, _EXEC_CFG))
-    assert "B6" in note and "B161" in note
-    assert "CONTENT" in note
+    assert "actually say" in note
+    assert "not just the config" in note
+    for cid in ("B6", "B161", "B20", "A1"):
+        assert cid not in note, f"check id {cid} leaked into owner-facing text"
 
 
 def test_bootstrap_keys_are_paths_not_bare_filenames():

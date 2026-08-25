@@ -720,22 +720,29 @@ def _persistence_note(ctx: Context) -> str:
     # ctx.bootstrap is keyed by PATH ("workspace/AGENTS.md"), not by bare filename — a
     # membership test against BOOTSTRAP_FILES matches nothing at all. Measured: the first
     # version of this note never fired on any home, including the real one.
+    # getattr, not attribute access: a caller can hand this a Context-shaped stub that
+    # predates the field (tests/test_b283_shallow_reads.py does), and a note must never be
+    # the thing that raises inside a check.
     present = sorted({
-        n.rsplit("/", 1)[-1] for n in (ctx.bootstrap or {})
+        n.rsplit("/", 1)[-1] for n in (getattr(ctx, "bootstrap", None) or {})
         if n.rsplit("/", 1)[-1] in BOOTSTRAP_FILES
     })
     if not present:
         return ""
-    cfg = ctx.config or {}
+    cfg = getattr(ctx, "config", None) or {}
     if not (_real_exec_enabled(cfg) or (set(_enabled_tools(cfg)) & _B55_FS_WRITE_TOOLS)):
         return ""
+    # Names the RISK, not the check ids that find it. F-169 proposed pointing "at the
+    # content ring (B6/B161)" and the first version printed those ids verbatim into
+    # owner-facing output, which tests/test_brand_consistency.py rejects: a reader is
+    # owed what to look at, not our internal numbering.
     named = ", ".join(present[:3]) + (", …" if len(present) > 3 else "")
     return (
         f" Note: {len(present)} identity/bootstrap file(s) ({named}) load into context"
         " every turn, and this config grants a write path to them. Breaking a trifecta leg"
         " changes what the agent can do NEXT — it does not remove a directive already"
-        " written into those files, which keeps loading either way. Check their CONTENT"
-        " (B6/B161), not just the config."
+        " written into those files, which keeps loading either way. Read what those files"
+        " actually say, not just the config."
     )
 
 
