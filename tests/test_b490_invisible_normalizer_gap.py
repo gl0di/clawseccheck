@@ -18,6 +18,14 @@ These tests pin all three halves of the fix: the stripper is widened, the
 tokenizer is deliberately NOT, and the two classes can never silently drift
 apart again.
 
+B-450 (Cf-property sweep, 2026-08-25): `_ZERO_WIDTH_CLASS_SRC` widened again, from the
+twenty above to sixty-one, using `unicodedata.category(ch) == "Cf"` as the spine instead
+of a hand list; a new, separate `_BIDI_MARK_SRC` (LRM / RLM / Arabic Letter Mark --
+directional marks, not the embedding/override/isolate CONTROLS `_BIDI_CLASS_SRC` already
+covered) joined `_INVISIBLE_RE` and the bidi signal alongside it. The membership pins
+below are updated to match; `_ZERO_WIDTH_MEMBERS` and `_BIDI_MARK_MEMBERS` carry the new
+members independently of the source under test, same as the original twenty.
+
 Offline, read-only, stdlib only.
 """
 from __future__ import annotations
@@ -27,6 +35,7 @@ import json
 from clawseccheck.checks import vet_mcp
 from clawseccheck.textnorm import (
     _BIDI_CLASS_SRC,
+    _BIDI_MARK_SRC,
     _INVISIBLE_RE,
     _INVISIBLE_TOKEN_RE,
     _ZERO_WIDTH_CLASS_SRC,
@@ -35,9 +44,10 @@ from clawseccheck.textnorm import (
     obfuscation_signals,
 )
 
-# The twenty zero-width members, spelled out independently of the source under
-# test — a pin is worthless if it derives from the thing it pins.
-_ZERO_WIDTH_MEMBERS = (
+# The twenty zero-width members from before the B-450 Cf-property sweep, spelled out
+# independently of the source under test — a pin is worthless if it derives from the
+# thing it pins.
+_ZERO_WIDTH_MEMBERS_PRE_SWEEP = (
     "­",                                          # soft hyphen
     "᠎",                                          # Mongolian vowel separator
     "​", "‌", "‍",                      # ZWSP / ZWNJ / ZWJ
@@ -46,10 +56,54 @@ _ZERO_WIDTH_MEMBERS = (
     "﻿",                                          # BOM / ZWNBSP
     "￹", "￺", "￻",                      # interlinear annotation
 )
+# B-450 (Cf-property sweep): forty-one further members. Written as \uXXXX/\UXXXXXXXX
+# escapes and range()-generated where contiguous, UNLIKE the literals above — several of
+# these are supplementary-plane historic/notational scripts (Kaithi, Egyptian
+# Hieroglyph, Duployan shorthand, Musical Symbol) that most fonts do not render at all,
+# so a literal here would be unreviewable and indistinguishable from a typo (the same
+# reasoning tests/test_checks_b61_c038.py already gives for its own escaped members).
+# Still independent of `_ZERO_WIDTH_CLASS_SRC`: these ranges were re-derived from
+# Unicode's own category data, not copied from textnorm.py.
+#
+# Every entry below is `chr(0x...)`, not a `"\uXXXX"` string literal -- unlike the rest
+# of this file. That is a deliberate, narrower safety margin than a plain escape: a
+# `\uXXXX` escape is text that still has to be TYPED correctly to stay an escape (and
+# characters this rare are not visually checkable either way), where `chr(cp)` is
+# Python evaluating an integer, so there is no character-shaped text in the source at
+# all for either a human or an editing tool to silently mis-paste as a literal.
+#
+# DO NOT "tidy" these back into `"\uXXXX"` literals -- that is exactly what re-opens
+# this. `repr()` renders a genuine raw non-printable Cf character and its `\uXXXX`
+# escape IDENTICALLY (both show as one backslash + u + 4-6 hex digits, because that is
+# also how Python's repr chooses to display any non-printable code point) -- so `repr()`
+# is not capable of telling a literal from an escape apart, and a review pass built on
+# it returns a confident, wrong "clean" either way. The only check that actually sees
+# the difference is ordinal-level: `[hex(ord(c)) for c in line]` on the raw decoded file
+# text, counting characters, not eyeballing rendered text. That is how a batch of these
+# entries first got written as raw literals in this exact file while `repr()`-based
+# review called them clean.
+_CF_SWEEP_MEMBERS = (
+    tuple(chr(cp) for cp in range(0x0600, 0x0606))      # Arabic number sign family
+    + (chr(0x06dd),)                                    # Arabic End of Ayah
+    + (chr(0x070f),)                                    # Syriac Abbreviation Mark
+    + (chr(0x0890), chr(0x0891))                        # Arabic Pound / Piastre Mark Above
+    + (chr(0x08e2),)                                    # Arabic Disputed End of Ayah
+    + (chr(0x110bd), chr(0x110cd))                      # Kaithi Number Sign / Above
+    + tuple(chr(cp) for cp in range(0x13430, 0x13440))  # Egyptian Hieroglyph format controls
+    + tuple(chr(cp) for cp in range(0x1bca0, 0x1bca4))  # Shorthand (Duployan) format controls
+    + tuple(chr(cp) for cp in range(0x1d173, 0x1d17b))  # Musical Symbol format controls
+)
+_ZERO_WIDTH_MEMBERS = _ZERO_WIDTH_MEMBERS_PRE_SWEEP + _CF_SWEEP_MEMBERS
 _BIDI_MEMBERS = (
     "‪", "‫", "‬", "‭", "‮",  # embedding / override
     "⁦", "⁧", "⁨", "⁩",            # isolates
 )
+# B-450 (Cf-property sweep): LRM / RLM / Arabic Letter Mark — directional marks kept in a
+# SEPARATE upstream source (_BIDI_MARK_SRC) from the embedding/override/isolate CONTROLS
+# above, but reported through the same "bidi-override / embedding controls found" signal
+# and stripped by the same _INVISIBLE_RE. `chr(cp)`, not a literal or an escape, for the
+# same reason as _CF_SWEEP_MEMBERS.
+_BIDI_MARK_MEMBERS = (chr(0x200e), chr(0x200f), chr(0x061c))  # LRM, RLM, Arabic Letter Mark
 # What the tokenizer keeps, and must keep: the pre-B-490 membership.
 _TOKEN_MEMBERS = ("­", "​", "‌", "‍", "⁠", "﻿") + _BIDI_MEMBERS
 
@@ -114,14 +168,19 @@ def test_vet_mcp_fails_an_injection_split_by_any_invisible(tmp_path):
 
 def test_stripper_class_is_exactly_the_zero_width_plus_bidi_members():
     """Exhaustive, so a widened range that overshoots its own boundary is caught."""
-    assert _members(_INVISIBLE_RE) == set(_ZERO_WIDTH_MEMBERS) | set(_BIDI_MEMBERS)
+    assert _members(_INVISIBLE_RE) == (
+        set(_ZERO_WIDTH_MEMBERS) | set(_BIDI_MEMBERS) | set(_BIDI_MARK_MEMBERS)
+    )
 
 
 def test_the_two_class_sources_compose_the_stripper():
     """The sources are what `obfuscation_signals` also builds from, so this pins
-    that there is ONE definition rather than two that happen to agree today."""
+    that there are three named sources composing it (B-450 added _BIDI_MARK_SRC as
+    a third), not a fourth copy that happens to agree today."""
     assert _members(_INVISIBLE_RE) == _members(
-        __import__("re").compile("[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + "]")
+        __import__("re").compile(
+            "[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + _BIDI_MARK_SRC + "]"
+        )
     )
 
 

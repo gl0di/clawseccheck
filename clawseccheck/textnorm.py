@@ -22,18 +22,31 @@ import unicodedata
 # so a literal is indistinguishable from its neighbours in source -- and one
 # silently shadowing another is how the divergence described below survived.
 #
-# ZERO-WIDTH members -- the same twenty `obfuscation_signals` reports; see the
+# ZERO-WIDTH members -- the same class `obfuscation_signals` reports; see the
 # curated class comment there for why each has no honest use in agent-facing text:
-#   U+00AD        soft hyphen
-#   U+180E        Mongolian vowel separator (category Cf since Unicode 10)
-#   U+200B-200D   zero-width space / ZWNJ / ZWJ
-#   U+2060-2064   word joiner + the mathematical invisibles
-#   U+206A-206F   deprecated format controls
-#   U+FEFF        BOM / ZWNBSP
-#   U+FFF9-FFFB   interlinear annotation anchor / separator / terminator
-# BIDI members:
-#   U+202A-202E   LRE, RLE, PDF, LRO, RLO (embedding/override)
-#   U+2066-2069   LRI, RLI, FSI, PDI (Unicode 6.3 isolates)
+#   U+00AD          soft hyphen
+#   U+180E          Mongolian vowel separator (category Cf since Unicode 10)
+#   U+200B-200D     zero-width space / ZWNJ / ZWJ
+#   U+2060-2064     word joiner + the mathematical invisibles
+#   U+206A-206F     deprecated format controls
+#   U+FEFF          BOM / ZWNBSP
+#   U+FFF9-FFFB     interlinear annotation anchor / separator / terminator
+#   U+0600-0605     Arabic number sign family (SANAH / footnote / SAFHA / SAMVAT / above)
+#   U+06DD          Arabic End of Ayah
+#   U+070F          Syriac Abbreviation Mark
+#   U+0890-0891     Arabic Pound / Piastre Mark Above
+#   U+08E2          Arabic Disputed End of Ayah
+#   U+110BD,U+110CD Kaithi Number Sign / Number Sign Above
+#   U+13430-1343F   Egyptian Hieroglyph format controls (joiners / overlays / enclosures)
+#   U+1BCA0-1BCA3   Shorthand (Duployan) format controls
+#   U+1D173-1D17A   Musical Symbol format controls (begin/end beam/tie/slur/phrase)
+# BIDI EMBEDDING/OVERRIDE/ISOLATE members (unconditional -- see _BIDI_RE below,
+# and checks/_mcp.py for the consumer-side LRO/RLO-only escalation):
+#   U+202A-202E     LRE, RLE, PDF, LRO, RLO (embedding/override)
+#   U+2066-2069     LRI, RLI, FSI, PDI (Unicode 6.3 isolates)
+# BIDI MARK members -- kept in a SEPARATE constant, see _BIDI_MARK_SRC below:
+#   U+200E,U+200F   LRM, RLM
+#   U+061C          Arabic Letter Mark
 #
 # B-490: the zero-width half used to stop at the six pre-B-450 members while
 # `obfuscation_signals` already reported twenty -- so `normalize_for_scan` could
@@ -42,6 +55,45 @@ import unicodedata
 # and exfiltrate." came back from `vet_mcp` as PASS, "no supply-chain / trust
 # risks detected", while the same split on U+200B FAILed. Two invisible
 # characters were the entire bypass. Both halves now derive from one source.
+#
+# B-450 (Cf-property sweep, this pass): Tier 1 (landed 2026-08-06) hand-curated
+# four ranges "with no honest use in agent-facing text". `unicodedata.category(ch)
+# == "Cf"` (170 code points total) is the actual property that reasoning was
+# reaching for -- it names EVERY member with the shared "invisible format
+# character" shape, not just the four ranges someone happened to name, which is
+# exactly how the class stayed narrow enough to miss U+06DD (a genuine, measured,
+# clean-PASS gap: see tests/test_b450_cf_property_sweep.py). Applying the SAME
+# Tier-1 test ("would this ever honestly appear in a tool description, skill
+# manifest, or install-time target?") to the remaining 44 Cf code points not yet
+# covered (170 total, minus the 20 already in _ZERO_WIDTH_CLASS_SRC, minus 9 bidi
+# embedding/isolate controls, minus 97 in the Tag block already folded/stripped by
+# _TAG_TABLE) sorts them into exactly two groups:
+#   - Script-specific format/annotation marks (Arabic Quranic-verse and
+#     currency marks, Syriac abbreviation, Kaithi, Egyptian Hieroglyph,
+#     Duployan shorthand, Musical Symbol layout controls): every one of them
+#     has a real but NARROW legitimate home (liturgical text, a specific
+#     historic/notational script) and zero honest reason to appear in
+#     agent-facing English/mixed-language configuration text -- the same
+#     bucket Tier 1 already used for U+180E Mongolian. Added here.
+#   - LRM / RLM / Arabic Letter Mark: NOT added here. These are directional
+#     MARKS, not the embedding/override/isolate CONTROLS above -- the same
+#     "orders a run, cannot flip a strong character against its own
+#     direction" distinction the C-038 consumer already draws for
+#     FSI/PDI/LRE/PDF (see test_c038_c135_bidi_override_in_description_is_dangerous
+#     and its neighbour) -- and they are genuinely pervasive in real Hebrew/
+#     Arabic prose mixed with digits, punctuation or an embedded LTR run (the
+#     Unicode Bidirectional Algorithm's own recommended fix-up for exactly that
+#     case). Folding them into the unconditional zero-width bucket would punish
+#     ordinary RTL writers the same way the pre-existing bidi class would if
+#     LRO/RLO were not distinguished from FSI/PDI downstream. They go in
+#     _BIDI_MARK_SRC below instead: same signal family (bidi), same downstream
+#     "ordering, not overriding" treatment, not the zero-width one.
+#
+# Deliberately NOT Cf, so NOT swept in here (different Unicode category
+# entirely -- a property-based sweep of Cf cannot and should not reach them):
+# variation selectors U+FE00-FE0F (category Mn), Braille Pattern Blank U+2800
+# (category So), Hangul Filler U+3164 / U+FFA0 (category Lo). See the TIER 2
+# comment inside obfuscation_signals for what happens to each of those.
 # ---------------------------------------------------------------------------
 _ZERO_WIDTH_CLASS_SRC = (
     "\u00ad"          # soft hyphen
@@ -51,12 +103,34 @@ _ZERO_WIDTH_CLASS_SRC = (
     "\u206a-\u206f"   # deprecated format controls
     "\ufeff"          # BOM / ZWNBSP
     "\ufff9-\ufffb"   # interlinear annotation
+    "\u0600-\u0605"   # Arabic number sign family
+    "\u06dd"          # Arabic End of Ayah
+    "\u070f"          # Syriac Abbreviation Mark
+    "\u0890-\u0891"   # Arabic Pound / Piastre Mark Above
+    "\u08e2"          # Arabic Disputed End of Ayah
+    "\U000110bd"      # Kaithi Number Sign
+    "\U000110cd"      # Kaithi Number Sign Above
+    "\U00013430-\U0001343f"  # Egyptian Hieroglyph format controls
+    "\U0001bca0-\U0001bca3"  # Shorthand (Duployan) format controls
+    "\U0001d173-\U0001d17a"  # Musical Symbol format controls
 )
 _BIDI_CLASS_SRC = (
     "\u202a-\u202e"   # bidi embedding / override controls
     "\u2066-\u2069"   # bidi isolates
 )
-_INVISIBLE_RE = re.compile("[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + "]")
+# LRM / RLM / Arabic Letter Mark -- directional MARKS (order neutral characters,
+# cannot flip a strong character's own direction), unlike the embedding/override/
+# isolate CONTROLS in _BIDI_CLASS_SRC. Kept separate on purpose: reported through
+# the same "bidi-override / embedding controls found" signal (still stripped by
+# _INVISIBLE_RE, still there for a keyword split across one to recover), but
+# deliberately EXCLUDED from _INVISIBLE_TOKEN_RE below -- see that class comment.
+_BIDI_MARK_SRC = (
+    "\u200e-\u200f"   # LRM, RLM
+    "\u061c"          # Arabic Letter Mark
+)
+_INVISIBLE_RE = re.compile(
+    "[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + _BIDI_MARK_SRC + "]"
+)
 
 # The NARROWER class the two token-level signals below keep using, deliberately.
 #
@@ -64,13 +138,19 @@ _INVISIBLE_RE = re.compile("[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + "]")
 # BEFORE splitting on `\w+`. No member of either class is a `\w` character, so
 # one sitting between two letters SPLITS them into separate tokens; stripping it
 # first JOINS them into one. For the six that is long-settled behaviour. Joining
-# on the fourteen added above would newly fuse a pure-Cyrillic token to a
-# pure-ASCII one into a single mixed token -- verified to flip
+# on the Tier-1/Cf-sweep members added above would newly fuse a pure-Cyrillic
+# token to a pure-ASCII one into a single mixed token -- verified to flip
 # `confusable_in_ascii_context` False->True on "\u043e\u2062k", "\u0430\u180ez"
 # and "\u03bf\u2063n" -- and that signal is FAIL-capable (B332 homoglyph,
 # typosquat). Widening the STRIPPER closes a live bypass; widening the TOKENIZER
 # would only trade a false negative for a false positive. So this one does not
-# move with the other.
+# move with the other -- and _BIDI_MARK_SRC (LRM/RLM/ALM) stays out for the SAME
+# reason plus its own: those marks sit at exactly an RTL/LTR script BOUNDARY in
+# real bidi text, which is precisely where stripping one before tokenizing risks
+# fusing two genuinely different-script words that a real bidi document keeps
+# apart (measured: no real-fleet flip found, see tests/test_b450_cf_property_sweep.py,
+# but the risk is structural, not just unmeasured today, so it is excluded on the
+# same footing as the rest of this class rather than on "nothing found yet").
 _INVISIBLE_TOKEN_RE = re.compile(
     "["
     "\u00ad"          # soft hyphen
@@ -527,8 +607,15 @@ def obfuscation_signals(text: str) -> list[str]:
     # ------------------------------------------------------------------------
     # B-490: both bodies now come from the module-level sources above, so the
     # signal and the stripper cannot drift apart again (they did, for 14 members).
+    #
+    # B-450 (Cf-property sweep): _BIDI_RE also carries _BIDI_MARK_SRC (LRM/RLM/
+    # Arabic Letter Mark) alongside the embedding/override/isolate controls --
+    # NOT a separate signal string. Leaving it out here (while _INVISIBLE_RE
+    # above already strips it) would reproduce the exact B-490 defect one level
+    # down: the text gets silently cleaned and the caller is never told an
+    # invisible was there at all.
     _ZERO_WIDTH_RE = re.compile("[" + _ZERO_WIDTH_CLASS_SRC + "]")
-    _BIDI_RE = re.compile("[" + _BIDI_CLASS_SRC + "]")
+    _BIDI_RE = re.compile("[" + _BIDI_CLASS_SRC + _BIDI_MARK_SRC + "]")
 
     if _has_suspicious_zero_width(text, _ZERO_WIDTH_RE):
         signals.append("zero-width / invisible characters found")

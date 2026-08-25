@@ -46,6 +46,7 @@ from ..textnorm import (
     _has_suspicious_zero_width,
     _is_zwj_between_emoji,  # B-449: the emoji carve-out, reused for the COUNT half
     _nfkc_ascii_fold_changed,
+    _ZERO_WIDTH_CLASS_SRC,  # B-450: single source for the run/counted classes below
     confusable_in_ascii_context,
     normalize_for_scan,
     obfuscation_signals,
@@ -1667,27 +1668,38 @@ def _c038_has_rtl_script(text: str) -> bool:
 # needs at least two symbols, so a ZWJ-carrying payload still contributes non-ZWJ code
 # points at roughly half its length.
 #
-# The character classes MIRROR `textnorm.obfuscation_signals()`'s zero-width class, which
-# is a function-local and cannot be imported. They are pinned against it by
-# test_c038_invisible_run_class_mirrors_textnorm_signal so a drift is caught. This leg
-# only ever NARROWS that signal -- the signal is required first, so its emoji-ZWJ
+# The character classes are BUILT FROM `textnorm._ZERO_WIDTH_CLASS_SRC` -- the exact
+# source `obfuscation_signals()` itself compiles into `_ZERO_WIDTH_RE` -- rather than
+# restating its members here. This leg only ever NARROWS that signal (adds a run-length
+# or total-count gate on top of it); the signal is required first, so its emoji-ZWJ
 # exemption keeps holding untouched.
 #
-# B-450 (Tier 1, 2026-08-06): widened alongside the upstream class -- see
-# textnorm.obfuscation_signals' own comment above its `_ZERO_WIDTH_RE` for the full
-# rationale. Both classes below now carry the SAME twenty code points upstream does:
-# the original six (U+200B-200D, U+FEFF, U+00AD, U+2060) plus Tier 1
-# (U+2061-2064, U+FFF9-FFFB, U+206A-206F, U+180E). Tier 2 (variation selectors,
-# Braille blank, Hangul filler) stays out on both sides, same as upstream.
+# B-450 (Cf-property sweep): this used to be two hardcoded literal classes, kept in sync
+# by hand and pinned against upstream by test_c038_invisible_run_class_mirrors_textnorm_
+# signal / test_c038_invisible_counted_class_is_the_run_class_minus_zwj. That pin caught
+# every DRIFT (a copy that stopped matching a member both sides once had) but, by
+# construction, could not catch an ADDITION upstream never mirrored here -- it only ever
+# walked the members it already knew about. That is exactly what happened: this file
+# still carried the pre-sweep twenty (the original six plus Tier 1) after textnorm's
+# `_ZERO_WIDTH_CLASS_SRC` grew to sixty-one, so the FAIL-capable keyword-split leg (which
+# runs on `normalize_for_scan()` output, upstream of this file entirely) kept working for
+# every new member, but the WARN-only run/count gate below silently did not. Importing
+# the live source instead of restating it means this file cannot go stale again the next
+# time the upstream class moves -- there is nothing left here to forget to update.
+#
+# Tier 2 (variation selectors, Braille blank, Hangul filler) is not part of
+# `_ZERO_WIDTH_CLASS_SRC` at all (different Unicode category -- see the comment above
+# `_ZERO_WIDTH_RE` in textnorm.obfuscation_signals), so it stays out here automatically,
+# same as upstream, with no separate exclusion needed.
 _C038_INVISIBLE_RUN_MIN = 4
 _C038_INVISIBLE_RUN_RE = re.compile(
-    "[\u00ad\u180e\u200b-\u200d\u2060-\u2064\u206a-\u206f\ufeff\ufff9-\ufffb]{"
-    + str(_C038_INVISIBLE_RUN_MIN) + ",}"
+    "[" + _ZERO_WIDTH_CLASS_SRC + "]{" + str(_C038_INVISIBLE_RUN_MIN) + ",}"
 )
 _C038_INVISIBLE_TOTAL_MIN = 32
-_C038_INVISIBLE_COUNTED_RE = re.compile(
-    "[\u00ad\u180e\u200b\u200c\u2060-\u2064\u206a-\u206f\ufeff\ufff9-\ufffb]"
-)
+# U+200D ZWJ is excluded from the COUNTED class (see _c038_invisible_total below for why)
+# via a negative lookahead rather than a second, ZWJ-subtracted copy of the source string
+# -- so there is still only ONE place that spells out the member ranges.
+_C038_INVISIBLE_COUNTED_RE = re.compile("(?!\u200d)[" + _ZERO_WIDTH_CLASS_SRC + "]")
 _C038_ZWJ = "\u200d"
 
 
@@ -1715,16 +1727,21 @@ def _c038_invisible_total(text: str) -> int:
     counts, because that is what it is doing.
 
     WHAT THIS COUNTS, STATED EXACTLY, because an earlier draft of this docstring claimed
-    it counted "every invisible character" and that was false: it counts the nineteen
-    members of `_C038_INVISIBLE_COUNTED_RE` plus non-emoji ZWJ -- TWENTY code points as of
-    B-450 (Tier 1; was six before it). It is bounded by `obfuscation_signals`' own class,
+    it counted "every invisible character" and that was false: it counts every member of
+    `_C038_INVISIBLE_COUNTED_RE` plus non-emoji ZWJ -- i.e. every member of
+    `textnorm._ZERO_WIDTH_CLASS_SRC` (imported directly, not restated -- see the comment
+    above `_C038_INVISIBLE_RUN_RE`). Deliberately not stated as a number here: the exact
+    count moved from 6 to 20 (B-450 Tier 1) to 61 (B-450 Cf-property sweep) without this
+    docstring ever being told, which is what let the OLD, hardcoded pair of classes go
+    stale behind the count silently. It is bounded by `obfuscation_signals`' own class,
     which is upstream and shared, and the residuals below are all consequences of that
     boundary rather than of the arithmetic here.
 
     `_C038_INVISIBLE_COUNTED_RE` mirrors `obfuscation_signals`' class exactly, minus ZWJ --
-    widening the regex to add a new upstream member is fine (B-450 did exactly that); what
-    it must never do is fold the emoji exemption INTO the character class, because that
-    exemption is per-character-context (see `_is_zwj_between_emoji`) and cannot be
+    widening the regex to add a new upstream member is automatic now (both are built from
+    the same imported `_ZERO_WIDTH_CLASS_SRC`); what it must never do is fold the emoji
+    exemption INTO the character class, because that exemption is per-character-context
+    (see `_is_zwj_between_emoji`) and cannot be
     expressed as a static set of code points.
 
     MEASURED FALSE-POSITIVE COST: one file. Across 270,954 real text files plus 3,033 npm
@@ -1760,6 +1777,12 @@ def _c038_invisible_total(text: str) -> int:
         `_ZERO_WIDTH_RE` for why (pervasive legitimate per-character use, e.g. emoji
         presentation via U+FE0F, needs a per-character discriminator this class doesn't
         have) -- so a Tier-2-only channel is still a live gap, tracked there, not here.
+        A SECOND upstream widening (B-450, Cf-property sweep: 20 -> 61 members) landed
+        after the paragraph above was written, closing a set of narrow-script format
+        characters (Arabic/Syriac/Kaithi/Egyptian-Hieroglyph/Duployan/Musical-Symbol) the
+        same way. `_C038_INVISIBLE_RUN_RE` / `_C038_INVISIBLE_COUNTED_RE` now import
+        `_ZERO_WIDTH_CLASS_SRC` directly instead of restating its members, specifically so
+        this bullet does not need a third rewrite the next time the upstream class moves.
     """
     total = len(_C038_INVISIBLE_COUNTED_RE.findall(text))
     if _C038_ZWJ not in text:
