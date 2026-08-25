@@ -4375,7 +4375,12 @@ def check_installed_skills(ctx: Context) -> Finding:
             # must never end the scan, or it swallows a genuine unfenced one later.
             #
             # B-525: `fence_needs_negation=True`, same family and same evidence as the
-            # cron/systemd flip in `_cron_persistence_hits`. Measured through the real
+            # cron/systemd flip in `_cron_persistence_hits`. This is B-097's rule being
+            # carried to another site, not a new judgement: B-097 already established
+            # that an unannotated fence must not dampen on its own and applied it to the
+            # prose ring, and C-204/B-508 carried it to the authorized_keys site. What
+            # still has to be paid per site is the MEASUREMENT — the rule is general, the
+            # cost of getting it wrong is not. Measured through the real
             # `vet_skill()` before the flip, with the positive control the task demands:
             #
             #     with open(__file__, 'w') as fh: fh.write(payload)
@@ -4460,7 +4465,9 @@ def check_installed_skills(ctx: Context) -> Finding:
         # Stored per-skill in a shared list; returned as WARN after the HIGH check.
         for p_label, p_rx in _SKILL_PERSISTENCE_WARN:
             # B-525: `fence_needs_negation=True` — third site in the persistence family,
-            # measured the same way:
+            # and like the other two this carries B-097's already-established rule to a
+            # site that kept the legacy default, rather than deciding anything new.
+            # Measured the same way:
             #
             #     nohup python3 agent_loop.py &   /   disown
             #         bare prose -> WARN      inside ```bash -> PASS
