@@ -1062,6 +1062,20 @@ def _is_predominantly_utf8(data: bytes) -> bool:
     A file with no non-ASCII bytes at all returns False: there are no characters for the
     latin-1 rung to get wrong, so the byte-preserving read is the better one and this
     gate has nothing to protect.
+
+    B-546 (superseded as `_decode_ladder`'s gate, kept as a function): both terms of the
+    ratio above are counted over the WHOLE file, and every invalid byte an attacker adds
+    ANYWHERE increments both -- so padding walks the ratio across the threshold
+    regardless of where the real payload sits. Measured: 2 appended bytes flipped a
+    homoglyph document's rung and 2,941 appended bytes did the same to a 1,470-character
+    Cyrillic body, in both cases destroying the very non-ASCII characters this rung
+    exists to protect. `_decode_ladder` now calls `_decode_ladder_regions` instead,
+    which asks the same question per CONTIGUOUS REGION so a padding-inflated region
+    elsewhere cannot vote on how a different region is read. This function is left
+    exactly as it was -- it is still correct on the question it actually answers ("is
+    the WHOLE file predominantly UTF-8"), and it stays directly exercised by
+    `test_is_predominantly_utf8_separates_the_two_populations`
+    (tests/test_b538_reader_decode_ladder.py, a different task's file).
     """
     try:
         codecs.getincrementaldecoder("utf-8")().decode(data[:_TEXT_SAMPLE_BYTES], False)
@@ -1075,6 +1089,184 @@ def _is_predominantly_utf8(data: bytes) -> bool:
     return damaged / non_ascii < _LEGACY_DAMAGE_RATIO
 
 
+# B-546: match string for `_utf8_byte_regions` -- a maximal run of the low-surrogate
+# code points `errors="surrogateescape"` substitutes for a byte strict UTF-8 rejects.
+_SURROGATE_ESCAPE_RE = re.compile("[\udc80-\udcff]+")
+
+
+def _utf8_byte_regions(data: bytes) -> "list[tuple[bool, int, int]]":
+    """Split `data` into ordered ``(is_valid_utf8, start, end)`` byte spans.
+
+    Found in ONE linear pass rather than by repeatedly re-decoding the remaining tail on
+    each `UnicodeDecodeError` (which is worst-case O(n^2) on a file with many scattered
+    bad bytes -- exactly the shape an attacker controls, and exactly the kind of hang
+    `scanbudget.py` exists to catch rather than rely on here). `errors="surrogateescape"`
+    (PEP 383) maps each byte the strict decoder would reject to one low-surrogate code
+    point (U+DC80-U+DCFF) and never raises, so the whole file decodes natively in a
+    single pass; a maximal run of those surrogate code points in the output marks
+    exactly the bytes strict UTF-8 would have rejected -- one escaped code point per
+    rejected byte, finer-grained than but consistent with the "one U+FFFD per maximal
+    ill-formed subsequence" `errors="replace"` uses elsewhere in this ladder. Every
+    non-surrogate run round-trips through a plain `.encode("utf-8")`, which is how the
+    byte offsets below are recovered without a second decode pass over the same bytes.
+    """
+    if not data:
+        return []
+    decoded = data.decode("utf-8", errors="surrogateescape")
+    regions: "list[tuple[bool, int, int]]" = []
+    pos = 0
+    byte_pos = 0
+    for m in _SURROGATE_ESCAPE_RE.finditer(decoded):
+        if m.start() > pos:
+            valid_len = len(decoded[pos:m.start()].encode("utf-8"))
+            regions.append((True, byte_pos, byte_pos + valid_len))
+            byte_pos += valid_len
+        invalid_len = m.end() - m.start()  # one original byte per surrogate code point
+        regions.append((False, byte_pos, byte_pos + invalid_len))
+        byte_pos += invalid_len
+        pos = m.end()
+    if pos < len(decoded):
+        valid_len = len(decoded[pos:].encode("utf-8"))
+        regions.append((True, byte_pos, byte_pos + valid_len))
+    return regions
+
+
+# How close two invalid-UTF-8 runs must be, in bytes, before they are treated as ONE
+# damaged region rather than two independent ones. Genuine legacy prose is not one
+# unbroken run of bad bytes: every ASCII space, digit, or punctuation mark between two
+# non-ASCII words is itself valid UTF-8 (a single ASCII byte always is, and even a
+# legacy multi-byte codepage's bytes occasionally pair up into an "accidentally valid"
+# UTF-8 sequence by pure coincidence), so a byte-exact split fragments a real
+# cp1251/shift-jis/cp932/euc-jp/big5/gb18030/euc-kr document into hundreds of runs a
+# few bytes apart. Measured, on real documents in each of those encodings (the same
+# corpus `test_b537_shift_jis_multibyte_classification.py` and this ladder's cp1251
+# fixtures already exercise): the largest gap between two consecutive invalid runs
+# inside genuine legacy prose was 11 bytes. This sits roughly 6x above that, so an
+# embedded acronym, number, or short English word does not needlessly split one legacy
+# region into several, while staying far below any realistic separation between an
+# attacker's padding and the real payload elsewhere in the same document -- a large
+# valid stretch (the case this fix defends) is never bridged, because it is not
+# sandwiched between two runs close enough to qualify.
+_REGION_BRIDGE_BYTES = 64
+
+
+def _merge_bridged_invalid_runs(runs: "list[tuple[int, int]]") -> "list[tuple[int, int]]":
+    """Collapse consecutive ``(start, end)`` invalid-byte runs into ONE span wherever the
+    valid gap between them is <= `_REGION_BRIDGE_BYTES`. `runs` must already be in file
+    order, as `_utf8_byte_regions` produces them."""
+    if not runs:
+        return []
+    merged = [list(runs[0])]
+    for start, end in runs[1:]:
+        if start - merged[-1][1] <= _REGION_BRIDGE_BYTES:
+            merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    return [(s, e) for s, e in merged]
+
+
+# B-546 (round 2): an ABSOLUTE size floor on the merged span -- the first cut of this
+# fix -- broke a genuinely short legacy file. Measured on the real regression
+# (`test_every_reader_gets_the_decoded_text_not_just_the_ring`, a 53-byte cp1251
+# comment: `# Настройка плагина: описание параметров.\n` + one ASCII code line): after
+# `_merge_bridged_invalid_runs` correctly reassembles its four word-runs into ONE
+# 38-byte span (bridging was never the problem -- `_REGION_BRIDGE_BYTES=64` already
+# spans every gap in it), 38 bytes still cannot clear a 256-byte floor, because the
+# floor is bigger than the entire file. No bridge distance fixes that: the file has no
+# MORE bytes to bridge in. Size was never the right discriminator for "is this a
+# confident legacy guess" -- density is, which is what `_is_predominantly_utf8` already
+# measured, just over the WHOLE file. This asks the identical question (damaged bytes /
+# non-ASCII bytes, against the same `_LEGACY_DAMAGE_RATIO`) over a WINDOW around the
+# region instead: for a short file the window clips to the file and the two questions
+# coincide (ratio ~1.0 for the 53-byte case, correctly legacy); for a region embedded in
+# a much larger document, bytes outside the window cannot move its ratio no matter how
+# many of them there are, which is what actually stops the padding attack (a distant
+# 2,941-byte pad or a distant 2-byte homoglyph flip both stay OUTSIDE a real payload
+# region's own window). `_TEXT_SAMPLE_BYTES` is reused as the radius rather than adding
+# a second magic number -- it is already this ladder's answer to "how much of a
+# document is enough to judge by" (`classify_bytes`'s own sample).
+_REGION_RATIO_RADIUS_BYTES = _TEXT_SAMPLE_BYTES
+
+
+def _region_reads_as_legacy(data: bytes, start: int, end: int) -> bool:
+    """Is the ``[start, end)`` region -- plus up to `_REGION_RATIO_RADIUS_BYTES` of
+    context on each side, clipped to the file -- dense enough with invalid-UTF-8 bytes
+    to trust a legacy-codepage guess for it?
+
+    Same arithmetic as `_is_predominantly_utf8` (damaged / non-ASCII bytes, against
+    `_LEGACY_DAMAGE_RATIO`), but the denominator is a bounded WINDOW around one region
+    instead of the whole file -- see `_REGION_RATIO_RADIUS_BYTES` for why that is the
+    fix and bridging alone was not.
+    """
+    window = data[max(0, start - _REGION_RATIO_RADIUS_BYTES):min(len(data), end + _REGION_RATIO_RADIUS_BYTES)]
+    non_ascii = len(window.translate(None, bytes(range(128))))
+    if not non_ascii:
+        return False
+    damaged = window.decode("utf-8", errors="replace").count("�")
+    return damaged / non_ascii >= _LEGACY_DAMAGE_RATIO
+
+
+def _decode_ladder_regions(data: bytes) -> "tuple[str, str | None]":
+    """The B-546 replacement for the old whole-file `_is_predominantly_utf8` gate.
+
+    Called only from `_decode_ladder`'s NUL-free legacy branch, on data whose whole-file
+    UTF-8 decode has already failed. Rather than deciding ONE rung for the entire file,
+    this finds the byte spans that actually fail UTF-8 (`_utf8_byte_regions`), bridges
+    the ones close enough together into one damaged region
+    (`_merge_bridged_invalid_runs`), and only then asks whether that MERGED region --
+    not the whole file -- is dense enough with invalid bytes, in its own local
+    neighbourhood, to trust a legacy-codepage guess (`_region_reads_as_legacy`).
+
+    A region that fails that test -- an isolated stray byte surrounded by valid content
+    far past the window radius, or an attacker's padding sitting apart from anything
+    else non-ASCII -- is decoded lossily (`errors="replace"`) instead of guessed: per
+    the DoD, a region that cannot be confidently decoded stays scannable rather than
+    silently adopting a rung that could be wrong. A region that passes gets the SAME two
+    rungs the old whole-file gate used, unchanged (`_try_structured_multibyte` first,
+    then the byte-preserving latin-1 guess) -- just scoped to that region's own bytes,
+    so a padding-inflated region elsewhere in the file cannot vote on how this one is
+    read. `_try_structured_multibyte` keeps its own internal `_MULTIBYTE_MIN_SAMPLE_BYTES`
+    floor unchanged (a short span still cannot validate a multi-byte codec with
+    confidence); `_merge_bridged_invalid_runs` existing to reassemble fragmented runs
+    into one contiguous span is what lets a genuine multi-byte-legacy document clear
+    THAT floor at all.
+
+    The returned encoding name is the first assumed rung actually used, in file order --
+    a file needing two DIFFERENT guessed codecs in two different regions is a
+    degenerate case no existing fixture produces; the manifest disclosure exists to say
+    "at least one region here was guessed", not to enumerate every rung used.
+    """
+    regions = _utf8_byte_regions(data)
+    invalid_runs = [(start, end) for is_valid, start, end in regions if not is_valid]
+    merged = _merge_bridged_invalid_runs(invalid_runs)
+    legacy_spans = [(s, e) for s, e in merged if _region_reads_as_legacy(data, s, e)]
+
+    parts: "list[str]" = []
+    assumed_encoding: "str | None" = None
+    cursor = 0
+    for start, end in legacy_spans:
+        if start > cursor:
+            parts.append(data[cursor:start].decode("utf-8", errors="replace"))
+        chunk = data[start:end]
+        structured = _try_structured_multibyte(chunk)
+        if structured is not None:
+            decoded, name = structured
+        else:
+            decoded, name = chunk.decode("latin-1"), "latin-1"
+        parts.append(decoded)
+        if assumed_encoding is None:
+            assumed_encoding = name
+        cursor = end
+    # Reachable only once the whole-file UTF-8 attempt at the top of `_decode_ladder`
+    # has already failed, so `merged` (and thus `legacy_spans` or at least one lossy
+    # gap) is never empty here in practice -- the loop and this tail slice are written
+    # to stay correct standalone regardless (e.g. a test calling this helper directly).
+    if cursor < len(data):
+        parts.append(data[cursor:].decode("utf-8", errors="replace"))
+
+    return "".join(parts), assumed_encoding
+
+
 def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
     """Decode bytes the way the scanner must read them: (text, encoding-used).
 
@@ -1084,9 +1276,10 @@ def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
 
     The single decode ladder — UTF-8, then BOM/shape-confirmed UTF-16, then a legacy
     single-byte reading *only for files that really are single-byte* — shared by the
-    classifier and by every reader that feeds the content ring. That last rung is gated
-    by `_is_predominantly_utf8`: a UTF-8 file with bad bytes in it stays UTF-8 and pays
-    per character, which it reports by returning a None encoding.
+    classifier and by every reader that feeds the content ring. That last rung is gated,
+    per contiguous region (B-546), by `_decode_ladder_regions`: a region that is still
+    predominantly UTF-8 stays UTF-8 and pays per character, which it reports by
+    returning a None encoding.
 
     B-538: it used to live inside `classify_bytes` and nowhere else. The four skill
     readers (`_read_skill_text`, `read_skill_python`, `read_skill_shell`,
@@ -1139,44 +1332,20 @@ def _decode_ladder(data: bytes) -> tuple[str | None, str | None]:
         # the byte that failed — which made one attacker-planted byte a silencer for every
         # non-ASCII-keyed check. A file that is still predominantly UTF-8 therefore keeps a
         # UTF-8 reading and pays per character, disclosed as `(lossy)` by the None
-        # encoding; the single-byte rung below is for files that really are single-byte.
-        # See `_is_predominantly_utf8` for the two conditions and the measurements.
-        if _is_predominantly_utf8(data):
-            return data.decode("utf-8", errors="replace"), None
-
-        # B-537: a legacy MULTI-byte codepage (shift-jis, cp932, euc-jp, big5, gb18030,
-        # euc-kr) gets one rung of its own, ahead of the single-byte guess below. See
-        # `_try_structured_multibyte` for why a validating codec is real evidence and the
-        # latin-1 rung's blind accept is not, and for the C1-control-block mechanism that
-        # made shift-jis specifically score BINARY under latin-1.
-        structured = _try_structured_multibyte(data)
-        if structured is not None:
-            return structured
-
-        # Legacy single-byte encodings (latin-1, cp1251, iso-8859-*): valid prose that is
-        # not valid UTF-8. Found by the B-533 real-file sweep — /usr/bin/pygettext3.12
-        # carries `# -*- coding: iso-8859-1 -*-` and classified TEXT before that change
-        # only because the old UTF-16 fallback happened to score its mojibake above the
-        # gate. Losing it would mean a legacy-encoded README in a skill goes unscanned,
-        # which is the exact defect B-533 is about.
+        # encoding; the legacy rungs below are for files -- or, since B-546, REGIONS of a
+        # file -- that really are single- or multi-byte legacy.
         #
-        # The NUL test is the discriminator, and it is a strong one: compiled and
-        # container formats are NUL-dense (the .pyc files in that same sweep carry
-        # thousands), while single-byte text has none. latin-1 itself never raises, so it
-        # decides nothing on its own — `classify_bytes`'s printable-ratio gate still
-        # makes the call, which is the sound half of the original design.
-        #
-        # B-538: this rung is an ASSUMPTION, and the only one in the ladder that is.
-        # UTF-8 and UTF-16 are self-identifying (an invalid sequence raises; a BOM or the
-        # interleaved-NUL shape names the byte order); a single-byte codepage is not.
-        # `b"\xee"` is Cyrillic `о` in cp1251 and `î` in latin-1, and NOTHING in the bytes
-        # says which — measured: reading a cp1251 SKILL.md as latin-1 turns a planted
-        # `оpenclaw` homoglyph into `îpenclaw`, so B58 finds no confusable and reports
-        # PASS. Guessing the codepage would need charset detection (not stdlib, and a
-        # guess either way), so the sound move is to decode bytes-preserving and let the
-        # caller DISCLOSE the assumption rather than let a PASS speak for characters that
-        # were never reconstructed — hence the returned encoding name.
-        return data.decode("latin-1"), "latin-1"
+        # B-546: the first version of this gate (`_is_predominantly_utf8`) decided that
+        # question once, for the WHOLE file, from a ratio an attacker could walk across
+        # by padding anywhere in the file -- see that function's docstring for the
+        # measurements. `_decode_ladder_regions` asks it per CONTIGUOUS REGION instead
+        # (`_try_structured_multibyte` then the byte-preserving latin-1 guess, same as
+        # before, just scoped to a region rather than the whole file), so padding placed
+        # away from the real payload can no longer vote on how the payload's own region
+        # is read. See its docstring for the two rungs, the merge/floor mechanics, and
+        # why `b"\xee"` (cp1251 `о`, latin-1 `î`, nothing in the bytes says which) is
+        # still an assumption the caller must disclose, never a claimed read.
+        return _decode_ladder_regions(data)
 
     return None, None
 
