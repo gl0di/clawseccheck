@@ -241,6 +241,15 @@ def _host_finding(cid: str, cls: str, ctx: Context) -> Finding:
             f"Install/enable {label} on the host, or reduce the agent's blast radius "
             "(sandbox it, lock channels to an allowlist, remove exec/write tools).",
         )
+    # B-529: this is the exculpatory branch, and it is the one that must not be
+    # reached on an unreadable config. `active is False` is real, config-independent
+    # host-scan evidence; "low-privilege" is not -- `_agent_is_powerful` reads
+    # ctx.config, which is {} when openclaw.json could not be read, so a host with a
+    # genuine monitoring gap was excused on the strength of a config nobody managed to
+    # open. The WARN branch above is untouched: it earned its verdict from the host
+    # scan and does not need the config to be right.
+    if (unreadable := _config_unreadable(cid, ctx)) is not None:
+        return unreadable
     return _finding(
         cid,
         PASS,
@@ -522,6 +531,14 @@ def check_host_egress_posture(ctx: Context) -> Finding:
             "destinations the agent actually needs.",
             evidence=evidence,
         )
+    # B-529: same shape as B50-B54's terminal branch above — active is False is
+    # real, config-independent host-scan evidence, but "low-privilege" is read out
+    # of ctx.config via _agent_is_powerful, which is False on an unreadable
+    # openclaw.json (ctx.config == {}) purely because nothing could be read. Guard
+    # only this exculpatory clean verdict; the WARN branch above already earned
+    # its own merits from the host scan.
+    if (unreadable := _config_unreadable("B101", ctx)) is not None:
+        return unreadable
     return _finding(
         "B101",
         PASS,
