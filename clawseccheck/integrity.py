@@ -75,6 +75,27 @@ def _pyc_header_flags(path: Path) -> int | None:
     interpreter-dependent from this file ever reaches a caller. A file too short to hold
     a flags field, or one that cannot be opened, is simply unclassifiable: this is a
     best-effort signal, not a pyc validator.
+
+    B-608 follow-up (2026-08-25): the "cannot be opened" branch is a
+    genuine UNKNOWN, not a confirmed-benign, and it is silent by a deliberate, narrower
+    argument than the "too short to hold a header" branch above — those two are NOT the
+    same claim. A truncated file is provably inert: Python's own loader requires the full
+    header to accept a ``.pyc`` at all, so a file this short cannot be executed as an
+    unchecked-hash pyc either, whoever tries to import it. An ``OSError`` here (e.g.
+    permission denied) carries no such proof — the bytes behind it are unknown, not
+    absent. It stays silent anyway because ``--verify-self`` and the package's own
+    ``import`` both run as the invoking OS user on this single-user local CLI: a ``.pyc``
+    this call cannot open is, on that same principal, also a ``.pyc`` Python cannot open
+    to execute — unreadable-to-audit implies unreadable-to-run, not "invisible attack".
+    That equivalence is the actual precondition, not an oversight; it would NOT hold
+    under privilege separation (an auditor running as a lower-priv user than the process
+    that later imports the package), which this tool does not assume. Emitting a
+    distinct disclosure for this branch would need a new note kind whose header wording
+    cli.py owns (`clawseccheck/cli.py`'s verify_self block matches `NOTE_UNCHECKED_PYC`
+    to text that asserts a *confirmed* detection) — reusing that kind here would
+    overclaim an unread file as a found one. See
+    ``tests/test_b608_pyc_read_error_is_unknown_not_clean.py`` for the pinned behavior
+    and the escalation this leaves open.
     """
     try:
         with path.open("rb") as fh:
