@@ -126,6 +126,107 @@ def test_unknown_schema_version_marks_incomplete(tmp_path):
     assert r["present"] and r["unknown_version"] is True, r
 
 
+def test_foreign_traceschema_marks_incomplete_not_a_clean_negative(tmp_path):
+    """B-574: a line shaped like a tool.call (it contains the substring) but stamped
+    with a DIFFERENT tool's traceSchema — e.g. a user pointed --analyze-trajectory at
+    another agent tool's `.jsonl` — was previously silently dropped, producing the same
+    `tool_calls == 0` as a genuinely quiet file. It must instead mark the scan
+    unreadable/incomplete, never a clean negative."""
+    home = tmp_path
+    sess = home / "agents" / "main" / "sessions"
+    sess.mkdir(parents=True)
+    line = json.dumps({"traceSchema": "other-agent-tracer", "schemaVersion": 1,
+                       "type": "tool.call",
+                       "data": {"name": "bash", "arguments": {"command": "x"}}})
+    (sess / "s.trajectory.jsonl").write_text(line + "\n", encoding="utf-8")
+    c = Context(home=home)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {"s": "read fake_secrets/db_token.txt"}
+    r = analyze(c)
+    assert r["present"] is True
+    assert r["unreadable"] is True, r
+    assert r["tool_calls"] == 0 and r["hits"] == [], r
+
+    report = render_trajectory_analysis(c, ledger_home=str(tmp_path / "no_ledger.json"))
+    assert "INCOMPLETE" in report
+    assert "different tool's traceSchema" in report
+    assert "not observed acted-on" in report  # still the honest advisory line below it
+    assert "INCIDENT SIGNAL" not in report
+
+
+def test_malformed_json_line_marks_incomplete(tmp_path):
+    """B-574: a line that looks like a tool.call but fails to parse at all (e.g.
+    truncated mid-write by a crash) is an unreadable RECORD, not an absent one."""
+    home = tmp_path
+    sess = home / "agents" / "main" / "sessions"
+    sess.mkdir(parents=True)
+    broken = ('{"traceSchema": "openclaw-trajectory", "schemaVersion": 1, '
+              '"type": "tool.call", "data": {"name": "bash", "argumen')
+    (sess / "s.trajectory.jsonl").write_text(broken + "\n", encoding="utf-8")
+    c = Context(home=home)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {"s": "read fake_secrets/db_token.txt"}
+    r = analyze(c)
+    assert r["present"] is True
+    assert r["unreadable"] is True, r
+    assert r["tool_calls"] == 0 and r["hits"] == [], r
+
+    report = render_trajectory_analysis(c, ledger_home=str(tmp_path / "no_ledger.json"))
+    assert "INCOMPLETE" in report
+    assert "invalid JSON" in report
+    assert "INCIDENT SIGNAL" not in report
+
+
+def test_empty_file_is_a_clean_negative_not_flagged_unreadable(tmp_path):
+    """Counter-control (row 1 of B-574): a genuinely EMPTY sidecar has nothing to read,
+    and that is fine — it must keep the plain '✓ ... not observed acted-on' line with
+    NO incompleteness caveat. Absence is not the same fact as unreadable-but-present."""
+    home = tmp_path
+    sess = home / "agents" / "main" / "sessions"
+    sess.mkdir(parents=True)
+    (sess / "s.trajectory.jsonl").write_text("", encoding="utf-8")
+    c = Context(home=home)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {"s": "read fake_secrets/db_token.txt"}
+    r = analyze(c)
+    assert r["present"] is True  # the sidecar file itself exists
+    assert r["unreadable"] is False, r
+    assert r["unknown_version"] is False, r
+
+    report = render_trajectory_analysis(c, ledger_home=str(tmp_path / "no_ledger.json"))
+    assert "not observed acted-on" in report
+    assert "INCOMPLETE" not in report
+
+
+def test_quiet_session_with_real_records_stays_clean_not_incomplete(tmp_path):
+    """C-135 counter-assertion: records ARE present and parse fine (correct traceSchema/
+    schemaVersion), they are simply not `tool.call` records (e.g. a `prompt.submitted`
+    event) — an honest zero, not a failed read. Must NOT be flagged unreadable; a fix
+    keyed on `tool_calls == 0` rather than the parse failure itself would wrongly flag
+    this ordinary quiet session too."""
+    home = tmp_path
+    sess = home / "agents" / "main" / "sessions"
+    sess.mkdir(parents=True)
+    line = json.dumps({"traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                       "type": "prompt.submitted", "data": {"prompt": "hello"}})
+    (sess / "s.trajectory.jsonl").write_text(line + "\n", encoding="utf-8")
+    c = Context(home=home)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {"s": "read fake_secrets/db_token.txt"}
+    r = analyze(c)
+    assert r["present"] is True
+    assert r["unreadable"] is False, r
+    assert r["tool_calls"] == 0 and r["hits"] == [], r
+
+    report = render_trajectory_analysis(c, ledger_home=str(tmp_path / "no_ledger.json"))
+    assert "not observed acted-on" in report
+    assert "INCOMPLETE" not in report
+
+
 def test_truncation_marks_incomplete_and_a_hit_past_the_cap_is_missed(tmp_path):
     """C-180: same truncation blind spot as behavioral.py's T1/T2 — a real
     indicator hit placed entirely past the 8MB per-file scan cap is silently

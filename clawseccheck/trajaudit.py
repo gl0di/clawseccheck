@@ -298,6 +298,15 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
     arguments_blob is an in-memory json.dumps of data.arguments used ONLY for membership
     testing — it is never returned to a caller that renders it. Yields ("__unknown__", "")
     once if a line carries an unrecognised schema version, so the caller can mark UNKNOWN.
+
+    B-574: also yields ("__unreadable__", "") for a line that LOOKED like a tool.call
+    (it passed the cheap `"tool.call"` pre-filter below) but turned out not to be one of
+    ours at all — invalid JSON, or valid JSON whose `traceSchema` names a different
+    tool's tracer. Both are a FAILED READ, not evidence the file held nothing: a
+    genuinely quiet line (no `"tool.call"` substring at all — a different, correctly
+    recognised event type, or a truly empty file) never reaches this branch, so this
+    sentinel cannot fire on an honest zero. See `_analyze_scan`'s `unreadable` meta and
+    `render_trajectory_analysis`'s use of it.
     """
     try:
         read = 0
@@ -315,8 +324,18 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
                 try:
                     rec = json.loads(line)
                 except ValueError:
+                    # B-574: a line shaped like a tool.call that failed to parse at
+                    # all (e.g. truncated mid-write) is an unreadable RECORD, not an
+                    # absent one — surface it so a resulting zero count is never
+                    # mistaken for "the file legitimately had none".
+                    yield ("__unreadable__", "")
                     continue
                 if not isinstance(rec, dict) or rec.get("traceSchema") != _TRACE_SCHEMA:
+                    # B-574: valid JSON, but not one of our records — most commonly a
+                    # DIFFERENT tracer's `.jsonl` (a user with several agent tools
+                    # pointed this at the wrong file). We could not read it as our
+                    # format; same "failed read", never a fake all-clear.
+                    yield ("__unreadable__", "")
                     continue
                 if rec.get("schemaVersion") != _SCHEMA_VERSION:
                     yield ("__unknown__", "")
@@ -400,6 +419,7 @@ def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
         "files_scanned": 0,
         "unknown_version": False,
         "truncated": False,
+        "unreadable": False,
         "files_total": 0,
         "files_capped": False,
         "tool_calls": 0,
@@ -443,6 +463,9 @@ def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
                 continue
             if name == "__truncated__":
                 result["truncated"] = True
+                continue
+            if name == "__unreadable__":
+                result["unreadable"] = True
                 continue
             result["tool_calls"] += 1
             result["verbs"].add(name)
@@ -894,6 +917,13 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
     if r["unknown_version"]:
         lines.append(f"  {q} Some records used an unrecognised trajectory schema version — "
                      "results are INCOMPLETE (treat as UNKNOWN, not authoritative).")
+    if r["unreadable"]:
+        # B-574: a line that looked like a tool.call but was invalid JSON, or carried a
+        # DIFFERENT tool's traceSchema (wrong file / another tracer), was never parsed —
+        # a resulting zero-hit count is a failed read, not proof the file held nothing.
+        lines.append(f"  {q} Some trajectory lines could not be read as this format — "
+                     "invalid JSON, or a different tool's traceSchema — results are "
+                     "INCOMPLETE (treat as UNKNOWN, not authoritative).")
     if r["truncated"]:
         lines.append(f"  {q} A trajectory file exceeded the per-file scan cap — the "
                      "unscanned remainder was never analyzed. Results are INCOMPLETE "
