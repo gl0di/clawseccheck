@@ -845,6 +845,32 @@ def _is_borderline(f) -> bool:
     )
 
 
+def _with_documented_shape(items: list) -> list:
+    """B-571: every packet item carries `safe_facts`, even when it is empty.
+
+    `docs/OUTPUT_SCHEMA.md` §12 documents the field as an object that is "`{}` when
+    neither could be safely extracted" — `{}` is a VALUE, so the key exists. Only
+    `_item_from_finding` built it; the sink/taint/kwarg producers never set it, so one
+    item in a packet omitted the key entirely and a consumer reading
+    `item["safe_facts"]` raised KeyError on it. That is how this was found: 1 of 73.
+
+    Same ambiguity B-560 removed from SARIF's `selfExcludedSkills`, for the reason
+    recorded there — an absent key cannot be told apart from "nothing to report", so a
+    field meaning "nothing was extracted" must be present and empty rather than missing.
+
+    Applied HERE, at the single assembly point every producer flows through, rather than
+    patched into the one producer that was caught. There are four producers today and the
+    next one would reopen this the same way. Deliberately narrow: only the field the
+    schema documents as always-present-and-possibly-empty is defaulted. A producer that
+    omits any OTHER key is a real defect and must surface as one, not be papered over
+    with an invented value — `tests/test_b571_packet_item_shape.py` asserts the whole key
+    set is uniform, which is what catches that.
+    """
+    for item in items:
+        item.setdefault("safe_facts", {})
+    return items
+
+
 def build_judge_packet(ctx, findings) -> list[dict]:
     """Assemble the judge packet from a completed audit() pass.
 
@@ -870,6 +896,7 @@ def build_judge_packet(ctx, findings) -> list[dict]:
     items.extend(_env_auth_kwarg_items(ctx))
 
     items = _attach_corroboration(items, findings)
+    items = _with_documented_shape(items)
     items.sort(key=lambda d: (d["finding_id"], d["target"], d["redacted_evidence"]))
     return items
 
