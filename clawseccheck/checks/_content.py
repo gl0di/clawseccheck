@@ -5612,7 +5612,19 @@ def _fence_ranges(blob: str) -> list[tuple[int, int]]:
     A fence opens with a line starting with ``` or ~~~ (3+ chars) and closes with
     the same fence character repeated.  Unclosed fences extend to end-of-blob.
     Conservative: only marks spans where the open fence is clearly a Markdown fence
-    (at the start of a line, allowing leading whitespace up to 3 spaces per CommonMark).
+    (at the start of a line -- column 0 only).
+
+    NOT CommonMark-complete: the CLOSE side (below) allows up to 3 spaces of leading
+    indent, but the OPEN side (`_FENCE_OPEN_RE`) does not -- a fence opened under a
+    list item (e.g. "   ```bash") is column-0-only and is not recognised as an opener
+    at all. This is deliberate, not an oversight: B-489 built the CommonMark-complete
+    opener, measured it end to end, and retracted it (see
+    `tests/test_b526_fence_evasion_open.py`) -- it re-pairs the whole document
+    (a later column-0 closer gets misread as a fresh opener that runs to EOF) and it
+    hands an attacker a YAML `description: |` block-scalar payload that only an
+    indented fence can hide without breaking the scalar. Widening this is a
+    whole-ring behavioural change (dozens of call sites across `_content.py`,
+    `_config.py`, `_mcp.py`, `_lifecycle.py`, `_vet.py`), not a one-line coherence fix.
     """
     ranges: list[tuple[int, int]] = []
     pos = 0
