@@ -4005,7 +4005,9 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     return _asciify(out) if ascii_only else out
 
 
-def render_events(events, ascii_only: bool = False) -> str:
+def render_events(events, ascii_only: bool = False, *,
+                   journal_exists: "bool | None" = None,
+                   since: "str | None" = None) -> str:
     """Render the Agent Watch event journal (timeline of what changed when).
 
     C-250: the header used to print "{len(events)} recorded change event(s)" with no
@@ -4016,6 +4018,26 @@ def render_events(events, ascii_only: bool = False) -> str:
     see ``_rotate_journal``), it is pulled out of the generic per-line loop and folded
     into the header itself instead of rendered as one more anonymous [i] line a reader
     can scroll past without registering what it means.
+
+    B-583: an empty ``events`` list is ambiguous on its own — it is what a journal that
+    was NEVER WRITTEN looks like (monitoring has never run) and also what a journal
+    with a genuinely clean history looks like, and those are opposite facts. Two
+    optional, caller-supplied signals resolve it without this function doing any I/O
+    itself (it stays a pure renderer):
+
+    * ``journal_exists=False`` — the caller has confirmed there is no journal store at
+      all (e.g. the file does not exist). Rendered as "monitoring has not run", with
+      no "since" and no date, because none is honest to give.
+    * ``since=<iso timestamp>`` — the caller has an honest "as of" date for a clean
+      history (SKILL.md's documented "nothing has changed since <date>"). This must
+      come from a real record of when monitoring last ran (the monitor state's own
+      timestamp, or the freshness ledger) — **never** the journal file's mtime, which
+      rotation, a permission fix, or a backup restore can all move without a single
+      event being recorded, producing a fabricated "since <date>" (C-135).
+
+    Neither signal supplied (the default) preserves the original, deliberately vaguer
+    "No recorded change events yet." — the safe fallback for callers that have not
+    been updated to supply either fact yet, rather than guessing.
     """
     # Same severity vocabulary as render_monitor — a journal entry written at LOW must not
     # lose its glyph on the way into the permanent record.
@@ -4023,7 +4045,15 @@ def render_events(events, ascii_only: bool = False) -> str:
         if ascii_only \
         else {"CRITICAL": "⛔", "HIGH": "⚠️", "MEDIUM": "🔶", "LOW": "⚪", "INFO": "ℹ️"}
     if not events:
-        out = "Agent Watch journal\n" + "=" * 30 + "\n\nNo recorded change events yet.\n"
+        header = "Agent Watch journal\n" + "=" * 30 + "\n\n"
+        if since is not None:
+            body = f"Nothing has changed since {since}.\n"
+        elif journal_exists is False:
+            body = ("No event journal exists — monitoring has not run yet, so there "
+                     "is nothing that could have changed.\n")
+        else:
+            body = "No recorded change events yet.\n"
+        out = header + body
         return _asciify(out) if ascii_only else out
 
     pruned_note = None

@@ -103,7 +103,11 @@ def test_unreadable_named_events_path_is_reported_rc0(tmp_path):
     assert "note: --events:" in proc.stderr
     assert "no such file or directory" in proc.stderr
     assert MISSING_EVENTS in proc.stderr
-    assert "No recorded change events yet." in proc.stdout
+    # B-583 moved this sentence. What this test guards is the SEPARATION — the problem
+    # is noted on stderr and never on stdout, and rc stays 0 — not the exact wording of
+    # the empty-journal line, which now distinguishes "never written" from "ran and
+    # nothing changed" instead of collapsing both into one neutral sentence.
+    assert "monitoring has not run yet" in proc.stdout, proc.stdout
     assert "note:" not in proc.stdout
 
 
@@ -132,7 +136,11 @@ def test_fresh_default_events_reads_as_empty_not_error(tmp_path):
     proc = _run(tmp_path, "--watch-log")
     assert proc.returncode == 0
     assert proc.stderr == "", f"a first run must not note anything: {proc.stderr!r}"
-    assert "No recorded change events yet." in proc.stdout
+    # The invariant here is the SILENCE on stderr for an absent default path. B-583
+    # changed what stdout says about an empty journal: a genuine first run has neither
+    # a journal nor a prior monitor run, so it now says so instead of the older neutral
+    # sentence, which read identically to "monitoring ran and found nothing".
+    assert "monitoring has not run yet" in proc.stdout, proc.stdout
 
 
 # ------------------------------------------------------ the dropped write is reported

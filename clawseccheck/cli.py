@@ -26,7 +26,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import (
-    audit, fingerprint, load_events, load_ignore, make_canary, record_events,
+    audit, fingerprint, load_events, load_ignore, load_state, make_canary, record_events,
     render_canary, render_card, render_dashboard, render_dashboard_findings, render_events,
     render_json, render_monitor,
     render_report, render_svg, render_vet_json, save_state, snapshot,
@@ -3356,7 +3356,26 @@ def _main(argv=None) -> int:
             print(f"note: --events: {_path_problem_text(args.events, _events_problem, what='events file')}. "
                   "Showing no events for this run; your real event journal (if any) is "
                   "unaffected.", file=sys.stderr)
-        _emit(render_events(_events_rows, ascii_only))
+        # B-583: an empty journal is ambiguous on its own — "monitoring never ran" and
+        # "monitoring ran and nothing changed" are opposite facts that rendered as one
+        # sentence. Supply the two signals that separate them. `journal_exists` comes
+        # from the read we already did: a FileNotFoundError means no journal, whatever
+        # path it was. The "since" date is the monitor's own last-run timestamp, NOT
+        # this file's mtime — a rotation, a restore or a permission change would
+        # fabricate a date with zero events behind it.
+        _journal_exists = not isinstance(_events_problem, FileNotFoundError)
+        _events_since = None
+        if not _events_rows:
+            # Asked whenever there are no rows, NOT only when the journal exists:
+            # `record_events` is a no-op when nothing changed, so a monitor that ran
+            # cleanly leaves NO journal at all. Gating this on the file's existence
+            # made that case print "monitoring has not run yet" while the state file
+            # sitting beside it proved otherwise — a contradiction inside one run.
+            with contextlib.suppress(Exception):
+                _state = load_state(args.state) if args.state else load_state()
+                _events_since = (_state or {}).get("ts")
+        _emit(render_events(_events_rows, ascii_only,
+                            journal_exists=_journal_exists, since=_events_since))
         # B-582: same tamper-evident check --verify-events already has, run here too
         # — this viewer used to present the journal without ever consulting it. A
         # broken chain is disclosed, never withheld or called tampering (see
