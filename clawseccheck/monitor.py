@@ -343,6 +343,58 @@ def verify_chain(events_path: "str | Path",
     return True, "OK"
 
 
+def chain_provenance_note(ok: "bool | None", msg: str) -> "str | None":
+    """Turn a verify_chain() verdict into a one-line disclosure for a VIEWER
+    (--trend / --watch-log) — never a verifier, which already has its own blunter
+    wording (see ``_chain_verdict`` in cli.py, unchanged by this function). B-582:
+    both viewers rendered a tool-owned store without ever running the check that
+    exists for it, so a planted row displayed as fact with rc 0 while
+    ``--verify-history``/``--verify-events`` on the identical file said BROKEN.
+
+    Negative-only, deliberately. An earlier version of this also returned an
+    affirmative "Chain verified" line on ``ok is True``, and that was retracted
+    before shipping: a line present on every healthy machine, every run, is
+    exactly the "furniture within a week" shape ``report.py``'s coverage-note
+    renderer already documents a rule against — a standing line drowns out the
+    situational one it sits next to, which here is the one line that actually
+    matters. Silence means verified, the same way silence already means "nothing
+    was skipped" everywhere else in this tool. ``--verify-history``/
+    ``--verify-events`` are a different case (an explicit request to check the
+    chain, answered either way) and are untouched by this change.
+
+    Two constraints on the broken branch, both deliberate:
+
+    - Never refuse to show the rows. This is the user's own local data; the fix is
+      that they cannot be misled, not that they are locked out.
+    - Never say "tampering". ``configjournal.py`` already established the
+      precedent this mirrors: measured on a healthy real machine, 2 of 42 links in
+      an unrelated hash chain were already broken from ordinary causes — a hand
+      edit outside the writer, two writes racing from a common base. Log rotation
+      produces the same shape here. A broken link is unverified provenance, not an
+      accusation, and calling it tampering on an ordinary machine is a false
+      positive with an unusually high cost.
+
+    Returns ``None`` on both other outcomes: ``ok is True`` (verified — say
+    nothing) and ``ok is None`` (no chain to check at all — absent/empty/
+    unreadable; should not happen when a caller already loaded rows from the same
+    path moments earlier, and staying silent on a race is safer than a claim the
+    evidence does not support, same reasoning as ``verify_chain``'s own third
+    outcome).
+    """
+    if not ok:
+        if ok is None:
+            return None
+        match = re.search(r"entry (\d+)", msg)
+        where = f"entry {match.group(1)} onward" if match else "an earlier point onward"
+        return (
+            f"Chain does not verify from {where}: unverified provenance, not evidence of "
+            "tampering — an ordinary cause (a hand edit, two racing writes, log rotation) "
+            "breaks a link the same way an edit would. Rows recorded from that point on "
+            "cannot be confirmed as written by this tool."
+        )
+    return None
+
+
 def _rotate_journal(p: Path, max_lines: int = _JOURNAL_MAX_LINES,
                     keep: int = _JOURNAL_KEEP) -> None:
     """C-164: prune *p* to its last *keep* entries once it exceeds *max_lines*.

@@ -97,6 +97,7 @@ from .monitor import (
     CHAIN_UNREADABLE,
     DEFAULT_EVENTS,
     DEFAULT_STATE,
+    chain_provenance_note,
     load_events_with_problem,
     verify_chain,
 )
@@ -3356,6 +3357,14 @@ def _main(argv=None) -> int:
                   "Showing no events for this run; your real event journal (if any) is "
                   "unaffected.", file=sys.stderr)
         _emit(render_events(_events_rows, ascii_only))
+        # B-582: same tamper-evident check --verify-events already has, run here too
+        # — this viewer used to present the journal without ever consulting it. A
+        # broken chain is disclosed, never withheld or called tampering (see
+        # chain_provenance_note); render_events itself is untouched (owned
+        # elsewhere), so the note is appended as its own line.
+        _events_note = chain_provenance_note(*verify_chain(args.events))
+        if _events_note:
+            _emit(asciify(_events_note) if ascii_only else _events_note)
         return 0
 
     # B-476: read the bundle's attestation bucket at most once — `--judged-bundle -` reads
@@ -3858,7 +3867,14 @@ def _main(argv=None) -> int:
         # running `--trend --history /mnt/backup/hist.jsonl` after the mount drops loses
         # the point forever while "No history yet" looks like nothing is wrong.
         if not _skip_live_test_history:
-            _write_err = history_record(score, args.history)
+            # B-579: this row is produced by the ACT of looking at the trend, not by a
+            # check the user asked for — tag it distinctly ("view") so render_trend can
+            # tell a run performed apart from a run merely looked at, both in the
+            # per-row [source] tag and in the "N of M runs have no grade" count, which
+            # otherwise inflates itself every time this branch runs: three bare --trend
+            # invocations into one fresh store used to read "3 of 3 runs have no grade" —
+            # the tool grading its own look.
+            _write_err = history_record(score, args.history, source="view")
             if _write_err is not None:
                 # B-581: history.record() hands back the raw OSError text (e.g.
                 # "[Errno 13] Permission denied: '/home/dave/...'"), which — unlike
@@ -3878,7 +3894,12 @@ def _main(argv=None) -> int:
             print(f"note: --history: {_path_problem_text(args.history, _read_problem, what='history file')}. "
                   "Showing no history for this run; your real history (if any) is "
                   "unaffected.", file=sys.stderr)
-        _emit(render_trend(rows, ascii_only))
+        # B-582: this viewer used to render the store without ever running the
+        # tamper-evident check that exists for it. Same file, read again — cheap
+        # (measured: 0.6% of a --trend run's own cost) — and never withholds a row
+        # on a broken chain, only discloses it (see chain_provenance_note).
+        _chain_status = history_verify(args.history)
+        _emit(render_trend(rows, ascii_only, chain_status=_chain_status))
         _emit(_percentile_line(score, ascii_only))
         return 0
 

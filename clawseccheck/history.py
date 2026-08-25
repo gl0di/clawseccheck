@@ -17,7 +17,7 @@ from . import brand
 from .locking import journal_lock
 from .monitor import (
     SCHEMA_VERSION, _chain_hash, _iter_jsonl, _last_chain_hash, _rotate_journal, _schema_ok,
-    verify_chain,
+    chain_provenance_note, verify_chain,
 )
 from .safeio import secure_append_text, secure_dir
 
@@ -367,7 +367,8 @@ class HistoryRows(list):
     retention_pruned: int = 0
 
 
-def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
+def render_trend(rows: list[dict], ascii_only: bool = False,
+                 chain_status: "tuple[bool | None, str] | None" = None) -> str:
     """Return a compact human-readable trend string.
 
     Every row is shown, always, in the order recorded — each GRADED line
@@ -390,6 +391,16 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
         ``score``/``grade`` values, if any, are never rendered.
     ascii_only:
         Use ASCII arrows (^, v, =) instead of unicode (▲, ▼, ·).
+    chain_status:
+        B-582: the caller's own ``(ok, msg)`` from ``monitor.verify_chain(path)``
+        (or ``history.verify``, the same call), run over the SAME file these
+        ``rows`` were just loaded from. ``None`` (the default) renders no
+        provenance line at all — existing callers/tests that never pass this are
+        unaffected. Negative-only via ``monitor.chain_provenance_note``: a broken
+        chain appends one disclosure line (rows still render, never withheld, and
+        it is never called tampering — see that function's own docstring); a
+        verified chain appends nothing — silence means verified, the same as
+        every other "nothing to disclose" convention in this renderer.
 
     Design note (this replaces a default-on filter): an earlier version of
     this function hid rows whose ``source`` wasn't "audit"/"legacy" and only
@@ -415,6 +426,17 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
     against a ``None`` and crash). A one-line disclosure is appended whenever
     at least one hole exists, naming the count so an ungraded run is legible
     as "incomplete", not silently absent or silently averaged over.
+
+    B-579: a row whose ``source`` is exactly ``"view"`` is produced by the act
+    of running ``--trend`` itself (see ``history.record``'s call site in
+    ``cli.py``), not by a check the user asked for. It renders unconditionally,
+    same as every other row — tag included, "Tag, do not drop" — but it is
+    excluded from both the numerator and denominator of the "N of M runs have
+    no grade" ratio, and a SECOND line names the split whenever that exclusion
+    would otherwise leave the ratio's total silently short of the row count on
+    screen. Before this, a single bare ``--trend`` into a fresh store read
+    "1 of 1 runs have no grade" — the tool grading the very row it had just
+    created by being run, and every subsequent look made the ratio worse.
     """
     if not rows:
         return "No history yet. Run --trend again later to see your trend."
@@ -431,12 +453,21 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
     lines = [brand.header(subtitle="Score Trend", ascii_only=ascii_only), ""]
     last_graded_score = None
     holes = 0
+    # B-579: a "view" row is produced by the ACT of running --trend, not by a check the
+    # user asked for (see history.record's B-579 call site). It still renders — every row
+    # always does, unconditionally, tag visible — but it is excluded from BOTH sides of
+    # the "N of M runs have no grade" ratio below, or the tool would grade its own look:
+    # three bare --trend runs into one fresh store used to read "3 of 3 runs have no
+    # grade", which is the trend viewer reporting on rows it created by being run.
+    checkable = 0
     for row in rows:
         is_graded = row.get("graded", True) is not False and row.get("score") is not None
+        is_view = row.get("source") == "view"
         label = row.get("ts") or row["date"]
 
         if not is_graded:
-            holes += 1
+            if not is_view:
+                holes += 1
             line = f"{label}  no grade  [{row.get('source', 'legacy')}]"
         else:
             if last_graded_score is None:
@@ -450,6 +481,8 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
             last_graded_score = row["score"]
             line = f"{label}  {row['grade']}  {row['score']}  {arrow}  [{row.get('source', 'legacy')}]"
 
+        if not is_view:
+            checkable += 1
         home = row.get("home")
         if home:
             line += f"  {home}"
@@ -458,11 +491,26 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
     if holes:
         lines.append("")
         lines.append(
-            f"{holes} of {len(rows)} runs have no grade: the five-layer check did not "
+            f"{holes} of {checkable} runs have no grade: the five-layer check did not "
             "complete for them, so no letter or score was recorded. They are shown "
             "above in order; the arrows compare each graded run to the previous "
             "GRADED run."
         )
+        # B-579: the ratio above deliberately does not cover every row on screen when a
+        # "view" row is present (see the loop above) — say so explicitly, or a reader
+        # counting the rows above gets a different total than the sentence just gave them
+        # and cannot tell whether that is a filter or a miscount. Named, not silent.
+        view_count = len(rows) - checkable
+        if view_count:
+            if view_count == 1:
+                noun, verb_record, verb_be = "row", "records", "is"
+            else:
+                noun, verb_record, verb_be = "rows", "record", "are"
+            lines.append(
+                f"{checkable} of {len(rows)} rows shown above are counted in that ratio; "
+                f"the other {view_count} {noun}, tagged [view], {verb_record} only the act "
+                f"of looking at this trend and {verb_be} excluded from it."
+            )
 
     # B-580: what this trend does NOT cover. Said after the rows, because it qualifies the
     # shape the reader has just looked at — the pruned runs are the OLDEST, i.e. the
@@ -474,5 +522,14 @@ def render_trend(rows: list[dict], ascii_only: bool = False) -> str:
             "Not every recorded run is above: " + notice.strip()
             + " The trend therefore starts mid-history; the pruned runs are the oldest."
         )
+
+    # B-582: the chain check this store has always had, run on the path a human
+    # actually reads instead of only on a standalone --verify-history invocation
+    # nobody runs unless they already suspect something.
+    if chain_status is not None:
+        note = chain_provenance_note(*chain_status)
+        if note:
+            lines.append("")
+            lines.append(note)
 
     return "\n".join(lines)
