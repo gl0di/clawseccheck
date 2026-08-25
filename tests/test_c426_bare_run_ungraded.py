@@ -181,8 +181,17 @@ def test_bare_json_projection_does_not_republish_the_withheld_score(capsys):
 
 # ---- the four modes that bypass _resolve_runtime_caps ----
 
-def test_percentile_refuses_to_rank_an_ungraded_run(capsys):
-    _, out, _ = _run(capsys, "--percentile", "--home", SAFE, "--no-color")
+def test_percentile_refuses_to_rank_an_ungraded_run(tmp_path, capsys):
+    # B-578: an explicit EMPTY history, because an ungraded run now ranks the most recent
+    # COMPLETE check when local history holds one. Without this the assertion depends on
+    # whatever else in the suite has written to the redirected $HOME store — it passed
+    # alone and failed in a full run, which is the definition of a test asserting the
+    # wrong thing. The refusal being pinned here is the no-history case; the
+    # ranks-from-history case is pinned in tests/test_b578_*.
+    hist = tmp_path / "empty.jsonl"
+    hist.write_text("", encoding="utf-8")
+    _, out, _ = _run(capsys, "--percentile", "--home", SAFE, "--no-color",
+                     "--history", str(hist))
     _assert_publishes_no_grade(out, "--percentile")
     assert "No rank yet" in out
     assert "%" not in out, "a percentile rank was published for a run with no score"
@@ -211,7 +220,7 @@ def test_monitor_publishes_no_letter(tmp_path, capsys):
     _assert_publishes_no_grade(out, "--monitor")
 
 
-def test_percentile_line_is_the_single_decision_point():
+def test_percentile_line_is_the_single_decision_point(tmp_path):
     """Both call sites route through one helper so they cannot drift apart."""
     ctx, findings, graded = audit(SAFE)
     assert graded.graded is True
@@ -219,7 +228,12 @@ def test_percentile_line_is_the_single_decision_point():
 
     ungraded = compute(findings, ctx, ledger=_bare_ledger(findings))
     assert ungraded.graded is False
-    assert "No rank yet" in _percentile_line(ungraded, True)
+    # Explicit empty history — see the note in
+    # test_percentile_refuses_to_rank_an_ungraded_run above. The default path reads the
+    # ambient store, which other tests populate.
+    empty = str(tmp_path / "empty.jsonl")
+    Path(empty).write_text("", encoding="utf-8")
+    assert "No rank yet" in _percentile_line(ungraded, True, empty)
 
 
 # ---- the opposite direction: 'ungraded' must not become unconditional ----

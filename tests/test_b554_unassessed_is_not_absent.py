@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from _realhome import REAL_HOME
 from clawseccheck.collector import LIMIT_DOMAIN_SKILL, collect, limit_hits_for
 from clawseccheck.checks import check_installed_skills
 
@@ -100,4 +101,7 @@ def test_no_absolute_path_reaches_the_detail(tmp_path):
     finding = check_installed_skills(collect(home))
     assert "onlyskill" in finding.detail, finding.detail          # non-vacuity
     assert str(tmp_path) not in finding.detail, finding.detail
-    assert str(Path.home()) not in finding.detail, finding.detail
+    # REAL_HOME, not Path.home(): the suite redirects $HOME to a tmp dir (B-519), so
+    # Path.home() here asserts that a path nothing could have produced is absent —
+    # true for free, and the leak this line exists to catch would sail past it.
+    assert str(REAL_HOME) not in finding.detail, finding.detail

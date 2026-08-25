@@ -104,7 +104,7 @@ _PALETTE: tuple[PaletteCategory, ...] = (
     )),
     PaletteCategory("Dig deeper", READONLY, MODE_A, (
         PaletteEntry("Next steps", "--next",
-                     "which further checks are worth running, given the result"),
+                     "which further checks are worth running"),
         PaletteEntry("Attack paths", "--risk-paths",
                      "the highest-risk capability chains"),
         PaletteEntry("Percentile", "--percentile",
@@ -267,6 +267,7 @@ _UNLISTED_FLAG_MODES: dict[str, str] = {
     "--no-native": CROSS,
     "--no-sockets": CROSS,
     "--no-deptree": CROSS,
+    "--no-dist": CROSS,
     "--no-update-notice": CROSS,
     "--no-freshness-notice": CROSS,
     "--menu": CROSS,

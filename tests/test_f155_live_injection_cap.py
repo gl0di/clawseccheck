@@ -920,7 +920,14 @@ class TestB379CapReachesRemainingDispatchPaths:
         assert "No rank yet" in capped_out
         assert "No rank yet" in uncapped_out
         assert "%" not in capped_out and "%" not in uncapped_out
-        assert capped_out == uncapped_out
+        # B-578 note: the two outputs are no longer byte-identical, and that is correct
+        # rather than a regression. An ungraded run now NAMES the layers still open, and
+        # `--judged-bundle` closes one of them — so the capped invocation legitimately
+        # reports fewer missing layers than the bare one. The invariant this test exists
+        # for is untouched and asserted above: NEITHER publishes a rank, so a capped run
+        # still cannot be flattered with a rank it did not earn.
+        assert "layers did not run" in capped_out
+        assert "layers did not run" in uncapped_out
 
         ctx, findings, uncapped = audit(SAFE, include_native=False, include_sockets=False)
         capped = compute(findings, ctx, live_test_vulnerable=True,
