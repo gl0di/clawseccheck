@@ -320,6 +320,41 @@ def note_limit(sink, domain: str, message: str) -> None:
     sink.append(LimitHit(message, domain))
 
 
+def _note_unreadable_manifest(ctx, owner: str) -> None:
+    """Record that *owner*'s own SKILL.md is present but not a regular file (B-654).
+
+    The same five writes `collect_skill_files` already performed inline for this exact
+    fact (a dangling symlink, a FIFO) once a directory had already been yielded and
+    walked: the detail-bearing `unreadable_files` entry, the per-skill coverage gap, the
+    file manifest, the absent-vs-unreadable bridge B13's `unreadable`/absent-manifest
+    branches read (`unreadable_manifests`), and the domain-scoped limit hit. Extracted
+    into one place so a second call site — `_iter_skill_dirs_guarded`, which sees this
+    fact at DISCOVERY time, before a directory is ever added to `ctx.installed_skills` —
+    cannot describe the same fact a different way. That drift is exactly how B-549
+    attempt 3 went wrong one layer up (a `limit_hits`-only note landed on the generic
+    truncation branch instead of the correct `unreadable` one).
+
+    *rel* is always `f"{owner}/SKILL.md"`, never a bare "SKILL.md": at discovery time
+    `owner` never enters `ctx.installed_skills` (the directory is neither yielded nor
+    truncated — see `iter_discovered_skill_dirs`'s docstring), so an unprefixed name
+    would point at nothing a reader could act on. `owner` is always a bare directory
+    NAME, never a path (collector.py's own `Disclosure.subject` precedent) — these
+    records reach SARIF and a report a user pastes into an issue.
+    """
+    if ctx is None:
+        return
+    rel = f"{owner}/SKILL.md"
+    detail = f"{rel} (not a regular file — nothing to read at rest)"
+    ctx.unreadable_files.append(detail)
+    ctx.skill_coverage_gaps.setdefault(owner, []).append(detail)
+    ctx.file_manifest.setdefault(rel, "not-a-regular-file")
+    ctx.unreadable_manifests.add(owner)
+    note_limit(
+        ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+        f"Could not read {_cap_name(rel)}: not a regular file",
+    )
+
+
 def limit_hits_for(ctx, *domains: str) -> list[str]:
     """The limit hits that truncated one of *domains* — i.e. "was MY scan truncated?".
 
@@ -2086,14 +2121,6 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
             # excluded, they have their own channel) across 9,480 real ones — ~/.openclaw
             # 8,222, ~/.claude/skills 30, fixtures/ 1,228.
             if ctx is not None and _exists_but_not_regular(f):
-                rel = _rel(f)
-                ctx.unreadable_files.append(
-                    f"{rel} (not a regular file — nothing to read at rest)"
-                )
-                _note_skill_gap(
-                    ctx, skill_dir, f"{rel} (not a regular file — nothing to read at rest)"
-                )
-                ctx.file_manifest.setdefault(rel, "not-a-regular-file")
                 if f.name.lower() == "skill.md":
                     # B-461's absent-vs-unreadable bridge, which `_note_unreadable` below
                     # already crosses and this path did not. Caught by the independent C-135
@@ -2102,12 +2129,24 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     # found ... this skill will not appear to the agent" one row down, and
                     # that WARN owns the top `Fix (top):` line — so the user was told to add
                     # a `description:` field to a named pipe.
+                    #
+                    # B-654: routed through the shared helper so this call site and
+                    # `_iter_skill_dirs_guarded`'s discovery-time one agree byte-for-byte.
                     owner = skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
-                    ctx.unreadable_manifests.add(owner)
-                note_limit(
-                    ctx.limit_hits, LIMIT_DOMAIN_SKILL,
-                    f"Could not read {_cap_name(rel)}: not a regular file",
-                )
+                    _note_unreadable_manifest(ctx, owner)
+                else:
+                    rel = _rel(f)
+                    ctx.unreadable_files.append(
+                        f"{rel} (not a regular file — nothing to read at rest)"
+                    )
+                    _note_skill_gap(
+                        ctx, skill_dir, f"{rel} (not a regular file — nothing to read at rest)"
+                    )
+                    ctx.file_manifest.setdefault(rel, "not-a-regular-file")
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+                        f"Could not read {_cap_name(rel)}: not a regular file",
+                    )
             continue
 
         if ctx is not None:
@@ -3191,27 +3230,39 @@ def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
     A partial walk is recorded as a limit hit, never swallowed: consumers of
     ``ctx.installed_skills`` treat a limit hit as "this view is incomplete" and report
     UNKNOWN rather than a clean PASS over a scan that never finished.
+
+    B-654: also collects, without changing the population or the walk at all, every
+    directory whose own SKILL.md exists but is not a regular file — the fall-through
+    ``iter_discovered_skill_dirs`` already takes without yielding or truncating. Those
+    names get the same five writes ``collect_skill_files`` performs for the identical
+    fact once a directory HAS been yielded, via the shared ``_note_unreadable_manifest``,
+    so B13's existing ``unreadable`` branch (never a new one) turns this into UNKNOWN
+    instead of a clean PASS over a directory nothing read.
     """
+    unassessable: list[str] = []
     it = _iter_discovered_skill_dirs(
         base,
         allow_symlink_entries=allow_symlink,
         # skilldiscovery is a leaf and cannot import note_limit; hand it a pre-scoped sink
         # so its _MAX_DIRS cap hit lands tagged like every other skill-coverage limit.
         limit_hits=_ScopedLimitSink(ctx.limit_hits, LIMIT_DOMAIN_SKILL),
+        unassessable=unassessable,
     )
     while True:
         try:
             item = next(it)
         except StopIteration:
-            return
+            break
         except OSError as exc:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_SKILL,
                 f"skill discovery under '{base}' stopped early ({exc.__class__.__name__}) "
                 "— skills beyond that point were NOT scanned",
             )
-            return
+            break
         yield item
+    for name in unassessable:
+        _note_unreadable_manifest(ctx, name)
 
 
 def _read_installed_skills(home: Path, ctx: Context) -> None:

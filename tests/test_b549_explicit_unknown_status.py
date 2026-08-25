@@ -82,17 +82,32 @@ def test_an_ordinary_skill_stays_pass_not_unknown(tmp_path):
     assert ctx.skill_coverage_gaps == {}, ctx.skill_coverage_gaps
 
 
-def test_shape2_sibling_skill_with_dangling_manifest_is_still_a_silent_drop(tmp_path):
-    """The gap this task did NOT close, pinned so it is not mistaken for done.
+def test_shape2_sibling_skill_with_dangling_manifest_is_no_longer_a_silent_drop(tmp_path):
+    """Closed by B-654. Kept, inverted, because how it was closed is the useful part.
 
-    A flat (non-nested) skill directory whose OWN `SKILL.md` is a dangling symlink,
-    sitting beside a normal readable sibling skill, is invisible end to end: absent from
-    `installed_skills`, `skill_coverage_gaps` and `limit_hits` alike, so `check_installed_skills`
-    reports a plain PASS naming only the sibling it did see. Mechanism lives in
-    `skilldiscovery.iter_discovered_skill_dirs`, which documents three retracted attempts
-    at exactly this and defers the fix to a channel that does not exist yet (a per-subject
-    inventory row) -- not a `collector.py`-only change. Pinned here, in the failing
-    direction, as a live finding rather than silently re-discovering it next time."""
+    A flat skill directory whose OWN `SKILL.md` is a dangling symlink, beside a readable
+    sibling, used to be invisible end to end -- absent from `installed_skills`,
+    `skill_coverage_gaps` and `limit_hits` alike -- so `check_installed_skills` reported a
+    plain PASS naming only the sibling. The count said 1, which made it an affirmative
+    clean claim over a directory nothing read, and a dangling `SKILL.md` is a one-line
+    evasion anyone shipping a skill can use.
+
+    This test was originally written in the FAILING direction, pinning the defect so it
+    could not be mistaken for done. It is now inverted rather than deleted: the value is
+    the record that three earlier attempts here were retracted, and that none of them was
+    what finally worked. Two broke the walk's control flow (hiding nested skills, or
+    inventing a phantom merged skill); the third kept the control flow and chose the wrong
+    channel, landing on the generic truncation branch whose sentence and advice are both
+    false for this fact.
+
+    What worked needed no new channel: `collector.py` already wrote this exact fact for
+    the case where discovery had yielded the directory, and B13's `unreadable` branch
+    already turns it into UNKNOWN with prose that names a dangling link. Discovery simply
+    dropped the directory before collection could see it. The trigger is narrow on purpose
+    -- only a candidate whose whole subtree contributed no skill at all -- so a broken
+    manifest in a CONTAINER directory beside real skills still changes nothing about them,
+    which is the invariant `test_b549_unreadable_dir_disclosed.py` pins from the other
+    side."""
     home = _openclaw_home(tmp_path)
     skills = home / "workspace" / "skills"
     good = skills / "good"
@@ -107,9 +122,16 @@ def test_shape2_sibling_skill_with_dangling_manifest_is_still_a_silent_drop(tmp_
 
     ctx = collect(home)
     finding = check_installed_skills(ctx)
+    # The dropped directory is still not a scanned skill -- we cannot read a manifest that
+    # is not there. What changed is that we no longer claim it was clean.
     assert list(ctx.installed_skills.keys()) == ["good"], ctx.installed_skills.keys()
-    assert ctx.skill_coverage_gaps == {}, (
-        "if this fires, shape 2's sibling case has been fixed -- update this test's "
-        f"docstring and assertions: {ctx.skill_coverage_gaps}"
-    )
-    assert finding.status == "PASS", finding.detail
+    assert "badskill" in ctx.skill_coverage_gaps, (
+        f"the vanished directory is unrecorded again: {ctx.skill_coverage_gaps}")
+    assert "badskill" in (getattr(ctx, "unreadable_manifests", None) or set())
+    assert finding.status == "UNKNOWN", finding.detail
+    assert getattr(finding, "engine_degraded", False) is True, finding.detail
+    assert "badskill" in finding.detail, finding.detail
+    # The wrong-message failure that sank the third attempt: this must land on the
+    # unreadable branch, never the generic truncation one.
+    assert "truncated" not in finding.detail, finding.detail
+    assert "oversized" not in finding.detail, finding.detail
