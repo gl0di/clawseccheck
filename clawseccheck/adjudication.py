@@ -54,7 +54,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .baseline import fingerprint
-from .catalog import ATTESTED, FAIL, MEDIUM, UNKNOWN, WARN, Finding
+from .catalog import ATTESTED, BY_ID, FAIL, MEDIUM, UNKNOWN, WARN, Finding
 from .logsafe import redact
 from .sar import _VERDICT_VALUES, build_sars
 from .skillast import analyze_env_auth_kwarg_exfil, analyze_python
@@ -871,6 +871,60 @@ def _with_documented_shape(items: list) -> list:
     return items
 
 
+def _with_check_title(items: list) -> list:
+    """B-445: add ``safe_facts.check_title`` -- the CATALOG entry's title -- to every
+    packet item whose `finding_id` has one.
+
+    Measured on a real config (C-313): 25 of 26 borderline items carry zero signal on
+    every other axis at once -- generic target, contentless redacted_evidence, empty
+    safe_facts, generic question. This gives the judge the one thing none of those
+    fields do: the SUBJECT (e.g. "Host egress posture" instead of just "B77").
+
+    Why the catalog TITLE and not `Finding.detail`, which is often more specific:
+    `catalog.CheckMeta.title` is a plain string literal in our own source, never built
+    from an f-string or `.format()`/`%` against a skill name, plugin name, or config
+    value -- so it is engine-authored BY CONSTRUCTION, the same guarantee this module
+    already leans on for `_ID_QUESTIONS`/`_RULE_QUESTIONS`. `Finding.detail` carries no
+    such guarantee: several checks interpolate a skill/plugin name or a config value
+    straight into `detail` (that's the entire reason `_evidence_locations` above
+    reduces evidence to a bare `file:line`/config-path rather than surfacing the
+    matched text verbatim -- the matched text can be attacker-authored prose aimed at
+    the judge). Auditing every check's `detail` string for interpolation, one at a
+    time, to build a safe subset would be exactly the kind of allowlist this task's own
+    source ticket asked for and separate, undone work -- not this fix.
+
+    Applied HERE, at the single point every producer's items already pass through
+    (`_with_documented_shape`'s own reasoning, restated: there are four producers today
+    -- `_item_from_finding`, `_b62_items`, `_recover_dropped_taint`,
+    `_env_auth_kwarg_items` -- and patching only the one a report happened to catch
+    just leaves the other three to rediscover the same gap later), not inside any one
+    producer function.
+
+    A `finding_id` with no `catalog.BY_ID` entry -- the synthetic AST-rule ids
+    `_recover_dropped_taint`/`_env_auth_kwarg_items` emit (`DANGEROUS_SINK`,
+    `TT4_FILE_NET`, `TT_SSRF`, `TT5_ARG_INJECTION`, `ENV_AUTH_KWARG_EXFIL` -- these are
+    `ASTFinding.rule` values, not CATALOG check ids) -- omits the key entirely rather
+    than inventing a title: `.get()` returns `None` and the `if` below skips it, the
+    same "omit rather than fabricate" discipline `_config_field_path` already follows.
+
+    A TOP-LEVEL key, not a `safe_facts` entry. `safe_facts` is documented as engine-
+    EXTRACTED facts -- things recovered from this finding (a destination host, config
+    field paths, sub-signals) -- and a catalog title is static metadata about the CHECK,
+    extracted from nothing. Putting it there also broke twelve existing assertions that
+    pin `safe_facts` by exact equality, which is the contract telling you it is the wrong
+    home.
+
+    Always present, so B-571's uniform-key-set invariant still holds. Empty string for a
+    synthetic AST-rule id (`DANGEROUS_SINK`, `TT4_FILE_NET`, `TT_SSRF`,
+    `TT5_ARG_INJECTION`, `ENV_AUTH_KWARG_EXFIL` -- `ASTFinding.rule` values, not CATALOG
+    ids), which is honest and distinguishable rather than an invented title.
+    """
+    for item in items:
+        meta = BY_ID.get(item["finding_id"])
+        item["check_title"] = meta.title if meta is not None else ""
+    return items
+
+
 def build_judge_packet(ctx, findings) -> list[dict]:
     """Assemble the judge packet from a completed audit() pass.
 
@@ -897,6 +951,7 @@ def build_judge_packet(ctx, findings) -> list[dict]:
 
     items = _attach_corroboration(items, findings)
     items = _with_documented_shape(items)
+    items = _with_check_title(items)
     items.sort(key=lambda d: (d["finding_id"], d["target"], d["redacted_evidence"]))
     return items
 
