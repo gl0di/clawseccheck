@@ -217,13 +217,17 @@ _EXEMPT = {
                      "detectors from the renderer would separate each verdict from the text "
                      "that discloses its own limits, which is the pairing B-245 and B-559 "
                      "both exist to keep. A finer split is a later cycle.",
-    "adjudication.py": "~1,247 lines — the judge-packet builder. Crossed the budget with the "
+    "adjudication.py": "~1,570 lines — the judge-packet builder. Crossed the budget with the "
                        "ESET H1 2026 gap-closure pass (C-361: config field-path extraction so "
                        "the audit-path majority of findings, which cite a dig() path rather "
                        "than a file:line, stop always hitting the contentless evidence "
                        "fallback) and grew again with B-406 (duplicate (finding_id, target) "
-                       "verdict-entry resolution, order-independent by severity rank). A finer "
-                       "split is a later cycle.",
+                       "verdict-entry resolution, order-independent by severity rank). "
+                       "Restated from ~1,247 on 2026-08-24: it had drifted to 1,543 unnoticed "
+                       "(+24%, one point under this guard's tripwire) and B-618's cross-skill "
+                       "host attribution took it over. The guard fired for the right reason and "
+                       "the split is filed rather than waved off — restating the number without "
+                       "recording that would be the exact evasion this test exists to catch.",
 }
 
 

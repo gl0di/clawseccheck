@@ -316,6 +316,20 @@ def _target_from_evidence(f) -> str:
     """Best-effort skill/file name off the first evidence entry's ``name: ...``
     prefix (the convention every check's evidence list follows); falls back to
     the finding id when there is no evidence to draw a target from.
+
+    B-618: an earlier version of this fix tried to ALSO detect cross-skill
+    aggregation here, by re-parsing every evidence entry's prefix and comparing it
+    to the target. Retracted -- proven unsound two ways in the same C-135 round: (1)
+    a config-path-shaped evidence line (e.g. checks/_vet.py's cron-trigger evidence,
+    ``"cron job 'x'.payload.message: ..."`` / ``"...'.trigger.script: ..."``) reads
+    as a DIFFERENT "owner" per entry even though every entry is the same subject,
+    which cost a real finding (fixtures/bad_b168_cron_exfil_trigger) its destination
+    host; and (2) an attacker-controlled skill DIRECTORY NAME containing ``": "``
+    can forge agreement with a different skill's prefix on purpose (the name is the
+    payload, not something a smarter separator regex can out-parse). See
+    ``_safe_destination_host`` for where the actual fix now lives: at the producer
+    (checks/_vet.py's ``_sole_contributor``), using the real skill name the check
+    already has in hand, never a rendered string recovered after the fact.
     """
     for entry in getattr(f, "evidence", None) or []:
         name, sep, _rest = entry.partition(": ")
@@ -483,20 +497,33 @@ def _safe_destination_host(f) -> str | None:
     Anything that fails validation is DROPPED entirely, never truncated into the
     packet — an unparseable/oversized/non-LDH "hostname" carries no information a judge
     can act on safely, so silence is the correct answer, not a mangled fragment.
+
+    Anything that fails validation is DROPPED entirely, never truncated into the
+    packet — an unparseable/oversized/non-LDH "hostname" carries no information a judge
+    can act on safely, so silence is the correct answer, not a mangled fragment.
+
+    B-618: `Finding.destination_hosts` used to go wrong here -- a first attempt at this
+    fix tried to re-verify, IN THIS FUNCTION, that the structured value actually
+    belongs to the same skill as the packet's `target`, by re-parsing evidence-entry
+    prefixes. Retracted: proven unsound in the same C-135 round that found the original
+    bug, two ways -- a field-path-shaped evidence line reads as a different "owner" per
+    entry for the SAME subject (cost fixtures/bad_b168_cron_exfil_trigger its real
+    host), and an attacker-controlled skill DIRECTORY NAME containing `": "` can forge
+    agreement with a different skill's prefix on purpose. Re-parsing a rendered string
+    to recover an identity a producer already knew keeps failing in new shapes.
+    The actual fix now lives at the producer: checks/_vet.py's `_sole_contributor`
+    only populates `destination_hosts` when a single skill contributed EVERY piece of
+    evidence in the relevant bucket (tracked structurally, by list-length delta during
+    that skill's own scan iteration -- never by re-parsing text) AND that skill named
+    exactly one host. This function can therefore trust the channel outright again,
+    exactly as it did before B-618 -- the field's own contract (B-556) already promised
+    "engine-authored, never copied from skill prose"; B-618 was a gap in keeping that
+    promise, not a reason to duplicate the check here on rendered text.
     """
-    # B-556: the STRUCTURED channel first. `Finding.destination_hosts` is set by the
-    # check itself from a closed engine-authored source (an allowlist match, a parsed
-    # URL) — never copied from skill prose — because the evidence-scanning branch below
-    # cannot see a destination the check never wrote into a URL. Measured: B13's
-    # paste/exfil-host evidence is the engine's own LABEL ("<skill>: paste / exfiltration
-    # host"), so no URL exists to find and every such finding reached the judge with
-    # `safe_facts: {}` and a "do you trust the destination?" question that never named
-    # one.
-    #
-    # The field is a CHANNEL, not a trust grant: every value runs the identical
-    # gate as the evidence branch. A check that populated it from prose would still be
-    # bounded by the LDH charset and `_MAX_HOST_LEN`, exactly as C-284/C-135 established,
-    # and anything failing the gate is dropped rather than truncated into the packet.
+    # B-556: the STRUCTURED channel first. See this function's B-618 paragraph above for
+    # why it is trusted directly: checks/_vet.py's `_sole_contributor` now guarantees a
+    # value here belongs to a single skill, using the real skill name it already had in
+    # hand, never text recovered from `f.evidence`.
     for host in sorted(getattr(f, "destination_hosts", None) or ()):
         gated = _gate_host(host)
         if gated:
@@ -595,6 +622,7 @@ def _attach_corroboration(items: list[dict], findings) -> list[dict]:
 
 def _item_from_finding(f) -> dict:
     host = _safe_destination_host(f)
+    target = _target_from_evidence(f)
     field_paths = _config_field_paths(f)
     # C-284/C-361: engine-authored facts only, never copied from prose. Always a
     # dict (empty when nothing could be safely extracted).
@@ -613,7 +641,7 @@ def _item_from_finding(f) -> dict:
         safe_facts["sub_signals"] = sorted(str(s) for s in sub_signals)
     return {
         "finding_id": f.id,
-        "target": _target_from_evidence(f),
+        "target": target,
         "redacted_evidence": _evidence_locations(f),
         "engine_disposition": f.status,
         "question": _question_for(

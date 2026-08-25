@@ -3441,7 +3441,7 @@ _B13_WINNER_SUBSIGNAL = {
 }
 
 
-def _sole_contributor(hosts_by_skill: dict):
+def _sole_contributor(hosts_by_skill: dict, bucket_skills: set | None = None):
     """The one skill's host set, or None when zero or several skills contributed.
 
     B-556. B13 aggregates every installed skill into ONE finding carrying ONE `target`,
@@ -3473,8 +3473,25 @@ def _sole_contributor(hosts_by_skill: dict):
     and its sub-signal are unaffected either way.
 
     One function, three call sites: three copies is how one of them later stops matching.
+
+    B-618 (round 2): *bucket_skills*, when given, is the FULL set of skills that
+    contributed any evidence at all to the bucket this destination is attached to —
+    not just the skills `hosts_by_skill` happened to register a host for. A bucket can
+    have producers that append evidence without ever registering a host (measured:
+    `warns_install_curl` has three producers and only its pipe-to-shell one
+    registers) — a skill reaching the bucket only through such a producer was
+    invisible to the `len(hosts_by_skill) != 1` check above, so a DIFFERENT skill that
+    did register could still be published as "the sole contributor" while this
+    finding's own evidence, naming a different real host, sat right next to it.
+    Requiring `bucket_skills` to also be a singleton, and that its one member is the
+    same skill `hosts_by_skill` registered for, closes that regardless of how many
+    producers a bucket has or which one(s) fired.
     """
     if len(hosts_by_skill) != 1:
+        return None
+    if bucket_skills is not None and (
+        len(bucket_skills) != 1 or bucket_skills != set(hosts_by_skill)
+    ):
         return None
     hosts = next(iter(hosts_by_skill.values()))
     return hosts if len(hosts) == 1 else None
@@ -3630,7 +3647,28 @@ def check_installed_skills(ctx: Context) -> Finding:
     # no answer to "whose destination is this?" that is not a guess.
     notify_hosts_by_skill: dict = {}
     install_hosts_by_skill: dict = {}
+    # B-618: the set of skills that contributed ANY evidence to `crit` /
+    # `warns_install_curl` / `warns_notify_host` respectively — not just the ones that
+    # reached a host-REGISTERING producer. `warns_install_curl` alone has three
+    # producers and only its pipe-to-shell one registers into `install_hosts_by_skill`
+    # (crit_hosts_by_skill / notify_hosts_by_skill happen to have one registering
+    # producer each today, but a second could be added the same way tomorrow). A skill
+    # that only reaches a bucket through an unregistered producer was invisible to
+    # `_sole_contributor`'s old "one skill" check, which counted registered skills
+    # only — so a DIFFERENT skill that did register could be published as the sole
+    # contributor even while this one's own evidence, for a DIFFERENT host, sat right
+    # next to it in the same finding. Computed structurally, by list-length delta
+    # around this skill's iteration below — never by re-parsing an evidence string's
+    # presentation text (that path was tried and retracted: an evidence-prefix parser
+    # cannot tell "owner" apart from "field path", and a skill DIRECTORY NAME
+    # containing ": " can forge agreement with a different skill's prefix on purpose).
+    crit_skills: set = set()
+    install_curl_skills: set = set()
+    notify_skills: set = set()
     for name, blob in skills.items():
+        _crit_len0 = len(crit)
+        _install_curl_len0 = len(warns_install_curl)
+        _notify_len0 = len(warns_notify_host)
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
         _fr = _fence_ranges(blob)
@@ -4239,6 +4277,14 @@ def check_installed_skills(ctx: Context) -> Finding:
                     crit.append(msg)
                 else:
                     warns_js.append(msg)
+        # B-618: this skill contributed if -- and only if -- one of the buckets above
+        # actually grew during its own iteration. Structural, not text-parsed.
+        if len(crit) > _crit_len0:
+            crit_skills.add(name)
+        if len(warns_install_curl) > _install_curl_len0:
+            install_curl_skills.add(name)
+        if len(warns_notify_host) > _notify_len0:
+            notify_skills.add(name)
     # C-044: unpinned dependency scan — collect across all skills; WARN severity.
     # Runs after the main CRIT/HIGH loop to avoid polluting the main evidence lists.
     warns_unpinned: list[str] = []
@@ -4293,7 +4339,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             # is this?" that is not a guess. Silence is the honest output — a judge told
             # the wrong skill's destination is worse off than one told none, because it
             # would adjudicate confidently on a fact that does not belong to the subject.
-            destination_hosts=_sole_contributor(crit_hosts_by_skill),
+            destination_hosts=_sole_contributor(crit_hosts_by_skill, crit_skills),
         )
     if high:
         return _b13_verdict(
@@ -4446,7 +4492,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             # B-556: the fetch target IS the question here. This branch's own fix text
             # tells the reader to "confirm the host is the vendor's" — a judge was being
             # asked the same thing without being told the host.
-            destination_hosts=_sole_contributor(install_hosts_by_skill),
+            destination_hosts=_sole_contributor(install_hosts_by_skill, install_curl_skills),
         )
 
     # F-049: env-var / agent-config secret reaching a network sink — WARN-first (env
@@ -4693,7 +4739,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             "warns_notify_host",
             # B-556: same shape — the fix text says "confirm the bot/webhook is one you
             # configured yourself", which needs the service named.
-            destination_hosts=_sole_contributor(notify_hosts_by_skill),
+            destination_hosts=_sole_contributor(notify_hosts_by_skill, notify_skills),
         )
 
     # C-040: backgrounding/daemonize — lower confidence WARN (nohup/disown/setsid).
