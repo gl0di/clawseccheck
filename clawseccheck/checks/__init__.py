@@ -275,6 +275,7 @@ from ._config import (
     _meaningful_tool_surface,
     _model_names,
     _multi_agent_note,
+    _persistence_note,
     _net_is_private,
     _pattern_hits_real_secret,
     _peragent_sandbox_evidence,

@@ -56,6 +56,8 @@ from ._shared import (
     _config_unreadable,
     _DM_POLICY_NESTED_ONLY_CHANNELS,
     _enabled_tools,
+    _real_exec_enabled,
+    _B55_FS_WRITE_TOOLS,
     _external_input_channels,
     _finding,
     _gateway_remote_exposure_reason,
@@ -686,6 +688,57 @@ def _model_names(cfg: dict) -> list[str]:
 # Reframed from an interactive guide.py question (F-039) to this static note: a
 # blocking input() prompt would hang under headless CLI invocation (the tool's primary
 # usage — see SKILL.md), so this stays a caveat, not an attempt to resolve one agent.
+def _persistence_note(ctx: Context) -> str:
+    """F-169: breaking a leg does not remove what is already in the identity files.
+
+    OpenClaw injects the bootstrap/identity files into context EVERY TURN, so a directive
+    already written into one of them keeps loading no matter what the config says
+    afterwards. Palo Alto (Mishra & Morgan, 2026-01-29) call persistent memory an
+    accelerant on the trifecta; Zenity (Cohen & Donato, 2026-02-04) demonstrated the whole
+    chain against OpenClaw — indirect injection, then a scheduled task rewriting SOUL.md
+    every two minutes — under the framing "no software vulnerability is required".
+
+    The user-visible gap this closes: someone who breaks a leg watches A1 flip to PASS and
+    is told nothing about the directive still sitting in SOUL.md. Config hardening cannot
+    clear a content finding — measured at v3.60.0, a content_injection home with every
+    hardening lever applied at once (sandbox all, workspaceAccess ro, fs.workspaceOnly,
+    exec gated, trifecta broken so A1 PASSes) still graded F/49 with B6 FAIL.
+
+    Deliberately NOT a fourth leg in A1, and the reasons are recorded in F-169 so this is
+    not re-litigated: the trifecta is a named three-part concept and printing "4/4" would
+    redefine someone else's term in our own output; persistence is not a grantable
+    capability, so the leg would be on for everyone and discriminate nothing; and A1 is
+    CRITICAL and hard-caps the grade, so a 3-of-4 threshold would FAIL a config with
+    input + sensitive + memory and no outbound, which cannot exfiltrate.
+
+    The write-path term is `_real_exec_enabled` OR a granted write tool, not
+    `_enabled_tools` alone: measured on this machine, the real config resolves to
+    ``['exec']`` with no write tool in `_B55_FS_WRITE_TOOLS`, so keying on the write set
+    alone would silence the note on precisely the setup it was written for. An exec
+    capability IS a write path — a shell writes files.
+    """
+    # ctx.bootstrap is keyed by PATH ("workspace/AGENTS.md"), not by bare filename — a
+    # membership test against BOOTSTRAP_FILES matches nothing at all. Measured: the first
+    # version of this note never fired on any home, including the real one.
+    present = sorted({
+        n.rsplit("/", 1)[-1] for n in (ctx.bootstrap or {})
+        if n.rsplit("/", 1)[-1] in BOOTSTRAP_FILES
+    })
+    if not present:
+        return ""
+    cfg = ctx.config or {}
+    if not (_real_exec_enabled(cfg) or (set(_enabled_tools(cfg)) & _B55_FS_WRITE_TOOLS)):
+        return ""
+    named = ", ".join(present[:3]) + (", …" if len(present) > 3 else "")
+    return (
+        f" Note: {len(present)} identity/bootstrap file(s) ({named}) load into context"
+        " every turn, and this config grants a write path to them. Breaking a trifecta leg"
+        " changes what the agent can do NEXT — it does not remove a directive already"
+        " written into those files, which keeps loading either way. Check their CONTENT"
+        " (B6/B161), not just the config."
+    )
+
+
 def _multi_agent_note(ctx: Context) -> str:
     agent_list = dig(ctx.config, "agents.list")
     n = len(agent_list) if isinstance(agent_list, list) else 0
@@ -2881,6 +2934,7 @@ def check_trifecta(ctx: Context) -> Finding:
     detail += _multi_agent_note(ctx)
     detail += _resolved_default_note(ctx)
     detail += _substituted_dm_policy_note(ctx)  # B-609
+    detail += _persistence_note(ctx)  # F-169
 
     if len(active) >= 3:
         return _finding(

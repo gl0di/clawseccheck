@@ -234,13 +234,18 @@ _EXEMPT = {
                     "byte-format sniffing + the decode ladder out to a leaf (the "
                     "workspace/agent-id resolution to another) has moved from 'a later cycle' "
                     "to the next structural task on this file.",
-    "cli.py": "~4,329 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
+    "cli.py": "~4,881 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "
               "the dispatch cascade: each `_mode` branch that returns early has to repeat "
               "what the shared tail does, which is precisely the shape those four bugs were. "
+              "Then another ~550 over B-502/B-566/B-578/B-583 — and the shape repeated "
+              "exactly: B-583 was a mode branch not telling an absent journal from an empty "
+              "one, and B-578 was a mode branch that could not reach its own output at all. "
+              "Both are the early-return cascade failing to carry what the shared tail knows. "
               "That is the argument for the split (flag registration -> its own module, and "
-              "the mode branches -> a dispatch table) rather than a reason to defer it again.",
+              "the mode branches -> a dispatch table) rather than a reason to defer it again; "
+              "the entry has now been restated twice for the same cause.",
     "pipeline.py": "~1,314 lines — the --full P7-P10 orchestration. Crossed the budget with "
                    "C-425's PipelineResult.to_ledger(), which projects the run's phases onto "
                    "the five-layer ledger (layers.py). It belongs here and nowhere else: it "

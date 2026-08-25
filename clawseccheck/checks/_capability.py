@@ -27,6 +27,7 @@ from ..collector import (
 
 from . import _shared
 from ._shared import (
+    _B55_FS_WRITE_TOOLS,
     _b323_contains_env_var_reference,
     _canon_tool,
     _config_unreadable,
@@ -77,10 +78,7 @@ _B71_INEFFECTIVE_RE = re.compile(r"[ *|&;/]|--")
 # token, keep matching.
 _FS_WRITE_TOOL_HINTS = ("fs_write", "write_file", "writefile", "apply_patch")
 
-# B55/B-395: the real, canonical write-capable subset of _B68_FS_TOOLS. "read" is
-# deliberately excluded — B68's tuple includes it because B68 asks a DIFFERENT question
-# ("is any fs tool reachable"), but B55 asks specifically about WRITE exposure.
-_B55_FS_WRITE_TOOLS = frozenset({"write", "edit", "apply_patch"})
+# F-169: _B55_FS_WRITE_TOOLS now lives in ._shared (A1 asks the same question).
 
 
 def _approval_bypass_actors(

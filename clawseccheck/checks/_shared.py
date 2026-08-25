@@ -652,6 +652,17 @@ OUTBOUND_TOOL_HINTS = (
 )
 
 
+# B55/B-395: the real, canonical write-capable subset of _B68_FS_TOOLS. "read" is
+# deliberately excluded — B68's tuple includes it because B68 asks a DIFFERENT question
+# ("is any fs tool reachable"), but B55 asks specifically about WRITE exposure.
+#
+# F-169: moved here from checks/_capability.py when A1 (checks/_config.py) needed the same
+# question. §3.1 — a helper two topics reuse belongs in the leaf, not restated in each. A
+# second copy is exactly the drift that made B-450's consumer regexes miss every new class
+# member and left B-563's leg hints frozen at seven check ids.
+_B55_FS_WRITE_TOOLS = frozenset({"write", "edit", "apply_patch"})
+
+
 def _meta(cid: str):
     return BY_ID[cid]
 

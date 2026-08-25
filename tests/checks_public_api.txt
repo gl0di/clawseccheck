@@ -123,6 +123,7 @@ _other_can_reach_write
 _parse_source_target
 _parse_version
 _peragent_sandbox_evidence
+_persistence_note
 _read_jsonl_tail
 _reassembly
 _resolved_channel_nodes
