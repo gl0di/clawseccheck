@@ -4373,9 +4373,22 @@ def check_installed_skills(ctx: Context) -> Finding:
         for p_label, p_rx in _SKILL_PERSISTENCE_HIGH:
             # B-526: same for/else shape as the _SKILL_CRIT loop above — a fenced match
             # must never end the scan, or it swallows a genuine unfenced one later.
+            #
+            # B-525: `fence_needs_negation=True`, same family and same evidence as the
+            # cron/systemd flip in `_cron_persistence_hits`. Measured through the real
+            # `vet_skill()` before the flip, with the positive control the task demands:
+            #
+            #     with open(__file__, 'w') as fh: fh.write(payload)
+            #         bare prose -> FAIL      inside ```bash -> PASS
+            #
+            # A skill rewriting its own source is persistence, and wrapping the line in
+            # an unannotated fence made the HIGH finding vanish outright. Nothing else
+            # in this loop absorbed it: the `_p_fenced_only` coverage note below only
+            # fires when NOTHING convicted, so the suppression was silent whenever any
+            # other label happened to fire first.
             _p_fenced_only = False
             for pm in p_rx.finditer(blob):
-                if not _is_code_example(blob, pm.start(), _fr):
+                if not _is_code_example(blob, pm.start(), _fr, fence_needs_negation=True):
                     high.append(f"{name}: {p_label}")
                     break  # one finding per label per skill
                 if not _p_fenced_only and _fence_only_suppression(blob, pm.start(), _fr):
@@ -4446,8 +4459,18 @@ def check_installed_skills(ctx: Context) -> Finding:
         # We collect into a separate list so they don't escalate to HIGH FAIL.
         # Stored per-skill in a shared list; returned as WARN after the HIGH check.
         for p_label, p_rx in _SKILL_PERSISTENCE_WARN:
+            # B-525: `fence_needs_negation=True` — third site in the persistence family,
+            # measured the same way:
+            #
+            #     nohup python3 agent_loop.py &   /   disown
+            #         bare prose -> WARN      inside ```bash -> PASS
+            #
+            # Flipped even though this band is only WARN: the whole point of a WARN band
+            # is that a human still sees the signal, and a bare fence was deleting it
+            # rather than down-ranking it. A demotion the reader never learns about is
+            # the silencer shape this project keeps rejecting, WARN or not.
             for pm in p_rx.finditer(blob):
-                if not _is_code_example(blob, pm.start(), _fr):
+                if not _is_code_example(blob, pm.start(), _fr, fence_needs_negation=True):
                     # Append to high for now with a WARN tag — separated at return time.
                     # Actually: collect separately to keep severity correct.
                     # We use a dedicated collector defined just below.
