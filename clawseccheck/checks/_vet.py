@@ -4228,7 +4228,11 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if af.rule == "TUNNEL_LAUNCH_ARGV":
                     continue
                 loc = f"{relpath}:{af.lineno}"
-                if af.severity == "crit":
+                # B-636: the same predicate checks/_mcp.py asks. Equivalent here by
+                # construction — every rule in _AST_NEVER_FAIL_RULES has already
+                # `continue`d above — and stated rather than implied, so the two callers
+                # cannot drift apart silently.
+                if ast_finding_is_fail_capable(af):
                     crit.append(f"{name}: {af.reason} ({loc})")
                 elif cred_exfil_signal:
                     high.append(f"{name}: {af.reason} ({loc})")
@@ -5214,6 +5218,47 @@ def resolve_skill_target(path: str | Path) -> Path:
     return p
 
 
+# B-636: which ASTFinding rules may FAIL on their own — ONE source of truth.
+#
+# `check_installed_skills`'s Python loop (B13 — and the path `vet_skill` reaches by calling
+# it, which is why the bundled-skill case convicts) gets to `-> FAIL` only after a guarded
+# run of `if af.rule == "...": ...; continue` arms, each routing a rule to a WARN-only
+# bucket. Those arms ARE the policy: several rules carry an "info"/"crit"
+# severity label yet are deliberately never FAIL-capable (B336 CHUNKED_FILE_EXEC and
+# B338 TUNNEL_LAUNCH_ARGV say so in their own comments). Reading `af.severity` alone
+# would therefore convict rules this project has explicitly decided not to convict on.
+#
+# The plugin sweep (checks/_mcp.py, B-636) needs the same answer for Python that sits
+# outside a dispatched bundled skill. It asks HERE rather than re-deriving it, because a
+# second hand-written copy of a policy this calibrated is how B-497 happened — two
+# readers of one field, the narrower one silently wrong. `tests/test_b636_*.py` pins this
+# set against the `continue` arms in the loop below, so removing an arm without updating
+# the set fails the build.
+_AST_NEVER_FAIL_RULES = frozenset({
+    "AST_UNANALYZABLE",          # F-057: a parse failure — UNKNOWN, never a verdict
+    "ENV_EXFIL_FLOW",            # F-049
+    "HOST_INFO_EXFIL_FLOW",      # C-203
+    "EXCESSIVE_TELEMETRY_FLOW",  # B-342
+    "DROPPER_DOWNLOAD_TO_TMP",   # C-205
+    "CONDITIONAL_SINK",          # F-058
+    "SHELL_INJECTION_RISK",      # C-199
+    "CHUNKED_FILE_EXEC",         # B336 — explicitly not FAIL-capable
+    "TUNNEL_LAUNCH_ARGV",        # B338 — explicitly not FAIL-capable
+})
+
+
+def ast_finding_is_fail_capable(af) -> bool:
+    """True when this ASTFinding alone justifies a FAIL, on `vet_skill`'s own policy.
+
+    Deliberately conservative in the same direction the loop below is: a rule routed to a
+    WARN bucket there is not FAIL-capable here, whatever its severity label says. The
+    `cred_exfil_signal` escalation path (`high`) is NOT covered — that one needs the
+    skill's surrounding credential/exfil context, which a loose plugin file does not have,
+    so callers outside vet_skill get the unconditional half only.
+    """
+    return af.severity == "crit" and af.rule not in _AST_NEVER_FAIL_RULES
+
+
 def vet_skill(path: str | Path) -> Finding:
     """Vet a skill BEFORE installing it: run the B13 scan on a local skill dir or SKILL.md."""
     p = resolve_skill_target(path)
@@ -5331,6 +5376,14 @@ def vet_skill(path: str | Path) -> Finding:
             "content-ring coverage is incomplete: the scan budget was exhausted "
             "before the base scan could complete"
         )
+        # B-636: `ctx` is internal bookkeeping — the vet engine hands its own Context to
+        # the plugin dispatcher (checks/_mcp.py reads `sf.ctx` to build `bundled_contexts`,
+        # which the dossier turns into capability facts). It is not rendered by report.py,
+        # sarif.py or the dossier, and no consumer treats it as evidence. Recorded here
+        # because a channel carrying an entire engine Context should not be a field the
+        # next reader discovers by accident — see tests/test_c452_channel_registry.py,
+        # whose earlier version enumerated declared dataclass fields only and never saw
+        # this one at all.
         gap.ctx = ctx
         return gap
     # F-048: also run the shared content-security ring. check_installed_skills has already

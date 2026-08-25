@@ -560,8 +560,19 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     # fetch-to-exec. Measured against the pre-change tree: those axes read UNKNOWN before
     # and PASS after, so this was introduced here, not inherited.
     unread_code = [f for fx in pool for f in (getattr(fx, "unanalysed_code", None) or [])]
+    # B-636: read by the Danger pass, invisible to these two axes. See _unmeasurable_reason.
+    danger_only_code = [
+        f for fx in pool for f in (getattr(fx, "analysed_loose_code", None) or [])
+    ]
+    # B-636: `danger_only_code` bars measurability for the SAME reason `unread_code` does.
+    # Giving the sweep a Python reader emptied `unread_code`, and without this line the
+    # axes went straight back to an affirmative PASS over a file they still cannot see —
+    # re-opening exactly the hole B-628 closed, one layer down. B-628's own case-J test
+    # caught it. Reading a file for dangerous patterns is not measuring its persistence or
+    # its outbound surface; those are computed from bundled-skill Contexts, and a loose
+    # plugin file has none.
     code_measurable = (
-        (has_code and not scan_truncated and not unread_code)
+        (has_code and not scan_truncated and not unread_code and not danger_only_code)
         or target_type not in ("skill", "plugin")
     )
     # Was anything actually assessed? A definite finding (PASS/WARN/FAIL) anywhere, or —
@@ -589,7 +600,8 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
             reason, fix = _clean_reason(axis, families), ""
         elif status == UNKNOWN and not bucket:
             reason, fix = _unmeasurable_reason(
-                axis, truncated=scan_truncated, unanalysed=bool(unread_code)), ""
+                axis, truncated=scan_truncated, unanalysed=bool(unread_code),
+                danger_only=bool(danger_only_code)), ""
         else:
             reason, fix = _reason_and_fix(bucket, axis, empty_reason=_clean_reason(axis, families))
         axes.append(AxisResult(axis=axis, status=status, reason=reason, fix=fix, findings=list(bucket)))
@@ -698,8 +710,8 @@ def _clean_reason(axis: str, families: set) -> str:
 
 
 def _unmeasurable_reason(axis: str, *, truncated: bool = False,
-                        unanalysed: bool = False) -> str:
-    """Why an axis could not be measured -- and the three reasons are not one reason.
+                        unanalysed: bool = False, danger_only: bool = False) -> str:
+    """Why an axis could not be measured -- and the four reasons are not one reason.
 
     B-628: "no executable code to analyze" is a claim about the ARTIFACT, and it is false
     whenever code is present. Two distinct ways it can be present and still unmeasured:
@@ -711,8 +723,17 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
       fetch-to-exec as a root-level `install.py` is opened by nobody, and the reviewer
       measured this axis printing an affirmative PASS over exactly that.
 
+    * ``danger_only`` (B-636) -- a reader now EXISTS for that Python, and it ran: the
+      plugin sweep runs the AST/taint pass over .py outside a dispatched skill dir. But
+      these two axes are computed from bundled-skill Contexts, which still never see that
+      file. Adding the reader without adding this state swapped one false sentence for
+      another: `unanalysed` stopped applying, and a plugin shipping install.py fell
+      through to "no executable code to analyze" -- a claim about the ARTIFACT, and false.
+
     Truncation wins the wording when both hold: "we stopped early" already implies the
     rest is unknown, while naming an unread file would suggest the rest WAS read.
+    ``unanalysed`` in turn wins over ``danger_only``: if some file had no reader at all,
+    saying the code was "read for dangerous patterns" would overstate the coverage.
     """
     if truncated:
         if axis == "connections":
@@ -728,6 +749,14 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
             return ("executable code is present that this scan has no reader for, so "
                     "staged / persistent behavior was not measured")
         return "executable code is present that this scan has no reader for"
+    if danger_only:
+        if axis == "connections":
+            return ("code outside the declared skills was read for dangerous patterns "
+                    "only, so its outbound surface was not separately measured")
+        if axis == "persistence":
+            return ("code outside the declared skills was read for dangerous patterns "
+                    "only, so its staged / persistent behavior was not separately measured")
+        return "code outside the declared skills was read for dangerous patterns only"
     if axis == "connections":
         return "no executable code to analyze for outbound connections"
     if axis == "persistence":

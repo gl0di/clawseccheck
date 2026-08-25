@@ -78,6 +78,7 @@ from ._vet import (
     _PLUGIN_MANIFEST,
     _run_content_ring,
     _VET_MERGE_RANK,
+    ast_finding_is_fail_capable,
     _decoded_payloads,
     _locate_plugin_root,
     coverage_gap_finding,
@@ -119,6 +120,11 @@ _PLUGIN_JS_EXT = (".js", ".mjs", ".cjs", ".ts")
 # this list is "we can see the file and cannot say anything about it".
 _PLUGIN_UNREAD_SOURCE_EXT = (".py", ".pyw")
 _PLUGIN_JS_MAX_BYTES = 2_000_000
+# B-636: the same input bound the lexical JS pass uses, for the same reason — the AST pass
+# is bounded by input SIZE, not content hostility (F-148). A file over the cap is NOT
+# analysed and stays in `unanalysed_code`, so it keeps producing B-628's honest "no reader
+# for this" rather than a silent gap.
+_PLUGIN_PY_MAX_BYTES = 2_000_000
 
 
 _VET_RANK_STATUS = {3: FAIL, 2: WARN, 1: UNKNOWN, 0: PASS}
@@ -165,6 +171,56 @@ def _reprefix_bundled_evidence(entry: str, name: str, rel_label: str) -> str:
         if entry.startswith(head):
             return f"{rel_label}{sep}{entry[len(head):]}"
     return entry
+
+
+_PY_BUDGET_GAP = "the scan budget was reached while it was being read"
+
+
+def _scan_loose_plugin_python(source, rel, analyze_python, subs, py_signals) -> str:
+    """Analyse one plugin Python file that no bundled-skill dispatch will reach (B-636).
+
+    Returns "" when the file was analysed, or a short phrase naming why it was not — the
+    caller turns that into a `coverage:` note AND keeps the file in `unanalysed_code`, so
+    "this scan has no reader for it" stays true of exactly the files it is true of.
+
+    Fail-capable findings become B13 sub-findings on the plugin's own `subs` list rather
+    than a parallel channel: `vet_plugin`'s FAIL branch selects `worst` out of `subs`, and
+    `dossier._AXIS_BY_ID["B13"]` is already "danger", so a payload found here lands on the
+    same axis, with the same id, as the identical payload found one directory lower. That
+    identity is the whole point of the fix — the bug was that location, not content,
+    decided the verdict.
+
+    `analyze_python` is passed in because `vet_plugin` imports skillast lazily (this module
+    keeps that import deferred); taking it as an argument avoids adding a module-level
+    import that the rest of the file deliberately does without.
+    """
+    try:
+        ast_findings = analyze_python(source, rel)
+    except ScanBudgetExceeded:
+        return _PY_BUDGET_GAP
+    unparseable = ""
+    for af in ast_findings:
+        if af.rule == "AST_UNANALYZABLE":
+            # F-057's contract: a parse failure is reported as a finding rather than an
+            # empty list precisely so a caller can tell "clean" from "could not look".
+            unparseable = "the AST layer could not parse it"
+            continue
+        loc = f"{rel}:{af.lineno}"
+        if ast_finding_is_fail_capable(af):
+            subs.append(_finding(
+                "B13",
+                FAIL,
+                f"[plugin file '{rel}'] Dangerous code shipped in the plugin tree, "
+                f"outside any bundled skill: {af.reason} ({loc})",
+                "Do NOT install this plugin until this file has been reviewed. Code a "
+                "plugin ships outside its declared skills still runs with the plugin's "
+                "own authority — being outside a skill directory restricts nothing.",
+                evidence=[f"{rel}: {af.reason} ({loc})"],
+                severity=CRITICAL,
+            ))
+        else:
+            py_signals.append(f"{rel}: {af.reason} ({loc})")
+    return unparseable
 
 
 def _attribute_to_bundled_skill(f: Finding, name: str, rel_label: str) -> Finding:
@@ -303,7 +359,7 @@ def vet_plugin(
     """
     import json as _json
 
-    from ..skillast import analyze_javascript  # noqa: PLC0415
+    from ..skillast import analyze_javascript, analyze_python  # noqa: PLC0415
 
     p = Path(str(path)).expanduser()
     if not p.exists():
@@ -347,6 +403,11 @@ def vet_plugin(
     notes: list[str] = []  # coverage / informational evidence — never verdict-moving
     subs: list[Finding] = []  # dispatched engine findings (vet_skill / vet_mcp)
     js_signals: list[str] = []  # B-165: lexical JS/TS findings — raise the verdict to WARN
+    # B-636: non-fail-capable AST findings from plugin Python outside a dispatched skill.
+    # The fail-capable ones do not come through here — they are appended to `subs` as B13
+    # sub-findings, so the existing merge rank, `worst` selection, `ring_findings` and the
+    # dossier's own `_AXIS_BY_ID["B13"] == "danger"` routing all apply with no new wiring.
+    py_signals: list[str] = []
 
     # -- manifest sanity (required fields per recon §11.2; host blocks activation on error)
     pid = manifest.get("id")
@@ -547,6 +608,13 @@ def vet_plugin(
     # the dossier cannot mistake "one bundled skill had Python" for "this plugin's code
     # was measured" -- exactly the affirmative claim the reviewer reproduced.
     unanalysed_code: list[str] = []
+    # B-636: plugin Python the Danger pass DID read. Distinct from `unanalysed_code` and
+    # from "no code at all": the AST/taint pass covers dangerous patterns, while the
+    # Persistence and Connections axes are computed from bundled-skill Contexts that never
+    # see this file. Without this the dossier had only three states and had to pick a false
+    # one — after the reader landed, a plugin shipping install.py printed "no executable
+    # code to analyze", which is a claim about the ARTIFACT and was simply untrue.
+    analysed_loose_code: list[str] = []
     if cpu_exceeded(deadline):
         budget_hit = True
     else:
@@ -595,7 +663,70 @@ def vet_plugin(
             except OSError:
                 inside = False
             if not inside:
-                unanalysed_code.append(str(fp.relative_to(root)))
+                # B-636: READ it, instead of only recording that nothing read it.
+                #
+                # B-628 established that this Python is reached by no reader and made the
+                # Persistence/Connections axes say so. It did not make the DANGER axis stop
+                # affirming, and Danger is the axis a pre-install gate is consulted for.
+                # Measured before this change, with the payload held constant and only its
+                # location varied: the shipped `bad_b13_fetch_to_exec` loader
+                # (urlopen -> exec(compile(...))) placed at the plugin root, or beside the
+                # dispatched skill dir, produced `Danger PASS — no malware signature or
+                # known-bad indicator`, while the SAME BYTES one directory lower produced
+                # `DO-NOT-INSTALL`. A control run with no Python at all produced the same
+                # verdict as the loader did, so the verdict carried no information about it.
+                #
+                # `analyze_python` is the AST/taint pass that convicts those bytes in the
+                # bundled-skill case — the difference was reach, not capability. The JS
+                # branch below caps its own findings at WARN because that pass is LEXICAL
+                # and a minified bundle can false-positive; that reasoning does not transfer
+                # to an AST pass, so a fail-capable rule here FAILs, exactly as it does one
+                # directory lower. Which rules those are is `_vet.ast_finding_is_fail_capable`
+                # — asked, never re-derived, because several rules carry a "crit" label and
+                # are deliberately never FAIL-capable (B336, B338). That predicate is the
+                # one `check_installed_skills` (B13) applies, which is the function
+                # `vet_skill` calls and therefore the exact classifier that convicts these
+                # bytes when they sit one directory lower.
+                #
+                # Anything this branch cannot read — over the cap, unparseable, unreadable,
+                # or cut off by the budget — still lands in `unanalysed_code`, so B-628's
+                # honest "no reader for this" keeps firing for exactly the files it is true
+                # of. Doing both in ONE pass is what makes it impossible for the dossier to
+                # claim a file was unread on one line and quote its contents on the next.
+                rel = str(fp.relative_to(root))
+                gap = ""
+                if cpu_exceeded(deadline):
+                    budget_hit = True
+                    gap = "the scan budget was reached before it was read"
+                else:
+                    try:
+                        py_size = fp.stat().st_size
+                    except OSError:
+                        py_size = _PLUGIN_PY_MAX_BYTES + 1
+                    if py_size > _PLUGIN_PY_MAX_BYTES:
+                        gap = (
+                            f"it exceeds the {_PLUGIN_PY_MAX_BYTES // 1_000_000}MB scan cap"
+                        )
+                    else:
+                        try:
+                            py_src = fp.read_text(encoding="utf-8", errors="replace")
+                        except OSError:
+                            py_src = None
+                        if py_src is None:
+                            gap = "it could not be read"
+                        else:
+                            gap = _scan_loose_plugin_python(
+                                py_src, rel, analyze_python, subs, py_signals
+                            )
+                            if gap == _PY_BUDGET_GAP:
+                                budget_hit = True
+                if gap:
+                    unanalysed_code.append(rel)
+                    notes.append(
+                        f"coverage: plugin Python '{rel}' was not analysed — {gap}"
+                    )
+                else:
+                    analysed_loose_code.append(rel)
         if cpu_exceeded(deadline):
             budget_hit = True
             break
@@ -742,13 +873,23 @@ def vet_plugin(
     # on a minified bundle must not force a FAIL.
     # F-148: budget_hit joins `truncated` at the same UNKNOWN floor — either way the
     # sweep is incomplete, so a clean run (rank 0) can never be reported.
-    rank = max(sub_rank, 2 if (warns or js_signals) else 0, 1 if (truncated or budget_hit) else 0)
+    # B-636: py_signals join js_signals at the WARN floor. The fail-capable Python
+    # findings are NOT here — they are in `subs`, so `sub_rank` already carries them to
+    # FAIL; this floor is for the WARN-only rules (B336/B338 and the exfil-flow family).
+    rank = max(
+        sub_rank,
+        2 if (warns or js_signals or py_signals) else 0,
+        1 if (truncated or budget_hit) else 0,
+    )
     status = _VET_RANK_STATUS[rank]
 
     n_mcp = sum(1 for f in subs if f.id == "MCP-VET")
     summary = f"plugin '{pid}' ({len(skill_dirs)} bundled skill(s), {n_mcp} embedded MCP spec(s))"
     actionable = [f for f in subs if f.status in (FAIL, WARN, UNKNOWN)]
-    evidence = warns + js_signals + [f"{f.status}: {f.detail}" for f in actionable] + notes
+    evidence = (
+        warns + js_signals + py_signals
+        + [f"{f.status}: {f.detail}" for f in actionable] + notes
+    )
 
     if status == FAIL:
         worst = max(subs, key=lambda f: _VET_MERGE_RANK.get(f.status, 0))
@@ -765,6 +906,8 @@ def vet_plugin(
             head_sig, label = warns[0], "supply-chain / packaging signals"
         elif js_signals:
             head_sig, label = js_signals[0], "runtime JS/TS signals"
+        elif py_signals:
+            head_sig, label = py_signals[0], "plugin Python signals"
         else:
             head_sig, label = actionable[0].detail, "bundled-content signals"
         finding = _plugin_finding(
@@ -797,6 +940,7 @@ def vet_plugin(
     # verdict of its own and no consumer treats it as a finding.
     finding.bundled_contexts = bundled_contexts
     finding.unanalysed_code = unanalysed_code
+    finding.analysed_loose_code = analysed_loose_code
     if warns:
         # Container-native signals (manifest sanity, npm lifecycle scripts, floating
         # dependency versions, skills-entry path escape, native-executable stowaways)

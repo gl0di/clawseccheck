@@ -388,7 +388,21 @@ def test_j_code_with_no_reader_is_never_an_affirmative_clean_claim(tmp_path):
                 f"{name} asserted {axis.status} over code no reader opened "
                 f"(at_root={at_root}): {axis.reason}"
             )
-            assert "no reader for" in axis.reason, axis.reason
+            # B-636 moved the wording, not the decision. When this was written, .py
+            # outside a dispatched skill dir had no reader at all, so "no reader for" WAS
+            # the whole truth. The sweep now runs the AST/taint pass over exactly those
+            # files, and asserting the old sentence would demand the tool keep saying
+            # something that stopped being true. What must not move — and is what this
+            # test is named for — is that the axis never makes an affirmative clean claim
+            # over code IT cannot see: reading a file for dangerous patterns is not
+            # measuring its persistence or its outbound surface.
+            assert any(
+                phrase in axis.reason
+                for phrase in ("no reader for", "read for dangerous patterns only")
+            ), axis.reason
+            assert "no dormant" not in axis.reason and "no outbound" not in axis.reason, (
+                f"{name} made an affirmative clean claim: {axis.reason}"
+            )
 
 
 def test_k_a_truncated_scan_holds_even_when_a_definite_finding_is_present(tmp_path):
