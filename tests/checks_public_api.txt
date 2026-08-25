@@ -133,6 +133,7 @@ _skill_frontmatter_block
 _squat_hits
 _suspicious_pipe_hosts
 _tool_policy_view
+_unclassified_leg_verbs
 _unpinned_deps_in_skill
 _untrusted_input_channels
 _vet_mcp_least_privilege

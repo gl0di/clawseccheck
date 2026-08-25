@@ -36,6 +36,7 @@ from ..collector import (  # noqa: F401
     _is_own_source,
 )
 from ..iocdb import known_bad_host_records as _iocdb_known_bad_host_records
+from .. import attest as _attest
 
 
 def _is_posix() -> bool:
@@ -2004,6 +2005,47 @@ def _agent_legs(tools: list) -> dict:
 
 
 _LEG_KEYS = ("untrusted input", "sensitive data", "outbound actions")
+
+
+def _unclassified_leg_verbs(tools: list) -> list:
+    """Verb names whose trifecta legs cannot be determined from the name at all.
+
+    B-563. ``_agent_legs`` derives each leg from a substring hint list and returns
+    ``bool``, so a name none of the hints recognise records ``False`` on all three
+    legs -- and every consumer reads that as "this agent does not hold that
+    capability", when what actually happened is "this name was not recognised". The
+    unknown therefore makes the verdict SAFER, which is the fail-open shape Golden
+    Rule #4 exists to forbid: an agent answering the ``--ask`` template honestly with
+    its real verbs (``Read Write Edit Bash WebFetch Grep Glob Task``) scores 1/3 legs,
+    while the taxonomy's own hint words (``web secret exec``) score 3/3.
+
+    A name is listed here only when BOTH classifiers give up on it: no leg hint
+    matched, and ``attest.classify_verb`` -- the blast-radius taxonomy B43 already
+    trusts, and the only one of the two with a real UNKNOWN bucket -- also returns
+    UNKNOWN. A verb that taxonomy places as REVERSIBLE (``Read``, ``Grep``) is
+    genuinely leg-free rather than unrecognised and is NOT listed; calling those
+    unknown would push almost every real roster to UNKNOWN and cost the check the
+    ability to say anything.
+
+    Widening the hint lists is deliberately NOT the fix. It would convert this false
+    PASS into a false PASS for the next unlisted verb, and substring widening buys
+    false positives elsewhere -- B-395 and B-503 each had to undo one (``_hint``
+    matching "write" inside "underwriter_lookup").
+    """
+    out = []
+    for t in tools or ():
+        # Non-strings are skipped, matching attest.classify_tools. `attested_agents`
+        # already drops them upstream, so on the B45/B47 path this cannot trigger; it
+        # keeps a stray entry from another caller out of a user-facing evidence line
+        # as a verb literally named "None".
+        if not isinstance(t, (str, bytes)):
+            continue
+        name = str(t)
+        if _hint([name], INPUT_TOOL_HINTS + SENSITIVE_TOOL_HINTS + OUTBOUND_TOOL_HINTS):
+            continue
+        if _attest.classify_verb(name) == "UNKNOWN":
+            out.append(name)
+    return out
 
 
 def _has_approval_gate(cfg: dict) -> bool:

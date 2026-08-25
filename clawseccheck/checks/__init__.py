@@ -125,6 +125,7 @@ from ._shared import (
     _active_channels,
     _untrusted_input_channels,
     _agent_legs,
+    _unclassified_leg_verbs,
     _LEG_KEYS,
     _has_approval_gate,
     _is_public_ip,

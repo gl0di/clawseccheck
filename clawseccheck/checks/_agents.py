@@ -40,6 +40,7 @@ from ._shared import (
     _resolved_channel_nodes,
     _surface_absent,
     _trifecta_legs,
+    _unclassified_leg_verbs,
     _web_fetch_enabled,
     _wildcard_group_gap,
 )
@@ -278,6 +279,29 @@ def check_agent_separation(ctx: Context) -> Finding:
             "a separate agent the untrusted-input agent cannot drive.",
             evidence=[f"{n}: holds all 3 legs" for n in trifecta_agents],
         )
+    # B-563: only now may "no agent holds all three" mean anything. A verb neither
+    # classifier recognises contributes False to every leg, so an unrecognised roster
+    # counts DOWN to a clean separation verdict. Report what could not be read instead
+    # of a PASS the evidence does not support (Golden Rule #4).
+    unreadable = [(a["name"], _unclassified_leg_verbs(a["tools"])) for a in agents]
+    unreadable = [(name, verbs) for name, verbs in unreadable if verbs]
+    if unreadable:
+        return _finding(
+            "B45",
+            UNKNOWN,
+            "Privilege separation could not be assessed: some attested verb names were "
+            "not recognised by either tool classifier, and an unrecognised verb counts "
+            "as holding no trifecta leg — so 'no agent holds all three' would be an "
+            "artefact of the taxonomy, not a finding about your agents.",
+            "Re-run '--attest' listing each agent's tools under names that say what the "
+            "tool does (for example 'fs_write' or 'shell' rather than a product name). "
+            "Where a verb's capability is genuinely broad, assume it holds the leg and "
+            "separate the agents accordingly.",
+            evidence=[
+                f"{name}: {len(verbs)} unclassifiable verb(s): {', '.join(verbs)}"
+                for name, verbs in unreadable
+            ],
+        )
     return _finding(
         "B45",
         PASS,
@@ -324,6 +348,34 @@ def check_delegation_reassembly(ctx: Context) -> Finding:
             "share the same data-vs-instruction contract.",
         )
     if not r["reachable"]:
+        # B-563: "not reachable" is only meaningful if the legs were readable. An
+        # unrecognised verb holds no leg, so it can remove the entry point the walk
+        # starts from, or the sensitive/outbound end it looks for, and the walk then
+        # reports a clean graph it never actually traversed. Same fail-open shape as
+        # B45's PASS branch. The wall-tier PASS below is NOT gated: it already found
+        # reachability, so classification was good enough to get there.
+        unreadable = [
+            (a["name"], _unclassified_leg_verbs(a["tools"]))
+            for a in _attest.attested_agents(ctx.attestation)
+        ]
+        unreadable = [(name, verbs) for name, verbs in unreadable if verbs]
+        if unreadable:
+            return _finding(
+                "B47",
+                UNKNOWN,
+                "Cross-agent trifecta reassembly could not be assessed: some attested verb "
+                "names were not recognised by either tool classifier. An unrecognised verb "
+                "holds no leg, which can hide both the untrusted-input agent the traversal "
+                "starts from and the sensitive/outbound agents it looks for — so 'the "
+                "trifecta does not reassemble' would describe the taxonomy, not your graph.",
+                "Re-run '--attest' listing each agent's tools under names that say what the "
+                "tool does (for example 'fs_write' or 'shell' rather than a product name), "
+                "so the delegation walk can see which agent holds which leg.",
+                evidence=[
+                    f"{name}: {len(verbs)} unclassifiable verb(s): {', '.join(verbs)}"
+                    for name, verbs in unreadable
+                ],
+            )
         return _finding(
             "B47",
             PASS,
