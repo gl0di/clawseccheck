@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from clawseccheck.catalog import BY_ID, FAIL, PASS, UNKNOWN, WARN, Finding
+from clawseccheck.catalog import BY_ID, FAIL, WARN, Finding
 from clawseccheck.guide import _surface_failed, suggest_actions
 from clawseccheck.scoring import ScoreResult
 
