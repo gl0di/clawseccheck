@@ -981,6 +981,18 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
     UNKNOWN — non-POSIX platform, or no relevant files found.
     PASS  — files found, all perms are tight.
 
+    Scope, decided deliberately (B-495): this answers the MULTI-USER question only —
+    can some identity OTHER than the file's own owner write it. The agent itself runs
+    AS that owner, so a 0600 file it owns is fully writable by the agent regardless of
+    this check's verdict; that is a universal, always-true condition — and the
+    product's own documented workflow (docs/concepts/soul.md tells users to let the
+    agent rewrite its own SOUL.md) — not a permission weakness, so it is deliberately
+    not scored here. The evidence-based version of "was this file actually rewritten
+    with an injected directive" is B6/B161 (content scan of ctx.bootstrap), and
+    RISK-07/RISK-13 (B-494) already open their chain on either signal: this check's
+    FAIL OR a B6/B161 FAIL. So PASS/UNKNOWN below mean "no OTHER local identity can
+    write this," never "the file cannot be rewritten."
+
     Only stat() is called — no file contents are read.
     """
     if not _shared._is_posix():
@@ -1162,7 +1174,10 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
     return _finding(
         "B20",
         PASS,
-        "Bootstrap identity and memory files have tight write permissions.",
+        "Bootstrap identity and memory files have tight write permissions — no other "
+        "local user or group can write them. This does not cover the agent's own write "
+        "access to files it owns (always possible, and not itself a weakness); see "
+        "B6/B161 for whether an injected directive was actually found in their content.",
         "Keep workspace dirs at chmod 700 and bootstrap files at chmod 600.",
     )
 
@@ -2927,12 +2942,24 @@ def check_self_modification(ctx: Context) -> Finding:
     FAIL   — ALL three conditions hold:
                (a) fs_write/exec/elevated tools are enabled,
                (b) on POSIX, an identity target (SOUL.md) or skills dir is
-                   group/world-writable (the agent process can rewrite its own
-                   identity/skills without needing special escalation),
+                   group/world-writable — some identity OTHER than the file's
+                   own owner can write it,
                (c) no approval gate is configured.
     WARN   — (a) + (b) hold but (c) — approval IS present.
     UNKNOWN — tools absent (condition a false), or not POSIX, or no writable
               identity files found.
+
+    Scope, decided deliberately (B-495): condition (b) is the MULTI-USER question —
+    group/world write access — not "can the agent write its own files." The agent
+    runs AS the owner of these files, so a 0600 file it owns is always writable by
+    the agent regardless of (b); that is universal (also the product's documented
+    self-rewrite workflow for SOUL.md), not a permission weakness, so it is
+    deliberately not scored here. UNKNOWN on (b) alone means "no OTHER local
+    identity can write these files," never "self-modification risk is ruled out."
+    The evidence-based signal for an actual self-modification event is B6/B161 (did
+    a content scan find an injected directive actually written into the file), and
+    RISK-07/RISK-13 (B-494) already open their chain on either this check's FAIL OR
+    a B6/B161 FAIL.
     """
     cfg = ctx.config
     tools = _enabled_tools(cfg)
@@ -2965,9 +2992,13 @@ def check_self_modification(ctx: Context) -> Finding:
         return _finding(
             "B22",
             UNKNOWN,
-            "Dangerous tools present but no writable identity/skill targets found — "
-            "self-modification risk could not be confirmed.",
-            "Verify workspace SOUL.md and skills dirs are chmod 700/600.",
+            "Dangerous tools present but no group/world-writable identity/skill "
+            "targets found — the MULTI-USER self-modification risk could not be "
+            "confirmed. This does not rule out the agent rewriting files it already "
+            "owns (always possible, not itself a weakness); see B6/B161 for whether "
+            "an injected directive was actually found in their content.",
+            "Verify workspace SOUL.md and skills dirs are chmod 700/600. A B6/B161 "
+            "FAIL on these files is the actionable signal this check cannot see.",
         )
 
     # Condition (c): approval gate (real OpenClaw field: tools.exec.mode/security/ask)
