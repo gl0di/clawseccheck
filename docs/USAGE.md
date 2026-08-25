@@ -1257,8 +1257,11 @@ python3 audit.py --log audit.log            # also write log to a local file
   installed wrapper project) *before* you install it: manifest sanity, npm lifecycle scripts,
   floating dependency versions, native-executable stowaways, and skills entries escaping the
   plugin root — then dispatches bundled skills to the skill engine (they auto-load via
-  `~/.openclaw/plugin-skills/`) and embedded MCP specs to the MCP engine. Plugin runtime code is
-  JS/TS and is disclosed as outside this vet's static depth — review entry files before trusting.
+  `~/.openclaw/plugin-skills/`) and embedded MCP specs to the MCP engine. Python the plugin
+  ships outside its declared skills gets the same AST/taint pass a bundled skill's does, so a
+  remote code loader at the plugin root is convicted exactly as it is one directory lower;
+  runtime JS/TS gets a lexical pass only, and any file past the scan cap or that fails to parse
+  is named as unread rather than passed — review entry files before trusting.
 - **`--vet-source SLUG|URL|PKG`** is the pre-download reputation gate: it judges a source's
   *identity* — `clawhub:<slug>`, `npm:<pkg>`, `pypi:<pkg>`, `git:host/owner/repo[@ref]`, or a
   URL — with zero network and nothing fetched. Exact match in the bundled known-compromised
@@ -1375,17 +1378,22 @@ clawseccheck --purge          # lists the files, asks for confirmation, then del
 clawseccheck --purge --yes    # skip the prompt (for scripted uninstall)
 ```
 
-`--purge` only ever touches its own known files (`history.jsonl`, `events.jsonl`, `state.json`,
-`coverage.json`, plus their lock sidecars) — never a directory glob or recursive delete, so
-anything else you keep under that path is untouched. It exits without deleting anything if you
-answer no (or there's nothing to purge), and reports the count of files removed on success.
-Removing the `clawseccheck` package/skill itself is a separate, normal uninstall step (e.g.
+`--purge` only ever touches its own known files: the four store files (`history.jsonl`,
+`events.jsonl`, `state.json`, `coverage.json`) **and** the four default-named report outputs
+(`openclaw-security-badge.svg`, `openclaw-security-report.html`, `openclaw-security-report.sarif`,
+`openclaw-security-report.pdf`), plus all eight's lock sidecars — never a directory glob or
+recursive delete. That means if you save a report with `--pdf`/`--html`/`--sarif`/`--badge`
+under this same store directory using ClawSecCheck's own default filename, `--purge` deletes it
+too; anything else — including one of those same reports saved under a different name, or
+outside `~/.clawseccheck/` — is untouched. It exits without deleting anything if you answer no
+(or there's nothing to purge), and reports the count of files removed on success. Removing the
+`clawseccheck` package/skill itself is a separate, normal uninstall step (e.g.
 `pip uninstall clawseccheck` or removing the skill directory) — `--purge` only clears the local
 data store.
 
-That fixed four-name list is deliberate (never a glob), but it means a stray `.<name>.<random>.tmp`
+That fixed eight-name list is deliberate (never a glob), but it means a stray `.<name>.<random>.tmp`
 sidecar — left behind only if the process is killed (e.g. `SIGKILL`) between writing the temp file
-and the atomic rename that replaces the real one — is not one of the four and is not removed by
+and the atomic rename that replaces the real one — is not one of the eight and is not removed by
 `--purge`. It is inert (never read back by anything) and rare; `rm ~/.clawseccheck/.*.tmp` clears
 it by hand if you ever see one.
 

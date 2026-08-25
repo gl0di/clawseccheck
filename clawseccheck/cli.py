@@ -1974,11 +1974,13 @@ def _confirm_purge(paths: "list[Path]") -> "tuple[bool, bool]":
 def _run_purge(args) -> int:
     """Delete ClawSecCheck's local store (opt-in, confirmation-gated).
 
-    Resolves the store directory from --history's parent (all four known files
-    live alongside each other under ~/.clawseccheck/ by default). Operates ONLY
-    on the fixed whitelist of known filenames plus their ".lock" sidecars —
-    never globs or rmtree's the directory, so an unrelated file the user happens
-    to keep there is never at risk. Read-only until the user (or --yes) confirms.
+    Resolves the store directory from --history's parent (all _PURGE_FILENAMES
+    entries — the four store files plus the four default report-renderer
+    filenames, see that constant's comment for why — live alongside each other
+    under ~/.clawseccheck/ by default). Operates ONLY on that fixed whitelist
+    plus their ".lock" sidecars — never globs or rmtree's the directory, so an
+    unrelated file the user happens to keep there is never at risk. Read-only
+    until the user (or --yes) confirms.
     """
     store_dir = _store_dir(args)
     candidates = [store_dir / name for name in _PURGE_FILENAMES]
@@ -2650,7 +2652,8 @@ def _main(argv=None) -> int:
                         "previous --monitor run printed, and exit; read-only")
     p.add_argument("--purge", action="store_true",
                    help="delete ClawSecCheck's local store (history/events/state/coverage "
-                        "files + their lock sidecars) and exit — confirmation-gated unless "
+                        "files, plus the default-named badge/html/sarif/pdf report files if "
+                        "present, + their lock sidecars) and exit — confirmation-gated unless "
                         "--yes is also given; nothing else is touched")
     p.add_argument("--apply-ignore-proposals", metavar="PATH", dest="apply_ignore_proposals",
                    help="apply a --propose-ignore output: append its proposed entries to "
