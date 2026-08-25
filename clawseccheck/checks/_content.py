@@ -3550,11 +3550,40 @@ _LIFECYCLE_HOOK_RE = re.compile(
 
 # Words/phrases that mark a negation / example context in the PROSE immediately
 # before the dangerous pattern.  Only the nearest ~200 chars are scanned.
+#
+# B-656: every alternative here names an ACT — "for example", "e.g.", "do not",
+# "never run", "avoid running", "what not to do", "example:". Each is the author
+# saying *this command is not to be executed*. A bare `documentation\b` used to sit
+# among them, and it is not that: it names a TOPIC. It asserts only that the text is
+# about documentation, so the discriminator became a word the audited skill's own
+# author writes about itself. Measured, with the payload byte-identical:
+#
+#     description: A helper skill.               ->  B13 FAIL,  --vet DO-NOT-INSTALL
+#     description: A documentation helper skill. ->  B13 PASS,  --vet INSTALL
+#
+# The `description:` line sits inside the 200-char window of a small SKILL.md, so one
+# word in self-attested metadata absolved `curl http://…/x | sh`. Same shape a prior
+# C-135 already retracted one check over (see the note above
+# `test_ad_prereq_phrase_alone_no_longer_warns`): a bare window search, not a negation
+# grammatically bound to the directive.
+#
+# Removed rather than re-scoped, because the motive it existed for is already carried
+# by the FORM of the content and needs no word. Measured both directions before the
+# change — a documentation skill that quotes the command keeps its PASS on its own:
+#
+#     fenced ```bash curl … | sh```                     PASS with and without
+#     "Do not run commands of the form `curl … | sh`"   PASS with and without
+#     bare word in the description, no fence, no verb   PASS before  ->  WARN after
+#
+# and removing it cost nothing that any test or fixture demonstrates: 5,033 tests across
+# 186 files green without it, and 0 of the 16 fixture skills whose text contains the word
+# change verdict. The measurement that matters is that second one — a green suite proves
+# the alternative is unexercised, not that it is unnecessary.
 _NEGATION_RE = re.compile(
     r"\bfor\s+example\b|e\.g\.|(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|"
     r"\bdo\s+not\b|\bdo\s+NOT\b|\bdon'?t\s+(?:do|run|use|execute)\b|"
     r"\bnever\s+run\b|\bnever\s+use\b|\bavoid\s+(?:running|using|this)\b|"
-    r"\bexample:\s*$|documentation\b|\bwhat\s+not\s+to\s+do\b|"
+    r"\bexample:\s*$|\bwhat\s+not\s+to\s+do\b|"
     r"[✅❌]\s*(?:\*\*)?(?:don|never|avoid|bad|no\b)",
     re.I | re.MULTILINE,
 )
