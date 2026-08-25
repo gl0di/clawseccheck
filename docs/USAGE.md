@@ -1120,14 +1120,16 @@ python3 audit.py --log audit.log            # also write log to a local file
   Anything executable, or any manifest, is scanned regardless, so deleting `SKILL.md` is not a
   way to switch the scanner off.
   If the scan hits its own per-target budget, or a collector size/file cap, or a file that
-  is present but cannot be **opened** (permissions, a dangling link, an I/O error), before
-  it has read everything, that is **never** reported as a clean result. An unreadable file
-  is not an absent one: it is named, and the danger axis degrades to `UNKNOWN` rather than
-  claiming no malware signature was found in content nothing ever read. The gap lands on the
-  `danger` axis — as a synthetic `VET-COVERAGE` finding when the content-ring budget runs
-  out, and as a `"coverage is incomplete"` detail otherwise — which keeps the internal score
-  capped (never a confident "clean") and makes the overall verdict `CAUTION`, so a
-  partially-scanned target *does* exit `1` here. (The `--full` skill sweep treats truncation the
+  is present but cannot be **opened** (permissions, a dangling link, an I/O error), or a
+  content-security check itself **raises** before finishing, that is **never** reported as a
+  clean result. An unreadable file is not an absent one, and a check that crashed is not a
+  check that found nothing: each is named, and the danger axis degrades to `UNKNOWN` rather
+  than claiming no malware signature was found in content nothing ever read. The gap lands on
+  the `danger` axis — as a synthetic `VET-COVERAGE` finding when the content-ring budget runs
+  out, a `VET-RING-CHECK-ERROR` finding naming the checks that raised, and a
+  `"coverage is incomplete"` detail otherwise — which keeps the internal score capped (never a
+  confident "clean") and makes the overall verdict `CAUTION`, so a partially-scanned target
+  *does* exit `1` here. (The `--full` skill sweep treats truncation the
   opposite way — see `--full` below.)
 - **`--full`** runs the audit and then appends: self-test scenario generation, the MCP vet,
   a **skill sweep**, a **plugin sweep** (F-150), a **behavioral/trajectory replay**, and an
