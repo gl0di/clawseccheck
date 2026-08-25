@@ -1218,13 +1218,80 @@ def build_ignore_proposals(findings, verdicts_map: dict) -> list[dict]:
     return proposals
 
 
+def _note_policy_refused_verdicts(findings, verdicts_map: dict, proposals: list) -> None:
+    """B-572: say out loud when a well-formed SAFE verdict was refused on POLICY.
+
+    ``_note_nothing_applied`` already reports PARSE-level rejection, so a malformed
+    payload gets a detailed diagnostic while a perfectly well-formed one that is
+    declined by ``build_ignore_proposals``'s own rules is dropped in silence. That
+    made a partially-refused submission indistinguishable from a judge that simply
+    reviewed fewer items -- B-330's information gap one stage later, and its rationale
+    transfers verbatim.
+
+    The consumer here is usually not a human: a host-agent judge panel submits verdicts
+    programmatically and, with no signal, cannot tell "I reviewed 3" from "I reviewed 5
+    and two were refused", so it cannot relay the refusal, retry, or learn that a
+    CRITICAL is not suppressible. The user who ASKED for something to be accepted is
+    never told the request was declined.
+
+    The refusal itself is correct and stays exactly as it is -- this reports it, it does
+    not weaken it. Counts and reason classes only, never the refused ids: naming them
+    would read as advice on how to make a finding suppressible, and ``_note``'s contract
+    is fixed text plus integers so there is nothing for redact() to mask.
+    """
+    safe = [key for key, entry in (verdicts_map or {}).items()
+            if isinstance(entry, dict) and entry.get("verdict") == "SAFE"]
+    if not safe:
+        return
+    accepted = {(p["finding_id"], p["target"]) for p in proposals}
+    by_key = {(f.id, _target_from_evidence(f)): f for f in findings or []}
+    not_candidate = aggregate = unmatched = 0
+    for key in safe:
+        if key in accepted:
+            continue
+        f = by_key.get(key)
+        if f is None:
+            unmatched += 1
+        elif not _is_borderline(f):
+            not_candidate += 1
+        elif len(f.evidence or []) > 1:
+            aggregate += 1
+        else:
+            unmatched += 1
+    refused = not_candidate + aggregate + unmatched
+    if not refused:
+        return
+    reasons = []
+    if not_candidate:
+        reasons.append(
+            f"{not_candidate} are not suppression candidates (the finding is FAIL-status, "
+            "a sensitive id, already suppressed, or confirmed not-applicable)")
+    if aggregate:
+        reasons.append(
+            f"{aggregate} name a finding that aggregates more than one target, which a "
+            "single suppression entry cannot scope to the one that was reviewed")
+    if unmatched:
+        reasons.append(
+            f"{unmatched} did not match any finding in this run")
+    _note(
+        f"{refused} of {len(safe)} submitted SAFE verdicts were not proposed: "
+        + "; ".join(reasons)
+        + ". The other proposals are unaffected."
+    )
+
+
 def render_ignore_proposals_json(findings, *, verdicts_raw: str, version: str) -> str:
     """Return the standalone ``--propose-ignore`` JSON artifact as a string.
 
     Read-only: this function never touches disk. Applying a proposal is a
     separate, confirmation-gated step (``--apply-ignore-proposals``, cli.py).
     """
-    proposals = build_ignore_proposals(findings, _parse_verdicts(verdicts_raw))
+    _verdicts_map = _parse_verdicts(verdicts_raw)
+    proposals = build_ignore_proposals(findings, _verdicts_map)
+    # B-572: stdout, the proposals array and the exit code are all unchanged; this only
+    # adds the missing stderr diagnostic, the same shape B-561/B-562 landed for their own
+    # silences.
+    _note_policy_refused_verdicts(findings, _verdicts_map, proposals)
     payload = {
         "tool": "clawseccheck",
         "version": version,
