@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .catalog import FAIL, WARN, Finding
+from .catalog import BY_ID, FAIL, WARN, Finding
 from .scoring import ScoreResult
 from .textnorm import asciify
 
@@ -28,6 +28,33 @@ def _by_id(findings: list[Finding]) -> dict[str, Finding]:
     return {f.id: f for f in findings}
 
 
+def _surface_failed(findings: list[Finding], surface: str) -> bool:
+    """True when any check belonging to *surface* reported FAIL (B-566).
+
+    Derived from the catalog's own `surface` slug rather than from a list of check ids.
+    The id-keyed rules this supplements see 7 of 188 checks, so a FAIL on any other check
+    produced no next step at all, and the trigger set could not help falling further
+    behind — every new check needed a new rule to become visible here. Keying on the
+    surface means a new skills-surface check inherits its next step for free.
+
+    FAIL only, deliberately, and this is the whole calibration. Measured over 40 fixtures:
+    the current B13-keyed trigger fires on 22; adding every skills-surface FAIL *or* WARN
+    takes it to 35, which makes the action near-universal and costs it the signal a
+    prioritised list exists to carry. FAIL alone takes it to 24. The filed defect was a
+    FAIL that produced no next step, so FAIL is what closes it.
+
+    A suppressed finding does not count: the user has already said they do not want to be
+    told about it, and re-surfacing it as a recommended action would route around that.
+    """
+    for f in findings or []:
+        if getattr(f, "suppressed", False):
+            continue
+        meta = BY_ID.get(f.id)
+        if meta is not None and meta.surface == surface and f.status == FAIL:
+            return True
+    return False
+
+
 def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]:
     """Build a list of recommended next steps from the audit result.
 
@@ -41,9 +68,30 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
     # signature for API stability even though no current rule reads it.
     _ = score
 
-    # vet_skills: B13 is FAIL or WARN
+    # vet_skills: ANY skills-surface check is FAIL or WARN.
+    #
+    # B-566: this used to key on B13 alone, so a run could carry a skills-surface FAIL and
+    # produce no next step at all. The measured case was B181 ("installed skill files no
+    # longer match the SHA-256 digests ClawHub recorded") — a possible-compromise
+    # indicator that the command whose whole job is "what should I do now" had nothing to
+    # say about. B181 and B13 share surface="skills"; there was never a reason for one to
+    # reach this action and the other not.
+    #
+    # Derived from the catalog's own `surface`, deliberately NOT from a list of ids. A
+    # per-id rule set is what froze this trigger at 7 of 188 checks in the first place,
+    # and it would need a new rule every time a check is added. This way a new
+    # skills-surface check inherits the next step for free.
+    #
+    # Still inside the reports-only doctrine (F-074): the suggestion is to run a further
+    # CHECK (--vet), never to remediate. For B181 specifically the honest next step is to
+    # vet the skill, not "reinstall it".
+    #
+    # B13's own FAIL-or-WARN trigger is kept as it was, so nothing that reached this
+    # action before stops reaching it; the surface term only ADDS the FAILs that reached
+    # nothing. See _surface_failed for why that term is FAIL-only.
     b13 = idx.get("B13")
-    if b13 is not None and b13.status in (FAIL, WARN):
+    b13_hit = b13 is not None and b13.status in (FAIL, WARN)
+    if b13_hit or _surface_failed(findings, "skills"):
         actions.append(Action(
             id="vet_skills",
             title="Double-check your installed skills for malware",

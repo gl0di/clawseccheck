@@ -104,7 +104,7 @@ _PALETTE: tuple[PaletteCategory, ...] = (
     )),
     PaletteCategory("Dig deeper", READONLY, MODE_A, (
         PaletteEntry("Next steps", "--next",
-                     "recommended actions from the result"),
+                     "which further checks are worth running, given the result"),
         PaletteEntry("Attack paths", "--risk-paths",
                      "the highest-risk capability chains"),
         PaletteEntry("Percentile", "--percentile",

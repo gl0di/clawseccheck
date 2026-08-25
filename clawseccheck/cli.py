@@ -2685,7 +2685,7 @@ def _main(argv=None) -> int:
                         "IOC dataset's own staleness and coverage-gap notices "
                         "(also suppressible via CLAWSECCHECK_NO_FRESHNESS_NOTICE=1; offline, never a network call)")
     p.add_argument("--next", action="store_true",
-                   help="print recommended next actions based on the audit result")
+                   help="print which further ClawSecCheck checks are worth running given this result")
     p.add_argument("--dashboard", action="store_true",
                    help="print the deterministic chat Dashboard card (grade + framed "
                         "findings, Sections 1-2, + a Skills block when any are installed) "
