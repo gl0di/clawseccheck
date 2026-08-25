@@ -781,6 +781,56 @@ def _self_mod_exec(findings: list[Finding]) -> bool:
     return _finding_status(findings, "B22") == FAIL
 
 
+def _bootstrap_content_poisoned(findings: list[Finding]) -> bool:
+    """B-494: True when a content-ring scanner FOUND an injected directive actually
+    written into the agent's own bootstrap/identity files (B6 or B161 FAIL).
+
+    B20/B22 are mode-bit checks (group/world-writable permissions). The real
+    self-modification shape needs no permission weakness at all: a 0600 file the user
+    owns, poisoned through the agent's own granted `fs_write`. That sets neither bit,
+    so `_bootstrap_writable`/`_self_mod_exec` are structurally blind to it -- this is
+    the alternative kind of evidence: not "the file COULD be written by an outsider"
+    but "the file WAS written, and the payload is still there."
+
+    Scoped to exactly B6 and B161 -- both scan `ctx.bootstrap` ONLY (no
+    installed_skills, no MCP tool text mixed in), so a FAIL from either is
+    attributable to the bootstrap/identity file itself, matching this chain's own
+    "identity rewritten" / "persisted into files reloaded every turn" narrative.
+    `collector.py`'s bootstrap filename list already includes MEMORY.md, so this also
+    covers memory-file content, not just SOUL.md/AGENTS.md/TOOLS.md.
+
+    FAIL only, never WARN, for both:
+      - B161's own docstring hedges its WARN tier as "no corroborating fake code --
+        may be documentation"; FAIL there already required a corroborating fabricated
+        authorization code, i.e. the check's own high-confidence tier.
+      - B6 has no WARN tier at all (FAIL/PASS/UNKNOWN only), so this is consistent
+        rather than a special case.
+
+    Deliberately excluded, with reasons (do not fold these in without re-reading this
+    docstring):
+      - B64 (generic instruction-hierarchy override): its single FAIL/WARN verdict is
+        pooled across `ctx.bootstrap`, `ctx.installed_skills`, AND MCP tool
+        descriptions with no per-source status, so a B64 FAIL cannot be attributed to
+        the bootstrap file specifically -- it may be an installed skill or an MCP tool
+        with no bootstrap file touched at all. That is a different chain's shape
+        (malicious skill / malicious MCP tool), not "bootstrap file rewritten".
+      - B66 (persona/DAN jailbreak): never reaches FAIL -- WARN/PASS/UNKNOWN only.
+        Requiring FAIL from it would be permanently-dead code; lowering the bar to
+        WARN for a check whose own review never promoted it past WARN would undercut
+        the FAIL-strength bar this helper otherwise holds.
+      - B7 ("memory poisoning surface" in the catalog title): not actually a content
+        scanner -- it only checks whether `memory.vectorStore` declares explicit
+        access control (auth/readOnly); it never scans MEMORY.md text for an injected
+        directive, and has no FAIL status at all (WARN/UNKNOWN/PASS only). Its stated
+        surface is already covered above: MEMORY.md is one of the filenames B6/B161
+        scan via `ctx.bootstrap`.
+    """
+    return (
+        _finding_status(findings, "B6") == FAIL
+        or _finding_status(findings, "B161") == FAIL
+    )
+
+
 def _session_cross_user(findings: list[Finding], cfg: dict) -> bool:
     """True when B39 FAILs OR session.dmScope == 'main'."""
     if _finding_status(findings, "B39") == FAIL:
@@ -1031,15 +1081,27 @@ def _rule_control_plane_exposed(ctx: Context, findings: list[Finding],
 
 def _rule_self_modification(ctx: Context, findings: list[Finding],
                              tools: list[str], cfg: dict) -> RiskPath | None:
-    """HIGH: writable bootstrap + exec/fs_write without approval."""
-    # Check B20 (bootstrap write) or B22 (self-modification) failing
-    has_writable_bootstrap = (_finding_status(findings, "B20") == FAIL
-                               or _finding_status(findings, "B22") == FAIL)
-    if not has_writable_bootstrap:
+    """HIGH: writable bootstrap (or already-poisoned bootstrap) + exec/fs_write
+    without approval.
+
+    B-494: B20/B22 (mode-bit permission checks) alone are blind to the real
+    self-modification shape -- a 0600 bootstrap file the user owns, poisoned through
+    the agent's own granted fs_write. `_bootstrap_content_poisoned` (B6/B161 FAIL) is
+    an alternative kind of evidence for the same "identity file compromised" fact --
+    see its docstring for what's included/excluded and why.
+    """
+    has_bootstrap_evidence = (_finding_status(findings, "B20") == FAIL
+                               or _finding_status(findings, "B22") == FAIL
+                               or _bootstrap_content_poisoned(findings))
+    if not has_bootstrap_evidence:
         return None
     if not _has_exec_or_write_tools(tools):
         return None
-    # Only fire when there is no approval gate (real OpenClaw field: tools.exec.mode)
+    # Only fire when there is no approval gate (real OpenClaw field: tools.exec.mode).
+    # B-494: `_has_approval_gate` reads only `tools.exec.*` and does not know a bare
+    # fs_write grant (no exec tool) is left ungated by an exec-only "ask" mode -- a
+    # known gap in the approval-gate scope, deliberately NOT fixed or worked around
+    # here (wider than this rule; shared by the pre-existing B20/B22 path too).
     if _has_approval_gate(cfg):
         return None
     return RiskPath(
@@ -1050,16 +1112,19 @@ def _rule_self_modification(ctx: Context, findings: list[Finding],
                "agent identity rewritten → persistent compromise"],
         why=(
             "Bootstrap or identity files (SOUL.md / AGENTS.md / TOOLS.md) are "
-            "group- or world-writable (B20 or B22 fails), AND the agent has "
-            "exec or fs_write tools enabled without a human approval gate. The "
-            "agent can therefore rewrite its own instructions, identity, or "
-            "installed skills — a single successful prompt-injection makes the "
-            "compromise persistent across restarts."
+            "group- or world-writable (B20 or B22 fails), OR a content-ring scanner "
+            "already found an override/jailbreak directive actually written into them "
+            "(B6 or B161 fails — the normal-permission file poisoned through the "
+            "agent's own fs_write). Either way, the agent also has exec or fs_write "
+            "tools enabled without a human approval gate, so it can rewrite its own "
+            "instructions, identity, or installed skills — a single successful "
+            "prompt-injection makes the compromise persistent across restarts."
         ),
         fix=(
             "Run 'chmod 700 workspace/ && chmod 600 workspace/SOUL.md "
             "workspace/AGENTS.md workspace/TOOLS.md' to remove group/world "
-            "write access. Also add an approval gate: set tools.exec.mode='ask'/'allowlist' "
+            "write access, and restore any flagged file from a trusted backup. Also "
+            "add an approval gate: set tools.exec.mode='ask'/'allowlist' "
             "(or tools.exec.security='ask') so every write action needs explicit "
             "human sign-off."
         ),
@@ -1260,16 +1325,20 @@ def _rule_fs_write_tamper(ctx: Context, findings: list[Finding],
 
 
 def _rule_markdown_image_persistence(ctx: Context, findings: list[Finding]) -> RiskPath | None:
-    """HIGH (RISK-13): markdown-image exfil + writable bootstrap/memory = persistence/exfil.
+    """HIGH (RISK-13): markdown-image exfil + writable/poisoned bootstrap = persistence/exfil.
 
     B59 already shows that remote markdown/HTML image URLs can leak data out of the
-    agent context. If bootstrap or memory files are writable (B20 or B22 fail), the
-    same attacker can write a payload or instruction back into files the agent reloads
-    later. That turns a one-shot exfil channel into a persistence-plus-exfil path.
+    agent context. If bootstrap or memory files are writable (B20 or B22 fail), OR a
+    content-ring scanner already found a directive planted in them (B6 or B161 FAIL —
+    B-494; see `_bootstrap_content_poisoned`'s docstring for scope), the same attacker
+    can write (or already has written) a payload or instruction back into files the
+    agent reloads later. That turns a one-shot exfil channel into a
+    persistence-plus-exfil path.
     """
     if _finding_status(findings, "B59") not in (FAIL, WARN):
         return None
-    if not (_bootstrap_writable(findings) or _self_mod_exec(findings)):
+    if not (_bootstrap_writable(findings) or _self_mod_exec(findings)
+            or _bootstrap_content_poisoned(findings)):
         return None
     return RiskPath(
         id="RISK-13",
@@ -1282,10 +1351,12 @@ def _rule_markdown_image_persistence(ctx: Context, findings: list[Finding]) -> R
         ],
         why=(
             "B59 shows that a remote markdown/image URL can carry data out of the agent "
-            "context. If bootstrap or memory files are writable (B20 or B22 fails), the "
-            "same attacker can write a payload or instruction back into files the agent "
-            "reloads later. The result is a persistence-plus-exfil chain: steal data now, "
-            "leave behind code or instructions that survive restart."
+            "context. If bootstrap or memory files are writable (B20 or B22 fails), OR a "
+            "content-ring scanner already found a planted directive in them (B6 or B161 "
+            "fails), the same attacker can write — or already has written — a payload or "
+            "instruction back into files the agent reloads later. The result is a "
+            "persistence-plus-exfil chain: steal data now, leave behind code or "
+            "instructions that survive restart."
         ),
         fix=(
             "Remove remote markdown/image URLs from untrusted content, keep bootstrap and "

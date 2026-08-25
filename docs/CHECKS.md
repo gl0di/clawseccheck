@@ -2457,19 +2457,21 @@ These paths are computed from multiple checks. They fire only when every leg is 
 ### RISK-07 - Self-modification: writable identity/bootstrap + exec without approval
 
 - Severity: HIGH
-- Pattern: HIGH: writable bootstrap + exec/fs_write without approval.
+- Pattern: HIGH: writable bootstrap (or already-poisoned bootstrap) + exec/fs_write
 - Chain: exec / fs_write tool (no approval gate) -> writable bootstrap/identity files -> agent identity rewritten → persistent compromise
 - Why:
   Bootstrap or identity files (SOUL.md / AGENTS.md / TOOLS.md) are group- or world-
-  writable (B20 or B22 fails), AND the agent has exec or fs_write tools enabled without a
-  human approval gate. The agent can therefore rewrite its own instructions, identity, or
-  installed skills — a single successful prompt-injection makes the compromise persistent
-  across restarts.
+  writable (B20 or B22 fails), OR a content-ring scanner already found an
+  override/jailbreak directive actually written into them (B6 or B161 fails — the normal-
+  permission file poisoned through the agent's own fs_write). Either way, the agent also
+  has exec or fs_write tools enabled without a human approval gate, so it can rewrite its
+  own instructions, identity, or installed skills — a single successful prompt-injection
+  makes the compromise persistent across restarts.
 - Fix:
   Run 'chmod 700 workspace/ && chmod 600 workspace/SOUL.md workspace/AGENTS.md
-  workspace/TOOLS.md' to remove group/world write access. Also add an approval gate: set
-  tools.exec.mode='ask'/'allowlist' (or tools.exec.security='ask') so every write action
-  needs explicit human sign-off.
+  workspace/TOOLS.md' to remove group/world write access, and restore any flagged file
+  from a trusted backup. Also add an approval gate: set tools.exec.mode='ask'/'allowlist'
+  (or tools.exec.security='ask') so every write action needs explicit human sign-off.
 
 ### RISK-08 - Session context shared across users in a multi-user channel
 
@@ -2555,14 +2557,15 @@ These paths are computed from multiple checks. They fire only when every leg is 
 ### RISK-13 - Markdown-image exfil + writable memory/bootstrap = persistence / exfil
 
 - Severity: HIGH
-- Pattern: HIGH (RISK-13): markdown-image exfil + writable bootstrap/memory = persistence/exfil.
+- Pattern: HIGH (RISK-13): markdown-image exfil + writable/poisoned bootstrap = persistence/exfil.
 - Chain: remote markdown image URL with data-bearing query params -> writable bootstrap / memory files -> persisted payload + exfiltration channel
 - Why:
   B59 shows that a remote markdown/image URL can carry data out of the agent context. If
-  bootstrap or memory files are writable (B20 or B22 fails), the same attacker can write a
-  payload or instruction back into files the agent reloads later. The result is a
-  persistence-plus-exfil chain: steal data now, leave behind code or instructions that
-  survive restart.
+  bootstrap or memory files are writable (B20 or B22 fails), OR a content-ring scanner
+  already found a planted directive in them (B6 or B161 fails), the same attacker can
+  write — or already has written — a payload or instruction back into files the agent
+  reloads later. The result is a persistence-plus-exfil chain: steal data now, leave
+  behind code or instructions that survive restart.
 - Fix:
   Remove remote markdown/image URLs from untrusted content, keep bootstrap and memory
   files read-only, and require approval for any filesystem write that could persist
