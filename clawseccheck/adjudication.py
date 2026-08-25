@@ -97,6 +97,39 @@ _VERDICT_SCHEMA = {"verdict": list(_VERDICT_VALUES), "reason": "free text"}
 # here as a single Finding.
 _FN_PRONE_WARN_IDS = frozenset({
     "B100", "B65", "B66", "B99", "B90", "B102", "B154", "B13", "B156",
+    # C-378: B63 is CRITICAL when it can co-locate an action with the silent-instruction
+    # wording, and lands at WARN MEDIUM when it cannot ("no action context co-located --
+    # may be documentation"). That is verbatim the population this set documents above: a
+    # dual-use signal deliberately down-ranked from FAIL so a legitimate skill is never
+    # hard-failed on it alone. It belonged here and was not here.
+    #
+    # Spun out of B-451, which closed as resolved-by-existing-coverage after three C-135
+    # kills: the engine already surfaced 48 of 48 of the target population, 17 at FAIL and
+    # 26 as a WARN already routed to the judge, leaving 5 seen but never given a second
+    # read. Reproduced on those exact five cases from the corpus; B63 covers 3 of them.
+    #
+    # Bounded by construction: adding an id here can ONLY add a question to the judge
+    # packet. It cannot raise a FAIL, change a grade, or create a false-positive FAIL, so
+    # Golden Rule #5 is not in play and no C-135 pass is required -- stated explicitly so
+    # the omission is visible and deliberate rather than forgotten.
+    #
+    # B98 covers all 5 residual cases where B63 covers 3, and was NOT added -- decided by
+    # the blocking volume measurement the task required, not by intuition. Over a
+    # fixed-seed 400-case sample of the corpus, counting what actually reaches the judge
+    # (UNKNOWN findings + FN-prone WARNs):
+    #
+    #     items today  145
+    #     + B63        186   (+28%)
+    #     + B98        247   (+70%)
+    #     + both       288   (+99%)
+    #
+    # B98 is a generic hygiene signal ("invokes a code-execution primitive but declares no
+    # tools manifest"), so it fires broadly. Adding it roughly DOUBLES the packet, and the
+    # one real cost of this route is attention: a packet the user stops reading is worse
+    # than a smaller one. B63 alone is the 28% that buys 3 of the 5. The remaining 2
+    # (case_01331 via B334, case_03214 via B62) stay unrouted, deliberately, pending a
+    # decision on whether that volume is acceptable.
+    "B63",
 })
 
 # ASTFinding rules that check_installed_skills (checks/_vet.py) computes via
@@ -138,6 +171,10 @@ _ID_QUESTIONS = {
     "B154": "A plaintext (non-base64) command reassembles from string literals "
             "split across this skill's files. Is this a legitimate pattern, "
             "not a scanner-evasion payload? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
+    "B63": "Wording that tells the agent to act silently, or without informing you, "
+           "was found -- but with no action co-located, so it may be documentation "
+           "rather than a live instruction. Is this skill meant to do anything without "
+           "telling you? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
     "B156": "A secret (token / credential / api_key) appears to be sent to an "
             "external or second-party destination with no secrecy, override, "
             "or trigger framing. Is that destination one you trust with this "
@@ -1604,6 +1641,13 @@ def build_vet_judge_packet(engine_output, target: str) -> list[dict]:
     pool = _vet_pool(engine_output)
     items = [_item_from_finding(f) for f in pool if _is_borderline(f)]
     items.extend(_vet_attest_packet_items(_gate_target(_vet_target_name(target))))
+    # B-445/C-378: the vet packet is a SECOND assembly point, and it was not getting
+    # either normalisation — so a vet item shipped without `safe_facts` and without
+    # `check_title` while the audit packet had both. Exactly the one-producer-of-N gap
+    # B-571 was filed for, reintroduced by adding a second builder rather than a
+    # second producer. Found by a C-378 test asserting a rendered vet item, not by
+    # review.
+    items = _with_check_title(_with_documented_shape(items))
     return _attach_corroboration(items, pool)
 
 
