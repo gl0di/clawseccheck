@@ -10,6 +10,8 @@ Offline, stdlib only, nothing written outside pytest's own machinery.
 """
 from __future__ import annotations
 
+import dataclasses
+
 import re
 from pathlib import Path
 
@@ -131,7 +133,17 @@ def test_pdf_graded_empty_not_checked_is_byte_identical_to_today():
 
     assert default_score.graded is True
     assert default_score.not_checked == ()
-    assert complete_score == default_score
+    # Every field except `ledger_present`, which B-547 added precisely so a caller can
+    # tell "a ledger was supplied" from "none was" — the two calls below differ in
+    # exactly that, by design, and comparing the whole dataclass turned this guard red
+    # for a change it was never meant to catch. The C-422 guarantee this test exists for
+    # is about what a COMPLETE ledger does to the SCORE, and the byte-identical
+    # render_pdf comparison immediately below is the real proof of it.
+    _ignored = {"ledger_present"}
+    _fields = [f.name for f in dataclasses.fields(default_score) if f.name not in _ignored]
+    assert _fields, "ScoreResult lost its fields — this guard is inert"
+    for name in _fields:
+        assert getattr(complete_score, name) == getattr(default_score, name), name
 
     a = render_pdf(findings, default_score)
     b = render_pdf(findings, complete_score)
@@ -266,6 +278,53 @@ def test_incident_graded_with_not_checked_carries_the_coverage_gap(tmp_path):
 # ── 7. neither file carries its own copy of a layer label or status phrase ───────────
 
 
+
+def _code_only(text: str) -> str:
+    """*text* with `#` comments and docstrings blanked out, so a prose mention of an
+    ordinary English word is not mistaken for hardcoded output wording.
+
+    Real hardcoded wording lives in code — an f-string, a literal passed to a renderer —
+    and survives this strip. A module/class/function docstring is documentation, never
+    something a user sees in a report, so scanning it produced only false alarms.
+    """
+    import ast
+    import io
+    import tokenize
+
+    blanked = []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:  # pragma: no cover - the tree must parse for the suite to run
+        return text
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef,
+                                 ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            blanked.append((first.lineno, getattr(first, "end_lineno", first.lineno)))
+
+    lines = text.splitlines(keepends=True)
+    for start, end in blanked:
+        for i in range(start - 1, min(end, len(lines))):
+            lines[i] = "\n"
+    stripped = "".join(lines)
+
+    out = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(stripped).readline):
+            if tok.type == tokenize.COMMENT:
+                continue
+            out.append(tok.string)
+    except (tokenize.TokenError, IndentationError):  # pragma: no cover
+        return stripped
+    return "\n".join(out)
+
+
 def test_neither_file_hardcodes_layer_wording():
     pdf_text = (_REPO_ROOT / "clawseccheck" / "pdf.py").read_text(encoding="utf-8")
     incident_text = (_REPO_ROOT / "clawseccheck" / "incident.py").read_text(encoding="utf-8")
@@ -273,17 +332,40 @@ def test_neither_file_hardcodes_layer_wording():
     assert "describe_layer" in pdf_text, (
         "pdf.py must format layer/status wording exclusively through layers.describe_layer")
 
-    # STATUS_RAN's own phrase, "ran", is excluded: it is an ordinary English word that
-    # legitimately appears in this file's own prose comments (e.g. "a layer that ran"),
-    # so a bare substring/word match on it is not a meaningful hardcoding signal the way
-    # it is for the other, distinctive multi-word phrases below.
-    checked_phrases = [p for p in STATUS_PHRASE.values() if p != "ran"]
+    # Scan CODE only, and match whole words.
+    #
+    # This guard used to substring-scan the whole raw file, which could not tell a
+    # hardcoded output string from the same word appearing in the module's own prose. It
+    # carried an exclusion for "ran" because of that, then went red anyway when
+    # incident.py's module docstring gained the ordinary sentence "which check passed,
+    # failed, or was asked at all". Excluding "failed" as well would have hollowed the
+    # guard out one word at a time until it checked nothing.
+    #
+    # Two mechanical fixes instead, each closing a whole class:
+    #   * _code_only strips comments and docstrings, so prose cannot trip it. Real
+    #     hardcoded wording lives in an f-string or a literal and still gets caught.
+    #   * whole-word matching, so a short phrase is not found inside an unrelated
+    #     identifier. That was the REAL reason "ran" had to be excluded — it is a
+    #     substring of `range`, `transform` and plenty else — which the old comment
+    #     attributed to prose instead.
+    #
+    # Together these let "ran" back in, so this now checks strictly MORE than before.
+    pdf_text = _code_only(pdf_text)
+    incident_text = _code_only(incident_text)
+    checked_phrases = list(STATUS_PHRASE.values())
+
+    def _mentions(haystack: str, phrase: str) -> bool:
+        return re.search(rf"\b{re.escape(phrase)}\b", haystack) is not None
     for label in LAYER_LABEL.values():
-        assert label not in pdf_text, f"pdf.py hardcodes layer label {label!r} instead of describe_layer"
-        assert label not in incident_text, f"incident.py hardcodes layer label {label!r}"
+        assert not _mentions(pdf_text, label), (
+            f"pdf.py hardcodes layer label {label!r} instead of describe_layer")
+        assert not _mentions(incident_text, label), (
+            f"incident.py hardcodes layer label {label!r}")
     for phrase in checked_phrases:
-        assert phrase not in pdf_text, f"pdf.py hardcodes status phrase {phrase!r} instead of describe_layer"
-        assert phrase not in incident_text, f"incident.py hardcodes status phrase {phrase!r}"
+        assert not _mentions(pdf_text, phrase), (
+            f"pdf.py hardcodes status phrase {phrase!r} instead of describe_layer")
+        assert not _mentions(incident_text, phrase), (
+            f"incident.py hardcodes status phrase {phrase!r}")
 
 
 def test_pdf_ungraded_wording_matches_describe_layer_exactly():
