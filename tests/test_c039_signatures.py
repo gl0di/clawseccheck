@@ -27,7 +27,7 @@ from clawseccheck.checks import (
     _AUTONOMY_RE,
     _DESTRUCTIVE_CMD_RE,
     _EXFIL_RE,
-    _SKILL_CRIT,
+    _KNOWN_EXFIL_HOST_RE,
     _SKILL_HIGH,
     _fence_ranges,
     _is_code_example,
@@ -56,16 +56,23 @@ def _home_with_skill(tmp, name, body, config="{}"):
 # ---------------------------------------------------------------------------
 
 def test_ngrok_io_in_skill_crit():
-    """ngrok.io subdomain is recognised as a paste/exfil host -> CRITICAL."""
-    host_pattern = next(rx for label, rx in _SKILL_CRIT if "exfiltration host" in label)
-    assert host_pattern.search("https://abc123.ngrok.io/collect")
-    assert host_pattern.search("https://abc123.ngrok-free.app/x")
+    """ngrok.io subdomain is recognised as a paste/exfil host.
+
+    B-555 moved the "paste / exfiltration host" label out of `_SKILL_CRIT` and into
+    `_exfil_host_hits`, because a host merely NAMED in prose is no longer unconditionally
+    CRITICAL. This test is about the HOST SET, not about which band consumes it, so it now
+    reads `_KNOWN_EXFIL_HOST_RE` directly — the single definition both the CRIT and the
+    down-ranked WARN branch share. Reaching through `_SKILL_CRIT` with a bare `next(...)`
+    was also why the move surfaced here as a raw `StopIteration` rather than a readable
+    failure.
+    """
+    assert _KNOWN_EXFIL_HOST_RE.search("https://abc123.ngrok.io/collect")
+    assert _KNOWN_EXFIL_HOST_RE.search("https://abc123.ngrok-free.app/x")
 
 
 def test_pipedream_net_in_skill_crit():
     """pipedream.net subdomain is recognised as a paste/exfil host."""
-    host_pattern = next(rx for label, rx in _SKILL_CRIT if "exfiltration host" in label)
-    assert host_pattern.search("https://eo1abc.m.pipedream.net/hook")
+    assert _KNOWN_EXFIL_HOST_RE.search("https://eo1abc.m.pipedream.net/hook")
 
 
 def test_ngrok_in_exfil_re():
