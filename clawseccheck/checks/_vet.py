@@ -4811,7 +4811,16 @@ def check_installed_skills(ctx: Context) -> Finding:
     if getattr(ctx, "filename_obfuscations", None):  # F-061: homoglyph/RTL/zero-width filename
         warnings.append("obfuscated filename(s): " + ", ".join(ctx.filename_obfuscations[:4]))
     if getattr(ctx, "binary_files", None):
-        warnings.append(f"Binary files found: {len(ctx.binary_files)}")
+        # B-615: name the files, not a count. `ctx.binary_files` no longer includes
+        # PNG/JPEG/GIF files `collector.py` positively recognised AND verified are
+        # well-terminated with no trailing content (see _media_is_well_terminated) —
+        # those are disclosed on the B-617 channel instead and don't reach a WARN.
+        # What lands here is an unrecognised/opaque binary OR a polyglot that starts
+        # with recognised magic bytes but carries a payload after the format's own
+        # terminator — still a real signal either way.
+        warnings.append(
+            "unrecognised binary file(s): " + ", ".join(ctx.binary_files[:4])
+        )
 
     _signal_buckets["warnings"] = warnings
     if warnings:

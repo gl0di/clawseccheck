@@ -1108,10 +1108,13 @@ def classify_bytes(data: bytes, file_size: int) -> tuple[str, str | None]:
     # So CJK was reliably broken and the rest merely got away with it — the same wrong
     # cut, a different roll. Do not read the 2-byte rows as "those were fine".
     #
-    # The cost was never the cosmetic "Binary files found" WARN: a BINARY verdict drops
-    # the file from content scanning (see ctx.binary_files at the decompress call site),
-    # so a CJK skill's prose went unscanned past this sample size — injection and
-    # exfiltration instructions in it were invisible.
+    # The cost was never the "Binary files found" WARN itself — and as of B-615 it is
+    # not cosmetic either: it drives checks/_vet.py's CAUTION verdict and exit code for
+    # any binary `classify_bytes` did NOT recognise as inert media (see ctx.binary_files
+    # at the decompress call site; recognised PNG/JPEG/GIF are disclosed instead and
+    # don't reach it). The real, separate cost stands regardless: a BINARY verdict drops
+    # the file from content scanning, so a CJK skill's prose went unscanned past this
+    # sample size — injection and exfiltration instructions in it were invisible.
     #
     # B-538: the ladder itself now lives in `decode_scanned_text` so the readers that
     # feed the content ring use the SAME one — this function's verdict and their reading
@@ -1585,6 +1588,201 @@ def decompress_and_classify(
     return results
 
 
+# B-615: formats `classify_bytes` positively RECOGNISES as ordinary, inert media — a
+# logo, a screenshot, a rendered doc. Bundling one is normal skill authoring, not a
+# stowaway (F-054 already owns native executables/pyc/wasm, a separate branch below)
+# and not an opaque blob (an unrecognised binary still lands in `ctx.binary_files` and
+# still WARNs — that signal is real and stays). Deliberately narrow: archive formats
+# (ZIP/tar/gzip/bz2/xz) are excluded even though `classify_bytes` recognises them too,
+# because an archive that reached here failed or was capped during decompression, so it
+# is genuinely unresolved content, not inert media.
+#
+# PDF is deliberately NOT in this set despite being one of `classify_bytes`'s
+# recognised formats. A PNG/JPEG/GIF magic-byte match means the whole file IS a raster
+# image — the format has no capability for active content. A PDF magic-byte match
+# means only that the file STARTS with a valid header; the format itself can carry
+# `/JavaScript`, `/OpenAction`, `/Launch` actions and embedded files, none of which the
+# 8-byte `%PDF-` signature says anything about. "Recognised" would silently become
+# "presumed safe" for exactly the one format here where that presumption can be wrong,
+# so a PDF stays in `ctx.binary_files` and keeps WARNing like any other opaque binary.
+_RECOGNISED_INERT_MEDIA_FORMATS = frozenset({"PNG", "JPEG", "GIF"})
+
+def _png_end_offset(data: bytes) -> int | None:
+    """Byte offset immediately after a PNG's IEND chunk (length+type+CRC), reached by
+    structurally walking the chunk stream -- never by searching for `IEND` as a
+    substring, which a polyglot can defeat by placing a forged chunk after a real
+    payload. Returns None on a malformed/truncated stream or if IEND is never reached.
+    """
+    sig = b"\x89PNG\r\n\x1a\n"
+    if not data.startswith(sig):
+        return None
+    pos = len(sig)
+    n = len(data)
+    while pos + 8 <= n:
+        length = int.from_bytes(data[pos:pos + 4], "big")
+        ctype = data[pos + 4:pos + 8]
+        chunk_end = pos + 8 + length + 4  # len field + type + data + crc
+        if chunk_end > n:
+            return None
+        if ctype == b"IEND":
+            return chunk_end
+        pos = chunk_end
+    return None
+
+
+def _jpeg_end_offset(data: bytes) -> int | None:
+    """Byte offset immediately after a JPEG's EOI (0xFFD9) marker, reached by walking
+    segments from SOI (each non-entropy segment carries its own declared length, so an
+    embedded EXIF thumbnail -- itself a nested mini-JPEG with its own SOI/EOI -- is
+    skipped whole as opaque APPn payload rather than confusing a substring search) and,
+    once inside entropy-coded scan data, honouring byte-stuffing (`FF 00`) and restart
+    markers (`FF D0`-`FF D7`) so those bytes are never mistaken for the real EOI.
+    """
+    if not data.startswith(b"\xff\xd8"):
+        return None
+    n = len(data)
+    pos = 2
+    while pos < n:
+        if data[pos] != 0xFF:
+            return None
+        m = pos
+        while m < n and data[m] == 0xFF:  # marker fill bytes
+            m += 1
+        if m >= n:
+            return None
+        marker = data[m]
+        pos = m + 1
+        if marker == 0xD9:  # EOI
+            return pos
+        if marker == 0x01 or 0xD0 <= marker <= 0xD7:  # TEM / RSTn: no payload
+            continue
+        if pos + 2 > n:
+            return None
+        seg_len = int.from_bytes(data[pos:pos + 2], "big")
+        if seg_len < 2:
+            return None
+        seg_end = pos + seg_len
+        if seg_end > n:
+            return None
+        if marker == 0xDA:  # SOS: entropy-coded data follows, no declared length
+            pos = seg_end
+            while pos < n:
+                if data[pos] == 0xFF:
+                    if pos + 1 >= n:
+                        return None
+                    nxt = data[pos + 1]
+                    if nxt == 0x00:
+                        pos += 2  # byte-stuffed literal 0xFF in scan data
+                        continue
+                    if 0xD0 <= nxt <= 0xD7:
+                        pos += 2  # restart marker inside entropy data
+                        continue
+                    break  # a real marker follows: end of this scan
+                pos += 1
+            continue
+        pos = seg_end
+    return None
+
+
+def _gif_end_offset(data: bytes) -> int | None:
+    """Byte offset immediately after a GIF's trailer byte (0x3B), reached by walking
+    the block structure (extension/image-descriptor sub-block chains, each terminated
+    by a declared 0x00 length) rather than searching for 0x3B as a substring -- LZW-
+    compressed pixel data routinely contains that byte value by chance.
+    """
+    if not (data.startswith(b"GIF87a") or data.startswith(b"GIF89a")):
+        return None
+    n = len(data)
+    pos = 6
+    if pos + 7 > n:
+        return None
+    packed = data[pos + 4]
+    pos += 7
+    if packed & 0x80:  # global color table present
+        pos += 3 * (2 ** ((packed & 0x07) + 1))
+        if pos > n:
+            return None
+
+    def _skip_subblocks(p: int) -> int | None:
+        while p < n:
+            length = data[p]
+            p += 1
+            if length == 0:
+                return p
+            p += length
+            if p > n:
+                return None
+        return None
+
+    while pos < n:
+        marker = data[pos]
+        if marker == 0x3B:  # trailer
+            return pos + 1
+        if marker == 0x21:  # extension introducer
+            if pos + 2 > n:
+                return None
+            pos = _skip_subblocks(pos + 2)
+            if pos is None:
+                return None
+        elif marker == 0x2C:  # image descriptor
+            if pos + 10 > n:
+                return None
+            ipacked = data[pos + 9]
+            pos += 10
+            if ipacked & 0x80:  # local color table present
+                pos += 3 * (2 ** ((ipacked & 0x07) + 1))
+                if pos > n:
+                    return None
+            pos += 1  # LZW minimum code size
+            if pos > n:
+                return None
+            pos = _skip_subblocks(pos)
+            if pos is None:
+                return None
+        else:
+            return None
+    return None
+
+
+_MEDIA_END_OFFSET_FNS = {
+    "PNG": _png_end_offset,
+    "JPEG": _jpeg_end_offset,
+    "GIF": _gif_end_offset,
+}
+
+
+def _media_is_well_terminated(fmt: str, data: bytes) -> bool:
+    """True only if `data` genuinely IS the recognised format, start to end -- not
+    merely starts with its magic bytes.
+
+    B-615, round 2: the magic-byte check alone was defeated by a real, live attack --
+    a valid PNG with a payload appended after the image data classified identically to
+    a clean one (`binary_files=[]` either way), because the discriminator asked nothing
+    about what followed the header. Each format defines its own end-of-data terminator
+    (PNG's IEND chunk + CRC, JPEG's EOI marker, GIF's trailer byte); the offset
+    functions above locate it by walking the real container structure (declared
+    chunk/segment/block lengths), not by searching for the terminator bytes as a
+    substring -- a substring search is exactly what a polyglot can defeat, either by an
+    appended payload landing before a coincidental match or by forging a second, fake
+    terminator after the payload to make an `endswith`-style check pass.
+
+    Zero trailing bytes are tolerated, not "a few bytes of padding": measured against
+    4,092 real local files (4,000 system PNGs under /usr/share/icons + /usr/share/
+    pixmaps + installed Python package data, 89 system JPEGs, 3 system GIFs), every
+    single one ended EXACTLY at its terminator -- nothing measured pads, so no slack is
+    invented on the assumption that some encoder might. Any trailing byte at all, or a
+    malformed/truncated container the walker cannot reach a terminator in, means the
+    file is treated as an unrecognised/opaque binary -- the safe direction, since a
+    false CAUTION on an unusual-but-benign image is recoverable and a false INSTALL on
+    a polyglot is not.
+    """
+    fn = _MEDIA_END_OFFSET_FNS.get(fmt)
+    if fn is None:
+        return False
+    end = fn(data)
+    return end is not None and end == len(data)
+
+
 def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dict]:
     """Collect (and archive-decompress/classify) the files that make up one skill.
 
@@ -1888,7 +2086,30 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
             if sub_class == "BINARY":
                 if ctx is not None:
                     ctx.excluded_binary_files_count += 1
-                    ctx.binary_files.append(sub_relpath)
+                    # B-615: a RECOGNISED, WELL-TERMINATED inert media file (PNG/JPEG/
+                    # GIF, magic bytes at the start AND the format's own terminator
+                    # reached with nothing trailing it — see _media_is_well_terminated)
+                    # does not join `ctx.binary_files` — that list drives the
+                    # "unexpected binary" WARN in checks/_vet.py, and a bundled logo or
+                    # screenshot is ordinary skill content, not a suspicious one. It
+                    # still wasn't content-scanned (excluded_binary_files_count above
+                    # already says so honestly), so the fact is disclosed on the B-617
+                    # channel instead — never read by a check, never gates a verdict.
+                    # A magic-byte match alone is NOT enough: round 2 of this bug was a
+                    # live PNG-plus-appended-payload polyglot that the magic-only check
+                    # let through as INSTALL. An unrecognised, malformed, or trailing-
+                    # content binary keeps its current weight below.
+                    if sub_fmt in _RECOGNISED_INERT_MEDIA_FORMATS and _media_is_well_terminated(sub_fmt, sub_bytes):
+                        note_disclosure(
+                            ctx.disclosures,
+                            "recognised_binary_media",
+                            sub_relpath,
+                            f"{sub_relpath} is a recognised, well-terminated {sub_fmt} "
+                            "file; it was not content-scanned (binary) but is not "
+                            "flagged as an unexpected binary.",
+                        )
+                    else:
+                        ctx.binary_files.append(sub_relpath)
                     # F-054: a native executable (ELF/PE/Mach-O/JVM class) bundled inside a
                     # skill is a stowaway — skills are text/config; a compiled binary the
                     # prose doesn't need has no business here. Recorded for a WARN.
