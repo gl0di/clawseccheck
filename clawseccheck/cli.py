@@ -62,6 +62,7 @@ from .integrity import (
     NOTE_VANISHED,
     package_digest,
 )
+from .report import _missing_layers_sentence
 from .report import render_html
 from .report import (
     _evidence_bullets,
@@ -1059,7 +1060,34 @@ def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
                             attestation=attestation, live_test_bucket=live_test_bucket)
 
 
-def _percentile_line(score, ascii_only: bool) -> str:
+def _last_complete_history_row(path=None):
+    """The most recent history row a COMPLETE check produced, or ``None`` (B-578).
+
+    The discriminator is ``score is not None``, NOT ``"score" in row``. history.py's own
+    note says an ungraded row omits the key; the rows on this machine write it as
+    ``null`` alongside ``"graded": false``, so a membership test counts every ungraded
+    row as rankable. Measured against the real store: 4,678 rows, of which key-presence
+    calls 4,678 graded and ``score is not None`` calls 4,193 — the 485-row difference is
+    exactly the ungraded runs this must never rank. Both the null check and the
+    ``graded`` flag agree on 4,193; the null check is primary because it also covers rows
+    written before the flag existed.
+
+    A bool is rejected explicitly: ``isinstance(True, int)`` is True in Python, so a
+    malformed row carrying ``"score": true`` would otherwise rank as 1/100.
+    """
+    rows, _problem = history_load_with_problem(path) if path else history_load_with_problem()
+    for row in reversed(list(rows or ())):
+        if not isinstance(row, dict) or row.get("graded") is False:
+            continue
+        value = row.get("score")
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        if 0 <= value <= 100:
+            return row
+    return None
+
+
+def _percentile_line(score, ascii_only: bool, history_path=None) -> str:
     """C-426: rank the score, or say plainly why there is nothing to rank.
 
     `render_percentile` takes a bare int and would happily rank the number a
@@ -1072,11 +1100,43 @@ def _percentile_line(score, ascii_only: bool) -> str:
     audits, so an incomplete run has no honest place in it: withholding the rank is
     the correct answer, not a degraded one. Both call sites route through here so the
     two cannot drift.
+
+    B-578: withholding was correct, but it was ALSO the only thing this mode could ever
+    do. `--percentile` does not honor `--full`, and `graded` is True only once the
+    five-layer ledger is complete, which only a `--full` run reaches — so the rank branch
+    was unreachable from every documented invocation and the reference distribution was
+    dead code. Worse, the message told the user to "complete the remaining layers",
+    which is an instruction this mode rejects.
+
+    So an ungraded run now ranks the most recent COMPLETE check from local history,
+    labelled with that check's own date and never attributed to this run. What is
+    deliberately NOT done is falling back to `score.score` on an ungraded ScoreResult:
+    that number exists internally and publishing it is precisely the leak the first
+    paragraph describes. Ranking a score some complete check actually produced is a
+    different act from inventing one for a run that has none.
+
+    This is the first time this mode reads local history, but it introduces no
+    ordering dependency: `percentile.py` ranks against a BUILT-IN reference CDF and
+    never reads history (see its module docstring), so history supplies only the score,
+    never the distribution. The `--percentile` call site also emits before recording, so
+    the current run's own row cannot be the one ranked.
     """
     if not getattr(score, "graded", True):
-        return ("No rank yet — ranking compares your score against a reference "
-                "profile, and this run has no score. Complete the remaining layers "
-                "to get one.")
+        opened = _missing_layers_sentence(score)
+        row = _last_complete_history_row(history_path)
+        if row is None:
+            return (
+                f"{opened} No rank yet — a percentile compares a score against a "
+                "reference profile of complete audits, and no complete check has been "
+                "recorded here yet. Run 'clawseccheck --full' to complete one, then "
+                "'--percentile' to rank it."
+            )
+        when = row.get("date") or row.get("ts") or "an earlier run"
+        return (
+            f"{opened} Ranking your last COMPLETE check instead — {when}, scored "
+            f"{row['score']}/100, not this run: "
+            f"{render_percentile(row['score'], ascii_only)}"
+        )
     return render_percentile(score.score, ascii_only)
 
 
@@ -3925,7 +3985,7 @@ def _main(argv=None) -> int:
         # on a broken chain, only discloses it (see chain_provenance_note).
         _chain_status = history_verify(args.history)
         _emit(render_trend(rows, ascii_only, chain_status=_chain_status))
-        _emit(_percentile_line(score, ascii_only))
+        _emit(_percentile_line(score, ascii_only, args.history))
         return 0
 
     if _mode == "percentile":
@@ -3942,7 +4002,7 @@ def _main(argv=None) -> int:
         # its module docstring — "NOT telemetry, NOT collected from real users"). So there
         # is no ordering dependency to protect. The record still comes after the emit, for
         # no stronger reason than that every sibling branch reads that way.
-        _emit(_percentile_line(score, ascii_only))
+        _emit(_percentile_line(score, ascii_only, args.history))
         _record_history_point(score, args, _live_signal)
         return 0
 

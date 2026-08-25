@@ -231,7 +231,7 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 | "Am I vulnerable to prompt injection?" | Runs live self-tests: a benign injection canary, a broader dry-run harness, or all four harnesses together (canary + red-team + dry-run + multi-turn). | `--canary` · `--dryrun` · `--self-test` |
 | "What dangerous actions can my agent actually take?" | Emits a self-report template for your agent to fill in with its real tool/verb inventory, then scores the blast radius (EXEC, DESTRUCTIVE, EGRESS, …) once you feed it back. | `--ask` then `--attest <file>` |
 | "Watch for changes over time" | Re-audits and alerts on what changed since last time (new skill, config drift, a memory-file edit, a check leaving PASS). **Note:** this is the one opt-in exception to read-only — it writes a small local snapshot (`~/.clawseccheck/state.json`) so it has something to diff against next run. | `--monitor` |
-| "Am I improving? How do I rank?" | Shows your score history over time, or how your current score compares to an offline reference profile — no network either way. Both need a score: `--trend` plots only the graded runs (ungraded ones are recorded but carry no point), and `--percentile` answers "no rank yet" rather than estimating one. | `--trend` · `--percentile` |
+| "Am I improving? How do I rank?" | Shows your score history over time, or how your current score compares to an offline reference profile — no network either way. Both need a score: `--trend` plots only the graded runs (ungraded ones are recorded but carry no point), and `--percentile` ranks your last complete check — dated, and never presented as this run's — rather than estimating one for this one. | `--trend` · `--percentile` |
 | "Share my result without leaking my findings" | Produces just the grade + score (+ Lethal Trifecta ratio) — safe to post; your actual findings never appear. On an ungraded run it reads `no grade yet` and names how many layers ran, which is the correct artifact, not an error. | `--card` (prints it) · `--badge grade.svg` (writes an SVG) |
 | "What's actually installed — skills, MCP servers, plugins, versions?" | Exports a local bill-of-materials (skills, MCP servers, **installed plugins**, hashes, declared/unpinned dependencies) as JSON. The export records the `scanned_home` it read and a `config_found`/`complete` pair, so an empty BOM for a path that holds no OpenClaw setup is distinguishable from a real setup with no components — a typo'd `--home` must not read as "everything was uninstalled". `complete` is true only when the config was found, nothing was withheld from `skills` (`self_excluded_skills` empty), **and** the installed-plugin index (`installed_plugin_index.plugins_json`, the same source `--full`'s plugin sweep reads) was itself read cleanly (`plugins_scanned`) — a home whose plugin index couldn't be read reports `complete: false` rather than a `plugins` array that is silently empty. A skill bundled with a plugin (e.g. an OpenClaw core extension's own skill) names its supplying plugin in `SkillEntry.supplier`, or `"unknown"` when it's confirmed bundled but the specific plugin can't be resolved — never a guess from the name. | `--sbom` |
 | "I think I've been compromised — help me preserve evidence" | Bundles a findings snapshot, skill/MCP hashes, trajectory-log hashes, and a credential rotation list into one local JSON file — a preservation aid, never rotates or deletes anything itself. The rotation list names credentials by **config path only, never by value**, and marks an entry it could not confirm as `unconfirmed` rather than omitting it, so a blank line in it is not evidence of nothing to rotate. | `--incident` |
@@ -1025,7 +1025,7 @@ exists and still works, and the CI/power surface is unchanged. The grouping just
 | Attachable-into-chat report (mobile-friendly, unlike HTML) | `clawseccheck --pdf report.pdf` |
 | Accept a finding (show suppressed) | edit `.clawseccheckignore` · `clawseccheck --show-suppressed` |
 | Second opinion on borderline calls | `clawseccheck --judge-packet` · `clawseccheck --propose-ignore` |
-| Where you stand vs. a reference profile | `clawseccheck --percentile` (needs a score — an ungraded run answers "no rank yet") |
+| Where you stand vs. a reference profile | `clawseccheck --percentile` (an ungraded run ranks your last complete check instead, dated and labelled as such) |
 
 **Mode B · Watch** — what changed since last time? Never produces a number.
 
@@ -1342,8 +1342,11 @@ python3 audit.py --log audit.log            # also write log to a local file
   A version of this tool older than 4.0 silently omits such rows from its own `--trend` rather
   than showing them; the rows themselves are intact and re-appear on a current build.
 - **`--percentile`** compares your score against a bundled offline reference profile — no network,
-  no telemetry. A run with no score has nothing to rank, so it prints "No rank yet" and points at
-  the layers still to close instead of estimating a position.
+  no telemetry. A run with no score is never ranked on its own number: it names the layers still to
+  close, then ranks your most recent *complete* check from local history instead, labelled with
+  that check's own date and explicitly not attributed to this run. If no complete check has ever
+  been recorded, it says so and names the invocation that produces one. It never estimates a
+  position for an incomplete run.
 - **`--verbose` / `--debug` / `--log PATH`** activate structured local logging. Config values
   that may hold secrets are redacted before being written. `--verbose`/`--debug` set what
   reaches the **console** (stderr); `--log PATH` writes to a **file** and raises the file's
