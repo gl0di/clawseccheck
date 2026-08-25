@@ -42,6 +42,33 @@ _SEV_LEVEL = {
 }
 
 
+def _sarif_text(s: str) -> str:
+    """Sanitize *and* fold an operator home-directory prefix, for every string that
+    reaches SARIF `results[]` -- the artifact CLAUDE.md's own framing calls out as
+    handed to CI dashboards / pasted into public issues (B-620).
+
+    `_sanitize` alone (ANSI/OSC/control-char strip + `logsafe.redact`) does not fold a
+    path. B-620's own fix already reuses `_redact_home_paths` for the
+    `analysis_completeness.limit_hits` copy; this is the same helper applied to the
+    PRIMARY payload -- `message.text` / `properties.evidence` -- which is where the
+    leak was actually confirmed this round: `checks/_capability.py`'s C5 (native binary
+    PATH safety) builds its WARN `detail`/`evidence` from resolved, absolute
+    `Path` ancestors (e.g. ``/home/<user>/.npm-global/...``), and nothing between that
+    check and this renderer folds it. Fixed at the renderer, not at C5 (or any other
+    producer) deliberately: SARIF is the one channel every producer funnels through, so
+    this covers producers that were never individually audited for the same shape.
+
+    Also applied to `fixes[].description.text` (checked: sourced only from `catalog.
+    REMEDIATION`'s static string literals today, so no live path was found there --
+    wrapped anyway so a future REMEDIATION entry that interpolates a path doesn't leak
+    silently) and to `vetProfile.axes[].reason` (traced to `dossier._reason_and_fix`,
+    which returns `worst.detail` verbatim -- the SAME `Finding.detail` this function
+    already redacts for `results[].message.text`, so leaving it unwrapped here would
+    have reopened the identical leak one field over).
+    """
+    return _redact_home_paths(_sanitize(s))
+
+
 def _build_analysis_completeness(
     findings: list[Finding],
     checks_run: int,
@@ -229,13 +256,13 @@ def render_sarif(
         if f.status not in (FAIL, WARN):
             continue
         level = "error" if f.status == FAIL else "warning"
-        message_text = _sanitize(f.detail if f.detail else f.title)
+        message_text = _sarif_text(f.detail if f.detail else f.title)
         result = {
             "ruleId": f.id,
             "level": level,
             "message": {"text": message_text},
             "properties": {"confidence": getattr(f, "confidence", "HIGH"),
-                           "evidence": [_sanitize(e) for e in (f.evidence or [])]},
+                           "evidence": [_sarif_text(e) for e in (f.evidence or [])]},
         }
         # Risk-dossier axis (additive) so a SARIF viewer can group findings by axis.
         _ax = axis_for(f)
@@ -251,7 +278,7 @@ def render_sarif(
             else:
                 fix_texts.append(f"set {c['path']} = {json.dumps(c['set'])} ({c.get('note', '')})")
         if fix_texts:
-            result["fixes"] = [{"description": {"text": _sanitize(tx)}} for tx in fix_texts]
+            result["fixes"] = [{"description": {"text": _sarif_text(tx)}} for tx in fix_texts]
         if surfaced_suppressed:
             # SARIF-native suppression: the result stays in `results` (visible in the UI)
             # but is marked suppressed, so a gate that respects suppressions won't fail on
@@ -400,7 +427,7 @@ def render_sarif(
                 {
                     "axis": a.axis,
                     "status": a.status,
-                    "reason": _sanitize(a.reason),
+                    "reason": _sarif_text(a.reason),
                     "findingIds": [x.id for x in a.findings],
                 }
                 for a in profile.axes
