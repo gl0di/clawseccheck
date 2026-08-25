@@ -380,6 +380,47 @@ def _classify_event_role(
     return None
 
 
+# B-575: a PASS on `_classify_verb_role`'s output only means something if that function
+# could actually SEE a trifecta leg in the verbs the log used. On a real 1,824-event
+# corpus whose entire verb population was {bash, message, apply_patch, memory_search,
+# web_search, sessions_spawn, sessions_yield}, only `web_search` (ingress) and — via
+# `attest.classify_verb`'s EXEC/EGRESS fold, the third tier of `_classify_verb_role`,
+# easy to miss when reasoning about this by hand (an earlier repro script for this exact
+# bug did) — `bash` (egress) actually classify; the rest are None. T1/T2 still rendered a
+# plain green PASS: a true statement about the verbs they COULD read, worded as a
+# statement about the log. This mirrors B-559 (an unread FILE is not evidence of a clean
+# log) one level down: an unclassified VERB is not evidence either — it just never
+# reached either detector's vocabulary. `analysis_incompleteness` below only turns this
+# into UNKNOWN at TOTAL blindness (every verb-bearing event unclassified); see that
+# function's own comment for why a partial gap is deliberately left alone.
+def _verb_classification_coverage(events: list[dict]) -> "tuple[int, int, list[str]]":
+    """Return ``(verb_event_count, unclassified_event_count, unclassified_verb_names)``
+    over *events* — every event that carries a tool-verb `name` (so a nameless
+    `prompt.submitted` channel-origin event, which `_classify_event_role` handles via a
+    separate path, is not counted here at all: it was never eligible to be a "verb" in
+    the first place, so it can't count as a verb this detector failed to classify).
+
+    A verb is "classified" when `_classify_verb_role` returns any of ingress / sensitive
+    / egress — the union of everything either T1 or T2 can act on. This is deliberately
+    NOT scoped to just T1's ingress/egress or just T2's sensitive: both detectors share
+    one vocabulary and one blind spot, and `analysis_incompleteness` is a single signal
+    both already read (see B-559), so a second, narrower version of this per detector
+    would be the parallel-path mistake that function's own docstring warns against.
+    """
+    total = 0
+    unclassified_events = 0
+    unclassified_names: set = set()
+    for ev in events:
+        name = ev.get("name")
+        if not name:
+            continue
+        total += 1
+        if _classify_verb_role(name) is None:
+            unclassified_events += 1
+            unclassified_names.add(str(name))
+    return total, unclassified_events, sorted(unclassified_names)
+
+
 def _sort_key(event: dict):
     """Deterministic (seq, ts) ordering key — events with a missing/non-int seq sort
     after those with one (so partial data never silently reorders known-good events)."""
@@ -1015,6 +1056,10 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     events, meta = read_events(home, explicit_path=explicit_path,
                                 max_files=lim.traj_max_files,
                                 max_bytes_per_file=lim.traj_max_bytes_per_file)
+    # B-575: computed here, once, from the SAME `events` list every detector below reads
+    # — see `_verb_classification_coverage`'s own docstring for why this is one shared
+    # signal rather than a per-detector re-derivation.
+    verb_total, verb_unclassified, unclassified_names = _verb_classification_coverage(events)
     result = {
         "present": meta["present"],
         "files_scanned": meta["files_scanned"],
@@ -1026,6 +1071,9 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "thread_count": 0,
         "findings": [],
         "explicit_path_error": explicit_path_error,
+        "verb_event_count": verb_total,
+        "unclassified_verb_event_count": verb_unclassified,
+        "unclassified_verb_names": unclassified_names,
     }
     b191 = check_audit_trail_signals(
         ctx,
@@ -1085,7 +1133,10 @@ def analysis_incompleteness(result: dict) -> "str | None":
 
     Ordered most-fundamental first, so the reason a reader is given is the one that
     actually bounds the run: "nothing was parsed" is worth saying before "and some of
-    it was capped".
+    it was capped" — and (B-575) either of those is worth saying before "and what WAS
+    read used no verb this detector can classify", since a capped/partial read is the
+    more actionable fact (re-run once the rest is reachable) and may itself explain why
+    nothing classified.
     """
     if not result.get("present"):
         return "no trajectory sidecar was read"
@@ -1108,6 +1159,41 @@ def analysis_incompleteness(result: dict) -> "str | None":
         # Safe to add: measured across all 19 fixture homes carrying a sidecar, the two
         # counts are equal everywhere, so this fires only when a file really went unread.
         return f"{total - scanned} of {total} trajectory file(s) could not be read"
+    # B-575: the read itself was complete, but every verb-bearing event it found used a
+    # verb outside `_classify_verb_role`'s vocabulary — see `_verb_classification_
+    # coverage`'s own docstring. Deliberately gated at TOTAL blindness only
+    # (unclassified == total, both > 0), not any gap: on real logs a partial gap is the
+    # norm (message/apply_patch/read/write verbs are routinely and correctly outside
+    # this vocabulary — B-285 narrowed it on purpose to hold the false-positive line),
+    # so flagging every such log would make this caveat universal noise instead of the
+    # rare, meaningful signal that the detector had literally nothing it could evaluate.
+    verb_total = result.get("verb_event_count") or 0
+    verb_unclassified = result.get("unclassified_verb_event_count") or 0
+    if verb_total and verb_unclassified == verb_total:
+        names = result.get("unclassified_verb_names") or []
+        shown = ", ".join(names[:6]) + (f" (+{len(names) - 6} more)" if len(names) > 6 else "")
+        return (
+            f"all {verb_total} observed tool-call event(s) used a verb outside the "
+            f"ingress/sensitive/egress vocabulary this detector can classify "
+            f"({len(names)} distinct verb name(s): {shown})"
+        )
+    # NARROWER, ATTEMPTED-AND-RETRACTED (B-575 review): a per-ROLE version of the branch
+    # above — UNKNOWN when a REQUIRED role (T1: ingress+sensitive+egress all three; T2:
+    # sensitive alone) was never observed at all, even though SOME verbs did classify —
+    # was proposed and measured, not built. Reason: measured across all 27 fixture homes
+    # that carry a trajectory sidecar, at least one required role was entirely absent in
+    # 25 of them (missing "sensitive" alone in ~20), including homes where every verb WAS
+    # classified (uncl=0) — e.g. a home whose only verb is an egress call has ingress=0,
+    # sensitive=0 by design, not by gap. This is not a fixture-corpus artifact: the B-575
+    # bug report's own real 1,824-event corpus shows the identical shape (ingress + egress
+    # present, sensitive = zero), and T1's own CheckMeta entry (catalog.py) already
+    # documents this as an ACCEPTED, understood limitation — "on a core-tools-only agent
+    # T1 cannot fire at all and its PASS is vacuous" — that predates this task and was a
+    # deliberate call, not an oversight. Firing UNKNOWN on every run of any host that
+    # simply hasn't touched a DB/secrets-store/MCP verb would make the caveat universal
+    # noise on the majority of real installs — trading a documented, accepted limitation
+    # for per-run alarm fatigue, the opposite of Golden Rule #5. Left unbuilt; the
+    # total-blindness branch above is the whole of this fix.
     return None
 
 
