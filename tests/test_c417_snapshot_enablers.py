@@ -33,9 +33,23 @@ from clawseccheck.monitor import (
 )
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
-MONITOR_SRC = (
-    Path(__file__).resolve().parent.parent / "clawseccheck" / "monitor.py"
-).read_text(encoding="utf-8")
+_PKG = Path(__file__).resolve().parent.parent / "clawseccheck"
+
+MONITOR_SRC = (_PKG / "monitor.py").read_text(encoding="utf-8")
+
+#: C-433 slice 1 moved the local STORE — `state.json`, the hash-chained `events.jsonl`,
+#: their rotation and the baseline helpers — into `monitorstore.py`, re-exported from
+#: `monitor`. Guards about a property of the *stored form* must therefore read both files,
+#: or they silently narrow to whichever half the code did not move to. The dimension-key
+#: derivation below deliberately does NOT: it asks what `monitor.py` reads out of a
+#: snapshot, and the store slice reads no dimension key at all — which is the measured
+#: property that made it the safe first cut.
+#:
+#: A later slice that moves code which DOES read dimension keys must re-anchor that
+#: derivation to the imported objects, the way `tests/test_f173_behavioral_and_witness.py`
+#: was re-anchored, rather than widening this path list.
+STORE_SRC = (_PKG / "monitorstore.py").read_text(encoding="utf-8")
+SUBSYSTEM_SRC = MONITOR_SRC + "\n" + STORE_SRC
 
 _NEW_KEYS = ("ts", "watched", "config_file_sha256")
 
@@ -76,7 +90,7 @@ def _isoformat_call_sites() -> int:
     """Count real `datetime.now().isoformat(...)` calls — parsed, for the same reason
     `_both_dims_literals` is parsed."""
     n = 0
-    for node in ast.walk(ast.parse(MONITOR_SRC)):
+    for node in ast.walk(ast.parse(SUBSYSTEM_SRC)):
         if not (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "isoformat"):
@@ -95,7 +109,12 @@ def test_only_one_producer_of_that_timestamp_remains_in_the_module():
     assert _isoformat_call_sites() == 1, (
         "expected exactly one datetime.now().isoformat() call site, inside _now_iso"
     )
-    assert "def _now_iso" in MONITOR_SRC
+    # Across the SUBSYSTEM, not one file. `_now_iso` moved to `monitorstore.py` in C-433's
+    # first slice and is re-exported from `monitor`; the invariant being protected is "one
+    # clock", and a per-file assertion would have been satisfied by a second clock living
+    # one import away — the opposite of what this test is for.
+    assert "def _now_iso" in SUBSYSTEM_SRC
+    assert "def _now_iso" in STORE_SRC, "the clock is expected to live with the store"
     assert isinstance(_now_iso(), str) and len(_now_iso()) == 19
     # The shape check above only recognises `datetime.now().isoformat(...)`. A second clock
     # introduced by any OTHER spelling would sail past it, so the alternatives are named —
@@ -103,7 +122,7 @@ def test_only_one_producer_of_that_timestamp_remains_in_the_module():
     # build on a future comment explaining why `utcnow` was rejected, which is the same
     # documentation-as-evidence mistake `_keys_read_from_a_stored_snapshot` exists to avoid.
     called = set()
-    for node in ast.walk(ast.parse(MONITOR_SRC)):
+    for node in ast.walk(ast.parse(SUBSYSTEM_SRC)):
         if isinstance(node, ast.Call):
             fn = node.func
             if isinstance(fn, ast.Attribute):
