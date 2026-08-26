@@ -26,12 +26,27 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+
 import pytest
 
 from clawseccheck import monitor
 from clawseccheck.monitor import diff_with_notes
 
 _MARK = "behaviour pattern(s)"
+
+
+def _cli(home=None, store=None, extra=()) -> "tuple[int, str]":
+    """The real entry point, so these assertions cover the wiring and not just the arm."""
+    from clawseccheck.cli import main
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = main(["--monitor", "--home", str(home), "--data-dir", str(store), *extra])
+    return rc, buf.getvalue()
 
 
 def _snap(fired: list, capped, **kw) -> dict:
@@ -165,3 +180,85 @@ def test_a_complete_replay_reaches_the_shipped_threshold():
 
 def test_a_capped_replay_does_not_reach_it():
     assert not _rc(_snap([], True), _snap(["T1"], False), "medium")
+
+
+# ------------------------------------------------------------------ end to end, for real
+
+def test_the_paging_branch_is_reachable_through_the_real_cli(tmp_path):
+    """**This test exists because the claim it replaces was wrong.**
+
+    F-182 shipped saying the MEDIUM branch "has fixture evidence only, and structurally
+    cannot have more — the real machine is always capped, so no run on this fleet can
+    exercise it." The first half is true of *this machine's* OpenClaw home. The second half
+    was an overstatement: `files_capped` is a property of how much recorded activity a home
+    holds, not of the fleet, and a home with little of it replays in full.
+
+    Measured through the real `audit()` + `behavioral.analyze()` path:
+
+        ~/.openclaw                 files_capped=True
+        fixtures/home_safe          files_capped=False
+        fixtures/traj_outcome_anomaly  files_capped=False, fired=['T2']
+
+    So the branch that decides whether a human is woken about what their agent actually DID
+    is reachable end to end, and asserting it only against hand-built snapshot dicts was
+    leaving the strongest available evidence on the table.
+
+    The two runs use one home, with the trajectory appearing between them — which is what
+    "a detector newly fired" means in the field, rather than two different homes compared.
+    """
+    home, store = tmp_path / "home", tmp_path / "store"
+    sessions = home / "agents" / "main" / "sessions"
+    sessions.mkdir(parents=True)
+    store.mkdir()
+    cfg = home / "openclaw.json"
+    cfg.write_text(json.dumps({
+        "gateway": {"bind": "127.0.0.1:8080",
+                    "auth": {"mode": "token", "token": "a-very-long-token-of-32-chars!!"}},
+    }), encoding="utf-8")
+    os.chmod(cfg, 0o600)
+
+    rc0, out0 = _cli(home, store)
+    assert rc0 == 0, out0
+
+    src = Path("fixtures/traj_outcome_anomaly/agents/main/sessions/s1.trajectory.jsonl")
+    (sessions / "s1.trajectory.jsonl").write_text(src.read_text(encoding="utf-8"),
+                                                 encoding="utf-8")
+
+    rc, out = _cli(store=store, home=home, extra=("--exit-code", "--fail-on", "medium"))
+    assert _MARK in out, out
+    assert "actually did" in out, (
+        "the paging wording is expected here: both replays were complete\n" + out)
+    assert rc == 3, (
+        "an uncapped replay that newly fired a detector must reach the shipped "
+        f"cron recipe's threshold\n{out}")
+
+
+def test_the_same_case_stays_advisory_when_the_replay_was_capped(tmp_path):
+    """The positive control's mirror, also end to end. Same home, same newly-fired
+    detector, only the recorded cap flag differs — so a failure here means the severity is
+    keyed on something other than the flag."""
+    home, store = tmp_path / "home", tmp_path / "store"
+    sessions = home / "agents" / "main" / "sessions"
+    sessions.mkdir(parents=True)
+    store.mkdir()
+    cfg = home / "openclaw.json"
+    cfg.write_text(json.dumps({
+        "gateway": {"bind": "127.0.0.1:8080",
+                    "auth": {"mode": "token", "token": "a-very-long-token-of-32-chars!!"}},
+    }), encoding="utf-8")
+    os.chmod(cfg, 0o600)
+    _cli(home, store)
+
+    # Rewrite the stored baseline as a capped one. The alternative — generating enough
+    # activity to really hit the cap — would make this test slow and its premise fragile.
+    state = json.loads((store / "state.json").read_text(encoding="utf-8"))
+    state["behavioral_capped"] = True
+    (store / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    src = Path("fixtures/traj_outcome_anomaly/agents/main/sessions/s1.trajectory.jsonl")
+    (sessions / "s1.trajectory.jsonl").write_text(src.read_text(encoding="utf-8"),
+                                                  encoding="utf-8")
+    rc, out = _cli(store=store, home=home, extra=("--exit-code", "--fail-on", "medium"))
+    assert _MARK in out, "the pattern must still be reported, just not at paging severity"
+    assert "newly seen rather than newly done" in out, out
+    assert rc == 0, out

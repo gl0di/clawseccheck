@@ -3941,11 +3941,22 @@ def diff_with_notes(prev: dict | None, curr: dict
                     # loud kind — paging on a window slide.
                     #
                     # MEDIUM is the ceiling for the reason the `plugins` arm states: no
-                    # HIGH or CRITICAL ships on fixture evidence alone. AND THIS BRANCH HAS
-                    # ONLY FIXTURE EVIDENCE, by construction — the real machine is capped
-                    # (its "more saved agent activity than can be replayed" note fires
-                    # today), so no run on this fleet can exercise it. Do not read a green
-                    # gate as having observed it.
+                    # HIGH or CRITICAL ships on fixture evidence alone.
+                    #
+                    # An earlier version of this comment claimed the branch had ONLY fixture
+                    # evidence "by construction", because this machine's own OpenClaw home
+                    # is capped. That was an overstatement and it is corrected here rather
+                    # than quietly dropped: `files_capped` is a property of how much
+                    # recorded activity a home holds, not of the fleet. Measured through the
+                    # real audit path — `~/.openclaw` True, `fixtures/home_safe` False,
+                    # `fixtures/traj_outcome_anomaly` False with T2 fired — so the branch IS
+                    # reachable end to end, and
+                    # `tests/test_f182_behaviour_newly_done.py::test_the_paging_branch_is_
+                    # reachable_through_the_real_cli` exercises it through `main()`.
+                    #
+                    # What remains true: no run against a home with a LOT of recorded
+                    # activity exercises it, so the calibration is unvalidated for exactly
+                    # the users who have the most history.
                     _complete = (prev.get("behavioral_capped") is False
                                  and curr.get("behavioral_capped") is False)
                     _titles = ", ".join(_check_title(c) for c in _b_new)
