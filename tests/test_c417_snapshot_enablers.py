@@ -360,7 +360,8 @@ def _keys_read_from_a_stored_snapshot() -> set:
     comment that documented it. A guard that accepts its own documentation as evidence is,
     in miniature, the failure it exists to catch.
 
-    Deliberately module-wide rather than confined to `diff()`: the comparison is spread
+    Deliberately SUBSYSTEM-wide rather than confined to `diff()` or to one file: the
+    comparison is spread
     across helpers that take the two snapshots as arguments (`_append_memory_alerts`
     reads `memory` and `memory_capped`; `snapshot()` itself reads `config_ever_seen` off
     `prev`), and a scan of `diff()`'s body alone would call the manifest complete while
@@ -377,7 +378,13 @@ def _keys_read_from_a_stored_snapshot() -> set:
     hide.
     """
     out = set(_CONFIG_DIMENSIONS) | set(_SHRINKABLE_DIMENSIONS)
-    for node in ast.walk(ast.parse(MONITOR_SRC)):
+    # SUBSYSTEM, not one file. C-433 is moving this code out of `monitor.py` a slice at a
+    # time, and a derivation anchored to one path loses every read that migrates — failing
+    # in the direction that looks like a manifest with spare entries, i.e. like a coverage
+    # regression, when nothing about coverage changed. Slice 1 (the local store) reads no
+    # dimension key, so this widening is a no-op today and deliberately landed BEFORE the
+    # slice that does read them, rather than as a repair afterwards.
+    for node in ast.walk(ast.parse(SUBSYSTEM_SRC)):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "get"
                 and isinstance(node.func.value, ast.Name)
