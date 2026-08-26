@@ -98,7 +98,12 @@ marketplaces.sources
 meta.lastTouchedVersion
 models.providers
 plugins.allow
+plugins.bundledDiscovery
+plugins.deny
+plugins.enabled
+plugins.entries
 plugins.mcp
+plugins.slots
 proxy
 proxy.enabled
 proxy.proxyUrl

@@ -1564,6 +1564,109 @@ def _channel_entry(value) -> dict:
     return {}
 
 
+# C-135: OpenClaw's own plugin-id normalization, so a RENAME cannot read as a GRANT.
+#
+# An adversarial pass produced six false positives from one omission: `_plugins_sig` stored
+# raw strings and the arm did a raw set difference, while OpenClaw compares ids through
+# `normalizePluginId` — trim, lowercase, then an alias table
+# (`dist/config-state-CtMlHVRM.js`). Every identity-preserving re-spelling therefore looked
+# like a set difference, and always on a LOOSENING arm, because a re-spelling adds the new
+# form to `allow` and removes the old form from `deny` in the same edit.
+#
+# The worst of the six was OpenClaw's own `openclaw doctor --fix`, which its warning text
+# tells the user to run: the `openai-codex` -> `openai` migration rewrote the id in `allow`
+# and `deny` at once and produced two MEDIUM alerts, one of them saying a plugin that is
+# still denied had left the block list. Another announced a genuine TIGHTENING (two aliases
+# collapsed to one canonical deny entry) as a loosening — the exact inversion the direction
+# calibration exists to prevent.
+#
+# Lifted verbatim from BUILT_IN_PLUGIN_ALIAS_FALLBACKS (`config-state-CtMlHVRM.js`), read
+# out of the installed dist rather than from documentation.
+_PLUGIN_ID_ALIASES = {
+    "google-gemini-cli": "google",
+    "minimax-portal": "minimax",
+    "minimax-portal-auth": "minimax",
+    # A LEGACY MIGRATION rather than an alias, kept in the same map because the effect on a
+    # comparison is identical, and labelled because the provenance is not: OpenClaw's
+    # `rewriteLegacyOpenAICodexPluginPolicy` (`dist/legacy-config-migrations--PhUdsg4.js`)
+    # rewrites this id across allow, deny, entries AND slots when the user runs
+    # `openclaw doctor --fix`, which OpenClaw's own warning text tells them to run. Without
+    # it that one command produced two MEDIUM alerts, including one asserting a plugin that
+    # is still denied had left the block list.
+    "openai-codex": "openai",
+}
+
+
+def _plugin_id(raw: object) -> str:
+    """A plugin id as OpenClaw compares it: trimmed, lowercased, alias-resolved."""
+    ident = str(raw).strip().lower()
+    return _PLUGIN_ID_ALIASES.get(ident, ident)
+
+
+def _plugins_sig(ctx) -> dict:
+    """B-659: the plugin TRUST surface — who may load, who may not, and what switches it.
+
+    `plugins.*` reached the monitor only if some check's status happened to move, and
+    measured on `fixtures/home_safe` an appended `plugins.allow` entry moved none of 188.
+    A plugin runs inside the agent, so the allowlist is a trust grant and a change to it is
+    exactly the kind of thing a watch exists to notice.
+
+    Every field is read off the INSTALLED dist's own zod schema for the `plugins` object
+    (`zod-schema-O9ml_nmo.js`: `enabled`, `allow`, `deny`, `load`, `slots`, `entries`,
+    `bundledDiscovery`), not from a docs page and not invented.
+
+    `bundledDiscovery` is here because a C-135 pass found its absence to be a silent OFF
+    SWITCH for everything else in this dimension: `plugins.bundledDiscovery === "compat"`
+    sets `bypassAllowlist`, which leaves `allowSet` undefined and makes every bundled plugin
+    eligible (`dist/bundled-compat-yOgFRqvZ.js`). One word turns the allowlist off, and
+    `doctor --fix` writes it automatically for any restrictive allowlist — so the same run
+    that produced the migration false positive also produced this false negative.
+
+    `entries` records each id's `enabled` flag rather than only the id, because a plugin
+    already registered and switched off can be switched on without adding a key — invisible
+    to a keys-only signature and to the new-key arm both. The rest of an entry's body IS
+    provider setup's working state and stays unwatched.
+
+    `plugins.load.paths` — where plugins are loaded FROM — is deliberately out: it is its own
+    family and deserves its own adversarial pass rather than a rider on this one. An earlier
+    version of this docstring also claimed to be excluding `plugins.mcp`; there is no such
+    field in the installed schema, and justifying an omission with an invented field name is
+    the shape Golden Rule #4 exists to stop.
+
+    Lists are sorted sets of NORMALIZED ids, so reordering, re-casing, whitespace and the
+    built-in aliases cannot register as a change. Absent keys stay absent rather than
+    defaulting, so "not configured" and "configured empty" stay distinguishable.
+    """
+    from .collector import dig  # noqa: PLC0415
+    cfg = getattr(ctx, "config", None)
+    out: dict = {}
+    enabled = dig(cfg, "plugins.enabled")
+    if isinstance(enabled, bool):
+        out["enabled"] = enabled
+    allow = dig(cfg, "plugins.allow")
+    if isinstance(allow, list):
+        out["allow"] = sorted({_plugin_id(x) for x in allow})
+    deny = dig(cfg, "plugins.deny")
+    if isinstance(deny, list):
+        out["deny"] = sorted({_plugin_id(x) for x in deny})
+    discovery = dig(cfg, "plugins.bundledDiscovery")
+    if isinstance(discovery, str):
+        out["bundled_discovery"] = discovery.strip().lower()
+    slots = dig(cfg, "plugins.slots")
+    if isinstance(slots, dict):
+        out["slots"] = {str(k): _plugin_id(v) for k, v in slots.items()
+                        if isinstance(v, str)}
+    entries = dig(cfg, "plugins.entries")
+    if isinstance(entries, dict):
+        # id -> whether it is switched on. OpenClaw treats an absent `enabled` as on
+        # (`config-normalization-shared-w2iz0aeC.js`: `enabled: config?.enabled !== false`),
+        # so absent is recorded as True rather than as unknown.
+        out["entries"] = {
+            _plugin_id(k): (not (isinstance(v, dict) and v.get("enabled") is False))
+            for k, v in entries.items()}
+    return out
+
+
 def _gateway_bind(ctx) -> str:
     from .checks import parse_bind_host  # noqa: PLC0415
     from .collector import dig  # noqa: PLC0415
@@ -1649,7 +1752,7 @@ def _scan_truncated_skills(ctx) -> "set[str]":
 # B-269 — dimensions of the snapshot that are built from ``ctx.config``. When
 # openclaw.json cannot be read/parsed the collector falls back to ``ctx.config = {}`` and
 # every one of these collapses to empty, which ``diff()`` used to read as fact.
-_CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind")
+_CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind", "plugins")
 
 # B-269 — dimensions collected from disk that an unreadable config can still SHRINK,
 # because the config declares extra roots to scan: ``agents.defaults.workspace`` /
@@ -1681,10 +1784,14 @@ _CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind")
 # NAME, so which record wins is a merge decision, not a set operation — with last-wins,
 # merely adding a workspace to openclaw.json flipped the winner and the diff read the swap
 # as "the skill was replaced with different content", a false HIGH on an ordinary config
-# edit. `skillprovenance.read_provenance` now takes the FIRST root's record and the default
-# workspaces are searched before any config-declared one, so the winner does not depend on
-# the config at all. That is what makes this list the right one; the shrinkable machinery
-# never protected the record set and was never going to.
+# edit. That framing is now historical: B-541 removed the election from the verdict path
+# entirely — `read_provenance` emits one entry per (root, skill) pair and each record is
+# compared with itself, so first-wins survives only in the legacy name-keyed fallback that a
+# single post-upgrade run takes. The PLACEMENT is unchanged and still right, but it no longer
+# rests on "the winner does not depend on the config": it rests on the plainer fact that the
+# config can only ADD workspace roots, never remove one, so a blind run sees a SUBSET of the
+# roots — which is exactly the shrinkable contract. Re-grounded because the sentence that
+# used to carry this argument described a mechanism the tree no longer has.
 #
 # `openclaw_install` is in NEITHER list, deliberately: it is resolved from PATH, so an
 # unreadable config cannot move it. Its own failure mode is different and is handled at the
@@ -1750,6 +1857,11 @@ WATCHED_DIMENSIONS = (
     "config_file_sha256",
     "config_journal_head",
     "config_parse_error",
+    # B-659 made this a READ dimension: the disclosure that the settings file moved
+    # in a namespace this build does not model consults it, so an $include fragment
+    # edit counts too. B-527 landed it store-only; registering it here is what the
+    # C-417 manifest guard requires the moment something reads it back.
+    "config_resolved_sha256",
     "config_written_by",
     "gateway_bind",
     "grade",
@@ -1770,6 +1882,7 @@ WATCHED_DIMENSIONS = (
     # located on PATH (which a cron job's minimal PATH really does produce — verified),
     # `skill_provenance` when no ClawHub lock file was found in any workspace.
     "openclaw_install",
+    "plugins",
     "raw_score",
     "raw_score_scope",
     "scope",
@@ -1785,6 +1898,67 @@ WATCHED_DIMENSIONS = (
     # is precisely what that note reports.
     "watched",
 )
+
+
+# C-441: what to CALL a watched dimension when the user is told one could not be compared.
+#
+# The note that reports a baseline predating a comparison used to say only "this run cannot
+# say which comparisons it was able to make", which tells the reader nothing they can act on
+# and — on the very upgrade path it exists for — was the least informative sentence the
+# monitor emitted. The names are derivable; only the vocabulary was missing.
+#
+# Deliberately partial. Roughly half of WATCHED_DIMENSIONS is internal bookkeeping
+# (`graded`, `raw_score_scope`, `config_baseline`, the `*_capped` frontiers) whose names
+# would be jargon in a user-facing sentence, so those are COUNTED rather than named. A key
+# absent from this map is not an error: it falls into the count. That is why the renderer
+# below reports both halves instead of a single number — dropping the unnamed ones would
+# understate what was skipped, and naming them would bury the ones that matter.
+_DIMENSION_LABELS = {
+    "behavioral_fired": "how your agent has been behaving",
+    "bootstrap": "your bootstrap files",
+    "channels": "chat channel access",
+    "checks": "the individual check results",
+    "config_file_sha256": "the settings file's contents",
+    "config_journal_head": "OpenClaw's own record of settings changes",
+    "config_resolved_sha256": "the settings file including any included fragments",
+    "config_written_by": "who last wrote your settings",
+    "gateway_bind": "the gateway address",
+    "host": "the security tools on this machine",
+    "ignore_hash": "your suppression list",
+    "mcp": "connected tool servers",
+    "mcp_detail": "what each tool server exposes",
+    "memory": "your agent's memory files",
+    "native_count": "OpenClaw's own audit",
+    "openclaw_install": "the OpenClaw installation itself",
+    "plugins": "which plugins may load",
+    "score": "the security score",
+    "skill_provenance": "where each installed skill came from",
+    "skills": "your installed skills",
+}
+
+# How many names to spell out before falling back to a count. Six fits a readable sentence;
+# the rest are still counted, and the cap is stated in the output rather than applied
+# silently — a truncation the reader cannot see reads as "that was all of them".
+_DIMENSION_NAME_CAP = 6
+
+
+def _name_dimensions(keys: "list[str]") -> str:
+    """A readable clause naming *keys*, capped, with everything unnamed still counted.
+
+    Returns the empty string for an empty list, so the caller can decide whether there is
+    anything to say at all rather than emitting a sentence about nothing.
+    """
+    named = [_DIMENSION_LABELS[k] for k in keys if k in _DIMENSION_LABELS]
+    unnamed = len(keys) - len(named)
+    if not named:
+        return (f"{unnamed} internal bookkeeping field(s)") if unnamed else ""
+    shown, hidden = named[:_DIMENSION_NAME_CAP], len(named) - _DIMENSION_NAME_CAP
+    clause = ", ".join(shown)
+    if hidden > 0:
+        clause += f" and {hidden} more"
+    if unnamed:
+        clause += f", plus {unnamed} internal bookkeeping field(s)"
+    return clause
 
 
 # C-418 — the four reasons a comparison is DECLINED, as opposed to made and found equal.
@@ -2011,8 +2185,23 @@ def _config_resolved_digest(ctx) -> str:
     key-order-only edit to the ROOT file can leave this digest unchanged (parsing already
     normalized that away), which is exactly what the root byte digest still covers.
 
-    Returns ``""`` when there is nothing to hash (config never loaded), matching
-    ``_config_file_digest``'s convention so both digests are absent together on a blind run.
+    Returns ``""`` when there is nothing to hash — but note that ``ctx.config`` defaults
+    to ``{}``, which IS a dict, so "nothing to hash" is narrower than "no config was read".
+    An earlier version of this line claimed both digests are absent together on a blind run;
+    that was false as written, and measured: on a home with no ``openclaw.json`` and no prior
+    baseline the caller stored ``sha256("{}")`` here while ``config_file_sha256`` was absent.
+    The caller now gates this write on ``ctx.config_found`` and the two really are absent
+    together — the invariant holds at the CALL SITE, not in this function.
+
+    WHAT THIS DIGEST IS NOT: the identity of the files that produced the config. Two
+    ``$include`` targets with identical contents, or a fragment whose keys duplicate values
+    already present, resolve to the same dict and so to the same digest. That is deliberate
+    — a drift monitor asks "did the configuration my agent runs under change", and the
+    answer there is no. Recording which FILE was authoritative is a different question
+    (B-527's work-item 1, a per-fragment ``(path, sha256)`` set) and was not built: it needs
+    a ``configloader`` change, it would put fragment paths — which can carry a username or a
+    private repo name — into a field this project keeps free of them, and nothing in the
+    threat model turns on source identity once the resolved values are covered.
     """
     config = getattr(ctx, "config", None)
     if not isinstance(config, dict):
@@ -2126,6 +2315,7 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         "mcp_detail": _mcp_detail_sig(ctx),
         "channels": _channel_sig(ctx),
         "gateway_bind": _gateway_bind(ctx),
+        "plugins": _plugins_sig(ctx),
     }
     snap["memory_capped"] = sorted(_mem_capped)
     # B-268: the skills frontier comes from the collector (which is where the cap lives).
@@ -2139,12 +2329,15 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     # F-173: the behavioural layer, reduced to what a drift comparison can honestly use.
     #
     # `fired` is `behavioral.grade_cap_signal()`'s output and MUST NOT be the raw
-    # `result["findings"]`. Measured on this machine: `files_capped` is True (60 of 93
-    # trajectory files read), and behavioral.py's own comment calls a bare B191 divergence
-    # under a rotated cap "expected, near-certain-benign background noise". Raw findings
-    # here would put that in the drift stream on every run, forever. `grade_cap_signal`
-    # applies `_B191_STRONG_SUB_SIGNALS`; that filter is the entire reason this dimension
-    # can exist at all.
+    # `result["findings"]`. behavioral.py's own comment calls a bare B191 divergence under a
+    # rotated cap "expected, near-certain-benign background noise", and raw findings here
+    # would put that in the drift stream on every run, forever. `grade_cap_signal` applies
+    # `_B191_STRONG_SUB_SIGNALS`; that filter is the entire reason this dimension can exist.
+    #
+    # Re-grounded 2026-08-26, because the measurement this cited had drifted: `files_capped`
+    # is still True but the window is 60 of 88 files, not 93, and B191 currently reads PASS
+    # with `grade_cap_signal()` empty. The divergence is the hazard the filter holds off, not
+    # something happening right now — stated in the present tense it read as a live fact.
     #
     # `undetermined` is a first-class dimension rather than an afterthought because on the
     # real machine it is the ONLY one of the three carrying live data: measured
@@ -2211,7 +2404,18 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         # task exists for on its own (an $include fragment edit moves it even when the
         # root file's bytes do not), and a later phase can wire a comparison in once one
         # is wanted, the same staged shape C-417 used for config_file_sha256 itself.
-        resolved_digest = _config_resolved_digest(ctx)
+        # B-527 follow-up: gated on a config having actually been READ, not merely on the
+        # helper returning something. `collector.Context.config` defaults to `{}` — a dict —
+        # so on a home with no openclaw.json and no prior baseline this arm runs (that state
+        # is not `config_missing_blind`, which needs `prev_had_config`) and stored
+        # sha256("{}") beside an ABSENT config_file_sha256. A digest for a file nobody read
+        # is the clean-verdict-about-unread-ground shape B-269 exists to prevent, and it
+        # became load-bearing the moment B-659 started comparing this field: the empty-config
+        # digest would later "move" to a real one and be reported as a change the run could
+        # not explain. The gate belongs here rather than in the helper, whose `{}` handling
+        # is correct for a config file that genuinely contains `{}`.
+        resolved_digest = (_config_resolved_digest(ctx)
+                           if getattr(ctx, "config_found", False) else "")
         if resolved_digest:
             snap["config_resolved_sha256"] = resolved_digest
         # F-170: OpenClaw's own config-write journal, captured HERE rather than compared
@@ -2695,18 +2899,40 @@ def diff_with_notes(prev: dict | None, curr: dict
     #
     # Self-healing by construction: this run writes the current manifest, so the note
     # appears exactly once after an upgrade and never again.
+    # C-441: both arms NAME what was skipped. The absent arm used to say only "this run
+    # cannot say which comparisons it was able to make" — on the one upgrade path this note
+    # exists to serve, and the names were derivable the whole time. A baseline that predates
+    # the manifest still carries its own keys, and a key this build watches that is not
+    # among them is exactly a comparison that had nothing to compare against. So the two
+    # arms differ only in where the previous coverage is read FROM: the recorded manifest
+    # when there is one, the snapshot's own keys when there is not.
     _prev_watched = prev.get("watched")
-    if not isinstance(_prev_watched, list):
-        note(NOTE_NO_PRIOR_RECORD,
-             "Your saved record predates coverage tracking, so this run cannot say which "
-             "comparisons it was able to make. The next run will.")
-    else:
-        _unknown_to_prev = [k for k in WATCHED_DIMENSIONS if k not in _prev_watched]
-        if _unknown_to_prev:
+    _from_manifest = isinstance(_prev_watched, list)
+    _prev_covered = _prev_watched if _from_manifest else list(prev)
+    # `watched` itself is excluded when deriving from the snapshot's keys: its absence is
+    # the PRECONDITION of this branch, not a separate comparison that was skipped. Counting
+    # it would double-count the very thing the sentence is already explaining.
+    _unknown_to_prev = [k for k in WATCHED_DIMENSIONS
+                        if k not in _prev_covered and not (k == "watched" and not _from_manifest)]
+    if _unknown_to_prev:
+        _names = _name_dimensions(_unknown_to_prev)
+        if _from_manifest:
             note(NOTE_NO_PRIOR_RECORD,
                  f"{len(_unknown_to_prev)} thing(s) this version watches were not recorded "
                  f"by the run that saved your baseline, so they had nothing to compare "
-                 f"against this once.")
+                 f"against this once: {_names}. The next run compares them.")
+        else:
+            note(NOTE_NO_PRIOR_RECORD,
+                 f"Your saved record predates coverage tracking, so {len(_unknown_to_prev)} "
+                 f"thing(s) had nothing to compare against this once: {_names}. The next "
+                 "run compares them.")
+    elif not _from_manifest:
+        # A pre-manifest baseline that nonetheless recorded everything this build watches.
+        # Still worth one line — the reader is owed the reason this run had to derive the
+        # answer — but it must not imply a coverage gap, because there is not one.
+        note(NOTE_NO_PRIOR_RECORD,
+             "Your saved record predates coverage tracking, but it recorded everything "
+             "this version watches, so nothing was skipped.")
 
     if curr_blind:
         unknown = sum(1 for s in (curr.get("checks") or {}).values() if s == UNKNOWN)
@@ -3077,6 +3303,7 @@ def diff_with_notes(prev: dict | None, curr: dict
 
     # B-500: comparisons whose OUTCOME is real but whose CAUSE we cannot evidence. They
     # become coverage notes rather than alerts — see the arms below for why.
+    _checks_alerts_from = len(alerts)
     _went_dark: list = []
     _newly_visible: list = []
     def _check_sev(cid: str, fallback: str = "MEDIUM") -> str:
@@ -3256,9 +3483,50 @@ def diff_with_notes(prev: dict | None, curr: dict
             # five more of these on an unchanged machine.
             _newly_visible.append(cid)
 
-    if _num(curr, "native_count") > _num(prev, "native_count"):
-        delta = _num(curr, "native_count") - _num(prev, "native_count")
-        alerts.append(("INFO", f"openclaw security audit reports {delta} more issue(s) than last time."))
+    # B-660: this was the one arm in diff() gated on neither the scope flags nor presence.
+    #
+    # `native_count` is written as `len(native.findings) if native else 0`, and `_num`
+    # defaults a missing key to 0 — so "the native audit did not run last time" and "the
+    # native audit found fewer problems last time" arrived here as the same input. Two
+    # measured fabrications, both on a machine where nothing moved:
+    #
+    #   * a `--monitor --no-native` run followed by an ordinary one: prev 0, curr N ->
+    #     "openclaw security audit reports N more issue(s) than last time";
+    #   * a baseline written before this key existed: same sentence, and the `watched`
+    #     manifest recorded the absence correctly while this arm never consulted it.
+    #
+    # Latent rather than live on the maintainer's fleet only because `openclaw security
+    # audit` reports zero findings there, so `0 > 0` is False. That is why it survived
+    # every gate: `monitor_fp_gate.py` diffs two snapshots of an unchanged home taken the
+    # SAME way, and this needs the two runs to differ in how they were taken.
+    #
+    # Fixed the way its siblings already are, and deliberately not by changing `_num`'s
+    # default — other callers rely on 0 there. Presence on both sides, plus the same
+    # `_same_scope_flags` guard B-500 added to the check-transition arms after --no-host
+    # produced "No longer determinable: Host firewall active" on an unchanged machine.
+    # bool excluded for the same reason `_num` excludes it: True < 2 compares as 1, so a
+    # corrupted field would silently fabricate a delta out of nothing.
+    def _count(v: object) -> "int | None":
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    _p_native, _c_native = _count(prev.get("native_count")), _count(curr.get("native_count"))
+    _both_native = _p_native is not None and _c_native is not None
+    if not _both_native:
+        # Absent on either side is not silence: C-418's contract is that a comparison this
+        # run did not make is counted and, under --verbose, named. Self-healing — the next
+        # run has the key on both sides.
+        note(NOTE_NO_PRIOR_RECORD,
+             "The built-in `openclaw security audit` issue count was not compared: one of "
+             "these two runs did not record one.")
+    elif not _same_scope_flags:
+        note(NOTE_UNDETERMINED,
+             "The built-in `openclaw security audit` issue count was not compared: this "
+             "run and the last were taken with different options, so a change in the "
+             "number would be the option changing rather than the machine.")
+    elif _c_native > _p_native:
+        delta = _c_native - _p_native
+        alerts.append(("INFO",
+                       f"openclaw security audit reports {delta} more issue(s) than last time."))
 
     prev_ih = prev.get("ignore_hash", "")
     curr_ih = curr.get("ignore_hash", "")
@@ -3269,6 +3537,7 @@ def diff_with_notes(prev: dict | None, curr: dict
 
     # --- Agent Watch: connection / trust-surface drift (guarded so an old snapshot
     #     without these keys never produces spurious 'new X' alerts after upgrade) ---
+    _checks_alerts_to = len(alerts)
     # F-170: the config-derived alerts start here and end just before the host block.
     # Marked by index so a journaled write can be attributed to exactly those and not to
     # skill, memory or host drift, which the same config edit did not cause.
@@ -3503,7 +3772,155 @@ def diff_with_notes(prev: dict | None, curr: dict
                        f"Gateway bind changed: '{_pgb}' -> '{cb}'"
                        + (" (now exposed to the network!)" if exposed else "")))
 
+    # B-659: the plugin trust surface. A plugin runs inside the agent, so an id becoming
+    # allowed, a deny being lifted, or the global switch opening are all trust grants.
+    #
+    # Inside the config-alert span on purpose, so F-170's attribution stamps these the same
+    # way it stamps an MCP or gateway change — a config edit is what causes them.
+    #
+    # DIRECTION IS THE WHOLE CALIBRATION. Only loosening is reported: an id ADDED to allow,
+    # an id REMOVED from deny, `enabled` going false -> true. Tightening is the user doing
+    # the right thing, and announcing it would train them to ignore this dimension.
+    # Reordering cannot fire at all, because the signature sorts.
+    #
+    # MEDIUM is a ceiling, and it is the epic's constraint rather than timidity: this fleet
+    # configures `plugins.entries` (three of them) and has no `allow`/`deny` at all, so the
+    # loosening arms have FIXTURE evidence only — and no HIGH or CRITICAL alert may ship on
+    # fixture evidence alone. Raise it when a real config exercises it, not before.
+    #
+    # `entries` is INFO and separate: the installed dist documents that block as "updated by
+    # provider setup flows", i.e. OpenClaw writes it whenever the user configures a
+    # provider. Treating a routine write as a trust change is how a dimension earns itself a
+    # permanent place in the user's ignore list.
+    _plug_pair = _both_dims(prev, curr, "plugins")
+    if compare_config and _plug_pair is not None:
+        _pp, _cp = _plug_pair
+
+        def _listed(d: dict, key: str) -> "set | None":
+            v = d.get(key)
+            return set(v) if isinstance(v, list) else None
+
+        _pa, _ca = _listed(_pp, "allow"), _listed(_cp, "allow")
+        if _pa is not None and _ca is not None and (_ca - _pa):
+            alerts.append((
+                "MEDIUM",
+                "Plugin(s) newly allowed to load: " + ", ".join(sorted(_ca - _pa))
+                + ". A plugin runs inside your agent — vet it before trusting it."))
+        _pd, _cd = _listed(_pp, "deny"), _listed(_cp, "deny")
+        if _pd is not None and _cd is not None and (_pd - _cd):
+            alerts.append((
+                "MEDIUM",
+                "Plugin(s) no longer denied: " + ", ".join(sorted(_pd - _cd))
+                + ". They were on your block list at the last check and are not now."))
+        if _pp.get("enabled") is False and _cp.get("enabled") is True:
+            alerts.append((
+                "MEDIUM",
+                "Plugins were switched on since the last check (plugins.enabled). "
+                "Everything on your allow list can load again."))
+        # The allowlist's OFF SWITCH, found by the C-135 pass as a silent bypass of every
+        # arm above: `bundledDiscovery: "compat"` sets `bypassAllowlist`, leaving `allowSet`
+        # undefined so every bundled plugin becomes eligible
+        # (`dist/bundled-compat-yOgFRqvZ.js`). One word turns the allowlist off, and the arms
+        # watching the allowlist saw nothing because the list itself did not move.
+        if (_pp.get("bundled_discovery") != "compat"
+                and _cp.get("bundled_discovery") == "compat"):
+            alerts.append((
+                "MEDIUM",
+                "Plugin discovery switched to compat mode, which bypasses your "
+                "plugin allow list entirely — every bundled plugin can load again, whatever "
+                "the list says."))
+        # A slot names the plugin that OWNS memory or the context engine and puts it in the
+        # startup scope. Changing who holds one is a trust move that touches neither list.
+        _ps, _cs = _pp.get("slots"), _cp.get("slots")
+        if isinstance(_ps, dict) and isinstance(_cs, dict):
+            _moved = sorted(k for k, v in _cs.items() if _ps.get(k) not in (None, v))
+            _claimed = sorted(k for k, v in _cs.items() if k not in _ps)
+            if _moved or _claimed:
+                alerts.append((
+                    "MEDIUM",
+                    "Plugin slot(s) reassigned: "
+                    + ", ".join(f"{k}={_cs[k]}" for k in _moved + _claimed)
+                    + ". A slot owner runs at startup, whatever your allow list says."))
+        _pe, _ce = _pp.get("entries"), _cp.get("entries")
+        if isinstance(_pe, dict) and isinstance(_ce, dict):
+            _added = sorted(k for k in _ce if k not in _pe)
+            if _added:
+                alerts.append((
+                    "INFO",
+                    "Plugin registry entry added for: " + ", ".join(_added)
+                    + ". Configuring a provider writes one of these, so this is expected if "
+                    "you just did that."))
+            # A plugin already registered and switched OFF can be switched on without adding
+            # a key — invisible to the arm above and to a keys-only signature. INFO would be
+            # wrong here: this is a plugin becoming live, not a provider being configured.
+            _switched = sorted(k for k, v in _ce.items() if v and _pe.get(k) is False)
+            if _switched:
+                alerts.append((
+                    "MEDIUM",
+                    "Plugin(s) switched on: " + ", ".join(_switched)
+                    + ". They were registered but disabled at the last check."))
+
     _config_alerts_to = len(alerts)
+
+    # B-659: the settings file changed and nothing this build compares in it did.
+    #
+    # C-418's contract is that no all-clear is printed over a comparison this run skipped.
+    # That scoping is bounded by the same model that produced the blindness: it can only
+    # list a skip the code KNOWS about, and a config namespace nobody ever modelled is
+    # neither compared nor listed. `_CONFIG_DIMENSIONS` is five fields (`plugins` joined them);
+    # `tools.*`, `hooks.*`, `cron`, `agents.*`, `browser.*` and `secrets.providers` reach
+    # the monitor only if some check's STATUS happens to move. Measured: appending an entry
+    # to `plugins.allow` — a new trust grant, since that list decides which plugins may
+    # load — moved zero of 188 check statuses, moved `config_file_sha256`, and produced
+    # "No new threats among what was compared" with nothing in the un-compared list.
+    #
+    # THIS IS NOT THE DESIGN THE EPIC REJECTED, and the distinction is the whole reason it
+    # can ship. What was rejected is hashing the parsed config as a catch-all ALERT: OpenClaw
+    # itself writes `meta.lastTouchedAt/Version` and `wizard.lastRun*`, so an alert would
+    # fire on every upgrade with zero security content, and an unnamed "config hash changed"
+    # is unactionable. A NOTE is a different channel with a different contract — it says
+    # only "this run did not compare that", it is collapsed to a count unless the reader
+    # asks, it never reaches the event journal, and it cannot page a scheduled job. The
+    # rejected design's failure mode is alert noise; this one has no alert to make noise
+    # with. Do not "promote" it to an alert without re-reading that rejection.
+    #
+    # Deliberately narrow, because a note on every real change would inflate the
+    # "N things could not be compared" count until nobody reads it:
+    #   * only when a digest actually MOVED — an unchanged file says nothing, which is what
+    #     keeps the false-positive gate (two runs over an unchanged home) silent;
+    #   * only when NO config-derived alert fired. If drift was already named, the change is
+    #     accounted for and this would be the same edit reported twice;
+    #   * never on a blind run, where "the config was not compared" is already said louder.
+    # Both digests are consulted, so an edit inside an $include fragment counts too: the
+    # root digest cannot see one, and until now nothing read the resolved digest at all.
+    if compare_config and not (prev_blind or curr_blind):
+        # "Named" means THIS RUN ALREADY TOLD THE USER SOMETHING about the same edit, and
+        # that is broader than the config dimensions. Measured: `tools.profile` -> "all"
+        # moves no config dimension but turns three checks PASS -> WARN, and the run printed
+        # all three regressions by name and then added this note saying it "cannot tell you
+        # what it was" — a sentence the same screen refuted three lines above. `tools.*` is
+        # not compared as a dimension, but its consequences were named, so the note has
+        # nothing left to add.
+        #
+        # Check transitions are the right second term rather than "any alert at all": a
+        # skills or host alert in the same run says nothing about the settings file, and
+        # letting it suppress this would hide an unmodelled config edit behind an unrelated
+        # event. Trajectory-derived entries stay excluded from the config span for the same
+        # reason F-170 excludes them from attribution — their evidence is not the config.
+        _named_config_drift = any(
+            _i not in _trajectory_alerts
+            for _i in range(_config_alerts_from, min(_config_alerts_to, len(alerts)))
+        ) or _checks_alerts_to > _checks_alerts_from
+        _pf, _cf = prev.get("config_file_sha256"), curr.get("config_file_sha256")
+        _pr, _cr = prev.get("config_resolved_sha256"), curr.get("config_resolved_sha256")
+        _file_moved = bool(_pf) and bool(_cf) and _pf != _cf
+        _resolved_moved = bool(_pr) and bool(_cr) and _pr != _cr
+        if (_file_moved or _resolved_moved) and not _named_config_drift:
+            note(NOTE_UNDETERMINED,
+                 "Your settings file changed since the last check, but nothing this "
+                 "version compares inside it did — so the change is in a part of the file "
+                 "this version does not watch, and this run cannot tell you what it was. "
+                 "Run a full check to see the current verdicts.")
 
     _host_pair = pair_or_note("host", "Security tools running on this machine")
     if _host_pair is not None:
@@ -3627,7 +4044,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # is a separate decision:
     #
     # 1. APPEARANCE is reported, DISAPPEARANCE never is. The evidence window rotates — 60
-    #    of 93 trajectory files are read on this machine — so a pattern leaving the window
+    #    of 88 trajectory files on this machine as of 2026-08-26 — so a pattern leaving it
     #    is not evidence it stopped happening. "T1 cleared" would be a resolution we
     #    invented; a real one shows up as a check status change in `checks`, which is
     #    compared elsewhere.
@@ -3638,6 +4055,16 @@ def diff_with_notes(prev: dict | None, curr: dict
     #    HIGH default of the C-419 exit-code threshold, so this still cannot page anyone,
     #    and it never touches the score — the F-154 cap-only discipline is preserved
     #    because nothing here reaches `scoring.compute`.
+    #
+    #    Two channels it DOES reach, named here because an earlier version of this list
+    #    read as exhaustive while naming only what the alert cannot do. `record_events`
+    #    applies no severity filter, so an INFO behavioural alert is appended to
+    #    `events.jsonl` — which is hash-chained, so it is permanent — and `render_brief`
+    #    counts every journal entry, so it shows up in `--brief`'s "N event(s) recorded"
+    #    line. Verified by running it: an INFO baseline-reference entry lands in the journal
+    #    and is counted by `--brief` as "none above MEDIUM". Neither is a defect; both are
+    #    the difference between "cannot page you" and "leaves no trace", and only the first
+    #    was true.
     # 3. It stands down when either side was blind. Structural, not measured: T3's
     #    "declared" capability set is read out of the config, so a collapsed `ctx.config`
     #    could in principle widen "observed minus declared" and fabricate a firing. The

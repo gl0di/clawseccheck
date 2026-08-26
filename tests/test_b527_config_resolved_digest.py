@@ -152,10 +152,64 @@ def test_new_field_alone_produces_no_alert_against_a_pre_change_baseline(tmp_pat
 
 
 def test_snapshot_version_unchanged_field_is_purely_additive(tmp_path):
-    # Deliberately NOT bumped: nothing reads config_resolved_sha256 yet (store-only, the
-    # same staged shape C-417 used), so there is no comparison for an old baseline to lack.
+    # Not bumped when this landed: the field was store-only then (the same staged shape
+    # C-417 used), so no old baseline lacked a comparison. B-659 has since wired a
+    # comparison in, and it is registered in WATCHED_DIMENSIONS -- which is the
+    # mechanism that tells a pre-existing baseline it was not recorded, and the reason
+    # the version still does not need to move.
     _write(tmp_path / "openclaw.json", "{}")
     ctx, findings, score = audit(tmp_path)
     snap = snapshot(ctx, findings, score)
     assert snap["version"] == SNAPSHOT_VERSION == 8
+    assert "config_resolved_sha256" in snap
+
+
+# ---------------------------------------------------------------- B-527 follow-up
+#
+# The task's test plan asked that NO digest of any kind be written on the blind arms. Only
+# the config_parse_error arm was pinned, and the other one was not merely unpinned: it was
+# wrong. `collector.Context.config` defaults to `{}` -- a dict -- so a home with no
+# openclaw.json and no prior baseline took the NON-degraded arm and stored sha256("{}")
+# beside an absent config_file_sha256. Inert while the field was store-only; load-bearing
+# the moment B-659 started comparing it, since that empty-config digest would later "move"
+# to a real one and be reported as a change the run could not explain.
+
+
+def test_a_home_with_no_config_writes_neither_digest(tmp_path):
+    """The measured hole. Both digests absent together, which is what the helper's docstring
+    claimed all along and what the call site now actually enforces."""
+    ctx, findings, score = audit(tmp_path)          # no openclaw.json written at all
+    snap = snapshot(ctx, findings, score)
+    assert getattr(ctx, "config_found", False) is False, "fixture premise: no config found"
+    assert "config_file_sha256" not in snap
+    assert "config_resolved_sha256" not in snap, (
+        "a digest was stored for a file this run never read")
+
+
+def test_the_config_missing_blind_arm_writes_neither_digest(tmp_path):
+    """The arm the task named and nothing pinned: a baseline that HAD a config, and a run
+    where the file has since gone. Distinct from the case above, which has no baseline."""
+    _write(tmp_path / "openclaw.json", '{"gateway": {"bind": "127.0.0.1"}}')
+    ctx, findings, score = audit(tmp_path)
+    prev = snapshot(ctx, findings, score)
+    assert "config_resolved_sha256" in prev, "fixture premise: the baseline carries it"
+
+    (tmp_path / "openclaw.json").unlink()
+    ctx2, findings2, score2 = audit(tmp_path)
+    blind = snapshot(ctx2, findings2, score2, prev=prev)
+    assert blind.get("config_parse_error") or blind.get("config_baseline") == "carried", (
+        "fixture premise: this run must actually be the blind arm")
+    assert "config_file_sha256" not in blind
+    assert "config_resolved_sha256" not in blind
+
+
+def test_a_genuinely_empty_config_file_still_gets_a_digest(tmp_path):
+    """The control on the gate: `{}` written by a user is a config that WAS read, and its
+    digest is a real fact about it. Gating on `config_found` rather than on the helper's
+    return value is what keeps these two cases apart -- over-gating here would silently
+    stop covering the one config shape most likely to be a fresh install."""
+    _write(tmp_path / "openclaw.json", "{}")
+    ctx, findings, score = audit(tmp_path)
+    snap = snapshot(ctx, findings, score)
+    assert getattr(ctx, "config_found", False) is True
     assert "config_resolved_sha256" in snap

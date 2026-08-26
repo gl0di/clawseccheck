@@ -257,6 +257,25 @@ def render_next_actions(
 _CRON_JOB_NAME = "clawseccheck-watch"
 _CRON_EVERY_MS = 21_600_000        # six hours
 
+# B-658: the severity the emitted job pages on, named ONCE so the flag in the command and
+# the sentence describing exit 0 cannot drift apart. They did: the recipe said "Exit 0
+# means nothing changed" while a bare `--exit-code` pages only at HIGH and above, and the
+# arm that reports a check leaving PASS emits at MEDIUM unconditionally. Measured on this
+# tree: `gateway.auth.mode` token -> none printed `1 change(s) detected` on screen and
+# exited 0, so an agent following this very recipe stayed silent about the gateway losing
+# authentication — which is the case B-273's own source comment names as its
+# reason for existing.
+#
+# MEDIUM, not HIGH, because HIGH excludes the entire PASS->WARN/UNKNOWN regression arm, and
+# that arm is where a config edit lands when it degrades a control rather than removing it.
+# Not LOW: INFO and LOW carry routine advisories (a counter moving, a skill version bump)
+# and paging on those is what gets a scheduled check switched off, which the epic this
+# recipe belongs to counts as 0% coverage.
+#
+# It does NOT change what a bare `--exit-code` does — that stays at HIGH, documented and
+# depended on. This only sets the threshold for the job we hand the agent.
+_CRON_FAIL_ON = "medium"
+
 
 def render_cron_recipe(ascii_only: bool = False,
                        data_dir: str = "~/.clawseccheck") -> str:
@@ -275,11 +294,13 @@ def render_cron_recipe(ascii_only: bool = False,
         f'  "schedule": {{ "kind": "every", "everyMs": {_CRON_EVERY_MS} }},\n'
         '  "payload": {\n'
         '    "kind": "agentTurn",\n'
-        '    "message": "Run: clawseccheck --monitor --exit-code --data-dir '
-        f'{data_dir}\\nExit 0 means nothing changed — say nothing and stop. Exit 3 means '
-        'drift was recorded: report what changed, quoting the tool\'s own output. Exit 1 '
-        'means monitoring is NOT established (the run could not write its state) — say so, '
-        'it is more urgent than drift. Exit 2 is a usage error in this job, not a finding."\n'
+        f'    "message": "Run: clawseccheck --monitor --exit-code --fail-on {_CRON_FAIL_ON} '
+        f'--data-dir {data_dir}\\nExit 0 means nothing at {_CRON_FAIL_ON} severity or above '
+        'was recorded — say nothing and stop; anything below that is advisory and is '
+        'counted by `clawseccheck --brief`. Exit 3 means drift was recorded: report what '
+        'changed, quoting the tool\'s own output. Exit 1 means monitoring is NOT established '
+        '(the run could not write its state) — say so, it is more urgent than drift. '
+        'Exit 2 is a usage error in this job, not a finding."\n'
         '  },\n'
         '  "delivery": { "mode": "announce", "channel": "<your-channel>", "to": "<you>" },\n'
         '  "sessionTarget": "isolated"\n'
@@ -297,6 +318,9 @@ def render_cron_recipe(ascii_only: bool = False,
         "Before you agree to it:",
         "",
         "  - It runs every 6 hours. Change everyMs if you want a different interval.",
+        f"  - It messages you at {_CRON_FAIL_ON} severity and above. Change --fail-on to",
+        "    widen or narrow that; changes below the line are still recorded, and --brief",
+        "    counts them. Nothing at all is silently discarded.",
         f"  - It writes three local files under {data_dir} — the drift baseline, the event",
         "    journal and the score history. Nothing leaves the machine.",
         "  - Replace <your-channel> and <you>. Delivery is OpenClaw's, not this tool's; set",

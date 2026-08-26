@@ -557,7 +557,11 @@ seconds. Three deliberate limits:
   activity and rotates, so a pattern leaving it is evidence the window moved, not that anything
   stopped. You will never be told a behaviour "cleared".
 - **It never changes your score.** These signals reach the report and the journal only, so score
-  history stays comparable across the release that added them.
+  history stays comparable across the release that added them. "The journal" is not a figure of
+  speech: they are appended to `events.jsonl`, which is hash-chained and therefore permanent, and
+  `--brief` counts them in its "N event(s) recorded" line. They are below `--exit-code`'s default
+  threshold, so they cannot page a scheduled job — but "cannot page you" and "leaves no trace" are
+  different claims, and only the first is true.
 - **A capped or inconclusive replay says so.** If there is more recorded activity than one run can
   replay, or a pattern cannot be settled from what is there, that is disclosed as a skipped
   comparison rather than folded into the all-clear. Run `--behavioral` for the detail.
@@ -602,11 +606,15 @@ clean gets no extra line — the change itself is already reported.
 > afterwards** (this). Anything claiming to stop an install from here would be describing a
 > capability the architecture does not have.
 
-And when two of your workspaces hold install records for the **same skill name** that disagree,
-the content comparison for that skill stands down and says so. Which of the two your agent
-actually loads is not something this check can determine, and picking one arbitrarily is how an
-ordinary config edit — adding an agent to `agents.list` — turned into a "this skill was replaced"
-alert during development.
+When two of your workspaces hold install records for the **same skill name**, each record is now
+compared with **itself** across runs, so there is no winner to elect and nothing stands down.
+That was not always true: picking one arbitrarily is how an ordinary config edit — adding an agent
+to `agents.list` — turned into a "this skill was replaced" alert during development, and the first
+fix for it was a stand-down that an attacker could trigger on purpose to buy silence. Per-record
+comparison removed the choice rather than making it better.
+
+The stand-down survives in one place only: the single run that reads a baseline written before
+per-record comparison existed. After that run it is unreachable.
 
 Two things worth knowing about how the comparison behaves:
 
@@ -817,12 +825,16 @@ gets to make. OpenClaw supplies the periodicity and the delivery to your phone; 
 supplies neither and should not.
 
 **A cron recipe for any other scheduler.** Pass `--exit-code` and read the exit status:
+The threshold here is `--exit-code`'s default of HIGH and above. The job that
+`--cron-recipe` prints sets `--fail-on medium` instead, because the arm that reports a
+check leaving PASS emits at MEDIUM — at HIGH that whole class of regression returns 0.
+Add `--fail-on medium` below if you want the shell variant to match.
 
 ```bash
 #!/bin/sh
 clawseccheck --monitor --exit-code --data-dir ~/.clawseccheck
 case $? in
-  0) exit 0 ;;                         # nothing changed
+  0) exit 0 ;;                         # nothing at or above the threshold
   3) echo "drift detected"; exit 1 ;;  # a HIGH-or-worse alert was recorded
   2) echo "bad usage"; exit 1 ;;       # argparse: a mistyped flag, not a finding
   *) echo "MONITORING NOT ESTABLISHED"; exit 1 ;;   # rc=1: the run could not record
@@ -848,6 +860,60 @@ Three things about that:
   that would page you at 3am for a counter going up. **INFO alerts cannot be selected at any
   threshold** — the ranking runs critical/high/medium/low only — so treat the exit code as a
   gate on regressions, not as a complete summary of the run.
+
+**A machine channel for JSON consumers.** `--monitor --json` prints a payload instead of the
+human report (`--exit-code`/`--fail-on` above still gate the exit status the same way; this is
+the same run, a second way to read its result):
+
+```bash
+clawseccheck --monitor --json --data-dir ~/.clawseccheck
+```
+
+```json
+{
+  "alerts": [{"severity": "HIGH", "message": "..."}],
+  "notes": [{"category": "config_blind", "message": "..."}],
+  "baseline_status": "ok",
+  "persisted": true,
+  "fully_compared": false,
+  "score": null,
+  "grade": null,
+  "graded": false,
+  "baseline_reference": "ab12cd34ef56ab78"
+}
+```
+
+- **`alerts`** — exactly what `diff()` reports for this run; each entry is a `(severity,
+  message)` pair, unchanged by this channel existing.
+- **`notes`** — the comparisons this run declined to make (a blind config, a truncated
+  collection, a baseline written by an older build, and so on — see the scoping note above). A
+  note is never an alert: it never appears in `alerts`, and it never reaches `events.jsonl`.
+- **`baseline_status`** — `"absent"` (first run), `"corrupt"` (a prior baseline existed and could
+  not be used), or `"ok"`.
+- **`persisted`** — whether this run's state/journal writes actually landed. See "Do NOT script
+  around the exit code" above `rc=1`/`rc=3` for what happens when they did not.
+- **`fully_compared`** — **true only when there was a usable prior baseline
+  (`baseline_status == "ok"`) AND `notes` is empty.** Neither half alone is enough: `notes` is
+  empty on a first run too (there being nothing yet to compare against is not the same as having
+  compared everything), and a valid prior baseline can still coexist with skipped comparisons.
+  A first run is therefore correctly reported `fully_compared: false` — that is expected, not a
+  fault to fix.
+- **What `fully_compared` will actually be, today: `false`.** Measured on a healthy pair —
+  unchanged home, zero alerts, `baseline_status: "ok"` — it still came back `false`, because a
+  bare `--monitor` run does not earn a grade (see `graded`, and E-077's five-layer rule), so the
+  score comparison emits a note on every run that has a prior baseline. Two further notes are
+  routine on a real machine (host security tools not confirmed for the previous run, and too
+  little recorded activity to judge behaviour). So read `fully_compared` as the strict
+  definition above and **not** as a health indicator: it is a claim about coverage, and this
+  mode's coverage is genuinely partial by construction. To learn whether a given run skipped
+  more than it usually does, compare the `category` values in `notes` between runs rather than
+  waiting for this flag to flip.
+- **`fully_compared` carries no exit-code weight**, deliberately. `--exit-code`/`--fail-on`
+  remain exactly the function of `alerts`/`persisted` described above; a partial run with no
+  alerts still exits 0, and a complete run with a HIGH+ alert still exits 3. A published cron
+  recipe depends on that not changing, and a second exit-code axis was rejected for the same
+  reason a second `--exit-code`-shaped flag was: read `fully_compared`/`notes` from the JSON if
+  the scope of a clean run matters to your automation.
 
 `--data-dir DIR` is worth using in any scripted context. `--monitor` writes three files, and
 before this the score history defaulted independently of the other two — so redirecting

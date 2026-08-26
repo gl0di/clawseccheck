@@ -154,6 +154,18 @@ def test_a_home_with_no_recorded_activity_is_disclosed_rather_than_passed(tmp_pa
     undetermined == ["B191"]`: with no recorded activity B191 cannot settle, and saying so
     is exactly right. What must NOT happen is the layer being reported as unexamined (it
     ran) or a pattern being reported as firing (none did).
+
+    The load-bearing assertion used to be `"could not be determined" in out` — that
+    substring is `report._NOTE_HEADINGS["undetermined"]`, the GENERIC section heading
+    `"Because the state of something could not be determined:"` that the renderer prints
+    for ANY `NOTE_UNDETERMINED` note regardless of source, so this test passed even with
+    the behavioural note itself suppressed entirely (confirmed by mutation: stubbing out
+    the `_b_unknown` arm in `monitor.py`'s `diff_with_notes` left this test green). The
+    fix asserts on the behavioural sentence's own wording instead — the one
+    `diff_with_notes` builds from `behavioral_undetermined`, in `monitor.py`:
+    `f"{len(_b_unknown)} thing(s) about how your agent has been behaving could not be
+    determined — there may be too little recorded activity to judge yet. Run --behavioral
+    to see which."`
     """
     home, store = _home(tmp_path), tmp_path / "store"
     _run(home, store)
@@ -162,7 +174,7 @@ def test_a_home_with_no_recorded_activity_is_disclosed_rather_than_passed(tmp_pa
     saved = json.loads((store / "state.json").read_text(encoding="utf-8"))
     assert saved["behavioral_fired"] == []
     assert saved["behavioral_undetermined"] == ["B191"]
-    assert "could not be determined" in out
+    assert "about how your agent has been behaving could not be determined" in out
     assert "what your agent actually did" not in out.lower(), "the layer DID run"
     assert "behaviour pattern(s) now appear" not in out, "nothing fired"
 
@@ -298,11 +310,47 @@ def test_the_arm_does_not_need_the_scope_gate_and_this_is_why():
 
 def test_the_behavioural_arm_never_moves_the_score():
     """F-154's cap-only discipline, preserved: nothing here reaches `scoring.compute`, so
-    score history stays comparable across the release that added the layer."""
+    score history stays comparable across the release that added the layer.
+
+    The original assertion here — `curr["score"] == prev["score"]` — was vacuous: it is a
+    property of `_snap()`, which hardcodes `score: 90` on both sides, and this test
+    overrides only `behavioral_fired`. The two scores were equal before `diff_with_notes`
+    ever ran and would stay equal even if the arm computed and discarded a brand-new score,
+    or mutated its inputs. `diff_with_notes` doesn't return a score at all, so there was
+    nothing in its actual output to check F-154 against.
+
+    What IS mechanically checkable: `diff_with_notes` never references the name `scoring`
+    anywhere in its body — not via a module-level import used inside it, not via a local
+    `import scoring` (which would still show up as an `ast.Import`/`ast.ImportFrom` node in
+    its subtree). That means the behavioural diff arm, which lives inside this function,
+    cannot call `scoring.compute` at all — the actual claim the docstring makes."""
+    import ast
+    import inspect
+    import textwrap
+
+    # Read the function through the imported object, not through a relative path: a path
+    # depends on the CWD pytest happened to start in, and it would keep parsing a file
+    # named monitor.py after C-433 moves this function into a package submodule — passing
+    # while testing the wrong thing. `getsource` follows the function wherever it lives.
+    src = textwrap.dedent(inspect.getsource(diff_with_notes))
+    diff_fn = next(n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.FunctionDef) and n.name == "diff_with_notes")
+    names_referenced = {n.id for n in ast.walk(diff_fn) if isinstance(n, ast.Name)}
+    imported_in_fn: set = set()
+    for n in ast.walk(diff_fn):
+        if isinstance(n, ast.Import):
+            imported_in_fn.update((a.asname or a.name).split(".")[0] for a in n.names)
+        elif isinstance(n, ast.ImportFrom):
+            imported_in_fn.update(a.asname or a.name for a in n.names)
+    assert names_referenced, "the AST walk found nothing — this guard would pass vacuously"
+    assert "scoring" not in names_referenced and "scoring" not in imported_in_fn, (
+        "diff_with_notes now references `scoring` — the behavioural diff arm must not "
+        "reach scoring.compute (F-154's cap-only discipline)"
+    )
+
     prev, curr = _snap(), _snap(behavioral_fired=["T1", "T2"])
     alerts, _ = diff_with_notes(prev, curr)
     assert all(lvl == "INFO" for lvl, _ in alerts)
-    assert curr["score"] == prev["score"], "the arm must not touch the recorded score"
 
 
 def test_a_behavioural_layer_that_raises_does_not_take_the_run_down(tmp_path, capsys,

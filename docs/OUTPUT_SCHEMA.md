@@ -1518,3 +1518,75 @@ value: `3` (bumped from `2` by B-568 — see the Notes below for what changed).
   new key, and `complete` changed meaning under the same name (was `config_found`
   alone; now also requires nothing withheld). Same defect shape B-463 fixed one field
   over: two different facts must not serialise identically under one version number.
+
+---
+
+## 22. `--monitor --json` Output (F-176)
+
+Produced by `--monitor --json`. A separate, standalone artifact — not part of the
+`--json` envelope (§1) and not covered by its stability policy (§17) — describing the
+result of one drift-comparison run: what changed since the last `--monitor` run, what
+this run could not compare, and whether the run's own writes (state/journal) landed.
+
+Before F-176, `--monitor --json` silently dropped `--json` and printed the human report
+instead. `--exit-code`/`--fail-on` (see `docs/USAGE.md`'s cron section) are unaffected by
+this document existing — they gate the process exit status of the *same* run this
+document describes; reading both from one invocation is expected.
+
+### Envelope fields
+
+| Field | Type | Description |
+|---|---|---|
+| `alerts` | `array[Alert]` | Exactly what `diff()` reports for this run — unchanged by this JSON channel existing. Empty on a first run or a run with no drift. |
+| `notes` | `array[Note]` | The comparisons this run declined to make (a blind config, a truncated collection, a baseline written by an older build that lacks a key this build compares, and so on). A note is never an alert: it never appears in `alerts`, never reaches the event journal (`--events`), and never moves a score. |
+| `baseline_status` | `str` | One of `"absent"` (no prior state file — a real first run), `"corrupt"` (a prior state file exists but carries no usable snapshot), or `"ok"` (a usable prior snapshot was compared against). |
+| `persisted` | `bool` | Whether this run's writes (state file, and the event journal if there were alerts) actually landed. `false` means the drift above was computed but NOT recorded, so an unchanged next run will report it again. |
+| `fully_compared` | `bool` | `true` only when `baseline_status` is `"ok"` **and** `notes` is empty — every comparison this build knows how to make against a usable prior baseline was actually made. **Not** derivable from `notes` alone: `notes` is also empty on a first run (nothing existed yet to compare against), which is `fully_compared: false` — a correct, expected result, not a fault. Carries no exit-code weight; see `docs/USAGE.md`'s "`--monitor --json`" section for why a fifth exit code was rejected. **In practice this is `false` on every `--monitor` run today**, because such a run does not earn a grade (`graded` below) and the score comparison therefore always emits a note once a prior baseline exists — measured on a healthy pair with zero alerts. Treat it as a strict coverage claim, not a health signal. |
+| `score` | `int \| null` | This run's score, or `null` when `graded` is `false`. |
+| `grade` | `str \| null` | This run's letter grade, or `null` when `graded` is `false`. |
+| `graded` | `bool` | Whether `score`/`grade` are a real verdict — `--monitor` runs the same five-layer rule as the default `--json` path (§1's `graded` field) and is `false` on most runs (`--monitor` never runs the installed-skill/plugin sweep or the behavioral replay, even under `--full`). |
+| `baseline_reference` | `str \| null` | F-173's off-machine anchor for the newly-saved baseline (a short hex fingerprint), or `null` when nothing was written this run (`persisted` is `false`) or there was nothing to read back. |
+
+### `Alert` object
+
+| Field | Type | Description |
+|---|---|---|
+| `severity` | `str` | One of `CRITICAL` / `HIGH` / `MEDIUM` / `LOW` / `INFO`. |
+| `message` | `str` | Human-readable description of what changed. Home-path redacted the same way the text report is. |
+
+### `Note` object
+
+| Field | Type | Description |
+|---|---|---|
+| `category` | `str` | One of `config_blind` / `record_damaged` / `inspection_capped` / `undetermined` / `no_prior_record` — see `monitor.py`'s `NOTE_*` constants for what each means. Stable identifiers; the associated `message` wording is not part of the frozen contract and may be reworded. |
+| `message` | `str` | Human-readable description of what could not be compared and why. |
+
+### Example
+
+```json
+{
+  "alerts": [
+    {"severity": "CRITICAL", "message": "Gateway bind changed 127.0.0.1 -> 0.0.0.0."}
+  ],
+  "notes": [
+    {"category": "undetermined",
+     "message": "The score was not compared: at least one of these two runs did not earn a grade, so there is no verdict to compare it against."}
+  ],
+  "baseline_status": "ok",
+  "persisted": true,
+  "fully_compared": false,
+  "score": null,
+  "grade": null,
+  "graded": false,
+  "baseline_reference": "ab12cd34ef56ab78"
+}
+```
+
+### Notes
+
+- Not part of the `--json` envelope (§1) — a separate, standalone artifact with no
+  `version`/schema-number field of its own yet; treat additive new top-level keys as
+  possible in a minor release, the same discipline §17 states for §1.
+- `alerts`/`notes` carry no filesystem paths beyond what the text report already
+  redacts — see `_sanitize` in `report.py`, applied to both before they reach this
+  document.
