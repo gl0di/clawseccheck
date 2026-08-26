@@ -1784,10 +1784,14 @@ _CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind", "plugins"
 # NAME, so which record wins is a merge decision, not a set operation — with last-wins,
 # merely adding a workspace to openclaw.json flipped the winner and the diff read the swap
 # as "the skill was replaced with different content", a false HIGH on an ordinary config
-# edit. `skillprovenance.read_provenance` now takes the FIRST root's record and the default
-# workspaces are searched before any config-declared one, so the winner does not depend on
-# the config at all. That is what makes this list the right one; the shrinkable machinery
-# never protected the record set and was never going to.
+# edit. That framing is now historical: B-541 removed the election from the verdict path
+# entirely — `read_provenance` emits one entry per (root, skill) pair and each record is
+# compared with itself, so first-wins survives only in the legacy name-keyed fallback that a
+# single post-upgrade run takes. The PLACEMENT is unchanged and still right, but it no longer
+# rests on "the winner does not depend on the config": it rests on the plainer fact that the
+# config can only ADD workspace roots, never remove one, so a blind run sees a SUBSET of the
+# roots — which is exactly the shrinkable contract. Re-grounded because the sentence that
+# used to carry this argument described a mechanism the tree no longer has.
 #
 # `openclaw_install` is in NEITHER list, deliberately: it is resolved from PATH, so an
 # unreadable config cannot move it. Its own failure mode is different and is handled at the
@@ -2325,12 +2329,15 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     # F-173: the behavioural layer, reduced to what a drift comparison can honestly use.
     #
     # `fired` is `behavioral.grade_cap_signal()`'s output and MUST NOT be the raw
-    # `result["findings"]`. Measured on this machine: `files_capped` is True (60 of 93
-    # trajectory files read), and behavioral.py's own comment calls a bare B191 divergence
-    # under a rotated cap "expected, near-certain-benign background noise". Raw findings
-    # here would put that in the drift stream on every run, forever. `grade_cap_signal`
-    # applies `_B191_STRONG_SUB_SIGNALS`; that filter is the entire reason this dimension
-    # can exist at all.
+    # `result["findings"]`. behavioral.py's own comment calls a bare B191 divergence under a
+    # rotated cap "expected, near-certain-benign background noise", and raw findings here
+    # would put that in the drift stream on every run, forever. `grade_cap_signal` applies
+    # `_B191_STRONG_SUB_SIGNALS`; that filter is the entire reason this dimension can exist.
+    #
+    # Re-grounded 2026-08-26, because the measurement this cited had drifted: `files_capped`
+    # is still True but the window is 60 of 88 files, not 93, and B191 currently reads PASS
+    # with `grade_cap_signal()` empty. The divergence is the hazard the filter holds off, not
+    # something happening right now — stated in the present tense it read as a live fact.
     #
     # `undetermined` is a first-class dimension rather than an afterthought because on the
     # real machine it is the ONLY one of the three carrying live data: measured
@@ -4037,7 +4044,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # is a separate decision:
     #
     # 1. APPEARANCE is reported, DISAPPEARANCE never is. The evidence window rotates — 60
-    #    of 93 trajectory files are read on this machine — so a pattern leaving the window
+    #    of 88 trajectory files on this machine as of 2026-08-26 — so a pattern leaving it
     #    is not evidence it stopped happening. "T1 cleared" would be a resolution we
     #    invented; a real one shows up as a check status change in `checks`, which is
     #    compared elsewhere.
@@ -4048,6 +4055,16 @@ def diff_with_notes(prev: dict | None, curr: dict
     #    HIGH default of the C-419 exit-code threshold, so this still cannot page anyone,
     #    and it never touches the score — the F-154 cap-only discipline is preserved
     #    because nothing here reaches `scoring.compute`.
+    #
+    #    Two channels it DOES reach, named here because an earlier version of this list
+    #    read as exhaustive while naming only what the alert cannot do. `record_events`
+    #    applies no severity filter, so an INFO behavioural alert is appended to
+    #    `events.jsonl` — which is hash-chained, so it is permanent — and `render_brief`
+    #    counts every journal entry, so it shows up in `--brief`'s "N event(s) recorded"
+    #    line. Verified by running it: an INFO baseline-reference entry lands in the journal
+    #    and is counted by `--brief` as "none above MEDIUM". Neither is a defect; both are
+    #    the difference between "cannot page you" and "leaves no trace", and only the first
+    #    was true.
     # 3. It stands down when either side was blind. Structural, not measured: T3's
     #    "declared" capability set is read out of the config, so a collapsed `ctx.config`
     #    could in principle widen "observed minus declared" and fabricate a firing. The

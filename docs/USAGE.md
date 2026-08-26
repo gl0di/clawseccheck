@@ -557,7 +557,11 @@ seconds. Three deliberate limits:
   activity and rotates, so a pattern leaving it is evidence the window moved, not that anything
   stopped. You will never be told a behaviour "cleared".
 - **It never changes your score.** These signals reach the report and the journal only, so score
-  history stays comparable across the release that added them.
+  history stays comparable across the release that added them. "The journal" is not a figure of
+  speech: they are appended to `events.jsonl`, which is hash-chained and therefore permanent, and
+  `--brief` counts them in its "N event(s) recorded" line. They are below `--exit-code`'s default
+  threshold, so they cannot page a scheduled job — but "cannot page you" and "leaves no trace" are
+  different claims, and only the first is true.
 - **A capped or inconclusive replay says so.** If there is more recorded activity than one run can
   replay, or a pattern cannot be settled from what is there, that is disclosed as a skipped
   comparison rather than folded into the all-clear. Run `--behavioral` for the detail.
@@ -602,11 +606,15 @@ clean gets no extra line — the change itself is already reported.
 > afterwards** (this). Anything claiming to stop an install from here would be describing a
 > capability the architecture does not have.
 
-And when two of your workspaces hold install records for the **same skill name** that disagree,
-the content comparison for that skill stands down and says so. Which of the two your agent
-actually loads is not something this check can determine, and picking one arbitrarily is how an
-ordinary config edit — adding an agent to `agents.list` — turned into a "this skill was replaced"
-alert during development.
+When two of your workspaces hold install records for the **same skill name**, each record is now
+compared with **itself** across runs, so there is no winner to elect and nothing stands down.
+That was not always true: picking one arbitrarily is how an ordinary config edit — adding an agent
+to `agents.list` — turned into a "this skill was replaced" alert during development, and the first
+fix for it was a stand-down that an attacker could trigger on purpose to buy silence. Per-record
+comparison removed the choice rather than making it better.
+
+The stand-down survives in one place only: the single run that reads a baseline written before
+per-record comparison existed. After that run it is unreachable.
 
 Two things worth knowing about how the comparison behaves:
 

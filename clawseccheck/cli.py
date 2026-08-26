@@ -4255,14 +4255,24 @@ def _main(argv=None) -> int:
         # `_resolve_runtime_caps` and `pipeline.run_behavioral` already wrap this identical
         # call. A monitor run must not be taken down by the layer it just gained.
         #
-        # `_behavioral_grade_cap_signal`, never `result["findings"]`. Measured on this
-        # machine: files_capped is True and a bare B191 divergence under a rotated cap is
-        # behavioral.py's own documented benign background noise, so raw findings would put
-        # a permanent entry in the drift stream. On failure the key is left ABSENT rather
-        # than set empty, so the next diff says "not examined" instead of "nothing found".
+        # `_behavioral_grade_cap_signal`, never `result["findings"]`. The rule is
+        # structural: a bare B191 divergence under a rotated cap is behavioral.py's own
+        # documented benign background noise, so raw findings would put a permanent entry
+        # in the drift stream. On failure the key is left ABSENT rather than set empty, so
+        # the next diff says "not examined" instead of "nothing found".
         #
-        # Cost measured before it was written: analyze() is 0.176 s against a 4.9 s
-        # run_all — the layer this adds is 3.5% of a run it makes materially less blind.
+        # The measurement this used to cite is re-grounded rather than restated, because it
+        # had rotted into something that no longer reproduces. As of 2026-08-26 on the
+        # maintainer's machine: files_capped is still True (60 of 88 trajectory files read,
+        # not the 93 this comment used to name), but B191 reads PASS and grade_cap_signal()
+        # returns the empty set — so the divergence that motivates the filter is NOT
+        # currently firing. It is a hazard the filter exists to hold off, not a live
+        # measurement, and writing it in the present tense made a test-pinned claim out of
+        # a state of the world.
+        #
+        # Cost, re-measured the same day: analyze() 0.26 s against a 7.66 s run_all (both
+        # up from the 0.176 s / 4.9 s originally recorded here) — still under 4% of a run
+        # it makes materially less blind.
         _behavioral_snap = None
         try:
             _b_result = _behavioral_analyze(ctx)
