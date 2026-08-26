@@ -1539,7 +1539,9 @@ _MODE_HONORS = {
     # F-176: "json" joined the same way — --monitor --json used to be silently dropped
     # (the no-effect note fired and no payload was ever built). See the `if args.json:`
     # branch in the "monitor" mode dispatch for the payload shape.
-    "monitor": frozenset({"judged_bundle", "exit_code", "fail_on", "json"}),
+    # F-180: "probe" is a monitor-only modifier — it suppresses the three writes so a
+    # frequent poll does not consume the drift it is polling for.
+    "monitor": frozenset({"judged_bundle", "exit_code", "fail_on", "json", "probe"}),
     # B-379: --percentile/--next now resolve the liveTest cap the same way
     # --trend/--monitor already did (see _apply_live_test_cap's call sites below).
     "percentile": frozenset({"judged_bundle"}),
@@ -2528,6 +2530,10 @@ def _main(argv=None) -> int:
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")
     p.add_argument("--monitor", action="store_true",
                    help="monitor mode: alert on what changed since the last check")
+    p.add_argument("--probe", action="store_true",
+                   help="with --monitor: report drift WITHOUT recording it — writes none "
+                        "of the three local files, so the same drift is still reported by "
+                        "the next ordinary run. For cheap polling.")
     p.add_argument("--state", default=None, metavar="PATH",
                    help=f"snapshot file for --monitor (default: {DEFAULT_STATE})")
     p.add_argument("--events", default=None, metavar="PATH",
@@ -4475,17 +4481,25 @@ def _main(argv=None) -> int:
         # "score dropped" alert on every single run forever (the baseline never
         # advances, so nothing ever consumes it), which is exactly the manufactured-
         # drift failure mode the seed gate exists to prevent.
-        journal_err = record_events(alerts, args.events) if not _skip_live_test_persist else None
+        # F-180: a probe answers "is anything different" without ANSWERING it — none of the
+        # three files moves, so the drift stays unconsumed and the next ordinary run reports
+        # it again. That re-detection is the point, not a duplicate: B-278's note a few
+        # lines up already established that leaving a baseline un-advanced is how drift
+        # survives a failed write, and this is the same shape chosen deliberately.
+        _probe = bool(getattr(args, "probe", False))
+        journal_err = (record_events(alerts, args.events)
+                       if not (_skip_live_test_persist or _probe) else None)
         state_err = None
         # F-155: an unseeded VULNERABLE verdict must never be recorded, so the baseline
         # advance is skipped exactly like a write failure would skip it — except this is
         # not a failure (state_err stays None; no stderr, no non-zero exit below).
-        if journal_err is None and not _skip_live_test_persist:
+        if journal_err is None and not _skip_live_test_persist and not _probe:
             try:
                 save_state(args.state, snap)
             except OSError as exc:
                 state_err = str(exc)
-        persisted = journal_err is None and state_err is None and not _skip_live_test_persist
+        persisted = (journal_err is None and state_err is None
+                     and not _skip_live_test_persist and not _probe)
         # F-173 Part B: an off-machine anchor for the baseline — on screen always, in the
         # event chain only when it MOVED.
         #
@@ -4585,8 +4599,21 @@ def _main(argv=None) -> int:
         # paths below: this run's score was really measured, and the trend should not gain
         # a hole because a different file was unwritable. Skipped only for the same F-155
         # unseeded-live-test exclusion as the baseline advance above.
-        if not _skip_live_test_persist:
+        # F-180: `_probe` too, and this one was NOT obvious — the first implementation
+        # gated only `record_events` and `save_state`, and the end-to-end test caught
+        # `history.jsonl` still growing on every poll. That is the documented three-file
+        # footgun (--state and --events do not isolate a run; --history defaults
+        # independently), reappearing inside the very feature written to avoid consuming
+        # state. A frequent poll would have quietly padded the score trend with a row per
+        # poll while claiming to write nothing.
+        if not _skip_live_test_persist and not _probe:
             history_record(score, args.history)
+        # F-180: a probe must SAY it did not record, or the user reads the alert as filed
+        # and then sees the identical alert on the next ordinary run with no explanation.
+        if _probe:
+            print("\nThis was a probe: nothing was recorded, so your baseline still points "
+                  "at the last ordinary check.\n  The change above is still outstanding and "
+                  "the next ordinary run will report it again.")
         # B-271/B-278: a write mode that could not write must not report success. --badge /
         # --html / --sarif / --save all return 1 on OSError; --monitor was the sole outlier,
         # returning 0 forever while persisting nothing, so cron saw a healthy job.
@@ -4641,7 +4668,16 @@ def _main(argv=None) -> int:
             # again, and an exit code claiming "drift was journaled" would be describing
             # something that did not happen. An earlier version of this comment asserted
             # these alerts were always journaled; it was wrong on exactly that path.
-            if persisted and any(_SEVERITY_RANK.get(lvl, -1) >= _rank for lvl, _ in alerts):
+            # F-180: `or _probe`. Reading this arm as written, a non-persisting run returns
+            # 0 EVEN WITH DRIFT — which for the F-155 seed gate is right (nothing was
+            # recorded, so claiming "drift was journaled" would be false), and for a probe
+            # is exactly backwards: a poll that cannot report drift is not a poll. The two
+            # cases differ in intent, and only one of them chose not to write. So for a
+            # probe, 3 means "drift exists and was deliberately left unconsumed" — which is
+            # the signal a `trigger.script` needs — while 1 stays reserved for a store that
+            # genuinely could not be written.
+            if (persisted or _probe) and any(_SEVERITY_RANK.get(lvl, -1) >= _rank
+                                             for lvl, _ in alerts):
                 # 3, not 2. argparse exits 2 on ANY usage error, so a cron job reading the
                 # published recipe reported "drift detected" for a mistyped flag —
                 # reproduced with `--fail-on hgih`. A machine channel whose "something

@@ -676,6 +676,30 @@ clawseccheck --verify-baseline 1f4b9c02ae77d310    # read-only; writes nothing
 This is not a signature and is not claimed to be one — see the `state.json` limit below for why
 signing it locally would defend against nobody, and for what a mismatch does and does not mean.
 
+### Checking for drift without consuming it — `--probe`
+
+An ordinary `--monitor` run advances your baseline: it records the state it just saw, so
+the next run compares against *that*. That is what you want for a scheduled check, and
+exactly what you do not want for a frequent poll — the poll would see the change, record
+it, and leave nothing for the run you actually read.
+
+```bash
+clawseccheck --monitor --probe --exit-code --fail-on medium
+```
+
+A probe reports drift and writes **nothing**: not the drift baseline, not the event
+journal, not the score history. The change stays outstanding, and the next ordinary run
+reports it again. The run says so on screen, so a repeated alert does not read as the tool
+double-reporting.
+
+Exit codes are unchanged — `3` still means drift was found, `0` still means nothing at or
+above your threshold. `1` keeps its meaning of *monitoring is not established*, and a
+probe never returns it: a probe was not going to write, so an unwritable store is not its
+emergency.
+
+Use it for cheap, frequent polling; use a plain `--monitor` for the check whose result you
+read and act on.
+
 ### Known limits of `--monitor` (read before relying on it)
 
 These are inherent boundaries of a **local, file-based, scheduled** drift detector — not bugs to
