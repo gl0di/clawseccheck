@@ -817,12 +817,16 @@ gets to make. OpenClaw supplies the periodicity and the delivery to your phone; 
 supplies neither and should not.
 
 **A cron recipe for any other scheduler.** Pass `--exit-code` and read the exit status:
+The threshold here is `--exit-code`'s default of HIGH and above. The job that
+`--cron-recipe` prints sets `--fail-on medium` instead, because the arm that reports a
+check leaving PASS emits at MEDIUM — at HIGH that whole class of regression returns 0.
+Add `--fail-on medium` below if you want the shell variant to match.
 
 ```bash
 #!/bin/sh
 clawseccheck --monitor --exit-code --data-dir ~/.clawseccheck
 case $? in
-  0) exit 0 ;;                         # nothing changed
+  0) exit 0 ;;                         # nothing at or above the threshold
   3) echo "drift detected"; exit 1 ;;  # a HIGH-or-worse alert was recorded
   2) echo "bad usage"; exit 1 ;;       # argparse: a mistyped flag, not a finding
   *) echo "MONITORING NOT ESTABLISHED"; exit 1 ;;   # rc=1: the run could not record
