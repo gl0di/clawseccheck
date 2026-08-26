@@ -10,7 +10,11 @@ STATUS happens to move. When none does, the edit was neither compared nor disclo
 Measured before the fix, on `fixtures/home_safe`: appending an entry to `plugins.allow` — a
 new trust grant, since that list decides which plugins may load — moved zero of 188 check
 statuses, moved `config_file_sha256`, and produced `No new threats among what was compared`
-with nothing in the un-compared list.
+with nothing in the un-compared list. That particular namespace is now a watched dimension
+(B-659(b)) and so is named rather than noted; the end-to-end fixtures here moved to
+`secrets.providers`, which is still unmodelled. The note is for whatever is unmodelled at the
+time, so its fixture is expected to migrate as coverage grows — and when nothing is left
+unmodelled, these tests failing is the correct way to find that out.
 
 **Why this is a note and not an alert.** The monitoring epic explicitly rejected hashing the
 parsed config as a catch-all ALERT: OpenClaw writes `meta.lastTouchedAt/Version` and
@@ -137,7 +141,6 @@ def _home(tmp_path: Path, mutate=None) -> tuple[Path, Path]:
     body = {
         "gateway": {"bind": "127.0.0.1:8080",
                     "auth": {"mode": "token", "token": "a-very-long-token-of-32-chars!!"}},
-        "plugins": {"allow": ["trentclaw"]},
     }
     if mutate:
         mutate(body)
@@ -147,14 +150,27 @@ def _home(tmp_path: Path, mutate=None) -> tuple[Path, Path]:
     return home, store
 
 
-def test_the_filed_repro_is_now_disclosed(tmp_path, capsys):
-    """`plugins.allow` gaining an entry: zero check statuses move, so before this fix the run
-    printed the all-clear with nothing in the un-compared list."""
+def _configure_secrets(body: dict) -> None:
+    """An edit in a namespace this build models NEITHER as a dimension NOR through a check
+    whose status moves. The original repro used `plugins.allow`, which B-659(b) has since
+    promoted to a real dimension — so it now produces a NAMED alert and this note correctly
+    stays quiet. Keeping the old fixture here would have pinned the note against a case it
+    is no longer for."""
+    body.setdefault("secrets", {})["providers"] = {"env": {"enabled": True}}
+
+
+def test_an_edit_in_an_unmodelled_namespace_is_disclosed(tmp_path, capsys):
+    """The shape the note exists for: the file changed, zero check statuses moved, no
+    dimension moved, and before this the run printed the all-clear with nothing in the
+    un-compared list."""
     home, store = _home(tmp_path)
     main(["--monitor", "--home", str(home), "--data-dir", str(store)])
-    _home(tmp_path, lambda b: b["plugins"]["allow"].append("attacker-plugin"))
+    _home(tmp_path, _configure_secrets)
     main(["--monitor", "--home", str(home), "--data-dir", str(store), "--verbose"])
     out = capsys.readouterr().out
+    assert "change(s) detected" not in out, (
+        "fixture premise: this edit must name nothing, or the note is correctly suppressed "
+        "and this test is measuring the wrong thing\n" + out)
     assert _MARKER in out, out
 
 
@@ -163,7 +179,7 @@ def test_it_does_not_move_the_exit_code(tmp_path, capsys):
     threshold, so if this ever became selectable it would show up here first."""
     home, store = _home(tmp_path)
     main(["--monitor", "--home", str(home), "--data-dir", str(store)])
-    _home(tmp_path, lambda b: b["plugins"]["allow"].append("attacker-plugin"))
+    _home(tmp_path, _configure_secrets)
     rc = main(["--monitor", "--home", str(home), "--data-dir", str(store),
                "--exit-code", "--fail-on", "low"])
     capsys.readouterr()
@@ -175,9 +191,52 @@ def test_it_never_reaches_the_event_journal(tmp_path, capsys):
     record of something the run explicitly declined to conclude."""
     home, store = _home(tmp_path)
     main(["--monitor", "--home", str(home), "--data-dir", str(store)])
-    _home(tmp_path, lambda b: b["plugins"]["allow"].append("attacker-plugin"))
+    _home(tmp_path, _configure_secrets)
     main(["--monitor", "--home", str(home), "--data-dir", str(store)])
     capsys.readouterr()
     journal = store / "events.jsonl"
     body = journal.read_text(encoding="utf-8") if journal.is_file() else ""
     assert _MARKER not in body, body
+
+
+def test_a_run_that_named_a_check_regression_does_not_also_say_it_cannot_tell(tmp_path, capsys):
+    """The self-contradiction this note shipped with for one afternoon.
+
+    `tools.*` is not a watched dimension, so the first version of the suppression — "did any
+    CONFIG DIMENSION alert fire?" — left the note firing beside three named regressions.
+    Measured on `fixtures/home_safe` with `tools.profile` -> "all": the run printed
+
+        No longer passing: Least privilege (elevated tools / allowlists) ...
+        No longer passing: Filesystem-write tool exposure ...
+        No longer passing: File tools workspace-only confinement disabled ...
+
+    and then "this run cannot tell you what it was" — a sentence the same screen refuted
+    three lines above. "Named" has to mean "this run already told the user something about
+    the same edit", which includes a check status moving, not only a dimension.
+    """
+    home, store = tmp_path / "home", tmp_path / "store"
+    home.mkdir()
+
+    def write(body):
+        cfg = home / "openclaw.json"
+        cfg.write_text(json.dumps(body), encoding="utf-8")
+        os.chmod(cfg, 0o600)
+
+    base = {"gateway": {"bind": "127.0.0.1:8080",
+                        "auth": {"mode": "token", "token": "a-very-long-token-of-32-chars!!"}},
+            "tools": {"profile": "minimal", "exec": {"mode": "ask"}}}
+    write(base)
+    main(["--monitor", "--home", str(home), "--data-dir", str(store)])
+    capsys.readouterr()
+
+    widened = json.loads(json.dumps(base))
+    widened["tools"]["profile"] = "all"
+    write(widened)
+    main(["--monitor", "--home", str(home), "--data-dir", str(store), "--verbose"])
+    out = capsys.readouterr().out
+
+    assert "No longer passing" in out, (
+        "fixture premise: this edit must move a check status, or the test proves nothing\n"
+        + out)
+    assert _MARKER not in out, (
+        "the run named regressions and then said it could not tell what changed:\n" + out)
