@@ -853,6 +853,60 @@ Three things about that:
   threshold** — the ranking runs critical/high/medium/low only — so treat the exit code as a
   gate on regressions, not as a complete summary of the run.
 
+**A machine channel for JSON consumers.** `--monitor --json` prints a payload instead of the
+human report (`--exit-code`/`--fail-on` above still gate the exit status the same way; this is
+the same run, a second way to read its result):
+
+```bash
+clawseccheck --monitor --json --data-dir ~/.clawseccheck
+```
+
+```json
+{
+  "alerts": [{"severity": "HIGH", "message": "..."}],
+  "notes": [{"category": "config_blind", "message": "..."}],
+  "baseline_status": "ok",
+  "persisted": true,
+  "fully_compared": false,
+  "score": null,
+  "grade": null,
+  "graded": false,
+  "baseline_reference": "ab12cd34ef56ab78"
+}
+```
+
+- **`alerts`** — exactly what `diff()` reports for this run; each entry is a `(severity,
+  message)` pair, unchanged by this channel existing.
+- **`notes`** — the comparisons this run declined to make (a blind config, a truncated
+  collection, a baseline written by an older build, and so on — see the scoping note above). A
+  note is never an alert: it never appears in `alerts`, and it never reaches `events.jsonl`.
+- **`baseline_status`** — `"absent"` (first run), `"corrupt"` (a prior baseline existed and could
+  not be used), or `"ok"`.
+- **`persisted`** — whether this run's state/journal writes actually landed. See "Do NOT script
+  around the exit code" above `rc=1`/`rc=3` for what happens when they did not.
+- **`fully_compared`** — **true only when there was a usable prior baseline
+  (`baseline_status == "ok"`) AND `notes` is empty.** Neither half alone is enough: `notes` is
+  empty on a first run too (there being nothing yet to compare against is not the same as having
+  compared everything), and a valid prior baseline can still coexist with skipped comparisons.
+  A first run is therefore correctly reported `fully_compared: false` — that is expected, not a
+  fault to fix.
+- **What `fully_compared` will actually be, today: `false`.** Measured on a healthy pair —
+  unchanged home, zero alerts, `baseline_status: "ok"` — it still came back `false`, because a
+  bare `--monitor` run does not earn a grade (see `graded`, and E-077's five-layer rule), so the
+  score comparison emits a note on every run that has a prior baseline. Two further notes are
+  routine on a real machine (host security tools not confirmed for the previous run, and too
+  little recorded activity to judge behaviour). So read `fully_compared` as the strict
+  definition above and **not** as a health indicator: it is a claim about coverage, and this
+  mode's coverage is genuinely partial by construction. To learn whether a given run skipped
+  more than it usually does, compare the `category` values in `notes` between runs rather than
+  waiting for this flag to flip.
+- **`fully_compared` carries no exit-code weight**, deliberately. `--exit-code`/`--fail-on`
+  remain exactly the function of `alerts`/`persisted` described above; a partial run with no
+  alerts still exits 0, and a complete run with a HIGH+ alert still exits 3. A published cron
+  recipe depends on that not changing, and a second exit-code axis was rejected for the same
+  reason a second `--exit-code`-shaped flag was: read `fully_compared`/`notes` from the JSON if
+  the scope of a clean run matters to your automation.
+
 `--data-dir DIR` is worth using in any scripted context. `--monitor` writes three files, and
 before this the score history defaulted independently of the other two — so redirecting
 `--state` and `--events` for a scratch run quietly kept appending to your real history.

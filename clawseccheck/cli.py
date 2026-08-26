@@ -1534,7 +1534,10 @@ _MODE_HONORS = {
     # said so via the no-effect note. Honouring them here is what turns that honest refusal
     # into a working machine channel, without inventing a second flag with different
     # semantics in a different mode.
-    "monitor": frozenset({"judged_bundle", "exit_code", "fail_on"}),
+    # F-176: "json" joined the same way — --monitor --json used to be silently dropped
+    # (the no-effect note fired and no payload was ever built). See the `if args.json:`
+    # branch in the "monitor" mode dispatch for the payload shape.
+    "monitor": frozenset({"judged_bundle", "exit_code", "fail_on", "json"}),
     # B-379: --percentile/--next now resolve the liveTest cap the same way
     # --trend/--monitor already did (see _apply_live_test_cap's call sites below).
     "percentile": frozenset({"judged_bundle"}),
@@ -4479,16 +4482,64 @@ def _main(argv=None) -> int:
             if _witness_err is not None:
                 print(f"Note: the baseline was saved, but its reference value could not be "
                       f"recorded in {args.events}: {_witness_err}", file=sys.stderr)
+        # F-176: one boolean saying whether THIS run made every comparison this build knows
+        # how to make — the machine-channel analogue of the scoped ✅ C-418 gave the human
+        # report. Named `fully_compared`, never `complete`: a first run legitimately has
+        # nothing to compare against yet, and that is correct, not a defect, so the name
+        # must not read as a verdict on the run itself — only as a coverage fact.
+        #
+        # Definition: `base_status == BASELINE_OK and not monitor_notes`. Two narrower
+        # definitions were tried and rejected against the actual note sites above:
+        #
+        # - `not monitor_notes` alone. Rejected: `diff_with_notes` deliberately returns
+        #   `([], [])` — NO notes — on both BASELINE_ABSENT and BASELINE_CORRUPT (its own
+        #   comment: "A note would be a second, vaguer voice for a state that is already
+        #   named precisely"). Using notes alone would call an empty first run, which
+        #   compared nothing, "fully compared" — the exact reassuring lie this field exists
+        #   to stop making.
+        # - `base_status == BASELINE_OK` alone. Rejected: an OK (present, usable) baseline
+        #   can still carry NOTE_CONFIG_BLIND / NOTE_INSPECTION_CAPPED / NOTE_UNDETERMINED /
+        #   NOTE_NO_PRIOR_RECORD notes — from `diff_with_notes` itself, or appended by the
+        #   re-vet loop above — each recording a real comparison this run skipped despite
+        #   having a valid prior baseline to compare against.
+        #
+        # Both conditions together are exactly "there was something to compare against, and
+        # every comparison this build knows how to make against it was actually made".
+        _fully_compared = base_status == BASELINE_OK and not monitor_notes
         # B-271: render AFTER the writes, and tell the renderer whether they landed — the
         # success wording used to be printed before the save was even attempted.
-        _emit(render_monitor(alerts, score, ascii_only,
-                             baseline=base_status == BASELINE_ABSENT,
-                             persisted=persisted,
-                             baseline_corrupt=base_status == BASELINE_CORRUPT,
-                             live_test_skipped=_skip_live_test_persist,
-                             notes=monitor_notes,
-                             verbose=bool(getattr(args, "verbose", False)),
-                             baseline_ref=_reference))
+        if args.json:
+            # F-176: the machine channel. `alerts`/`notes` carry EXACTLY what
+            # `diff_with_notes` (plus the re-vet loop's own appends) produced — no
+            # transformation beyond `_sanitize`, the same redaction the text renderer
+            # already applies to both. A note never appears here as an alert, and neither
+            # array is ever written to `args.events` (only `alerts` is, above).
+            _monitor_payload = {
+                "alerts": [{"severity": lvl, "message": _sanitize(msg)}
+                          for lvl, msg in alerts],
+                "notes": [{"category": cat, "message": _sanitize(msg)}
+                         for cat, msg in monitor_notes],
+                "baseline_status": base_status,
+                "persisted": persisted,
+                "fully_compared": _fully_compared,
+                # Parity with the text renderer's other inputs — free to compute, and a
+                # JSON consumer should not have to shell out to --json (no --monitor) just
+                # to learn the score this run actually saw.
+                "score": score.score if getattr(score, "graded", True) else None,
+                "grade": score.grade if getattr(score, "graded", True) else None,
+                "graded": bool(getattr(score, "graded", True)),
+                "baseline_reference": _reference or None,
+            }
+            _emit(json.dumps(_monitor_payload, ensure_ascii=True, indent=2))
+        else:
+            _emit(render_monitor(alerts, score, ascii_only,
+                                 baseline=base_status == BASELINE_ABSENT,
+                                 persisted=persisted,
+                                 baseline_corrupt=base_status == BASELINE_CORRUPT,
+                                 live_test_skipped=_skip_live_test_persist,
+                                 notes=monitor_notes,
+                                 verbose=bool(getattr(args, "verbose", False)),
+                                 baseline_ref=_reference))
         # --monitor records a score-history point as part of tracking drift, even under
         # --no-history; the conflict is surfaced as a stderr note (B-066), not silently
         # honored, to keep monitor's drift baseline intact. Recorded even on the failure
@@ -4518,6 +4569,17 @@ def _main(argv=None) -> int:
         # established" — a cron job has to be able to tell "drift was found" from "the
         # store is unwritable", and overloading one code would destroy that distinction.
         # So drift exits 3 (see the return below for why not 2).
+        #
+        # F-176: `fully_compared`/`baseline_status` do NOT get their own exit code, and the
+        # decision is deliberate, not an oversight. Rejected: a fifth value (say, "4" for
+        # "ran clean but was partial") — it would need its own opt-in flag to stay backward
+        # compatible (the task forbids a second, competing --exit-code surface), and a bare
+        # `--exit-code`/`--fail-on` invocation that started returning non-zero on an
+        # ordinary partial run (any first run, any run with a momentarily-unreadable
+        # config) would silently change what 0 already promises the published cron recipe.
+        # The JSON payload's `fully_compared`/`baseline_status`/`notes` carry the scoping
+        # instead — the "keep 0, let the JSON carry it" option the task calls safest. The
+        # exit code stays a pure function of `alerts`/`persisted`, exactly as C-419 left it.
         #
         # Off unless asked for, because the previous behaviour is documented as deliberate
         # and a published cron recipe is built on it: users running that recipe under
