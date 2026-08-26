@@ -4256,13 +4256,52 @@ def diff_with_notes(prev: dict | None, curr: dict
             else:
                 _b_new = sorted(set(_c_fired) - set(_p_fired))
                 if _b_new:
-                    alerts.append((
-                        "INFO",
-                        f"{len(_b_new)} behaviour pattern(s) now appear in your agent's "
-                        f"replayable activity and did not last time: "
-                        f"{', '.join(_check_title(c) for c in _b_new)}. That window only "
-                        f"holds the most recent activity, so this may be newly seen rather "
-                        f"than newly done. Run --behavioral for the detail."))
+                    # F-182: severity depends on whether the two runs actually READ the
+                    # whole trajectory, and until now the answer was recorded and never
+                    # consulted. `behavioral_capped` is written into the snapshot on both
+                    # sides; only `curr`'s copy was ever read, and only to raise a note.
+                    #
+                    # The INFO below is correct WHEN the window was capped: the replay holds
+                    # only recent activity, so a detector firing now and not last time can
+                    # mean nothing more than the window sliding over older events, and
+                    # paging on window movement is a false alarm. But when NEITHER run hit
+                    # the cap, both replays were complete, that ambiguity does not exist,
+                    # and "newly fired" means newly DONE — the agent did something it had
+                    # not done before. At INFO that sat below the shipped cron recipe's
+                    # `--fail-on medium`, so the one signal in this whole watch about what
+                    # the agent actually DID, rather than how it is configured, could never
+                    # reach anyone.
+                    #
+                    # `is False`, not falsy: an ABSENT flag (an older baseline, or a run
+                    # that did not record one) must read as capped. Absence is not evidence
+                    # that the replay was complete, and the failure it would cause is the
+                    # loud kind — paging on a window slide.
+                    #
+                    # MEDIUM is the ceiling for the reason the `plugins` arm states: no
+                    # HIGH or CRITICAL ships on fixture evidence alone. AND THIS BRANCH HAS
+                    # ONLY FIXTURE EVIDENCE, by construction — the real machine is capped
+                    # (its "more saved agent activity than can be replayed" note fires
+                    # today), so no run on this fleet can exercise it. Do not read a green
+                    # gate as having observed it.
+                    _complete = (prev.get("behavioral_capped") is False
+                                 and curr.get("behavioral_capped") is False)
+                    _titles = ", ".join(_check_title(c) for c in _b_new)
+                    if _complete:
+                        alerts.append((
+                            "MEDIUM",
+                            f"{len(_b_new)} behaviour pattern(s) appear in what your agent "
+                            f"actually did, and did not last time: {_titles}. Both checks "
+                            f"replayed its activity in full, so this is something new it "
+                            f"did rather than something newly visible. Run --behavioral "
+                            f"for the detail."))
+                    else:
+                        alerts.append((
+                            "INFO",
+                            f"{len(_b_new)} behaviour pattern(s) now appear in your agent's "
+                            f"replayable activity and did not last time: "
+                            f"{_titles}. That window only "
+                            f"holds the most recent activity, so this may be newly seen "
+                            f"rather than newly done. Run --behavioral for the detail."))
 
     # ---- F-174: the OpenClaw installation itself --------------------------------------
     #
