@@ -8,6 +8,8 @@ Pure stdlib, no deps.
 """
 from __future__ import annotations
 
+import json
+
 from dataclasses import dataclass
 
 from .catalog import BY_ID, FAIL, WARN, Finding
@@ -276,6 +278,64 @@ _CRON_EVERY_MS = 21_600_000        # six hours
 # depended on. This only sets the threshold for the job we hand the agent.
 _CRON_FAIL_ON = "medium"
 
+#: How often the low-latency job POLLS. The probe measures 13.1-13.8 s on a real
+#: machine against OpenClaw's 30 s trigger deadline (HEADLESS_TRIGGER_WALL_CLOCK_MS),
+#: so five minutes keeps the duty cycle near one twenty-fifth and leaves better than
+#: 2x headroom on the deadline.
+_CRON_POLL_MS = 300000
+
+#: The trigger script. OpenClaw runs it in an isolated quickjs-wasi sandbox with a
+#: budget of 5 tool calls and a 30 s wall clock. Grounded against the installed dist,
+#: not invented: `runHeadless` resolves to `runCodeModeScriptHeadless`
+#: (server-cron-Cwg2hJro.js:3647), whose own tool description states that Node modules
+#: and require/import are NOT available and that any shell action must go through
+#: `tools.search` / `tools.describe` / `tools.call` (code-mode-D5mNEiYV.js:731). It must
+#: return an object carrying a boolean `fire` (server-cron:3572).
+#:
+#: THE EXIT CODE IS READ OUT OF THE COMMAND'S OWN OUTPUT, not out of a result field.
+#: What `tools.call` hands back for an exec tool is a shape we have NOT pinned, and
+#: guessing a field name is the kind of invention that fails silently. `echo CSC_RC=$?`
+#: puts the answer in stdout, which every exec tool returns in some readable form, and
+#: the script greps the stringified result for it.
+#:
+#: The one guess left is the exec tool's INPUT field (`command`). It is the common
+#: name, and a wrong one throws, which the catch turns into fire:true with an explicit
+#: message -- loud, not silent. That is the whole reason the error paths fire.
+_CRON_TRIGGER_JS = r"""// ClawSecCheck drift probe. Runs on every poll; the agent turn below runs only if
+// this returns fire:true. --probe means the check reports drift WITHOUT recording it,
+// so the turn it wakes still sees the same drift and is the run that records it.
+// This fails OPEN on purpose: anything it cannot determine returns fire:true, because
+// OpenClaw treats a trigger error or timeout as fire:false, and a watch that goes
+// quiet on error is worse than one that occasionally wakes you for nothing.
+const CMD = "clawseccheck --monitor --probe --exit-code --fail-on __FAILON__ --data-dir __DATADIR__ >/dev/null 2>&1; echo CSC_RC=$?";
+try {
+  const hits = await tools.search("run a shell command");
+  if (!hits || !hits.length) {
+    return { fire: true, message: "ClawSecCheck watch: no shell tool is available to this job, so it could not check for drift." };
+  }
+  const raw = JSON.stringify(await tools.call(hits[0].id, { command: CMD }));
+  const m = raw.match(/CSC_RC=(\d+)/);
+  if (!m) {
+    return { fire: true, message: "ClawSecCheck watch: the drift probe returned no exit code, so this run could not tell whether anything changed." };
+  }
+  const rc = Number(m[1]);
+  if (rc === 0) return { fire: false };
+  if (rc === 3) return { fire: true, message: "ClawSecCheck: drift was found and deliberately NOT recorded. The run below reports and records it." };
+  return { fire: true, message: "ClawSecCheck watch: the drift probe exited " + rc + ", which is not a normal result for a probe." };
+} catch (e) {
+  return { fire: true, message: "ClawSecCheck watch: the drift probe could not run (" + String(e) + ")." };
+}"""
+
+
+def _json_str(value: str) -> str:
+    """JSON-encode a string for embedding in the hand-built recipe.
+
+    The trigger script is multi-line JavaScript going into a JSON string field, so it
+    needs real JSON escaping rather than a hand-rolled replace. `json.dumps` on a bare
+    string is exactly that and nothing more.
+    """
+    return json.dumps(value)
+
 
 def render_cron_recipe(ascii_only: bool = False,
                        data_dir: str = "~/.clawseccheck") -> str:
@@ -306,18 +366,64 @@ def render_cron_recipe(ascii_only: bool = False,
         '  "sessionTarget": "isolated"\n'
         '}'
     )
+    # F-181: the low-latency half. `trigger.script` polls headlessly and the agent turn --
+    # the part that costs tokens and sends you a message -- runs only when the probe finds
+    # drift. The interval is the alert latency, so this is what takes it from six hours to
+    # minutes without a resident process and without writing anything into openclaw.json.
+    trigger_script = (_CRON_TRIGGER_JS
+                      .replace("__FAILON__", _CRON_FAIL_ON)
+                      .replace("__DATADIR__", data_dir))
+    fast_job = (
+        '{\n'
+        f'  "name": "{_CRON_JOB_NAME}-now",\n'
+        f'  "schedule": {{ "kind": "every", "everyMs": {_CRON_POLL_MS} }},\n'
+        f'  "trigger": {{ "script": {_json_str(trigger_script)}, "once": false }},\n'
+        '  "payload": {\n'
+        '    "kind": "agentTurn",\n'
+        f'    "message": "Run: clawseccheck --monitor --exit-code --fail-on {_CRON_FAIL_ON} '
+        f'--data-dir {data_dir}\\nThe probe that woke you already saw drift but did NOT '
+        'record it, so this run is the one that reports and records it. Exit 3 means drift: '
+        "report what changed, quoting the tool's own output. Exit 1 means monitoring is NOT "
+        'established — say so, it is more urgent than drift. Exit 0 here means the change '
+        'was resolved between the probe and this run; say that plainly rather than nothing."\n'
+        '  },\n'
+        '  "delivery": { "mode": "announce", "channel": "<your-channel>", "to": "<you>" },\n'
+        '  "sessionTarget": "isolated"\n'
+        '}'
+    )
     lines = [
         "Watch this setup on a schedule",
         "",
         "OpenClaw runs the schedule and delivers the message; this tool only checks. Ask",
-        "your agent to create this job with its own `cron` tool — nothing here is created",
-        "for you:",
+        "your agent to create these jobs with its own `cron` tool — nothing here is created",
+        "for you.",
+        "",
+        "TWO jobs, and you want both. The first tells you quickly; the second is the one",
+        "that cannot fail quietly.",
+        "",
+        "1. Tell me quickly (polls, wakes you only when something changed):",
+        "",
+        fast_job,
+        "",
+        "2. The backstop (runs whatever the poll did or did not do):",
         "",
         job,
         "",
-        "Before you agree to it:",
+        "Why both, and this is the part worth reading:",
         "",
-        "  - It runs every 6 hours. Change everyMs if you want a different interval.",
+        "  - OpenClaw treats a trigger script that errors or times out as 'do not fire'.",
+        "    So if the probe ever fails to run, job 1 goes SILENT rather than loud — and a",
+        "    security watch that goes quiet on error looks exactly like one with nothing to",
+        "    report. The script itself fires on anything it cannot determine, which covers",
+        "    the errors it can see; it cannot cover being killed or timing out. Job 2 is",
+        "    what covers that, which is why it runs unconditionally.",
+        "  - The probe takes about 13 s against OpenClaw's 30 s trigger deadline. That is",
+        "    comfortable on an idle machine and not guaranteed on a loaded one.",
+        "",
+        "Before you agree to them:",
+        "",
+        "  - Job 1 polls every 5 minutes; that interval IS your alert latency. Job 2 runs",
+        "    every 6 hours. Change either everyMs.",
         f"  - It messages you at {_CRON_FAIL_ON} severity and above. Change --fail-on to",
         "    widen or narrow that; changes below the line are still recorded, and --brief",
         "    counts them. Nothing at all is silently discarded.",

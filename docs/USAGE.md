@@ -841,8 +841,31 @@ writing one:
 clawseccheck --cron-recipe
 ```
 
-That prints a native OpenClaw cron job — schedule, the command to run, and what each exit
-code means — for your agent to create with its own `cron` tool. It prints **only**: nothing
+That prints **two** native OpenClaw cron jobs for your agent to create with its own `cron`
+tool, and you want both:
+
+1. **Tell me quickly.** Polls every five minutes using a `trigger.script` — OpenClaw's own
+   mechanism for running a cheap headless check and waking the agent *only* when it returns
+   `{ fire: true }`. The poll runs `--monitor --probe`, which reports drift without
+   recording it, so the agent turn it wakes still sees the same drift and is the run that
+   records it. Your alert latency becomes the poll interval instead of six hours, and no
+   resident process is involved.
+2. **The backstop.** The unconditional six-hourly job, unchanged.
+
+**Why the second one is not optional.** OpenClaw treats a trigger script that errors or
+times out as *do not fire*. So if the poll ever fails to run, job 1 goes **silent** — and a
+security watch that goes quiet on error looks exactly like one with nothing to report. The
+emitted script deliberately fires on anything it cannot determine, which covers the errors
+it can see, but nothing inside a script can cover that script being killed or timing out.
+The unconditional job is what covers it. The probe measures about 13 s against OpenClaw's
+30 s trigger deadline: comfortable on an idle machine, not guaranteed on a loaded one.
+
+The emitted script runs in an isolated QuickJS sandbox with no Node modules and no
+`require`/`import`, so it reaches a shell only through OpenClaw's own tool catalogue, and
+it reads the exit code out of the command's own output rather than out of a result field
+this project has not pinned.
+
+Both jobs print **only**: nothing
 is written, no config is edited, and `openclaw cron` is never invoked, because installing a
 recurring job as a side effect of being asked how to install one is not a decision this tool
 gets to make. OpenClaw supplies the periodicity and the delivery to your phone; this tool
