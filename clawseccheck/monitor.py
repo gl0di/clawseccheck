@@ -1750,6 +1750,11 @@ WATCHED_DIMENSIONS = (
     "config_file_sha256",
     "config_journal_head",
     "config_parse_error",
+    # B-659 made this a READ dimension: the disclosure that the settings file moved
+    # in a namespace this build does not model consults it, so an $include fragment
+    # edit counts too. B-527 landed it store-only; registering it here is what the
+    # C-417 manifest guard requires the moment something reads it back.
+    "config_resolved_sha256",
     "config_written_by",
     "gateway_bind",
     "grade",
@@ -1807,6 +1812,7 @@ _DIMENSION_LABELS = {
     "checks": "the individual check results",
     "config_file_sha256": "the settings file's contents",
     "config_journal_head": "OpenClaw's own record of settings changes",
+    "config_resolved_sha256": "the settings file including any included fragments",
     "config_written_by": "who last wrote your settings",
     "gateway_bind": "the gateway address",
     "host": "the security tools on this machine",
@@ -3626,6 +3632,52 @@ def diff_with_notes(prev: dict | None, curr: dict
                        + (" (now exposed to the network!)" if exposed else "")))
 
     _config_alerts_to = len(alerts)
+
+    # B-659: the settings file changed and nothing this build compares in it did.
+    #
+    # C-418's contract is that no all-clear is printed over a comparison this run skipped.
+    # That scoping is bounded by the same model that produced the blindness: it can only
+    # list a skip the code KNOWS about, and a config namespace nobody ever modelled is
+    # neither compared nor listed. `_CONFIG_DIMENSIONS` is four fields; `plugins.*`,
+    # `tools.*`, `hooks.*`, `cron`, `agents.*`, `browser.*` and `secrets.providers` reach
+    # the monitor only if some check's STATUS happens to move. Measured: appending an entry
+    # to `plugins.allow` — a new trust grant, since that list decides which plugins may
+    # load — moved zero of 188 check statuses, moved `config_file_sha256`, and produced
+    # "No new threats among what was compared" with nothing in the un-compared list.
+    #
+    # THIS IS NOT THE DESIGN THE EPIC REJECTED, and the distinction is the whole reason it
+    # can ship. What was rejected is hashing the parsed config as a catch-all ALERT: OpenClaw
+    # itself writes `meta.lastTouchedAt/Version` and `wizard.lastRun*`, so an alert would
+    # fire on every upgrade with zero security content, and an unnamed "config hash changed"
+    # is unactionable. A NOTE is a different channel with a different contract — it says
+    # only "this run did not compare that", it is collapsed to a count unless the reader
+    # asks, it never reaches the event journal, and it cannot page a scheduled job. The
+    # rejected design's failure mode is alert noise; this one has no alert to make noise
+    # with. Do not "promote" it to an alert without re-reading that rejection.
+    #
+    # Deliberately narrow, because a note on every real change would inflate the
+    # "N things could not be compared" count until nobody reads it:
+    #   * only when a digest actually MOVED — an unchanged file says nothing, which is what
+    #     keeps the false-positive gate (two runs over an unchanged home) silent;
+    #   * only when NO config-derived alert fired. If drift was already named, the change is
+    #     accounted for and this would be the same edit reported twice;
+    #   * never on a blind run, where "the config was not compared" is already said louder.
+    # Both digests are consulted, so an edit inside an $include fragment counts too: the
+    # root digest cannot see one, and until now nothing read the resolved digest at all.
+    if compare_config and not (prev_blind or curr_blind):
+        _named_config_drift = any(
+            _i not in _trajectory_alerts
+            for _i in range(_config_alerts_from, min(_config_alerts_to, len(alerts))))
+        _pf, _cf = prev.get("config_file_sha256"), curr.get("config_file_sha256")
+        _pr, _cr = prev.get("config_resolved_sha256"), curr.get("config_resolved_sha256")
+        _file_moved = bool(_pf) and bool(_cf) and _pf != _cf
+        _resolved_moved = bool(_pr) and bool(_cr) and _pr != _cr
+        if (_file_moved or _resolved_moved) and not _named_config_drift:
+            note(NOTE_UNDETERMINED,
+                 "Your settings file changed since the last check, but nothing this "
+                 "version compares inside it did — so the change is in a part of the file "
+                 "this version does not watch, and this run cannot tell you what it was. "
+                 "Run a full check to see the current verdicts.")
 
     _host_pair = pair_or_note("host", "Security tools running on this machine")
     if _host_pair is not None:

@@ -447,6 +447,7 @@ _CONDITIONAL = {
     # no readable config at all; no config-audit journal on this install; a journal that
     # exists but recorded no write producing the bytes that are there now (a hand edit).
     "config_file_sha256": "absent when the config could not be read",
+    "config_resolved_sha256": "absent when the config could not be read",
     "config_journal_head": "absent when OpenClaw keeps no config-audit journal",
     "config_written_by": "absent when no journaled write produced the current bytes",
     # F-173. All three share one condition — the caller ran the behavioural layer and
