@@ -1956,3 +1956,209 @@ def check_path_safety(ctx: Context) -> Finding:
         "dirs all have tight permissions.",
         "Keep install/PATH directories owner-only (chmod 755 at most, never group/world-writable).",
     )
+
+
+# B351: mirrors OpenClaw's own `normalizeCodeModeRawConfig`
+# (code-mode-D5mNEiYV.js:36-41) rather than approximating it. The boolean shorthand is
+# REAL - `codeMode: true` is a legal config with no `.enabled` key at all - and anything
+# that is neither a boolean nor a record resolves to "absent", which the caller's `or {}`
+# then turns into disabled. Reimplementing this by hand is how a lying-PASS gets written:
+# reading `.enabled` off `True` returns nothing and reports the feature off.
+def _b351_raw_code_mode(value):
+    """The vendor's normalisation: bool -> {"enabled": bool}, record -> itself, else None."""
+    if value is True:
+        return {"enabled": True}
+    if value is False:
+        return {"enabled": False}
+    return value if isinstance(value, dict) else None
+
+
+def _b351_enabled(raw: dict) -> bool:
+    """`readBoolean(raw.enabled, false)` (code-mode-D5mNEiYV.js:50-52).
+
+    Only a real boolean counts. A truthy non-bool (`"true"`, `1`) falls back to the
+    default, so it does NOT enable code mode - matching the vendor exactly instead of
+    guessing, the same discipline B350 applies to gateway.terminal.enabled.
+    """
+    val = raw.get("enabled")
+    return val if isinstance(val, bool) else False
+
+
+# B351: OpenClaw's own agent-id canonicalisation, ported from `normalizeAgentId`
+# (session-key-VWT_xzM9.js:95-101) and verified by EXECUTING the installed dist against
+# these exact inputs rather than by reading the regex. The vendor resolves an agent by
+# normalised ID, not by list position, so a check that loops raw entries reports agents
+# the resolver can never reach.
+_B351_VALID_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$", re.IGNORECASE)
+_B351_INVALID_CHARS_RE = re.compile(r"[^a-z0-9_-]+")
+_B351_DEFAULT_AGENT_ID = "main"
+
+
+def _b351_normalize_agent_id(value) -> str:
+    """`normalizeAgentId` — measured, not inferred.
+
+    Executed against the real dist: ``None``/``""``/``"   "``/``"!!!"`` -> ``"main"``;
+    ``"Main"`` -> ``"main"``; ``"my agent"`` -> ``"my-agent"``; ``"-x-"`` -> ``"x"``; a
+    70-character id truncates to 64. A non-string id is treated as absent, matching the
+    vendor's ``value ?? ""`` for null and the fact that the schema types `id` as a string
+    so a number never loads.
+
+    The consequence that matters: an entry with NO id normalises to ``"main"`` and
+    therefore COLLIDES with an entry explicitly named ``main`` — it is not skipped.
+    """
+    trimmed = value.strip() if isinstance(value, str) else ""
+    if not trimmed:
+        return _B351_DEFAULT_AGENT_ID
+    lowered = trimmed.lower()
+    if _B351_VALID_ID_RE.match(trimmed):
+        return lowered
+    cleaned = _B351_INVALID_CHARS_RE.sub("-", lowered).strip("-")[:64]
+    return cleaned or _B351_DEFAULT_AGENT_ID
+
+
+def _b351_resolvable_agents(agents) -> list:
+    """The entries the vendor's resolver can actually reach, in its own order.
+
+    ``resolveAgentEntry`` is ``listAgentEntries(cfg).find(e => normalizeAgentId(e.id) ===
+    id)`` (agent-scope-config-BxAUeF6t.js:66-69) and ``listAgentIds`` de-dups on the
+    normalised id (:41-53), so for any id the FIRST matching entry wins and every later
+    one is unreachable. Reporting a shadowed entry is a claim about an agent that cannot
+    exist.
+
+    Returns ``[(normalized_id, entry), ...]``.
+    """
+    out = []
+    if not isinstance(agents, list):
+        return out
+    seen = set()
+    for entry in agents:
+        if not isinstance(entry, dict):
+            continue
+        aid = _b351_normalize_agent_id(entry.get("id"))
+        if aid in seen:
+            continue
+        seen.add(aid)
+        out.append((aid, entry))
+    return out
+
+
+def check_code_mode_tool_surface(ctx: Context) -> Finding:
+    """B351 - code mode replaces the model's tool surface with `exec` + `wait`.
+
+    Grounded on the INSTALLED dist (openclaw@2026.7.1-2) and on its RESOLVER, not on the
+    descriptions map. `tools.codeMode` is
+    ``ZodOptional<ZodUnion<[ZodBoolean, ZodObject<{enabled?, runtime?, mode?, ...}>]>>``
+    (plugin-sdk/config-schema.d.ts:3654), with a per-agent twin at
+    ``agents.list[].tools.codeMode`` (:1583). OpenClaw's own description (:331) states
+    that when enabled, "agent runs expose only `exec` and `wait` to the model and hide
+    normal tools behind a QuickJS-WASI catalog bridge".
+
+    WHY THIS IS WORTH A FINDING AT ALL. Code mode is not a hole - the guest runs in
+    QuickJS-WASI and the feature fails closed when the runtime is unavailable (:332). It
+    is reported because it silently changes what every OTHER tool-policy verdict MEANS: a
+    `tools.allow` list, a profile, a deny entry all describe a surface the model no longer
+    sees directly, while `exec` is exposed. An owner reading "tools are restricted to X"
+    should know the model is actually being handed exec-and-wait over a catalog bridge.
+
+    THE LYING-PASS THIS CLOSES, and why the check must walk agents. The resolver merges
+    per-agent OVER global - ``agentRaw ? {...globalRaw, ...agentRaw} : globalRaw``
+    (code-mode-D5mNEiYV.js:42-49) - so the override works in BOTH directions:
+
+      global off + agent `codeMode: true`   -> ON for that agent   <- a global-only read
+                                                                      reports PASS here
+      global on  + agent `codeMode: false`  -> OFF for that agent  <- benign narrowing,
+                                                                      must not fire
+      global on  + agent `{timeoutMs: 100}` -> still ON (the agent object carries no
+                                               `enabled`, so global's survives the spread)
+
+    Reading only `tools.codeMode` would therefore report a clean surface while a named
+    agent runs in code mode. Measured against the schema: `agents.defaults` carries no
+    `tools.codeMode`, so there are exactly TWO layers and no third to miss.
+
+    PASS    - resolved off everywhere: globally, and for every configured agent.
+    WARN    - resolved on globally, or on for at least one named agent (which one is
+              named in the detail).
+    UNKNOWN - the config was not read, or is present and unparseable.
+
+    Never FAILs: this is a capability disclosure about a sandboxed, fail-closed vendor
+    feature, not a compromise. A FAIL tier would need its own independent C-135 pass.
+
+    WHY THE VERDICT SAYS "QuickJS code mode" AND NOT "code mode". An independent pass
+    found a SECOND, unrelated path to the same user-visible property:
+    ``plugins.entries.<name>.config.appServer.codeModeOnly`` (config-fy-53tqM.js:122,
+    read at :302) flows through to ``"features.code_mode_only": true`` for Codex
+    app-server runs (run-attempt-CXZNKJ6y.js:2863 ->
+    thread-lifecycle-DSMv62L1.js:2339,2346). That is a DIFFERENT engine - Codex native,
+    not the QuickJS exec/wait bridge - so it is outside ``resolveCodeModeConfig`` and
+    outside this check. Nothing in ``checks/`` reads it today. The honest response is to
+    narrow the CLAIM rather than widen the check on ungrounded ground: an unqualified
+    "code mode is off" is what a reader would believe, and it would be wrong for that
+    config. Widening is a separate change with its own C-135 pass.
+
+    AGENT IDENTITY IS THE VENDOR'S, NOT LIST POSITION. See
+    ``_b351_resolvable_agents``: OpenClaw resolves an agent by NORMALISED id and takes
+    the first entry that matches, so two entries whose ids normalise the same (``"Main"``
+    and ``"main"``; an entry with no id, which normalises to ``"main"`` and collides with
+    one) are ONE agent, and the later entry is unreachable. Looping raw list entries
+    reported an agent the resolver can never produce - a false WARN, found by an
+    independent adversarial pass and fixed here.
+    """
+    unreadable = _config_unreadable("B351", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B351",
+            UNKNOWN,
+            "No config was read, so whether code mode replaces the model's tool surface "
+            "could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
+    global_raw = _b351_raw_code_mode(dig(cfg, "tools.codeMode")) or {}
+    global_on = _b351_enabled(global_raw)
+
+    on_agents: list[str] = []
+    off_agents: list[str] = []
+    for aid, agent in _b351_resolvable_agents(dig(cfg, "agents.list")):
+        agent_raw = _b351_raw_code_mode(dig(agent, "tools.codeMode"))
+        merged = {**global_raw, **agent_raw} if agent_raw is not None else global_raw
+        label = f"agents.list[{aid}]"
+        (on_agents if _b351_enabled(merged) else off_agents).append(label)
+
+    if not global_on and not on_agents:
+        return _finding(
+            "B351",
+            PASS,
+            "QuickJS code mode is off, so the model sees the ordinary tool surface "
+            "rather than exec/wait over a catalog bridge.",
+            "Keep it off unless you specifically want the exec/wait surface; it is off "
+            "by default.",
+        )
+
+    if global_on:
+        who = "for every agent" if not off_agents else (
+            f"globally, and narrowed off for {', '.join(sorted(off_agents)[:4])}"
+        )
+        where = f"tools.codeMode is on {who}"
+    else:
+        where = (
+            "tools.codeMode is off globally but ON for "
+            f"{', '.join(sorted(on_agents)[:4])}"
+        )
+    return _finding(
+        "B351",
+        WARN,
+        f"{where}. Those agent runs expose only `exec` and `wait` to the model and hide "
+        "the normal tools behind a QuickJS-WASI catalog bridge, so any tools.allow / "
+        "tools.profile / tools.deny policy describes a surface the model does not see "
+        "directly.",
+        "If code mode is intentional, read the tool-policy findings in this report as "
+        "describing the CATALOG rather than what the model is handed, and confirm the "
+        "exec surface is governed by tools.exec.*. If it is not intentional, set "
+        "tools.codeMode.enabled to false (and check each agents.list entry, which can "
+        "turn it back on independently of the global setting).",
+        evidence=sorted(on_agents)[:8] or None,
+    )

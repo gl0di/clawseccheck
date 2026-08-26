@@ -2357,6 +2357,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B351 - Code mode replaces the model's tool surface with exec/wait
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Tool Surface
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Code mode replaces the model's tool surface with exec/wait
+- Remediation:
+  - none
+
 ### B350 - Gateway operator terminal (browser/mobile shell) enabled
 
 - Severity: HIGH

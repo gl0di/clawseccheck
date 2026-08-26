@@ -116,6 +116,7 @@ skills.workshop.approvalPolicy
 skills.workshop.autonomous.enabled
 tools.allow
 tools.alsoAllow
+tools.codeMode
 tools.deny
 tools.elevated.allowFrom
 tools.elevated.enabled
@@ -159,6 +160,7 @@ relative:sandbox.docker.dangerouslyAllowReservedContainerTargets
 relative:subagents
 relative:subagents.allowAgents
 relative:tools.allow
+relative:tools.codeMode
 relative:tools.deny
 relative:tools.fs.workspaceOnly
 relative:tools.profile

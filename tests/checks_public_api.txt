@@ -66,6 +66,10 @@ _b182_audits_this_users_own_home
 _b182_candidate_stores
 _b182_readable_by_others
 _b184_is_canonical
+_b351_enabled
+_b351_normalize_agent_id
+_b351_raw_code_mode
+_b351_resolvable_agents
 _b58_hidden_segments
 _b62_actual_families
 _b62_classify_category
@@ -164,6 +168,7 @@ check_clawhub_registry_provenance
 check_clawhub_token_store
 check_clickfix_setup_section
 check_cloud_metadata_credential_fetch
+check_code_mode_tool_surface
 check_codex_project_trust
 check_compiled_tool_poisoning
 check_conditional_sleeper_trigger

@@ -231,6 +231,11 @@ from ._agents import (
 )
 
 from ._capability import (
+    _b351_normalize_agent_id,
+    _b351_resolvable_agents,
+    _b351_enabled,
+    _b351_raw_code_mode,
+    check_code_mode_tool_surface,
     _AUTO_GATE_BLAST,
     _B31_BYPASS_CANDIDATES,
     _B31_WRITE_CLASS,
@@ -1350,6 +1355,9 @@ CHECKS = [
     # B350 — the gateway operator terminal: a PTY-backed shell carrying the gateway
     # process environment, served to Control UI and mobile clients. WARN-only.
     check_gateway_operator_terminal,
+    # B351 — code mode: the model is handed exec+wait over a catalog bridge instead of
+    # the ordinary tool surface. Walks agents.list, which can enable it independently.
+    check_code_mode_tool_surface,
     check_subagent_spawn_limits,
     check_cachetrace_redaction,
     # B-281/B-282 (ENV-1/ENV-6): is the audited file the one the agent loads, and is a
