@@ -171,6 +171,15 @@ _EMIT_TEE: list[str] | None = None
 _RELAYABLE_CARD_CHARS = 8000
 
 
+# B-604: the compact pointer, named once so its length can be RESERVED from the card's
+# budget instead of being discovered after the fact. It is appended after
+# render_dashboard has already enforced the budget, so anything not reserved is simply
+# over the cap: measured on a real config, a 4,066-char card plus these 55 characters
+# emitted 4,121 against a documented 4,096. Fixed string on purpose (see below) —
+# which is exactly what makes reserving it possible.
+_COMPACT_NEXT_POINTER = "\nWhat you can do next: run --next for the ranked list.\n"
+
+
 def _with_next_actions(card: str, findings, score, ascii_only: bool,
                        compact: bool = False) -> str:
     """B-604: the Dashboard was the one verdict surface that offered the user nothing.
@@ -211,8 +220,7 @@ def _with_next_actions(card: str, findings, score, ascii_only: bool,
     if not actions:
         return card
     if compact:
-        return (card.rstrip("\n")
-                + "\nWhat you can do next: run --next for the ranked list.\n")
+        return card.rstrip("\n") + _COMPACT_NEXT_POINTER
     return card.rstrip("\n") + "\n\n" + render_next_actions(actions, ascii_only)
 
 
@@ -4141,7 +4149,10 @@ def _main(argv=None) -> int:
                 findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
                 risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
                 adjudication=adjudication_phase, compact=args.compact,
-                pdf_path=pdf_written),
+                pdf_path=pdf_written,
+                # Reserve what _with_next_actions is about to append, so the card's own
+                # severity-ordered ladder absorbs it rather than the cap being exceeded.
+                compact_reserve=len(_COMPACT_NEXT_POINTER) if args.compact else 0),
             findings, score, ascii_only, compact=args.compact)
         _emit_paste_instruction(pdf_written, len(_card))
         _emit(_card)

@@ -3372,8 +3372,20 @@ def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
     return lines
 
 
-def _finalize_compact_dashboard(assemble, *, compact: bool, ascii_only: bool) -> str:
+def _finalize_compact_dashboard(assemble, *, compact: bool, ascii_only: bool,
+                                reserve: int = 0) -> str:
     """B-405: render_dashboard's hard budget enforcement.
+
+    *reserve* is how many characters the CALLER will append to this card after the
+    budget has been enforced. It exists because enforcing here and appending there is
+    not enforcement at all: measured on a real config, the card came back at 4,066 —
+    inside the 4,096 budget — and cli.py's fixed 55-character next-actions pointer took
+    the emitted result to 4,121. B-604 already collapsed that block to a one-liner for
+    this reason and its own docstring names the principle it still missed: "a budget
+    that depends on the config is not a budget". Subtracting the caller's known,
+    fixed addition makes the ladder do the reduction — severity-ordered, LOW detail
+    first, CRITICAL never — instead of the tail being cut blind or the cap being
+    exceeded.
 
     `assemble(why_drop_severities)` builds the full (non-asciified) card for a given
     drop set; this wrapper renders it, applies `_asciify` when requested (the length
@@ -3391,14 +3403,15 @@ def _finalize_compact_dashboard(assemble, *, compact: bool, ascii_only: bool) ->
         out = assemble(why_drop_severities)
         return _asciify(out) if ascii_only else out
 
+    budget = max(_COMPACT_CHAR_BUDGET - max(reserve, 0), 0)
     result = _final()
-    if not compact or len(result) <= _COMPACT_CHAR_BUDGET:
+    if not compact or len(result) <= budget:
         return result
     for drop_set in _COMPACT_WHY_DROP_LEVELS:
         result = _final(drop_set)
-        if len(result) <= _COMPACT_CHAR_BUDGET:
+        if len(result) <= budget:
             return result
-    return _hard_truncate_compact(result, _COMPACT_CHAR_BUDGET)
+    return _hard_truncate_compact(result, budget)
 
 
 # ── C-373: the default chat card is an OVERVIEW, not the full findings dump ──────────
@@ -3529,7 +3542,8 @@ def _finalize_card(assemble_with_limit, *, ascii_only: bool) -> str:
 def render_dashboard(findings: list[Finding], score: ScoreResult, *,
                      ascii_only: bool = False, ctx=None, full: bool = False,
                      risk=None, plugin_sweep=None, behavioral=None,
-                     adjudication=None, compact: bool = False, pdf_path=None) -> str:
+                     adjudication=None, compact: bool = False, pdf_path=None,
+                     compact_reserve: int = 0) -> str:
     """Deterministic chat Dashboard card — Sections 1-2 of SKILL.md Step 3, pasted verbatim,
     plus an optional Section 3 (B-356) with per-skill vet verdicts, plus (F-153) the rest
     of --full's pipeline when `full=True`.
@@ -3803,7 +3817,8 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
 
         return out + footer_block
 
-    return _finalize_compact_dashboard(_assemble, compact=compact, ascii_only=ascii_only)
+    return _finalize_compact_dashboard(_assemble, compact=compact, ascii_only=ascii_only,
+                                       reserve=compact_reserve)
 
 
 def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = False) -> str:
