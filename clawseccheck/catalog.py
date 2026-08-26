@@ -2861,6 +2861,19 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B350: the gateway operator terminal — a PTY-backed shell with the gateway process
+    # environment, served to Control UI and mobile. Grounded on the installed dist
+    # (config-schema.d.ts:4499-4503, description :129-131), default false. WARN-only:
+    # enabling it is the owner's explicit act, so it is a capability disclosure, not a
+    # compromise. A FAIL tier would need its own C-135 pass.
+    CheckMeta(
+        "B350",
+        "Gateway operator terminal (browser/mobile shell) enabled",
+        HIGH,
+        "hardening",
+        "Zero Trust / Gateway",
+        surface="gateway",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

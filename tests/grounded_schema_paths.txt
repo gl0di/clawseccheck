@@ -72,6 +72,8 @@ gateway.nodes.denyCommands
 gateway.nodes.pairing.autoApproveCidrs
 gateway.port
 gateway.tailscale.mode
+gateway.terminal.enabled
+gateway.terminal.shell
 gateway.tls.enabled
 gateway.token
 gateway.tools.allow

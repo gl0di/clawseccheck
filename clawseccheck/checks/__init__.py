@@ -295,6 +295,7 @@ from ._config import (
     check_dangerous_overrides,
     check_effective_bind,
     check_gateway,
+    check_gateway_operator_terminal,
     check_gateway_rate_limit,
     check_hook_template_content,
     check_hooks_enable_toggles,
@@ -1346,6 +1347,9 @@ CHECKS = [
     check_session_approval_policy,
     check_gateway_rate_limit,
     check_effective_bind,  # B340 — corroborate declared gateway.bind against the actual listening socket (F-156)
+    # B350 — the gateway operator terminal: a PTY-backed shell carrying the gateway
+    # process environment, served to Control UI and mobile clients. WARN-only.
+    check_gateway_operator_terminal,
     check_subagent_spawn_limits,
     check_cachetrace_redaction,
     # B-281/B-282 (ENV-1/ENV-6): is the audited file the one the agent loads, and is a

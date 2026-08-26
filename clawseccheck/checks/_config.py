@@ -4214,3 +4214,189 @@ def check_env_vars_path_override(ctx: Context) -> Finding:
         "Keep it that way; if PATH customization is genuinely needed, prefer scoping "
         "it narrowly (e.g. a per-tool wrapper) and reviewing it periodically.",
     )
+
+
+# B350: a sentinel, because `gateway` being ABSENT and `gateway` being present-but-null
+# are different facts and `.get("gateway")` collapses them to the same None.
+_B350_ABSENT = object()
+
+
+def check_gateway_operator_terminal(ctx: Context) -> Finding:
+    """B350 - the operator terminal: a PTY-backed shell served to Control UI and mobile.
+
+    Grounded against the INSTALLED dist (openclaw@2026.7.1-2), not the recon, and
+    independently re-verified against the RUNTIME rather than the schema alone.
+
+    SHAPE. ``gateway.terminal`` is ``{enabled?: boolean, shell?: string,
+    detachedSessionTimeoutSeconds?: number}`` - object only, ``$strict``, with no boolean
+    shorthand (plugin-sdk/config-schema.d.ts:4499-4503, and the runtime zod builder at
+    zod-schema-O9ml_nmo.js:1365-1369, which wraps no ``union([boolean(), object()])``).
+    That is the OPPOSITE of ``tools.codeMode``, which really is boolean-or-object, so the
+    two must not be read with the same helper.
+
+    DEFAULT. There is no zod ``.default(false)`` - ``enabled`` is a bare
+    ``boolean().optional()``. The false default is FUNCTIONAL, enforced by strict equality
+    at three independent runtime sites: launch-BmPwk1y9.js:103, launch-BmPwk1y9.js:154 and
+    server.impl-qYPVZMND.js:1002 all test ``=== true``. That is why this check tests
+    ``is not True`` rather than truthiness: it matches the vendor's own gate exactly, so a
+    truthy non-bool is not "on" here for the same reason it is not "on" there.
+
+    NO SECOND LOCATION. ``terminal`` occurs exactly ONCE in the 4,896-line declaration,
+    under top-level ``gateway`` - absent from ``agents``, ``agents.list``,
+    ``agents.profiles`` and ``presets``, and read at runtime from the single source
+    ``config.gateway?.terminal`` (launch-BmPwk1y9.js:88-107). The contrast is the evidence
+    that this is deliberate rather than an omission: ``codeMode`` IS defined both
+    top-level and per-agent, so the schema author wires per-agent overrides where they are
+    intended and did not here.
+
+    ``.shell`` pins the interpreter; unset, the runtime resolves ``$SHELL`` as a login
+    shell (``-l``), falling back to ``cmd.exe`` on win32 and to ``/bin/bash -l`` when
+    ``$SHELL`` is itself unset (launch-BmPwk1y9.js:9-30).
+
+    PASS - ``gateway.terminal.enabled`` is absent or not true. That is the shipped
+           default, and it is what every config on this machine's fleet carries today.
+    WARN - it is true. The detail names the REACH: whether the gateway is proven
+           reachable beyond loopback, proven loopback-only, or not resolvable from a
+           config file alone.
+
+    WHY THE VERDICT DOES NOT BRANCH ON THE BIND. ``_gateway_remote_exposure_reason``
+    returns ``None`` for BOTH "proven loopback" and "no claim possible" (the ``auto``
+    profile, and ``custom`` with an unresolvable host - see its docstring, which is
+    deliberate and correct). Deciding WHETHER to report on that value would therefore
+    turn an unresolvable bind into a silent PASS, which is the fail-open shape this
+    project keeps finding. Turning the terminal on is the owner's explicit act and is
+    reportable on its own; the bind only changes how urgent it is, so it belongs in the
+    detail. The reach sentence is built from ``parse_bind_host``/``LOOPBACK`` first so
+    that a proven-loopback bind is described as such rather than lumped in with the
+    unresolvable case.
+
+    WHY THE SANDBOX MITIGATION IS NAMED RATHER THAN COMPUTED. The refusal is real and
+    verified in code, not just prose: ``resolveTerminalLaunch`` returns
+    ``{ok: false, block: {kind: "sandboxed"}}`` when
+    ``resolveSandboxConfigForAgent(config, agentId).mode === "all"``
+    (launch-BmPwk1y9.js:55-62), whose own comment calls it fail-closed. But it is
+    PER-AGENT and resolved at launch, so claiming it statically means proving EVERY agent
+    is fully sandboxed - including agents added after this audit ran - and a wrong proof
+    in either direction is worse than naming the condition. The fix text names it so the
+    owner can check the one thing this reader cannot.
+
+    DECLARED LIMITS, both in the over-reporting direction, so neither can hide a real
+    exposure. (1) A config with ``enabled: true`` whose only reachable agents all run
+    ``sandbox.mode: "all"`` still WARNs here, per the paragraph above. (2) There is a
+    transient state this reader cannot see at all: ``createTerminalLaunchPolicy`` keeps
+    ``terminalDisabledUntilRestart`` / ``terminalDisabledUntilCommit`` windows
+    (launch-BmPwk1y9.js:80-179) in which a snapshot showing ``enabled: true`` is
+    functionally disabled until the gateway restarts or commits. A single static config
+    snapshot has no way to observe that, and the honest consequence is a WARN that is
+    momentarily early rather than a silence that is wrong.
+
+    Never FAILs. This is a configured-capability disclosure, not a proven compromise; a
+    FAIL tier would need its own independent C-135 pass against real configs first.
+
+    WHY ``.shell`` IS INTERPOLATED VERBATIM (§8). It is an absolute path and it reaches a
+    report a user may paste in public, so the question is fair - but ``_detail_path``'s
+    contract already answers it: a scan-root path must be made relative, while "a path the
+    CONFIG itself declares in absolute form is deliberately left verbatim: that string is a
+    function of the audited subject, so it belongs in the finding's identity (and in the
+    text, since it is what the owner has to go fix)". ``gateway.terminal.shell`` is exactly
+    that case. It is also not credential-bearing - unlike B80's gateway token, where only
+    the LENGTH is read - so there is nothing here to route through ``logsafe.redact``.
+    Measured: a ``.shell`` carrying newlines, ANSI escapes, 5,000 characters, non-ASCII, or
+    a non-string type produces no raise and puts no newline or escape into the detail.
+    """
+    unreadable = _config_unreadable("B350", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    # The fail-open branch this check would otherwise have had, and did have when first
+    # written. `_config_unreadable` only covers "openclaw.json present and unparseable";
+    # on a host with NO openclaw.json at all, `config_parse_error` is False and
+    # `ctx.config` is `{}` (see `_surface_absent`'s docstring), so falling straight
+    # through would report "the terminal is not enabled" about a config nobody read. A
+    # malformed `gateway` value (null, a list, a number) is the same hazard by another
+    # route -- every dig() below would silently degrade to its default. Both take the
+    # B32 precedent: UNKNOWN, with not_applicable set ONLY when the config locus was
+    # read completely and is genuinely empty.
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B350",
+            UNKNOWN,
+            "No config was read, so whether the operator terminal is enabled could not "
+            "be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    gw = cfg.get("gateway", _B350_ABSENT)
+    if gw is _B350_ABSENT:
+        # A config that WAS read and simply carries no gateway block. The terminal
+        # cannot be on: `enabled` defaults to false and the vendor gates the feature on
+        # `gateway?.terminal?.enabled === true`, which an absent block cannot satisfy.
+        # This is a real PASS, not an absence of knowledge -- and saying otherwise would
+        # be inconsistent with `{"gateway": {}}`, which reaches the ordinary PASS below
+        # while encoding the identical fact. Measured: 72 of the 651 fixture homes are
+        # this shape, so the distinction is not hypothetical.
+        return _finding(
+            "B350",
+            PASS,
+            "No gateway block is configured, so no operator terminal is served.",
+            "Nothing to do; if you later add a gateway block, leave "
+            "gateway.terminal.enabled off unless you need an operator shell.",
+        )
+    if not isinstance(gw, dict):
+        # Present but malformed (null, a list, a number, a bare string). Every dig()
+        # below would degrade to its default without raising, which is indistinguishable
+        # from "terminal simply not configured" -- a verdict over ground never read.
+        return _finding(
+            "B350",
+            UNKNOWN,
+            f"The gateway config is present but is not an object (found "
+            f"{type(gw).__name__}), so whether the operator terminal is enabled could "
+            f"not be determined.",
+            "Fix the gateway block in openclaw.json so it is a JSON object, then re-run "
+            "the audit.",
+        )
+    enabled = dig(cfg, "gateway.terminal.enabled")
+    if enabled is not True:
+        return _finding(
+            "B350",
+            PASS,
+            "The gateway operator terminal is not enabled (gateway.terminal.enabled is "
+            "absent or not true), so no browser- or mobile-reachable shell is served.",
+            "Keep it off unless you specifically need an operator shell; it is off by "
+            "default.",
+        )
+
+    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    if bind_host in LOOPBACK:
+        reach = (
+            "the gateway is bound to loopback, so the shell is reachable only from this "
+            "host"
+        )
+    else:
+        reason = _gateway_remote_exposure_reason(cfg)
+        if reason:
+            reach = f"the gateway is reachable beyond loopback ({reason}), so the shell is too"
+        else:
+            reach = (
+                "the gateway bind cannot be resolved from config alone, so whether the "
+                "shell is reachable off-host is not established here"
+            )
+
+    shell = dig(cfg, "gateway.terminal.shell")
+    which = (
+        f"it launches the pinned interpreter {shell!r}"
+        if isinstance(shell, str) and shell.strip()
+        else "it launches the host login shell ($SHELL), since gateway.terminal.shell is unset"
+    )
+    return _finding(
+        "B350",
+        WARN,
+        f"gateway.terminal.enabled is true: OpenClaw serves a PTY-backed shell running "
+        f"with the gateway process environment to Control UI and mobile clients, and "
+        f"{which}. Right now {reach}.",
+        "Set gateway.terminal.enabled to false unless an operator shell is genuinely "
+        "needed. If it is needed, keep the gateway on loopback (or behind your own "
+        "authenticated tunnel) and confirm the agents it can target run with "
+        "sandbox.mode 'all' - OpenClaw refuses the terminal for fully-sandboxed agents, "
+        "which is the one mitigation this audit cannot verify for you.",
+    )
