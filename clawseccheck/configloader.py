@@ -305,7 +305,9 @@ def load_openclaw_config(path: Path, *, root_byte_limit: int,
 
     Root only: ``$include`` fragments are merged into the returned dict but are not covered
     by this digest, so an unchanged digest means "the root file is unchanged", never "the
-    config is unchanged". Widening it to cover the fragments is tracked separately.
+    config is unchanged". The fragments are covered instead by monitor.py's
+    ``_config_resolved_sha256``, which hashes the RESOLVED dict this load returns, so
+    no second read of the fragments happens and no path of theirs is recorded.
     """
     config_dir = path.parent.resolve()
     try:

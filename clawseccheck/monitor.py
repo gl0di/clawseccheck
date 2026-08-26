@@ -2076,8 +2076,23 @@ def _config_resolved_digest(ctx) -> str:
     key-order-only edit to the ROOT file can leave this digest unchanged (parsing already
     normalized that away), which is exactly what the root byte digest still covers.
 
-    Returns ``""`` when there is nothing to hash (config never loaded), matching
-    ``_config_file_digest``'s convention so both digests are absent together on a blind run.
+    Returns ``""`` when there is nothing to hash — but note that ``ctx.config`` defaults
+    to ``{}``, which IS a dict, so "nothing to hash" is narrower than "no config was read".
+    An earlier version of this line claimed both digests are absent together on a blind run;
+    that was false as written, and measured: on a home with no ``openclaw.json`` and no prior
+    baseline the caller stored ``sha256("{}")`` here while ``config_file_sha256`` was absent.
+    The caller now gates this write on ``ctx.config_found`` and the two really are absent
+    together — the invariant holds at the CALL SITE, not in this function.
+
+    WHAT THIS DIGEST IS NOT: the identity of the files that produced the config. Two
+    ``$include`` targets with identical contents, or a fragment whose keys duplicate values
+    already present, resolve to the same dict and so to the same digest. That is deliberate
+    — a drift monitor asks "did the configuration my agent runs under change", and the
+    answer there is no. Recording which FILE was authoritative is a different question
+    (B-527's work-item 1, a per-fragment ``(path, sha256)`` set) and was not built: it needs
+    a ``configloader`` change, it would put fragment paths — which can carry a username or a
+    private repo name — into a field this project keeps free of them, and nothing in the
+    threat model turns on source identity once the resolved values are covered.
     """
     config = getattr(ctx, "config", None)
     if not isinstance(config, dict):
@@ -2276,7 +2291,18 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         # task exists for on its own (an $include fragment edit moves it even when the
         # root file's bytes do not), and a later phase can wire a comparison in once one
         # is wanted, the same staged shape C-417 used for config_file_sha256 itself.
-        resolved_digest = _config_resolved_digest(ctx)
+        # B-527 follow-up: gated on a config having actually been READ, not merely on the
+        # helper returning something. `collector.Context.config` defaults to `{}` — a dict —
+        # so on a home with no openclaw.json and no prior baseline this arm runs (that state
+        # is not `config_missing_blind`, which needs `prev_had_config`) and stored
+        # sha256("{}") beside an ABSENT config_file_sha256. A digest for a file nobody read
+        # is the clean-verdict-about-unread-ground shape B-269 exists to prevent, and it
+        # became load-bearing the moment B-659 started comparing this field: the empty-config
+        # digest would later "move" to a real one and be reported as a change the run could
+        # not explain. The gate belongs here rather than in the helper, whose `{}` handling
+        # is correct for a config file that genuinely contains `{}`.
+        resolved_digest = (_config_resolved_digest(ctx)
+                           if getattr(ctx, "config_found", False) else "")
         if resolved_digest:
             snap["config_resolved_sha256"] = resolved_digest
         # F-170: OpenClaw's own config-write journal, captured HERE rather than compared
