@@ -58,7 +58,7 @@ def test_the_snapshot_carries_all_three_new_fields():
     snap = _snap(FIXTURES / "home_safe")
     # The literal is deliberate: a schema bump should cost a conscious edit here, not slide
     # through because the assertion reads the constant it is meant to be pinning.
-    assert snap["version"] == SNAPSHOT_VERSION == 8
+    assert snap["version"] == SNAPSHOT_VERSION == 9
     for key in _NEW_KEYS:
         assert key in snap, f"{key} missing from a clean-run snapshot: {sorted(snap)}"
 
@@ -441,6 +441,11 @@ def test_the_unconditional_keys_are_written_on_every_run():
 # escape would let a genuinely missing key hide behind it.
 _CONDITIONAL = {
     "host": "only on a supported host",
+    # F-179: the host's own startup/scheduling surface. Absent whenever the shell did not
+    # hand `snapshot()` a scan — which includes every direct `snapshot()` call in this
+    # suite, since the parameter defaults to None. Same shape as the three behavioural
+    # keys below: the shell owns the discovery, so the dimension cannot be unconditional.
+    "host_persist": "absent when the caller did not run the host-persistence scan",
     "config_baseline": "only on a blind run (_degrade_snapshot)",
     "config_parse_error": "only on a blind run (_degrade_snapshot)",
     # F-170. Each absent for a DIFFERENT reason, which is why they are named separately:

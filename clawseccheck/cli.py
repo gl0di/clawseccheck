@@ -130,6 +130,8 @@ from .behavioral import analyze as _behavioral_analyze
 from .behavioral import explicit_path_problem as _behavioral_path_problem
 from .behavioral import grade_cap_signal as _behavioral_grade_cap_signal
 from .behavioral import render_behavioral_analysis
+from .hostpersist import scan as _hostpersist_scan
+from .hostpersist import to_snapshot as _hostpersist_to_snapshot
 from .openclawdist import describe_install as _describe_install
 from .skillprovenance import read_provenance as _read_provenance
 from .skillprovenance import workspace_roots as _workspace_roots
@@ -4310,11 +4312,38 @@ def _main(argv=None) -> int:
             _provenance_snap = _scan.as_dimension() if _scan.present else None
         except Exception:  # noqa: BLE001 — same containment
             _provenance_snap = None
+        # F-179: the host's own startup and scheduling surface. Same containment as the two
+        # above — it walks `/etc` and `sys.path`, and a permission surprise on an unusual
+        # box must leave the dimension absent rather than take the watch down.
+        #
+        # THE HOME HERE IS THE USER'S, NOT `ctx.home`. This looks like an inconsistency with
+        # every other collector in this file and it is deliberate — `ctx.home` is the
+        # OpenClaw state directory (`~/.openclaw`), while this surface lives in the account's
+        # home (`~/.config/systemd/user`, `~/.bashrc`). Passing `ctx.home` was the first
+        # version and it FAILED SILENTLY: the scan looked for `~/.openclaw/.config/...`,
+        # found nothing there, and returned 23 entries instead of 36 with no error — every
+        # home-rooted family missing, the two system-wide ones intact, and a plausible
+        # number on the screen. Caught by comparing the two counts before shipping.
+        #
+        # `os.path.expanduser` rather than `Path.home()`: on POSIX it consults $HOME first,
+        # so a test can redirect it, which `Path.home()` does not reliably allow. `--home`
+        # deliberately does NOT move this scan; it names a different directory.
+        #
+        # Cost measured on the real machine: 63 ms cold, 5.2 ms warm, for 34 entries across
+        # three families, against a ~12.9 s monitor run. Both figures are stated because the
+        # cold one is what a 6-hourly cron job actually pays.
+        _host_persist_snap = None
+        try:
+            _hp_scan = _hostpersist_scan(os.path.expanduser("~"))
+            _host_persist_snap = _hostpersist_to_snapshot(_hp_scan)
+        except Exception:  # noqa: BLE001 — same containment
+            _host_persist_snap = None
         # B-269: snapshot() needs the previous state so that a run which could not read
         # openclaw.json preserves the last known-good config baseline instead of writing
         # the collapsed (empty) view over it — see monitor._degrade_snapshot.
         snap = snapshot(ctx, findings, score, prev=prev, behavioral=_behavioral_snap,
-                        install=_install_snap, provenance=_provenance_snap)
+                        install=_install_snap, provenance=_provenance_snap,
+                        host_persist=_host_persist_snap)
         # C-418: `notes` records every comparison this run DECLINED to make. They are
         # deliberately NOT passed to record_events below — a note is not an event, and a
         # tamper-evident timeline of what changed must not fill with entries about what
