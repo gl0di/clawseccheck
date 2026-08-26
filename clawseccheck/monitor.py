@@ -1787,6 +1787,65 @@ WATCHED_DIMENSIONS = (
 )
 
 
+# C-441: what to CALL a watched dimension when the user is told one could not be compared.
+#
+# The note that reports a baseline predating a comparison used to say only "this run cannot
+# say which comparisons it was able to make", which tells the reader nothing they can act on
+# and — on the very upgrade path it exists for — was the least informative sentence the
+# monitor emitted. The names are derivable; only the vocabulary was missing.
+#
+# Deliberately partial. Roughly half of WATCHED_DIMENSIONS is internal bookkeeping
+# (`graded`, `raw_score_scope`, `config_baseline`, the `*_capped` frontiers) whose names
+# would be jargon in a user-facing sentence, so those are COUNTED rather than named. A key
+# absent from this map is not an error: it falls into the count. That is why the renderer
+# below reports both halves instead of a single number — dropping the unnamed ones would
+# understate what was skipped, and naming them would bury the ones that matter.
+_DIMENSION_LABELS = {
+    "behavioral_fired": "how your agent has been behaving",
+    "bootstrap": "your bootstrap files",
+    "channels": "chat channel access",
+    "checks": "the individual check results",
+    "config_file_sha256": "the settings file's contents",
+    "config_journal_head": "OpenClaw's own record of settings changes",
+    "config_written_by": "who last wrote your settings",
+    "gateway_bind": "the gateway address",
+    "host": "the security tools on this machine",
+    "ignore_hash": "your suppression list",
+    "mcp": "connected tool servers",
+    "mcp_detail": "what each tool server exposes",
+    "memory": "your agent's memory files",
+    "native_count": "OpenClaw's own audit",
+    "openclaw_install": "the OpenClaw installation itself",
+    "score": "the security score",
+    "skill_provenance": "where each installed skill came from",
+    "skills": "your installed skills",
+}
+
+# How many names to spell out before falling back to a count. Six fits a readable sentence;
+# the rest are still counted, and the cap is stated in the output rather than applied
+# silently — a truncation the reader cannot see reads as "that was all of them".
+_DIMENSION_NAME_CAP = 6
+
+
+def _name_dimensions(keys: "list[str]") -> str:
+    """A readable clause naming *keys*, capped, with everything unnamed still counted.
+
+    Returns the empty string for an empty list, so the caller can decide whether there is
+    anything to say at all rather than emitting a sentence about nothing.
+    """
+    named = [_DIMENSION_LABELS[k] for k in keys if k in _DIMENSION_LABELS]
+    unnamed = len(keys) - len(named)
+    if not named:
+        return (f"{unnamed} internal bookkeeping field(s)") if unnamed else ""
+    shown, hidden = named[:_DIMENSION_NAME_CAP], len(named) - _DIMENSION_NAME_CAP
+    clause = ", ".join(shown)
+    if hidden > 0:
+        clause += f" and {hidden} more"
+    if unnamed:
+        clause += f", plus {unnamed} internal bookkeeping field(s)"
+    return clause
+
+
 # C-418 — the four reasons a comparison is DECLINED, as opposed to made and found equal.
 #
 # `diff()` is full of deliberate silences: a blind config makes every disappearance
@@ -2695,18 +2754,40 @@ def diff_with_notes(prev: dict | None, curr: dict
     #
     # Self-healing by construction: this run writes the current manifest, so the note
     # appears exactly once after an upgrade and never again.
+    # C-441: both arms NAME what was skipped. The absent arm used to say only "this run
+    # cannot say which comparisons it was able to make" — on the one upgrade path this note
+    # exists to serve, and the names were derivable the whole time. A baseline that predates
+    # the manifest still carries its own keys, and a key this build watches that is not
+    # among them is exactly a comparison that had nothing to compare against. So the two
+    # arms differ only in where the previous coverage is read FROM: the recorded manifest
+    # when there is one, the snapshot's own keys when there is not.
     _prev_watched = prev.get("watched")
-    if not isinstance(_prev_watched, list):
-        note(NOTE_NO_PRIOR_RECORD,
-             "Your saved record predates coverage tracking, so this run cannot say which "
-             "comparisons it was able to make. The next run will.")
-    else:
-        _unknown_to_prev = [k for k in WATCHED_DIMENSIONS if k not in _prev_watched]
-        if _unknown_to_prev:
+    _from_manifest = isinstance(_prev_watched, list)
+    _prev_covered = _prev_watched if _from_manifest else list(prev)
+    # `watched` itself is excluded when deriving from the snapshot's keys: its absence is
+    # the PRECONDITION of this branch, not a separate comparison that was skipped. Counting
+    # it would double-count the very thing the sentence is already explaining.
+    _unknown_to_prev = [k for k in WATCHED_DIMENSIONS
+                        if k not in _prev_covered and not (k == "watched" and not _from_manifest)]
+    if _unknown_to_prev:
+        _names = _name_dimensions(_unknown_to_prev)
+        if _from_manifest:
             note(NOTE_NO_PRIOR_RECORD,
                  f"{len(_unknown_to_prev)} thing(s) this version watches were not recorded "
                  f"by the run that saved your baseline, so they had nothing to compare "
-                 f"against this once.")
+                 f"against this once: {_names}. The next run compares them.")
+        else:
+            note(NOTE_NO_PRIOR_RECORD,
+                 f"Your saved record predates coverage tracking, so {len(_unknown_to_prev)} "
+                 f"thing(s) had nothing to compare against this once: {_names}. The next "
+                 "run compares them.")
+    elif not _from_manifest:
+        # A pre-manifest baseline that nonetheless recorded everything this build watches.
+        # Still worth one line — the reader is owed the reason this run had to derive the
+        # answer — but it must not imply a coverage gap, because there is not one.
+        note(NOTE_NO_PRIOR_RECORD,
+             "Your saved record predates coverage tracking, but it recorded everything "
+             "this version watches, so nothing was skipped.")
 
     if curr_blind:
         unknown = sum(1 for s in (curr.get("checks") or {}).values() if s == UNKNOWN)
