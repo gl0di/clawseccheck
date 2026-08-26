@@ -70,7 +70,7 @@ def _ignore_hash(home: Path) -> str:
 # one is skipped for exactly one post-upgrade run. That cost is real but bounded and, since
 # C-418, DISCLOSED: the `watched` manifest tells the user how many comparisons their
 # baseline predates, rather than letting them fall into a bare all-clear.
-SNAPSHOT_VERSION = 9
+SNAPSHOT_VERSION = 8
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
 
@@ -1899,6 +1899,14 @@ WATCHED_DIMENSIONS = (
     "graded",
     "host",
     # F-179. Conditional: absent when the shell did not hand `snapshot()` a host scan.
+    #
+    # SNAPSHOT_VERSION deliberately does NOT move for this. It was bumped to 9 while this
+    # landed and the full suite caught it: B-527 already settled the convention, and
+    # `test_snapshot_version_unchanged_field_is_purely_additive` states it — membership in
+    # WATCHED_DIMENSIONS is what tells a pre-existing baseline the key was never recorded,
+    # and `diff()` never branches on the version at all. The three version literals a bump
+    # forces you to edit are tripwires, not chores; needing to touch them is the signal to
+    # stop and ask whether the bump is doing anything.
     "host_persist",
     "ignore_hash",
     "mcp",
@@ -3980,8 +3988,31 @@ def diff_with_notes(prev: dict | None, curr: dict
     #
     # REMOVAL is INFO in every family. It can be track-covering, but it is far more often a
     # user tidying up, and there is no discriminator available to a digest comparison.
-    _hp_pair = pair_or_note("host_persist", "The machine's own startup and scheduling files")
-    if _hp_pair is not None:
+    # ABSENCE IS HANDLED BESPOKE, not through `pair_or_note`, and the reason is a real
+    # fabrication that the generic helper produced here. `host_persist` is CONDITIONAL: the
+    # shell may hand `snapshot()` nothing, so "recorded last time, absent now" is a routine
+    # state, not damage. `pair_or_note` classified exactly that as `record_damaged` and told
+    # the user *"the saved record for them is damaged. Delete the monitor state file"* —
+    # advice that destroys a working baseline over a scan that simply did not run. Measured,
+    # not theorised. Same bespoke shape `openclaw_install` uses a few arms below, for the
+    # same reason. The reverse direction (absent in the baseline, present now) IS worth a
+    # note and keeps one: that is the honest first-run-after-upgrade message.
+    _hp_pair = _both_dims(prev, curr, "host_persist")
+    if _hp_pair is None:
+        if "host_persist" in prev and "host_persist" not in curr:
+            note(NOTE_UNDETERMINED,
+                 "This machine's own startup and scheduling files were not compared: this "
+                 "run did not examine them. Your saved record for them is kept as it was.")
+        elif "host_persist" not in prev and "host_persist" in curr:
+            note(NOTE_NO_PRIOR_RECORD,
+                 "This machine's own startup and scheduling files had nothing to compare "
+                 "against — your saved record predates this check. It will cover them from "
+                 "the next run onwards.")
+        elif "host_persist" in prev or "host_persist" in curr:
+            note(NOTE_RECORD_DAMAGED,
+                 "The record of this machine's startup and scheduling files is not in the "
+                 "expected form, so it was not compared. It will rebuild on the next run.")
+    else:
         _php, _chp = _hp_pair
         _pe = _php.get("entries") if isinstance(_php.get("entries"), dict) else None
         _ce = _chp.get("entries") if isinstance(_chp.get("entries"), dict) else None

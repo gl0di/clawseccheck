@@ -58,7 +58,7 @@ def test_the_snapshot_carries_all_three_new_fields():
     snap = _snap(FIXTURES / "home_safe")
     # The literal is deliberate: a schema bump should cost a conscious edit here, not slide
     # through because the assertion reads the constant it is meant to be pinning.
-    assert snap["version"] == SNAPSHOT_VERSION == 9
+    assert snap["version"] == SNAPSHOT_VERSION == 8
     for key in _NEW_KEYS:
         assert key in snap, f"{key} missing from a clean-run snapshot: {sorted(snap)}"
 

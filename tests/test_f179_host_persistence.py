@@ -268,6 +268,47 @@ def test_a_damaged_record_is_a_note_not_a_silent_skip():
     assert [s for _c, s in notes if "not in the expected form" in s], notes
 
 
+def _notes_for(prev, curr):
+    _a, notes = diff_with_notes(prev, curr)
+    return [(c, s) for c, s in notes if "startup and scheduling" in s]
+
+
+def test_a_layer_that_did_not_run_is_not_called_damage():
+    """The fabrication the generic `pair_or_note` helper produced here, pinned.
+
+    `host_persist` is CONDITIONAL — the shell may hand `snapshot()` nothing — so "recorded
+    last time, absent now" is routine. Routed through `pair_or_note` it came out as
+    `record_damaged` with the sentence *"Delete the monitor state file"*, which destroys a
+    working baseline because a scan did not run. Both halves are asserted: the category AND
+    the absence of the destructive advice.
+    """
+    prev = _snap({_UNIT: _e(hostpersist.FAMILY_SYSTEMD, "a" * 8)})
+    curr = _snap({})
+    del curr["host_persist"]
+    hits = _notes_for(prev, curr)
+    assert hits, "the skipped comparison must still be disclosed"
+    assert all(c == "undetermined" for c, _s in hits), hits
+    assert not [s for _c, s in hits if "delete" in s.lower()], hits
+
+
+def test_a_baseline_predating_the_dimension_says_so():
+    """The honest first-run-after-upgrade message, and the reason SNAPSHOT_VERSION does not
+    need to move for an additive dimension."""
+    prev = _snap({})
+    del prev["host_persist"]
+    hits = _notes_for(prev, _snap({_UNIT: _e(hostpersist.FAMILY_SYSTEMD, "a" * 8)}))
+    assert [c for c, _s in hits if c == "no_prior_record"], hits
+
+
+def test_absent_on_both_sides_produces_no_note():
+    """A surface never recorded on this platform is not a gap. A note here would inflate the
+    un-compared count on every run of a build whose caller never scans."""
+    prev, curr = _snap({}), _snap({})
+    del prev["host_persist"]
+    del curr["host_persist"]
+    assert not _notes_for(prev, curr)
+
+
 def test_an_absent_dimension_on_one_side_does_not_fabricate():
     """A baseline written before this dimension existed must not report the entire host as
     newly appeared on the first run after an upgrade."""
