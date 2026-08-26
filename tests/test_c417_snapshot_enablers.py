@@ -441,6 +441,11 @@ def test_the_unconditional_keys_are_written_on_every_run():
 # escape would let a genuinely missing key hide behind it.
 _CONDITIONAL = {
     "host": "only on a supported host",
+    # F-179: the host's own startup/scheduling surface. Absent whenever the shell did not
+    # hand `snapshot()` a scan — which includes every direct `snapshot()` call in this
+    # suite, since the parameter defaults to None. Same shape as the three behavioural
+    # keys below: the shell owns the discovery, so the dimension cannot be unconditional.
+    "host_persist": "absent when the caller did not run the host-persistence scan",
     "config_baseline": "only on a blind run (_degrade_snapshot)",
     "config_parse_error": "only on a blind run (_degrade_snapshot)",
     # F-170. Each absent for a DIFFERENT reason, which is why they are named separately:

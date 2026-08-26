@@ -676,6 +676,30 @@ clawseccheck --verify-baseline 1f4b9c02ae77d310    # read-only; writes nothing
 This is not a signature and is not claimed to be one — see the `state.json` limit below for why
 signing it locally would defend against nobody, and for what a mismatch does and does not mean.
 
+### Checking for drift without consuming it — `--probe`
+
+An ordinary `--monitor` run advances your baseline: it records the state it just saw, so
+the next run compares against *that*. That is what you want for a scheduled check, and
+exactly what you do not want for a frequent poll — the poll would see the change, record
+it, and leave nothing for the run you actually read.
+
+```bash
+clawseccheck --monitor --probe --exit-code --fail-on medium
+```
+
+A probe reports drift and writes **nothing**: not the drift baseline, not the event
+journal, not the score history. The change stays outstanding, and the next ordinary run
+reports it again. The run says so on screen, so a repeated alert does not read as the tool
+double-reporting.
+
+Exit codes are unchanged — `3` still means drift was found, `0` still means nothing at or
+above your threshold. `1` keeps its meaning of *monitoring is not established*, and a
+probe never returns it: a probe was not going to write, so an unwritable store is not its
+emergency.
+
+Use it for cheap, frequent polling; use a plain `--monitor` for the check whose result you
+read and act on.
+
 ### Known limits of `--monitor` (read before relying on it)
 
 These are inherent boundaries of a **local, file-based, scheduled** drift detector — not bugs to
@@ -817,8 +841,31 @@ writing one:
 clawseccheck --cron-recipe
 ```
 
-That prints a native OpenClaw cron job — schedule, the command to run, and what each exit
-code means — for your agent to create with its own `cron` tool. It prints **only**: nothing
+That prints **two** native OpenClaw cron jobs for your agent to create with its own `cron`
+tool, and you want both:
+
+1. **Tell me quickly.** Polls every five minutes using a `trigger.script` — OpenClaw's own
+   mechanism for running a cheap headless check and waking the agent *only* when it returns
+   `{ fire: true }`. The poll runs `--monitor --probe`, which reports drift without
+   recording it, so the agent turn it wakes still sees the same drift and is the run that
+   records it. Your alert latency becomes the poll interval instead of six hours, and no
+   resident process is involved.
+2. **The backstop.** The unconditional six-hourly job, unchanged.
+
+**Why the second one is not optional.** OpenClaw treats a trigger script that errors or
+times out as *do not fire*. So if the poll ever fails to run, job 1 goes **silent** — and a
+security watch that goes quiet on error looks exactly like one with nothing to report. The
+emitted script deliberately fires on anything it cannot determine, which covers the errors
+it can see, but nothing inside a script can cover that script being killed or timing out.
+The unconditional job is what covers it. The probe measures about 13 s against OpenClaw's
+30 s trigger deadline: comfortable on an idle machine, not guaranteed on a loaded one.
+
+The emitted script runs in an isolated QuickJS sandbox with no Node modules and no
+`require`/`import`, so it reaches a shell only through OpenClaw's own tool catalogue, and
+it reads the exit code out of the command's own output rather than out of a result field
+this project has not pinned.
+
+Both jobs print **only**: nothing
 is written, no config is edited, and `openclaw cron` is never invoked, because installing a
 recurring job as a side effect of being asked how to install one is not a decision this tool
 gets to make. OpenClaw supplies the periodicity and the delivery to your phone; this tool

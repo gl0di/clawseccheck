@@ -223,18 +223,31 @@ def test_an_undetermined_pattern_is_disclosed_and_routed_somewhere_useful():
 
 
 def test_a_newly_appearing_pattern_is_reported():
+    """`_snap()` records an UNCAPPED replay on both sides, so F-182's paging branch is the
+    one this exercises: both runs read the trajectory in full, which makes a newly-fired
+    detector newly DONE rather than newly visible. The capped branch keeps INFO and is
+    covered next.
+    """
     alerts, _ = diff_with_notes(_snap(), _snap(behavioral_fired=["T1"]))
     assert len(alerts) == 1
     level, msg = alerts[0]
-    assert level == "INFO"
+    assert level == "MEDIUM"
     assert "Behavioral trifecta" in msg
 
 
 def test_the_report_admits_the_window_may_only_be_newly_seen():
     """The evidence window rotates, so "it appeared" is not "it started". Saying otherwise
     would be a claim about when something happened, written into a tamper-evident journal
-    on the strength of a file having been rotated out."""
-    alerts, _ = diff_with_notes(_snap(), _snap(behavioral_fired=["T1"]))
+    on the strength of a file having been rotated out.
+
+    **F-182 refined the condition rather than the principle, so this now pins the capped
+    case explicitly.** The window rotates *when it was capped*; when both runs replayed the
+    activity in full, nothing rotated out and there is no ambiguity to admit. The hedge is
+    therefore required exactly here and would be false on the uncapped branch — which is
+    why `behavioral_capped=True` is passed rather than relying on the fixture's default.
+    """
+    alerts, _ = diff_with_notes(_snap(behavioral_capped=True),
+                                _snap(behavioral_fired=["T1"], behavioral_capped=True))
     assert "newly seen rather than newly done" in alerts[0][1]
 
 
@@ -348,9 +361,15 @@ def test_the_behavioural_arm_never_moves_the_score():
         "reach scoring.compute (F-154's cap-only discipline)"
     )
 
+    # Anti-vacuity only: the AST assertions above are the F-154 claim, and this proves the
+    # arm actually ran rather than the guard passing over a function that emitted nothing.
+    # Deliberately severity-AGNOSTIC — the previous version asserted INFO here, which is a
+    # claim about calibration owned by F-182, in a test about scoring. It reddened when that
+    # calibration legitimately changed, which is a test failing for a reason it is not about.
     prev, curr = _snap(), _snap(behavioral_fired=["T1", "T2"])
     alerts, _ = diff_with_notes(prev, curr)
-    assert all(lvl == "INFO" for lvl, _ in alerts)
+    assert alerts, "the behavioural arm produced nothing — the guard above proved nothing"
+    assert all("score" not in m.lower() for _lvl, m in alerts), alerts
 
 
 def test_a_behavioural_layer_that_raises_does_not_take_the_run_down(tmp_path, capsys,

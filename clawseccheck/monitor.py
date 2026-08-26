@@ -23,6 +23,9 @@ from .locking import journal_lock
 from .configjournal import find_by_hash as _journal_find_by_hash
 from .configjournal import newest_hash as _journal_newest_hash
 from .configjournal import read_writes as _journal_read
+from .hostpersist import FAMILY_LABELS as _hp_FAMILY_LABELS
+from .hostpersist import FAMILY_SYSTEM_CRON as _hp_FAMILY_SYSTEM_CRON
+from .hostpersist import FAMILY_SYSTEMD as _hp_FAMILY_SYSTEMD
 from .logsafe import redact_urls_in_text, sanitize_url_host_only
 # B-541: the key vocabulary of the provenance dimension, imported rather than restated.
 # `skillprovenance` is a documented LEAF (it imports nothing from this package), so a
@@ -1796,6 +1799,15 @@ _CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind", "plugins"
 # `openclaw_install` is in NEITHER list, deliberately: it is resolved from PATH, so an
 # unreadable config cannot move it. Its own failure mode is different and is handled at the
 # diff instead — see the presence gate there.
+#
+# F-179: `host_persist` is in NEITHER list for a related but distinct reason. It is read from
+# the HOST — `~/.config/systemd/user`, the shell startup files, `/etc/cron.*`, `sys.path` —
+# so an unreadable `openclaw.json` cannot shrink it either, which rules out
+# `_CONFIG_DIMENSIONS`. It is not `_SHRINKABLE_DIMENSIONS` either, and that one is worth
+# stating because the name invites it: that list means "config can only ADD roots, so a
+# SHRINK is a real signal". On the host the asymmetry does not hold — a user deleting a
+# systemd unit and an attacker deleting one to cover a track are the same edit, so BOTH
+# directions are reported and neither is privileged.
 _SHRINKABLE_DIMENSIONS = ("skills", "bootstrap", "memory", "skill_provenance")
 
 # C-417 — every snapshot key THIS build reads out of a stored baseline, persisted with
@@ -1841,6 +1853,20 @@ _SHRINKABLE_DIMENSIONS = ("skills", "bootstrap", "memory", "skill_provenance")
 # module reads off a stored snapshot straight from the AST and asserts EXACT equality with
 # this tuple — subset in either direction is how the first version passed while being
 # wrong. Sorted, so the persisted list is stable across runs.
+# F-179: the human-facing family names, and which families count as INFRASTRUCTURE for
+# severity purposes. Sourced from `hostpersist.FAMILY_LABELS` rather than retyped, so a
+# family renamed in the leaf cannot silently stop matching here — B-483 found seven copies
+# of one table in this tree and three of them had drifted.
+_HOST_PERSIST_LABELS = dict(_hp_FAMILY_LABELS)
+
+# systemd units and system cron are edited rarely and every line in them can start a
+# process, so a MODIFICATION is as meaningful as an addition. Shell startup files and
+# Python auto-execution hooks are routinely rewritten by package managers and by the user,
+# so a modification there stays advisory. Membership is asserted against the leaf's own
+# family list by a test, so a new family cannot land here unclassified.
+_HOST_PERSIST_INFRA = frozenset({_hp_FAMILY_SYSTEMD, _hp_FAMILY_SYSTEM_CRON})
+
+
 WATCHED_DIMENSIONS = (
     # F-173. Conditional: present only when the shell handed `snapshot()` a behavioural
     # result, so their absence says "that layer did not run", never "your baseline is old".
@@ -1872,6 +1898,16 @@ WATCHED_DIMENSIONS = (
     # treats as ungraded rather than assuming the number was shown.
     "graded",
     "host",
+    # F-179. Conditional: absent when the shell did not hand `snapshot()` a host scan.
+    #
+    # SNAPSHOT_VERSION deliberately does NOT move for this. It was bumped to 9 while this
+    # landed and the full suite caught it: B-527 already settled the convention, and
+    # `test_snapshot_version_unchanged_field_is_purely_additive` states it — membership in
+    # WATCHED_DIMENSIONS is what tells a pre-existing baseline the key was never recorded,
+    # and `diff()` never branches on the version at all. The three version literals a bump
+    # forces you to edit are tripwires, not chores; needing to touch them is the signal to
+    # stop and ask whether the bump is doing anything.
+    "host_persist",
     "ignore_hash",
     "mcp",
     "mcp_detail",
@@ -1924,6 +1960,7 @@ _DIMENSION_LABELS = {
     "config_written_by": "who last wrote your settings",
     "gateway_bind": "the gateway address",
     "host": "the security tools on this machine",
+    "host_persist": "the machine's own startup and scheduling files",
     "ignore_hash": "your suppression list",
     "mcp": "connected tool servers",
     "mcp_detail": "what each tool server exposes",
@@ -2212,7 +2249,7 @@ def _config_resolved_digest(ctx) -> str:
 
 def snapshot(ctx, findings, score, prev: "dict | None" = None,
              behavioral: "dict | None" = None, install: "dict | None" = None,
-             provenance: "dict | None" = None) -> dict:
+             provenance: "dict | None" = None, host_persist: "dict | None" = None) -> dict:
     """Build the drift snapshot for this run.
 
     *prev* is the previously saved snapshot, used to preserve the baseline when this run
@@ -2356,6 +2393,11 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         snap["openclaw_install"] = install
     if isinstance(provenance, dict):
         snap["skill_provenance"] = provenance
+    # F-179: the host's own startup/scheduling surface, handed in by the shell for the same
+    # reason as the two above — `hostpersist.scan` walks `/etc` and `sys.path`, which is
+    # discovery, and this module stays a pure function of what it is given.
+    if isinstance(host_persist, dict) and host_persist:
+        snap["host_persist"] = host_persist
 
     host = getattr(ctx, "host", None)
     if host and host.get("supported"):
@@ -3922,6 +3964,115 @@ def diff_with_notes(prev: dict | None, curr: dict
                  "this version does not watch, and this run cannot tell you what it was. "
                  "Run a full check to see the current verdicts.")
 
+    # ------------------------------------------------------------------ F-179: the host
+    # The machine's own startup and scheduling files. NOT gated on `compare_config`: this
+    # surface is read from the host, so an unreadable `openclaw.json` says nothing about
+    # it, and skipping it on a blind run would hide the one thing a blind run can still
+    # see. See `hostpersist.py` for what is readable and — more importantly — what is not.
+    #
+    # SEVERITY, and why it differs by family rather than being uniform. An entry APPEARING
+    # is an execution entry point that did not exist at the last check, which is the shape
+    # of the published attack (a host job rewriting an identity file), so it is MEDIUM
+    # across the board. A MODIFICATION splits: `~/.config/systemd/user` and `/etc/cron.*`
+    # are infrastructure that changes rarely and whose every line can start a process, so a
+    # modification there is MEDIUM too; a shell startup file or a `.pth` is edited by
+    # humans and by ordinary package managers (`pip install -e` writes a `.pth`, every
+    # version manager appends to `.bashrc`), so a modification there is INFO — recorded,
+    # counted by `--brief`, and deliberately below the cron recipe's `--fail-on medium`
+    # threshold, because a watch that pages on `pip install` gets switched off.
+    #
+    # MEDIUM is a ceiling here for the same reason the `plugins` arm above states: no HIGH
+    # or CRITICAL may ship on evidence this thin. Nothing on this fleet has yet been
+    # observed to move, so every arm below is calibrated from reasoning about the surface,
+    # not from measured drift. That is exactly what the C-135 pass is for.
+    #
+    # REMOVAL is INFO in every family. It can be track-covering, but it is far more often a
+    # user tidying up, and there is no discriminator available to a digest comparison.
+    # ABSENCE IS HANDLED BESPOKE, not through `pair_or_note`, and the reason is a real
+    # fabrication that the generic helper produced here. `host_persist` is CONDITIONAL: the
+    # shell may hand `snapshot()` nothing, so "recorded last time, absent now" is a routine
+    # state, not damage. `pair_or_note` classified exactly that as `record_damaged` and told
+    # the user *"the saved record for them is damaged. Delete the monitor state file"* —
+    # advice that destroys a working baseline over a scan that simply did not run. Measured,
+    # not theorised. Same bespoke shape `openclaw_install` uses a few arms below, for the
+    # same reason. The reverse direction (absent in the baseline, present now) IS worth a
+    # note and keeps one: that is the honest first-run-after-upgrade message.
+    _hp_pair = _both_dims(prev, curr, "host_persist")
+    if _hp_pair is None:
+        if "host_persist" in prev and "host_persist" not in curr:
+            note(NOTE_UNDETERMINED,
+                 "This machine's own startup and scheduling files were not compared: this "
+                 "run did not examine them. Your saved record for them is kept as it was.")
+        elif "host_persist" not in prev and "host_persist" in curr:
+            note(NOTE_NO_PRIOR_RECORD,
+                 "This machine's own startup and scheduling files had nothing to compare "
+                 "against — your saved record predates this check. It will cover them from "
+                 "the next run onwards.")
+        elif "host_persist" in prev or "host_persist" in curr:
+            note(NOTE_RECORD_DAMAGED,
+                 "The record of this machine's startup and scheduling files is not in the "
+                 "expected form, so it was not compared. It will rebuild on the next run.")
+    else:
+        _php, _chp = _hp_pair
+        _pe = _php.get("entries") if isinstance(_php.get("entries"), dict) else None
+        _ce = _chp.get("entries") if isinstance(_chp.get("entries"), dict) else None
+        if _pe is None or _ce is None:
+            note(NOTE_RECORD_DAMAGED,
+                 "The record of this machine's startup and scheduling files is not in the "
+                 "expected form, so it was not compared. It will rebuild on the next run.")
+        else:
+            def _fam(entry: object) -> str:
+                return entry.get("family", "") if isinstance(entry, dict) else ""
+
+            def _dig(entry: object) -> str:
+                return entry.get("digest", "") if isinstance(entry, dict) else ""
+
+            def _label(path: str, entry: object) -> str:
+                fam = _HOST_PERSIST_LABELS.get(_fam(entry))
+                return "{0} ({1})".format(path, fam) if fam else path
+
+            def _say(level: str, verb: str, items: "list[str]") -> None:
+                if not items:
+                    return
+                shown = sorted(items)[:_DIMENSION_NAME_CAP]
+                more = len(items) - len(shown)
+                tail = ", and {0} more".format(more) if more > 0 else ""
+                alerts.append((level, "Startup/scheduling file(s) {0} on this machine: "
+                                      "{1}{2}. These run code without your agent's "
+                                      "involvement, so a change here is outside anything "
+                                      "your OpenClaw settings control."
+                               .format(verb, ", ".join(shown), tail)))
+
+            _added = [p for p in _ce if p not in _pe]
+            _removed = [p for p in _pe if p not in _ce]
+            _changed = [p for p in (set(_pe) & set(_ce)) if _dig(_pe[p]) != _dig(_ce[p])]
+
+            _say("MEDIUM", "appeared", [_label(p, _ce[p]) for p in _added])
+            _say("INFO", "were removed", [_label(p, _pe[p]) for p in _removed])
+            _say("MEDIUM", "changed",
+                 [_label(p, _ce[p]) for p in _changed
+                  if _fam(_ce[p]) in _HOST_PERSIST_INFRA])
+            _say("INFO", "changed",
+                 [_label(p, _ce[p]) for p in _changed
+                  if _fam(_ce[p]) not in _HOST_PERSIST_INFRA])
+
+        # A path that EXISTS but this process may not read. On a normal Linux box the
+        # user's own crontab spool is here every single run, and that is the point: the
+        # closest on-disk analogue of the published attack is one we structurally cannot
+        # see, and saying so every run beats a silence that reads as "nothing scheduled".
+        _unread = _chp.get("unreadable")
+        if isinstance(_unread, list) and _unread:
+            note(NOTE_UNDETERMINED,
+                 "{0} startup/scheduling location(s) on this machine exist but could not "
+                 "be read, so this run cannot tell you whether anything in them changed: "
+                 "{1}. Reading a per-user crontab needs privileges this tool does not "
+                 "take; check it yourself with 'crontab -l'."
+                 .format(len(_unread), ", ".join(sorted(_unread)[:_DIMENSION_NAME_CAP])))
+        if _chp.get("capped"):
+            note(NOTE_INSPECTION_CAPPED,
+                 "There are more startup and scheduling files on this machine than can be "
+                 "recorded in one run, so only part of that surface was compared.")
+
     _host_pair = pair_or_note("host", "Security tools running on this machine")
     if _host_pair is not None:
         ph, ch = _host_pair
@@ -4105,13 +4256,52 @@ def diff_with_notes(prev: dict | None, curr: dict
             else:
                 _b_new = sorted(set(_c_fired) - set(_p_fired))
                 if _b_new:
-                    alerts.append((
-                        "INFO",
-                        f"{len(_b_new)} behaviour pattern(s) now appear in your agent's "
-                        f"replayable activity and did not last time: "
-                        f"{', '.join(_check_title(c) for c in _b_new)}. That window only "
-                        f"holds the most recent activity, so this may be newly seen rather "
-                        f"than newly done. Run --behavioral for the detail."))
+                    # F-182: severity depends on whether the two runs actually READ the
+                    # whole trajectory, and until now the answer was recorded and never
+                    # consulted. `behavioral_capped` is written into the snapshot on both
+                    # sides; only `curr`'s copy was ever read, and only to raise a note.
+                    #
+                    # The INFO below is correct WHEN the window was capped: the replay holds
+                    # only recent activity, so a detector firing now and not last time can
+                    # mean nothing more than the window sliding over older events, and
+                    # paging on window movement is a false alarm. But when NEITHER run hit
+                    # the cap, both replays were complete, that ambiguity does not exist,
+                    # and "newly fired" means newly DONE — the agent did something it had
+                    # not done before. At INFO that sat below the shipped cron recipe's
+                    # `--fail-on medium`, so the one signal in this whole watch about what
+                    # the agent actually DID, rather than how it is configured, could never
+                    # reach anyone.
+                    #
+                    # `is False`, not falsy: an ABSENT flag (an older baseline, or a run
+                    # that did not record one) must read as capped. Absence is not evidence
+                    # that the replay was complete, and the failure it would cause is the
+                    # loud kind — paging on a window slide.
+                    #
+                    # MEDIUM is the ceiling for the reason the `plugins` arm states: no
+                    # HIGH or CRITICAL ships on fixture evidence alone. AND THIS BRANCH HAS
+                    # ONLY FIXTURE EVIDENCE, by construction — the real machine is capped
+                    # (its "more saved agent activity than can be replayed" note fires
+                    # today), so no run on this fleet can exercise it. Do not read a green
+                    # gate as having observed it.
+                    _complete = (prev.get("behavioral_capped") is False
+                                 and curr.get("behavioral_capped") is False)
+                    _titles = ", ".join(_check_title(c) for c in _b_new)
+                    if _complete:
+                        alerts.append((
+                            "MEDIUM",
+                            f"{len(_b_new)} behaviour pattern(s) appear in what your agent "
+                            f"actually did, and did not last time: {_titles}. Both checks "
+                            f"replayed its activity in full, so this is something new it "
+                            f"did rather than something newly visible. Run --behavioral "
+                            f"for the detail."))
+                    else:
+                        alerts.append((
+                            "INFO",
+                            f"{len(_b_new)} behaviour pattern(s) now appear in your agent's "
+                            f"replayable activity and did not last time: "
+                            f"{_titles}. That window only "
+                            f"holds the most recent activity, so this may be newly seen "
+                            f"rather than newly done. Run --behavioral for the detail."))
 
     # ---- F-174: the OpenClaw installation itself --------------------------------------
     #

@@ -35,11 +35,19 @@ _PAYLOAD_KINDS = {"systemEvent", "agentTurn"}
 _DELIVERY_MODES = {"none", "announce", "webhook"}
 
 
+def _jobs(text: str) -> list:
+    """Every job the recipe prints, parsed.
+
+    F-181 added a second job. The previous first-`{`-to-last-`}` extraction silently began
+    spanning both and failing to parse — splitting on whole top-level blocks is what makes
+    this survive a third."""
+    import re
+    return [json.loads(b) for b in re.findall(r"^\{$.*?^\}$", text, re.S | re.M)]
+
+
 def _job(text: str) -> dict:
-    """The JSON object out of the printed recipe."""
-    start = text.index("{")
-    end = text.rindex("}") + 1
-    return json.loads(text[start:end])
+    """The BACKSTOP job — the unconditional one these tests were written about."""
+    return _jobs(text)[-1]
 
 
 def test_the_emitted_job_uses_only_grounded_keys():
@@ -58,13 +66,38 @@ def test_it_emits_valid_json():
     assert isinstance(_job(render_cron_recipe()), dict)
 
 
-def test_no_trigger_block_is_emitted():
-    """Pinned as a DECISION, not an omission. `trigger.script` is grounded as JavaScript in
-    a QuickJS/WASI sandbox with a 30s and five-tool-call budget; what is not grounded is
+def test_the_backstop_job_stays_unconditional():
+    """**This replaces `test_no_trigger_block_is_emitted`, and the reversal is answered
+    rather than deleted.**
+
+    That test pinned a decision whose stated reason was precise: *"what is not grounded is
     whether that sandbox can run an external binary and read its exit status, without which
     a trigger cannot consult `--exit-code` at all. Emitting one anyway would be a guess
-    about a field's contract."""
-    assert "trigger" not in _job(render_cron_recipe())
+    about a field's contract."* Both halves have since been addressed, and differently:
+
+    - **Running an external binary IS now grounded.** The code-mode tool's own description
+      (`code-mode-D5mNEiYV.js:731`) states that for any shell action the script must use
+      `tools.search` / `tools.describe` / `tools.call` against the enabled catalogue.
+    - **Reading the exit status is still NOT grounded, and the recipe does not guess it.**
+      Rather than reaching for a `result.exitCode` whose shape nobody has pinned, the
+      emitted command carries its own answer in stdout (`echo CSC_RC=$?`) and the script
+      greps the stringified result. The objection is answered by removing the dependency,
+      not by resolving it.
+
+    **What remains a guess, stated plainly:** the exec tool's INPUT field name (`command`).
+    A wrong one throws, and the script's catch turns that into `fire: true` with an explicit
+    message — so it fails loudly, which is materially different from the silent-wrong-field
+    failure the original decision was protecting against.
+
+    What that decision was really protecting is the property this test now pins directly:
+    the unconditional job must survive. OpenClaw treats a trigger that errors or times out
+    as `fire: false`, so a trigger-only recipe can go silent, and silence from a security
+    watch is indistinguishable from good news.
+    """
+    jobs = _jobs(render_cron_recipe())
+    assert len(jobs) == 2, [j.get("name") for j in jobs]
+    assert "trigger" not in jobs[-1], "the backstop must never become conditional"
+    assert "trigger" in jobs[0], "the fast job is the one that carries the trigger"
 
 
 def test_the_message_tells_the_agent_what_each_exit_code_means():

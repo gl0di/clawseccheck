@@ -50,10 +50,22 @@ _AUTHED = {"gateway": {"bind": "127.0.0.1:8080",
 _UNAUTHED = {"gateway": {"bind": "127.0.0.1:8080", "auth": {"mode": "none"}}}
 
 
+def _jobs() -> list:
+    """Every job the recipe emits, parsed.
+
+    F-181 added a second job (the trigger-gated poll), and the previous single-job
+    extraction — first `{` to last `}` — silently started spanning both and failing to
+    parse. Splitting on whole top-level blocks is what makes this survive a third job.
+    """
+    import re
+    return [json.loads(b) for b in
+            re.findall(r"^\{$.*?^\}$", render_cron_recipe(), re.S | re.M)]
+
+
 def _message() -> str:
-    text = render_cron_recipe()
-    job = json.loads(text[text.index("{"):text.rindex("}") + 1])
-    return job["payload"]["message"]
+    """The BACKSTOP job's message — the unconditional every-6h run these tests were
+    written about. The trigger-gated job's message is covered separately, below."""
+    return _jobs()[-1]["payload"]["message"]
 
 
 def _emitted_argv(store: Path) -> list[str]:
@@ -125,10 +137,27 @@ def test_the_recipe_never_claims_exit_zero_means_nothing_changed():
     the threshold". Any absolute reading of exit 0 is therefore wrong, whatever the
     threshold is set to.
     """
-    message = _message().lower()
-    assert "nothing changed" not in message, (
-        "exit 0 does not mean nothing changed — it means nothing at or above the threshold "
-        "was recorded")
+    for job in _jobs():
+        message = job["payload"]["message"].lower()
+        assert "nothing changed" not in message, (
+            f"{job['name']}: exit 0 does not mean nothing changed — it means nothing at or "
+            "above the threshold was recorded")
+
+
+def test_the_trigger_gated_job_inherits_the_same_guarantee():
+    """F-181's job is a second artifact instructing a second agent, and B-658's defect was
+    a false claim inside exactly such a payload. Extending the guarantee rather than
+    leaving the new job unpinned is the whole reason `_jobs()` returns all of them.
+
+    Its exit-0 case is DIFFERENT from the backstop's — the probe already saw drift, so a 0
+    here means the change was resolved in between — and saying nothing about that would be
+    the same class of silence."""
+    fast = _jobs()[0]
+    assert "trigger" in fast, "this test is measuring the wrong job"
+    message = fast["payload"]["message"]
+    assert "nothing changed" not in message.lower(), message
+    assert "Exit 0 here" in message, message
+    assert "resolved" in message, message
 
 
 def test_the_recipe_says_where_the_sub_threshold_changes_went():
