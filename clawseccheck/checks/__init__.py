@@ -231,6 +231,9 @@ from ._agents import (
 )
 
 from ._capability import (
+    _b352_effective_prepends,
+    _b352_risky,
+    check_exec_path_prepend,
     _b351_normalize_agent_id,
     _b351_resolvable_agents,
     _b351_enabled,
@@ -1358,6 +1361,9 @@ CHECKS = [
     # B351 — code mode: the model is handed exec+wait over a catalog bridge instead of
     # the ordinary tool surface. Walks agents.list, which can enable it independently.
     check_code_mode_tool_surface,
+    # B352 — tools.exec.pathPrepend: what OpenClaw exports ahead of $PATH for every
+    # exec run. Skips scopes where host=node, which the runtime ignores.
+    check_exec_path_prepend,
     check_subagent_spawn_limits,
     check_cachetrace_redaction,
     # B-281/B-282 (ENV-1/ENV-6): is the audited file the one the agent loads, and is a

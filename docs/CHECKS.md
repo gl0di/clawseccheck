@@ -2357,6 +2357,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B352 - Exec PATH prepend puts a hijackable directory ahead of every command
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Least Privilege / Execution
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Exec PATH prepend puts a hijackable directory ahead of every command
+- Remediation:
+  - none
+
 ### B351 - Code mode replaces the model's tool surface with exec/wait
 
 - Severity: MEDIUM

@@ -27,6 +27,7 @@ from ..collector import (
 
 from . import _shared
 from ._shared import (
+    _dir_replaceable_by_others,
     _B55_FS_WRITE_TOOLS,
     _b323_contains_env_var_reference,
     _canon_tool,
@@ -2161,4 +2162,185 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
         "tools.codeMode.enabled to false (and check each agents.list entry, which can "
         "turn it back on independently of the global setting).",
         evidence=sorted(on_agents)[:8] or None,
+    )
+
+
+# B352: PATH entries that OpenClaw puts ahead of everything the agent runs.
+_B352_TMPISH = ("/tmp/", "/var/tmp/", "/dev/shm/")
+# The vendor's own tilde predicate, verbatim: io-By0s-a_s.js PATH_VALUE_RE.
+_B352_TILDE_RE = re.compile(r"^~(?=$|[\\\\/])")
+
+
+def _b352_effective_prepends(cfg: dict) -> list:
+    """Every (scope, host, entries) the runtime could actually apply.
+
+    Grounded on `agent-tools-BD8WL7ny.js`, which resolves BOTH fields with `??` rather
+    than a merge:
+
+        host:         agentExec?.host        ?? globalExec?.host
+        pathPrepend:  agentExec?.pathPrepend ?? globalExec?.pathPrepend
+
+    So an agent carrying its own list REPLACES the global one wholesale, and an agent
+    without one inherits it. The set of lists that can reach a shell is therefore the
+    global list plus each agent's own - reading `tools.exec.pathPrepend` alone would miss
+    a list only one agent has, the same per-agent shape B351 closed for code mode.
+    """
+    g = dig(cfg, "tools.exec") if isinstance(cfg, dict) else None
+    g = g if isinstance(g, dict) else {}
+    out = [("tools.exec", g.get("host"), g.get("pathPrepend"))]
+    for aid, agent in _b351_resolvable_agents(dig(cfg, "agents.list")):
+        a = dig(agent, "tools.exec")
+        a = a if isinstance(a, dict) else {}
+        entries = a.get("pathPrepend") if a.get("pathPrepend") is not None else g.get("pathPrepend")
+        out.append((f"agents.list[{aid}].tools.exec", a.get("host") or g.get("host"), entries))
+    return out
+
+
+def _b352_risky(entry: str, home) -> "str | None":
+    """Why this entry is a hijack surface, or None.
+
+    Tilde entries are NOT relative: `normalize-paths` lists `pathPrepend` in
+    `PATH_LIST_KEYS` and runs `resolveUserPath` over it (`io-By0s-a_s.js`), so `~/bin`
+    reaches the runtime already absolute.
+    """
+    if not isinstance(entry, str) or not entry.strip():
+        return None
+    text = entry.strip()
+    # Mirror the vendor's own predicate exactly: PATH_VALUE_RE is /^~(?=$|[\\/])/, so a
+    # BARE `~` resolves to home just as `~/x` does, while `~user/x` does not resolve at
+    # all (no slash directly after the tilde). Handling only the `~/` form reported a
+    # bare `~` as relative — measured, and the test caught it.
+    if _B352_TILDE_RE.match(text):
+        rest = text[2:] if len(text) > 1 else ""
+        text = str(Path(home).parent / rest) if rest else str(Path(home).parent)
+    if not text.startswith("/"):
+        return "relative, so which binary runs depends on the working directory"
+    if any(text.rstrip("/").startswith(t.rstrip("/")) for t in _B352_TMPISH):
+        return "under a world-writable temp directory"
+    writable = _dir_replaceable_by_others(Path(text))
+    if writable:
+        return writable
+    return None
+
+
+def check_exec_path_prepend(ctx: Context) -> Finding:
+    """B352 - directories OpenClaw puts AHEAD of the agent's PATH for every exec run.
+
+    Grounded on the installed dist (openclaw@2026.7.1-2), on the code that applies it
+    rather than on the descriptions map. `wrapPosixCommandWithPathPrepend`
+    (bash-tools.exec-runtime-u4DiNcL4.js) rewrites the command itself:
+
+        export PATH="${OPENCLAW_PREPEND_PATH}${PATH:+:$PATH}"; unset ...; <command>
+
+    with the vendor's own reason: "This ensures our paths take precedence even if user RC
+    files (e.g. ~/.zshenv) prepend their own entries to PATH during shell startup." So an
+    entry here outranks the operator's own shell configuration by design. A directory on
+    that list that someone else can write is a standing binary-hijack primitive: plant
+    `git`, `curl` or `python` there and the agent runs it in preference to the real one,
+    with no approval prompt, because nothing about the command changed.
+
+    PASS    - nothing prepended, or every entry is an absolute path that only the owner
+              can write. The entries are still listed in the detail, because "what is
+              ahead of the agent's PATH" is worth knowing even when it is safe.
+    WARN    - an entry is relative (its meaning depends on the working directory), lives
+              under a world-writable temp directory, or is group/world-writable.
+    UNKNOWN - the config was not read.
+
+    TWO MITIGATIONS THAT ARE REAL, AND ARE RESPECTED RATHER THAN IGNORED.
+
+    `host: "node"` - the runtime does not apply the list at all, and says so:
+    "Warning: tools.exec.pathPrepend is ignored for host=node. Configure PATH on the node
+    host/service instead." (bash-tools-DHyGpWCr.js). Reporting a hijack risk from a
+    setting the engine discards would be a finding about nothing, so that scope is
+    skipped and the skip is named in the detail.
+
+    Windows - `wrapPosixCommandWithPathPrepend` returns the command unchanged on win32.
+    This is a self-audit, so the auditing platform IS the target platform; the detail
+    says so rather than silently assuming POSIX.
+
+    TILDE ENTRIES ARE NOT RELATIVE. `normalize-paths` puts `pathPrepend` in
+    `PATH_LIST_KEYS` and resolves `~` through `resolveUserPath` (io-By0s-a_s.js), so
+    `~/bin` arrives absolute. Treating it as relative would be a false positive on the
+    commonest way an owner writes their own bin directory.
+
+    Never FAILs: a writable PATH entry is a real hijack surface, but "someone else can
+    write it" is a property of the filesystem at audit time, and a FAIL tier needs its
+    own independent C-135 pass against real configs first.
+    """
+    unreadable = _config_unreadable("B352", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B352",
+            UNKNOWN,
+            "No config was read, so what is prepended to the agent's exec PATH could not "
+            "be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
+    risky: list[str] = []
+    listed: list[str] = []
+    ignored_scopes: list[str] = []
+    for scope, host, entries in _b352_effective_prepends(cfg):
+        if not isinstance(entries, list) or not entries:
+            continue
+        if host == "node":
+            ignored_scopes.append(scope)
+            continue
+        for entry in entries:
+            if not isinstance(entry, str):
+                continue
+            listed.append(f"{scope}: {entry}")
+            why = _b352_risky(entry, ctx.home)
+            if why:
+                risky.append(f"{scope}: {entry} — {why}")
+
+    if not listed and not ignored_scopes:
+        return _finding(
+            "B352",
+            PASS,
+            "Nothing is prepended to the exec PATH, so the agent resolves binaries the "
+            "way the host normally would.",
+            "Keep it that way; an entry here outranks even your own shell startup files.",
+        )
+
+    tail = ""
+    if ignored_scopes:
+        tail = (
+            f" Not assessed for {', '.join(sorted(ignored_scopes)[:3])}: exec runs "
+            "through host=node there, and the runtime ignores pathPrepend for that host."
+        )
+
+    if not risky:
+        # `listed` can be empty while `ignored_scopes` is not: every configured list sits
+        # under host=node, which the runtime discards. Saying "prepends are absolute and
+        # owner-only" there would be a sentence about an empty list.
+        head = (
+            f"Exec PATH prepends are absolute and owner-only: {'; '.join(sorted(listed)[:4])}."
+            if listed else
+            "No exec PATH prepend is applied on any scope this run could assess."
+        )
+        return _finding(
+            "B352",
+            PASS,
+            head + tail,
+            "Nothing to do. Re-check if any of those directories later becomes writable "
+            "by another account.",
+            evidence=sorted(listed)[:8] or None,
+        )
+    return _finding(
+        "B352",
+        WARN,
+        f"{len(risky)} exec PATH prepend entr{'y is' if len(risky) == 1 else 'ies are'} a "
+        f"binary-hijack surface: {'; '.join(sorted(risky)[:3])}. OpenClaw exports these "
+        "ahead of $PATH for every exec run — deliberately outranking your own shell "
+        "startup files — so a binary planted there runs instead of the real one, with no "
+        "approval prompt because the command text is unchanged." + tail,
+        "Make each entry an absolute path to a directory only your account can write, or "
+        "remove tools.exec.pathPrepend and let the host resolve binaries normally. Check "
+        "every agents.list[] entry too: an agent's own list replaces the global one.",
+        evidence=sorted(risky)[:8] or None,
     )

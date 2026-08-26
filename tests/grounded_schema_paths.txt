@@ -120,6 +120,7 @@ tools.codeMode
 tools.deny
 tools.elevated.allowFrom
 tools.elevated.enabled
+tools.exec
 tools.exec.applyPatch.workspaceOnly
 tools.fs.workspaceOnly
 tools.exec.ask
@@ -162,5 +163,6 @@ relative:subagents.allowAgents
 relative:tools.allow
 relative:tools.codeMode
 relative:tools.deny
+relative:tools.exec
 relative:tools.fs.workspaceOnly
 relative:tools.profile

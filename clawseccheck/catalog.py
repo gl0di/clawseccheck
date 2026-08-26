@@ -2870,6 +2870,18 @@ CATALOG: list[CheckMeta] = [
     # catalog bridge. MEDIUM, not HIGH: the guest is sandboxed and the feature fails
     # closed, so this is a disclosure that recontextualises every other tool-policy
     # verdict, not a hole. Grounded on the vendor's own resolver (code-mode-D5mNEiYV.js).
+    # B352: tools.exec.pathPrepend — directories exported AHEAD of $PATH for every exec
+    # run, deliberately outranking the operator's own shell startup files
+    # (wrapPosixCommandWithPathPrepend). A writable entry there is a standing
+    # binary-hijack primitive with no approval prompt. HIGH; WARN-only for now.
+    CheckMeta(
+        "B352",
+        "Exec PATH prepend puts a hijackable directory ahead of every command",
+        HIGH,
+        "hardening",
+        "Least Privilege / Execution",
+        surface="tools",
+    ),
     CheckMeta(
         "B351",
         "Code mode replaces the model's tool surface with exec/wait",

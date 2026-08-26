@@ -513,7 +513,7 @@ On an audit run it also carries the **five-layer state** (B-585) — `graded` (b
 `ScoreResult`: mode C produces no grade by construction, so `graded: false` there would
 imply a letter was withheld when none ever existed.
 
-`checksRun`/`checksTotal` count **checks**, not the analysis: 186 of 186 checks can run on
+`checksRun`/`checksTotal` count **checks**, not the analysis: 187 of 187 checks can run on
 a home whose config was never found. Read `layersRan`/`graded` for whether the analysis
 itself was complete. `score`/`grade` are deliberately never emitted here — they are `null`
 on an ungraded run, and a consumer reading a `0` where `null` was meant would rank a blind
@@ -1368,7 +1368,7 @@ One entry per subject in the 8-subject taxonomy (§18):
   instances; every other subject counts checks. Until B-565 the page rendered both in one
   identically-formatted unlabelled list, so `Skills: 2 of 2 scanned` read as full coverage
   of the 55 catalog entries routed to that subject — 13 of which were `UNKNOWN` in that same
-  run. 68 of the catalog's 190 entries (skills 55 + mcp 13) appeared in neither the numerator
+  run. 68 of the catalog's 191 entries (skills 55 + mcp 13) appeared in neither the numerator
   nor the denominator of any row. The text renderer now names the unit on every line
   (`MCP servers: 3 of 3 servers inventoried; 4 of 13 checks scanned` — a real line from a
   config with three servers) and the JSON carries the second
