@@ -3256,9 +3256,50 @@ def diff_with_notes(prev: dict | None, curr: dict
             # five more of these on an unchanged machine.
             _newly_visible.append(cid)
 
-    if _num(curr, "native_count") > _num(prev, "native_count"):
-        delta = _num(curr, "native_count") - _num(prev, "native_count")
-        alerts.append(("INFO", f"openclaw security audit reports {delta} more issue(s) than last time."))
+    # B-660: this was the one arm in diff() gated on neither the scope flags nor presence.
+    #
+    # `native_count` is written as `len(native.findings) if native else 0`, and `_num`
+    # defaults a missing key to 0 — so "the native audit did not run last time" and "the
+    # native audit found fewer problems last time" arrived here as the same input. Two
+    # measured fabrications, both on a machine where nothing moved:
+    #
+    #   * a `--monitor --no-native` run followed by an ordinary one: prev 0, curr N ->
+    #     "openclaw security audit reports N more issue(s) than last time";
+    #   * a baseline written before this key existed: same sentence, and the `watched`
+    #     manifest recorded the absence correctly while this arm never consulted it.
+    #
+    # Latent rather than live on the maintainer's fleet only because `openclaw security
+    # audit` reports zero findings there, so `0 > 0` is False. That is why it survived
+    # every gate: `monitor_fp_gate.py` diffs two snapshots of an unchanged home taken the
+    # SAME way, and this needs the two runs to differ in how they were taken.
+    #
+    # Fixed the way its siblings already are, and deliberately not by changing `_num`'s
+    # default — other callers rely on 0 there. Presence on both sides, plus the same
+    # `_same_scope_flags` guard B-500 added to the check-transition arms after --no-host
+    # produced "No longer determinable: Host firewall active" on an unchanged machine.
+    # bool excluded for the same reason `_num` excludes it: True < 2 compares as 1, so a
+    # corrupted field would silently fabricate a delta out of nothing.
+    def _count(v: object) -> "int | None":
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    _p_native, _c_native = _count(prev.get("native_count")), _count(curr.get("native_count"))
+    _both_native = _p_native is not None and _c_native is not None
+    if not _both_native:
+        # Absent on either side is not silence: C-418's contract is that a comparison this
+        # run did not make is counted and, under --verbose, named. Self-healing — the next
+        # run has the key on both sides.
+        note(NOTE_NO_PRIOR_RECORD,
+             "The built-in `openclaw security audit` issue count was not compared: one of "
+             "these two runs did not record one.")
+    elif not _same_scope_flags:
+        note(NOTE_UNDETERMINED,
+             "The built-in `openclaw security audit` issue count was not compared: this "
+             "run and the last were taken with different options, so a change in the "
+             "number would be the option changing rather than the machine.")
+    elif _c_native > _p_native:
+        delta = _c_native - _p_native
+        alerts.append(("INFO",
+                       f"openclaw security audit reports {delta} more issue(s) than last time."))
 
     prev_ih = prev.get("ignore_hash", "")
     curr_ih = curr.get("ignore_hash", "")
