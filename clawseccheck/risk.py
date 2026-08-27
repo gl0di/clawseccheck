@@ -922,7 +922,8 @@ def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPat
             "Lock every channel's dmPolicy and groupPolicy to 'allowlist' so only "
             "known, trusted senders can reach the agent. If open channels are required, "
             "remove or gate exec/write/elevated tools behind human approval "
-            "(tools.exec.mode='ask' or tools.exec.security='ask')."
+            "(tools.exec.mode='ask' puts a command to you when it is not on the allow "
+            "list; tools.exec.ask='always' puts every one to you)."
         ),
     )
 
@@ -1124,9 +1125,9 @@ def _rule_self_modification(ctx: Context, findings: list[Finding],
             "Run 'chmod 700 workspace/ && chmod 600 workspace/SOUL.md "
             "workspace/AGENTS.md workspace/TOOLS.md' to remove group/world "
             "write access, and restore any flagged file from a trusted backup. Also "
-            "add an approval gate: set tools.exec.mode='ask'/'allowlist' "
-            "(or tools.exec.security='ask') so every write action needs explicit "
-            "human sign-off."
+            "add an approval gate: tools.exec.ask='always' requires your sign-off "
+            "before EVERY exec action; tools.exec.mode='ask' requires it only when the "
+            "command is not on the allow list."
         ),
     )
 

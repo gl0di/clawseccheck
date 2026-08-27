@@ -763,9 +763,9 @@ def check_autonomy(ctx: Context) -> Finding:
             WARN,
             "Agent runs autonomously (heartbeat) and can take outbound actions — "
             "ensure it cannot act on untrusted input without approval.",
-            "Add an approval gate (tools.exec.mode='ask' or tools.exec.security='ask') "
-            "for all outbound/exec actions triggered by heartbeat tasks; validate any "
-            "external content before acting on it.",
+            "Add an approval gate (tools.exec.mode='ask', or tools.exec.ask='always' to "
+            "be asked before every one) for all outbound/exec actions triggered by "
+            "heartbeat tasks; validate any external content before acting on it.",
         )
     return _finding(
         "B17",
@@ -1861,8 +1861,9 @@ def check_human_approval(ctx: Context) -> Finding:
         "B8",
         WARN,
         "Destructive tools (exec/send/write) present with no clear approval gate.",
-        "Set tools.exec.mode to 'ask' or 'allowlist' (not 'full') and "
-        "tools.exec.security='ask' to gate exec actions.",
+        "Set tools.exec.mode to 'ask' (a command that is not on the allow list is put "
+        "to you) or 'allowlist' (it is refused outright) — not 'full'. Use "
+        "tools.exec.ask='always' to be asked before every command.",
     )
 
 

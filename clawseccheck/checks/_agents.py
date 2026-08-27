@@ -916,8 +916,9 @@ def check_subagents(ctx: Context) -> Finding:
         "B18",
         WARN,
         "Subagents can be spawned and may inherit elevated/exec tools without human approval.",
-        "Set tools.exec.mode to 'ask'/'allowlist' (or tools.exec.security='ask') "
-        "so subagent-triggered elevated/exec actions need explicit human sign-off.",
+        "Set tools.exec.mode to 'ask' so a subagent-triggered elevated/exec action is "
+        "put to you when it is not on the allow list, or tools.exec.ask='always' to be "
+        "asked before every one.",
     )
 
 
