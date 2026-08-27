@@ -2511,6 +2511,135 @@ def _diff_host_monitors(pair, alerts, note) -> None:
              f"as running last time, so this run cannot tell you if they stopped.")
 
 
+
+def _diff_plugins(pair, alerts, compare_config) -> None:
+    """C-433: the `plugins` dimension's diff arm.
+
+    Third per-dimension extraction, and the largest so far at 66 lines with only THREE
+    parameters. `_listed` looked like a blocker in the first survey — it is a closure — but
+    it is defined inside this arm rather than at the function's top level, so it travels
+    with the arm instead of having to be threaded in. Worth recording because the survey
+    that flagged it was counting names, not asking where they were bound.
+    """
+    # BOTH clauses. The original condition was `if compare_config and _pair is not None:`
+    # and the extraction script rebuilt only the None half, which dropped the blind-run
+    # guard: on a run recovering from an unknown baseline `compare_config` is False, so
+    # this arm ran anyway and fabricated a HIGH "a plugin trust change" about a channel the
+    # baseline had simply never recorded. That is the exact class B-269 exists to prevent,
+    # and the full suite caught it where a 19-case equivalence harness did not.
+    if not compare_config or pair is None:
+        return
+    _pp, _cp = pair
+
+    def _listed(d: dict, key: str) -> "set | None":
+        v = d.get(key)
+        return set(v) if isinstance(v, list) else None
+
+    _pa, _ca = _listed(_pp, "allow"), _listed(_cp, "allow")
+    if _pa is not None and _ca is not None and (_ca - _pa):
+        alerts.append((
+            "MEDIUM",
+            "Plugin(s) newly allowed to load: " + ", ".join(sorted(_ca - _pa))
+            + ". A plugin runs inside your agent — vet it before trusting it."))
+    _pd, _cd = _listed(_pp, "deny"), _listed(_cp, "deny")
+    if _pd is not None and _cd is not None and (_pd - _cd):
+        alerts.append((
+            "MEDIUM",
+            "Plugin(s) no longer denied: " + ", ".join(sorted(_pd - _cd))
+            + ". They were on your block list at the last check and are not now."))
+    if _pp.get("enabled") is False and _cp.get("enabled") is True:
+        alerts.append((
+            "MEDIUM",
+            "Plugins were switched on since the last check (plugins.enabled). "
+            "Everything on your allow list can load again."))
+    # The allowlist's OFF SWITCH, found by the C-135 pass as a silent bypass of every
+    # arm above: `bundledDiscovery: "compat"` sets `bypassAllowlist`, leaving `allowSet`
+    # undefined so every bundled plugin becomes eligible
+    # (`dist/bundled-compat-yOgFRqvZ.js`). One word turns the allowlist off, and the arms
+    # watching the allowlist saw nothing because the list itself did not move.
+    if (_pp.get("bundled_discovery") != "compat"
+            and _cp.get("bundled_discovery") == "compat"):
+        alerts.append((
+            "MEDIUM",
+            "Plugin discovery switched to compat mode, which bypasses your "
+            "plugin allow list entirely — every bundled plugin can load again, whatever "
+            "the list says."))
+    # A slot names the plugin that OWNS memory or the context engine and puts it in the
+    # startup scope. Changing who holds one is a trust move that touches neither list.
+    _ps, _cs = _pp.get("slots"), _cp.get("slots")
+    if isinstance(_ps, dict) and isinstance(_cs, dict):
+        _moved = sorted(k for k, v in _cs.items() if _ps.get(k) not in (None, v))
+        _claimed = sorted(k for k, v in _cs.items() if k not in _ps)
+        if _moved or _claimed:
+            alerts.append((
+                "MEDIUM",
+                "Plugin slot(s) reassigned: "
+                + ", ".join(f"{k}={_cs[k]}" for k in _moved + _claimed)
+                + ". A slot owner runs at startup, whatever your allow list says."))
+    _pe, _ce = _pp.get("entries"), _cp.get("entries")
+    if isinstance(_pe, dict) and isinstance(_ce, dict):
+        _added = sorted(k for k in _ce if k not in _pe)
+        if _added:
+            alerts.append((
+                "INFO",
+                "Plugin registry entry added for: " + ", ".join(_added)
+                + ". Configuring a provider writes one of these, so this is expected if "
+                "you just did that."))
+        # A plugin already registered and switched OFF can be switched on without adding
+        # a key — invisible to the arm above and to a keys-only signature. INFO would be
+        # wrong here: this is a plugin becoming live, not a provider being configured.
+        _switched = sorted(k for k, v in _ce.items() if v and _pe.get(k) is False)
+        if _switched:
+            alerts.append((
+                "MEDIUM",
+                "Plugin(s) switched on: " + ", ".join(_switched)
+                + ". They were registered but disabled at the last check."))
+
+
+
+def _diff_channels(pair, partial, alerts, compare_config) -> None:
+    """C-433: the `channels` dimension's diff arm.
+
+    Second per-dimension extraction. Four parameters, derived rather than guessed: the arm's
+    free-variable set inside `diff_with_notes` was `_chan_pair`, `_chan_partial`, `alerts`
+    and `compare_config`, plus the module-level `_channel_entry`.
+    """
+    # BOTH clauses. The original condition was `if compare_config and _pair is not None:`
+    # and the extraction script rebuilt only the None half, which dropped the blind-run
+    # guard: on a run recovering from an unknown baseline `compare_config` is False, so
+    # this arm ran anyway and fabricated a HIGH "NEW channel appeared" about a channel the
+    # baseline had simply never recorded. That is the exact class B-269 exists to prevent,
+    # and the full suite caught it where a 19-case equivalence harness did not.
+    if not compare_config or pair is None:
+        return
+    pch, cch = pair
+    for name in sorted(cch.keys() - pch.keys()):
+        alerts.append(("HIGH", f"NEW channel '{name}' appeared since last check — "
+                       "confirm its auth / allowlist before it can reach the agent."))
+    for name in sorted(pch.keys() & cch.keys()):
+        # B-274: compare only the sub-signatures present on BOTH sides. A key this
+        # release added has no predecessor in an older snapshot, and comparing it
+        # against nothing would report drift on a config nobody touched — every
+        # user, every channel, on the first post-upgrade run. Gating on
+        # `shared` costs exactly one run of sensitivity for a newly added key and
+        # buys silence on the upgrade itself. `_channel_entry` normalizes the
+        # legacy one-string shape, so `core` still compares across the boundary.
+        pe, ce = _channel_entry(pch[name]), _channel_entry(cch[name])
+        shared = pe.keys() & ce.keys()
+        if pe.keys() ^ ce.keys():
+            partial.add(name)
+        if any(pe[k] != ce[k] for k in shared):
+            alerts.append(("MEDIUM", f"Channel '{name}' openness/auth changed — review it."))
+    # B-275: the channels dimension had no removal branch either. INFO, not HIGH:
+    # de-configuring a channel SHRINKS the agent's reachable surface, and users retire
+    # channels routinely — worth recording in the journal, not worth alarming over.
+    # (Unreachable on a blind run: this whole block is behind compare_config, so a
+    # collapsed config can never present itself as a channel deletion.)
+    for name in sorted(pch.keys() - cch.keys()):
+        alerts.append(("INFO", f"Channel '{name}' is no longer configured — the agent "
+                       "can no longer be reached over it."))
+
+
 def diff_with_notes(prev: dict | None, curr: dict
                     ) -> "tuple[list[tuple[str, str]], list[tuple[str, str]]]":
     """Return ``(alerts, notes)``.
@@ -3482,33 +3611,7 @@ def diff_with_notes(prev: dict | None, curr: dict
             _trajectory_alerts.update(range(_traj_from, len(alerts)))
 
     _chan_pair = pair_or_note("channels", "The ways your agent can be contacted")
-    if compare_config and _chan_pair is not None:
-        pch, cch = _chan_pair
-        for name in sorted(cch.keys() - pch.keys()):
-            alerts.append(("HIGH", f"NEW channel '{name}' appeared since last check — "
-                           "confirm its auth / allowlist before it can reach the agent."))
-        for name in sorted(pch.keys() & cch.keys()):
-            # B-274: compare only the sub-signatures present on BOTH sides. A key this
-            # release added has no predecessor in an older snapshot, and comparing it
-            # against nothing would report drift on a config nobody touched — every
-            # user, every channel, on the first post-upgrade run. Gating on
-            # `shared` costs exactly one run of sensitivity for a newly added key and
-            # buys silence on the upgrade itself. `_channel_entry` normalizes the
-            # legacy one-string shape, so `core` still compares across the boundary.
-            pe, ce = _channel_entry(pch[name]), _channel_entry(cch[name])
-            shared = pe.keys() & ce.keys()
-            if pe.keys() ^ ce.keys():
-                _chan_partial.add(name)
-            if any(pe[k] != ce[k] for k in shared):
-                alerts.append(("MEDIUM", f"Channel '{name}' openness/auth changed — review it."))
-        # B-275: the channels dimension had no removal branch either. INFO, not HIGH:
-        # de-configuring a channel SHRINKS the agent's reachable surface, and users retire
-        # channels routinely — worth recording in the journal, not worth alarming over.
-        # (Unreachable on a blind run: this whole block is behind compare_config, so a
-        # collapsed config can never present itself as a channel deletion.)
-        for name in sorted(pch.keys() - cch.keys()):
-            alerts.append(("INFO", f"Channel '{name}' is no longer configured — the agent "
-                           "can no longer be reached over it."))
+    _diff_channels(_chan_pair, _chan_partial, alerts, compare_config)
 
     # B-270: both sides must be STRINGS, not merely present — `cb in EXPOSED_BINDS` raises
     # TypeError on an unhashable (list/dict) value from a corrupted snapshot, and a
@@ -3553,72 +3656,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # provider. Treating a routine write as a trust change is how a dimension earns itself a
     # permanent place in the user's ignore list.
     _plug_pair = _both_dims(prev, curr, "plugins")
-    if compare_config and _plug_pair is not None:
-        _pp, _cp = _plug_pair
-
-        def _listed(d: dict, key: str) -> "set | None":
-            v = d.get(key)
-            return set(v) if isinstance(v, list) else None
-
-        _pa, _ca = _listed(_pp, "allow"), _listed(_cp, "allow")
-        if _pa is not None and _ca is not None and (_ca - _pa):
-            alerts.append((
-                "MEDIUM",
-                "Plugin(s) newly allowed to load: " + ", ".join(sorted(_ca - _pa))
-                + ". A plugin runs inside your agent — vet it before trusting it."))
-        _pd, _cd = _listed(_pp, "deny"), _listed(_cp, "deny")
-        if _pd is not None and _cd is not None and (_pd - _cd):
-            alerts.append((
-                "MEDIUM",
-                "Plugin(s) no longer denied: " + ", ".join(sorted(_pd - _cd))
-                + ". They were on your block list at the last check and are not now."))
-        if _pp.get("enabled") is False and _cp.get("enabled") is True:
-            alerts.append((
-                "MEDIUM",
-                "Plugins were switched on since the last check (plugins.enabled). "
-                "Everything on your allow list can load again."))
-        # The allowlist's OFF SWITCH, found by the C-135 pass as a silent bypass of every
-        # arm above: `bundledDiscovery: "compat"` sets `bypassAllowlist`, leaving `allowSet`
-        # undefined so every bundled plugin becomes eligible
-        # (`dist/bundled-compat-yOgFRqvZ.js`). One word turns the allowlist off, and the arms
-        # watching the allowlist saw nothing because the list itself did not move.
-        if (_pp.get("bundled_discovery") != "compat"
-                and _cp.get("bundled_discovery") == "compat"):
-            alerts.append((
-                "MEDIUM",
-                "Plugin discovery switched to compat mode, which bypasses your "
-                "plugin allow list entirely — every bundled plugin can load again, whatever "
-                "the list says."))
-        # A slot names the plugin that OWNS memory or the context engine and puts it in the
-        # startup scope. Changing who holds one is a trust move that touches neither list.
-        _ps, _cs = _pp.get("slots"), _cp.get("slots")
-        if isinstance(_ps, dict) and isinstance(_cs, dict):
-            _moved = sorted(k for k, v in _cs.items() if _ps.get(k) not in (None, v))
-            _claimed = sorted(k for k, v in _cs.items() if k not in _ps)
-            if _moved or _claimed:
-                alerts.append((
-                    "MEDIUM",
-                    "Plugin slot(s) reassigned: "
-                    + ", ".join(f"{k}={_cs[k]}" for k in _moved + _claimed)
-                    + ". A slot owner runs at startup, whatever your allow list says."))
-        _pe, _ce = _pp.get("entries"), _cp.get("entries")
-        if isinstance(_pe, dict) and isinstance(_ce, dict):
-            _added = sorted(k for k in _ce if k not in _pe)
-            if _added:
-                alerts.append((
-                    "INFO",
-                    "Plugin registry entry added for: " + ", ".join(_added)
-                    + ". Configuring a provider writes one of these, so this is expected if "
-                    "you just did that."))
-            # A plugin already registered and switched OFF can be switched on without adding
-            # a key — invisible to the arm above and to a keys-only signature. INFO would be
-            # wrong here: this is a plugin becoming live, not a provider being configured.
-            _switched = sorted(k for k, v in _ce.items() if v and _pe.get(k) is False)
-            if _switched:
-                alerts.append((
-                    "MEDIUM",
-                    "Plugin(s) switched on: " + ", ".join(_switched)
-                    + ". They were registered but disabled at the last check."))
+    _diff_plugins(_plug_pair, alerts, compare_config)
 
     _config_alerts_to = len(alerts)
 

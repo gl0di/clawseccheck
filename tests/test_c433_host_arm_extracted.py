@@ -94,3 +94,96 @@ def test_the_function_tolerates_no_pair(pair):
     """It is called unconditionally now; the None guard moved inside. A caller that stops
     checking must not get an exception."""
     monitor._diff_host_monitors(pair, [], lambda *_a, **_k: None)
+
+
+# ------------------------------------------------ the second and third extractions
+
+def test_the_channels_and_plugins_arms_are_module_level_too():
+    """Three dimensions now travel as their own functions. Each is the shape C-433 asks for
+    — an arm with its dimension — rather than the by-function shape it rejected."""
+    for name in ("_diff_host_monitors", "_diff_channels", "_diff_plugins"):
+        assert callable(getattr(monitor, name, None)), name
+
+
+def test_the_extracted_arms_take_only_what_they_measured_to_need():
+    """The parameter counts are the measurement, not a preference: 3, 4 and 3. The task's
+    blocking analysis said a per-dimension cut meant threading 61 shared locals; that
+    figure describes the whole function, and the arms read three or four names each."""
+    import inspect
+    assert len(inspect.signature(monitor._diff_host_monitors).parameters) == 3
+    assert len(inspect.signature(monitor._diff_channels).parameters) == 4
+    assert len(inspect.signature(monitor._diff_plugins).parameters) == 3
+
+
+def test_a_plugin_newly_allowed_still_alerts_after_the_move():
+    """A positive control per extracted arm. Without one, 'the output did not change' is
+    satisfied by an arm that no longer runs — which is exactly how the first harness for
+    this refactor passed with the host arm deleted."""
+    base = _snap()
+    before = dict(base, plugins={"allow": ["a"], "deny": ["evil"], "entries": {},
+                                 "bundled_discovery": "strict"})
+    after = dict(base, plugins={"allow": ["a", "new"], "deny": ["evil"], "entries": {},
+                                "bundled_discovery": "strict"})
+    alerts, _notes = diff_with_notes(before, after)
+    assert [m for _lvl, m in alerts if "newly allowed" in m], alerts
+
+
+def test_an_unchanged_plugin_surface_is_silent_after_the_move():
+    base = _snap()
+    same = dict(base, plugins={"allow": ["a"], "deny": ["evil"], "entries": {},
+                               "bundled_discovery": "strict"})
+    alerts, _notes = diff_with_notes(same, dict(same))
+    assert not [m for _lvl, m in alerts if "Plugin" in m], alerts
+
+
+def test_the_provenance_arm_was_deliberately_left_in_place():
+    """**Not an omission — a measurement.**
+
+    The large `skill_provenance` arm reads `trust_removals`, which is written once and read
+    by five separate statements in `diff_with_notes`. It is a genuinely shared accumulator,
+    so that arm cannot leave without deciding how that state travels — unlike the three
+    above, whose free variables are their own pair plus the two universal accumulators.
+
+    This test exists so the next reader does not assume the remaining arms are all equally
+    mechanical. An earlier hand-off of mine said exactly that, and it was wrong for one arm
+    in three.
+    """
+    import inspect
+    src = inspect.getsource(monitor.diff_with_notes)
+    assert "trust_removals" in src, (
+        "if this moved, re-derive which statements share it before extracting the "
+        "provenance arm")
+    assert not hasattr(monitor, "_diff_skill_provenance"), (
+        "the provenance arm was extracted without this test being updated — check the "
+        "trust_removals coupling was actually resolved rather than duplicated")
+
+
+def test_the_extracted_arms_keep_the_blind_run_guard():
+    """**The regression this refactor actually shipped, before the full suite caught it.**
+
+    The original conditions were `if compare_config and _pair is not None:`. The extraction
+    script rebuilt only the None half, so on a run recovering from an unknown baseline —
+    where `compare_config` is False — the channels arm ran anyway and fabricated
+
+        HIGH  NEW channel 'telegram' appeared since last check
+
+    about a channel the baseline had simply never recorded. That is precisely the
+    fabrication class B-269 exists to prevent, reintroduced by a mechanical move.
+
+    Two things are worth carrying from it. A compound guard is not one guard: an AST-driven
+    extraction that reconstructs an `if` must reconstruct the whole test, and mine took one
+    clause. And the 19-case equivalence harness did not see it — the case that did is in
+    `tests/test_b269_monitor_config_parse_error.py`, which builds the unknown-baseline state
+    the harness never constructed. An equivalence harness covers the states you thought of.
+    """
+    pair = ({"telegram": {"dm": "closed"}}, {"telegram": {"dm": "closed"},
+                                             "slack": {"dm": "open"}})
+    for fn, args in ((monitor._diff_channels, (pair, False, [], False)),
+                     (monitor._diff_plugins, (pair, [], False))):
+        alerts: list = []
+        call = list(args)
+        call[-2 if fn is monitor._diff_channels else 1] = alerts
+        fn(*call)
+        assert alerts == [], (
+            f"{fn.__name__} fired with compare_config False — the blind-run guard is gone "
+            f"and this is the B-269 fabrication shape\n{alerts}")
