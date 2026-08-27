@@ -1530,6 +1530,14 @@ one entry per line, either a check id (`B14`) or a finding fingerprint (`B14:ab1
 with `--show-suppressed`). Suppressed findings drop out of the **score**, the **report**, and
 **monitor** alerts — so re-runs and `--monitor` stop nagging about things you've accepted.
 
+**One exception, by design:** a score-capping CRITICAL/HIGH FAIL (or a sensitive id) still
+appears in the report even if suppressed, and still counts — it stays in
+`fail_counts_by_severity`, which is the same predicate `--exit-code` gates on, so a
+`.clawseccheckignore` line cannot silently turn a CI gate green. Instead of silence you get a
+`WARNING:` line naming the id; that is the tool working, not the ignore file failing. Ordinary
+findings below that bar do go quiet. Run `--show-suppressed` to see every entry, which ones
+actually matched this run, and which match nothing any more.
+
 ```text
 # ~/.openclaw/.clawseccheckignore
 B14            # accept the egress-surface advisory
