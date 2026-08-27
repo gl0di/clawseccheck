@@ -89,20 +89,45 @@ handles it**, no matter how capable the agent is.
 
 These are the source classes that have actually produced records or grounded prose in
 this repo, not an aspirational list. Each row names what that class typically yields, in
-the vocabulary of the triage buckets below.
+the vocabulary of the triage buckets below, and — where one exists — the **entry point**
+to start from, so a sweep does not re-derive its own sources every time.
 
-| Source class | Examples that have landed here | Typically yields |
+| Source class | Entry point | Typically yields |
 | --- | --- | --- |
-| Vendor threat research on agent/skill supply chain | ESET, Palo Alto Unit 42, Koi Security, Proofpoint | indicators **and** attack forms |
-| National / sector advisories | NSA, CISA, published CVE records | attack forms, occasionally a version-gated fact |
-| Package-ecosystem advisories (npm, PyPI) | ecosystem advisory databases, registry takedowns | attack forms; indicators when a name is confirmed |
-| OpenClaw's own releases and advisories | new config surface, changed defaults, fixed bugs | schema drift; sometimes a brand-new check surface |
-| The ClawHub registry | trust dispositions, removed listings | indicators |
+| Package-ecosystem advisories (npm, PyPI) | <https://github.com/advisories> · <https://api.github.com/advisories> · <https://osv.dev/list> · <https://api.osv.dev/> | attack forms; indicators when a name is confirmed |
+| OpenClaw's own releases | <https://registry.npmjs.org/-/package/openclaw/dist-tags> (all four channels, not just `latest`) · <https://docs.openclaw.ai/> | schema drift; sometimes a brand-new check surface |
+| Vendor threat research on agent/skill supply chain | <https://unit42.paloaltonetworks.com/> · <https://www.koi.ai/> · ESET, Proofpoint, Island, CSA Labs | indicators **and** attack forms |
+| Academic pre-prints | <http://export.arxiv.org/rss/cs.CR> | attack forms, typically ahead of vendor blogs |
+| National / sector advisories | <https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json> (KEV), published CVE records | attack forms, occasionally a version-gated fact; KEV separates *published* from *exploited in the wild* |
+| The ClawHub registry | <https://clawhub.ai/> — trust dispositions, removed listings | indicators |
+| Threat-model frameworks | <https://genai.owasp.org/> · OWASP Agentic · MITRE ATLAS | coverage gaps, never a specific indicator |
 | Peer scanners and public benchmarks | competitive review, corpus evaluation | blind spots and false negatives |
 | Our own runs, and reports from a user's host agent | real-fleet audits, GitHub issues, an agent that judged a finding worse than the engine did | false positives, false negatives, blind spots |
-| Threat-model frameworks | OWASP LLM Top 10, OWASP Agentic, MITRE ATLAS | coverage gaps, never a specific indicator |
 
-Two of these deserve a note. **Framework updates never yield an indicator** — they yield a
+Every URL above was checked to resolve on 2026-08-27. A fabricated feed URL in a document
+about grounding discipline would be the worst possible place to break Golden Rule #4, so
+**verify before writing, and re-verify when you use one**; a link that has rotted is a
+signal about the source, not a formatting problem.
+
+**Faster must come from a machine-readable primary, never from a quicker secondary.**
+That is the ordering rule for this table, and it is why the ecosystem-advisory row is now
+first. An aggregator can beat a vendor blog by hours, at the cost of the one property a
+record here has to have; GHSA/OSV/npm beat the blog *and* are primary. When speed matters,
+reach for the structured feed, not the faster write-up.
+
+**Aggregators and news sites are excluded, and the reason is structural, not editorial.**
+`tests/test_iocdb.py` requires every shipped record to carry a complete provenance trail —
+`value` / `type` / `first_seen` / `source_url` / `source_name` — and Golden Rule #4 requires
+that source to be a checkable **primary**. A record sourced from an aggregator cannot pass
+that gate: the maintainer has to walk back to the primary report to satisfy it, so the
+aggregator bought nothing but a chance to inherit its errors. Two named candidates were
+assessed on 2026-08-06 and correctly stay out: one had published an OWASP GenAI top-ten list
+with seven of ten entries misnumbered, two invented titles, and one superseded 2023-era
+wording; the other is a single-byline aggregator that accepts press releases and has open
+contributor registration. Neither does original research. The cited set is short and
+entirely primary, and that is the intended shape.
+
+Two further rows deserve a note. **Framework updates never yield an indicator** — they yield a
 category, which then needs a real-world form before it can become a check; adding a check
 because a framework named a category, with no observed instance, is how a scanner ends up
 with impressive coverage claims and no efficacy. And **peer scanners are a source, not a
@@ -117,6 +142,23 @@ section is deliberately short on promises and specific about triggers.
 **Per release.** The indicator dataset's own age is re-checked, and `iocdb.REVISION` is
 bumped to the verification date in the same change that adds any record. This is already
 part of [RELEASING.md](RELEASING.md)'s documentation-alignment step.
+
+**Per release, also: read all four OpenClaw dist-tags, not just `latest`.**
+`https://registry.npmjs.org/-/package/openclaw/dist-tags` returns `alpha`, `latest`,
+`extended-stable` and `beta`. Every version-gated fact we ship is grounded against `latest`,
+so the other three are maintained channels with real users that nothing here re-checks
+unless this step is taken. Two dated readings, so the rate of change is visible rather than
+assumed:
+
+| Read on | `alpha` | `latest` | `extended-stable` | `beta` |
+| --- | --- | --- | --- | --- |
+| 2026-08-06 | 2026.5.19-alpha.1 | 2026.7.1-2 | 2026.6.34 | 2026.7.2-beta.7 |
+| 2026-08-27 | 2026.5.19-alpha.1 | 2026.7.1-2 | 2026.6.34 | 2026.8.1-beta.3 |
+
+`beta` moved twice in three weeks while `latest` did not move at all. That asymmetry is the
+whole reason for the step: a fact confirmed on a beta build is not a fact about OpenClaw,
+and stating it without the channel is how the internal schema recon came to carry a
+`CONFIRMED` entry for an env var that does not exist on `latest`.
 
 **Per named incident.** When a specific, verifiable event surfaces — a campaign, an
 advisory, a registry takedown, an OpenClaw release — it is triaged into the buckets below
@@ -222,6 +264,29 @@ tag: a real check id, an attestation-only tag, a judge-band tag, or a declared c
 is whether the chosen tag is the *right* one — that is a human call, made during triage.
 This means the only real failure mode of this whole process is an incident that produced no
 tag at all: not a wrong bucket, not a deferred build, but an event nobody wrote down.
+
+## Recorded incident — extended-stable diffed, 2026-08-06, CLEAN
+
+This document requires an incident be recorded even when the outcome is "nothing changes".
+This is that record, and it is the first exercise of the dist-tag step above.
+
+`extended-stable` (`openclaw@2026.6.34`, published 2026-08-04) had never been diffed against
+the `latest` our grounding is built on. It was unpacked and compared against the installed
+`2026.7.1-2`:
+
+- `sanitizeMcpMetadataText` — **byte-identical**: the same two regex phrase families and the
+  same no-op `system prompt` replacement. B331's verdict logic holds on both channels.
+- `BUNDLE_MCP_METADATA_TEXT_LIMIT` — **1200 in both**. B331's truncation boundary holds.
+- Annotation hints (`readOnlyHint` and siblings) — absent from the registration context in
+  both, so B333's "OpenClaw never reads these" claim holds.
+- `tests/grounded_schema_paths.txt` — **135 of 135** paths present in the extended-stable
+  dist. (A first pass flagged two; that was a scripting artifact — `relative:` is a manifest
+  namespace prefix, not part of the path. Both tokens are present.)
+
+**Bucket 4 (schema drift), triaged CLEAN — no tree change.** The channel exists and does not
+diverge on anything we ground against. Recorded rather than discarded, because an untriaged
+channel and a triaged one that produced no code look identical in the repo unless the second
+is written down.
 
 ## Worked example — the npm dependency tree, 2026-08-04
 
