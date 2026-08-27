@@ -501,16 +501,30 @@ This is the same predicate §2's `fail_counts_by_severity` describes: one
 ### `runs[0].properties.analysisCompleteness`
 
 Everything under `runs[0].properties` is outside the frozen contract (§17) and additive.
-The block carries the run's reach: `checksRun`/`checksTotal`, the per-status counts
-(`passCount`/`warnCount`/`failCount`/`unknownCount`/`notApplicableCount`/`suppressedCount`),
-`failCountsBySeverity` (the numbers `--fail-on` gates on), `selfExcludedSkills`, and
-`limitations`.
+The block carries the run's reach.
 
-On an audit run it also carries the **five-layer state** (B-585) — `graded` (bool),
-`layersRan`/`layersTotal`, `missingLayers` (`[{"layer", "status"}]`), `notChecked`, and
-`configBlind` (`{"capped", "reason"}` where reason is `"unreadable"`, `"absent"` or
-`null`). Those keys are **absent** on the `--vet` paths, where there is no
-`ScoreResult`: mode C produces no grade by construction, so `graded: false` there would
+| Field | Type | Present | Description |
+|---|---|---|---|
+| `checksRun` | `int` | always | Checks that produced a result. |
+| `checksTotal` | `int` | always | Checks in the catalog. |
+| `passCount` | `int` | always | `PASS` results. |
+| `warnCount` | `int` | always | `WARN` results. |
+| `failCount` | `int` | always | `FAIL` results. |
+| `unknownCount` | `int` | always | `UNKNOWN` results. |
+| `notApplicableCount` | `int` | always | Checks whose surface is confirmed absent. |
+| `suppressedCount` | `int` | always | Findings suppressed via `.clawseccheckignore`. |
+| `failCountsBySeverity` | `object` | always | The numbers `--fail-on` gates on; same shape and predicate as §2's field of the same name. |
+| `selfExcludedSkills` | `array[str]` | always | Skills excluded because they are ClawSecCheck's own installed copy. |
+| `limitations` | `array[str]` | always | Plain-English limits this run hit. |
+| `graded` | `bool` | audit runs only | §2's `graded`. |
+| `layersRan` | `int` | audit runs only | Five-layer-ledger layers whose status is `ran`. |
+| `layersTotal` | `int` | audit runs only | Layers in the ledger. |
+| `missingLayers` | `array[{"layer", "status"}]` | audit runs only | §2's `missing_layers`. |
+| `notChecked` | `array[str]` | audit runs only | §2's `not_checked`. |
+| `configBlind` | `object` | audit runs only | `{"capped", "reason"}`, where `reason` is `"unreadable"`, `"absent"` or `null`. |
+
+The six **five-layer state** keys (B-585) are **absent** on the `--vet` paths, where there is
+no `ScoreResult`: mode C produces no grade by construction, so `graded: false` there would
 imply a letter was withheld when none ever existed.
 
 `checksRun`/`checksTotal` count **checks**, not the analysis: 187 of 187 checks can run on
@@ -575,8 +589,8 @@ because ClawSecCheck never rewrites the artifacts it audits.
 
 ### `runs[0].properties.analysis_completeness` (when context is available)
 
-Present only when a full context object was passed to the renderer (i.e. when invoked
-as a full audit, not in unit/library mode).
+Present whenever a context object reached the renderer — that is, on any CLI run, audit
+**and** vet alike. Absent only in library/unit use, where the caller passes none.
 
 | Field | Type | Description |
 |---|---|---|
@@ -586,7 +600,9 @@ as a full audit, not in unit/library mode).
 | `limit_hits` | `array` | Signals where an inspection limit was reached. |
 | `path_traversal_violations` | `array` | Paths rejected by the traversal guard. |
 | `file_manifest` | `object` | Map of relative path → file metadata. |
+| `disclosures` | `array[{"kind", "subject", "detail"}]` | The same inert reach disclosures §2 carries (`disclosures`), in the same shape. Empty array when there is nothing to say — present either way, so an absent key cannot be read as "nothing to report". |
 | `simulated_effects` | `array` | Effect-profile entries derived from static analysis of skill Python files. |
+| `config_parse_error` | `bool` | B-166: `true` when `openclaw.json` was present but could not be parsed. Exists so a consumer does not read an UNKNOWN-only run over a broken config as a clean scan. |
 
 ### `runs[0].properties.effectProfile` (when non-empty)
 
