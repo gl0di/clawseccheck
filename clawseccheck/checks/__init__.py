@@ -1004,7 +1004,13 @@ _B30_PROVIDERS_WITH_NAME_MATCH = ("discord", "slack")
 # browser.ssrfPolicy.dangerouslyAllowPrivateNetwork (bool) — lets the agent browser
 # reach internal/metadata IPs (cloud-credential theft via 169.254.169.254).
 # browser.noSandbox (bool) — browser runs without OS sandbox.
-# browser.ssrfPolicy.hostnameAllowlist (array) — restrict outbound browser targets.
+# browser.ssrfPolicy.allowedHostnames (array) — restrict outbound browser targets.
+#   B-515: the installed dist honours TWO sibling keys under ssrfPolicy and merges
+#   them at runtime — allowedHostnames (current) and hostnameAllowlist (which the
+#   vendor itself labels legacy/alternate). B38 reads BOTH and combines them, so an
+#   allowlist counts as present when EITHER holds a non-empty list; keying on the
+#   legacy field alone warned at operators who had configured the current one.
+#   See check_browser_ssrf in checks/_egress.py.
 # browser.headless (bool) — informational; headless adds stealth but not a FAIL alone.
 
 
