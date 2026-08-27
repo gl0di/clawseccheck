@@ -66,10 +66,14 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _MEMORY_SIGNAL_VERSION,
     _MEMORY_TEXT_EXTS,
     _MEMORY_URL_RE,
+    _MODE_POLICY,
     _PLUGIN_ID_ALIASES,
     _RUNNER_LEAD_SUBCOMMANDS_BY_CMD,
     _RUNNER_LEAD_VALUE_MARKERS_BY_CMD,
+    _SANDBOX_ALWAYS,
+    _SANDBOX_NEVER,
     _SCAN_TRUNCATED_RE,
+    _SECURITY_RANK,
     _SIGNAL_CLASS_LABELS,
     _SKILL_VERSION_RE,
     _VALUE_FLAGS_BY_CMD,
@@ -81,6 +85,7 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _channel_sig,
     _config_file_digest,
     _config_resolved_digest,
+    _describe,
     _diff_behavioral,
     _diff_bootstrap_added,
     _diff_bootstrap_changed,
@@ -90,6 +95,7 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _diff_check_transitions,
     _diff_config_digest_unmoved,
     _diff_config_journal,
+    _diff_exec_policy,
     _diff_gateway_bind_moved,
     _diff_host_monitors,
     _diff_host_persist,
@@ -98,6 +104,7 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _diff_native_findings,
     _diff_openclaw_install,
     _diff_plugins,
+    _diff_scope,
     _diff_score,
     _diff_skill_provenance,
     _diff_skills_added,
@@ -105,17 +112,21 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _diff_skills_removed,
     _diff_vanished_checks,
     _dim,
+    _every_request_is_prompted,
+    _exec_policy_sig,
     _extract_args_pkg,
     _extract_memory_signals,
     _frontier,
     _gateway_bind,
     _h,
     _has_memory_name,
+    _human_reviews_a_miss,
     _mcp_detail_sig,
     _mcp_observed_surfaces,
     _mcp_sig,
     _memory_injection_patterns,
     _memory_tight_signal_patterns,
+    _misses_can_still_run,
     _name_dimensions,
     _note_gateway_bind_unreadable,
     _note_skills_capped,
@@ -132,12 +143,15 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _prov_records_seen,
     _prov_searched_roots,
     _raw_score_scope,
+    _resolve_mode_from_policy,
+    _resolve_scope,
     _scan_truncated_skills,
     _signal_class_label,
     _skill_sig,
     _snapshot_memory_files,
     _snapshot_memory_text,
     _tool_surface_hash,
+    _undetermined_reason,
     annotations,
     changed_skills,
 )
@@ -229,7 +243,12 @@ _VALUE_FLAGS_BY_CMD["podman"] = set(_VALUE_FLAGS_BY_CMD["docker"])
 # B-269 — dimensions of the snapshot that are built from ``ctx.config``. When
 # openclaw.json cannot be read/parsed the collector falls back to ``ctx.config = {}`` and
 # every one of these collapses to empty, which ``diff()`` used to read as fact.
-_CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind", "plugins")
+_CONFIG_DIMENSIONS = ("mcp", "mcp_detail", "channels", "gateway_bind", "plugins",
+                      # B-664: read purely from the config, so a blind run must
+                      # carry the last known policy forward rather than record an
+                      # empty one — an empty record would compare as "the gate is
+                      # gone" on the next sighted run.
+                      "exec_policy")
 
 # B-269 — dimensions collected from disk that an unreadable config can still SHRINK,
 # because the config declares extra roots to scan: ``agents.defaults.workspace`` /
@@ -351,6 +370,9 @@ WATCHED_DIMENSIONS = (
     # C-417 manifest guard requires the moment something reads it back.
     "config_resolved_sha256",
     "config_written_by",
+    # B-664. Written on every run whose config parsed; `{}` when it did not,
+    # which the arm treats as nothing to compare rather than as a policy.
+    "exec_policy",
     "gateway_bind",
     "grade",
     # B-511: whether the grade above was EARNED. diff() reads it off the stored
@@ -554,6 +576,10 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         "mcp_detail": _mcp_detail_sig(ctx),
         "channels": _channel_sig(ctx),
         "gateway_bind": _gateway_bind(ctx),
+        # B-664: the approval gate on unattended shell execution. Resolved,
+        # not raw — see monitordims/_execpolicy.py for why the raw fields do
+        # not compare meaningfully.
+        "exec_policy": _exec_policy_sig(ctx),
         "plugins": _plugins_sig(ctx),
     }
     snap["memory_capped"] = sorted(_mem_capped)
@@ -1136,6 +1162,12 @@ def diff_with_notes(prev: dict | None, curr: dict
     _pgb, _cgb = prev.get("gateway_bind"), curr.get("gateway_bind")
     _note_gateway_bind_unreadable(_cgb, _pgb, compare_config, note, prev)
     _diff_gateway_bind_moved(_cgb, _pgb, alerts, compare_config)
+
+    # B-664: the approval gate on unattended shell execution. Sits inside the config span
+    # (between _config_alerts_from and _config_alerts_to) so F-170 can attribute a change
+    # here to the write that produced it, like every other config-derived alert.
+    _exec_pair = pair_or_note("exec_policy", "Your agent's shell-approval policy")
+    _diff_exec_policy(_exec_pair, alerts, compare_config, note)
 
     # B-659: the plugin trust surface. A plugin runs inside the agent, so an id becoming
     # allowed, a deny being lifted, or the global switch opening are all trust grants.

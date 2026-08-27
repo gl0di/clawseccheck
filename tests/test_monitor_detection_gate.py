@@ -133,6 +133,25 @@ def test_channel_policies_use_the_real_vocabulary(tmp_path):
                     )
 
 
+def test_the_marker_set_covers_every_glyph_the_renderer_uses():
+    """Parsed out of `report.py`, so the two cannot drift apart.
+
+    The gate reads a run's output as text. A severity whose glyph is missing here is a
+    severity the gate cannot see: the first version omitted ⛔ and ⚠️ — CRITICAL and HIGH —
+    and read its two loudest alerts only through the exit code.
+    """
+    src = (REPO_ROOT / "clawseccheck" / "report.py").read_text(encoding="utf-8")
+    maps = re.findall(
+        r'\{"CRITICAL": "([^"]+)", "HIGH": "([^"]+)", "MEDIUM": "([^"]+)", '
+        r'"LOW": "([^"]+)", "INFO": "([^"]+)"\}', src)
+    assert maps, "the severity->glyph map in report.py has moved; re-anchor this guard"
+    for row in maps:
+        for glyph in row:
+            assert glyph in gate._ALERT_MARKS, (
+                f"report.py renders a severity as {glyph!r} and the gate cannot see it"
+            )
+
+
 def test_the_info_glyph_counts_as_an_alert():
     """INFO sits below every `--fail-on` threshold by design (`_SEVERITY_RANK` has no INFO
     entry), so a scenario can warn on screen without paging. Dropping it from the marker set

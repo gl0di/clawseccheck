@@ -73,6 +73,23 @@ from ._configfile import (  # noqa: F401
     _note_unmodelled_config_edit,
 )
 
+from ._execpolicy import (  # noqa: F401
+    _MODE_POLICY,
+    _SANDBOX_ALWAYS,
+    _SANDBOX_NEVER,
+    _SECURITY_RANK,
+    _describe,
+    _diff_exec_policy,
+    _diff_scope,
+    _every_request_is_prompted,
+    _exec_policy_sig,
+    _human_reviews_a_miss,
+    _misses_can_still_run,
+    _resolve_mode_from_policy,
+    _resolve_scope,
+    _undetermined_reason,
+)
+
 from ._gateway import (  # noqa: F401
     _diff_gateway_bind_moved,
     _gateway_bind,

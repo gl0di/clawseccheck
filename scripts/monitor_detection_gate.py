@@ -57,11 +57,25 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 BASE_HOME = REPO / "fixtures" / "home_safe"
 
-#: Alert glyphs the renderer uses, plus the INFO one. INFO is included deliberately: it is
-#: a real alert that sits below every `--fail-on` threshold by design (`_SEVERITY_RANK` has
-#: no INFO entry), so a scenario can warn on screen without paging. Counting it as silence
-#: would report a working detector as broken.
-_ALERT_MARKS = ("\U0001f534", "\U0001f7e0", "\U0001f536", "⚪", "ℹ️")
+#: Every glyph `report.py`'s monitor renderer puts in front of an alert line, both the
+#: unicode set and the `--ascii` one.
+#:
+#: Taken from that map, not guessed. The first version listed the `_SEV_GLYPH` colours
+#: (red/orange circles) used elsewhere in the report and omitted **⛔ and ⚠️ — CRITICAL and
+#: HIGH** — so the gate could not read its two loudest severities as text at all and saw
+#: them only through the exit code. Every verdict was still right, because a CRITICAL or
+#: HIGH always trips `--fail-on medium`; what was wrong is that four scenarios printed
+#: "(no alert line)" beside a perfectly good alert, and a regression that dropped an alert
+#: without changing the exit code would have gone unread.
+#:
+#: INFO is deliberately included: it is a real alert that sits below every `--fail-on`
+#: threshold by design (`_SEVERITY_RANK` has no INFO entry), so a scenario can warn on
+#: screen without paging. Counting it as silence reports a working detector as broken.
+#:
+#: `tests/test_monitor_detection_gate.py` requires this to cover the renderer's map, so the
+#: two cannot drift apart again.
+_ALERT_MARKS = ("⛔", "⚠️", "🔶", "⚪", "ℹ️",
+                "[X]", "[!]", "[~]", "[-]", "[i]")
 
 
 def _cfg(home: Path) -> dict:
@@ -205,11 +219,10 @@ DANGERS = {
     "gateway-auth-off": (_gateway_auth_off, True),
     "new-open-channel": (_new_open_channel, True),
     "channel-thrown-open": (_channel_thrown_open, True),
-    # B-664: `tools` is not among _CONFIG_DIMENSIONS, and the checks that read
-    # tools.exec.mode read it as a corroborator, so on this home nothing moves. The run
-    # does NOT claim it looked — B-659's note fires — but it is a note, not an alert, and
-    # the exit code stays 0, so a scheduled job does not page.
-    "exec-auto-approved": (_exec_auto_approved, False),
+    # B-664, CLOSED: `exec_policy` is now a watched dimension of its own
+    # (monitordims/_execpolicy.py). This entry was the gate's one KNOWN silence; it is an
+    # expected ALERT again, so a regression that re-loses the approval gate reddens here.
+    "exec-auto-approved": (_exec_auto_approved, True),
     "mcp-server-added": (_mcp_server_added, True),
     "mcp-command-swapped": (_mcp_command_swapped, True),
     "plugin-newly-allowed": (_plugin_newly_allowed, True),
