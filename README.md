@@ -29,12 +29,15 @@ your keys, and acts on your behalf. That power is exactly what attackers want
 to borrow: **one poisoned message or one malicious skill can quietly turn your
 agent against you.**
 
-ClawSecCheck is a **security check-up for your agent**. It runs in three modes —
-a deliberate full check, an ongoing watch for change, and a before-you-install
-gate — and explains, in plain language, right in your chat, what is risky and
-why. A full check earns an **A–F grade**, but only once all five of its audit
-layers have run; short of that it leads with the most urgent finding in words
-and names what didn't run, never a guessed number. It reports, it doesn't
+ClawSecCheck is a **security check-up for your agent — one you run again, not
+once.** A setup is not safe or unsafe forever: you add a skill, connect an MCP
+server, edit a config, and the answer changes. So it runs in three modes — a
+deliberate full check, an ongoing **watch** that tells you what changed since
+last time, and a before-you-install gate — and explains, in plain language,
+right in your chat, what is risky and why. A full check earns an **A–F grade**,
+but only once all five of its audit layers have run; short of that it leads with
+the most urgent finding in words and names what didn't run, never a guessed
+number. It reports, it doesn't
 remediate: it never touches your OpenClaw config, needs no API key, and the
 scanner itself makes **no network calls** — no telemetry, no uploads, ever.
 (One narrow, opt-in exception: `--apply-ignore-proposals` can append entries to
@@ -96,6 +99,48 @@ Run it repeatedly. Gives you events, never a number.
 | You say | You get |
 |---|---|
 | *"Watch my setup for changes"* | Alerts when something changes — a new skill, config drift, a finding that appeared or cleared |
+| *"What changed since the last check?"* | The same, on demand — the diff since the last recorded baseline |
+
+**How the watch actually behaves.** The first run records a local baseline and
+says so; it does not invent a "before" it never saw. Every later run compares
+against it and reports only the difference:
+
+```text
+Baseline saved. Future runs will alert on what changes since now.
+Baseline reference: a6a061e78c6239b7
+```
+
+```text
+1 change(s) detected since last check:
+⛔ NEW MCP server connected since last check: 'newthing' — vet it before
+   trusting (new tool/data trust surface).
+```
+
+Three things make this a watch rather than a re-run:
+
+- **It reports the change, not the state.** A run with nothing new says `No new
+  threats among what was compared` — you are not asked to re-read a full report
+  to spot what moved.
+- **It says what it could not compare.** Every run ends with a count of
+  dimensions it had no basis to diff (`ℹ️ 5 things could not be compared this
+  run`), so a quiet run is never mistaken for a clean one.
+- **The baseline has a reference fingerprint.** Each run prints a short value;
+  keep a copy off the machine and re-check it later with `--verify-baseline`.
+  It moves whenever anything the watch recorded is different — so a copy you
+  hold elsewhere is how you notice a local record that was quietly rewritten.
+  It also moves when you change the flags you run with, and the check prints
+  what it covered so you can tell those two apart.
+
+Ask your agent to watch on a schedule, or run it yourself:
+
+```bash
+clawseccheck --monitor
+```
+
+Nothing leaves the machine: the baseline, the event journal and the score
+history all live under `~/.clawseccheck/` and are removable at any time
+(`--purge`). Points elsewhere with `--state` / `--events` if you want to keep
+several watches apart.
 
 ### C · Before you install — *is this thing safe to add?*
 
