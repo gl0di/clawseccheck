@@ -49,7 +49,22 @@ MONITOR_SRC = (_PKG / "monitor.py").read_text(encoding="utf-8")
 #: derivation to the imported objects, the way `tests/test_f173_behavioral_and_witness.py`
 #: was re-anchored, rather than widening this path list.
 STORE_SRC = (_PKG / "monitorstore.py").read_text(encoding="utf-8")
-SUBSYSTEM_SRC = MONITOR_SRC + "\n" + STORE_SRC
+
+#: C-433's per-dimension slice moved each dimension's signature builder AND its diff arm
+#: into `monitordims/`, and those DO read dimension keys — `memory_capped` became readable
+#: only from `monitordims/_memory.py` the moment the memory family moved, and this guard
+#: failed in exactly the direction its own comment predicted: "declared but never read",
+#: which reads like a manifest with spare entries rather than like code that changed homes.
+#:
+#: Globbed rather than listed. A hand-written list is a second place to remember, and the
+#: failure mode of forgetting an entry here is silent narrowing — the derivation simply
+#: stops seeing a dimension's reads and the manifest looks over-declared. `sorted()` keeps
+#: the concatenation stable so a failure is reproducible.
+DIMS_SRC = "\n".join(
+    p.read_text(encoding="utf-8")
+    for p in sorted((_PKG / "monitordims").glob("*.py"))
+)
+SUBSYSTEM_SRC = MONITOR_SRC + "\n" + STORE_SRC + "\n" + DIMS_SRC
 
 _NEW_KEYS = ("ts", "watched", "config_file_sha256")
 

@@ -1427,7 +1427,7 @@ value: `3` (bumped from `2` by B-568 — see the Notes below for what changed).
 |---|---|---|
 | `name` | `str` | Skill directory name. |
 | `version` | `str \| null` | Declared version extracted from the skill's frontmatter, or `null` if undeclared. |
-| `hash` | `str` | Content hash of the skill's `SKILL.md`, using the SAME hash scheme `monitor.py`'s own drift-detection snapshots use — so a BOM hash can be cross-referenced against a `--monitor` baseline. |
+| `hash` | `str` | Content hash of the skill's `SKILL.md`, using the SAME hash scheme the drift-detection snapshots use (`monitordims/_shared.py`'s `_h`) — so a BOM hash can be cross-referenced against a `--monitor` baseline. |
 | `declared_deps` | `array[str]` | Dependency names the skill declares, sorted. |
 | `unpinned_deps` | `array[str]` | Subset of `declared_deps` that carry no version pin, sorted. |
 | `supplier` | `str \| null` | B-568: which plugin supplies this skill. `null` — a skill discovered outside the plugin-skills root (`ctx.installed_skill_bundled`, B-507) is directly user-installed and has no plugin-supplier concept to report, a different fact from "unknown". `"unknown"` — the skill IS bundled with a plugin but which one cannot be resolved (the persisted plugin index carries no reverse skill list; resolution is by directory containment against `ctx.installed_skill_dirs`, and containment found zero or more than one match). A `<plugin_id>` string — exactly one plugin's `root_dir` contains this skill's directory. Never derived from the skill's or plugin's NAME. |
@@ -1558,7 +1558,7 @@ document describes; reading both from one invocation is expected.
 
 | Field | Type | Description |
 |---|---|---|
-| `category` | `str` | One of `config_blind` / `record_damaged` / `inspection_capped` / `undetermined` / `no_prior_record` — see `monitor.py`'s `NOTE_*` constants for what each means. Stable identifiers; the associated `message` wording is not part of the frozen contract and may be reworded. |
+| `category` | `str` | One of `config_blind` / `record_damaged` / `inspection_capped` / `undetermined` / `no_prior_record` — see the `NOTE_*` constants in `clawseccheck/monitordims/_shared.py` (re-exported from `clawseccheck.monitor`) for what each means. Stable identifiers; the associated `message` wording is not part of the frozen contract and may be reworded. |
 | `message` | `str` | Human-readable description of what could not be compared and why. |
 
 ### Example

@@ -1,0 +1,155 @@
+# The public import surface of `clawseccheck.monitor`, captured from commit 1fd915b —
+# the tree immediately BEFORE C-433 split the watched dimensions into
+# `clawseccheck/monitordims/`.
+#
+# Why this file exists. That split moved ~3,300 lines out of `monitor.py` into sixteen
+# dimension modules, and `monitor` re-exports every one of them because `monitor` is the
+# import site 46 test modules and several siblings already use. "Every name stays
+# importable" is the contract, and the first version of the aggregator quietly dropped ten
+# names — `FAIL`, `PASS`, `WARN`, the four `PROV_*` provenance helpers, and three leaf
+# aliases — because nothing in tests/ happened to import them. A contract nothing checks is
+# a claim, so it is checked here.
+#
+# Same shape and same purpose as tests/checks_public_api.txt (CLAUDE.md §3.1-a): a SUBSET
+# assertion. Adding a name is free; removing one has to be a deliberate edit to this file.
+# Dunders are excluded — `__annotations__` appears and disappears with module-level
+# annotated assignments and says nothing about the import surface.
+BASELINE_ABSENT
+BASELINE_CORRUPT
+BASELINE_CORRUPT_ALERT
+BASELINE_DIGEST_CHARS
+BASELINE_OK
+BY_ID
+CHAIN_ABSENT
+CHAIN_BAD_PATH
+CHAIN_EMPTY
+CHAIN_NOT_A_FILE
+CHAIN_NO_ENTRIES
+CHAIN_UNREADABLE
+DEFAULT_EVENTS
+DEFAULT_STATE
+FAIL
+NOTE_CATEGORY_ORDER
+NOTE_CONFIG_BLIND
+NOTE_INSPECTION_CAPPED
+NOTE_NO_PRIOR_RECORD
+NOTE_RECORD_DAMAGED
+NOTE_UNDETERMINED
+PASS
+PROV_KEY_SEP
+PROV_ROOT_MARK
+Path
+SCHEMA_VERSION
+SNAPSHOT_VERSION
+UNKNOWN
+WARN
+WATCHED_DIMENSIONS
+_CHANNEL_ALLOWLIST_KEYS
+_CHANNEL_SCOPE_KEYS
+_CHANNEL_SECRET_KEYS
+_CONFIG_DIMENSIONS
+_DIMENSION_LABELS
+_DIMENSION_NAME_CAP
+_HOST_PERSIST_INFRA
+_HOST_PERSIST_LABELS
+_JOURNAL_KEEP
+_JOURNAL_MAX_LINES
+_MEMORY_FILE_NAMES
+_MEMORY_MAX_BYTES
+_MEMORY_MAX_FILES
+_MEMORY_SIGNAL_VERSION
+_MEMORY_TEXT_EXTS
+_MEMORY_URL_RE
+_PLUGIN_ID_ALIASES
+_REFERENCE_VOLATILE_KEYS
+_RUNNER_LEAD_SUBCOMMANDS_BY_CMD
+_RUNNER_LEAD_VALUE_MARKERS_BY_CMD
+_SCAN_TRUNCATED_RE
+_SHRINKABLE_DIMENSIONS
+_SIGNAL_CLASS_LABELS
+_SKILL_VERSION_RE
+_VALUE_FLAGS_BY_CMD
+_append_memory_alerts
+_b62_families
+_both_dims
+_chain_hash
+_channel_entry
+_channel_scope_nodes
+_channel_sig
+_config_file_digest
+_config_resolved_digest
+_degrade_snapshot
+_diff_channels
+_diff_host_monitors
+_diff_host_persist
+_diff_mcp_servers
+_diff_native_findings
+_diff_openclaw_install
+_diff_plugins
+_diff_skill_provenance
+_dim
+_extract_args_pkg
+_extract_memory_signals
+_frontier
+_gateway_bind
+_h
+_has_memory_name
+_hp_FAMILY_LABELS
+_hp_FAMILY_SYSTEMD
+_hp_FAMILY_SYSTEM_CRON
+_ignore_hash
+_iter_jsonl
+_journal_find_by_hash
+_journal_newest_hash
+_journal_read
+_last_chain_hash
+_mcp_detail_sig
+_mcp_observed_surfaces
+_mcp_sig
+_memory_injection_patterns
+_memory_tight_signal_patterns
+_name_dimensions
+_now_iso
+_num
+_plugin_id
+_plugins_sig
+_prov_comparable
+_prov_compare_records
+_prov_is_record_key
+_prov_is_root_key
+_prov_legacy_names
+_prov_not_compared
+_prov_records_seen
+_prov_searched_roots
+_raw_score_scope
+_rotate_journal
+_scan_truncated_skills
+_schema_ok
+_signal_class_label
+_skill_sig
+_snapshot_memory_files
+_snapshot_memory_text
+_tool_surface_hash
+_version_order
+annotations
+baseline_reference
+baseline_witness_event
+chain_provenance_note
+changed_skills
+diff
+diff_with_notes
+hashlib
+json
+load_events
+load_events_with_problem
+load_state
+re
+read_baseline
+record_events
+redact_urls_in_text
+sanitize_url_host_only
+save_state
+snapshot
+snapshot_reference
+verify_baseline
+verify_chain
