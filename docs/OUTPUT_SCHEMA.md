@@ -615,7 +615,8 @@ Keys are skill names; values are arrays of effect-profile entry objects.
 
 Produced by `--vet` / `--vet-skill` / `--vet-plugin`, `--vet-mcp`, and `--vet-source`.
 **Since v3.8.0** the vet output is a **risk dossier**: the same per-finding results (§2 shape)
-plus a five-axis roll-up and an overall grade. No full-audit `next_actions` / `capability_graph`.
+plus a five-axis roll-up and a single verdict word. No letter grade and no numeric score — see
+below. No full-audit `next_actions` / `capability_graph`.
 
 ### Fields
 
@@ -664,9 +665,11 @@ but `danger` is `"N/A"`. An axis with a producer but no measurable input (e.g. a
 no executable code) is `"UNKNOWN"`, distinct from PASS. `verdict` maps the overall status:
 `FAIL`→DANGEROUS, `WARN`→SUSPICIOUS, `PASS`→NO KNOWN ISSUE, else UNKNOWN.
 
-`grade` derivation: `danger == FAIL` → `F`; otherwise a weighted pass-rate over the
-assessable axes (PASS=1, WARN=0.5, FAIL=0; N/A and UNKNOWN excluded), with any WARN capping
-below A and any non-danger FAIL capping at C. All-N/A/UNKNOWN → `"N/A"`.
+`VetProfile.overall_grade` derivation, **for readers of the code — this value is not in the
+payload above**: `danger == FAIL` → `F`; otherwise a weighted pass-rate over the assessable
+axes (PASS=1, WARN=0.5, FAIL=0; N/A and UNKNOWN excluded), with any WARN capping below A and
+any non-danger FAIL capping at C. All-N/A/UNKNOWN → `"N/A"`. It is recorded here because the
+coverage-gap cap machinery reasons about it; no renderer prints it.
 
 `--vet-plugin` decomposes into its dispatched sub-findings (bundled-skill B13/ring,
 embedded-MCP `MCP-VET`), which bucket onto the axes; the `PLUGIN-VET` container id is not
@@ -697,8 +700,6 @@ as a reason string in a full audit's per-skill inventory (§18).
   "target": "/path/to/skill",
   "target_type": "skill",
   "verdict": "DANGEROUS",
-  "grade": "F",
-  "score": 0,
   "axes": [
     {"axis": "danger", "status": "FAIL", "reason": "...", "fix": "...", "finding_ids": ["B13"]},
     {"axis": "persistence", "status": "PASS", "reason": "...", "fix": "", "finding_ids": []}
