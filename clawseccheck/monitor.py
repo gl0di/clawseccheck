@@ -2771,6 +2771,220 @@ def _diff_skill_provenance(pair, prev, curr, alerts, note, trust_removals) -> No
                                   _p_names)
 
 
+
+def _diff_openclaw_install(_c_inst, _p_inst, alerts, curr, note, prev) -> None:
+    """C-433: the diff arm for the installed OpenClaw package.
+
+    The statement is moved **verbatim, condition included**. The previous batch rebuilt an
+    `if compare_config and _pair is not None:` as `if pair is None: return`, kept one clause
+    and dropped the blind-run interlock, and reintroduced a B-269 fabrication. Moving the
+    whole `if` removes that class of error entirely.
+
+    Parameter names keep their original underscore-prefixed spelling for the same reason:
+    a rename is an edit, and the contract for this move is that the body is unchanged.
+    """
+    if _p_inst is None:
+        if "openclaw_install" not in curr and "openclaw_install" in prev:
+            note(NOTE_UNDETERMINED,
+                 "Your OpenClaw installation was not compared: this run could not find it. "
+                 "That is normal for a scheduled run, whose search path is narrower than "
+                 "yours.")
+    else:
+        _p_ver, _c_ver = _p_inst.get("version", ""), _c_inst.get("version", "")
+        if _p_ver and _c_ver and _p_ver != _c_ver:
+            # Direction only when it is defensible — see openclawdist.compare_versions for
+            # why a wrong "rolled back" is worse than a bare "changed".
+            if _version_order(_p_ver, _c_ver) == "down":
+                alerts.append((
+                    "HIGH",
+                    f"Your OpenClaw installation went BACKWARDS, from {_p_ver} to {_c_ver}. "
+                    f"A downgrade re-opens whatever the newer build had fixed, and it is "
+                    f"not something a routine update does. Confirm you did this."))
+            else:
+                alerts.append((
+                    "INFO",
+                    f"Your OpenClaw installation changed from {_p_ver} to {_c_ver}."))
+        elif _p_ver and _c_ver and _p_ver == _c_ver \
+                and _p_inst.get("code_sha256") and _c_inst.get("code_sha256") \
+                and _p_inst["code_sha256"] != _c_inst["code_sha256"] \
+                and not _c_inst.get("code_capped") and not _p_inst.get("code_capped"):
+            # The attack the version number cannot show: same version, different build.
+            #
+            # Gated on both versions being RECORDED and EQUAL, not merely on the version
+            # branch above not having fired. The `elif` alone was reached when one side's
+            # version was never recorded at all (a manifest with no `version` string), and
+            # the sentence then asserted the version "stayed at" a value the other side did
+            # not have — claiming a same-version swap out of a missing field.
+            alerts.append((
+                "HIGH",
+                f"Your OpenClaw program files changed while the version number stayed at "
+                f"{_c_ver}. A normal update moves both. Re-install OpenClaw from a source "
+                f"you trust if you did not do this deliberately."))
+        elif (_p_ver and _c_ver and _p_ver == _c_ver
+                and not _p_inst.get("code_capped") and not _c_inst.get("code_capped")
+                and _p_inst.get("code_sha256") and _c_inst.get("code_sha256")
+                and _p_inst["code_sha256"] == _c_inst["code_sha256"]
+                and _p_inst.get("lock_sha256") and _c_inst.get("lock_sha256")
+                and _p_inst["lock_sha256"] != _c_inst["lock_sha256"]):
+            # Every clause of the sentence has to be EVIDENCED, not merely un-contradicted.
+            # Tightening the swapped-build branch above pushed three cases down into this
+            # one — a missing version on either side, and a capped code digest — and this
+            # line then asserted the version AND the program files were unchanged when one
+            # was unrecorded and the other demonstrably differed. An `elif` chain makes
+            # "the branch above did not fire" look like evidence; it never is.
+            alerts.append((
+                "INFO",
+                "The set of packages OpenClaw depends on changed, with its own version and "
+                "program files unchanged."))
+        if _c_inst.get("code_capped"):
+            note(NOTE_INSPECTION_CAPPED,
+                 "Your OpenClaw installation is larger than one run inspects, so only part "
+                 "of its program files were fingerprinted.")
+
+
+
+def _diff_host_persist(_hp_pair, alerts, curr, note, prev) -> None:
+    """C-433: the diff arm for the machine's own startup and scheduling files.
+
+    The statement is moved **verbatim, condition included**. The previous batch rebuilt an
+    `if compare_config and _pair is not None:` as `if pair is None: return`, kept one clause
+    and dropped the blind-run interlock, and reintroduced a B-269 fabrication. Moving the
+    whole `if` removes that class of error entirely.
+
+    Parameter names keep their original underscore-prefixed spelling for the same reason:
+    a rename is an edit, and the contract for this move is that the body is unchanged.
+    """
+    if _hp_pair is None:
+        if "host_persist" in prev and "host_persist" not in curr:
+            note(NOTE_UNDETERMINED,
+                 "This machine's own startup and scheduling files were not compared: this "
+                 "run did not examine them. Your saved record for them is kept as it was.")
+        elif "host_persist" not in prev and "host_persist" in curr:
+            note(NOTE_NO_PRIOR_RECORD,
+                 "This machine's own startup and scheduling files had nothing to compare "
+                 "against — your saved record predates this check. It will cover them from "
+                 "the next run onwards.")
+        elif "host_persist" in prev or "host_persist" in curr:
+            note(NOTE_RECORD_DAMAGED,
+                 "The record of this machine's startup and scheduling files is not in the "
+                 "expected form, so it was not compared. It will rebuild on the next run.")
+    else:
+        _php, _chp = _hp_pair
+        _pe = _php.get("entries") if isinstance(_php.get("entries"), dict) else None
+        _ce = _chp.get("entries") if isinstance(_chp.get("entries"), dict) else None
+        if _pe is None or _ce is None:
+            note(NOTE_RECORD_DAMAGED,
+                 "The record of this machine's startup and scheduling files is not in the "
+                 "expected form, so it was not compared. It will rebuild on the next run.")
+        else:
+            def _fam(entry: object) -> str:
+                return entry.get("family", "") if isinstance(entry, dict) else ""
+
+            def _dig(entry: object) -> str:
+                return entry.get("digest", "") if isinstance(entry, dict) else ""
+
+            def _label(path: str, entry: object) -> str:
+                fam = _HOST_PERSIST_LABELS.get(_fam(entry))
+                return "{0} ({1})".format(path, fam) if fam else path
+
+            def _say(level: str, verb: str, items: "list[str]") -> None:
+                if not items:
+                    return
+                shown = sorted(items)[:_DIMENSION_NAME_CAP]
+                more = len(items) - len(shown)
+                tail = ", and {0} more".format(more) if more > 0 else ""
+                alerts.append((level, "Startup/scheduling file(s) {0} on this machine: "
+                                      "{1}{2}. These run code without your agent's "
+                                      "involvement, so a change here is outside anything "
+                                      "your OpenClaw settings control."
+                               .format(verb, ", ".join(shown), tail)))
+
+            _added = [p for p in _ce if p not in _pe]
+            _removed = [p for p in _pe if p not in _ce]
+            _changed = [p for p in (set(_pe) & set(_ce)) if _dig(_pe[p]) != _dig(_ce[p])]
+
+            _say("MEDIUM", "appeared", [_label(p, _ce[p]) for p in _added])
+            _say("INFO", "were removed", [_label(p, _pe[p]) for p in _removed])
+            _say("MEDIUM", "changed",
+                 [_label(p, _ce[p]) for p in _changed
+                  if _fam(_ce[p]) in _HOST_PERSIST_INFRA])
+            _say("INFO", "changed",
+                 [_label(p, _ce[p]) for p in _changed
+                  if _fam(_ce[p]) not in _HOST_PERSIST_INFRA])
+
+        # A path that EXISTS but this process may not read. On a normal Linux box the
+        # user's own crontab spool is here every single run, and that is the point: the
+        # closest on-disk analogue of the published attack is one we structurally cannot
+        # see, and saying so every run beats a silence that reads as "nothing scheduled".
+        _unread = _chp.get("unreadable")
+        if isinstance(_unread, list) and _unread:
+            note(NOTE_UNDETERMINED,
+                 "{0} startup/scheduling location(s) on this machine exist but could not "
+                 "be read, so this run cannot tell you whether anything in them changed: "
+                 "{1}. Reading a per-user crontab needs privileges this tool does not "
+                 "take; check it yourself with 'crontab -l'."
+                 .format(len(_unread), ", ".join(sorted(_unread)[:_DIMENSION_NAME_CAP])))
+        if _chp.get("capped"):
+            note(NOTE_INSPECTION_CAPPED,
+                 "There are more startup and scheduling files on this machine than can be "
+                 "recorded in one run, so only part of that surface was compared.")
+
+
+
+def _diff_mcp_servers(_mcp_pair, alerts, compare_config) -> None:
+    """C-433: the diff arm for the configured MCP servers.
+
+    The statement is moved **verbatim, condition included**. The previous batch rebuilt an
+    `if compare_config and _pair is not None:` as `if pair is None: return`, kept one clause
+    and dropped the blind-run interlock, and reintroduced a B-269 fabrication. Moving the
+    whole `if` removes that class of error entirely.
+
+    Parameter names keep their original underscore-prefixed spelling for the same reason:
+    a rename is an edit, and the contract for this move is that the body is unchanged.
+    """
+    if compare_config and _mcp_pair is not None:
+        pm, cm = _mcp_pair
+        for name in sorted(cm.keys() - pm.keys()):
+            alerts.append(("CRITICAL", f"NEW MCP server connected since last check: '{name}' — "
+                           "vet it before trusting (new tool/data trust surface)."))
+        for name in sorted(pm.keys() & cm.keys()):
+            if pm[name] != cm[name]:
+                alerts.append(("HIGH", f"MCP server '{name}' configuration CHANGED — "
+                               "re-review its transport, secret passthrough and scope."))
+        for name in sorted(pm.keys() - cm.keys()):
+            alerts.append(("INFO", f"MCP server '{name}' was removed."))
+
+
+
+def _diff_native_findings(_both_native, _c_native, _p_native, _same_scope_flags, alerts, note) -> None:
+    """C-433: the diff arm for the native-tool finding count.
+
+    The statement is moved **verbatim, condition included**. The previous batch rebuilt an
+    `if compare_config and _pair is not None:` as `if pair is None: return`, kept one clause
+    and dropped the blind-run interlock, and reintroduced a B-269 fabrication. Moving the
+    whole `if` removes that class of error entirely.
+
+    Parameter names keep their original underscore-prefixed spelling for the same reason:
+    a rename is an edit, and the contract for this move is that the body is unchanged.
+    """
+    if not _both_native:
+        # Absent on either side is not silence: C-418's contract is that a comparison this
+        # run did not make is counted and, under --verbose, named. Self-healing — the next
+        # run has the key on both sides.
+        note(NOTE_NO_PRIOR_RECORD,
+             "The built-in `openclaw security audit` issue count was not compared: one of "
+             "these two runs did not record one.")
+    elif not _same_scope_flags:
+        note(NOTE_UNDETERMINED,
+             "The built-in `openclaw security audit` issue count was not compared: this "
+             "run and the last were taken with different options, so a change in the "
+             "number would be the option changing rather than the machine.")
+    elif _c_native > _p_native:
+        delta = _c_native - _p_native
+        alerts.append(("INFO",
+                       f"openclaw security audit reports {delta} more issue(s) than last time."))
+
+
 def diff_with_notes(prev: dict | None, curr: dict
                     ) -> "tuple[list[tuple[str, str]], list[tuple[str, str]]]":
     """Return ``(alerts, notes)``.
@@ -3531,22 +3745,7 @@ def diff_with_notes(prev: dict | None, curr: dict
 
     _p_native, _c_native = _count(prev.get("native_count")), _count(curr.get("native_count"))
     _both_native = _p_native is not None and _c_native is not None
-    if not _both_native:
-        # Absent on either side is not silence: C-418's contract is that a comparison this
-        # run did not make is counted and, under --verbose, named. Self-healing — the next
-        # run has the key on both sides.
-        note(NOTE_NO_PRIOR_RECORD,
-             "The built-in `openclaw security audit` issue count was not compared: one of "
-             "these two runs did not record one.")
-    elif not _same_scope_flags:
-        note(NOTE_UNDETERMINED,
-             "The built-in `openclaw security audit` issue count was not compared: this "
-             "run and the last were taken with different options, so a change in the "
-             "number would be the option changing rather than the machine.")
-    elif _c_native > _p_native:
-        delta = _c_native - _p_native
-        alerts.append(("INFO",
-                       f"openclaw security audit reports {delta} more issue(s) than last time."))
+    _diff_native_findings(_both_native, _c_native, _p_native, _same_scope_flags, alerts, note)
 
     prev_ih = prev.get("ignore_hash", "")
     curr_ih = curr.get("ignore_hash", "")
@@ -3568,17 +3767,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # per-server loop.
     _trajectory_alerts: set = set()
     _mcp_pair = pair_or_note("mcp", "Connected tool servers")
-    if compare_config and _mcp_pair is not None:
-        pm, cm = _mcp_pair
-        for name in sorted(cm.keys() - pm.keys()):
-            alerts.append(("CRITICAL", f"NEW MCP server connected since last check: '{name}' — "
-                           "vet it before trusting (new tool/data trust surface)."))
-        for name in sorted(pm.keys() & cm.keys()):
-            if pm[name] != cm[name]:
-                alerts.append(("HIGH", f"MCP server '{name}' configuration CHANGED — "
-                               "re-review its transport, secret passthrough and scope."))
-        for name in sorted(pm.keys() - cm.keys()):
-            alerts.append(("INFO", f"MCP server '{name}' was removed."))
+    _diff_mcp_servers(_mcp_pair, alerts, compare_config)
 
     # --- Rug-pull detection (RP1-RP3): fine-grained MCP server manifest drift ---
     # Only runs when BOTH snapshots carry the structured mcp_detail key (guarded so an
@@ -3885,80 +4074,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # same reason. The reverse direction (absent in the baseline, present now) IS worth a
     # note and keeps one: that is the honest first-run-after-upgrade message.
     _hp_pair = _both_dims(prev, curr, "host_persist")
-    if _hp_pair is None:
-        if "host_persist" in prev and "host_persist" not in curr:
-            note(NOTE_UNDETERMINED,
-                 "This machine's own startup and scheduling files were not compared: this "
-                 "run did not examine them. Your saved record for them is kept as it was.")
-        elif "host_persist" not in prev and "host_persist" in curr:
-            note(NOTE_NO_PRIOR_RECORD,
-                 "This machine's own startup and scheduling files had nothing to compare "
-                 "against — your saved record predates this check. It will cover them from "
-                 "the next run onwards.")
-        elif "host_persist" in prev or "host_persist" in curr:
-            note(NOTE_RECORD_DAMAGED,
-                 "The record of this machine's startup and scheduling files is not in the "
-                 "expected form, so it was not compared. It will rebuild on the next run.")
-    else:
-        _php, _chp = _hp_pair
-        _pe = _php.get("entries") if isinstance(_php.get("entries"), dict) else None
-        _ce = _chp.get("entries") if isinstance(_chp.get("entries"), dict) else None
-        if _pe is None or _ce is None:
-            note(NOTE_RECORD_DAMAGED,
-                 "The record of this machine's startup and scheduling files is not in the "
-                 "expected form, so it was not compared. It will rebuild on the next run.")
-        else:
-            def _fam(entry: object) -> str:
-                return entry.get("family", "") if isinstance(entry, dict) else ""
-
-            def _dig(entry: object) -> str:
-                return entry.get("digest", "") if isinstance(entry, dict) else ""
-
-            def _label(path: str, entry: object) -> str:
-                fam = _HOST_PERSIST_LABELS.get(_fam(entry))
-                return "{0} ({1})".format(path, fam) if fam else path
-
-            def _say(level: str, verb: str, items: "list[str]") -> None:
-                if not items:
-                    return
-                shown = sorted(items)[:_DIMENSION_NAME_CAP]
-                more = len(items) - len(shown)
-                tail = ", and {0} more".format(more) if more > 0 else ""
-                alerts.append((level, "Startup/scheduling file(s) {0} on this machine: "
-                                      "{1}{2}. These run code without your agent's "
-                                      "involvement, so a change here is outside anything "
-                                      "your OpenClaw settings control."
-                               .format(verb, ", ".join(shown), tail)))
-
-            _added = [p for p in _ce if p not in _pe]
-            _removed = [p for p in _pe if p not in _ce]
-            _changed = [p for p in (set(_pe) & set(_ce)) if _dig(_pe[p]) != _dig(_ce[p])]
-
-            _say("MEDIUM", "appeared", [_label(p, _ce[p]) for p in _added])
-            _say("INFO", "were removed", [_label(p, _pe[p]) for p in _removed])
-            _say("MEDIUM", "changed",
-                 [_label(p, _ce[p]) for p in _changed
-                  if _fam(_ce[p]) in _HOST_PERSIST_INFRA])
-            _say("INFO", "changed",
-                 [_label(p, _ce[p]) for p in _changed
-                  if _fam(_ce[p]) not in _HOST_PERSIST_INFRA])
-
-        # A path that EXISTS but this process may not read. On a normal Linux box the
-        # user's own crontab spool is here every single run, and that is the point: the
-        # closest on-disk analogue of the published attack is one we structurally cannot
-        # see, and saying so every run beats a silence that reads as "nothing scheduled".
-        _unread = _chp.get("unreadable")
-        if isinstance(_unread, list) and _unread:
-            note(NOTE_UNDETERMINED,
-                 "{0} startup/scheduling location(s) on this machine exist but could not "
-                 "be read, so this run cannot tell you whether anything in them changed: "
-                 "{1}. Reading a per-user crontab needs privileges this tool does not "
-                 "take; check it yourself with 'crontab -l'."
-                 .format(len(_unread), ", ".join(sorted(_unread)[:_DIMENSION_NAME_CAP])))
-        if _chp.get("capped"):
-            note(NOTE_INSPECTION_CAPPED,
-                 "There are more startup and scheduling files on this machine than can be "
-                 "recorded in one run, so only part of that surface was compared.")
+    _diff_host_persist(_hp_pair, alerts, curr, note, prev)
 
     _host_pair = pair_or_note("host", "Security tools running on this machine")
     _diff_host_monitors(_host_pair, alerts, note)
@@ -4201,63 +4317,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # would otherwise have reported "OpenClaw was uninstalled" on its first cron run and
     # "OpenClaw appeared" the first time someone ran it by hand. It gets a note.
     _p_inst, _c_inst = _both_dims(prev, curr, "openclaw_install") or (None, None)
-    if _p_inst is None:
-        if "openclaw_install" not in curr and "openclaw_install" in prev:
-            note(NOTE_UNDETERMINED,
-                 "Your OpenClaw installation was not compared: this run could not find it. "
-                 "That is normal for a scheduled run, whose search path is narrower than "
-                 "yours.")
-    else:
-        _p_ver, _c_ver = _p_inst.get("version", ""), _c_inst.get("version", "")
-        if _p_ver and _c_ver and _p_ver != _c_ver:
-            # Direction only when it is defensible — see openclawdist.compare_versions for
-            # why a wrong "rolled back" is worse than a bare "changed".
-            if _version_order(_p_ver, _c_ver) == "down":
-                alerts.append((
-                    "HIGH",
-                    f"Your OpenClaw installation went BACKWARDS, from {_p_ver} to {_c_ver}. "
-                    f"A downgrade re-opens whatever the newer build had fixed, and it is "
-                    f"not something a routine update does. Confirm you did this."))
-            else:
-                alerts.append((
-                    "INFO",
-                    f"Your OpenClaw installation changed from {_p_ver} to {_c_ver}."))
-        elif _p_ver and _c_ver and _p_ver == _c_ver \
-                and _p_inst.get("code_sha256") and _c_inst.get("code_sha256") \
-                and _p_inst["code_sha256"] != _c_inst["code_sha256"] \
-                and not _c_inst.get("code_capped") and not _p_inst.get("code_capped"):
-            # The attack the version number cannot show: same version, different build.
-            #
-            # Gated on both versions being RECORDED and EQUAL, not merely on the version
-            # branch above not having fired. The `elif` alone was reached when one side's
-            # version was never recorded at all (a manifest with no `version` string), and
-            # the sentence then asserted the version "stayed at" a value the other side did
-            # not have — claiming a same-version swap out of a missing field.
-            alerts.append((
-                "HIGH",
-                f"Your OpenClaw program files changed while the version number stayed at "
-                f"{_c_ver}. A normal update moves both. Re-install OpenClaw from a source "
-                f"you trust if you did not do this deliberately."))
-        elif (_p_ver and _c_ver and _p_ver == _c_ver
-                and not _p_inst.get("code_capped") and not _c_inst.get("code_capped")
-                and _p_inst.get("code_sha256") and _c_inst.get("code_sha256")
-                and _p_inst["code_sha256"] == _c_inst["code_sha256"]
-                and _p_inst.get("lock_sha256") and _c_inst.get("lock_sha256")
-                and _p_inst["lock_sha256"] != _c_inst["lock_sha256"]):
-            # Every clause of the sentence has to be EVIDENCED, not merely un-contradicted.
-            # Tightening the swapped-build branch above pushed three cases down into this
-            # one — a missing version on either side, and a capped code digest — and this
-            # line then asserted the version AND the program files were unchanged when one
-            # was unrecorded and the other demonstrably differed. An `elif` chain makes
-            # "the branch above did not fire" look like evidence; it never is.
-            alerts.append((
-                "INFO",
-                "The set of packages OpenClaw depends on changed, with its own version and "
-                "program files unchanged."))
-        if _c_inst.get("code_capped"):
-            note(NOTE_INSPECTION_CAPPED,
-                 "Your OpenClaw installation is larger than one run inspects, so only part "
-                 "of its program files were fingerprinted.")
+    _diff_openclaw_install(_c_inst, _p_inst, alerts, curr, note, prev)
 
     # ---- F-174: where each installed skill came from -----------------------------------
     #
