@@ -485,6 +485,7 @@ _CONDITIONAL = {
     # handed the result to `snapshot()` — but they are named individually anyway, because
     # the alternative is one entry that quietly covers whatever else gets added beside them.
     "behavioral_fired": "absent when the caller did not run the behavioural layer",
+    "behavioral_incomplete": "absent when the caller did not run the behavioural layer",
     "behavioral_undetermined": "absent when the caller did not run the behavioural layer",
     "behavioral_capped": "absent when the caller did not run the behavioural layer",
     # F-174. Both absent for a REAL reason a consumer must not read as a stale baseline:

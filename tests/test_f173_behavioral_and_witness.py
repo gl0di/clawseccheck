@@ -80,6 +80,13 @@ def _snap(**over) -> dict:
         "checks": {"B1": "PASS"},
         "checks_not_applicable": [], "checks_degraded": [],
         "behavioral_fired": [], "behavioral_undetermined": [], "behavioral_capped": False,
+        # F-182 follow-up: the severity gate reads the INCOMPLETENESS verdict, not the cap.
+        # The cap is one of six reasons a replay cannot support a clean verdict, and an
+        # unreadable sidecar leaves it False while nothing was parsed. This fixture stands
+        # for a replay that really was complete, so it must say so with the key the gate
+        # actually reads — otherwise its absence correctly reads as "incomplete" and the
+        # tests below measure the advisory branch while claiming to measure the other one.
+        "behavioral_incomplete": False,
     }
     base.update(over)
     return base
@@ -246,8 +253,12 @@ def test_the_report_admits_the_window_may_only_be_newly_seen():
     therefore required exactly here and would be false on the uncapped branch — which is
     why `behavioral_capped=True` is passed rather than relying on the fixture's default.
     """
-    alerts, _ = diff_with_notes(_snap(behavioral_capped=True),
-                                _snap(behavioral_fired=["T1"], behavioral_capped=True))
+    # A capped replay IS an incomplete one, so both keys say so. The gate reads the
+    # incompleteness verdict — `behavioral_capped` alone stopped deciding severity when a
+    # measurement showed an unreadable sidecar leaves the cap False while nothing parses.
+    alerts, _ = diff_with_notes(
+        _snap(behavioral_capped=True, behavioral_incomplete=True),
+        _snap(behavioral_fired=["T1"], behavioral_capped=True, behavioral_incomplete=True))
     assert "newly seen rather than newly done" in alerts[0][1]
 
 

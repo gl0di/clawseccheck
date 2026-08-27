@@ -1535,6 +1535,7 @@ WATCHED_DIMENSIONS = (
     # result, so their absence says "that layer did not run", never "your baseline is old".
     "behavioral_capped",
     "behavioral_fired",
+    "behavioral_incomplete",
     "behavioral_undetermined",
     "bootstrap",
     "channels",
@@ -2047,6 +2048,9 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         snap["behavioral_fired"] = sorted(behavioral.get("fired") or ())
         snap["behavioral_undetermined"] = sorted(behavioral.get("undetermined") or ())
         snap["behavioral_capped"] = bool(behavioral.get("capped"))
+        # F-182 follow-up: the FULL incompleteness verdict, not just the cap. See the note
+        # at the newly-fired arm for the measurement that made this necessary.
+        snap["behavioral_incomplete"] = bool(behavioral.get("incomplete"))
 
     # F-174: the two supply-chain subjects, both handed in by the caller for the same reason
     # `behavioral` is — the shell owns discovery (one of them reads PATH) and this module
@@ -3957,8 +3961,18 @@ def diff_with_notes(prev: dict | None, curr: dict
                     # What remains true: no run against a home with a LOT of recorded
                     # activity exercises it, so the calibration is unvalidated for exactly
                     # the users who have the most history.
-                    _complete = (prev.get("behavioral_capped") is False
-                                 and curr.get("behavioral_capped") is False)
+                    # `behavioral_incomplete`, NOT `behavioral_capped`. The first version
+                    # of this gate used the cap alone, and a measurement broke it: an
+                    # unreadable sidecar (mode 000, a broken link, a race) leaves
+                    # `files_capped` False while nothing was parsed at all, so the gate
+                    # called an empty replay complete and paged on a detector that was newly
+                    # SEEN. `analysis_incompleteness` covers six reasons; the cap is one.
+                    #
+                    # Still `is False`, and now it matters twice over: a baseline written
+                    # before this key existed has no opinion about completeness, and reading
+                    # its absence as "complete" would page on the first run after an upgrade.
+                    _complete = (prev.get("behavioral_incomplete") is False
+                                 and curr.get("behavioral_incomplete") is False)
                     _titles = ", ".join(_check_title(c) for c in _b_new)
                     if _complete:
                         alerts.append((

@@ -40,6 +40,22 @@ from clawseccheck.monitor import diff_with_notes
 _MARK = "behaviour pattern(s)"
 
 
+def _behavioural_line(out: str) -> str:
+    """The rendered behavioural alert, with its severity marker.
+
+    **Assert on this, not on the process exit code.** The exit code aggregates every
+    dimension, and swapping a trajectory between two runs legitimately flips an unrelated
+    check (`Declared vs. effective vs. proven tool use` goes PASS -> UNKNOWN), which emits
+    its own `[~]` and drives rc=3 on its own. An earlier version of these tests asserted
+    `rc == 3` and would have passed with this arm at INFO — a test green for a reason it is
+    not about. The exit-code claim belongs in `_rc()` below, which runs the diff in
+    isolation.
+    """
+    hits = [ln.strip() for ln in out.splitlines() if _MARK in ln]
+    assert len(hits) == 1, f"expected exactly one behavioural line, got {hits}"
+    return hits[0]
+
+
 def _cli(home=None, store=None, extra=()) -> "tuple[int, str]":
     """The real entry point, so these assertions cover the wiring and not just the arm."""
     from clawseccheck.cli import main
@@ -49,11 +65,17 @@ def _cli(home=None, store=None, extra=()) -> "tuple[int, str]":
     return rc, buf.getvalue()
 
 
-def _snap(fired: list, capped, **kw) -> dict:
+def _snap(fired: list, incomplete, **kw) -> dict:
     """A snapshot carrying the behavioural layer's result.
 
-    `capped` is passed through verbatim rather than coerced, so a test can supply the
-    absent case by handing in `None` and having the key omitted.
+    The parameter drives `behavioral_incomplete`, which is what the severity gate reads.
+    It was `behavioral_capped` until a measurement showed the cap is only ONE of six
+    reasons a replay cannot support a clean verdict — an unreadable sidecar leaves the cap
+    False while nothing is parsed at all. `behavioral_capped` is still written alongside,
+    consistently, because a capped replay is by definition an incomplete one.
+
+    Passed through verbatim rather than coerced, so a test can supply the absent case by
+    handing in `None` and having the key omitted.
     """
     base = {
         "version": monitor.SNAPSHOT_VERSION,
@@ -64,8 +86,9 @@ def _snap(fired: list, capped, **kw) -> dict:
         "behavioral_fired": sorted(fired),
         "behavioral_undetermined": [],
     }
-    if capped is not None:
-        base["behavioral_capped"] = capped
+    if incomplete is not None:
+        base["behavioral_incomplete"] = incomplete
+        base["behavioral_capped"] = incomplete
     base.update(kw)
     return base
 
@@ -97,7 +120,7 @@ def test_the_paging_branch_says_why_it_is_confident():
 # ------------------------------------------------------------------ the narrowness
 
 @pytest.mark.parametrize("prev_cap,curr_cap", [(True, False), (False, True), (True, True)])
-def test_a_capped_replay_on_either_side_stays_advisory(prev_cap, curr_cap):
+def test_an_incomplete_replay_on_either_side_stays_advisory(prev_cap, curr_cap):
     """Both directions, because ignoring ONE of the two flags is the likely defect and a
     test that only capped `curr` would pass with `prev` unread — which is exactly the state
     this task found the code in."""
@@ -108,7 +131,7 @@ def test_a_capped_replay_on_either_side_stays_advisory(prev_cap, curr_cap):
 
 
 @pytest.mark.parametrize("prev_cap,curr_cap", [(None, False), (False, None), (None, None)])
-def test_an_absent_cap_flag_reads_as_capped(prev_cap, curr_cap):
+def test_an_absent_flag_reads_as_incomplete(prev_cap, curr_cap):
     """Absence is not evidence that the replay was complete.
 
     An older baseline predating the flag, or a run that recorded none, must not be read as
@@ -217,6 +240,15 @@ def test_the_paging_branch_is_reachable_through_the_real_cli(tmp_path):
     }), encoding="utf-8")
     os.chmod(cfg, 0o600)
 
+    # The baseline needs a trajectory that parses IN FULL and fires nothing. An empty home
+    # was the first version of this test and it was measuring the wrong thing: with no
+    # sidecar at all the baseline run is INCOMPLETE ("no trajectory sidecar was read"), so
+    # a detector appearing afterwards is newly SEEN, and the stricter gate correctly refuses
+    # to page. That refusal is right; the test was wrong.
+    quiet = Path("fixtures/clean_i025_b164_own_api_trajectory_no_cap"
+                 "/agents/main/sessions/s1.trajectory.jsonl")
+    (sessions / "s1.trajectory.jsonl").write_text(quiet.read_text(encoding="utf-8"),
+                                                  encoding="utf-8")
     rc0, out0 = _cli(home, store)
     assert rc0 == 0, out0
 
@@ -224,13 +256,13 @@ def test_the_paging_branch_is_reachable_through_the_real_cli(tmp_path):
     (sessions / "s1.trajectory.jsonl").write_text(src.read_text(encoding="utf-8"),
                                                  encoding="utf-8")
 
-    rc, out = _cli(store=store, home=home, extra=("--exit-code", "--fail-on", "medium"))
-    assert _MARK in out, out
-    assert "actually did" in out, (
-        "the paging wording is expected here: both replays were complete\n" + out)
-    assert rc == 3, (
-        "an uncapped replay that newly fired a detector must reach the shipped "
-        f"cron recipe's threshold\n{out}")
+    _rc_ignored, out = _cli(store=store, home=home,
+                            extra=("--exit-code", "--fail-on", "medium"))
+    line = _behavioural_line(out)
+    assert line.startswith("[~]"), (
+        "a complete replay on both sides must render at paging severity, not advisory\n"
+        + line)
+    assert "actually did" in line, line
 
 
 def test_the_same_case_stays_advisory_when_the_replay_was_capped(tmp_path):
@@ -247,18 +279,74 @@ def test_the_same_case_stays_advisory_when_the_replay_was_capped(tmp_path):
                     "auth": {"mode": "token", "token": "a-very-long-token-of-32-chars!!"}},
     }), encoding="utf-8")
     os.chmod(cfg, 0o600)
+    quiet = Path("fixtures/clean_i025_b164_own_api_trajectory_no_cap"
+                 "/agents/main/sessions/s1.trajectory.jsonl")
+    (sessions / "s1.trajectory.jsonl").write_text(quiet.read_text(encoding="utf-8"),
+                                                  encoding="utf-8")
     _cli(home, store)
 
-    # Rewrite the stored baseline as a capped one. The alternative — generating enough
+    # Rewrite the stored baseline as an incomplete one. The alternative — generating enough
     # activity to really hit the cap — would make this test slow and its premise fragile.
     state = json.loads((store / "state.json").read_text(encoding="utf-8"))
+    state["behavioral_incomplete"] = True
     state["behavioral_capped"] = True
     (store / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
     src = Path("fixtures/traj_outcome_anomaly/agents/main/sessions/s1.trajectory.jsonl")
     (sessions / "s1.trajectory.jsonl").write_text(src.read_text(encoding="utf-8"),
                                                   encoding="utf-8")
-    rc, out = _cli(store=store, home=home, extra=("--exit-code", "--fail-on", "medium"))
-    assert _MARK in out, "the pattern must still be reported, just not at paging severity"
-    assert "newly seen rather than newly done" in out, out
-    assert rc == 0, out
+    _rc_ignored, out = _cli(store=store, home=home,
+                            extra=("--exit-code", "--fail-on", "medium"))
+    line = _behavioural_line(out)
+    assert line.startswith("[i]"), (
+        "an incomplete replay must stay advisory, whatever else the run reports\n" + line)
+    assert "newly seen rather than newly done" in line, line
+
+
+def test_an_unreadable_sidecar_is_incomplete_even_though_it_is_not_capped():
+    """**The case that distinguishes the fix from the defect it replaced.**
+
+    The first version of this gate read `behavioral_capped`. Every other test in this file
+    passed under that version too, because they set the cap and the incompleteness flag to
+    the same value — so the suite pinned the behaviour without pinning the *reason*, and a
+    revert to the defect went green. This is the test that reddens on that revert.
+
+    The distinguishing state is real, not contrived. `analysis_incompleteness` names six
+    reasons a replay cannot support a clean verdict and the cap is one of them. Measured on
+    a copy of `fixtures/traj_outcome_anomaly` with the sidecar at mode 000:
+
+        files_capped            False
+        analysis_incompleteness "no events could be parsed from the trajectory sidecar(s)"
+
+    So a run that parsed nothing at all reported an uncapped replay. Under the old gate that
+    read as complete, and a detector appearing on the next run — when the file was readable
+    again — would have paged as newly DONE. It was newly SEEN, which is exactly the false
+    alarm the advisory wording exists to prevent.
+
+    That direction matters beyond noise: making a sidecar briefly unreadable is something an
+    attacker can do, and it would have converted the watch's own recovery into an alert
+    about the victim's behaviour.
+    """
+    prev = _snap([], False)
+    prev["behavioral_capped"] = False        # not capped ...
+    prev["behavioral_incomplete"] = True     # ... but nothing was parsed
+    curr = _snap(["T1"], False)
+    hits = _alerts(prev, curr)
+    assert hits, "the pattern must still be reported"
+    assert all(lvl == "INFO" for lvl, _m in hits), (
+        "an unreadable sidecar is an incomplete replay; paging on it is the newly-seen "
+        f"false alarm this gate exists to prevent\n{hits}")
+
+
+def test_the_cap_flag_alone_no_longer_decides():
+    """The mirror of the case above, and the second half of the discriminator.
+
+    A replay that WAS capped but is otherwise complete must also stay advisory — so a gate
+    that swapped one flag for the other without keeping the cap's implication would fail
+    here. Together the two tests fix the gate to the incompleteness verdict rather than to
+    either flag alone.
+    """
+    prev = _snap([], False)
+    prev["behavioral_capped"] = True
+    prev["behavioral_incomplete"] = True
+    assert all(lvl == "INFO" for lvl, _m in _alerts(prev, _snap(["T1"], False)))

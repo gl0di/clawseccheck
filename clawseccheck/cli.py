@@ -127,6 +127,7 @@ from .incident import render_incident
 from .layers import LAYER_ORDER
 from .trajaudit import render_trajectory_analysis
 from .behavioral import analyze as _behavioral_analyze
+from .behavioral import analysis_incompleteness as _behavioral_incompleteness
 from .behavioral import explicit_path_problem as _behavioral_path_problem
 from .behavioral import grade_cap_signal as _behavioral_grade_cap_signal
 from .behavioral import render_behavioral_analysis
@@ -4289,6 +4290,18 @@ def _main(argv=None) -> int:
                 "undetermined": sorted(
                     f.id for f in _b_result.get("findings", ()) if f.status == UNKNOWN),
                 "capped": bool(_b_result.get("files_capped")),
+                # F-182 follow-up. `files_capped` is ONE of six reasons a replay cannot
+                # support a clean verdict, and the severity gate in monitor.py was keyed on
+                # it alone. Measured: a sidecar the reader cannot OPEN (mode 000, a broken
+                # link, a race) leaves `files_capped` False while the run parsed nothing —
+                # so an incomplete run read as complete and would have paged on a detector
+                # that was newly SEEN rather than newly done. That is exactly the false
+                # alarm the advisory wording existed to prevent.
+                #
+                # `analysis_incompleteness` is the single predicate that owns this question
+                # and lives beside the flags it reads, precisely so a caller re-deriving it
+                # cannot miss a new one. Asking it here rather than restating its six arms.
+                "incomplete": _behavioral_incompleteness(_b_result) is not None,
             }
         except Exception:  # noqa: BLE001 — see run_behavioral's identical containment
             _behavioral_snap = None
