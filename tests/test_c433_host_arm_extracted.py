@@ -136,26 +136,57 @@ def test_an_unchanged_plugin_surface_is_silent_after_the_move():
     assert not [m for _lvl, m in alerts if "Plugin" in m], alerts
 
 
-def test_the_provenance_arm_was_deliberately_left_in_place():
-    """**Not an omission — a measurement.**
+def test_the_provenance_arm_moved_too_and_the_claim_that_blocked_it_was_wrong():
+    """**This replaces a test that pinned a wrong claim of mine.**
 
-    The large `skill_provenance` arm reads `trust_removals`, which is written once and read
-    by five separate statements in `diff_with_notes`. It is a genuinely shared accumulator,
-    so that arm cannot leave without deciding how that state travels — unlike the three
-    above, whose free variables are their own pair plus the two universal accumulators.
+    The previous version asserted the provenance arm had been "deliberately left in place"
+    because `trust_removals` is a shared accumulator, and it asserted
+    `not hasattr(monitor, "_diff_skill_provenance")` to keep it there. That was a test
+    enforcing my own mistake.
 
-    This test exists so the next reader does not assume the remaining arms are all equally
-    mechanical. An earlier hand-off of mine said exactly that, and it was wrong for one arm
-    in three.
+    `trust_removals = not curr_blind` is a **boolean flag**, computed once and never
+    mutated. My scan looked for assignments by name, which would not have seen a `.append`;
+    re-checked for method calls, augmented assignment and item stores, there are none. A
+    read-only flag is a parameter, and the arm extracts with six of them.
+
+    Twice on this task I called a per-dimension cut infeasible on a measurement that was
+    true of the wrong thing — first the 61-shared-locals figure, which describes the whole
+    function rather than its arms, then this. The pattern is worth more than either fix:
+    **a claim that blocks work deserves the same adversarial pass as the work.**
     """
+    assert callable(getattr(monitor, "_diff_skill_provenance", None))
     import inspect
+    assert len(inspect.signature(monitor._diff_skill_provenance).parameters) == 6
     src = inspect.getsource(monitor.diff_with_notes)
-    assert "trust_removals" in src, (
-        "if this moved, re-derive which statements share it before extracting the "
-        "provenance arm")
-    assert not hasattr(monitor, "_diff_skill_provenance"), (
-        "the provenance arm was extracted without this test being updated — check the "
-        "trust_removals coupling was actually resolved rather than duplicated")
+    assert "trust_removals = not curr_blind" in src, (
+        "if this stops being a plain flag, the parameter passed to the provenance arm "
+        "needs re-deriving before anything else moves")
+
+
+def test_all_four_dimension_arms_are_module_level():
+    """The state C-433 has reached: four dimensions travel as their own functions, and
+    what remains in `diff_with_notes` converges on the preamble plus a list of calls."""
+    for name in ("_diff_host_monitors", "_diff_channels", "_diff_plugins",
+                 "_diff_skill_provenance"):
+        assert callable(getattr(monitor, name, None)), name
+
+
+def test_a_provenance_record_that_moved_still_alerts():
+    """Positive control for the fourth arm, so 'the output did not change' is not satisfied
+    by an arm that stopped running."""
+    def rec(**kw):
+        base = {"version": "1.0.0", "installed_at": 1, "registry": "",
+                "artifact_sha256": "a" * 64, "skill_file_sha256": "c" * 64,
+                "corroborated": True}
+        base.update(kw)
+        return base
+
+    base = _snap()
+    before = dict(base, skill_provenance={"demo-skill": rec()})
+    after = dict(base, skill_provenance={
+        "demo-skill": rec(version="2.0.0", artifact_sha256="b" * 64, installed_at=2)})
+    alerts, _notes = diff_with_notes(before, after)
+    assert alerts, "a moved install record must still be reported"
 
 
 def test_the_extracted_arms_keep_the_blind_run_guard():

@@ -780,9 +780,15 @@ def test_the_conflict_tuple_covers_every_field_the_guarded_arms_read():
 
     from clawseccheck.skillprovenance import CONFLICT_FIELDS
 
-    src = inspect.getsource(diff_with_notes)
-    block = src[src.index("# ---- F-174: where each installed skill came from"):
-                src.index("# ---- F-170:")]
+    # C-433 moved these arms into `_diff_skill_provenance`, so the block IS that function
+    # now. Reading it whole also removes the comment-marker slicing this used before: the
+    # opening marker travelled with the arm while the closing one stayed behind, which left
+    # the scan matching nothing. The invariant is unchanged — a field read by a guarded arm
+    # must be in CONFLICT_FIELDS — and the anti-vacuity assert below is what caught the
+    # move rather than letting an empty scan pass as a clean one.
+    from clawseccheck.monitor import _diff_skill_provenance
+
+    block = inspect.getsource(_diff_skill_provenance)
     read = set(re.findall(r'_[ab]\.get\("([a-z_0-9]+)"', block))
     assert read, "the field scan matched nothing — the arms or their names moved"
     # `ambiguous` / `n_records` / `witness_digest` are the stand-down machinery itself, not

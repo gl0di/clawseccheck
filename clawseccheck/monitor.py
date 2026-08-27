@@ -2640,6 +2640,137 @@ def _diff_channels(pair, partial, alerts, compare_config) -> None:
                        "can no longer be reached over it."))
 
 
+
+def _diff_skill_provenance(pair, prev, curr, alerts, note, trust_removals) -> None:
+    """C-433: the `skill_provenance` dimension's diff arm — BOTH branches.
+
+    Fourth and last per-dimension extraction, and it corrects a claim from the previous
+    commit. I recorded that this arm could not leave because `trust_removals` is "a
+    genuinely shared accumulator, written once and read by five statements". The read count
+    is right; the word accumulator was not. It is
+
+        trust_removals = not curr_blind
+
+    a boolean flag, never mutated after creation. My first scan looked for assignments by
+    name and would not have seen a `.append`, so I re-checked for method calls, augmented
+    assignment and item stores as well — there are none. A read-only flag is a parameter,
+    exactly like `compare_config` two arms up.
+
+    That is the second time on this task I called a per-dimension cut infeasible on a
+    measurement that was true of the wrong thing. The blocking claim deserves the same
+    adversarial pass as the change it blocks.
+
+    Both the `is None` and `is not None` branches travel together: they are one dimension's
+    diff, and splitting them is the by-function shape C-433 rejected. Their conditions were
+    read as TEXT before the move rather than inferred — the previous extraction dropped a
+    `compare_config` clause that way and reintroduced a B-269 fabrication. These two are
+    single-clause.
+    """
+    if pair is None:
+        _p_has, _c_has = "skill_provenance" in prev, "skill_provenance" in curr
+        if _p_has and not _c_has:
+            note(NOTE_UNDETERMINED,
+                 "Where your skills came from was not compared: this run found no install "
+                 "records. That happens when the records are missing, unreadable, or kept "
+                 "in a workspace this run could not locate.")
+        elif _c_has and not _p_has:
+            # The FIRST RUN AFTER THIS RELEASE, for every existing user. The first attempt
+            # at this block had no branch here, so it fell through to the damaged wording
+            # below and told every upgrading user to delete their drift history — a worse
+            # regression than the one it was written to fix, introduced while fixing it and
+            # caught only because an independent pass reproduced the upgrade path from a
+            # real baseline downgraded to the previous schema version. Silent on purpose:
+            # the generic `watched` arm above already says the baseline predates it.
+            pass
+        elif _p_has or _c_has:
+            # Present on a side but not a dict — a genuinely damaged record, and the one
+            # case the wording below IS true of.
+            note(NOTE_RECORD_DAMAGED,
+                 "Where your skills came from could not be compared — the saved record for "
+                 "them is damaged. Delete the monitor state file to start a fresh baseline.")
+    if pair is not None:
+        _pp, _cp = pair
+        # B-541: the dimension now carries a `(root, skill)` entry per record alongside the
+        # legacy name-keyed ones. When BOTH sides have them the per-root pass below is the
+        # verdict and this legacy pass is skipped entirely; on the transition run — a baseline
+        # written before this release — the legacy pass still runs, so nothing is lost and no
+        # user gets a one-run blind spot out of the schema move.
+        _p_names, _c_names = _prov_legacy_names(_pp), _prov_legacy_names(_cp)
+        _p_rec = {k for k in _pp if _prov_is_record_key(k, _p_names)}
+        _c_rec = {k for k in _cp if _prov_is_record_key(k, _c_names)}
+        _per_root = bool(_p_rec) and bool(_c_rec)
+        for name in sorted(_prov_legacy_names(_cp) & _prov_legacy_names(_pp)):
+            if _per_root:
+                break
+            _a, _b = _pp.get(name), _cp.get(name)
+            if not isinstance(_a, dict) or not isinstance(_b, dict):
+                continue
+            # ONE gate for all three comparisons below, and a sentence whenever it closes.
+            #
+            # It used to guard the middle one only, so a config edit that added a second
+            # workspace produced "The skill 'demo' was updated, from 1.0.0 to 2.0.0" from
+            # the arm above it and "the two install records no longer agree with each
+            # other" from the arm below — two claims about a skill whose record this run
+            # could not even identify, one of them an accusation. A branch that stands down
+            # must say so rather than fall silent: an unexplained silence is the B-269
+            # failure this project has already paid for twice, and here it is also how an
+            # attacker would learn that manufacturing ambiguity costs one file and buys
+            # quiet.
+            if not _prov_comparable(_a, _b):
+                note(NOTE_UNDETERMINED, _prov_not_compared(name, _a, _b))
+                continue
+            _av, _bv = _a.get("version", ""), _b.get("version", "")
+            _ad, _bd = _a.get("artifact_sha256", ""), _b.get("artifact_sha256", "")
+            if _av and _bv and _av != _bv:
+                alerts.append((
+                    "INFO",
+                    f"The skill '{name}' was updated, from {_av} to {_bv}. Run "
+                    f"--vet-skill on it if you did not expect that."))
+            elif _av and _bv and _av == _bv and _ad and _bd and _ad != _bd:
+                # Same version, different artifact: the version is the publisher's to
+                # choose and the digest is not, so this is the stronger of the two signals
+                # even though it is the quieter-looking one.
+                #
+                # Both versions must be RECORDED and EQUAL — the same correction the
+                # OpenClaw arm above needed. Falling through on a missing version and then
+                # asserting the number "stayed at" something is a claim built out of a
+                # field that was never there.
+                alerts.append((
+                    "HIGH",
+                    f"The skill '{name}' was replaced with different content while its "
+                    f"version number stayed at {_bv}. A normal update moves both. Run "
+                    f"--vet-skill on it."))
+            # Corroboration is reported only on the TRANSITION into disagreement. A skill
+            # whose two records already disagreed when the baseline was taken would
+            # otherwise re-alert on every run forever, which is how a warning becomes
+            # something the reader learns to skip. (The stand-down NOTE above is the
+            # opposite case and repeats deliberately: it discloses a comparison this run
+            # declined, which stays true for as long as it stays undeterminable.)
+            if _b.get("corroborated") is False and _a.get("corroborated") is not False:
+                alerts.append((
+                    "MEDIUM",
+                    f"The two install records for the skill '{name}' no longer agree with "
+                    f"each other. They are written together by the installer, so one "
+                    f"changing alone is not something an ordinary update produces."))
+        # Names only. A `(root, skill)` key entering this arm would report the same skill as
+        # "installed" once per workspace, and `::roots` as a skill called `::roots`.
+        _new = sorted(_prov_legacy_names(_cp) - _prov_legacy_names(_pp))
+        if _new:
+            alerts.append((
+                "INFO",
+                f"{len(_new)} skill(s) were installed since the last check: "
+                f"{', '.join(_new[:5])}."))
+        _gone = sorted(_prov_legacy_names(_pp) - _prov_legacy_names(_cp))
+        if _gone and trust_removals:
+            alerts.append((
+                "INFO",
+                f"{len(_gone)} skill(s) are no longer in your install records: "
+                f"{', '.join(_gone[:5])}."))
+        if _per_root:
+            _prov_compare_records(_pp, _cp, _p_rec, _c_rec, alerts, note, trust_removals,
+                                  _p_names)
+
+
 def diff_with_notes(prev: dict | None, curr: dict
                     ) -> "tuple[list[tuple[str, str]], list[tuple[str, str]]]":
     """Return ``(alerts, notes)``.
@@ -4144,109 +4275,7 @@ def diff_with_notes(prev: dict | None, curr: dict
     # `openclaw_install` right above got bespoke, correct absence handling and its sibling
     # was routed through a generic helper carrying the opposite meaning.
     _prov = _both_dims(prev, curr, "skill_provenance")
-    if _prov is None:
-        _p_has, _c_has = "skill_provenance" in prev, "skill_provenance" in curr
-        if _p_has and not _c_has:
-            note(NOTE_UNDETERMINED,
-                 "Where your skills came from was not compared: this run found no install "
-                 "records. That happens when the records are missing, unreadable, or kept "
-                 "in a workspace this run could not locate.")
-        elif _c_has and not _p_has:
-            # The FIRST RUN AFTER THIS RELEASE, for every existing user. The first attempt
-            # at this block had no branch here, so it fell through to the damaged wording
-            # below and told every upgrading user to delete their drift history — a worse
-            # regression than the one it was written to fix, introduced while fixing it and
-            # caught only because an independent pass reproduced the upgrade path from a
-            # real baseline downgraded to the previous schema version. Silent on purpose:
-            # the generic `watched` arm above already says the baseline predates it.
-            pass
-        elif _p_has or _c_has:
-            # Present on a side but not a dict — a genuinely damaged record, and the one
-            # case the wording below IS true of.
-            note(NOTE_RECORD_DAMAGED,
-                 "Where your skills came from could not be compared — the saved record for "
-                 "them is damaged. Delete the monitor state file to start a fresh baseline.")
-    if _prov is not None:
-        _pp, _cp = _prov
-        # B-541: the dimension now carries a `(root, skill)` entry per record alongside the
-        # legacy name-keyed ones. When BOTH sides have them the per-root pass below is the
-        # verdict and this legacy pass is skipped entirely; on the transition run — a baseline
-        # written before this release — the legacy pass still runs, so nothing is lost and no
-        # user gets a one-run blind spot out of the schema move.
-        _p_names, _c_names = _prov_legacy_names(_pp), _prov_legacy_names(_cp)
-        _p_rec = {k for k in _pp if _prov_is_record_key(k, _p_names)}
-        _c_rec = {k for k in _cp if _prov_is_record_key(k, _c_names)}
-        _per_root = bool(_p_rec) and bool(_c_rec)
-        for name in sorted(_prov_legacy_names(_cp) & _prov_legacy_names(_pp)):
-            if _per_root:
-                break
-            _a, _b = _pp.get(name), _cp.get(name)
-            if not isinstance(_a, dict) or not isinstance(_b, dict):
-                continue
-            # ONE gate for all three comparisons below, and a sentence whenever it closes.
-            #
-            # It used to guard the middle one only, so a config edit that added a second
-            # workspace produced "The skill 'demo' was updated, from 1.0.0 to 2.0.0" from
-            # the arm above it and "the two install records no longer agree with each
-            # other" from the arm below — two claims about a skill whose record this run
-            # could not even identify, one of them an accusation. A branch that stands down
-            # must say so rather than fall silent: an unexplained silence is the B-269
-            # failure this project has already paid for twice, and here it is also how an
-            # attacker would learn that manufacturing ambiguity costs one file and buys
-            # quiet.
-            if not _prov_comparable(_a, _b):
-                note(NOTE_UNDETERMINED, _prov_not_compared(name, _a, _b))
-                continue
-            _av, _bv = _a.get("version", ""), _b.get("version", "")
-            _ad, _bd = _a.get("artifact_sha256", ""), _b.get("artifact_sha256", "")
-            if _av and _bv and _av != _bv:
-                alerts.append((
-                    "INFO",
-                    f"The skill '{name}' was updated, from {_av} to {_bv}. Run "
-                    f"--vet-skill on it if you did not expect that."))
-            elif _av and _bv and _av == _bv and _ad and _bd and _ad != _bd:
-                # Same version, different artifact: the version is the publisher's to
-                # choose and the digest is not, so this is the stronger of the two signals
-                # even though it is the quieter-looking one.
-                #
-                # Both versions must be RECORDED and EQUAL — the same correction the
-                # OpenClaw arm above needed. Falling through on a missing version and then
-                # asserting the number "stayed at" something is a claim built out of a
-                # field that was never there.
-                alerts.append((
-                    "HIGH",
-                    f"The skill '{name}' was replaced with different content while its "
-                    f"version number stayed at {_bv}. A normal update moves both. Run "
-                    f"--vet-skill on it."))
-            # Corroboration is reported only on the TRANSITION into disagreement. A skill
-            # whose two records already disagreed when the baseline was taken would
-            # otherwise re-alert on every run forever, which is how a warning becomes
-            # something the reader learns to skip. (The stand-down NOTE above is the
-            # opposite case and repeats deliberately: it discloses a comparison this run
-            # declined, which stays true for as long as it stays undeterminable.)
-            if _b.get("corroborated") is False and _a.get("corroborated") is not False:
-                alerts.append((
-                    "MEDIUM",
-                    f"The two install records for the skill '{name}' no longer agree with "
-                    f"each other. They are written together by the installer, so one "
-                    f"changing alone is not something an ordinary update produces."))
-        # Names only. A `(root, skill)` key entering this arm would report the same skill as
-        # "installed" once per workspace, and `::roots` as a skill called `::roots`.
-        _new = sorted(_prov_legacy_names(_cp) - _prov_legacy_names(_pp))
-        if _new:
-            alerts.append((
-                "INFO",
-                f"{len(_new)} skill(s) were installed since the last check: "
-                f"{', '.join(_new[:5])}."))
-        _gone = sorted(_prov_legacy_names(_pp) - _prov_legacy_names(_cp))
-        if _gone and trust_removals:
-            alerts.append((
-                "INFO",
-                f"{len(_gone)} skill(s) are no longer in your install records: "
-                f"{', '.join(_gone[:5])}."))
-        if _per_root:
-            _prov_compare_records(_pp, _cp, _p_rec, _c_rec, alerts, note, trust_removals,
-                                  _p_names)
+    _diff_skill_provenance(_prov, prev, curr, alerts, note, trust_removals)
 
     # ---- F-170: OpenClaw's own config-write journal, as a second witness ---------------
     #
