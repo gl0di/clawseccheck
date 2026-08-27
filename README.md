@@ -288,6 +288,66 @@ release workflow and hasn't been altered since.
 
 </details>
 
+## 🚩 Why security scanners flag this repo
+
+If you arrived from a directory listing showing a red verdict on this
+repository, this section is for you — and everything in it is checkable in the
+source in about a minute.
+
+**A detection tool has to contain the things it detects.** Three classes of
+alarming-looking string live here on purpose:
+
+1. **A known-bad IOC dataset.** `clawseccheck/iocdb.py` ships a small, dated,
+   provenance-tagged list — host indicators `91.92.242.30`, `laosji.net` and
+   `letssendit.fun`, plus known-bad ClawHub slugs — each carrying the primary
+   report it came from (Koi Security, Palo Alto Unit 42). It exists so the tool
+   can *warn you* about them. A scanner matching raw strings sees a repository
+   that contains malicious infrastructure.
+2. **Detection signatures.** The checks look for pipe-to-shell installs,
+   obfuscated `exec`, and credential-exfiltration shapes. Those patterns are in
+   the source *as patterns* — that is what a signature is.
+3. **Deliberately vulnerable fixtures.** `fixtures/` holds hundreds of `bad_*`
+   configs and `tests/` holds the payload each check must fire on. That is
+   where the two URLs most often quoted back at us live —
+   `http://evil.example/x` and `http://evil/x`. Neither can resolve: `.example`
+   is reserved by [RFC 2606](https://www.rfc-editor.org/rfc/rfc2606) for
+   documentation, and `evil` is a bare label with no TLD.
+
+**What you can verify yourself, without trusting this paragraph:**
+
+- **Nothing here fetches anything.** No network client is imported anywhere in
+  the package — read the import lines. `urllib.parse` is string parsing; the
+  single `import socket` (`clawseccheck/checks/_egress.py`) is used only for
+  `inet_aton`/`inet_ntoa` IP-string conversion; the only `.connect(` calls in
+  the tree are `sqlite3.connect(…, mode=ro)` against local files. The names
+  `urlopen`, `requests` and `httpx` *do* appear throughout
+  `clawseccheck/skillast.py` — as string literals in the sink tables the AST
+  layer uses to spot network calls in **your** skills. Data, not imports.
+- **The flagged URLs are inert.** `grep -rn "evil.example" clawseccheck/` returns
+  only comments and docstrings that *explain* a check; the executable
+  occurrences are all under `tests/`.
+- **The whole engine is stdlib.** `pyproject.toml` declares
+  `dependencies = []`.
+
+**A worked example, as of 2026-08-27.** The `skills.sh` listing shows a *Gen
+Agent Trust Hub: FAIL, risk HIGH* badge (audited 2026-07-21). That same audit's
+own FULL ANALYSIS section contains five `[SAFE]` findings stating, correctly,
+that the flagged patterns are "detection signatures for the auditing engine and
+are not executed by the tool itself", that the flagged URLs are "an internal
+reputation blacklist", and that the injection strings "belong to intentionally
+vulnerable test fixtures". Its RECOMMENDATIONS section then still emits
+`HIGH: Downloads and executes remote code from: http://evil/x,
+http://evil.example/x`. Both statements are in the same report; the second does
+not survive the first. We read this as a verdict-aggregation issue in that
+tool — the false-positive-on-your-own-signatures problem every security scanner
+has to solve — and not as a finding about this one.
+
+We say this without smugness: **the same class of false positive is what this
+project treats as a release-blocking bug in its own output**, which is why a
+false FAIL here is a hard blocker and not a tuning preference. See the
+[security model](SECURITY_MODEL.md) for the complete capability surface, and
+[`docs/IOC_DATA.md`](docs/IOC_DATA.md) for the IOC dataset's provenance policy.
+
 <details>
 <summary><b>⚙️ For terminal users: CLI, JSON, SARIF, CI gates</b></summary>
 
