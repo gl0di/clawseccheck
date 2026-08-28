@@ -482,6 +482,12 @@ def test_the_unconditional_keys_are_written_on_every_run():
 # escape would let a genuinely missing key hide behind it.
 _CONDITIONAL = {
     "host": "only on a supported host",
+    # B-676: the record of which comparisons this run could NOT make. Written by the
+    # shell (cli.py) after the diff, and only on a run with a usable baseline — a run
+    # that compared nothing must not store an empty list, which would read as "the
+    # watch skipped nothing last time" and make every standing limitation look newly
+    # lost on the next run. So it is absent from every direct `snapshot()` call here.
+    "not_compared": "absent unless the run had a usable baseline to compare against",
     # F-179: the host's own startup/scheduling surface. Absent whenever the shell did not
     # hand `snapshot()` a scan — which includes every direct `snapshot()` call in this
     # suite, since the parameter defaults to None. Same shape as the three behavioural

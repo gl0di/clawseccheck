@@ -506,7 +506,18 @@ def save_state(path: str | Path, snap: dict) -> None:
 # So the reference describes the baseline's CONTENT, not its bytes. That is also the better
 # primitive on its own merits: a forged baseline with different content moves it, and a
 # forged baseline with identical content changed nothing that is watched.
-_REFERENCE_VOLATILE_KEYS = frozenset({"ts"})
+# B-676 joins it, and for the same class of reason rather than by analogy. `not_compared`
+# records which comparisons the RUN could not make, which is a property of the run and of
+# this build, not of the user's setup — and it is written only on a run that had a usable
+# baseline, so it is guaranteed ABSENT on the first run of any new baseline and PRESENT on
+# the second. Leaving it in moved the reference between run 1 and run 2 of an untouched
+# machine and journaled a witness event for it, breaking the three F-173 invariants that
+# exist to stop exactly that (`test_two_runs_over_an_untouched_setup_give_the_SAME_reference`,
+# `test_verify_still_matches_after_a_later_run_changed_nothing`,
+# `test_a_quiet_run_adds_no_journal_line`). The user-facing signal for a coverage change is
+# an ALERT from `monitordims/_coverage.py`, which is the actionable channel; the reference
+# does not need to double as a second, vaguer one.
+_REFERENCE_VOLATILE_KEYS = frozenset({"ts", "not_compared"})
 # How many hex characters of the reference are shown and compared. Short enough to read off
 # a phone screen and retype, long enough that finding a second baseline with the same prefix
 # is not something an attacker does on the way past — 16 hex chars is 64 bits.

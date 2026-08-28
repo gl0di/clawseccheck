@@ -73,6 +73,17 @@ from ._configfile import (  # noqa: F401
     _note_unmodelled_config_edit,
 )
 
+from ._coverage import (  # noqa: F401
+    _COVERAGE_ALREADY_ANNOUNCED,
+    _COVERAGE_DIGITS_RE,
+    _COVERAGE_MAX_ENTRIES,
+    _COVERAGE_NAME_CAP,
+    _coverage_key,
+    _coverage_live_text,
+    _coverage_signature,
+    _diff_coverage,
+)
+
 from ._execpolicy import (  # noqa: F401
     _MODE_POLICY,
     _SANDBOX_ALWAYS,

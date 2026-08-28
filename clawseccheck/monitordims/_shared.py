@@ -48,6 +48,7 @@ _DIMENSION_LABELS = {
     "mcp_detail": "what each tool server exposes",
     "memory": "your agent's memory files",
     "native_count": "OpenClaw's own audit",
+    "not_compared": "which comparisons this check was able to make",
     "openclaw_install": "the OpenClaw installation itself",
     "plugins": "which plugins may load",
     "score": "the security score",

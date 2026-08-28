@@ -734,6 +734,24 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   `No new threats since last check. ✅`; `--verbose` lists them, grouped by cause. The tick is
   reserved for a run that compared everything it knows how to compare, so its absence is
   information. This does not make the skipped comparisons happen — it stops them being invisible.
+- **A comparison the watch made last time and cannot make now is itself reported, as a MEDIUM
+  alert.** The counted line above is a note, and notes do not reach the event journal or the exit
+  code — so a scheduled job branching on `$?` could not tell a complete clean run from a partial
+  one. Fixing that by exporting "was this run fully compared?" does not work: measured over five
+  consecutive runs of an unchanged setup, that flag is `false` **every time**, because several of
+  the standing limitations are permanent (your own crontab spool cannot be read without elevated
+  rights, most host-monitor classes cannot be confirmed at all, and the agent-activity window
+  rotates). A signal that never changes is not a signal.
+
+  What does change is the *set* of skipped comparisons, which is stable run to run on an unchanged
+  machine. So the watch records it and compares it like anything else: if it could compare
+  something last time and cannot now, that is drift in its own right — the watch is looking at
+  less than it was, which is exactly when a real change slips past — and it is reported as a
+  MEDIUM alert, which reaches the journal and `--fail-on medium`. Coverage *improving* is never
+  reported, the first comparison after a fresh baseline is silent (every standing limitation would
+  otherwise read as newly lost), and the run after a ClawSecCheck upgrade stands down with a note,
+  because a new release changing what it can compare is not your machine changing. The exit-code
+  contract itself is untouched: a coverage regression is simply an alert like any other.
 - **`state.json` is unauthenticated.** Unlike `history.jsonl`/`events.jsonl` (hash-chained — see
   "Audit trail" in [SECURITY_MODEL.md](../SECURITY_MODEL.md)), the drift baseline
   (`~/.clawseccheck/state.json`) carries no chain and no signature. Anyone with write access to

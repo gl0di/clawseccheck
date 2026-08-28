@@ -43,6 +43,7 @@ from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
 from .monitor import (
     BASELINE_ABSENT, BASELINE_CORRUPT, BASELINE_CORRUPT_ALERT, BASELINE_OK,
     BASELINE_DIGEST_CHARS, baseline_reference, baseline_witness_event,
+    _coverage_signature, _diff_coverage,
     diff_with_notes, read_baseline, snapshot_reference,
 )
 # Aliased: `args.verify_baseline` holds the user's reference string, and giving the
@@ -4474,6 +4475,28 @@ def _main(argv=None) -> int:
             # IS the event. Prepended (not rendered separately) so the identical string
             # reaches the screen and the tamper-evident journal.
             alerts = [BASELINE_CORRUPT_ALERT] + alerts
+        # ── B-676: the watch getting quieter is itself drift ───────────────────────────
+        #
+        # Runs HERE, not inside `diff_with_notes`, because three of the note appends above
+        # happen in this shell — the re-vet overflow, the history-write failure and the
+        # re-vet cap — so an arm one level down would compare against an incomplete note
+        # set and report those three as newly lost on the following run.
+        #
+        # The signature is taken BEFORE the arm runs, so a note the arm itself emits (the
+        # post-upgrade stand-down, the cap disclosure) is not recorded as a comparison this
+        # run skipped — it would read as newly lost next run and vanish the run after.
+        #
+        # Appends to `alerts`, which is the whole point: `--exit-code`/`--fail-on` stay a
+        # pure function of alerts (cli.py's contract note below is unmoved), and a coverage
+        # regression now simply IS an alert, so `--fail-on medium` picks it up like any
+        # other drift.
+        _coverage_now = _coverage_signature(monitor_notes)
+        _diff_coverage(prev, snap, monitor_notes, alerts,
+                       lambda _cat, _msg: monitor_notes.append((_cat, _msg)))
+        if base_status == BASELINE_OK:
+            # Conditional on a USABLE baseline: a run that compared nothing must not store
+            # an empty list, which would mean "the watch skipped nothing last time".
+            snap["not_compared"] = _coverage_now
         # ── B-278 + B-271: write order is a deliberate choice, documented here ──────────
         # Journal FIRST, then advance the baseline, and skip the advance if the journal
         # write failed. The alternative (advance first) is what lost drift permanently: a

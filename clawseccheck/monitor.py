@@ -85,6 +85,13 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _channel_sig,
     _config_file_digest,
     _config_resolved_digest,
+    _COVERAGE_ALREADY_ANNOUNCED,
+    _COVERAGE_DIGITS_RE,
+    _COVERAGE_MAX_ENTRIES,
+    _COVERAGE_NAME_CAP,
+    _coverage_key,
+    _coverage_live_text,
+    _coverage_signature,
     _describe,
     _diff_behavioral,
     _diff_bootstrap_added,
@@ -95,6 +102,7 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _diff_check_transitions,
     _diff_config_digest_unmoved,
     _diff_config_journal,
+    _diff_coverage,
     _diff_exec_policy,
     _diff_gateway_bind_moved,
     _diff_host_monitors,
@@ -398,6 +406,12 @@ WATCHED_DIMENSIONS = (
     "memory",
     "memory_capped",
     "native_count",
+    # B-676. CONDITIONAL, and the condition is load-bearing: written only on a run that
+    # had a usable baseline, because a run that compared nothing would otherwise store an
+    # empty list meaning "the watch skipped nothing last time" — and the next run would
+    # then report every standing limitation as newly lost. Measured: notes go 0 -> 4
+    # between the first and second run of an unchanged home, and that step is not drift.
+    "not_compared",
     # F-174. Both conditional: `openclaw_install` is absent when no OpenClaw package can be
     # located on PATH (which a cron job's minimal PATH really does produce — verified),
     # `skill_provenance` when no ClawHub lock file was found in any workspace.
