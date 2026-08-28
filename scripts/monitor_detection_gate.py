@@ -194,6 +194,99 @@ def _trifecta_opened(home):
     _write(home, c)
 
 
+# ------------------------------------------------- C-463: the incompleteness family
+#
+# Everything above makes the home MORE dangerous and asks whether the watch says so. This
+# family makes the watch SEE LESS and asks the same question, because that is the half
+# neither gate exercised: `monitor_fp_gate.py` asserts on `alerts` and never on `notes`, so
+# an incompleteness disclosure is invisible to it by construction, and nothing here planted
+# a cap, an unreadable file or a damaged baseline. The whole "a clean-looking verdict over
+# an incomplete walk" surface was proven by unit tests only, never end to end — and these
+# are COMPOSITION defects, where every unit is right and the assembled pipeline still says
+# all clear, which is exactly what a unit test cannot see.
+
+
+def _config_unreadable(home, store):
+    """The loudest case, and the one that must stay loud."""
+    p = home / "openclaw.json"
+    p.write_text("{ this is not json", encoding="utf-8")
+    os.chmod(p, 0o600)
+
+
+def _seed_a_memory_file(home, store):
+    d = home / "workspace-home" / "memory"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "notes.md").write_text("Project notes.\n", encoding="utf-8")
+
+
+def _memory_becomes_unreadable(home, store):
+    """A memory file the watch READ last time and cannot read now.
+
+    The file must exist in the baseline. Creating and unreadable-ing it in one step is
+    what the first version of this scenario did, and it passed on the INFO "new memory
+    file appeared" line at rc=0 — a green for the wrong reason, which is the exact vacuity
+    this family exists to remove.
+    """
+    os.chmod(home / "workspace-home" / "memory" / "notes.md", 0o000)
+
+
+def _seed_skills_under_the_cap(home, store):
+    _make_skills(home, 0, 250)
+
+
+def _skills_pushed_past_the_cap(home, store):
+    """Over `collector._MAX_SKILLS` (300), so the collection frontier goes partial.
+
+    A partial frontier suppresses removal alerts wholesale, so a silent version of this
+    would let a skill be deleted with nothing said.
+    """
+    _make_skills(home, 250, 350)
+
+
+def _make_skills(home, start, stop):
+    root = home / "workspace" / "skills"
+    for i in range(start, stop):
+        d = root / f"filler{i:03d}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: filler{i:03d}\nversion: 1.0.0\ndescription: filler\n---\n\nx\n",
+            encoding="utf-8")
+
+
+# --- scenarios that need more than a home and two runs -----------------------------
+
+
+def _corrupt_the_baseline(home, store):
+    """The drift baseline is damaged between the two runs.
+
+    `read_baseline` returns BASELINE_CORRUPT and `diff()` compares nothing at all — the
+    single largest silent-coverage event there is. B-107 fixed the crash-safety half of
+    this; nothing exercised the disclosure end to end.
+    """
+    (store / "state.json").write_text("{ not a snapshot", encoding="utf-8")
+
+
+def _seed_a_versioned_skill(home, store):
+    d = home / "workspace" / "skills" / "base"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(
+        "---\nname: base\nversion: 1.0.0\ndescription: baseline helper\n---\n\nHelper.\n",
+        encoding="utf-8")
+
+
+def _add_an_unversioned_skill(home, store):
+    """B-676's own case: a comparison the watch made last time it can no longer make.
+
+    Needs one settle run — the version note only fires for skills present on BOTH sides,
+    so the run where the skill first appears cannot show it.
+    """
+    d = home / "workspace" / "skills" / "noversion"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(
+        "---\nname: noversion\ndescription: declares no version\n---\n\nHelper.\n",
+        encoding="utf-8")
+
+
 # ------------------------------------------------------------ benign controls
 
 def _nothing(home):
@@ -236,6 +329,34 @@ DANGERS = {
     "trifecta-opened": (_trifecta_opened, True),
 }
 
+
+#: C-463. name -> (setup, mutate, settle_runs, expect_text).
+#:
+#: `expect_text` is a SUBSTRING the judged run must print, not a boolean. That is the
+#: difference between this family and `DANGERS`, and it is not stylistic: "any alert line
+#: or rc==3" let two of these pass on an unrelated alert — `memory-unreadable` on an INFO
+#: "new memory file appeared" and `skills-past-the-cap` on the first of 320 new-skill
+#: CRITICALs — while the disclosure they exist to check was never asserted at all. A
+#: scenario that cannot name the sentence it is waiting for is not testing anything.
+#:
+#: `None` records a KNOWN, FILED silence, and `tests/test_monitor_detection_gate.py`
+#: requires a task id in the comment directly above it, exactly as it does for `DANGERS`.
+#: Both callables take (home, store); `setup` runs before the baseline.
+INCOMPLETENESS = {
+    "config-unreadable":
+        (None, _config_unreadable, 0, "Could not read openclaw.json"),
+    "memory-unreadable":
+        (_seed_a_memory_file, _memory_becomes_unreadable, 0, "present but NOT monitored"),
+    "skills-past-the-cap":
+        (_seed_skills_under_the_cap, _skills_pushed_past_the_cap, 0, "were NOT collected"),
+    "baseline-corrupted":
+        (None, _corrupt_the_baseline, 0, "previous monitor baseline could not be read"),
+    "coverage-lost-skill-version":
+        (_seed_a_versioned_skill, _add_an_unversioned_skill, 1,
+         "could not make a comparison it made at the last check"),
+}
+
+
 CONTROLS = {
     "nothing-changed": _nothing,
     "same-value-rewritten": _same_value_rewritten,
@@ -272,12 +393,47 @@ def _scenario(mutate) -> "tuple[int, str]":
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _scenario_incomplete(setup, mutate, settle: int) -> "tuple[int, str]":
+    """Like `_scenario`, but the callables also get the store, and the judged run can be
+    later than the one right after the change."""
+    tmp = Path(tempfile.mkdtemp(prefix="csc-detect-"))
+    try:
+        home, store = tmp / "home", tmp / "store"
+        shutil.copytree(BASE_HOME, home)
+        store.mkdir(parents=True, exist_ok=True)
+        if setup is not None:
+            setup(home, store)
+        _lock(home)
+        rc0, out0 = _run(home, store)
+        if rc0 != 0:
+            sys.exit("FATAL: the baseline run exited %d, so nothing below means anything.\n%s"
+                     % (rc0, out0[-1500:]))
+        # A second clean run, so the note set is in its steady state before the change —
+        # otherwise the 0 -> N step every new baseline takes would read as the event.
+        _run(home, store)
+        mutate(home, store)
+        _lock(home)
+        for _ in range(settle):
+            _run(home, store)
+            _lock(home)
+        return _run(home, store)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _lock(home: Path) -> None:
     """0600 every file, the way conftest.py pins fixtures — otherwise the at-rest
     permission checks move for reasons that have nothing to do with the scenario."""
     for p in home.rglob("*"):
-        if p.is_file():
-            os.chmod(p, 0o600)
+        if not p.is_file():
+            continue
+        if p.stat().st_mode & 0o777 == 0:
+            # C-463: a scenario deliberately made this unreadable, and re-locking it to
+            # 0600 hands it straight back. Measured: `memory-unreadable` reported MUTE at
+            # rc=0 for exactly this reason — the harness was undoing the change it had
+            # just applied, which reads as a detection gap and is not one.
+            continue
+        os.chmod(p, 0o600)
 
 
 def main() -> int:
@@ -289,16 +445,22 @@ def main() -> int:
     if args.list:
         for n in DANGERS:
             print(n)
+        for n in INCOMPLETENESS:
+            print(n)
         for n in CONTROLS:
             print(n)
         return 0
 
     if args.names:
         for n in args.names:
-            mutate = DANGERS.get(n, (None, None))[0] or CONTROLS.get(n)
-            if mutate is None:
-                return int(bool(sys.stderr.write("unknown scenario: %s\n" % n)))
-            rc, out = _scenario(mutate)
+            if n in INCOMPLETENESS:
+                _setup, _mutate, _settle, _ = INCOMPLETENESS[n]
+                rc, out = _scenario_incomplete(_setup, _mutate, _settle)
+            else:
+                mutate = DANGERS.get(n, (None, None))[0] or CONTROLS.get(n)
+                if mutate is None:
+                    return int(bool(sys.stderr.write("unknown scenario: %s\n" % n)))
+                rc, out = _scenario(mutate)
             print("=" * 72)
             print("%s  ->  rc=%d" % (n, rc))
             print("=" * 72)
@@ -321,6 +483,24 @@ def main() -> int:
         if lines:
             print("            %s" % lines[0][:100])
 
+    print("\n=== incompleteness: does the watch say it can see less? ===\n")
+    for name, (setup, mutate, settle, expect_text) in INCOMPLETENESS.items():
+        rc, out = _scenario_incomplete(setup, mutate, settle)
+        said = expect_text is not None and expect_text in out
+        if expect_text is None:
+            if _alert_lines(out) or rc == 3:
+                failures.append("%s: expected the KNOWN silence, got an alert (rc=%d)"
+                                % (name, rc))
+            print("  [%-6s] rc=%d  %s" % ("silent", rc, name))
+            continue
+        if not said:
+            failures.append("%s: rc=%d but never printed %r" % (name, rc, expect_text))
+        print("  [%-6s] rc=%d  %s%s" % ("SAYS" if said else "MUTE", rc, name,
+                                        "" if said else "   <-- UNEXPECTED"))
+        if said:
+            print("            %s" % next(
+                (ln.strip()[:100] for ln in out.splitlines() if expect_text in ln), ""))
+
     print("\n=== controls: does it stay quiet? ===\n")
     for name, mutate in CONTROLS.items():
         rc, out = _scenario(mutate)
@@ -329,9 +509,11 @@ def main() -> int:
             failures.append("%s: false alarm (rc=%d) %s" % (name, rc, lines[:1]))
         print("  [%-6s] rc=%d  %s" % ("QUIET" if not lines and rc == 0 else "NOISY", rc, name))
 
-    expected_silent = [n for n, (_, e) in DANGERS.items() if not e]
+    expected_silent = ([n for n, (_, e) in DANGERS.items() if not e]
+                       + [n for n, (_, _, _, e) in INCOMPLETENESS.items() if e is None])
+    _total = len(DANGERS) + len(INCOMPLETENESS)
     print("\n%d danger scenarios, %d expected to warn, %d KNOWN silent: %s"
-          % (len(DANGERS), len(DANGERS) - len(expected_silent), len(expected_silent),
+          % (_total, _total - len(expected_silent), len(expected_silent),
              ", ".join(expected_silent) or "none"))
     if failures:
         print("\nFAILURES:")

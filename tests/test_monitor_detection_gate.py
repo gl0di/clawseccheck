@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,7 @@ def test_the_gate_has_scenarios_at_all():
     whole file pass while asserting nothing."""
     assert len(gate.DANGERS) >= 10, sorted(gate.DANGERS)
     assert len(gate.CONTROLS) >= 3, sorted(gate.CONTROLS)
+    assert len(gate.INCOMPLETENESS) >= 5, sorted(gate.INCOMPLETENESS)
 
 
 def test_every_scenario_is_a_callable_and_an_expectation():
@@ -84,6 +86,73 @@ def test_every_danger_actually_changes_the_home(name, tmp_path):
     assert after != before, f"{name} left the home byte-identical"
 
 
+def test_every_incompleteness_scenario_names_the_sentence_it_waits_for():  # C-463
+    """The whole difference between this family and `DANGERS`, pinned.
+
+    `DANGERS` passes on "any alert line or rc==3". For a scenario that makes the watch see
+    LESS that criterion is vacuous, and it was measured to be: `memory-unreadable` passed
+    on an INFO "new memory file appeared" and `skills-past-the-cap` on the first of 320
+    new-skill CRITICALs, while the disclosure each exists to check went unasserted. So an
+    entry must name a substring, or be an explicitly filed silence (`None`).
+    """
+    for name, entry in gate.INCOMPLETENESS.items():
+        assert isinstance(entry, tuple) and len(entry) == 4, name
+        setup, mutate, settle, expect = entry
+        assert setup is None or callable(setup), name
+        assert callable(mutate), name
+        assert isinstance(settle, int) and settle >= 0, name
+        assert expect is None or (isinstance(expect, str) and len(expect) > 15), (
+            f"{name}: expect_text must be a sentence specific enough to fail when the "
+            "disclosure stops being printed"
+        )
+
+
+@pytest.mark.parametrize("name", sorted(gate.INCOMPLETENESS))
+def test_every_incompleteness_mutation_changes_the_home_or_the_store(name, tmp_path):
+    """Same anti-vacuity rule as `DANGERS`, widened: these mutations may change file MODES
+    (`memory-unreadable`) or the STORE rather than the home (`baseline-corrupted`), so a
+    content-only comparison would report them as no-ops."""
+    home, store = tmp_path / "home", tmp_path / "store"
+    shutil.copytree(gate.BASE_HOME, home)
+    store.mkdir()
+    (store / "state.json").write_text('{"version": 8}', encoding="utf-8")
+    setup, mutate, _settle, _expect = gate.INCOMPLETENESS[name]
+    if setup is not None:
+        setup(home, store)
+
+    def _state():
+        out = {}
+        for root in (home, store):
+            for p in sorted(root.rglob("*")):
+                if p.is_file():
+                    mode = p.stat().st_mode & 0o777
+                    body = p.read_bytes() if mode else b"<unreadable>"
+                    out[str(p)] = (mode, body)
+        return out
+
+    before = _state()
+    mutate(home, store)
+    assert _state() != before, f"{name} changed neither content nor mode anywhere"
+
+
+def test_the_lock_respects_a_deliberately_unreadable_file():  # C-463
+    """`_lock` chmods every file to 0600 after a mutation so at-rest permission checks do
+    not move for unrelated reasons — and it used to hand back a file a scenario had just
+    made unreadable, so `memory-unreadable` reported MUTE at rc=0. The harness was undoing
+    the change it had applied, which reads as a detection gap and is not one."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        keep = root / "unreadable.md"
+        keep.write_text("x", encoding="utf-8")
+        os.chmod(keep, 0o000)
+        loose = root / "loose.md"
+        loose.write_text("y", encoding="utf-8")
+        os.chmod(loose, 0o644)
+        gate._lock(root)
+        assert keep.stat().st_mode & 0o777 == 0, "the deliberate 000 was handed back"
+        assert loose.stat().st_mode & 0o777 == 0o600, "an ordinary file must still be locked"
+
+
 def test_every_known_silence_names_the_task_that_tracks_it():
     """`expect_alert=False` records a KNOWN, FILED gap — never a shrug.
 
@@ -92,9 +161,12 @@ def test_every_known_silence_names_the_task_that_tracks_it():
     the failure list, not in the table.
     """
     lines = GATE_PATH.read_text(encoding="utf-8").splitlines()
-    for name, (_, expect) in gate.DANGERS.items():
-        if expect:
-            continue
+    silent = [n for n, (_, e) in gate.DANGERS.items() if not e]
+    # C-463: the same rule for the incompleteness family, where a filed silence is an
+    # `expect_text` of None. Widened here rather than copied into a second guard, so a
+    # third table cannot be added with the rule quietly applying to only two of them.
+    silent += [n for n, (_, _, _, e) in gate.INCOMPLETENESS.items() if e is None]
+    for name in silent:
         i = next(n for n, ln in enumerate(lines) if ln.strip().startswith('"%s":' % name))
         # The CONTIGUOUS comment block directly above this entry, and nothing else. A
         # character window instead of this passed while the id it found belonged to the
