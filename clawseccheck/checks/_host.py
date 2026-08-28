@@ -36,6 +36,7 @@ from ._shared import (
     _finding,
     _plugins,
 )
+from ..invocation import command_prefix
 
 
 def _detail_path(value, home) -> str:
@@ -435,7 +436,7 @@ def check_monitoring(ctx: Context) -> Finding:
             "name is chosen by whoever installed it. Treat monitoring as unconfirmed.",
             "Confirm it really is a monitor and that its alerts reach you. If it is, "
             "self-report it via `--attest` (host_monitors) so this check can credit it; "
-            "if you do not recognise it, vet it with `clawseccheck --vet <folder>`.",
+            f"if you do not recognise it, vet it with `{command_prefix()} --vet <folder>`.",
         )
     return _finding(
         "B16",
@@ -446,7 +447,7 @@ def check_monitoring(ctx: Context) -> Finding:
         "'not detected here', not proof you're unwatched; confirm before relying on it.",
         "If you have no detection, add a monitoring skill (e.g. ClawSec or "
         "openclaw-security-monitor), wire audit logging to an alert channel, or schedule "
-        "ClawSecCheck's own `clawseccheck --monitor`. If monitoring lives elsewhere, you can "
+        f"ClawSecCheck's own `{command_prefix()} --monitor`. If monitoring lives elsewhere, you can "
         "self-report it via `--ask`/`--attest` (host_monitors) so the host-watch checks "
         "credit it.",
     )

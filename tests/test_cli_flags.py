@@ -15,6 +15,7 @@ import pytest
 
 from clawseccheck import __released__, __version__
 from clawseccheck.cli import main
+from clawseccheck.invocation import command_prefix
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 VULN = str(FIXTURES / "home_vuln")
@@ -243,10 +244,16 @@ def test_next_flag_prints_guide_header(capsys):
 
 
 def test_next_flag_prints_command(capsys):
+    """B-679: the command printed is the invocation form this process was started with.
+
+    This used to assert `"clawseccheck " in out` and `"audit.py" not in out`, which is the
+    opposite of correct on the install shape the skill ships in — a ClawHub install has no
+    such command (measured: rc=127) and `SKILL.md` tells the agent to use `audit.py`. The
+    property that matters is that whatever is printed is RUNNABLE, so it is pinned against
+    the resolver rather than against one hardcoded shape."""
     main(["--home", VULN] + BASE + ["--next"])
     out = capsys.readouterr().out
-    assert "clawseccheck " in out
-    assert "audit.py" not in out
+    assert command_prefix() + " " in out, out[:400]
 
 
 def test_next_flag_standalone_no_report(capsys):

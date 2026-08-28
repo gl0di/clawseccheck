@@ -84,6 +84,7 @@ from ._shared import (
     _web_fetch_enabled,
     parse_bind_host,
 )
+from ..invocation import command_prefix
 
 
 def _detail_path(value, home) -> str:
@@ -2922,7 +2923,7 @@ def check_trifecta(ctx: Context) -> Finding:
                 " Runtime tools (e.g. message, exec_command, web_*) granted at"
                 " session start are not reflected in openclaw.json."
             ),
-            "Run `clawseccheck --ask` to generate an attestation template, then re-run"
+            f"Run `{command_prefix()} --ask` to generate an attestation template, then re-run"
             " with `--attest <file>` so these legs resolve — or treat as possible 3/3.",
             evidence=active,
         )
@@ -3914,7 +3915,7 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             f"the agent resolves a different file ({reason}) — so a clean grade here says "
             "nothing about the configuration the agent is actually running. Both paths "
             "are named in full in this finding's evidence and in the fix below.",
-            f"Re-run the audit against the live target: clawseccheck --home "
+            f"Re-run the audit against the live target: {command_prefix()} --home "
             f"{product.parent}. If the audited file is the intended one instead, unset "
             "OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR (these are what "
             "`openclaw --profile` sets) so the agent and the audit agree.",

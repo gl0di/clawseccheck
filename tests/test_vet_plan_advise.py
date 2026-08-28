@@ -19,6 +19,7 @@ from clawseccheck.checks import vet_skill
 from clawseccheck.cli import main
 from clawseccheck.dossier import build_profile
 from clawseccheck.report import render_advise, render_advise_json, render_vet_plan
+from clawseccheck.invocation import command_prefix
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -77,7 +78,8 @@ def test_vet_plan_always_includes_quarantine_and_cleanup():
     for target in ("npm:foo", "pypi:bar", "git:github.com/a/b", "https://x.com/y", "clawhub:z", "bare"):
         out = render_vet_plan(target)
         assert "mktemp -d" in out
-        assert "clawseccheck --advise" in out
+        # B-679: the resolved invocation form, not the console name — see test_guide.py.
+        assert command_prefix() + " --advise" in out
         assert "rm -rf" in out
         assert "--vet-source" in out  # nudges the pre-download gate first
 

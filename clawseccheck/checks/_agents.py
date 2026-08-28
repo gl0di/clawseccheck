@@ -44,6 +44,7 @@ from ._shared import (
     _web_fetch_enabled,
     _wildcard_group_gap,
 )
+from ..invocation import command_prefix
 
 
 # Phrases that prove the bootstrap ORDERS the agent to obey external content (FAIL).
@@ -262,7 +263,7 @@ def check_agent_separation(ctx: Context) -> Finding:
             "assessed from config alone (per-agent tool config exists, but it can't "
             "show session-granted runtime tools, so it can't fully stand in for each "
             "agent's real legs).",
-            "If you run more than one agent, run 'clawseccheck --ask', have each agent "
+            f"If you run more than one agent, run '{command_prefix()} --ask', have each agent "
             "list its real tools under 'agents', then re-run with '--attest <file>'.",
         )
     rostered = [(a["name"], _agent_legs(a["tools"])) for a in agents]

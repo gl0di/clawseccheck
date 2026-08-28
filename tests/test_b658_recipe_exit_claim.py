@@ -75,8 +75,14 @@ def _emitted_argv(store: Path) -> list[str]:
     whatever the recipe currently says. Restating them would let the recipe drift while the
     tests kept passing against the version this file was written for.
     """
+    # B-679: split at the first FLAG, not at the word "clawseccheck". The emitted command
+    # is now the resolved invocation form, and on a source checkout that path contains the
+    # word itself (`~/dev/clawseccheck/skill/audit.py`) — so the old split landed inside
+    # the path and handed `main()` `/skill/audit.py` as a positional argument.
     first = _message().splitlines()[0]
-    argv = first.split("clawseccheck", 1)[1].split()
+    tokens = first.split()
+    start = next(i for i, tok in enumerate(tokens) if tok.startswith("--"))
+    argv = tokens[start:]
     out: list[str] = []
     skip = False
     for i, tok in enumerate(argv):

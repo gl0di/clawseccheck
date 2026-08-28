@@ -38,6 +38,7 @@ from .brand import WORDMARK
 # internal resolver does not have to widen the curated public API in __init__.py.
 from .checks import resolve_skill_target
 from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
+from .invocation import command_prefix
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
 from .monitor import (
@@ -1140,7 +1141,7 @@ def _percentile_line(score, ascii_only: bool, history_path=None) -> str:
             return (
                 f"{opened} No rank yet — a percentile compares a score against a "
                 "reference profile of complete audits, and no complete check has been "
-                "recorded here yet. Run 'clawseccheck --full' to complete one, then "
+                f"recorded here yet. Run '{command_prefix()} --full' to complete one, then "
                 "'--percentile' to rank it."
             )
         when = row.get("date") or row.get("ts") or "an earlier run"
@@ -3491,7 +3492,7 @@ def _main(argv=None) -> int:
             # Diagnostic, not report content: keep machine-readable stdout (--json/--sarif)
             # clean — a stdout warning here corrupts `--attest bad.json --json` (B-070).
             print(f"⚠ could not read a valid attestation from {src} "
-                  "(ignored; B43/B44 stay UNKNOWN). See 'clawseccheck --ask'.",
+                  f"(ignored; B43/B44 stay UNKNOWN). See '{command_prefix()} --ask'.",
                   file=sys.stderr)
     elif args.full and args.judged_bundle is not None:
         # B-476: --judged-bundle's own --help promises four buckets, and
@@ -3515,7 +3516,7 @@ def _main(argv=None) -> int:
             if not attestation:
                 print("⚠ the --judged-bundle 'attestation' object is not a valid "
                       "attestation (ignored; B43/B44 stay UNKNOWN). "
-                      "See 'clawseccheck --ask'.", file=sys.stderr)
+                      f"See '{command_prefix()} --ask'.", file=sys.stderr)
     if args.attest and _bundle_att is not None:
         print("note: --attest was given, so the --judged-bundle 'attestation' object "
               "was not used.", file=sys.stderr)

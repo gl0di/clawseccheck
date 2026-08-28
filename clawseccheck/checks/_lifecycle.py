@@ -65,6 +65,7 @@ from ._shared import (
     _skill_frontmatter_block,
     _surface_absent,
 )
+from ..invocation import command_prefix
 
 
 def _detail_path(value, home) -> str:
@@ -1192,7 +1193,7 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
             "No workspace bootstrap files (SOUL.md/AGENTS.md/TOOLS.md/MEMORY.md) found "
             "under the audited home or known workspace dirs — they may live elsewhere.",
             "Point the audit at the directory holding these files with "
-            "`clawseccheck --home <workspace>`, or declare their real paths via "
+            f"`{command_prefix()} --home <workspace>`, or declare their real paths via "
             "`--attest` (paths.bootstrap) so the engine can stat them.",
         )
 

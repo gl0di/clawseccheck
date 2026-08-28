@@ -39,6 +39,7 @@ from .layers import (
 )
 from .scoring import ScoreResult, assessment_coverage
 from .skillast import capability_families
+from .invocation import command_prefix
 from .textnorm import ASCII_MAP, asciify
 
 # Findings, skill names, decoded payload previews and native-audit fields are UNTRUSTED
@@ -4786,10 +4787,10 @@ def render_vet_plan(target: str) -> str:
         "",
         "Commands (for the agent — clawseccheck never touches the network itself):",
         "",
-        f"  clawseccheck --vet-source {_shq(target)}   # 1: reputation, zero network",
+        f"  {command_prefix()} --vet-source {_shq(target)}   # 1: reputation, zero network",
         "  QUARANTINE=$(mktemp -d)   # 2: throwaway, outside auto-load",
         f"  {fetch}{fetch_note}",
-        "  clawseccheck --advise \"$QUARANTINE\"   # 3: verdict",
+        f"  {command_prefix()} --advise \"$QUARANTINE\"   # 3: verdict",
         "  rm -rf \"$QUARANTINE\"   # 4: cleanup (always)",
     ])
 
@@ -5657,7 +5658,7 @@ def render_brief(state: "dict | None", events: "list | None",
     if not isinstance(state, dict) or not state:
         lines.append(
             "Nothing is watching this setup: no drift baseline exists. Run "
-            "`clawseccheck --monitor` once to start, or `--cron-recipe` for a schedule.")
+            f"`{command_prefix()} --monitor` once to start, or `--cron-recipe` for a schedule.")
     else:
         ts = state.get("ts")
         age = _brief_age_days(ts, now) if ts else None
@@ -5699,10 +5700,10 @@ def render_brief(state: "dict | None", events: "list | None",
         # tool can observe, and claiming it would be a statement about the user's attention
         # rather than about the evidence.
         lines.append(f"{n} {worst}-or-worse event(s) recorded in the journal{tail}. "
-                     "Run `clawseccheck --watch-log` for the timeline.")
+                     f"Run `{command_prefix()} --watch-log` for the timeline.")
     elif events:
         lines.append(f"{len(events)} event(s) recorded, none above MEDIUM. "
-                     "Run `clawseccheck --watch-log` for the timeline.")
+                     f"Run `{command_prefix()} --watch-log` for the timeline.")
 
     # ---- 3. has a real check ever run ----
     real = [r for r in (history or ())

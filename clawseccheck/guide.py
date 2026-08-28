@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass
 
 from .catalog import BY_ID, FAIL, WARN, Finding
+from .invocation import cmd, machine_command_prefix
 from .scoring import ScoreResult
 from .textnorm import asciify
 
@@ -97,7 +98,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="vet_skills",
             title="Double-check your installed skills for malware",
-            command="clawseccheck --vet <skill-folder>",
+            command=cmd("--vet <skill-folder>"),
             why="Installed skills run with your agent's full permissions.",
             priority=1,
         ))
@@ -108,7 +109,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="setup_monitoring",
             title="Turn on ongoing monitoring so you're alerted if something changes",
-            command="clawseccheck --monitor",
+            command=cmd("--monitor"),
             why="An agent with no monitoring won't warn you if it's compromised.",
             priority=3,
         ))
@@ -124,7 +125,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="live_test",
             title="Run a live prompt-injection test to see if your agent actually resists",
-            command="clawseccheck --canary   (then --dryrun / --redteam)",
+            command=cmd("--canary   (then --dryrun / --redteam)"),
             why="Passive checks tell you the config; this tests real behavior.",
             priority=4,
         ))
@@ -143,7 +144,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         actions.append(Action(
             id="review_mcp",
             title="Vet your connected MCP servers for supply-chain risk",
-            command="clawseccheck --vet-mcp",
+            command=cmd("--vet-mcp"),
             why="MCP servers can inject prompts or reach internal services.",
             priority=5,
         ))
@@ -159,7 +160,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         id="track_trend",
         title=("Track your security score over time" if graded
                else "Track your posture over time"),
-        command="clawseccheck --trend",
+        command=cmd("--trend"),
         why=("See if you're getting safer or drifting." if graded else
              "Only graded runs plot on the trend — this run is recorded, not plotted. "
              "Complete all five layers to put a point on the line."),
@@ -171,7 +172,7 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
         id="share_grade",
         title=("Share your grade (safe — findings stay private)" if graded
                else "Share your result (safe — findings stay private)"),
-        command="clawseccheck --badge grade.svg",
+        command=cmd("--badge grade.svg"),
         why=(
             # C-428 follow-up: the second sentence used to be carried over verbatim from
             # the graded branch — "Only the grade + score is ever shared" two words after
@@ -307,7 +308,7 @@ _CRON_TRIGGER_JS = r"""// ClawSecCheck drift probe. Runs on every poll; the agen
 // This fails OPEN on purpose: anything it cannot determine returns fire:true, because
 // OpenClaw treats a trigger error or timeout as fire:false, and a watch that goes
 // quiet on error is worse than one that occasionally wakes you for nothing.
-const CMD = "clawseccheck --monitor --probe --exit-code --fail-on __FAILON__ --data-dir __DATADIR__ >/dev/null 2>&1; echo CSC_RC=$?";
+const CMD = "__CSCCMD__ --monitor --probe --exit-code --fail-on __FAILON__ --data-dir __DATADIR__ >/dev/null 2>&1; echo CSC_RC=$?";
 try {
   const hits = await tools.search("run a shell command");
   if (!hits || !hits.length) {
@@ -325,6 +326,17 @@ try {
 } catch (e) {
   return { fire: true, message: "ClawSecCheck watch: the drift probe could not run (" + String(e) + ")." };
 }"""
+
+
+def _json_inner(value: str) -> str:
+    """*value* escaped for embedding INSIDE a hand-built JSON string literal.
+
+    `_json_str` returns a quoted JSON string; these recipe fields are assembled by hand and
+    need the escaped body without the quotes. Not cosmetic: B-679 puts a resolved
+    filesystem path in there, and on Windows that path carries backslashes, which are a
+    JSON escape character — `C:\\Users\\...` unescaped makes the emitted job unparseable.
+    """
+    return json.dumps(value)[1:-1]
 
 
 def _json_str(value: str) -> str:
@@ -354,10 +366,11 @@ def render_cron_recipe(ascii_only: bool = False,
         f'  "schedule": {{ "kind": "every", "everyMs": {_CRON_EVERY_MS} }},\n'
         '  "payload": {\n'
         '    "kind": "agentTurn",\n'
-        f'    "message": "Run: clawseccheck --monitor --exit-code --fail-on {_CRON_FAIL_ON} '
+        f'    "message": "Run: {_json_inner(machine_command_prefix())} --monitor --exit-code --fail-on {_CRON_FAIL_ON} '
         f'--data-dir {data_dir}\\nExit 0 means nothing at {_CRON_FAIL_ON} severity or above '
         'was recorded — say nothing and stop; anything below that is advisory and is '
-        'counted by `clawseccheck --brief`. Exit 3 means drift was recorded: report what '
+        f'counted by `{_json_inner(machine_command_prefix())} --brief`. Exit 3 means drift was '
+        'recorded: report what '
         'changed, quoting the tool\'s own output. Exit 1 means monitoring is NOT established '
         '(the run could not write its state) — say so, it is more urgent than drift. '
         'Exit 2 is a usage error in this job, not a finding."\n'
@@ -370,7 +383,13 @@ def render_cron_recipe(ascii_only: bool = False,
     # the part that costs tokens and sends you a message -- runs only when the probe finds
     # drift. The interval is the alert latency, so this is what takes it from six hours to
     # minutes without a resident process and without writing anything into openclaw.json.
+    # B-679: the machine form -- absolute interpreter, absolute script. A cron job
+    # inherits neither the user's PATH nor their cwd, and the bare console-script name
+    # does not exist at all on a ClawHub install (measured: rc=127). The trigger maps any
+    # code outside {0, 3} to fire:true, so a command that cannot be found became a
+    # wake-up every five minutes, forever.
     trigger_script = (_CRON_TRIGGER_JS
+                      .replace("__CSCCMD__", machine_command_prefix())
                       .replace("__FAILON__", _CRON_FAIL_ON)
                       .replace("__DATADIR__", data_dir))
     fast_job = (
@@ -380,7 +399,7 @@ def render_cron_recipe(ascii_only: bool = False,
         f'  "trigger": {{ "script": {_json_str(trigger_script)}, "once": false }},\n'
         '  "payload": {\n'
         '    "kind": "agentTurn",\n'
-        f'    "message": "Run: clawseccheck --monitor --exit-code --fail-on {_CRON_FAIL_ON} '
+        f'    "message": "Run: {_json_inner(machine_command_prefix())} --monitor --exit-code --fail-on {_CRON_FAIL_ON} '
         f'--data-dir {data_dir}\\nThe probe that woke you already saw drift but did NOT '
         'record it, so this run is the one that reports and records it. Exit 3 means drift: '
         "report what changed, quoting the tool's own output. Exit 1 means monitoring is NOT "

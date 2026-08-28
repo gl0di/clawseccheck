@@ -895,6 +895,13 @@ The threshold here is `--exit-code`'s default of HIGH and above. The job that
 check leaving PASS emits at MEDIUM — at HIGH that whole class of regression returns 0.
 Add `--fail-on medium` below if you want the shell variant to match.
 
+> **`clawseccheck` here is shorthand for however you invoke this tool.** The console script
+> exists only under a `pip`/`pipx` install; a ClawHub install puts a *directory* on disk and
+> the entry point is `python3 <skill-dir>/audit.py`. Everything the tool prints — the "what
+> you can do next" list and, most importantly, the job `--cron-recipe` emits — is written
+> with the form you actually started it with, resolved at run time, so it is runnable as
+> printed. If you are writing a script by hand, use whichever of the two works in your shell.
+
 ```bash
 #!/bin/sh
 clawseccheck --monitor --exit-code --data-dir ~/.clawseccheck

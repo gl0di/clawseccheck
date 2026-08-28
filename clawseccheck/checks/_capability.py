@@ -42,6 +42,7 @@ from ._shared import (
     _surface_absent,
     _unpolicied_open_wildcard_group_channels,
 )
+from ..invocation import command_prefix
 
 
 _AUTO_GATE_BLAST = {
@@ -270,7 +271,7 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
             UNKNOWN,
             "No tool inventory attested — capability blast-radius cannot be "
             "classified from config (tool names are opaque strings there).",
-            "Run 'clawseccheck --ask' to emit a template, have the agent fill in its "
+            f"Run '{command_prefix()} --ask' to emit a template, have the agent fill in its "
             "real 'tools' list, then re-run with '--attest <file>'.",
         )
     held = _attest.classify_tools(tools)

@@ -18,6 +18,7 @@ from pathlib import Path
 from clawseccheck.catalog import BY_ID, FAIL, WARN, Finding
 from clawseccheck.guide import _surface_failed, suggest_actions
 from clawseccheck.scoring import ScoreResult
+from clawseccheck.invocation import command_prefix
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -93,10 +94,19 @@ def test_a_non_skills_fail_does_not_trigger_the_skill_action():
 # --------------------------------------------------------------- doctrine
 def test_no_action_is_ever_remediation():
     """Reports-only (F-074) — the widening must not smuggle in a fix instruction."""
+    prefix = command_prefix()
     for a in suggest_actions([_f("B181", FAIL)], _score()):
-        assert a.command.startswith("clawseccheck"), a.command
+        # B-679: the invocation form this process was started with, not the console name.
+        # A ClawHub install has no `clawseccheck` command at all (measured: rc=127) — see
+        # tests/test_b679_invocation_prefix.py for why the old literal was wrong.
+        assert a.command.startswith(prefix + " "), a.command
+        # The banned-verb scan runs over the ARGUMENTS, not the prefix. The prefix now
+        # carries a filesystem path, and a path is not an instruction: scanning it would
+        # make this doctrine test fail on a machine whose install directory happened to
+        # contain one of these words.
+        args = a.command[len(prefix):]
         for banned in ("reinstall", "delete ", "rm ", "chmod", "uninstall"):
-            assert banned not in f"{a.title} {a.command} {a.why}".lower(), (a.id, banned)
+            assert banned not in f"{a.title} {args} {a.why}".lower(), (a.id, banned)
 
 
 def test_a_run_whose_fail_no_rule_references_still_produces_a_coherent_list():
