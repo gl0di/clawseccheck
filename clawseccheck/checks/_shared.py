@@ -691,6 +691,53 @@ INPUT_TOOL_HINTS = (
 )
 
 
+# B-667: the SUBSTRING hints below are a generic vocabulary ("db", "vault", "fs_read")
+# that predates any grounding against OpenClaw's own tool catalog — and it misses the
+# catalog entirely. The real ids a config writes into `tools.allow` are `read`, `write`,
+# `edit`, `apply_patch`, `memory_get`, `memory_search`, … (dist tool-catalog-*.js,
+# CORE_TOOL_DEFINITIONS), and not one of them is a substring match for any hint:
+# `"fs_read" in "read"` is False. Five corpus configs name `read` outright and A1's
+# sensitive-data leg stayed off for every one of them.
+#
+# Widening the hint tuple is not the fix and must not be attempted: `_hint` matches a
+# substring of a joined blob, so adding "read" would convict a tool named `thread` or
+# `spreadsheet`, "write" would convict `copywriter`, "edit" would convict `credit`. This
+# is an EXACT-id set instead, compared after the same alias fold OpenClaw applies
+# (`_canon_tool` ↔ normalizeToolName), so it can only ever match a tool the user actually
+# named.
+#
+# Membership rule, applied to each id's own dist description: a tool belongs here when it
+# RETURNS EXISTING CONTENT to the model.
+#   read          "Read file contents"          -> in
+#   memory_get    "Read memory files"           -> in
+#   memory_search "Semantic search" (memory)    -> in
+# Deliberately OUT, and this is not timidity:
+#   write / edit / apply_patch — mutation tools. To edit or patch, the model must already
+#     hold the content; none of them hands it back. They are a WRITE surface (a gap on the
+#     outbound leg, which cannot see them either — separate defect, not widened here).
+#   sessions_history — "Read *sanitized* session history". OpenClaw sanitizes it, so it is
+#     not the unqualified private-data read the other three are.
+# Measured before choosing: `read` alone turns the leg on for 5 of 581 corpus homes and
+# produces ZERO new A1 FAILs; adding the mutation tools would add one (a clawrange
+# `self_modification_risk` config, via `apply_patch`) for a capability that does not
+# actually return data.
+SENSITIVE_TOOL_IDS = frozenset({"read", "memory_get", "memory_search"})
+
+# SCOPE, stated because the boundary is not obvious. This set is a like-for-like extension
+# of the NAMED-TOOL source beside it and inherits that source's semantics exactly,
+# including its indifference to confinement: `tools.allow: ["fs_read"]` has always raised
+# this leg without consulting `tools.fs.workspaceOnly`, and `tools.allow: ["read"]` now
+# does the same. What it deliberately does NOT do is treat a `tools.profile` of "coding"
+# or "full" as a data-read grant, even though the runtime resolves both to a `read` tool.
+# That is a larger, unresolved question and the measurement says so: raising the leg from
+# the profile turns 6 more corpus homes into CRITICAL 3/3 FAILs — including the
+# maintainer's own machine, whose file tools B-666 proved cannot reach the OpenClaw home
+# because `tools.fs.workspaceOnly` is true there. Deciding it means deciding whether
+# "sensitive data" means the home's credentials or any private data the agent can read at
+# all, which moves a real grade; it is filed, not smuggled in here.
+
+
+
 SENSITIVE_TOOL_HINTS = (
     "db",
     "sql",
@@ -1577,6 +1624,69 @@ def _enabled_tools_sources(cfg: dict) -> dict:
         out["exec"] = f"tools.profile={profile!r} (a powerful profile)"
     elif sandbox_mode is not None and sandbox_mode != "off":
         out["exec"] = f"agents.defaults.sandbox.mode={sandbox_mode!r}"
+    return out
+
+
+def _tool_id_sources(cfg: dict, ids) -> list:
+    """Tool grants naming one of *ids* EXACTLY, attributed to the field that granted it.
+
+    The exact-match sibling of ``_tool_hint_sources`` (B-667). Each configured entry is
+    alias-folded through ``_canon_tool`` — the same fold OpenClaw's ``normalizeToolName``
+    applies before its own allow/deny matching — and then compared for equality, never
+    containment, so a tool called ``thread`` can never satisfy an id ``read``.
+
+    Reads ``tools.alsoAllow`` as well as the ``tools.allow`` / ``gateway.tools.allow``
+    pair ``_enabled_tools`` uses. ``alsoAllow`` is a real grant field — the runtime unions
+    it onto the profile's allowlist (``mergeAlsoAllowPolicy``) — and the substring-hint
+    path above has never read it. That blindness is a separate defect affecting all three
+    legs; it is not reproduced here just to stay symmetrical with it.
+
+    Deliberately does NOT strip an MCP/provider namespace: OpenClaw's own allowlist
+    matcher does not either, so ``mcp__srv__read`` in a config names that server's tool
+    and not the core ``read``. MCP sensitivity is B229's (``_mcp_leg_contributions``).
+    """
+    out = []
+    # C-135: deny wins in the runtime matcher (`makeToolPolicyMatcher` tests the deny
+    # list first and returns false on a hit), so a tool named in BOTH lists is not
+    # granted. Reading only the allow side would report a capability the config
+    # explicitly took away — a false positive on a CRITICAL leg.
+    denied = {
+        _canon_tool(raw)
+        for raw in (dig(cfg, "tools.deny") or [])
+        if isinstance(dig(cfg, "tools.deny"), list)
+    }
+    listed = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
+    field = "tools.allow" if dig(cfg, "tools.allow") else "gateway.tools.allow"
+    also = dig(cfg, "tools.alsoAllow")
+    for source_field, values in ((field, listed), ("tools.alsoAllow", also)):
+        if not isinstance(values, list):
+            continue
+        for raw in values:
+            name = _canon_tool(raw)
+            if name in ids and name not in denied:
+                out.append(f"{source_field} entry {str(raw)!r}")
+    return out
+
+
+def _attested_tool_id_sources(ctx, ids) -> list:
+    """Attested tool inventories naming one of *ids* exactly (B-667).
+
+    ``--attest`` could previously only ever CLEAR a leg: ``_capabilities_attested`` gates
+    A1's hedges, so a roster that truthfully declared a file-read tool silenced the very
+    warning it should have confirmed — a one-way ratchet where telling the truth improved
+    the verdict. An attested roster is a deliberate declaration by the operator (B-033's
+    whole premise for trusting it to resolve an OFF leg), so it is trusted symmetrically
+    here: it can raise this leg as well as leave it down.
+
+    Names are normalized the way ``checks/_capability.py`` already normalizes an attested
+    tool — ``_canon_tool(_attest.normalize_verb(t))`` — so a namespaced
+    ``mcp__server__read`` is compared as ``read``.
+    """
+    out = []
+    for agent in _attest.attested_agents(getattr(ctx, "attestation", {}) or {}):
+        for raw in agent.get("tools") or []:
+            if _canon_tool(_attest.normalize_verb(raw)) in ids:
+                out.append(f"attested agent {agent['name']!r} holds {str(raw)!r}")
     return out
 
 
@@ -2821,6 +2931,11 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     # that is the gateway's own auth secret, not agent-readable data; B1 flags it).
     sensitive: list = []
     sensitive.extend(_tool_hint_sources(cfg, SENSITIVE_TOOL_HINTS))
+    # B-667: the generic hints above cannot see OpenClaw's own tool ids — see
+    # SENSITIVE_TOOL_IDS. Exact match, alias-folded, over the config's grants and over an
+    # attested roster (which until now could only ever clear a leg, never raise one).
+    sensitive.extend(_tool_id_sources(cfg, SENSITIVE_TOOL_IDS))
+    sensitive.extend(_attested_tool_id_sources(ctx, SENSITIVE_TOOL_IDS))
     # getattr, not ctx.home directly: a few tests build Context via __new__ without
     # setting .home, relying on _trifecta_legs' original `or`-chain never reaching this
     # term once an earlier one is already True (test_b283_shallow_reads.py's

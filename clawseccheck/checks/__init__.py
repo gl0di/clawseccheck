@@ -203,6 +203,11 @@ from ._egress import (
 )
 
 from ._shared import (_trifecta_legs, _trifecta_leg_sources,)  # B-493
+from ._shared import (  # B-667
+    SENSITIVE_TOOL_IDS,
+    _attested_tool_id_sources,
+    _tool_id_sources,
+)
 from ._shared import (  # B-666
     _CRED_STORE_MAX_BYTES,
     _CRED_STORE_MAX_FILES,
