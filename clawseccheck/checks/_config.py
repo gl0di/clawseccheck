@@ -6,7 +6,6 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import ipaddress
 import os
-import re
 from pathlib import Path
 from .. import attest as _attest
 from .. import sockets as _sockets
@@ -30,6 +29,7 @@ from ..collector import (
 )
 from ..safeio import walk_dir_safely
 from ..textnorm import normalize_for_scan
+from ..toolpolicy import scopes_reaching_outside_workspace
 
 from ._content import (
     _B58_HTML_COMMENT_RE,
@@ -63,7 +63,11 @@ from ._shared import (
     _gateway_remote_exposure_reason,
     _hint,
     _hooks_session_key_exposures,
-    _is_secret_reference,
+    _C015_EXTRA_SECRET_PATTERNS,  # noqa: F401 — re-exported (moved to _shared, B-666)
+    _c015_has_secret,
+    _credential_store_state,
+    _is_secret_reference,  # noqa: F401 — re-exported for existing importers
+    _pattern_hits_real_secret,
     _mcp_leg_contributions,
     _norm_group_policy,
     _open_channels,
@@ -132,37 +136,6 @@ _B32_CONTROL_PLANE_TOOLS = frozenset(
         "update.run",
     }
 )
-
-
-# C015 mirrors logsafe's additional secret token shapes so the home-file scan catches
-# the same secret families the logger already redacts, without ever echoing values.
-_C015_EXTRA_SECRET_PATTERNS = [
-    re.compile(r"gh[opsur]_[A-Za-z0-9]{20,}"),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{10,}"),
-    re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
-    re.compile(
-        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
-        re.DOTALL,
-    ),
-    # B-133: pretty-printed JSON quotes the key ("token": "value"), so the shared
-    # SECRET_PATTERNS keyword pattern (which expects key[:=]value with no closing
-    # quote in between) never matches identity/device-auth.json or devices/paired.json
-    # style credential objects. This mirrors that same pattern for the quoted-JSON-key
-    # shape, scoped to key names that only carry live credential/grant material
-    # (password/secret/api[_-]key/*token/privateKey*) — not a general JSON-value scan.
-    # `\w*token` (not just `token`) also covers accessToken/refreshToken-style keys
-    # confirmed under identity/device-auth.json's and devices/paired.json's "tokens"
-    # object.
-    # C-226: value captured in group(1) so _pattern_hits_real_secret can tell a pure
-    # SecretRef indirection (e.g. "secretref-env:NAME") apart from a real inline
-    # secret sharing the same quoted-JSON-key shape.
-    re.compile(
-        r'"(?:password|secret|api[_-]?key|\w*token|private[_-]?key\w*)"\s*:\s*"([^"\s]{8,})"',
-        re.I,
-    ),
-]
 
 
 _C015_MAX_BYTES = 200_000
@@ -321,7 +294,8 @@ def _has_world_open_cidr(value) -> bool:
 # F-036: for a 2/3 config, name the one missing leg + the concrete field that would
 # complete the trifecta. Grounded only in field paths the engine already reads
 # (_untrusted_input_channels / _unpolicied_open_wildcard_group_channels (B-371) /
-# INPUT_TOOL_HINTS + web for input; SENSITIVE_TOOL_HINTS, ungated exec, credentials/ for
+# INPUT_TOOL_HINTS + web for input; SENSITIVE_TOOL_HINTS, ungated exec, a credential file
+# in the store (B-666: its CONTENT, not the directory's name) for
 # sensitive; OUTBOUND_TOOL_HINTS, exec, elevated, web for outbound). No new schema invented.
 _MISSING_LEG_ACTIVATORS = {
     "untrusted input": (
@@ -333,7 +307,7 @@ _MISSING_LEG_ACTIVATORS = {
     "sensitive data": (
         "a private-data tool (tools.allow: fs_read/db/sql/vault/credential), "
         "ungated exec — tools.exec.mode/security/ask absent, or set to a non-gating "
-        "value (e.g. mode='full') — or a readable credentials/ dir"
+        "value (e.g. mode='full') — or a plaintext credential in the credentials/ store"
     ),
     "outbound actions": (
         "an outbound tool (tools.allow: send/webhook/http_post/fs_write/deploy), "
@@ -452,34 +426,6 @@ def _c015_candidate_files(ctx: Context, capped: list | None = None) -> list[Path
         prune_dir=_prune,
         keep_file=_keep_file,
         capped=capped,
-    )
-
-
-def _pattern_hits_real_secret(patterns, text: str) -> bool:
-    """True if any *patterns* match in *text* with a value that is not a pure
-    SecretRef indirection (C-226; see ``_is_secret_reference`` in checks/_shared.py).
-
-    Patterns with no capturing group are concrete API-key literal formats
-    (sk-ant-.../AKIA.../AIza...) that can never collide with `$NAME`/`${NAME}`/
-    legacy-marker syntax, so any match on those fires immediately. Patterns WITH a
-    capturing group (the generic ``keyword[:=]value`` shapes) have that captured
-    value checked against ``_is_secret_reference`` before counting as a hit — via
-    ``finditer`` over every match, not just the first, so a real secret elsewhere in
-    the same text still fires even when an earlier match of the SAME pattern is a
-    pure reference (a decoy reference in one field must never mask a real secret in
-    another field scanned by the same pattern).
-    """
-    for pat in patterns:
-        for m in pat.finditer(text):
-            if pat.groups >= 1 and _is_secret_reference(m.group(1)):
-                continue
-            return True
-    return False
-
-
-def _c015_has_secret(text: str) -> bool:
-    return _pattern_hits_real_secret(SECRET_PATTERNS, text) or _pattern_hits_real_secret(
-        _C015_EXTRA_SECRET_PATTERNS, text
     )
 
 
@@ -2911,8 +2857,9 @@ def check_trifecta(ctx: Context) -> Finding:
     # config-derived) read as OFF even when the real config has them ON. Guarded at the
     # top, before computing legs at all: unlike B1/B11 (whose independent, non-config
     # signal is a COMPLETE, self-sufficient basis for their own FAIL/WARN), the one
-    # non-config contributor mixed into _trifecta_legs — `(ctx.home / "credentials")
-    # .is_dir()`, feeding only the "sensitive data" leg — can never by itself clear the
+    # non-config contributor mixed into _trifecta_legs — the credential-store CONTENT read
+    # (B-666; was `(ctx.home / "credentials").is_dir()`), feeding only the "sensitive
+    # data" leg — can never by itself clear the
     # >=3-legs FAIL threshold or satisfy the thin-surface WARN branch below (which keys on
     # the untrusted-input/outbound legs, not sensitive data). So guarding here cannot mask
     # an independently-provable verdict; it only stops a confidently-worded WARN/PASS from
@@ -3007,6 +2954,78 @@ def check_trifecta(ctx: Context) -> Finding:
             " still honored there). An unrecognized literal is not read as a restriction.",
             evidence=active,
         )
+
+    # Ordering: this runs LAST of the three hedges, immediately before the PASS it
+    # replaces. The other two answer "the config stated this leg's input ambiguously";
+    # this one answers "the config never stated this leg at all", which is the weakest
+    # claim of the three, so it yields to either of the more specific ones when both
+    # apply. Putting it earlier stole B-499's remediation text on the risk21 fixtures.
+    # B-666: the same reasoning as the two guards above, for the leg they do not cover.
+    # `runtime_unknown` hedges an OFF input/outbound leg because runtime tools are not
+    # written to openclaw.json; nothing hedged an OFF "sensitive data" leg, so a config
+    # that simply never named a data tool got a confidently-worded PASS — the leg read as
+    # KNOWN-ABSENT when it was only UNDECLARED. It is not merely undeclared, either: both
+    # config layers that decide whether a file-read tool can leave the workspace default
+    # to the PERMISSIVE end (see clawseccheck/toolpolicy.py), so on such a config the
+    # agent really can read openclaw.json, credentials/ and anything else its user can.
+    #
+    # Deliberately a WARN and NOT a leg, following B-499 exactly: promoting this to a leg
+    # was measured across 581 local corpus homes and produced 18 new CRITICAL FAILs, six
+    # of them on `clean_*` fixtures — `active` and `evidence` stay untouched, so the leg
+    # count a reader sees is unchanged and no new FAIL can come out of this branch.
+    # (The wiring B-666 originally proposed — raise the leg from C015's at-rest scan or
+    # B41's credential inventory — was measured too and is worse: 470 of 581 homes carry
+    # a secret-shaped value in openclaw.json itself, so the leg would be ON for 81% of all
+    # configs and A1 would collapse into "ingress AND outbound".)
+    # Gated on the ATTESTATION alone, deliberately NOT on `_meaningful_tool_surface`
+    # (which silences the runtime_unknown hedge above). That helper counts a powerful
+    # `tools.profile` as a visible capability surface — and `coding` is precisely the
+    # profile that GRANTS the unconfined `read` tool, so reusing it here would switch the
+    # hedge off exactly where the exposure is most certain. Only a positive declaration
+    # of the agent's real tool inventory can resolve a leg the config left undeclared.
+    #
+    # Known limitation, recorded rather than hidden: an attestation that NAMES a
+    # data-read tool silences this hedge instead of raising the leg, because nothing
+    # feeds attested tool names into `_trifecta_leg_sources`. Same root as the fact that
+    # SENSITIVE_TOOL_HINTS does not know OpenClaw's real fs tool ids (`read`/`edit`/
+    # `write`/`apply_patch`) — "read" cannot simply be added to a substring hint list
+    # without matching "thread"/"spreadsheet". Tracked separately; not widened here,
+    # because raising a leg is FAIL-capable movement and this change adds no FAIL.
+    if not legs["sensitive data"] and not _capabilities_attested(ctx):
+        reach = scopes_reaching_outside_workspace(ctx.config)
+        store = _credential_store_state(getattr(ctx, "home", None))
+        if reach or store["incomplete"]:
+            why = []
+            if reach:
+                why.append(
+                    f"file tools are not confined to the workspace for {', '.join(reach)}"
+                    " (tools.fs.workspaceOnly is not true there) and the `read` tool is"
+                    " still granted, so an injected prompt can read openclaw.json,"
+                    " credentials/ and any other file this account can"
+                )
+            if store["incomplete"]:
+                why.append(
+                    "the credential store could not be read in full"
+                    f" ({store['reason']}), so nothing found in it means 'not found',"
+                    " not 'not there'"
+                )
+            return _finding(
+                "A1",
+                WARN,
+                detail
+                + " Cannot determine from config: sensitive data. The leg is reported"
+                f" off because no data tool is named in the config, but {'; and '.join(why)}.",
+                (
+                    "Set tools.fs.workspaceOnly=true, or narrow tools.profile to"
+                    " 'minimal' or 'messaging' (or add 'read' to tools.deny), so file"
+                    " tools cannot reach credentials outside the workspace."
+                    if reach
+                    else "Make the credential store readable to this audit (it is"
+                    " normally mode 0700 and owned by you) and re-run, so the leg can"
+                    " be established rather than left undetermined."
+                ),
+                evidence=active,
+            )
 
     return _finding(
         "A1", PASS, detail, "Keep it at ≤2 of 3 — do not add the third capability.", evidence=active

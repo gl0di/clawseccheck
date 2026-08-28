@@ -32,6 +32,9 @@ _B62_EXPECTED
 _B62_HIGH_SURPRISE
 _B74_ROLE_BLOCK_RE
 _CRED_RE
+_CRED_STORE_MAX_BYTES
+_CRED_STORE_MAX_FILES
+_CRED_STORE_MAX_NAMES
 _DESTRUCTIVE_CMD_RE
 _EXFIL_RE
 _INSTALL_HEADING_RE
@@ -84,6 +87,7 @@ _blank_fences
 _canonical_ipv4
 _channel_has_implicit_default_account
 _check_unicode_obfuscation
+_credential_store_state
 _defensive_context
 _defensive_section
 _dep_names_in_skill
@@ -140,6 +144,7 @@ _skill_frontmatter_block
 _squat_hits
 _suspicious_pipe_hosts
 _tool_policy_view
+_trifecta_leg_sources
 _unclassified_leg_verbs
 _unpinned_deps_in_skill
 _untrusted_input_channels

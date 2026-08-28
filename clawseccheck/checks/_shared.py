@@ -36,6 +36,7 @@ from ..collector import (  # noqa: F401
     _is_own_source,
 )
 from ..iocdb import known_bad_host_records as _iocdb_known_bad_host_records
+from ..safeio import walk_dir_safely
 from .. import attest as _attest
 
 
@@ -385,6 +386,70 @@ def _is_secret_reference(value: str) -> bool:
     if not isinstance(value, str):
         return False
     return bool(_SECRET_REFERENCE_RE.fullmatch(value.strip()))
+
+
+# F-180/B-666: moved here VERBATIM from checks/_config.py so `_trifecta_leg_sources`
+# (this leaf) can ask whether a file carries a real secret without importing a
+# Layer-2 topic module — _config.py imports them back from here, so C015 and A1 now
+# share ONE definition of "this text contains a plaintext secret" instead of A1
+# proxying for it with a directory name.
+# C015 mirrors logsafe's additional secret token shapes so the home-file scan catches
+# the same secret families the logger already redacts, without ever echoing values.
+_C015_EXTRA_SECRET_PATTERNS = [
+    re.compile(r"gh[opsur]_[A-Za-z0-9]{20,}"),
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{10,}"),
+    re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
+    re.compile(
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        re.DOTALL,
+    ),
+    # B-133: pretty-printed JSON quotes the key ("token": "value"), so the shared
+    # SECRET_PATTERNS keyword pattern (which expects key[:=]value with no closing
+    # quote in between) never matches identity/device-auth.json or devices/paired.json
+    # style credential objects. This mirrors that same pattern for the quoted-JSON-key
+    # shape, scoped to key names that only carry live credential/grant material
+    # (password/secret/api[_-]key/*token/privateKey*) — not a general JSON-value scan.
+    # `\w*token` (not just `token`) also covers accessToken/refreshToken-style keys
+    # confirmed under identity/device-auth.json's and devices/paired.json's "tokens"
+    # object.
+    # C-226: value captured in group(1) so _pattern_hits_real_secret can tell a pure
+    # SecretRef indirection (e.g. "secretref-env:NAME") apart from a real inline
+    # secret sharing the same quoted-JSON-key shape.
+    re.compile(
+        r'"(?:password|secret|api[_-]?key|\w*token|private[_-]?key\w*)"\s*:\s*"([^"\s]{8,})"',
+        re.I,
+    ),
+]
+
+
+def _pattern_hits_real_secret(patterns, text: str) -> bool:
+    """True if any *patterns* match in *text* with a value that is not a pure
+    SecretRef indirection (C-226; see ``_is_secret_reference`` in checks/_shared.py).
+
+    Patterns with no capturing group are concrete API-key literal formats
+    (sk-ant-.../AKIA.../AIza...) that can never collide with `$NAME`/`${NAME}`/
+    legacy-marker syntax, so any match on those fires immediately. Patterns WITH a
+    capturing group (the generic ``keyword[:=]value`` shapes) have that captured
+    value checked against ``_is_secret_reference`` before counting as a hit — via
+    ``finditer`` over every match, not just the first, so a real secret elsewhere in
+    the same text still fires even when an earlier match of the SAME pattern is a
+    pure reference (a decoy reference in one field must never mask a real secret in
+    another field scanned by the same pattern).
+    """
+    for pat in patterns:
+        for m in pat.finditer(text):
+            if pat.groups >= 1 and _is_secret_reference(m.group(1)):
+                continue
+            return True
+    return False
+
+
+def _c015_has_secret(text: str) -> bool:
+    return _pattern_hits_real_secret(SECRET_PATTERNS, text) or _pattern_hits_real_secret(
+        _C015_EXTRA_SECRET_PATTERNS, text
+    )
 
 
 # Credential/secret access is only malicious when EXFILTRATED.
@@ -2633,6 +2698,83 @@ def _unpolicied_open_wildcard_group_channels(cfg: dict) -> dict:
     return out
 
 
+# B-666: how many files of the credential store are read before the answer is called
+# incomplete. The real store holds a handful of small JSON files (OpenClaw's own
+# `resolveOAuthDir` writes `oauth.json` there, and channel pairing/allowFrom state lands
+# beside it), so a trip here means something pathological, not a big-home budget problem
+# — which is why the cap is disclosed to the caller instead of silently absorbed.
+_CRED_STORE_MAX_FILES = 200
+_CRED_STORE_MAX_BYTES = 200_000
+# How many file names one over-determined store contributes before the rest are counted.
+_CRED_STORE_MAX_NAMES = 3
+
+
+def _credential_store_state(home) -> dict:
+    """What OpenClaw's credential store HOLDS — not merely that the directory exists.
+
+    ``<home>/credentials`` is ``resolveOAuthDir`` (dist paths-*.js: ``$STATE_DIR/credentials``),
+    where an OAuth grant is written as ``oauth.json``. It is ALSO where channel pairing
+    state lands, and OpenClaw creates it as soon as a channel is paired — so its mere
+    presence says nothing about whether a credential is in it.
+
+    B-666: A1's "sensitive data" leg used to be raised by ``(home / "credentials").is_dir()``
+    alone. Measured on the real fleet home, that directory held 94 bytes across two files —
+    a Telegram allow-list and an empty pairing-request list, neither of them a secret — and
+    that was the ONLY thing holding up a CRITICAL 3/3 FAIL. Moving those 94 bytes out
+    flipped A1 to PASS and the grade from F/49 to C/79 while every real credential
+    (the bot token, the provider profile, the gateway token) stayed exactly where it was.
+    A directory name is not evidence; its contents are. The same secret detector C015 uses
+    now answers the question, so one definition of "this file carries a plaintext secret"
+    serves both checks.
+
+    Returns ``{"present", "secret_files", "incomplete", "reason"}``. ``secret_files`` holds
+    store-relative names only — never a value, never an absolute path (§8). ``incomplete``
+    is True when the walk could not finish (cap or an unlistable directory): an empty
+    ``secret_files`` then means "not found in what we read", NOT "not there", and
+    ``check_trifecta`` routes that to its hedge rather than to a clean leg-is-off PASS.
+    """
+    out = {"present": False, "secret_files": [], "incomplete": False, "reason": ""}
+    if home is None:
+        return out
+    store = Path(home) / "credentials"
+    if not store.is_dir():
+        return out
+    out["present"] = True
+    capped: list = []
+    unreadable: list = []
+    files = walk_dir_safely(
+        store,
+        max_files=_CRED_STORE_MAX_FILES,
+        capped=capped,
+        unreadable_dirs=unreadable,
+    )
+    for path in files:
+        try:
+            if path.stat().st_size > _CRED_STORE_MAX_BYTES:
+                # Too big to read is not "clean" — the store was not fully covered.
+                out["incomplete"] = True
+                out["reason"] = "a file in it is too large to scan"
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            out["incomplete"] = True
+            out["reason"] = "a file in it could not be read"
+            continue
+        if _c015_has_secret(text):
+            try:
+                out["secret_files"].append(str(path.relative_to(store)))
+            except ValueError:
+                out["secret_files"].append(path.name)
+    if capped:
+        out["incomplete"] = True
+        out["reason"] = f"it holds more than {_CRED_STORE_MAX_FILES} files"
+    if unreadable:
+        out["incomplete"] = True
+        out["reason"] = "a directory inside it could not be listed"
+    out["secret_files"].sort()
+    return out
+
+
 # ---------------------------------------------------------------- Block A
 def _trifecta_leg_sources(ctx: Context) -> dict:
     """The three lethal-trifecta legs, each mapped to the SPECIFIC config entries that
@@ -2674,7 +2816,8 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     untrusted.extend(mcp_legs["untrusted input"])  # B-247: fetch/web-search/inbox/... MCP
 
     # Agent-readable private data: a data tool (db/credential/vault/fs_read/...), a
-    # credentials/ dir under the home, or ungated exec (NOT gateway.auth.password —
+    # plaintext credential inside the credentials/ store (B-666 — its content, not the
+    # directory's existence), or ungated exec (NOT gateway.auth.password —
     # that is the gateway's own auth secret, not agent-readable data; B1 flags it).
     sensitive: list = []
     sensitive.extend(_tool_hint_sources(cfg, SENSITIVE_TOOL_HINTS))
@@ -2686,8 +2829,19 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     # the same test double the lazy `or` used to protect by construction. Production
     # Context.home is a required dataclass field (collector.py) and is always set.
     home = getattr(ctx, "home", None)
-    if home is not None and (home / "credentials").is_dir():
-        sensitive.append("credentials/ directory present under the agent home")
+    # B-666: CONTENT, not a directory name. See _credential_store_state — the store
+    # exists on any home that ever paired a channel, so its presence raised this
+    # CRITICAL leg over 94 bytes of pairing state on the real fleet home, and moving
+    # those bytes out bought a clean A1 while every actual credential stayed put.
+    store = _credential_store_state(home)
+    names = store["secret_files"]
+    for name in names[:_CRED_STORE_MAX_NAMES]:
+        sensitive.append(f"credentials/{name} holds a plaintext credential")
+    if len(names) > _CRED_STORE_MAX_NAMES:
+        sensitive.append(
+            f"(+{len(names) - _CRED_STORE_MAX_NAMES} more file(s) in credentials/ "
+            "hold a plaintext credential)"
+        )
     # B-061: ungated exec/shell can read any private file. Approval-gated exec (see
     # _has_approval_gate) is NOT autonomous, so it must not raise this leg — matches
     # _trifecta_legs' exec_enabled = _real_exec_enabled(cfg) and not _has_approval_gate(cfg).

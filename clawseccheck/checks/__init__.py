@@ -202,7 +202,13 @@ from ._egress import (
     check_webfetch_redirects,
 )
 
-from ._shared import (_trifecta_legs,)
+from ._shared import (_trifecta_legs, _trifecta_leg_sources,)  # B-493
+from ._shared import (  # B-666
+    _CRED_STORE_MAX_BYTES,
+    _CRED_STORE_MAX_FILES,
+    _CRED_STORE_MAX_NAMES,
+    _credential_store_state,
+)
 from ._shared import (_unpolicied_open_wildcard_group_channels,)  # B-371
 from ._agents import (
     _B21_OBEY_RE,

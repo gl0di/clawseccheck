@@ -261,7 +261,14 @@ def test_the_distance_note_stops_advising_against_a_state_already_in_force(tmp_p
     data and this branch correctly never fires."""
     home = tmp_path / "home"
     home.mkdir()
-    (home / "credentials").mkdir()  # sensitive-data leg
+    # B-666: the store's CONTENT raises the leg, not the directory's existence — an empty
+    # `credentials/` used to be enough here and is (correctly) inert now. Assembled from
+    # fragments so no contiguous secret-shaped literal exists in source (§2.3).
+    store = home / "credentials"
+    store.mkdir()
+    (store / "oauth.json").write_text(
+        json.dumps({"access_token": "ya29." + "A" * 40}), encoding="utf-8"
+    )
     cfg = {
         "channels": {"telegram": {"enabled": True}},  # no dmPolicy -> resolved default
         "tools": {"elevated": {"allowFrom": ["*"]}},  # outbound-actions leg

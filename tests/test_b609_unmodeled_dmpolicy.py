@@ -207,7 +207,10 @@ def test_a1_disabled_on_feishu_still_passes(tmp_path):
         "channels": {
             "feishu": {"enabled": True, "dmPolicy": "disabled", "appId": "x", "appSecret": "y"}
         },
-        "tools": {"elevated": {"allowFrom": ["*"]}},
+        # B-666: `fs.workspaceOnly` confines the file tools, so A1's sensitive-data hedge
+        # (which fires when nothing confines them) stays out of a test about dmPolicy and
+        # this can keep asserting PASS rather than "does not say Unmodeled dmPolicy".
+        "tools": {"elevated": {"allowFrom": ["*"]}, "fs": {"workspaceOnly": True}},
     }
     f = check_trifecta(_ctx(tmp_path, cfg))
     assert f.status == PASS, f.status
@@ -221,7 +224,8 @@ def test_a1_core_channel_unmodeled_literal_stays_pass(tmp_path):
 
     cfg = {
         "channels": {"telegram": {"enabled": True, "dmPolicy": "banned"}},
-        "tools": {"elevated": {"allowFrom": ["*"]}},
+        # B-666: see the note above — confinement keeps the sensitive-data hedge out.
+        "tools": {"elevated": {"allowFrom": ["*"]}, "fs": {"workspaceOnly": True}},
     }
     f = check_trifecta(_ctx(tmp_path, cfg))
     assert f.status == PASS, f.status
@@ -275,7 +279,8 @@ def test_the_warn_branch_is_inert_when_the_helper_is_empty(tmp_path):
     the branch it protects here is new enough that nothing else pins its removal."""
     cfg = {
         "channels": {"feishu": {"enabled": True, "dmPolicy": "owner", "appId": "x", "appSecret": "y"}},
-        "tools": {"elevated": {"allowFrom": ["*"]}},
+        # B-666: see the note above — confinement keeps the sensitive-data hedge out.
+        "tools": {"elevated": {"allowFrom": ["*"]}, "fs": {"workspaceOnly": True}},
     }
     ctx = _ctx(tmp_path, cfg)
     with patch("clawseccheck.checks._config._substituted_dm_policy_channels", return_value={}):

@@ -40,7 +40,7 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
-    "checks/_config.py": "~3,995 lines — the config-hardening topic (15 checks + helpers); "
+    "checks/_config.py": "~4,410 lines — the config-hardening topic (15 checks + helpers); "
                          "topic-faithful and over budget by design. A finer split is a "
                          "later cycle (I-022 secondary target).",
     "checks/_lifecycle.py": "~5,662 lines — the approval / update-pinning / self-modification "
@@ -79,7 +79,7 @@ _EXEMPT = {
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "
                          "posture across two topic files. A finer split is a later cycle.",
-    "checks/_shared.py": "~3,216 lines — the leaf every checks/_<topic> module (and "
+    "checks/_shared.py": "~3,423 lines — the leaf every checks/_<topic> module (and "
                          "risk.py) imports from: tool-hint constants, MCP-server helpers, "
                          "and _trifecta_legs, the single shared leg definition A1 and B46 "
                          "both read. Crossed the exact 1,200-line ceiling with B-247's MCP "
