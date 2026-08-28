@@ -38,6 +38,7 @@ _CRED_STORE_MAX_FILES
 _CRED_STORE_MAX_NAMES
 _DESTRUCTIVE_CMD_RE
 _EXFIL_RE
+_FS_GOVERNED_TOOL_IDS
 _INSTALL_HEADING_RE
 _JSONL_SCAN_CAP
 _KNOWN_ADVISORIES
@@ -100,6 +101,7 @@ _fence_ranges
 _finding
 _fm_metadata_obj_multiline
 _frontmatter_name
+_fs_reads_are_confined
 _gateway_remote_exposure_reason
 _has_approval_gate
 _has_cred_exfil_outside_fence

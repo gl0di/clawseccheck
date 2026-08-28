@@ -305,9 +305,11 @@ _MISSING_LEG_ACTIVATORS = {
         "or tools.web.fetch.enabled"
     ),
     "sensitive data": (
-        "a private-data tool (tools.allow: fs_read/db/sql/vault/credential), "
-        "ungated exec — tools.exec.mode/security/ask absent, or set to a non-gating "
-        "value (e.g. mode='full') — or a plaintext credential in the credentials/ store"
+        "a private-data tool named in tools.allow (read/db/sql/vault/credential — a file "
+        "`read` counts only while it is unconfined: tools.fs.workspaceOnly is not true "
+        "and the agent is not fully sandboxed), ungated exec — "
+        "tools.exec.mode/security/ask absent, or set to a non-gating value (e.g. "
+        "mode='full') — or a plaintext credential in the credentials/ store"
     ),
     "outbound actions": (
         "an outbound tool (tools.allow: send/webhook/http_post/fs_write/deploy), "

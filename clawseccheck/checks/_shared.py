@@ -37,6 +37,7 @@ from ..collector import (  # noqa: F401
 )
 from ..iocdb import known_bad_host_records as _iocdb_known_bad_host_records
 from ..safeio import walk_dir_safely
+from .. import toolpolicy as _toolpolicy
 from .. import attest as _attest
 
 
@@ -2886,6 +2887,33 @@ def _credential_store_state(home) -> dict:
 
 
 # ---------------------------------------------------------------- Block A
+# ---------------------------------------------------------------------------- C-462
+# Only ONE member of SENSITIVE_TOOL_IDS is a tool `tools.fs.workspaceOnly` actually
+# governs: `read`. `memory_get`/`memory_search` are memory tools, and the substring hints
+# beside them (`fs_read`, `files`, `db`, `vault`, …) are generic names — `fs_read` is not
+# even an id OpenClaw defines — so no filesystem setting confines any of them. Applying
+# the guard past `read` would suppress a leg over a control that does not reach the tool.
+_FS_GOVERNED_TOOL_IDS = frozenset({"read"})
+
+
+def _fs_reads_are_confined(cfg: dict) -> bool:
+    """True when EVERY declared scope confines its file reads.
+
+    C-462: the two guards are OpenClaw's own, taken from the predicate its audit uses for
+    `security.exposure.open_groups_with_runtime_or_fs`:
+
+        fsUnguarded = fsTools.length > 0 && sandboxMode !== "all" && fsWorkspaceOnly !== true
+
+    So a granted file-read tool behind `tools.fs.workspaceOnly: true` — or inside a fully
+    sandboxed session, where the OpenClaw home is not mounted at all — is not an exposure,
+    by the platform's own reckoning. Scopes are the same ones `toolpolicy` resolves (the
+    global surface plus each `agents.list` entry), and the answer is the conjunction: one
+    unconfined scope is enough to leave the capability exposed.
+    """
+    scopes = _toolpolicy.confined_scopes(cfg)
+    return scopes is not None and all(scopes)
+
+
 def _trifecta_leg_sources(ctx: Context) -> dict:
     """The three lethal-trifecta legs, each mapped to the SPECIFIC config entries that
     make it active (B-493) — every OR-disjunct `_trifecta_legs` (below) used to collapse
@@ -2895,6 +2923,23 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     `test_b493_trifecta_leg_sources.py`, which also checks every fixture home, so a
     future disjunct added to one function without a matching source in the other is
     caught as a leg going True with an empty `[]`, not silently.
+
+    WHAT A LEG IS (C-462, written down because the engine used to hold two answers). A
+    leg is a capability this config **declares** and does not **confine**:
+
+      * declared — a tool named in `tools.allow`/`alsoAllow`/`gateway.tools.allow` or in
+        an attested roster, ungated exec, a sensitive MCP server, a credential sitting in
+        the store. NOT a capability that exists only because OpenClaw's defaults are
+        permissive: an absent `tools.profile` grants every core tool, including `read`,
+        and treating that as a leg would make A1 fire CRITICAL on any config that merely
+        never mentioned tools. That population is reported by `check_trifecta`'s WARN
+        hedge instead — which is also how OpenClaw's own audit rates it
+        (`security.exposure.open_groups_with_runtime_or_fs` is `critical` only when
+        RUNTIME tools are unguarded, and `warn` when the exposure is filesystem-only).
+      * confined — for a file `read`, `tools.fs.workspaceOnly: true` or a fully sandboxed
+        session, the two guards that same vendor predicate uses. See
+        `_fs_reads_are_confined`. Nothing else in the sensitive set is governed by a
+        filesystem setting, so nothing else is filtered by it.
 
     A leg is frequently OVER-DETERMINED — several independent suppliers each sufficient
     alone (e.g. `web` in `tools.allow` AND an open channel both raise "untrusted
@@ -2934,8 +2979,13 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     # B-667: the generic hints above cannot see OpenClaw's own tool ids — see
     # SENSITIVE_TOOL_IDS. Exact match, alias-folded, over the config's grants and over an
     # attested roster (which until now could only ever clear a leg, never raise one).
-    sensitive.extend(_tool_id_sources(cfg, SENSITIVE_TOOL_IDS))
-    sensitive.extend(_attested_tool_id_sources(ctx, SENSITIVE_TOOL_IDS))
+    # C-462: a declared file-read tool is a leg only while it is UNCONFINED — see
+    # `_fs_reads_are_confined`. The ids that no filesystem setting governs are unaffected.
+    granting_ids = SENSITIVE_TOOL_IDS
+    if _fs_reads_are_confined(cfg):
+        granting_ids = SENSITIVE_TOOL_IDS - _FS_GOVERNED_TOOL_IDS
+    sensitive.extend(_tool_id_sources(cfg, granting_ids))
+    sensitive.extend(_attested_tool_id_sources(ctx, granting_ids))
     # getattr, not ctx.home directly: a few tests build Context via __new__ without
     # setting .home, relying on _trifecta_legs' original `or`-chain never reaching this
     # term once an earlier one is already True (test_b283_shallow_reads.py's

@@ -328,6 +328,42 @@ def _sandbox_confines(cfg: dict, agent_id: str, entry) -> bool:
     return mode == _SANDBOX_NON_MAIN and agent_id != _default_agent_id(cfg)
 
 
+def confined_scopes(cfg: dict):
+    """Per scope: is this scope's file READ confined? ``None`` when there is no config.
+
+    C-462 needs a different question from ``scopes_reaching_outside_workspace``. That one
+    asks whether the ``read`` tool is BOTH granted and unconfined, which is the right
+    question for "is this agent exposed by default". This one asks only about the
+    CONFINEMENT half, because its caller already has independent evidence that a read
+    capability was DECLARED (a tool named in the config, or an attested roster) and only
+    needs to know whether a guard neutralizes it. Asking the granted-question there would
+    silently drop a declared tool whose name OpenClaw's policy stack does not recognize —
+    ``fs_read``, for one, which two corpus fixtures grant and the runtime does not define.
+
+    Guards are OpenClaw's own, from the predicate behind
+    ``security.exposure.open_groups_with_runtime_or_fs``: ``tools.fs.workspaceOnly === true``
+    (per scope, nullish-coalesced onto the global field) or a session the sandbox fully
+    contains, where the OpenClaw home is not mounted at all.
+
+    Returns one entry per declared scope — the main agent's surface plus each
+    ``agents.list`` entry — so a caller can require ALL of them, which is the honest
+    reading: one unconfined scope leaves the capability exposed.
+    """
+    if not isinstance(cfg, dict) or not cfg:
+        return None
+    main = _default_agent_id(cfg)
+    entries = _agent_entries(cfg)
+    by_id = dict(entries)
+    scopes = [(main, by_id.get(main) or {})]
+    scopes += [(name, entry) for name, entry in entries if name != main]
+    out = []
+    for name, entry in scopes:
+        tools = entry.get("tools") if isinstance(entry, dict) else None
+        fs_scope = tools if _has_fs_flag(tools) else cfg.get("tools")
+        out.append(bool(_workspace_only_of(fs_scope)) or _sandbox_confines(cfg, name, entry))
+    return out
+
+
 def scopes_reaching_outside_workspace(cfg: dict) -> list:
     """Every declared scope whose file-read tool can reach files outside its workspace.
 

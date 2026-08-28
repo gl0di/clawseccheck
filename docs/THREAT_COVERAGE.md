@@ -57,7 +57,7 @@ third-party reputation database behind any verdict here.
 
 | Threat | Covered by | Notes |
 |---|---|---|
-| **Lethal Trifecta** (headline correlation) | A1 | Untrusted input × sensitive data × outbound actions active together — the tool's single CRITICAL trifecta check; keep at most 2 of 3 `[CHECK: A1]` |
+| **Lethal Trifecta** (headline correlation) | A1 | Untrusted input × sensitive data × outbound actions active together — the tool's single CRITICAL trifecta check; keep at most 2 of 3. A leg is a capability the config **declares** and does not confine: a file `read` counts while `tools.fs.workspaceOnly` is not true and the agent is not fully sandboxed, which are the same two guards OpenClaw's own audit uses. A capability present only through OpenClaw's permissive default is reported as undetermined (WARN), not as a leg `[CHECK: A1]` |
 | Plaintext secrets in config / bootstrap | B1 | Reports key paths, not values `[CHECK: B1]` |
 | System-prompt / secret leak in tool output | B9 | `[CHECK: B9]` |
 | Audit log & sensitive redaction | B10 | `[CHECK: B10]` |
