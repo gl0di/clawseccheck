@@ -1144,8 +1144,10 @@ and argparse's own. So a pipeline can branch three ways — `0` clean, `1` somet
 on, `2` fix the command line — where before a mistyped target was indistinguishable from a
 risky one.
 
-- `--vet`, `--vet-skill`, `--vet-plugin` return it when the **path** you named is not
-  there, is a symlink to something that is not there, or cannot be read.
+- `--vet`, `--vet-skill`, `--vet-plugin`, `--advise` return it when the **path** you named
+  is not there, is a symlink to something that is not there, or cannot be read. `--advise`
+  is the surface whose whole job is the install decision, so rendering one about a subject
+  that was never examined — which it used to do, at `0` — was the worst instance of this.
 - `--vet-mcp` returns it when the **name** you gave is not a configured MCP server and is
   not a readable spec file either. This one used to exit `0` — the code a clean vet
   returns — so a typo was reported as "checked it, nothing to act on".

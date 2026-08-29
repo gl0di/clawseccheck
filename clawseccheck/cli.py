@@ -1731,6 +1731,72 @@ def _verdicts_with_note(raw_path: str, flag: str) -> str:
     return payload
 
 
+def _unassessable_target(typed) -> "str | None":
+    """Why a user-named path cannot be assessed AT ALL, or None if it can be reached.
+
+    B-680: a target that is not there is a USAGE error, not a verdict. `--vet
+    <workspace>/skills/browser-automation` -- a name the audit's own inventory had just
+    listed as clean, because those skills live inside a plugin and that standalone path
+    does not exist -- printed "RISK DOSSIER — skill 'browser-automation'  CAUTION" over
+    five UNKNOWN axes and returned 1, the same code a genuinely suspicious skill returns.
+    Nothing downstream could tell a mistyped path from a finding, and CAUTION — a word
+    about software — was spent on a path with no software at all.
+
+    The test is the raised errno, not `.exists()`: `.exists()` collapses "not there", "a
+    link to nothing" and "I am not allowed to look" into one False, and answering "there
+    is nothing there" to the last two would be a second lying verdict. Each gets its own
+    sentence. Any other OSError returns None and leaves today's dossier, which prints the
+    reason in full.
+
+    The permission arm is not merely a wrong verdict: `resolve_skill_target` calls
+    `Path.is_file()`, which does NOT swallow EACCES, so an unreadable parent reached the
+    top-level handler and printed "unexpected internal error (PermissionError) ... open an
+    issue" — the tool asking to be bug-reported for the user's own directory mode.
+    """
+    target_path = Path(str(typed)).expanduser()
+    try:
+        os.stat(target_path)  # follows symlinks: "is there something here to read?"
+    except (FileNotFoundError, NotADirectoryError):
+        try:
+            os.lstat(target_path)
+        except OSError:
+            return "no such file or directory"
+        # lstat saw it, stat did not: a symlink whose target is gone. Saying "no such
+        # file" here would be wrong — the link IS there.
+        return "the symlink there points at a path that does not exist"
+    except PermissionError:
+        return "permission denied"
+    except OSError:
+        return None  # e.g. a symlink loop: still assessable-ish, leave today's dossier
+    return None
+
+
+def _report_unassessable(flag: str, typed, why: str) -> int:
+    """Print why nothing could be assessed and return the usage-error code.
+
+    rc=2, not a fourth code: this is the family `_empty_mode_target` below already answers
+    2 for (`--vet ""`), and it is argparse's own usage-error code. The reason --monitor
+    refused 2 for drift was the mirror image of this rule — a finding must not wear the
+    usage-error code — so it argues for 2 here, not against it. All three reasons share
+    it; a caller that must tell a typo from a chmod reads the message, exactly as it would
+    for argparse's own several rc=2 messages.
+
+    stdout stays empty on purpose. It is the channel a pipeline parses, and a dossier
+    there says a subject was examined.
+    """
+    # The hint is for the shape that actually sent this bug in — a skill name the audit
+    # listed as clean, typed as a path it never had. It would be noise on a link to
+    # nothing or on a directory mode, so it is tied to the reason.
+    tail = (
+        " A skill bundled inside a plugin has no standalone path — vet the plugin instead."
+        if why == "no such file or directory"
+        else ""
+    )
+    print(f"{flag}: cannot assess {typed} — {why}. No verdict was produced.{tail}",
+          file=sys.stderr)
+    return 2
+
+
 def _empty_mode_target(args):
     """The first mode flag given an empty value, or None. Never mutates args."""
     for flag, attr in _VALUE_REQUIRED_MODES:
@@ -3227,67 +3293,20 @@ def _main(argv=None) -> int:
         _vet_route = ("plugin", args.vet_plugin)
 
 
-    # B-680: a target that is not there at all is a USAGE error, not a verdict.
+    # B-680: an unassessable target is a usage error, not a verdict. Shared with
+    # --advise below through `_unassessable_target` / `_report_unassessable`, which carry
+    # the reasoning; a second copy of this decision is exactly how the two would drift.
     #
-    # `--vet <workspace>/skills/browser-automation` -- a name the audit's own inventory
-    # had just listed as clean, because those skills live inside a plugin and that
-    # standalone path does not exist -- printed "RISK DOSSIER - skill
-    # 'browser-automation'  CAUTION" over five UNKNOWN axes and returned 1. That is the
-    # same code a genuinely suspicious skill returns, so nothing downstream could tell a
-    # mistyped path from a finding, and CAUTION -- a word about software -- was spent on
-    # a path with no software at all.
-    #
-    # rc=2, not a fourth code: this is the family `_empty_mode_target` above already
-    # answers 2 for (`--vet ""`), and it is argparse's own usage-error code. The reason
-    # --monitor refused 2 for drift was the mirror image of this rule -- a finding must
-    # not wear the usage-error code -- so it argues for 2 here, not against it.
-    #
-    # The test is the raised errno, not `.exists()`: `.exists()` collapses "not there",
-    # "a link to nothing" and "I am not allowed to look" into one False, and answering
-    # "there is nothing there" to the last two would be a second lying verdict. Each gets
-    # its own sentence; any other OSError keeps today's dossier, which prints the reason
-    # in full. All three share rc=2 -- a caller that must tell a typo from a chmod reads
-    # the message, exactly as it would for argparse's own several rc=2 messages.
+    # A configured MCP server NAME is not a path, and `os.stat` on it raises
+    # FileNotFoundError like any typo would — so this is gated on the route the target
+    # actually took. Move it above `detect_vet_type` and every named MCP server starts
+    # failing as "no such file or directory".
     if _vet_route and _vet_route[0] in ("skill", "plugin"):
-        _typed, _why = _vet_route[1], None
-        _target_path = Path(str(_typed)).expanduser()
-        try:
-            os.stat(_target_path)  # follows symlinks: "is there something here to read?"
-        except (FileNotFoundError, NotADirectoryError):
-            try:
-                os.lstat(_target_path)
-            except OSError:
-                _why = "no such file or directory"
-            else:
-                # lstat saw it, stat did not: a symlink whose target is gone. Saying
-                # "no such file" here would be wrong — the link IS there.
-                _why = "the symlink there points at a path that does not exist"
-        except PermissionError:
-            # Not merely a wrong verdict before B-680: resolve_skill_target calls
-            # Path.is_file(), which does NOT swallow EACCES, so an unreadable parent
-            # reached the top-level handler and printed "unexpected internal error
-            # (PermissionError) ... open an issue" -- the tool asking to be bug-reported
-            # for the user's own directory mode.
-            _why = "permission denied"
-        except OSError:
-            pass  # e.g. a symlink loop: still assessable-ish, leave today's dossier
+        _why = _unassessable_target(_vet_route[1])
         if _why is not None:
-            _flag = "--vet" if _mode == "vet" else "--vet-" + _vet_route[0]
-            # The hint is for the shape that actually sent this bug in -- a skill name
-            # the audit listed as clean, typed as a path it never had. It would be noise
-            # on a link to nothing or on a directory mode, so it is tied to the reason.
-            _tail = (
-                " A skill bundled inside a plugin has no standalone path \u2014 "
-                "vet the plugin instead."
-                if _vet_route[0] == "skill" and _why == "no such file or directory"
-                else ""
-            )
-            print(
-                f"{_flag}: cannot assess {_typed} \u2014 {_why}. "
-                f"No verdict was produced.{_tail}",
-                file=sys.stderr,
-            )
-            return 2
+            return _report_unassessable(
+                "--vet" if _mode == "vet" else "--vet-" + _vet_route[0],
+                _vet_route[1], _why)
 
     if args.emit_manifest and not (_vet_route and _vet_route[0] == "skill"):
         print(
@@ -3410,6 +3429,21 @@ def _main(argv=None) -> int:
         advise_target = args.advise
         detected = detect_vet_type(advise_target, home=args.home)
         print(f"detected type: {detected}", file=sys.stderr)
+        # B-685: the fourth member of B-680's family, and it failed the worse way. An
+        # absent path printed "⚠️  CAUTION — skill 'no-such-skill'", told the reader to
+        # "review manually before trusting this source", and returned 0 — the code a clean
+        # assessment returns — about a subject that was never examined. --advise is the
+        # surface whose entire job is the install decision, which is what makes rendering
+        # one about nothing worse here than in --vet.
+        #
+        # Same guard, not a second copy of it (see _unassessable_target). Skipped when the
+        # target resolved to a configured MCP server: that is a name, not a path, so
+        # "no such file or directory" would be true of it and useless. Routing an MCP name
+        # to the skill engine is pre-existing and left alone here.
+        if detected != "mcp":
+            _why = _unassessable_target(advise_target)
+            if _why is not None:
+                return _report_unassessable("--advise", advise_target, _why)
         advise_kind = detected if detected in ("plugin",) else "skill"
         f = vet_skill(advise_target) if advise_kind == "skill" else vet_plugin(advise_target)
         profile = build_profile(f, advise_target, advise_kind)

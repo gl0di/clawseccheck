@@ -48,7 +48,8 @@ kept here so the always-loaded playbook stays lean.
   `--vet`'s exit code is a separate contract (1 on SUSPICIOUS *or* DANGEROUS; 2 when the
   target cannot be assessed at all — a path that is absent, a link to nothing, or
   unreadable, or a `--vet-mcp` name that is neither a configured server nor a readable
-  spec file — which is a usage error, not a verdict, and prints no dossier).
+  spec file — which is a usage error, not a verdict, and prints no dossier). `--advise`
+  shares that contract.
 - `--fast` — only with `--full`: skip the plugin sweep, behavioral replay, and skill sweep,
   keeping the audit + self-test + vet-mcp + the (free) adjudication packet. For CI runs where
   the deep phases are too slow; this is the pre-F-150 `--full` shape.
