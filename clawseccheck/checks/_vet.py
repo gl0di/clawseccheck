@@ -5414,13 +5414,35 @@ def _run_content_ring(
                 # regression: it is a narrower version of the SAME landing-spot class
                 # this fix closes, reachable only by a signal arriving during one
                 # specific ~1-instruction transition rather than across two whole
-                # unguarded lines, and it was only reproduced via `sys.settrace`-timed
-                # signal injection forcing the landing spot — not observed under real
-                # load, unlike the bug this fix targets. Eliminating it would mean never
-                # using `continue`/`break` inside a try guarding a signal-based
+                # unguarded lines.
+                #
+                # B-688: it HAS now been seen for real, and this paragraph used to say it
+                # had not. Until 2026-08-29 it had only ever been produced by
+                # `sys.settrace`-timed signal injection forcing the landing spot, and it
+                # was described here as "not observed under real load". On that date a
+                # full-suite run (17,710 tests, ~39 minutes) failed once with
+                # ScanBudgetExceeded escaping this function, and the traceback named the
+                # `continue` below — this exact jump. Attribution was checked before the
+                # claim was changed: the failing test touches nothing the same day's
+                # commits altered, it passed 8/8 in isolation (3 clean, 5 under eight CPU
+                # burners), the immediate re-run of the whole suite was green, and the
+                # competing hypothesis (a DeadlineFrame leaked onto scanbudget._STACK by
+                # an earlier test) is covered by _Deadline.__del__, whose own docstring
+                # names that window.
+                #
+                # So: real, and rare enough that a synthetic 8-way CPU load over five runs
+                # did not reproduce it while one long suite did. The residual STAYS
+                # accepted and the analysis above is unchanged — eliminating it would mean
+                # never using `continue`/`break` inside a try guarding a signal-based
                 # exception anywhere a loop needs to skip an iteration, which is not
                 # achievable by restructuring THIS loop alone (the loop-back jump has to
-                # land somewhere). Documented here rather than chased further.
+                # land somewhere). What changed is only the frequency claim, because the
+                # next person to hit this needs to recognise it rather than conclude their
+                # own change broke something. Do NOT widen the `except` below to swallow an
+                # exception this frame does not own: `owned_by` exists so an outer
+                # deadline's expiry is not stolen by an inner frame, and scanbudget's own
+                # note records that raising an unattributed exception there would turn a
+                # healthy check into a spurious UNKNOWN.
                 name = getattr(check, "__name__", "ring check")
                 if cpu_exceeded(deadline):
                     skipped.append(name)
