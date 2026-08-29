@@ -123,20 +123,33 @@ def _diff_credentials(pair, alerts, note) -> None:
             f"{len(added_plain)} new file(s) appeared in your credential store with no "
             f"plaintext credential in them: {_credential_names(added_plain)}."))
 
+    # A CHANGED file is recorded, never paged, and that is a C-135 retraction rather than a
+    # preference. The first version raised MEDIUM on "a stored credential was replaced",
+    # reasoning that a token changing without the user rotating it is what a takeover looks
+    # like. Then the claim underneath it was grounded against the installed dist, which is
+    # where it died: OpenClaw refreshes OAuth grants and writes them back —
+    # `refreshOAuth` (25 sites), `writeOAuth` (14), `refreshAccessToken` (46), `expiresAt`
+    # (976). So `credentials/oauth.json` moves on a schedule on any machine using OAuth,
+    # and the alert would have fired on every refresh: an alarm that fires routinely is the
+    # exact failure B-676 was opened to fix, one dimension over.
+    #
+    # A digest cannot tell a refresh from a swap. What COULD is a digest over the
+    # identity-bearing subset of the grant — the account and scope, which a refresh
+    # preserves and a swap does not — and that needs the grant's real field paths grounded
+    # against the dist rather than guessed (section 2.4). Worth its own task; not worth
+    # guessing here.
+    #
+    # So the half that is sound ships: an ADDED credential is the planted-credential case,
+    # it was measured as invisible (a second credential file with the leg already up
+    # produced zero alerts anywhere), and nothing in OpenClaw creates one on a timer.
     changed = [n for n in sorted(set(prev_files) & set(curr_files))
                if prev_files[n].get("digest") != curr_files[n].get("digest")]
-    now_secret = [n for n in changed if curr_files[n].get("plaintext")]
-    still_plain = [n for n in changed if not curr_files[n].get("plaintext")]
-    if now_secret:
-        alerts.append((
-            "MEDIUM",
-            f"A stored credential was replaced: {_credential_names(now_secret)}. A token that changed "
-            "without you rotating it is what a session takeover looks like from here."))
-    if still_plain:
+    if changed:
         alerts.append((
             "INFO",
-            f"{len(still_plain)} file(s) in your credential store changed, with no "
-            f"plaintext credential in them: {_credential_names(still_plain)}."))
+            f"{len(changed)} file(s) in your credential store changed: "
+            f"{_credential_names(changed)}. Routine for an OAuth grant, which OpenClaw "
+            "refreshes and rewrites on its own; recorded here so the timeline has it."))
 
     if removed and not incomplete:
         alerts.append((

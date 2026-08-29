@@ -65,11 +65,22 @@ def test_a_new_plaintext_credential_is_medium_and_names_the_file():
     assert "credentials/oauth.json" in alerts[0][1]
 
 
-def test_a_replaced_credential_is_medium():
-    """The token-swap case, which nothing in the tree reported before."""
+def test_a_changed_credential_is_recorded_but_never_pages():
+    """A C-135 RETRACTION, pinned so it is not undone by someone reading the security story
+    without the measurement.
+
+    The first version raised MEDIUM here — "a token that changed without you rotating it is
+    what a takeover looks like". Grounding that claim against the installed dist killed it:
+    OpenClaw refreshes OAuth grants and writes them back (`refreshOAuth`, `writeOAuth`,
+    `refreshAccessToken`, `expiresAt` all present), so `oauth.json` moves on a schedule on
+    any machine using OAuth and the alert would have fired on every refresh. An alarm that
+    fires routinely is exactly what B-676 was opened to fix.
+
+    Telling a refresh from a swap needs a digest over the identity-bearing subset of the
+    grant, whose field paths have to be grounded against the dist rather than guessed."""
     alerts, _ = _run(_rec({"oauth.json": _f("aaaa")}), _rec({"oauth.json": _f("bbbb")}))
-    assert len(alerts) == 1 and alerts[0][0] == "MEDIUM"
-    assert "replaced" in alerts[0][1]
+    assert len(alerts) == 1
+    assert alerts[0][0] == "INFO", "a scheduled OAuth refresh must not page anyone"
 
 
 def test_a_new_file_with_no_credential_in_it_is_only_info():
@@ -173,8 +184,11 @@ def _monitor(home, store):
     return json.loads(res.stdout)
 
 
-def test_the_two_previously_invisible_transitions_now_surface(home, tmp_path):
-    """The measurement this task exists for, repeated through the real CLI."""
+def test_the_previously_invisible_transitions_now_surface(home, tmp_path):
+    """The measurement this task exists for, repeated through the real CLI.
+
+    The ADDED case pages; the CHANGED case is recorded at INFO — see the C-135 retraction
+    pinned above."""
     store = tmp_path / "store"
     _monitor(home, store)
     _monitor(home, store)
@@ -191,7 +205,10 @@ def test_the_two_previously_invisible_transitions_now_surface(home, tmp_path):
         json.dumps({"access_token": _token("Z")}), encoding="utf-8")
     os.chmod(home / "credentials" / "oauth.json", 0o600)
     replaced = _monitor(home, store)["alerts"]
-    assert [a for a in replaced if "replaced" in a["message"]], replaced
+    changed = [a for a in replaced if "changed" in a["message"]]
+    assert changed, replaced
+    assert all(a["severity"] == "INFO" for a in changed), (
+        "an OAuth refresh rewrites this file on a schedule; it must be recorded, not paged")
 
 
 def test_no_credential_value_ever_reaches_the_stored_state_or_the_journal(home, tmp_path):
