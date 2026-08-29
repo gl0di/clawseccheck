@@ -6,6 +6,8 @@ layer-1 modules (catalog/collector/...) and stdlib — never on a topic module.
 Moved verbatim from the former single-file checks.py; no logic changes.
 """
 from __future__ import annotations
+
+import hashlib
 import ipaddress
 import os
 import re
@@ -2844,7 +2846,13 @@ def _credential_store_state(home) -> dict:
     ``secret_files`` then means "not found in what we read", NOT "not there", and
     ``check_trifecta`` routes that to its hedge rather than to a clean leg-is-off PASS.
     """
-    out = {"present": False, "secret_files": [], "incomplete": False, "reason": ""}
+    # B-677 added `digests` additively: a per-file content hash so the MONITOR can see a
+    # credential replaced, which no status-based check can. Measured before building it —
+    # with the sensitive-data leg already up, a second credential file and a rotated token
+    # both produced ZERO alerts. Hashes only, never content (section 8), and every consumer
+    # of the other keys is unaffected.
+    out = {"present": False, "secret_files": [], "incomplete": False, "reason": "",
+           "digests": {}}
     if home is None:
         return out
     store = Path(home) / "credentials"
@@ -2871,11 +2879,14 @@ def _credential_store_state(home) -> dict:
             out["incomplete"] = True
             out["reason"] = "a file in it could not be read"
             continue
+        try:
+            name = str(path.relative_to(store))
+        except ValueError:
+            name = path.name
+        out["digests"][name] = hashlib.sha256(
+            text.encode("utf-8", "replace")).hexdigest()[:16]
         if _c015_has_secret(text):
-            try:
-                out["secret_files"].append(str(path.relative_to(store)))
-            except ValueError:
-                out["secret_files"].append(path.name)
+            out["secret_files"].append(name)
     if capped:
         out["incomplete"] = True
         out["reason"] = f"it holds more than {_CRED_STORE_MAX_FILES} files"

@@ -38,6 +38,7 @@ from .brand import WORDMARK
 # internal resolver does not have to widen the curated public API in __init__.py.
 from .checks import resolve_skill_target
 from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
+from .checks import _credential_store_state
 from .invocation import command_prefix
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
@@ -4362,9 +4363,17 @@ def _main(argv=None) -> int:
         # B-269: snapshot() needs the previous state so that a run which could not read
         # openclaw.json preserves the last known-good config baseline instead of writing
         # the collapsed (empty) view over it — see monitor._degrade_snapshot.
+        # B-677: OpenClaw's own credential store, read HERE in the shell for the same
+        # reason `host_persist` is — the scan is the caller's to run, and `monitor.py`
+        # stays out of the collection business. Digests and names only, never a value.
+        # Contained: a store that cannot be walked must not take a monitor run down.
+        try:
+            _credentials_snap = _credential_store_state(ctx.home)
+        except Exception:  # noqa: BLE001 - never let the store scan end the run
+            _credentials_snap = None
         snap = snapshot(ctx, findings, score, prev=prev, behavioral=_behavioral_snap,
                         install=_install_snap, provenance=_provenance_snap,
-                        host_persist=_host_persist_snap)
+                        host_persist=_host_persist_snap, credentials=_credentials_snap)
         # C-418: `notes` records every comparison this run DECLINED to make. They are
         # deliberately NOT passed to record_events below — a note is not an event, and a
         # tamper-evident timeline of what changed must not fill with entries about what

@@ -40,6 +40,7 @@ _DIMENSION_LABELS = {
     "config_journal_head": "OpenClaw's own record of settings changes",
     "config_resolved_sha256": "the settings file including any included fragments",
     "config_written_by": "who last wrote your settings",
+    "credential_store": "the credentials your agent has stored",
     "gateway_bind": "the gateway address",
     "host": "the security tools on this machine",
     "host_persist": "the machine's own startup and scheduling files",

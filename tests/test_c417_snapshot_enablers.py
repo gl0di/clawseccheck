@@ -482,6 +482,10 @@ def test_the_unconditional_keys_are_written_on_every_run():
 # escape would let a genuinely missing key hide behind it.
 _CONDITIONAL = {
     "host": "only on a supported host",
+    # B-677: the credential store. Scanned by the shell and handed in, like
+    # `host_persist` -- absent from every direct `snapshot()` call here, and that
+    # absence is what tells a baseline predating the dimension from an empty store.
+    "credential_store": "absent when the caller did not scan the credential store",
     # B-676: the record of which comparisons this run could NOT make. Written by the
     # shell (cli.py) after the diff, and only on a run with a usable baseline — a run
     # that compared nothing must not store an empty list, which would read as "the

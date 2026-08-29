@@ -68,7 +68,12 @@ def test_no_store_at_all_is_not_present(tmp_path):
     home = tmp_path / "bare"
     home.mkdir()
     state = _credential_store_state(home)
-    assert state == {"present": False, "secret_files": [], "incomplete": False, "reason": ""}
+    # `digests` was added by B-677 so the MONITOR can see a credential REPLACED, which no
+    # status-based check can — measured: with the sensitive-data leg already up, a second
+    # credential file and a rotated token both produced zero alerts anywhere. Additive: no
+    # existing key or value moved, and this exact-dict pin is what asked the question.
+    assert state == {"present": False, "secret_files": [], "incomplete": False,
+                     "reason": "", "digests": {}}
     assert _sensitive(home) == []
 
 
