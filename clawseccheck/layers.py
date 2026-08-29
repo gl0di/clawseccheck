@@ -16,6 +16,32 @@ logs_trajectories       trajectory/audit-trail/behavioral log analysis
 self_report             the audited agent's own attestation
 live_behaviour          active self-test / red-team / canary probes against a live agent
 ======================  ============================================================
+
+## This ledger and the monitor's ``fully_compared`` are DIFFERENT questions (C-466)
+
+Two things in this tree answer something that sounds the same, and they are not the same.
+Written down here rather than left to be rediscovered, because the divergence is the kind
+that stays correct until someone assumes one implies the other.
+
+* **This ledger** answers *"is the subject understood well enough to put a LETTER on it?"*
+  Its subject is the agent setup, its unit is a source of evidence, and it gates the grade.
+* **``fully_compared``** (``cli.py``, built from ``diff_with_notes``' notes) answers
+  *"did this monitor run make every comparison this build knows how to make?"* Its subject
+  is the RUN, its unit is a comparison against the previous snapshot, and it gates nothing.
+
+The monitor deliberately does not import this module. It reads the ledger's *output* — the
+``score``/``grade``/``graded`` keys, through its ``_score`` dimension — and computes its own
+completeness separately, because "which sources of evidence ran" is not "which comparisons
+were possible against a stored baseline".
+
+The trap that makes this worth stating: **``fully_compared`` is false on every ``--monitor``
+run of a healthy machine.** Measured over five consecutive runs on two populations — a bare
+monitor run earns no grade, so the score comparison always emits a note, and several other
+standing limitations are permanent (the crontab spool needs elevated rights, most
+host-monitor classes cannot be confirmed, the trajectory window rotates). A reader who takes
+it for this ledger's completeness will read a healthy machine as a broken one. B-676 exists
+because of that, and the actionable monitor signal is the ``not_compared`` DELTA — a
+comparison that was possible last run and is not now — never the flag's absolute value.
 """
 from __future__ import annotations
 
