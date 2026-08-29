@@ -780,6 +780,12 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
 
 # ── phase 2: the judged bundle ───────────────────────────────────────────────
 
+#: B-687: the type each bucket must carry, mirroring the isinstance gates in
+#: :func:`split_judged_bundle`. Kept beside them so a fifth bucket cannot be added to one
+#: without the other noticing.
+_BUCKET_TYPES = {"attestation": dict, "judged": dict, "vetJudged": list, "liveTest": dict}
+
+
 def split_judged_bundle(raw: str) -> dict:
     """Split a ``--judged-bundle`` payload into its four independent buckets.
 
@@ -803,13 +809,26 @@ def split_judged_bundle(raw: str) -> dict:
     empty: dict = {"attestation": None, "judged": None, "vetJudged": [], "liveTest": None}
     if not isinstance(raw, str):
         return empty
+    # B-687: three of the four early returns below drop a payload the caller DID send, and
+    # said nothing. B-597 put a disclosure at the end of this function; everything that
+    # reaches it is reported, and these paths return first. The consequence is the one
+    # `read_judged_bundle_with_problem` already records for the path it could not open --
+    # `liveTest` feeds `scoring.compute`'s cap, so a lost bundle is a silently HIGHER score.
+    #
+    # `_note_bundle_dropped` stays silent on an empty or whitespace-only payload, which is
+    # the "nothing was submitted" case `adjudication._payload_carries_content` protects --
+    # and which `read_judged_bundle_with_problem` also produces for an unreadable path, so
+    # noting it here would double-report what B-562 already says with the path named.
     if len(raw.encode("utf-8", "surrogatepass")) > MAX_BUNDLE_BYTES:
+        _note_bundle_dropped(raw, f"it is larger than the {MAX_BUNDLE_BYTES}-byte cap")
         return empty
     try:
         data = json.loads(raw)
     except ValueError:
+        _note_bundle_dropped(raw, "it is not valid JSON")
         return empty
     if not isinstance(data, dict):
+        _note_bundle_dropped(raw, "its top level is not a JSON object")
         return empty
     out = dict(empty)
     if isinstance(data.get("attestation"), dict):
@@ -823,6 +842,28 @@ def split_judged_bundle(raw: str) -> dict:
         out["liveTest"] = data["liveTest"]
     _note_misplaced_bundle_content(data, out)
     return out
+
+
+def _note_bundle_dropped(raw: str, reason: str) -> None:
+    """B-687: say that a bundle the caller sent was discarded whole, and why.
+
+    Silent when the payload is empty or whitespace-only. That is not a dropped bundle but
+    the "nothing was submitted" case, which ``adjudication._payload_carries_content``
+    deliberately keeps quiet -- and it is also what ``read_judged_bundle_with_problem``
+    hands us when the FILE could not be opened, a case B-562 already reports with the path
+    named. Noting it here would turn one failure into two lines.
+
+    *reason* is composed by this module from fixed text and this contract's own numbers;
+    nothing from the payload reaches it. See ``_note_misplaced_bundle_content`` for why
+    that rule exists -- a bundle key can carry a secret-shaped value straight into a
+    diagnostic.
+    """
+    from .adjudication import _note  # noqa: PLC0415 -- see the module note on layering
+
+    if not raw or not raw.strip():
+        return
+    _note(f"--judged-bundle was read but nothing was applied: {reason}. "
+          "The run continues as if no bundle had been submitted.")
 
 
 def _note_misplaced_bundle_content(data: dict, out: dict) -> None:
@@ -877,6 +918,25 @@ def _note_misplaced_bundle_content(data: dict, out: dict) -> None:
                 " applied."
             )
         return
+    # B-687: a recognised key carrying the WRONG TYPE was dropped as silently as an absent
+    # one -- the four isinstance gates above have no else. That is not a hypothetical shape:
+    # this whole function exists because the tool's own error message taught a host agent to
+    # move `verdicts` to the top level, and a mistyped `judged` is the same class of mistake
+    # by the same kind of caller. Checked BEFORE the early return below, because a bucket
+    # that was thrown away is thrown away whether or not a sibling bucket survived.
+    #
+    # The key names are this contract's own fixed strings and the type words are a fixed
+    # vocabulary, so nothing from the payload is echoed.
+    _mistyped = [k for k, t in _BUCKET_TYPES.items()
+                 if k in data and not isinstance(data[k], t)]
+    if _mistyped:
+        _keys = ", ".join(f'"{k}"' for k in _mistyped)
+        _one = len(_mistyped) == 1
+        _note(
+            f"--judged-bundle: {'bucket' if _one else 'buckets'} {_keys} carried the wrong"
+            f" type and {'was' if _one else 'were'} dropped. Expected an object for"
+            ' "attestation", "judged" and "liveTest", and an array for "vetJudged".'
+        )
     # A readable object none of whose keys we recognise is the other way to lose a whole
     # file in silence — B-562 covers the path that could not be READ, not the one that
     # parsed into nothing.

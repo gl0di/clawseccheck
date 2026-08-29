@@ -1330,6 +1330,16 @@ python3 audit.py --log audit.log            # also write log to a local file
     only a run submitted with a `seed` is recorded into history/trend (see
     `docs/OUTPUT_SCHEMA.md` §12 for the exact shape). `--full`'s own printed section is
     banner-titled `ADJUDICATION`; in `--json` the same data is the `secondOpinion` array.
+
+    A bundle is advisory, so anything malformed degrades to inert rather than stopping the
+    run — but **never silently**. If the file cannot be parsed, is larger than the size cap,
+    has a top level that is not a JSON object, carries a bucket of the wrong type, or holds
+    no recognised bucket at all, a `note:` on stderr says so and the run continues as if no
+    bundle had been submitted. That matters because `liveTest` feeds a grade cap: a bundle
+    quietly dropped would leave the run scoring higher than it should. An empty payload is
+    the one case that stays quiet, because it genuinely is "nothing was submitted"; an
+    unreadable *path* is reported separately, with the path named. Notes carry counts and
+    this contract's own key names only — never anything read out of your file.
     (`--dashboard --full`, below, prints this same data under the literal heading
     `"Second opinion (advisory)"` — the plain-language name a chat card uses.)
   - The whole pipeline shares one wall-clock budget (`DEFAULT_FULL_BUDGET_S`, currently
