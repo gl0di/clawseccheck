@@ -319,6 +319,7 @@ check_wildcard_group_ingress
 correlation_indicators
 coverage_gap_finding
 detect_vet_type
+detect_vet_type_with_reason
 dig
 normalize_for_scan
 parse_bind_host

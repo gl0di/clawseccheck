@@ -1151,6 +1151,10 @@ risky one.
 - `--vet-mcp` returns it when the **name** you gave is not a configured MCP server and is
   not a readable spec file either. This one used to exit `0` — the code a clean vet
   returns — so a typo was reported as "checked it, nothing to act on".
+- `--vet` and `--advise` also return it when your `openclaw.json` itself could not be read
+  and the target is not a path. The message says so rather than reporting only the missing
+  path: whether the name is a configured MCP server was never established, and "no such
+  file" alone would state one fact and imply another.
 
 A target that **exists** but yields nothing analysable is a different case and keeps its
 dossier at its usual code: there really is something there, and "I looked and could not

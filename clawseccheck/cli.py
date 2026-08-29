@@ -30,13 +30,16 @@ from . import (
     render_canary, render_card, render_dashboard, render_dashboard_findings, render_events,
     render_json, render_monitor,
     render_report, render_svg, render_vet_json, save_state, snapshot,
-    detect_vet_type, vet_mcp, vet_plugin, vet_skill, vet_source,
+    vet_mcp, vet_plugin, vet_skill, vet_source,
 )
 from . import __released__, __version__
 from .brand import WORDMARK
 # B-460: same rationale as the .monitor import below — taken from the submodule so this
 # internal resolver does not have to widen the curated public API in __init__.py.
-from .checks import resolve_skill_target
+# B-682 adds `detect_vet_type_with_reason` on the same terms: it is the pair-function that
+# carries WHY a classification may be undetermined, and `detect_vet_type` — the curated
+# public name — stays exactly as it was, wrapping it.
+from .checks import detect_vet_type_with_reason, resolve_skill_target
 from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
 from .checks import _credential_store_state
 from .invocation import command_prefix
@@ -1822,7 +1825,7 @@ def _unassessable_target(typed) -> "str | None":
     return None
 
 
-def _report_unassessable(flag: str, typed, why: str) -> int:
+def _report_unassessable(flag: str, typed, why: str, undetermined: "str | None" = None) -> int:
     """Print why nothing could be assessed and return the usage-error code.
 
     rc=2, not a fourth code: this is the family `_empty_mode_target` below already answers
@@ -1835,9 +1838,18 @@ def _report_unassessable(flag: str, typed, why: str) -> int:
     stdout stays empty on purpose. It is the channel a pipeline parses, and a dossier
     there says a subject was examined.
     """
+    # B-682: when the classifier could not read the config, "no such file or directory"
+    # is true and incomplete — the "is this a configured MCP server?" question was never
+    # asked, so answering only about the path would state one fact and imply another that
+    # was never established. Redacted, because we composed this path ourselves and it
+    # carries the operator's home (B-581); the typed target is echoed as given, since that
+    # is what the user needs to see to spot their own typo.
+    if undetermined:
+        why = f"{why}, and {_redact_home_paths(undetermined)}"
     # The hint is for the shape that actually sent this bug in — a skill name the audit
     # listed as clean, typed as a path it never had. It would be noise on a link to
-    # nothing or on a directory mode, so it is tied to the reason.
+    # nothing, on a directory mode, or where an unread config is the better explanation,
+    # so it is tied to the reason.
     tail = (
         " A skill bundled inside a plugin has no standalone path — vet the plugin instead."
         if why == "no such file or directory"
@@ -3345,8 +3357,10 @@ def _main(argv=None) -> int:
     # required value instead of only this family.
 
     _vet_route = None  # (kind, target) with kind in {"skill", "plugin", "mcp"}
+    _detect_undetermined = None  # B-682: why the classification is less than it looks
     if _mode == "vet":
-        detected = detect_vet_type(args.vet, home=args.home)
+        detected, _detect_undetermined = detect_vet_type_with_reason(
+            args.vet, home=args.home)
         print(f"detected type: {detected}", file=sys.stderr)
         # 'unknown' routes to the skill engine, which answers with an honest UNKNOWN —
         # exactly today's --vet behavior for a non-skill target (never a guessed PASS).
@@ -3370,7 +3384,7 @@ def _main(argv=None) -> int:
         if _why is not None:
             return _report_unassessable(
                 "--vet" if _mode == "vet" else "--vet-" + _vet_route[0],
-                _vet_route[1], _why)
+                _vet_route[1], _why, _detect_undetermined)
 
     if args.emit_manifest and not (_vet_route and _vet_route[0] == "skill"):
         print(
@@ -3491,7 +3505,8 @@ def _main(argv=None) -> int:
     if _mode == "advise":
         # F-067: same vet engines/profile as --vet, reframed as an install decision.
         advise_target = args.advise
-        detected = detect_vet_type(advise_target, home=args.home)
+        detected, _advise_undetermined = detect_vet_type_with_reason(
+            advise_target, home=args.home)
         print(f"detected type: {detected}", file=sys.stderr)
         # B-685: the fourth member of B-680's family, and it failed the worse way. An
         # absent path printed "⚠️  CAUTION — skill 'no-such-skill'", told the reader to
@@ -3507,7 +3522,8 @@ def _main(argv=None) -> int:
         if detected != "mcp":
             _why = _unassessable_target(advise_target)
             if _why is not None:
-                return _report_unassessable("--advise", advise_target, _why)
+                return _report_unassessable("--advise", advise_target, _why,
+                                            _advise_undetermined)
         advise_kind = detected if detected in ("plugin",) else "skill"
         f = vet_skill(advise_target) if advise_kind == "skill" else vet_plugin(advise_target)
         profile = build_profile(f, advise_target, advise_kind)

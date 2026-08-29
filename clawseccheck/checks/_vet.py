@@ -6103,6 +6103,39 @@ def detect_vet_type(target: str | Path, home: str | Path = "~/.openclaw") -> str
     config at *home*; then anything skill-shaped (today's --vet semantics). 'unknown'
     means nothing matched — callers route it to the skill engine, which answers with
     an honest UNKNOWN, never a guessed PASS.
+
+    B-682: this returns exactly the four values it always did. The fifth state — "the
+    config could not be read, so whether this names a configured server is undetermined"
+    — is carried by :func:`detect_vet_type_with_reason`, which this now wraps. A fifth
+    return string would have been a contract change on a name exported from the package
+    root's ``__all__`` and listed in ``tests/checks_public_api.txt``; an external caller
+    branching exhaustively would silently take a wrong arm. The paired-function shape is
+    the one this repo already uses for the same problem: ``read_judged_bundle`` /
+    ``read_judged_bundle_with_problem``, and ``cli._read_verdicts_payload``'s
+    ``(payload, problem)``.
+    """
+    return detect_vet_type_with_reason(target, home=home)[0]
+
+
+def detect_vet_type_with_reason(
+    target: str | Path, home: str | Path = "~/.openclaw"
+) -> "tuple[str, str | None]":
+    """:func:`detect_vet_type`, plus why the answer may be less than it looks.
+
+    Returns ``(kind, undetermined_reason)``. *undetermined_reason* is None whenever the
+    classification is as good as it can get. It is a short sentence when the target is
+    NOT on disk and the config could not be read, because the "is this a configured MCP
+    server?" question was then never actually asked.
+
+    B-682. Both failures used to collapse into ``cfg = {}``, so "read the config, the name
+    is not in it" and "could not read the config at all" produced the identical answer,
+    ``"unknown"`` — and ``--vet <a configured server name>`` on a machine with a truncated
+    ``openclaw.json`` routed to the SKILL engine and was reported as a path that is not
+    there. B-681 fixed the same collapse one layer down in ``vet_mcp``; this is the copy
+    that survived it.
+
+    The reason is composed here, from fixed text plus the config path, so the caller does
+    not have to re-derive which file was unreadable.
     """
     import json as _json
 
@@ -6118,8 +6151,10 @@ def detect_vet_type(target: str | Path, home: str | Path = "~/.openclaw") -> str
         # caller's own absent/unreadable guard then reports the real reason.
         _on_disk = False
     if _on_disk:
+        # On disk, so the config was never consulted and there is nothing undetermined
+        # about any of these answers.
         if _locate_plugin_root(p) is not None:
-            return "plugin"
+            return "plugin", None
         if p.is_file() and p.suffix == ".json":
             try:
                 data = _json.loads(p.read_text(encoding="utf-8", errors="replace"))
@@ -6134,20 +6169,39 @@ def detect_vet_type(target: str | Path, home: str | Path = "~/.openclaw") -> str
                 or "command" in data
                 or ("url" in data and "transport" in data)
             ):
-                return "mcp"
-            return "unknown"
+                return "mcp", None
+            return "unknown", None
         if p.is_dir() or p.is_file():
-            return "skill"
-        return "unknown"
+            return "skill", None
+        return "unknown", None
     # Not a path on disk: maybe a configured MCP server name.
     cfg_file = Path(str(home)).expanduser() / "openclaw.json"
     try:
         cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
+    except (FileNotFoundError, NotADirectoryError):
+        # B-682: an ABSENT config is not an unreadable one, and the difference is the whole
+        # point of this function's second return value. With no config there are no
+        # configured servers, so "this is not one" is a SOUND conclusion, not a gap --
+        # nothing is undetermined and the caller must not be told otherwise.
+        #
+        # This arm is not hypothetical and not rare: it is every machine that has not
+        # installed OpenClaw yet (vetting a skill before installing is a documented use of
+        # --vet), and it is every run of this test suite, whose conftest redirects $HOME to
+        # a throwaway directory (B-519). Collapsing it with the arm below is the same
+        # over-claim B-681 had to remove one layer down, in vet_mcp.
         cfg = {}
+    except (OSError, ValueError):
+        # Something IS there and we failed on it -- a permission problem, an I/O error, a
+        # truncated or malformed document. The membership test below never happened, so
+        # "unknown" here means "I could not look", and the caller is told so rather than
+        # left to report only a missing path.
+        return "unknown", (
+            f"the OpenClaw config at {cfg_file} could not be read, so whether this "
+            "names a configured MCP server is undetermined"
+        )
     if isinstance(cfg, dict) and str(target) in _mcp_servers(cfg):
-        return "mcp"
-    return "unknown"
+        return "mcp", None
+    return "unknown", None
 
 
 # ---------- vet_source: pre-download reputation gate (E-020 F-073 = E-019 F-064) ----

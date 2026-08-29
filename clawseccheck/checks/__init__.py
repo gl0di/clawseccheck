@@ -735,6 +735,7 @@ from ._vet import (
     _url_matches_own_host,
     check_installed_skills,
     detect_vet_type,
+    detect_vet_type_with_reason,
     resolve_skill_target,
     vet_skill,
     vet_source,
