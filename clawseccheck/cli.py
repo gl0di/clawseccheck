@@ -1384,6 +1384,29 @@ def _run_vet_mcp(target, args, ascii_only: bool) -> int:
     dossier — shared by the explicit --vet-mcp mode and the --vet autodetect route
     (F-072), so the two entry points can never drift."""
     findings = vet_mcp(target=target, home=args.home)
+    # B-681: the named subject does not exist, so there is nothing to render a verdict
+    # about. Before this, `--vet-mcp <typo>` printed "RISK DOSSIER — mcp '<typo>'
+    # CAUTION" over five UNKNOWN axes and returned 0 — the code a CLEAN vet returns — so
+    # a caller branching on `$?` was told "I checked it and there is nothing to act on"
+    # about a server that was never found. That failure direction is toward silence,
+    # which is worse than B-680's original shape: that one at least exited non-zero.
+    #
+    # 2 is the same usage-error code B-680 gave the three path-taking vet modes and that
+    # `_empty_mode_target` already answers for `--vet-mcp`'s neighbours. The signal is a
+    # declared field on the finding, not its `detail` text: an exit-code contract keyed
+    # on a sentence would break the first time the sentence was reworded.
+    #
+    # The no-target form ("every configured server") cannot reach this — `vet_mcp` only
+    # sets the flag on the target-is-a-name branch — and a server that IS configured but
+    # cannot be assessed keeps its UNKNOWN dossier at its usual code. Those two are the
+    # lines this must not cross.
+    if any(getattr(f, "subject_absent", False) for f in findings):
+        print(
+            f"--vet-mcp: cannot assess '{target}' — no configured MCP server by that "
+            "name, and no readable spec file at that path. No verdict was produced.",
+            file=sys.stderr,
+        )
+        return 2
     profile = build_profile(findings, target or "configured", "mcp")
     # Side output: SARIF file (mirrors the full-audit --sarif behavior, incl. the same
     # graceful handling of an unwritable path — B-014).
@@ -3203,6 +3226,69 @@ def _main(argv=None) -> int:
     elif _mode == "vet_plugin":
         _vet_route = ("plugin", args.vet_plugin)
 
+
+    # B-680: a target that is not there at all is a USAGE error, not a verdict.
+    #
+    # `--vet <workspace>/skills/browser-automation` -- a name the audit's own inventory
+    # had just listed as clean, because those skills live inside a plugin and that
+    # standalone path does not exist -- printed "RISK DOSSIER - skill
+    # 'browser-automation'  CAUTION" over five UNKNOWN axes and returned 1. That is the
+    # same code a genuinely suspicious skill returns, so nothing downstream could tell a
+    # mistyped path from a finding, and CAUTION -- a word about software -- was spent on
+    # a path with no software at all.
+    #
+    # rc=2, not a fourth code: this is the family `_empty_mode_target` above already
+    # answers 2 for (`--vet ""`), and it is argparse's own usage-error code. The reason
+    # --monitor refused 2 for drift was the mirror image of this rule -- a finding must
+    # not wear the usage-error code -- so it argues for 2 here, not against it.
+    #
+    # The test is the raised errno, not `.exists()`: `.exists()` collapses "not there",
+    # "a link to nothing" and "I am not allowed to look" into one False, and answering
+    # "there is nothing there" to the last two would be a second lying verdict. Each gets
+    # its own sentence; any other OSError keeps today's dossier, which prints the reason
+    # in full. All three share rc=2 -- a caller that must tell a typo from a chmod reads
+    # the message, exactly as it would for argparse's own several rc=2 messages.
+    if _vet_route and _vet_route[0] in ("skill", "plugin"):
+        _typed, _why = _vet_route[1], None
+        _target_path = Path(str(_typed)).expanduser()
+        try:
+            os.stat(_target_path)  # follows symlinks: "is there something here to read?"
+        except (FileNotFoundError, NotADirectoryError):
+            try:
+                os.lstat(_target_path)
+            except OSError:
+                _why = "no such file or directory"
+            else:
+                # lstat saw it, stat did not: a symlink whose target is gone. Saying
+                # "no such file" here would be wrong — the link IS there.
+                _why = "the symlink there points at a path that does not exist"
+        except PermissionError:
+            # Not merely a wrong verdict before B-680: resolve_skill_target calls
+            # Path.is_file(), which does NOT swallow EACCES, so an unreadable parent
+            # reached the top-level handler and printed "unexpected internal error
+            # (PermissionError) ... open an issue" -- the tool asking to be bug-reported
+            # for the user's own directory mode.
+            _why = "permission denied"
+        except OSError:
+            pass  # e.g. a symlink loop: still assessable-ish, leave today's dossier
+        if _why is not None:
+            _flag = "--vet" if _mode == "vet" else "--vet-" + _vet_route[0]
+            # The hint is for the shape that actually sent this bug in -- a skill name
+            # the audit listed as clean, typed as a path it never had. It would be noise
+            # on a link to nothing or on a directory mode, so it is tied to the reason.
+            _tail = (
+                " A skill bundled inside a plugin has no standalone path \u2014 "
+                "vet the plugin instead."
+                if _vet_route[0] == "skill" and _why == "no such file or directory"
+                else ""
+            )
+            print(
+                f"{_flag}: cannot assess {_typed} \u2014 {_why}. "
+                f"No verdict was produced.{_tail}",
+                file=sys.stderr,
+            )
+            return 2
+
     if args.emit_manifest and not (_vet_route and _vet_route[0] == "skill"):
         print(
             "note: --emit-manifest requires --vet/--vet-skill on a single skill; ignored",
@@ -3240,9 +3326,15 @@ def _main(argv=None) -> int:
             f = escalate_vet_output(f, verdicts_raw, target=vet_path)
         profile = build_profile(f, vet_path, vet_kind)
         # rc: overall FAIL/WARN → 1 (dangerous/suspicious target);
-        # UNKNOWN + target absent (not found / path unusable) → 1;
+        # UNKNOWN + target unusable → 1;
         # UNKNOWN + target exists (valid target, inconclusive assessment) → 0;
         # PASS → 0.
+        #
+        # B-680: "absent" no longer reaches this line — a path that simply is not there
+        # returned 2 above, before anything was assessed. What still lands here is the
+        # narrower case the guard deliberately declines to claim is absent: a path we
+        # could not stat at all (an unreadable parent). `.exists()` is False for that
+        # too, so the arm below is unchanged and still keeps it off 0.
         if profile.overall_status in ("FAIL", "WARN"):
             _vet_rc = 1
         elif profile.overall_status == "UNKNOWN" and not vet_target.exists():

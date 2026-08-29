@@ -1083,7 +1083,8 @@ the gate on its own terms (it ranks drift *alerts*, not findings, and defaults t
 The derived-view modes — `--next`, `--sbom`, `--risk-paths`, `--incident`, `--judge-packet`,
 `--dashboard-findings`, `--show-suppressed`, `--trend`, `--percentile` — do **not** gate, and
 say so on stderr when you pass one of the flags. The `--vet` family has a separate exit-code
-contract of its own (1 on DO-NOT-INSTALL), described in its own section.
+contract of its own (1 on DO-NOT-INSTALL, 2 on a target that cannot be assessed at all),
+described in its own section.
 
 Note that `rc 1` from an artifact mode has two possible causes: the gate tripped, or the
 file could not be written. A failed write always exits non-zero and prints the reason, so a
@@ -1135,6 +1136,29 @@ trips this either — it is advisory-only by design, same as everywhere else in 
 
 Note that `--vet`'s exit code is a **separate** contract: it returns 1 on a
 `CAUTION`/`DO-NOT-INSTALL` verdict (see `--vet TARGET` below), where a WARN *does* count.
+
+**`2` means the target could not be assessed at all** — the reason goes to stderr, stdout
+stays empty, no dossier is rendered and the word `CAUTION` is never spent on it. It is a
+usage error, not a verdict: the same code an empty target (`--vet ""`) already returned,
+and argparse's own. So a pipeline can branch three ways — `0` clean, `1` something to act
+on, `2` fix the command line — where before a mistyped target was indistinguishable from a
+risky one.
+
+- `--vet`, `--vet-skill`, `--vet-plugin` return it when the **path** you named is not
+  there, is a symlink to something that is not there, or cannot be read.
+- `--vet-mcp` returns it when the **name** you gave is not a configured MCP server and is
+  not a readable spec file either. This one used to exit `0` — the code a clean vet
+  returns — so a typo was reported as "checked it, nothing to act on".
+
+A target that **exists** but yields nothing analysable is a different case and keeps its
+dossier at its usual code: there really is something there, and "I looked and could not
+tell" is an honest UNKNOWN. So an unparseable spec file, an empty directory, and a
+configured server the vet cannot judge all stay where they were. `--vet-mcp` with no value
+at all is its documented "every configured server" form and is likewise untouched.
+
+`--vet-source` judges an identity — a slug, a URL, a package spec — with no filesystem or
+config lookup behind it, so there is no "not found" state for `2` to describe and it never
+returns it.
 
 ## More tools
 

@@ -6107,7 +6107,17 @@ def detect_vet_type(target: str | Path, home: str | Path = "~/.openclaw") -> str
     import json as _json
 
     p = Path(str(target)).expanduser()
-    if p.exists():
+    try:
+        _on_disk = p.exists()
+    except OSError:
+        # B-680: an unreadable parent makes Path.exists() RAISE -- EACCES is not in
+        # pathlib's ignored-errno set -- so this classifier answered a question about a
+        # path by crashing the process, and the caller printed "unexpected internal
+        # error (PermissionError) ... open an issue" for the user's own directory mode.
+        # "unknown" is this function's documented answer for "nothing matched"; the
+        # caller's own absent/unreadable guard then reports the real reason.
+        _on_disk = False
+    if _on_disk:
         if _locate_plugin_root(p) is not None:
             return "plugin"
         if p.is_file() and p.suffix == ".json":

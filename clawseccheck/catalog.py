@@ -3414,6 +3414,24 @@ class Finding:
     # meaningful alongside status == UNKNOWN (see __post_init__ below); no emitter sets
     # this yet (that starts with B2/F-139) — this field is plumbing only.
     not_applicable: bool = False
+    # B-681: true when the SPECIFIC subject named on the command line does not exist —
+    # `--vet-mcp <name>` where no configured server answers to that name and no readable
+    # spec file sits at that path. Distinct from `not_applicable` above, which says the
+    # whole SURFACE is missing (no MCP servers configured at all): here the surface is
+    # present and it was the named subject that was not found, so the honest answer is a
+    # usage error rather than a verdict about anything.
+    #
+    # It exists because the alternative was keying an exit code on a `detail` string. The
+    # reader is cli.py's `_run_vet_mcp`, which returns 2 — the code `_empty_mode_target`
+    # already answers for the neighbouring malformed invocation — instead of the 0 a
+    # clean vet returns. Before B-681 a mistyped server name rendered a CAUTION dossier
+    # over five UNKNOWN axes and exited 0, i.e. reported "I checked it and there is
+    # nothing to act on" about a subject that was never found.
+    #
+    # Default False, so an unaware producer keeps the ordinary UNKNOWN posture. Only
+    # meaningful alongside status == UNKNOWN. Never rendered by report.py / sarif.py —
+    # its whole destination is the process exit status.
+    subject_absent: bool = False
     # F-154 (round 2, C-135): names WHICH of a multi-signal check's internal sub-signals
     # actually fired, for a check whose WARN status alone conflates strengths a CAP-ONLY
     # consumer needs to tell apart. Introduced for B191 (checks/_host.py:

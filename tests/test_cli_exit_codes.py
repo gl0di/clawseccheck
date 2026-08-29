@@ -115,11 +115,20 @@ def test_vet_nonexistent_target_returns_nonzero(tmp_path, capsys):
 
 
 def test_vet_nonexistent_target_emits_hint(tmp_path, capsys):
+    """B-680 moved this message from stdout to stderr, on purpose.
+
+    It used to be a line INSIDE a rendered risk dossier -- "RISK DOSSIER - skill
+    '<basename>'  CAUTION" over five UNKNOWN axes -- so a mistyped path produced a
+    verdict-shaped artifact on the machine-readable channel. It is a usage error, so it
+    now goes to stderr and stdout stays empty. The reason is still printed; only the
+    channel and the framing changed.
+    """
     nonexistent = tmp_path / "no_such_skill_dir"
     main(["--vet", str(nonexistent)])
-    out = capsys.readouterr().out
-    # vet_skill emits the "could not assess" verdict for the missing path
-    assert "could not assess" in out or "no skill found" in out
+    captured = capsys.readouterr()
+    assert captured.out.strip() == ""
+    assert "no such file or directory" in captured.err
+    assert "RISK DOSSIER" not in captured.err and "CAUTION" not in captured.err
 
 
 # ---------------------------------------------------------------------------

@@ -2385,13 +2385,41 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
             cfg_file = home_path / "openclaw.json"
             import json as _json
 
+            # B-681: whether the config could be READ decides what we are entitled to
+            # say next. Both failures used to collapse into `cfg = {}`, which makes an
+            # empty server map indistinguishable from an unreadable one -- and the
+            # finding below then announced "not found in config" about a file nobody had
+            # managed to open. Harmless while it was only a sentence; not harmless once
+            # it drives an exit code, which is what this task added.
+            cfg_read = True
             try:
                 cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
             except (OSError, ValueError):
-                cfg = {}
+                cfg, cfg_read = {}, False
             all_servers = _mcp_servers(cfg)
             if name in all_servers:
                 servers = {name: all_servers[name]}
+            elif not cfg_read:
+                # The server may well be configured -- a truncated or unreadable
+                # openclaw.json cannot tell us either way. UNKNOWN, and NOT
+                # subject_absent: this keeps its dossier rather than being reported as
+                # the user's typo.
+                return [
+                    Finding(
+                        id="MCP-VET",
+                        title="MCP supply-chain / trust vet",
+                        severity=HIGH,
+                        status=UNKNOWN,
+                        detail=(
+                            f"Could not read the config at {cfg_file}, so whether "
+                            f"'{name}' is a configured server is undetermined."
+                        ),
+                        fix="Check that the config exists and is valid JSON, or point "
+                        "--vet-mcp at a JSON spec file.",
+                        framework="MCP Trust",
+                        scored=False,
+                    )
+                ]
             else:
                 return [
                     Finding(
@@ -2403,6 +2431,14 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                         fix="Check the server name or point --vet-mcp at a JSON file.",
                         framework="MCP Trust",
                         scored=False,
+                        # B-681: the named subject does not exist — nothing was assessed.
+                        # Every possibility was genuinely checked before we get here:
+                        # `p.is_file()` was False (no readable spec at that path), the
+                        # config WAS read, and the name is absent from its server map.
+                        # The caller turns this into a usage error; the "Could not parse"
+                        # finding above deliberately does NOT set it, because there the
+                        # subject IS there and it is the assessment that failed.
+                        subject_absent=True,
                     )
                 ]
     else:

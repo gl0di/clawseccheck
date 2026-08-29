@@ -68,6 +68,11 @@ _CHANNELS = {
     "scored": ("machine", "whether the finding counted toward the score", None),
     "framework": ("machine", "MITRE/OWASP tag", None),
     "not_applicable": ("machine", "a surface positively confirmed missing", None),
+    # B-681. Its destination IS the process exit status: `--vet-mcp <typo>` used to
+    # render a CAUTION dossier and exit 0, the code a clean vet returns. "machine" is
+    # therefore exact rather than approximate -- no text or JSON surface shows this
+    # field, and none should, because the run it describes produces no verdict to show.
+    "subject_absent": ("machine", "the named subject does not exist; a usage error", None),
     "engine_degraded": (
         "both",
         "the check broke rather than concluded",
