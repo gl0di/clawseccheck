@@ -2354,7 +2354,32 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
 
     if target is not None:
         p = Path(str(target)).expanduser()
-        if p.is_file():
+        # B-683: `Path.is_file()` does NOT swallow EACCES, so a target under a directory
+        # this process cannot stat used to raise straight past every branch below and out
+        # to the top-level handler, which printed "unexpected internal error
+        # (PermissionError) ... open an issue" — a bug report solicited for the caller's
+        # own directory mode. Ask the question this branch actually needs ("is there a
+        # readable spec file here?") in a form that can answer "I could not look".
+        try:
+            _is_spec_file = p.is_file()
+        except OSError:
+            # NOT subject_absent (B-681): whether this names a server or a spec file is
+            # exactly what we failed to establish, and the caller turns subject_absent
+            # into "you mistyped that". UNKNOWN, with the reason, is the honest answer.
+            return [
+                Finding(
+                    id="MCP-VET",
+                    title="MCP supply-chain / trust vet",
+                    severity=HIGH,
+                    status=UNKNOWN,
+                    detail=f"Could not read '{p}', so it could not be assessed.",
+                    fix="Check the path and its parent directories are readable, or "
+                    "name a configured MCP server instead.",
+                    framework="MCP Trust",
+                    scored=False,
+                )
+            ]
+        if _is_spec_file:
             loaded = _load_mcp_spec_file(p)
             if loaded is None:
                 # F-142: none of the four {name: spec} config shapes matched — last

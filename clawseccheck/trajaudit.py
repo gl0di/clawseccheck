@@ -135,6 +135,7 @@ from .trajectory import (
     _SCHEMA_VERSION,
     _TRACE_SCHEMA,
     find_trajectory_files,
+    resolve_explicit_file,
 )
 
 # _SECRET_PATH_RE moved to checks/_shared.py (F-124/E-044 layer-fix): logscan.py (a
@@ -524,6 +525,9 @@ def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
         "unknown_version": False,
         "truncated": False,
         "unreadable": False,
+        # B-683: the EXPLICIT path could not be opened at all — distinct from
+        # "unreadable", which is about individual LINES inside a file we did open.
+        "path_unreadable": False,
         "files_total": 0,
         "files_capped": False,
         "tool_calls": 0,
@@ -536,8 +540,9 @@ def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
     }
 
     if explicit_path:
-        p = Path(explicit_path).expanduser()
-        files = [p] if p.is_file() else []
+        # B-683: one implementation, in trajectory.py — see its docstring for why an
+        # empty `files` alone is the wrong answer to "I could not open that".
+        files, result["path_unreadable"] = resolve_explicit_file(explicit_path)
         result["files_total"] = len(files)
     else:
         home = getattr(ctx, "home", None)
@@ -841,8 +846,9 @@ def self_test_corroboration(home, *, explicit_path: str | None = None,
         return result
 
     if explicit_path:
-        p = Path(explicit_path).expanduser()
-        files = [p] if p.is_file() else []
+        # B-683: one implementation, in trajectory.py — see its docstring for why an
+        # empty `files` alone is the wrong answer to "I could not open that".
+        files, result["path_unreadable"] = resolve_explicit_file(explicit_path)
         result["files_total"] = len(files)
     else:
         stats: dict = {}
@@ -1001,9 +1007,21 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
     lines = ["Trajectory incident analysis (post-hoc, read-only)"]
 
     if not r["present"]:
-        lines.append(f"  {q} No trajectory sidecars found "
-                     "(agents/*/sessions/*.trajectory.jsonl). Nothing to analyze — run on a "
-                     "host where an OpenClaw agent has produced session trajectories.")
+        # B-683: the not-present branch RETURNS, so a disclosure placed further down (next
+        # to `unreadable`) is unreachable in exactly the case that needs it. Verified by
+        # running it: fixing the crash alone produced "No trajectory sidecars found ...
+        # run on a host where an OpenClaw agent has produced session trajectories" for a
+        # file the process was not allowed to open — the host blamed for a directory mode,
+        # which is the same wrong answer B-462 already fixed for a typo'd path.
+        if r.get("path_unreadable"):
+            lines.append(f"  {q} The trajectory file you named could not be read "
+                         "(permission denied, or otherwise unopenable) — nothing was "
+                         "analyzed. This is NOT evidence that the file is empty, and it "
+                         "is not a statement about this host.")
+        else:
+            lines.append(f"  {q} No trajectory sidecars found "
+                         "(agents/*/sessions/*.trajectory.jsonl). Nothing to analyze — run on a "
+                         "host where an OpenClaw agent has produced session trajectories.")
         lines.extend(render_self_test_corroboration(
             getattr(ctx, "home", None), explicit_path=explicit_path, ascii_only=ascii_only,
             ledger_home=ledger_home, ctx=ctx))
@@ -1021,6 +1039,12 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
     if r["unknown_version"]:
         lines.append(f"  {q} Some records used an unrecognised trajectory schema version — "
                      "results are INCOMPLETE (treat as UNKNOWN, not authoritative).")
+    if r.get("path_unreadable"):
+        # B-683: the named file could not be opened, so "no trajectory data" would be a
+        # statement about our permissions rather than about the agent's history.
+        lines.append(f"  {q} The trajectory file you named could not be read (permission "
+                     "denied, or otherwise unopenable) — nothing was analyzed. This is "
+                     "NOT evidence that the file is empty.")
     if r["unreadable"]:
         # B-574: a line that looked like a tool.call but was invalid JSON, or carried a
         # DIFFERENT tool's traceSchema (wrong file / another tracer), was never parsed —

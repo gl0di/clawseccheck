@@ -1026,8 +1026,22 @@ def explicit_path_problem(explicit_path: str | None) -> str | None:
     if not explicit_path:
         return None
     p = Path(explicit_path).expanduser()
-    if not p.exists():
+    # B-683: `Path.exists()` swallows ENOENT/ENOTDIR/EBADF/ELOOP and NOT EACCES, so a
+    # path under a directory this process cannot stat made it RAISE — and the one
+    # function whose entire job is to name a path problem answered one of them with
+    # "unexpected internal error (PermissionError) ... open an issue", i.e. by asking to
+    # be bug-reported for the caller's own directory mode. Ask stat directly and name
+    # each errno, rather than reading a boolean that cannot represent the third case.
+    try:
+        p.stat()
+    except (FileNotFoundError, NotADirectoryError):
         return f"{explicit_path}: no such file or directory"
+    except PermissionError:
+        return f"{explicit_path}: permission denied"
+    except OSError as exc:
+        return f"{explicit_path}: {exc.strerror or exc}"
+    # Reached only after a successful stat, so the parent is readable and this cannot
+    # raise for the same reason.
     if p.is_dir():
         return f"{explicit_path}: is a directory, not a trajectory file"
     return None

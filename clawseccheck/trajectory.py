@@ -37,6 +37,33 @@ _MAX_FILES = 60
 _MAX_BYTES_PER_FILE = 8_000_000
 
 
+def resolve_explicit_file(explicit_path) -> "tuple[list, bool]":
+    """``(files, path_unreadable)`` for a user-named trajectory path.
+
+    B-683. This was four copies of ``files = [p] if p.is_file() else []`` across this
+    module and ``trajaudit.py``, and every one of them had the same two defects.
+
+    ``Path.is_file()`` swallows ENOENT/ENOTDIR/EBADF/ELOOP and **not EACCES**, so a path
+    under a directory the process cannot stat *raised* — out past every branch to the
+    top-level handler, which printed "unexpected internal error (PermissionError) ...
+    open an issue", soliciting a bug report for the caller's own directory mode.
+
+    And catching it is only half the fix: falling back to an empty ``files`` on its own
+    leaves ``present`` False, which every caller renders as "no trajectory data" — a
+    statement about the agent's history sourced from a file nobody was allowed to open.
+    The second return value is what keeps "there is nothing here" and "I could not look"
+    apart, so a caller can say which one it means.
+
+    One implementation rather than four, because the four had already drifted in what
+    they recorded and a fifth copy is the obvious next step otherwise.
+    """
+    p = Path(explicit_path).expanduser()
+    try:
+        return ([p], False) if p.is_file() else ([], False)
+    except OSError:
+        return [], True
+
+
 def find_trajectory_files(
     home: Path, *, max_files: int = _MAX_FILES, stats: dict | None = None
 ) -> list[Path]:
@@ -339,11 +366,11 @@ def read_compiled_tool_descriptions(
         "present": False, "files_scanned": 0, "events": 0,
         "unknown_version": False, "truncated": False,
         "files_total": 0, "files_capped": False,
+        "path_unreadable": False,  # B-683
     }
 
     if explicit_path:
-        p = Path(explicit_path).expanduser()
-        files = [p] if p.is_file() else []
+        files, meta["path_unreadable"] = resolve_explicit_file(explicit_path)
         meta["files_total"] = len(files)
     else:
         stats: dict = {}
@@ -560,11 +587,12 @@ def read_events(
     meta = {
         "present": False, "files_scanned": 0, "unknown_version": False, "truncated": False,
         "files_total": 0, "files_capped": False,
+        # B-683: the named path could not be opened at all.
+        "path_unreadable": False,
     }
 
     if explicit_path:
-        p = Path(explicit_path).expanduser()
-        files = [p] if p.is_file() else []
+        files, meta["path_unreadable"] = resolve_explicit_file(explicit_path)
         meta["files_total"] = len(files)
     else:
         stats: dict = {}
