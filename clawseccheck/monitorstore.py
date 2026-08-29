@@ -668,8 +668,36 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS,
         with journal_lock(p):
             prev_hash = _last_chain_hash(p)
             lines_out: list[str] = []
+            # C-465: redact at the journal boundary.
+            #
+            # Both transient channels already do — the text renderer and `--monitor --json`
+            # run every message through `report._sanitize`, which calls `logsafe.redact`,
+            # and that helper's own comment explains why it is one shared point: "secret
+            # redaction cannot be accidentally implemented for JSON while remaining absent
+            # from text/SARIF/HTML". The journal is not a renderer, so it sat outside that
+            # boundary — and it is the one channel that is append-only and hash-chained,
+            # i.e. the one where a leaked value is permanent. The asymmetry pointed the
+            # wrong way: the durable channel protected less than the ephemeral one.
+            #
+            # No live leak today; redaction is done at the SOURCE (`monitordims/_mcp.py`
+            # runs command/args through `redact_urls_in_text` before they enter the
+            # snapshot, `_channels.py` hashes secret-bearing fields, and the 78
+            # `alerts.append` sites interpolate names and counts). This is defence in
+            # depth, and it is what makes a future secret-bearing dimension safe by
+            # construction rather than by remembering.
+            #
+            # LAZY, and not by preference: `logsafe` imports from `checks`, so a module
+            # level import here would pull the whole engine into the store. `report.py`'s
+            # `_sanitize` takes the same lazy import for the same reason, and says so.
+            #
+            # `redact` is idempotent, so a value already redacted at the source is
+            # unchanged. Only NEW entries are affected; existing lines keep their bytes and
+            # `verify_chain` recomputes from what is stored, so the chain stays valid
+            # across the change.
+            from .logsafe import redact  # noqa: PLC0415
             for lvl, msg in alerts:
-                base = {"ts": when, "level": lvl, "message": msg, "_schema": SCHEMA_VERSION}
+                base = {"ts": when, "level": lvl, "message": redact(msg),
+                        "_schema": SCHEMA_VERSION}
                 ch = _chain_hash(prev_hash, base)
                 entry = {**base, "chain_hash": ch}
                 lines_out.append(json.dumps(entry))
