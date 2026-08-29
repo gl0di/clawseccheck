@@ -1666,6 +1666,44 @@ def _path_problem_text(raw_path, exc: OSError, *, what: str) -> str:
     return _redact_home_paths(f"{_sanitize(str(raw_path))}: {_describe_os_error(exc, what=what)}")
 
 
+class UnusableInputPath(Exception):
+    """A file the user named exists but could not be turned into text at all.
+
+    B-684. Two shapes reach here, and B-561 decided — correctly — that both must stay
+    LOUD rather than degrade to the `note:` an OSError gets: a non-zero exit, empty
+    stdout, no artifact. Turning them into a note would hand back a normal-looking rc 0
+    report to someone who pointed the tool at the wrong file.
+
+    What B-561 explicitly left for later is what this class is for: *"Naming the path in
+    them is a separate improvement to the crash handler, not this one."* Until now the
+    failure was loud and anonymous — no path, no reason, only an exception class name,
+    and an invitation to open an issue about the caller's own typo. Being loud and being
+    a bug report are different things.
+
+    Carries the composed, redacted text rather than the raw path, so the handler prints
+    it without needing to know which reader raised.
+    """
+
+    def __init__(self, raw_path, reason: str):
+        self.raw_path = raw_path
+        self.reason = reason
+        self.text = _unusable_path_text(raw_path, reason)
+        super().__init__(self.text)
+
+
+def _unusable_path_text(raw_path, reason: str) -> str:
+    """``"<path>: <reason>"`` for a user-named file that could not be decoded.
+
+    The `_path_problem_text` composition minus `_describe_os_error`, because there is no
+    errno here — the same `_sanitize` + `_redact_home_paths` pair, for the same B-581
+    reason: a path typed on the command line routinely embeds the operator's OS username
+    and this text reaches stderr unconditionally.
+    """
+    if not str(raw_path).strip():
+        return "no path was given"
+    return _redact_home_paths(f"{_sanitize(str(raw_path))}: {reason}")
+
+
 def _read_verdicts_payload(raw_path: str) -> "tuple[str, str | None]":
     """``(payload, problem)`` for a judge-verdicts path. *problem* is None when it was read.
 
@@ -1695,6 +1733,19 @@ def _read_verdicts_payload(raw_path: str) -> "tuple[str, str | None]":
         return Path(raw_path).expanduser().read_text(encoding="utf-8"), None
     except OSError as exc:
         return "", _path_problem_text(raw_path, exc, what="verdicts file")
+    except UnicodeDecodeError:
+        # B-684: still loud — this returns nothing, it raises. See UnusableInputPath for
+        # why widening the OSError arm to cover this would undo B-561, and why naming the
+        # file was the part B-561 deferred rather than the part it settled.
+        raise UnusableInputPath(
+            raw_path, "not valid UTF-8 text (a binary file?), so it holds no verdicts"
+        ) from None
+    except RuntimeError:
+        # `~nosuchuser/x.json` — expanduser() raises this, not OSError. The other shape
+        # B-561 names, and the same answer.
+        raise UnusableInputPath(
+            raw_path, "the '~user' in it names no account on this machine"
+        ) from None
 
 
 def _verdicts_with_note(raw_path: str, flag: str) -> str:
@@ -2428,6 +2479,19 @@ def main(argv=None) -> int:
             f"keeps happening, see docs/TROUBLESHOOTING.md or open an issue: {_ISSUES_URL}",
             file=sys.stderr,
         )
+        return 1
+    except UnusableInputPath as exc:
+        # B-684: loud, and now named. The exit code and the empty stdout are deliberately
+        # the same ones the generic arm below produces — that is the half B-561 protects,
+        # and moving it would trade a wrong verdict for a missing one. What changes is
+        # that the message says which file and what was wrong with it, and does NOT ask
+        # for a bug report: that banner is for defects in this tool, and a file the user
+        # picked is not one.
+        raw = list(sys.argv[1:] if argv is None else argv)
+        if "--debug" in raw:
+            raise
+        print(f"clawseccheck: {exc.text}. Nothing was produced; fix the path and re-run.",
+              file=sys.stderr)
         return 1
     except Exception as exc:  # noqa: BLE001 — a security tool must fail readably, not crash
         raw = list(sys.argv[1:] if argv is None else argv)
