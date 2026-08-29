@@ -84,6 +84,13 @@ from ._coverage import (  # noqa: F401
     _diff_coverage,
 )
 
+from ._credentials import (  # noqa: F401
+    _CRED_NAME_CAP,
+    _credentials_sig,
+    _diff_credentials,
+    _credential_names,
+)
+
 from ._execpolicy import (  # noqa: F401
     _MODE_POLICY,
     _SANDBOX_ALWAYS,
@@ -107,7 +114,11 @@ from ._gateway import (  # noqa: F401
     _note_gateway_bind_unreadable,
 )
 
-from ._host import _diff_host_monitors  # noqa: F401
+from ._host import (  # noqa: F401
+    _HOST_CLASS_NAMES,
+    _diff_host_monitors,
+    _name_host_classes,
+)
 
 from ._hostpersist import (  # noqa: F401
     _HOST_PERSIST_INFRA,

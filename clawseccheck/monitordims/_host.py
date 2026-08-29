@@ -6,7 +6,40 @@ so in a note instead of letting the silence read as "nothing changed".
 """
 
 from __future__ import annotations
-from ._shared import NOTE_UNDETERMINED  # noqa: F401
+from ._shared import _DIMENSION_NAME_CAP, NOTE_UNDETERMINED  # noqa: F401
+
+#: B-678: short, user-facing names for the host classes, so the disclosure below NAMES what
+#: it could not confirm instead of only counting it. C-441 made exactly this change for
+#: watched dimensions, and its reason applies here unchanged: a bare count "tells the reader
+#: nothing they can act on". Knowing that endpoint protection is the unconfirmed one is a
+#: different fact from knowing that some number of things are.
+#:
+#: Deliberately NOT `checks/_host.py`'s `_HOST_CLASS_LABEL`, which is written for a finding
+#: ("network monitoring / IDS (Suricata, Zeek, Snort)") and covers five of the seven
+#: classes. Five names of that length do not fit a sentence. Kept in step with the source of
+#: truth by `tests/test_b678_host_class_names.py`, which requires a name for every entry in
+#: `hostwatch.CLASSES` — a replicated vocabulary with no guard is one that drifts.
+_HOST_CLASS_NAMES = {
+    "network_ids": "network intrusion detection",
+    "host_audit": "audit logging",
+    "file_integrity": "file-integrity monitoring",
+    "edr_av": "endpoint protection",
+    "firewall": "the host firewall",
+    "egress_posture": "outbound-traffic policy",
+    "tunnel_transport": "tunnel and transport agents",
+}
+
+
+def _name_host_classes(classes) -> str:
+    """A readable clause naming *classes*, capped, with the remainder counted.
+
+    Mirrors `_shared._name_dimensions`, including the cap being STATED rather than applied
+    silently — a truncation the reader cannot see reads as "that was all of them".
+    """
+    named = [_HOST_CLASS_NAMES.get(c, c) for c in sorted(classes)]
+    shown, hidden = named[:_DIMENSION_NAME_CAP], len(named) - _DIMENSION_NAME_CAP
+    clause = ", ".join(shown)
+    return clause + (f" and {hidden} more" if hidden > 0 else "")
 
 
 def _diff_host_monitors(pair, alerts, note) -> None:
@@ -52,8 +85,9 @@ def _diff_host_monitors(pair, alerts, note) -> None:
     # every run forever, which would put the tick this change introduced permanently
     # out of reach there. A note that can never be cleared trains the reader to ignore
     # the whole block.
-    _undetermined = sum(1 for cls in set(ph) & set(ch) if ph[cls] == "unknown")
+    _undetermined = [cls for cls in set(ph) & set(ch) if ph[cls] == "unknown"]
     if _undetermined:
         note(NOTE_UNDETERMINED,
-             f"{_undetermined} security tool(s) on this machine could not be confirmed "
-             f"as running last time, so this run cannot tell you if they stopped.")
+             f"{len(_undetermined)} security tool(s) on this machine could not be confirmed "
+             f"as running last time, so this run cannot tell you if they stopped: "
+             f"{_name_host_classes(_undetermined)}.")

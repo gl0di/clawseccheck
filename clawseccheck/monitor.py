@@ -85,6 +85,7 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _channel_sig,
     _config_file_digest,
     _config_resolved_digest,
+    _CRED_NAME_CAP,
     _COVERAGE_ALREADY_ANNOUNCED,
     _COVERAGE_DIGITS_RE,
     _COVERAGE_MAX_ENTRIES,
@@ -92,6 +93,8 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _coverage_key,
     _coverage_live_text,
     _coverage_signature,
+    _credential_names,
+    _credentials_sig,
     _describe,
     _diff_behavioral,
     _diff_bootstrap_added,
@@ -103,8 +106,10 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _diff_config_digest_unmoved,
     _diff_config_journal,
     _diff_coverage,
+    _diff_credentials,
     _diff_exec_policy,
     _diff_gateway_bind_moved,
+    _HOST_CLASS_NAMES,
     _diff_host_monitors,
     _diff_host_persist,
     _diff_mcp_detail,
@@ -136,6 +141,7 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _memory_tight_signal_patterns,
     _misses_can_still_run,
     _name_dimensions,
+    _name_host_classes,
     _note_gateway_bind_unreadable,
     _note_skills_capped,
     _note_skills_frontier_partial,
@@ -378,6 +384,11 @@ WATCHED_DIMENSIONS = (
     # C-417 manifest guard requires the moment something reads it back.
     "config_resolved_sha256",
     "config_written_by",
+    # B-677. CONDITIONAL: absent when the shell did not scan the credential store, which
+    # is how a baseline predating this dimension is told from a store that is genuinely
+    # empty. Not a `_CONFIG_DIMENSIONS` member — the store lives at `<home>/credentials`
+    # and no config key can move, add or shrink it.
+    "credential_store",
     # B-664. Written on every run whose config parsed; `{}` when it did not,
     # which the arm treats as nothing to compare rather than as a policy.
     "exec_policy",
@@ -487,7 +498,8 @@ def _degrade_snapshot(snap: dict, prev: "dict | None") -> None:
 
 def snapshot(ctx, findings, score, prev: "dict | None" = None,
              behavioral: "dict | None" = None, install: "dict | None" = None,
-             provenance: "dict | None" = None, host_persist: "dict | None" = None) -> dict:
+             provenance: "dict | None" = None, host_persist: "dict | None" = None,
+             credentials: "dict | None" = None) -> dict:
     """Build the drift snapshot for this run.
 
     *prev* is the previously saved snapshot, used to preserve the baseline when this run
@@ -643,6 +655,11 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     # discovery, and this module stays a pure function of what it is given.
     if isinstance(host_persist, dict) and host_persist:
         snap["host_persist"] = host_persist
+    # B-677: OpenClaw's own credential store. Conditional on the caller having scanned it,
+    # so an absent key means "that layer did not run", never "the store is empty".
+    _cred = _credentials_sig(credentials)
+    if _cred:
+        snap["credential_store"] = _cred
 
     host = getattr(ctx, "host", None)
     if host and host.get("supported"):
@@ -1245,6 +1262,12 @@ def diff_with_notes(prev: dict | None, curr: dict
     # note and keeps one: that is the honest first-run-after-upgrade message.
     _hp_pair = _both_dims(prev, curr, "host_persist")
     _diff_host_persist(_hp_pair, alerts, curr, note, prev)
+
+    # B-677: what the credential store gained, lost, or had replaced. Measured before it
+    # was built: with the sensitive-data leg already up, a second credential file and a
+    # rotated token both produced zero alerts anywhere in the tree.
+    _cred_pair = pair_or_note("credential_store", "Your stored credentials")
+    _diff_credentials(_cred_pair, alerts, note)
 
     _host_pair = pair_or_note("host", "Security tools running on this machine")
     _diff_host_monitors(_host_pair, alerts, note)
