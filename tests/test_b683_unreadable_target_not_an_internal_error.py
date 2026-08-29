@@ -102,19 +102,29 @@ def test_analyze_trajectory_does_not_blame_the_host_for_a_directory_mode(tmp_pat
         out = capsys.readouterr().out
     finally:
         locked.chmod(0o755)
-    assert "could not be read" in out
-    assert "NOT evidence that the file is empty" in out
+    # B-686 re-worded this through the shared `explicit_path_problem`, so the sentence
+    # now names the path and the errno; what this test pins is unchanged — the host is
+    # not blamed, and the reader is told the silence is not evidence.
+    assert "permission denied" in out
+    assert "not evidence that the file is empty" in out
     # The exact sentence the first version of this fix produced instead.
     assert "run on a host where" not in out
 
 
-def test_analyze_trajectory_still_says_nothing_found_when_nothing_is_there(tmp_path, capsys):
-    """The control. A fix that printed the unreadable line unconditionally passes the test
-    above and is wrong; this is what fails it."""
+def test_an_absent_path_is_not_reported_as_unreadable(tmp_path, capsys):
+    """The control: a fix that printed the permission sentence unconditionally passes the
+    test above and is wrong.
+
+    B-686 moved what the RIGHT answer is here — an absent path used to fall through to
+    "No trajectory sidecars found … run on a host where…", and now names itself — so this
+    no longer pins that sentence. What it pins is the invariant that outlives both
+    changes: the three path problems stay distinguishable from each other, and an absent
+    file is never described as one we were not allowed to read.
+    """
     main(["--analyze-trajectory", str(tmp_path / "gone"), *_base(tmp_path)])
     out = capsys.readouterr().out
-    assert "No trajectory sidecars found" in out
-    assert "could not be read" not in out
+    assert "no such file or directory" in out
+    assert "permission denied" not in out
 
 
 def test_behavioral_names_the_permission_problem(tmp_path, capsys):

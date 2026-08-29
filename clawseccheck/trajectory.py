@@ -37,6 +37,55 @@ _MAX_FILES = 60
 _MAX_BYTES_PER_FILE = 8_000_000
 
 
+def explicit_path_problem(explicit_path: str | None) -> str | None:
+    """Why an explicitly-named --behavioral PATH cannot be read, or None if it is fine.
+
+    B-462: when the user names a file, a bad path is THEIR fact, not the host's. A typo
+    used to fall through to the generic "no trajectory sidecars found ... run on a host
+    where an OpenClaw agent has produced session trajectories" — blaming the machine,
+    never echoing the path, and exiting 0 under a green tick.
+
+    Shared by `analyze` and the CLI's exit-code decision so the two cannot disagree, and
+    so deciding the exit code costs a stat rather than a second full `analyze()` pass over
+    every trajectory file.
+
+    B-686: moved here from ``behavioral.py``. Both trajectory modes take the same
+    kind of argument and must answer a bad one the same way; leaving the predicate
+    in one of them and importing it from the other would be a sibling dependency
+    for a question that belongs to neither. It sits beside ``resolve_explicit_file``,
+    which answers the adjacent half ("could I open it?"). ``behavioral`` re-exports
+    the name, so every existing importer still resolves.
+
+    The path is echoed unredacted, matching every other line these renderers print.
+    ``report._redact_home_paths`` is for artifacts handed to someone else -- the
+    dashboard card, SARIF, the CLI's stderr notes -- while an on-screen report keeps
+    full paths on purpose: "a real path is exactly what an owner debugging their own
+    config needs to see" (see that function's own docstring).
+    """
+    if not explicit_path:
+        return None
+    p = Path(explicit_path).expanduser()
+    # B-683: `Path.exists()` swallows ENOENT/ENOTDIR/EBADF/ELOOP and NOT EACCES, so a
+    # path under a directory this process cannot stat made it RAISE — and the one
+    # function whose entire job is to name a path problem answered one of them with
+    # "unexpected internal error (PermissionError) ... open an issue", i.e. by asking to
+    # be bug-reported for the caller's own directory mode. Ask stat directly and name
+    # each errno, rather than reading a boolean that cannot represent the third case.
+    try:
+        p.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return f"{explicit_path}: no such file or directory"
+    except PermissionError:
+        return f"{explicit_path}: permission denied"
+    except OSError as exc:
+        return f"{explicit_path}: {exc.strerror or exc}"
+    # Reached only after a successful stat, so the parent is readable and this cannot
+    # raise for the same reason.
+    if p.is_dir():
+        return f"{explicit_path}: is a directory, not a trajectory file"
+    return None
+
+
 def resolve_explicit_file(explicit_path) -> "tuple[list, bool]":
     """``(files, path_unreadable)`` for a user-named trajectory path.
 

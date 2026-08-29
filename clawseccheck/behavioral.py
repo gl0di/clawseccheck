@@ -49,7 +49,12 @@ from .checks import (
 )
 from .collector import dig
 from .scanbudget import limits_for
-from .trajectory import EXTERNAL_ORIGIN_KINDS, read_events, read_proven_tools
+from .trajectory import (
+    EXTERNAL_ORIGIN_KINDS,
+    explicit_path_problem,
+    read_events,
+    read_proven_tools,
+)
 
 # C-170 adversarial pass found the naive "reuse A1's three hint tuples verbatim"
 # design (still used for `INPUT_TOOL_HINTS` below) has two real bugs when applied
@@ -1009,42 +1014,6 @@ def audit_trail_divergence(ctx, events: list[dict]) -> "frozenset[str]":
         if isinstance(e.get("sessionId"), str) and e.get("sessionId").strip()
     }
     return frozenset(audit_sessions - traj_sessions)
-
-
-def explicit_path_problem(explicit_path: str | None) -> str | None:
-    """Why an explicitly-named --behavioral PATH cannot be read, or None if it is fine.
-
-    B-462: when the user names a file, a bad path is THEIR fact, not the host's. A typo
-    used to fall through to the generic "no trajectory sidecars found ... run on a host
-    where an OpenClaw agent has produced session trajectories" — blaming the machine,
-    never echoing the path, and exiting 0 under a green tick.
-
-    Shared by `analyze` and the CLI's exit-code decision so the two cannot disagree, and
-    so deciding the exit code costs a stat rather than a second full `analyze()` pass over
-    every trajectory file.
-    """
-    if not explicit_path:
-        return None
-    p = Path(explicit_path).expanduser()
-    # B-683: `Path.exists()` swallows ENOENT/ENOTDIR/EBADF/ELOOP and NOT EACCES, so a
-    # path under a directory this process cannot stat made it RAISE — and the one
-    # function whose entire job is to name a path problem answered one of them with
-    # "unexpected internal error (PermissionError) ... open an issue", i.e. by asking to
-    # be bug-reported for the caller's own directory mode. Ask stat directly and name
-    # each errno, rather than reading a boolean that cannot represent the third case.
-    try:
-        p.stat()
-    except (FileNotFoundError, NotADirectoryError):
-        return f"{explicit_path}: no such file or directory"
-    except PermissionError:
-        return f"{explicit_path}: permission denied"
-    except OSError as exc:
-        return f"{explicit_path}: {exc.strerror or exc}"
-    # Reached only after a successful stat, so the parent is readable and this cannot
-    # raise for the same reason.
-    if p.is_dir():
-        return f"{explicit_path}: is a directory, not a trajectory file"
-    return None
 
 
 def analyze(ctx, *, explicit_path: str | None = None) -> dict:

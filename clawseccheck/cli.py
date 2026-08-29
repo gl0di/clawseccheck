@@ -4416,8 +4416,20 @@ def _main(argv=None) -> int:
         return 0
 
     if _mode == "analyze_trajectory":
+        _traj_target = args.analyze_trajectory or None
         _emit(render_trajectory_analysis(
-            ctx, explicit_path=args.analyze_trajectory or None, ascii_only=ascii_only))
+            ctx, explicit_path=_traj_target, ascii_only=ascii_only))
+        # B-686: a path the user named that could not be used is THEIR fact, and 0 said
+        # the opposite — the report explained the problem while the exit code told any
+        # script reading `$?` that the analysis had completed. Decided rather than
+        # inherited: 1 is what --behavioral already returns for the same three cases
+        # through the same predicate (see `_behavioral_path_problem` below), and the two
+        # modes taking the same kind of argument should not answer it differently.
+        #
+        # Only reachable with an explicit path: with none, the predicate returns None and
+        # this stays 0, which is the correct answer for "this host has no trajectories".
+        if _behavioral_path_problem(_traj_target):
+            return 1
         return 0
 
     if _mode == "behavioral":

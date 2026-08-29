@@ -134,6 +134,7 @@ from .trajectory import (
     _MAX_BYTES_PER_FILE,
     _SCHEMA_VERSION,
     _TRACE_SCHEMA,
+    explicit_path_problem,
     find_trajectory_files,
     resolve_explicit_file,
 )
@@ -1007,17 +1008,22 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
     lines = ["Trajectory incident analysis (post-hoc, read-only)"]
 
     if not r["present"]:
-        # B-683: the not-present branch RETURNS, so a disclosure placed further down (next
-        # to `unreadable`) is unreachable in exactly the case that needs it. Verified by
-        # running it: fixing the crash alone produced "No trajectory sidecars found ...
-        # run on a host where an OpenClaw agent has produced session trajectories" for a
-        # file the process was not allowed to open — the host blamed for a directory mode,
-        # which is the same wrong answer B-462 already fixed for a typo'd path.
-        if r.get("path_unreadable"):
-            lines.append(f"  {q} The trajectory file you named could not be read "
-                         "(permission denied, or otherwise unopenable) — nothing was "
-                         "analyzed. This is NOT evidence that the file is empty, and it "
-                         "is not a statement about this host.")
+        # B-686, and B-683 before it: this branch RETURNS, so anything said further down —
+        # next to `unreadable` — is unreachable in exactly the cases that need it. Both
+        # attempts at this disclosure landed there first and printed nothing.
+        #
+        # A path the USER named is their fact, not the host's. Falling through to "run on
+        # a host where an OpenClaw agent has produced session trajectories" told someone
+        # who mistyped a filename to go and find a different machine. B-462 removed that
+        # answer from --behavioral; --analyze-trajectory kept it until now. The two take
+        # the same kind of argument, so they now share one predicate rather than wording
+        # the same three cases twice.
+        _problem = explicit_path_problem(explicit_path)
+        if _problem:
+            lines.append(f"  {warn} {_problem}")
+            lines.append(f"  {q} Nothing was analyzed. That is a fact about the path you "
+                         "named — not about this host, and not evidence that the file is "
+                         "empty.")
         else:
             lines.append(f"  {q} No trajectory sidecars found "
                          "(agents/*/sessions/*.trajectory.jsonl). Nothing to analyze — run on a "
