@@ -87,6 +87,8 @@ from ._content import (
     _b63_decoded_actionable,
     _dep_names_in_skill,
     _fence_only_suppression,
+    fence_suppression_note,
+    fence_suppression_provenance,
     _fence_ranges,
     _frontmatter_name,
     _in_fence,
@@ -306,10 +308,15 @@ def _notify_host_hits(
             if coverage is not None and _fence_only_suppression(
                 blob, m.start(), fence_ranges
             ):
+                _mf, _ff = fence_suppression_provenance(
+                    blob, m.start(), fence_ranges
+                )
                 coverage.append(
-                    f"coverage: a self-notification to Telegram/Discord ({m.group(0)})"
-                    " sits in a fence carrying no marker we recognise, so its payload"
-                    " was not assessed"
+                    "coverage: "
+                    + fence_suppression_note(
+                        f"a self-notification to Telegram/Discord ({m.group(0)})",
+                        _mf, _ff,
+                    )
                 )
             continue
         if hosts is not None:
@@ -1022,9 +1029,15 @@ def _cron_persistence_hits(
                 and _fence_only_suppression(blob, m.start(), fence_ranges)
                 and not _pos_in_test_fixture_file(blob, m.start(), _header_matches)
             ):
+                _mf, _ff = fence_suppression_provenance(
+                    blob, m.start(), fence_ranges, _header_matches
+                )
                 coverage.append(
-                    "coverage: a cron/startup persistence pattern sits in a fence carrying"
-                    f" no marker we recognise, so it was not assessed: {m.group(0)[:80]}"
+                    "coverage: "
+                    + fence_suppression_note(
+                        "a cron/startup persistence pattern", _mf, _ff
+                    )
+                    + f": {m.group(0)[:80]}"
                 )
             continue
         # B-199: attack-shaped cron content inside the skill's OWN test fixture is not
@@ -1720,9 +1733,14 @@ def _authkey_persistence_hits(
                 and _fence_only_suppression(blob, m.start(), fence_ranges)
                 and not _pos_in_test_fixture_file(blob, m.start(), _header_matches)
             ):
+                _mf, _ff = fence_suppression_provenance(
+                    blob, m.start(), fence_ranges, _header_matches
+                )
                 coverage.append(
-                    "coverage: an ~/.ssh/authorized_keys path sits in a fence carrying no"
-                    " marker we recognise, so whether it is written to was not assessed"
+                    "coverage: "
+                    + fence_suppression_note(
+                        "an ~/.ssh/authorized_keys path", _mf, _ff
+                    )
                 )
             continue
         if _pos_in_test_fixture_file(blob, m.start(), _header_matches):
@@ -3980,7 +3998,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             # unfenced match later in the same file. So the WARN is emitted only by the
             # `else` clause below, which runs exactly when no `break` happened — i.e.
             # when nothing convicted.
-            _fenced_only = False
+            _fenced_only_pos = None  # B-526: keep the offset, not just the fact
             for m in rx.finditer(blob):
                 if not _is_code_example(blob, m.start(), _fr):
                     crit.append(f"{name}: {label}")
@@ -3990,13 +4008,16 @@ def check_installed_skills(ctx: Context) -> Finding:
                     if rx is _KNOWN_EXFIL_HOST_RE:
                         crit_hosts_by_skill.setdefault(name, set()).add(m.group(0))
                     break  # one finding per label per skill is enough
-                if not _fenced_only and _fence_only_suppression(blob, m.start(), _fr):
-                    _fenced_only = True
+                if _fenced_only_pos is None and _fence_only_suppression(
+                    blob, m.start(), _fr
+                ):
+                    _fenced_only_pos = m.start()
             else:
-                if _fenced_only:
+                if _fenced_only_pos is not None:
+                    _mf, _ff = fence_suppression_provenance(blob, _fenced_only_pos, _fr)
                     coverage_fence.append(
-                        f"coverage: {name}: {label} sits in a fence carrying no marker we"
-                        " recognise, so it was not assessed"
+                        f"coverage: {name}: "
+                        + fence_suppression_note(label, _mf, _ff)
                     )
 
         # B-122: Telegram/Discord are dual-use notification hosts, not unambiguous
@@ -4029,7 +4050,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         for label, rx in _SKILL_HIGH:
             _test_fixture_only = False  # B-193: saw ONLY test-fixture-scoped live matches
             _agency_prohibited_only = False  # B-197: saw ONLY prohibition-governed matches
-            _fence_only = False  # B-526: saw ONLY bare-fence-hidden matches
+            _fence_only_pos = None  # B-526: offset of the first bare-fence-hidden match
             for m in rx.finditer(blob):
                 # C-135 (performance): _is_code_example is computed ONCE per match —
                 # this file's own notes record a 1 MB skill turning into a 107s check
@@ -4041,8 +4062,10 @@ def check_installed_skills(ctx: Context) -> Finding:
                     # a fenced match end the scan and swallow a real one further down.
                     # The else clause below already exists for exactly this pattern
                     # (B-193 / B-197), so this is a third flag in an established shape.
-                    if not _fence_only:
-                        _fence_only = _fence_only_suppression(blob, m.start(), _fr)
+                    if _fence_only_pos is None and _fence_only_suppression(
+                        blob, m.start(), _fr
+                    ):
+                        _fence_only_pos = m.start()  # B-526: keep the offset
                 else:
                     # C-259 (D2, docs/design/severity-separability.md): measured net-correct,
                     # not just assumed — over the 2,052-case WARN corpus this gate fires on
@@ -4104,12 +4127,13 @@ def check_installed_skills(ctx: Context) -> Finding:
             else:
                 if _test_fixture_only:
                     warns_content.append(f"{name}: {label} (inside the skill's own test fixture)")
-                elif _fence_only:
+                elif _fence_only_pos is not None:
                     # B-526: reached only when NOTHING convicted for this label, so a
                     # real match later in the blob can never be hidden by this note.
+                    _mf, _ff = fence_suppression_provenance(blob, _fence_only_pos, _fr)
                     coverage_fence.append(
-                        f"coverage: {name}: {label} sits in a fence carrying no marker we"
-                        " recognise, so it was not assessed"
+                        f"coverage: {name}: "
+                        + fence_suppression_note(label, _mf, _ff)
                     )
                 elif _agency_prohibited_only:
                     warns_content.append(f"{name}: {label} (prohibition/safety-constraint phrasing)")
@@ -4391,18 +4415,21 @@ def check_installed_skills(ctx: Context) -> Finding:
             # in this loop absorbed it: the `_p_fenced_only` coverage note below only
             # fires when NOTHING convicted, so the suppression was silent whenever any
             # other label happened to fire first.
-            _p_fenced_only = False
+            _p_fenced_only_pos = None  # B-526: keep the offset, not just the fact
             for pm in p_rx.finditer(blob):
                 if not _is_code_example(blob, pm.start(), _fr, fence_needs_negation=True):
                     high.append(f"{name}: {p_label}")
                     break  # one finding per label per skill
-                if not _p_fenced_only and _fence_only_suppression(blob, pm.start(), _fr):
-                    _p_fenced_only = True
+                if _p_fenced_only_pos is None and _fence_only_suppression(
+                    blob, pm.start(), _fr
+                ):
+                    _p_fenced_only_pos = pm.start()
             else:
-                if _p_fenced_only:
+                if _p_fenced_only_pos is not None:
+                    _mf, _ff = fence_suppression_provenance(blob, _p_fenced_only_pos, _fr)
                     coverage_fence.append(
-                        f"coverage: {name}: {p_label} sits in a fence carrying no marker we"
-                        " recognise, so it was not assessed"
+                        f"coverage: {name}: "
+                        + fence_suppression_note(p_label, _mf, _ff)
                     )
 
         # B-144: cron/startup persistence — dual-use, disclosure-aware (see

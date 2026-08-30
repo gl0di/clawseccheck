@@ -132,9 +132,23 @@ def test_the_dossier_and_advise_word_it_identically(tmp_path):
         capture_output=True, text=True,
     ).stdout
 
-    note = "an ~/.ssh/authorized_keys path sits in a fence"
-    assert note in dossier, dossier
-    assert note in advise_text, advise_text
+    # B-526, 2026-08-30: this compared both surfaces against a LITERAL sentence, and the
+    # literal went stale when the note was corrected — it used to say the path "sits in a
+    # fence", which is false in this very fixture: the path is in install.sh and the fence
+    # is in SKILL.md. Comparing the two surfaces to EACH OTHER pins the property this test
+    # is named for and cannot rot with the wording. It is also strictly stronger: a literal
+    # in both would still pass if both drifted together, which is exactly the divergence
+    # the one-helper rule exists to prevent.
+    def _note_line(text: str) -> str:
+        lines = [ln.strip() for ln in text.splitlines()
+                 if "authorized_keys" in ln and ln.strip().startswith("-")]
+        assert len(lines) == 1, f"expected exactly one disclosure line, got {lines}\n{text}"
+        return lines[0]
+
+    assert _note_line(dossier) == _note_line(advise_text)
+    # and it must be the corrected sentence: naming both files is the whole point (B-526).
+    assert "install.sh" in _note_line(dossier), dossier
+    assert "SKILL.md" in _note_line(dossier), dossier
     assert "(does not affect the verdict)" in advise_text
 
 

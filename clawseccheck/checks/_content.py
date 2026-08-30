@@ -6189,6 +6189,80 @@ def _has_cred_exfil_cross_skill(blob: str) -> bool:
     return bool(_CRED_RE.search(blob) and _EXFIL_RE.search(blob))
 
 
+def fence_suppression_provenance(
+    blob: str, pos: int, ranges: "list[tuple[int, int]]", header_matches=None
+) -> "tuple[str | None, str | None]":
+    """``(file_holding_pos, file_that_opened_the_fence)`` for a fence-suppressed match.
+
+    B-526. The disclosure this feeds used to read *"an ~/.ssh/authorized_keys path sits in
+    a fence carrying no marker we recognise"* — and in the evasion this task exists for,
+    that sentence is FALSE. The path sits in `install.sh`, an ordinary unfenced shell
+    script; the fence is three lines of changelog in `SKILL.md`. The note named no file
+    and never said that a whole file had fallen inside one unterminated fence, so a reader
+    was sent to look for a fence where there is none.
+
+    Both halves are recoverable from the blob the collector already built: it concatenates
+    every file behind ``# file: <name>`` headers (``_MANIFEST_HEADER_RE``), so the section
+    containing an offset names the file it came from. The fence's OPENING offset resolves
+    the same way, and when the two differ that difference IS the finding — the suppression
+    was written in a file other than the one it silenced.
+
+    Returns ``(None, None)`` rather than guessing when the blob carries no headers (a
+    single-file target) or the position falls outside every fence: an unknown file name
+    must not be invented into a sentence a user will act on.
+
+    *header_matches*: optional precomputed ``list(_MANIFEST_HEADER_RE.finditer(blob))``,
+    the same precompute-once-per-blob shape ``_pos_in_source_code_section`` takes.
+    """
+    sections = header_matches if header_matches is not None else list(
+        _MANIFEST_HEADER_RE.finditer(blob)
+    )
+    if not sections:
+        return None, None
+
+    def _file_at(offset: int) -> "str | None":
+        for m in sections:
+            if m.start() <= offset < m.end():
+                name = (m.group("name") or "").strip()
+                return name or None
+        return None
+
+    fence_open = None
+    for start, end in ranges:
+        if start <= pos < end:
+            fence_open = start
+            break
+        if start > pos:
+            break  # ranges are ordered by start position
+    return _file_at(pos), (_file_at(fence_open) if fence_open is not None else None)
+
+
+def fence_suppression_note(label: str, match_file, fence_file) -> str:
+    """The one sentence every fence-suppression disclosure uses. B-526.
+
+    Four call sites in ``checks/_vet.py`` composed this independently and all four said
+    the match "sits in a fence", which is only true when the fence and the match share a
+    file. Composing it once means the cross-file case — the evasion — cannot be described
+    correctly at one site and wrongly at the other three.
+
+    Degrades honestly: with no file names recoverable it says what it knows and no more,
+    which is the sentence that shipped before this and is still correct for a single-file
+    target.
+    """
+    if match_file and fence_file and match_file != fence_file:
+        return (
+            f"{label} was not assessed: it is in {match_file}, which fell inside an "
+            f"unterminated fence opened in {fence_file} — the fence that silenced it is "
+            "in a different file"
+        )
+    if match_file:
+        return (
+            f"{label} was not assessed: it sits inside a fence in {match_file} carrying "
+            "no marker we recognise"
+        )
+    return f"{label} sits in a fence carrying no marker we recognise, so it was not assessed"
+
+
 def _in_fence(pos: int, ranges: list[tuple[int, int]]) -> bool:
     """Return True when *pos* falls inside any of the precomputed fence ranges."""
     for start, end in ranges:

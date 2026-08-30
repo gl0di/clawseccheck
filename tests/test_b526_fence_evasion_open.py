@@ -202,6 +202,13 @@ def _assert_disclosed_not_convicted(rc: int, out: str, subject: str) -> None:
 
     * the subject is NAMED, in the human text output — this is the closure. Losing it
       means a fenced backdoor is invisible again.
+    * the note came from the FENCE branch. This asserted the literal "no marker we
+      recognise" until 2026-08-30, when that sentence was found to be false in the very
+      case this file exists for: the payload does not sit in a fence, it sits in an
+      ordinary script that a fence in ANOTHER file swallowed. The wording moved; the
+      property did not, so the assertion now pins the word the three branches share
+      rather than one branch's prose. A phrase is a proxy for a branch and rots when the
+      branch is reworded; that is what happened here.
     * it is under the "Not assessed" block — a disclosure, never a verdict.
     * the verdict is NOT a conviction.
     * **rc is ZERO, and that is the point.** An earlier draft of this helper asserted
@@ -220,7 +227,7 @@ def _assert_disclosed_not_convicted(rc: int, out: str, subject: str) -> None:
     assert "Not assessed" in out, (
         "the subject is named but not in the non-gating disclosure block\n" + out[:2000]
     )
-    assert "no marker we recognise" in out, (
+    assert "fence" in out, (
         "named, but not as a fence disclosure — check which branch fired\n" + out[:2000]
     )
     assert "DO-NOT-INSTALL" not in out, (
@@ -280,7 +287,15 @@ def test_the_two_skills_differ_only_in_three_characters_of_markdown(tmp_path):
     # The whole repair, and the only thing separating this from the original hole:
     assert "Not assessed" in out_f, out_f[:1500]
     assert "authorized_keys" in out_f, out_f[:1500]
-    assert "no marker we recognise" in out_f, out_f[:1500]
+    assert "fence" in out_f, out_f[:1500]
+    # B-526, 2026-08-30: and it must name BOTH files. The sentence used to say the path
+    # "sits in a fence", which is false here and was the reviewer's first defect — the
+    # path sits in install.sh, an ordinary unfenced script, and the fence is three lines
+    # of changelog in SKILL.md. A reader was sent to look for a fence where there is
+    # none. Naming the swallowed file and the file that opened the fence is the whole
+    # value of the disclosure in the cross-file case, which is the case this file is about.
+    assert "install.sh" in out_f, out_f[:1500]
+    assert "SKILL.md" in out_f, out_f[:1500]
 
 
 def test_a_dead_heredoc_in_one_script_STILL_SILENCES_ANOTHER_SCRIPT(tmp_path):
