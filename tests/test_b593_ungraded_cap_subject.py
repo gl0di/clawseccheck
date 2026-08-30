@@ -196,12 +196,23 @@ def test_the_three_sites_share_one_constant():
     flat = " ".join(flat.split())
     assert "would have capped the grade" not in flat, \
         "a hand-rolled copy of the cap sentence reappeared in report.py"
-    # Exact counts, not a lower bound: a new consumer has to come here and say so. In
-    # report.py the sentence form serves render_report's three ungraded paragraphs
-    # (F-155 live-test, F-154 behavioural, I-025 runtime signal) and the tail form serves
-    # the two renderers that follow it with an em dash — render_dashboard's card and
-    # render_html's ungraded cap paragraph (B-600). pdf.py is the sixth consumer and is
-    # checked by tests/test_b600_ungraded_cap_reaches_every_surface.py.
+    # Exact counts, not a lower bound: a new consumer has to come here and say so.
+    #
+    # The SENTENCE form is pinned at ZERO, and that is the load-bearing number. It used to
+    # serve render_report's three ungraded paragraphs (F-155 live-test, F-154 behavioural,
+    # I-025 runtime signal); B-600's follow-up took it off all three, because each fires on
+    # its own raw flag and so cannot say WHICH signal led, while the cascade line can and
+    # does. Three private copies of one sentence are what made 56 of the 64 signal
+    # combinations state it two to four times. Pinning zero is what stops a fourth
+    # paragraph from quietly growing its own copy again; the constant itself stays defined
+    # and is still checked by test_the_two_forms_differ_only_in_capitalisation.
+    #
+    # The TAIL form serves the three sites in report.py that follow it with an em dash:
+    # render_report's cascade line, render_dashboard's card, and render_html's ungraded cap
+    # paragraph. render_report's arrived last -- B-600 fixed the card and the HTML, and the
+    # 2026-08-21 review found the text report still silently dropping an ordinary severity
+    # cap the other three disclosed. pdf.py:632 is the fourth and final consumer, checked by
+    # tests/test_b600_ungraded_cap_reaches_every_surface.py.
     # Count real INTERPOLATIONS, not occurrences of the name: the derivation line and the
     # prose comments mention it too, and counting those makes the pin drift for reasons
     # that have nothing to do with a new consumer appearing.
@@ -209,8 +220,8 @@ def test_the_three_sites_share_one_constant():
              if "_UNGRADED_CAP_TAIL" in ln and ('f"' in ln or "f'" in ln)]
     _sentence = [ln for ln in _uses if "_UNGRADED_CAP_TAIL_SENTENCE" in ln]
     _tail = [ln for ln in _uses if ln not in _sentence]
-    assert len(_sentence) == 3, _sentence      # F-155, F-154, I-025 ungraded paragraphs
-    assert len(_tail) == 2, _tail              # render_dashboard's card, render_html (B-600)
+    assert len(_sentence) == 0, _sentence      # took off all three paragraphs by B-600
+    assert len(_tail) == 3, _tail              # card, render_html, render_report's generic line
 
 
 def test_the_two_forms_differ_only_in_capitalisation():

@@ -2564,6 +2564,27 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(
             f"(capped from {score.raw_score} - {_reason_text}{_cap_also_clause(_extras)})"
         )
+    elif _primary is not None:
+        # B-600 (2026-08-21 review): C-423's "skip it entirely" above is right about the
+        # NUMBER and wrong about the FACT. The card, the HTML and the PDF all say it; the
+        # text report did not, so an ordinary severity cap on an ungraded run was named
+        # everywhere but here.
+        #
+        # This line is now the ONE place the text states a cap, and it is the only one that
+        # can: `_cap_cascade` carries RANK — which signal led and which merely also fired —
+        # and the per-signal paragraphs below cannot, because each fires on its own raw flag
+        # with no knowledge of the others. On `severity + runtime` the text used to print the
+        # SECONDARY signal and omit the primary. Those paragraphs consequently no longer
+        # carry the tail sentence (see the notes beside them); they keep their framing and
+        # their reason phrase, and this line says the cap once, in the card's words and the
+        # card's order.
+        #
+        # Measured over all 64 signal combinations on an ungraded run: the sentence appears
+        # exactly once for every combination with a cap, and not at all for the one without.
+        lines.append(
+            f"{_cap_primary_reason_text(_primary, score, audited_path=_audited_path)}"
+            f"{_cap_also_clause(_extras)} — {_UNGRADED_CAP_TAIL}"
+        )
 
     # B-281 (ENV-1): name the file this grade actually describes. OpenClaw resolves its
     # config through OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR (what
@@ -2757,9 +2778,14 @@ def render_report(findings: list[Finding], score: ScoreResult,
             )
         else:
             lines.append(
+                # B-600 follow-up: the tail sentence deliberately does NOT live here.
+                # The cascade line above already states the cap ONCE, with rank (which
+                # signal led, which merely also fired) — the same sentence and the same
+                # ordering the card, the HTML and the PDF print. This paragraph keeps its
+                # own framing and its reason phrase; a private copy of the shared sentence
+                # is what made 56 of the 64 signal combinations say it two to four times.
                 "Runtime signal (I-025): a trajectory-indicator match fired — "
-                f"{_runtime_cap_phrase(score.runtime_cap_reason)}. "
-                f"{_UNGRADED_CAP_TAIL_SENTENCE}"
+                f"{_runtime_cap_phrase(score.runtime_cap_reason)}."
             )
     # F-155: a SECOND exception to "this grade never reflects runtime behaviour" — a
     # submitted VULNERABLE verdict from a live injection-test harness (canary/dryrun/
@@ -2786,7 +2812,13 @@ def render_report(findings: list[Finding], score: ScoreResult,
             # report can carry. It is stated whether or not a grade was issued.
             lines.append(
                 "Live-test result (F-155): a submitted VULNERABLE verdict — "
-                f"{_live_phrase}. {_UNGRADED_CAP_TAIL_SENTENCE}"
+                # B-600 follow-up: the tail sentence deliberately does NOT live here.
+                # The cascade line above already states the cap ONCE, with rank (which
+                # signal led, which merely also fired) — the same sentence and the same
+                # ordering the card, the HTML and the PDF print. This paragraph keeps its
+                # own framing and its reason phrase; a private copy of the shared sentence
+                # is what made 56 of the 64 signal combinations say it two to four times.
+                f"{_live_phrase}."
             )
     # F-154: a THIRD exception to "this grade never reflects runtime behaviour" — a
     # fired T1/T2/T3/B191 behavioral detector (--behavioral or --full) MAY CAP this
@@ -2809,7 +2841,13 @@ def render_report(findings: list[Finding], score: ScoreResult,
         else:
             lines.append(
                 "Behavioral result (F-154): a behavioral detector fired — "
-                f"{_beh_phrase}. {_UNGRADED_CAP_TAIL_SENTENCE}"
+                # B-600 follow-up: the tail sentence deliberately does NOT live here.
+                # The cascade line above already states the cap ONCE, with rank (which
+                # signal led, which merely also fired) — the same sentence and the same
+                # ordering the card, the HTML and the PDF print. This paragraph keeps its
+                # own framing and its reason phrase; a private copy of the shared sentence
+                # is what made 56 of the 64 signal combinations say it two to four times.
+                f"{_beh_phrase}."
             )
     # B-306 (C-135 follow-up): openclaw.json itself went dark this run (present but
     # unparseable, or unreadable) — every config-derived check (A1/B41/B1/B11/...)
@@ -3675,7 +3713,9 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         # this branch an ungraded --dashboard --full run disclosed NOTHING about a
         # submitted VULNERABLE live-test verdict — the most serious thing this tool can
         # report — purely because there was no number to say it had been capped from.
-        # Same fix render_report already carries; the card was missed. Golden Rule #4.
+        # Golden Rule #4. (This comment used to say render_report already carried the
+        # same fix. It did not: the text report reached the tail only through its
+        # signal-specific sites, and its generic cap path stayed silent until B-600.)
         grade_lines.append(
             f"{_mark} {_cap_primary_reason_text(_cap_primary, score)}"
             f"{_cap_also_clause(_cap_extras)} — {_UNGRADED_CAP_TAIL}"

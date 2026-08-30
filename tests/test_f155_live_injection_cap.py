@@ -26,7 +26,7 @@ from clawseccheck import audit
 from clawseccheck.catalog import CRITICAL, FAIL, LOW, PASS, Finding
 from clawseccheck.cli import main
 from clawseccheck.history import load as history_load
-from clawseccheck.report import _UNGRADED_CAP_TAIL_SENTENCE
+from clawseccheck.report import _UNGRADED_CAP_TAIL
 from clawseccheck.monitor import load_state
 from clawseccheck.report import render_html, render_json, render_report
 from clawseccheck.scoring import LIVE_INJECTION_CAP, ScoreResult, compute
@@ -368,7 +368,11 @@ class TestCliEndToEnd:
         # was issued.
         assert "Live-test exception (F-155)" not in out
         assert "Live-test result (F-155): a submitted VULNERABLE verdict" in out
-        assert _UNGRADED_CAP_TAIL_SENTENCE in out
+        # B-600 follow-up: see the sibling note in test_f154_behavioral_cap.py. The
+        # paragraph above keeps its framing; the cap sentence is now said once, by the
+        # cascade line, with rank. The pinned invariant -- an ungraded run still states
+        # the cap -- is untouched.
+        assert _UNGRADED_CAP_TAIL in out
 
     def test_resistant_verdict_scores_the_same_but_ledger_shows_it_ran(self, tmp_path, capsys):
         # C-425: no longer byte-identical, ON PURPOSE. A submitted RESISTANT verdict

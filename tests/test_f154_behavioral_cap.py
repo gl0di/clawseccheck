@@ -58,7 +58,7 @@ from clawseccheck.behavioral import (
     group_events_by_thread,
 )
 from clawseccheck.catalog import CRITICAL, FAIL, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
-from clawseccheck.report import _UNGRADED_CAP_TAIL_SENTENCE
+from clawseccheck.report import _UNGRADED_CAP_TAIL
 from clawseccheck.cli import main
 from clawseccheck.collector import Context, collect
 from clawseccheck.report import render_html, render_json, render_report
@@ -780,7 +780,12 @@ class TestCliEndToEnd:
         # behavioral detector fired is stated whether or not a grade was issued.
         assert "Behavioral exception (F-154)" not in out
         assert "Behavioral result (F-154): a behavioral detector fired" in out
-        assert _UNGRADED_CAP_TAIL_SENTENCE in out
+        # B-600 follow-up: the sentence moved OFF this paragraph and onto the single
+        # cascade line above it, which is the only site that can say WHICH signal led.
+        # The invariant this test pins is unchanged and is the one that matters: on an
+        # ungraded run the cap fact is stated, not suppressed. Only its address moved,
+        # so the lowercase tail is asserted where the capitalised sentence used to be.
+        assert _UNGRADED_CAP_TAIL in out
         assert "T1 behavioral trifecta" in out
 
     # ── F-154 round 2 (C-135 review) — Finding 1, real CLI end-to-end repro ──────

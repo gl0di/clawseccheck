@@ -135,10 +135,16 @@ def test_all_four_surfaces_agree_on_one_run(tmp_path):
     assert _UNGRADED_CAP_TAIL in card
     assert _UNGRADED_CAP_TAIL in html.read_text(encoding="utf-8")
     assert any(_TAIL_PDF in ln for ln in _pdf_text(pdf))
-    # The text report's own severity-cap disclosure is the card's — it reaches this sentence
-    # through the F-155/F-154/I-025 paragraphs, which need a submitted verdict. What it must
-    # not do is contradict the other three by claiming the finding does not exist.
-    assert "CRITICAL finding — it would have capped the grade; this run has none" not in report
+    # 2026-08-21 review: the text used to be the one surface asserted NEGATIVELY — "does
+    # not contradict the other three" — on the belief that it reached this sentence only
+    # through the F-155/F-154/I-025 paragraphs, which need a submitted verdict. The belief
+    # was wrong, and the asymmetry is precisely what hid the gap: an ordinary severity cap
+    # was named on the card, the HTML and the PDF and nowhere in the text report, while a
+    # green run of THIS test reported that the four surfaces agreed. The old assertion
+    # could not fail either way — it looked for the pre-B-593 semicolon wording, which no
+    # longer exists anywhere in the tree. All four are asserted the same way now, so
+    # "agree" means agree rather than "three agree and one was not asked".
+    assert _UNGRADED_CAP_TAIL in report
 
 
 def test_one_wording_no_fourth_copy():
