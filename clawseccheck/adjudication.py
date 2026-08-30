@@ -1167,6 +1167,38 @@ def run_state(score) -> dict:
     }
 
 
+def _emit_json(payload, *, sort_keys: bool = True) -> str:
+    """The one way this module turns a payload into an emitted artifact.
+
+    B-693. Every emitter in `report.py` and `pipeline.py` ends by routing its tree through
+    `report._sanitize_tree`; every emitter in this module used to end at a bare
+    `json.dumps`. `PipelineResult.to_json`'s docstring states the rule they were following
+    and this module was not: "the producer already sanitized it" is not a property this
+    boundary may assume -- it enforces it.
+
+    That matters more here than there. The `--judge-packet` and `--vet-judge-packet`
+    artifacts are the ones SKILL.md tells the agent to paste into a possibly THIRD-PARTY
+    judge panel, so this module emits the payloads that travel furthest from the machine
+    that produced them, and it was the one with no enforcing boundary. Safety rested on a
+    dozen independent producers each remembering (B-570 gates `target`, B-556 reduces
+    content-ring evidence, `live_test_cap_signal` allow-lists tools and regex-gates ids).
+    They are all careful; none of that is a structure.
+
+    A FUNCTION rather than four remembered calls, for the reason this thread keeps
+    relearning: four hand-maintained copies of one rule are four chances to diverge, which
+    is exactly what B-689 was. `tests/test_b693_the_packet_boundary_is_enforced.py` pins
+    that no `json.dumps` remains outside this helper.
+
+    Measured before shipping, on `fixtures/home_vuln`, `fixtures/home_safe` and the real
+    config: `_sanitize_tree` is INERT on all three packets -- byte-identical output. It is
+    also idempotent, so `render_judged_json`, whose base already came sanitised out of
+    `report.render_json`, keeps the byte-identity its own docstring promises.
+    """
+    from .report import _sanitize_tree  # noqa: PLC0415 -- mirrors PipelineResult.to_json
+    return json.dumps(_sanitize_tree(payload), ensure_ascii=True, indent=2,
+                      sort_keys=sort_keys)
+
+
 def render_judge_packet_json(ctx, findings, *, version: str, score=None) -> str:
     """Return the standalone ``--judge-packet`` JSON artifact as a string."""
     payload = {
@@ -1176,7 +1208,7 @@ def render_judge_packet_json(ctx, findings, *, version: str, score=None) -> str:
         "runState": run_state(score),
         "bundleTemplate": build_bundle_template(),
     }
-    return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+    return _emit_json(payload)
 
 
 # --------------------------------------------------------------------------- --judged consumer (F-115)
@@ -1397,7 +1429,7 @@ def render_judged_json(ctx, findings, score, *, verdicts_raw: str, risk=None) ->
 
     base = json.loads(render_json(findings, score, risk=risk, ctx=ctx))
     base["secondOpinion"] = _second_opinion(ctx, findings, _parse_verdicts(verdicts_raw))
-    return json.dumps(base, ensure_ascii=True, indent=2)
+    return _emit_json(base, sort_keys=False)
 
 
 # --------------------------------------------------------------------------- --propose-ignore (C-253)
@@ -1547,7 +1579,7 @@ def render_ignore_proposals_json(findings, *, verdicts_raw: str, version: str) -
             "against this output saved to a file."
         ),
     }
-    return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+    return _emit_json(payload)
 
 
 # --------------------------------------------------------------------------- --vet-judge-packet / --vet-judged (C-254)
@@ -1712,7 +1744,7 @@ def render_vet_judge_packet_json(engine_output, *, target: str, version: str) ->
         "targetFingerprint": _vet_run_fingerprint(target),
         "judgePacket": build_vet_judge_packet(engine_output, target),
     }
-    return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+    return _emit_json(payload)
 
 
 def _escalate_finding(f, verdicts_map: dict):
