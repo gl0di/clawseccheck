@@ -28,6 +28,7 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -158,3 +159,79 @@ def test_an_explicit_history_path_takes_the_ledger_with_it(tmp_path):
     _run(tmp_path, "--dryrun", "--history", str(hist))
     assert (hist.parent / "coverage.json").exists()
     assert not (tmp_path / "store" / "coverage.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# B-599, second half: the READER. Added 2026-08-30.
+#
+# `d3bd32e` moved the WRITE side onto the run's own store and this file pinned it. One
+# reader was left behind: `--analyze-trajectory` renders a self-test corroboration line
+# from the coverage ledger, and it resolved that ledger from `$HOME` no matter what
+# `--data-dir` said. So a scratch or CI run reported corroboration derived from the
+# operator's real machine — the tool asserting an activity that did not happen in the
+# store the run was using.
+#
+# The same shape as B-683 earlier in the week: a fix that closed one side of a symmetry
+# and left the other, where each side alone looks complete.
+# ---------------------------------------------------------------------------
+
+def _analyze(home_dir, data_dir, openclaw_home):
+    env = dict(os.environ)
+    env["HOME"] = str(home_dir)
+    proc = subprocess.run(
+        [sys.executable, "-m", "clawseccheck", "--analyze-trajectory", "",
+         "--home", str(openclaw_home), "--data-dir", str(data_dir)],
+        cwd=REPO_ROOT, capture_output=True, text=True, env=env,
+    )
+    return proc.stdout + proc.stderr
+
+
+def _ledger_fixture(tmp_path, *, home_says_run: bool, store_says_run: bool):
+    fake_home = tmp_path / "fakehome"
+    (fake_home / ".clawseccheck").mkdir(parents=True)
+    store = tmp_path / "store"
+    store.mkdir()
+    openclaw = tmp_path / "oc"
+    openclaw.mkdir()
+    (openclaw / "openclaw.json").write_text('{"mcp": {"servers": {}}}', encoding="utf-8")
+    ran = '{"self_test": "2026-08-30", "_schema": "1"}'
+    idle = '{"_schema": "1"}'
+    (fake_home / ".clawseccheck" / "coverage.json").write_text(
+        ran if home_says_run else idle, encoding="utf-8")
+    (store / "coverage.json").write_text(
+        ran if store_says_run else idle, encoding="utf-8")
+    return fake_home, store, openclaw
+
+
+_LEDGER_CLAIM = "local ledger shows a self-test capability was run"
+
+
+def test_the_reader_ignores_the_real_home_ledger(tmp_path):
+    """The defect: `$HOME`'s ledger said a self-test ran, the run's own store said it did
+    not, and the report believed `$HOME`."""
+    fake_home, store, oc = _ledger_fixture(
+        tmp_path, home_says_run=True, store_says_run=False)
+    out = _analyze(fake_home, store, oc)
+    assert _LEDGER_CLAIM not in out, out[:1200]
+
+
+def test_the_reader_uses_the_store_this_run_was_given(tmp_path):
+    """The other direction, and the control: a fix that simply stopped reading any ledger
+    would pass the test above and fail this one."""
+    fake_home, store, oc = _ledger_fixture(
+        tmp_path, home_says_run=False, store_says_run=True)
+    out = _analyze(fake_home, store, oc)
+    assert _LEDGER_CLAIM in out, out[:1200]
+
+
+def test_the_reader_and_the_writer_resolve_the_same_file(tmp_path):
+    """Pinned as one question rather than two.
+
+    `_coverage_path` is the single resolver; the write side, the freshness notice and now
+    this reader all go through it. Two call sites resolving a store independently is how
+    half of a redirect goes missing, which is the whole of B-599.
+    """
+    from clawseccheck.cli import _coverage_path
+
+    args = SimpleNamespace(history=str(tmp_path / "s" / "history.jsonl"))
+    assert _coverage_path(args) == str(tmp_path / "s" / "coverage.json")

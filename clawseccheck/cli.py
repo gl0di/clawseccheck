@@ -4433,8 +4433,13 @@ def _main(argv=None) -> int:
 
     if _mode == "analyze_trajectory":
         _traj_target = args.analyze_trajectory or None
+        # B-599: read the ledger from the store THIS run is using. `_coverage_path` is
+        # the same resolver the write side (`_record_run`) and the freshness notice
+        # already go through, so --data-dir moves this file with the other three instead
+        # of leaving one reader pointed at the operator's real ~/.clawseccheck/.
         _emit(render_trajectory_analysis(
-            ctx, explicit_path=_traj_target, ascii_only=ascii_only))
+            ctx, explicit_path=_traj_target, ascii_only=ascii_only,
+            ledger_path=_coverage_path(args)))
         # B-686: a path the user named that could not be used is THEIR fact, and 0 said
         # the opposite — the report explained the problem while the exit code told any
         # script reading `$?` that the analysis had completed. Decided rather than

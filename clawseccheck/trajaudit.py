@@ -792,7 +792,8 @@ def _iter_selftest_texts(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
 
 
 def self_test_corroboration(home, *, explicit_path: str | None = None,
-                             ledger_home: str | None = None, ctx=None) -> dict:
+                             ledger_home: str | None = None, ctx=None,
+                             ledger_path: str | None = None) -> dict:
     """B-300: corroborate a canary/multi-turn self-test claim against the trajectory log.
 
     Returns a result dict:
@@ -841,7 +842,13 @@ def self_test_corroboration(home, *, explicit_path: str | None = None,
         },
     }
 
-    ledger = load_ledger(ledger_home)
+    # B-599: `ledger_path` is the store THIS RUN is using, resolved by the CLI from
+    # --data-dir the same way history/state/events already are; it wins over
+    # `ledger_home` exactly as it does in `load_ledger` itself. Without it this read
+    # went to the real ~/.clawseccheck/ no matter what --data-dir said, so a scratch run
+    # reported corroboration derived from the operator's OWN machine. The write side was
+    # fixed by d3bd32e and this reader was left behind — the same half of a symmetry.
+    ledger = load_ledger(ledger_home, path=ledger_path)
     result["ledger_recorded"] = "self_test" in ledger
     if not result["ledger_recorded"]:
         return result
@@ -899,6 +906,7 @@ _SELFTEST_LABELS = {"canary": "canary (--canary)", "multiturn": "multi-turn (--m
 
 def render_self_test_corroboration(home, *, explicit_path: str | None = None,
                                     ledger_home: str | None = None,
+                                    ledger_path: str | None = None,
                                     ascii_only: bool = False, ctx=None) -> list:
     """Render B-300's self-test corroboration lines for --analyze-trajectory.
 
@@ -910,6 +918,7 @@ def render_self_test_corroboration(home, *, explicit_path: str | None = None,
     ``--exhaustive``'s widened trajectory cap; ``None`` keeps today's default.
     """
     r = self_test_corroboration(home, explicit_path=explicit_path, ledger_home=ledger_home,
+                                ledger_path=ledger_path,
                                  ctx=ctx)
     if not r["ledger_recorded"]:
         return []
@@ -994,7 +1003,8 @@ def render_self_test_corroboration(home, *, explicit_path: str | None = None,
 
 
 def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_only: bool = False,
-                                ledger_home: str | None = None) -> str:
+                                ledger_home: str | None = None,
+                                ledger_path: str | None = None) -> str:
     """Human-readable, §8-safe incident report for --analyze-trajectory.
 
     ``ledger_home`` overrides B-300's self-test-corroboration ledger lookup (tests only;
@@ -1030,7 +1040,7 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
                          "host where an OpenClaw agent has produced session trajectories.")
         lines.extend(render_self_test_corroboration(
             getattr(ctx, "home", None), explicit_path=explicit_path, ascii_only=ascii_only,
-            ledger_home=ledger_home, ctx=ctx))
+            ledger_home=ledger_home, ledger_path=ledger_path, ctx=ctx))
         return "\n".join(lines)
 
     lines.append(
