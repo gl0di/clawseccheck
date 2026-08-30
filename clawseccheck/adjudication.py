@@ -1069,6 +1069,57 @@ def build_bundle_template() -> dict:
     }
 
 
+# B-689: every cap signal `scoring.compute` can set, in `report._CAP_SIGNAL_TABLE`'s own
+# priority order. It used to be an inline five-tuple missing `cap_severity` -- the most
+# ordinary cap there is -- so a run capped by an open CRITICAL handed the adjudicator
+# `capsFired: []`, a positive claim that nothing capped it, about the one case every
+# vulnerable config produces.
+#
+# The WORDING is deliberately not shared with `_CAP_SIGNAL_TABLE`, and deriving it from
+# there would be the wrong repair. That table phrases a cap for OUR report ("a
+# blind/unreadable config"); these labels are read by a possibly third-party host agent
+# that has none of our context, so they are self-contained plain English ("config could
+# not be read"). Two audiences, two vocabularies, one FACT -- and it is the fact that has
+# to be kept in step. `tests/test_b689_every_cap_reaches_the_judge.py` does that against
+# `dataclasses.fields(ScoreResult)`, the producer itself, so a seventh `*_capped` field
+# reddens the build. An earlier version of this comment claimed the guard was anchored on
+# `report._cap_signal_active`; that is a hand-written six-key literal with no introspection
+# of scoring, so it would have missed exactly the divergence this bug WAS.
+#
+# `cap_severity` is the odd entry and that asymmetry is why it was missed: the other five
+# are booleans, it is a severity string, so it serves as BOTH the presence flag and the
+# reason. On every score that reaches this function it is a catalog severity
+# (CRITICAL/HIGH/...), engine-authored, so it crosses the Golden Rule #1 boundary as state
+# rather than user data. Scoped to those scores on purpose: `tamperscore.tamper_subgrade`
+# writes check-id labels ("B22-FAIL", "no-monitor") into the SAME field, and that
+# ScoreResult reaches `render_report(tamper=...)` and never this function.
+#
+# `live_injection_cap_reason` was the second half of the same divergence: it exists, it is
+# already published top-level by `report.render_json`, and its own producer bounds it --
+# `LIVE_TEST_TOOLS` is four literals, `_LIVE_TEST_ID_RE` is `^[A-Za-z0-9_.-]{1,32}$`, six
+# entries max, then `_sanitize()`. So it may cross this boundary exactly as the other
+# stable labels do.
+#
+# Be honest about what wiring it currently buys: NOTHING YET, and that is a separate gap
+# rather than a reason to leave the entry wrong. `--judge-packet` builds its score before
+# any bundle is resolved (`judge_packet` is not in `_MODE_HONORS`), so the flag is always
+# False on that path; `--full --json` DOES resolve it, and `PipelineResult.to_json`'s
+# allowlist then drops `runState` entirely. The entry is correct and becomes visible the
+# moment either is fixed.
+#
+# `degraded_capped` genuinely has no reason attribute to surface -- scoring defines none --
+# and its count already rides the envelope as `degradedChecks`, so that None is correct
+# rather than an omission; the same is true of nothing else in this table.
+_CAP_LADDER = (
+    ("live_injection_capped", "live_injection_cap_reason", "live injection test"),
+    ("config_blind_capped", "config_blind_reason", "config could not be read"),
+    ("degraded_capped", None, "checks broke rather than concluded"),
+    ("cap_severity", "cap_severity", "open finding at the capping severity"),
+    ("runtime_capped", "runtime_cap_reason", "corroborated runtime signal"),
+    ("behavioral_capped", "behavioral_cap_reason", "behavioral detector fired"),
+)
+
+
 def run_state(score) -> dict:
     """What a judge needs to know about the RUN, as opposed to any one finding.
 
@@ -1095,13 +1146,7 @@ def run_state(score) -> dict:
     if score is None:
         return {"stated": False}
     caps = []
-    for flag, reason_attr, label in (
-        ("config_blind_capped", "config_blind_reason", "config could not be read"),
-        ("runtime_capped", "runtime_cap_reason", "corroborated runtime signal"),
-        ("behavioral_capped", "behavioral_cap_reason", "behavioral detector fired"),
-        ("degraded_capped", None, "checks broke rather than concluded"),
-        ("live_injection_capped", None, "live injection test"),
-    ):
+    for flag, reason_attr, label in _CAP_LADDER:
         if not getattr(score, flag, False):
             continue
         entry = {"cap": flag, "what": label}

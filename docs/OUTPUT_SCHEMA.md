@@ -808,7 +808,8 @@ Sources folded into the packet:
 | `tool` | `str` | Always `"clawseccheck"`. |
 | `version` | `str` | Tool version string. |
 | `judgePacket` | `array[JudgePacketItem]` | The packet items. May be an empty array. |
-| `runState` | `object` | B-623: the state of the RUN that produced the packet, as opposed to any one item. `{"stated": false}` when the caller supplied no score — silence and health are different claims, and the packet must not make the second by omission. Otherwise `stated: true` plus `graded` (bool), `missingLayers` (`[{layer, status}]`), `notChecked` (`array[str]`, the running layers' own plain-English limits), `capsFired` (`[{cap, what, reason?}]`) and `degradedChecks` (int). Only STATE crosses this boundary — never config content, since the packet is pasted into a possibly third-party host agent. Rides the envelope rather than each item because it is per-run: a config-blind audit produces ~174 items that are ALL `UNKNOWN`, and repeating the one fact that explains all of them on every item would be noise. |
+| `bundleTemplate` | `object` | B-596: the envelope a judge's answers have to arrive in, shipped WITH the packet so the return shape travels attached to the items it describes rather than as prose the agent has already summarised away. Its arrays are empty on purpose — a pre-filled `"verdict": "SAFE"` would round-trip just as well and invite the rubber-stamp the panel exists to prevent; the filled shapes sit beside them as `entryExample`, which no parser reads. The same skeleton is reproduced in `SKILL.md`, and the shape it must be filled to is §13's own input contract below; every value is derived from the constants the parser itself uses. |
+| `runState` | `object` | B-623: the state of the RUN that produced the packet, as opposed to any one item. `{"stated": false}` when the caller supplied no score — silence and health are different claims, and the packet must not make the second by omission. Otherwise `stated: true` plus `graded` (bool), `missingLayers` (`[{layer, status}]`), `notChecked` (`array[str]`, the running layers' own plain-English limits), `capsFired` (`[{cap, what, reason?}]`) and `degradedChecks` (int). `capsFired` lists **every** cap signal the scoring layer can set, in the engine's own priority order: `live_injection_capped`, `config_blind_capped`, `degraded_capped`, `cap_severity`, `runtime_capped`, `behavioral_capped`. `cap` is the score attribute's name, `what` is plain English for an adjudicator with none of this tool's context, and `reason` is present only where the engine defines a stable label for that signal (`degraded_capped` has none -- its count rides `degradedChecks` instead). An empty list is a positive claim that nothing capped the run, so completeness is enforced rather than maintained by hand: through v3.61.0 `cap_severity` was absent and an ordinary run capped by an open CRITICAL reported `capsFired: []`. Only STATE crosses this boundary — never config content, since the packet is pasted into a possibly third-party host agent. Rides the envelope rather than each item because it is per-run: a config-blind audit produces ~174 items that are ALL `UNKNOWN`, and repeating the one fact that explains all of them on every item would be noise. |
 
 ### JudgePacketItem fields
 
@@ -841,9 +842,23 @@ Sources folded into the packet:
       "safe_facts": {"destination_host": "reports.example.com"},
       "corroboration": {"count": 2, "check_ids": ["B65", "TT4_FILE_NET"], "scope": "target"}
     }
-  ]
+  ],
+  "runState": {
+    "stated": true,
+    "graded": false,
+    "missingLayers": [{"layer": "self_report", "status": "not_submitted"}],
+    "notChecked": ["101 log/transcript sink(s) not scanned"],
+    "capsFired": [
+      {"cap": "cap_severity", "what": "open finding at the capping severity", "reason": "CRITICAL"}
+    ],
+    "degradedChecks": 0
+  }
 }
 ```
+
+`bundleTemplate` is elided above for length: it is a fixed 28-line envelope shipped verbatim
+with every packet, described in the table above and reproduced in `SKILL.md`.
+Every other envelope key a real `--judge-packet` run emits is shown.
 
 ---
 
