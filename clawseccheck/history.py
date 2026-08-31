@@ -16,8 +16,9 @@ from pathlib import Path
 from . import brand
 from .locking import journal_lock
 from .monitor import (
-    SCHEMA_VERSION, _chain_hash, _iter_jsonl, _last_chain_hash, _rotate_journal, _schema_ok,
-    chain_provenance_note, verify_chain,
+    RAW_DEGRADED, RAW_HELD, SCHEMA_VERSION, _chain_hash, _iter_jsonl, _last_chain_hash,
+    _raw_score_scope, _rotate_journal, _schema_ok, chain_provenance_note, raw_backstop,
+    verify_chain,
 )
 from .safeio import secure_append_text, secure_dir
 
@@ -75,7 +76,8 @@ def _sanitize_home(value: str | None) -> str | None:
 
 
 def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
-           home: str | None = None, source: str | None = None) -> "str | None":
+           home: str | None = None, source: str | None = None,
+           findings=None, version: str | None = None) -> "str | None":
     """Append one JSON line {date, ts, score, grade, home, source, chain_hash}
     to the history file.
 
@@ -186,6 +188,43 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
         {"score": int(score.score), "grade": str(score.grade)} if graded
         else {}
     )
+    # B-691: what the capped score CANNOT say. `score` is pinned at a floor by the most
+    # severe open FAIL, so a run that got materially worse records the same number and
+    # --trend printed a flat arrow across it. The uncapped pass-rate still moves, and the
+    # monitor has watched it since B-273; this store never did.
+    #
+    # Three keys or none, and only on a graded row. Each is load-bearing:
+    #   raw_score  the figure itself.
+    #   raw_scope  WHICH checks were in its denominator. That set grows with every release,
+    #              so two rows straddling an upgrade hold different denominators with
+    #              nothing on disk changed -- measured on a real home, two new WARN checks
+    #              alone fell raw 83 -> 82 while the capped score held.
+    #   raw_ver    the build. The scope hash is over check IDs and raw_score is severity-
+    #              WEIGHTED, so a severity re-tune moves the figure with the hash
+    #              byte-identical; a hash alone cannot see that.
+    #
+    # `assessable` is not decoration: `compute([])` returns `assessable=False, raw_score=0,
+    # graded=True`, so a run that found nothing would otherwise publish `raw 0` as a
+    # measurement and two of them would read as a perfect standstill.
+    #
+    # `getattr`, never `score.raw_score`: 13 test modules record through objects carrying
+    # only `.score`/`.grade`, the same tolerance the `graded` read above documents. A
+    # caller that cannot supply `findings` or `version` writes no triple at all, and the
+    # row is simply not comparable -- which is the honest outcome, not a silent zero.
+    _raw = getattr(score, "raw_score", None)
+    raw_fields = {}
+    if (graded and getattr(score, "assessable", True) and findings is not None
+            and version and isinstance(_raw, int) and not isinstance(_raw, bool)):
+        raw_fields = {
+            "raw_score": _raw,
+            "raw_scope": _raw_score_scope(findings),
+            "raw_ver": str(version),
+        }
+    # TAIL position, after `_schema` and the ungraded marker: the seven-key graded prefix
+    # stays byte-identical, and `_rotate_journal` re-emits each parsed row in its own
+    # insertion order, so the position survives every rotation. Inside the hashed payload
+    # like every other field, so a planted `raw_score` breaks the chain (C-162's reason
+    # for putting `_schema` there).
     base = {
         "date": date,
         **graded_fields,
@@ -194,6 +233,7 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
         "source": _run_source(source),
         "_schema": SCHEMA_VERSION,
         **({} if graded else {"graded": False}),
+        **raw_fields,
     }
     # Symlink-safe: dir 0700 and an O_NOFOLLOW append, so a planted symlink at
     # history.jsonl can never redirect this default-path write to another file.
@@ -328,6 +368,15 @@ def load_with_problem(path: str = DEFAULT_HISTORY) -> "tuple[HistoryRows, OSErro
             row["ts"] = obj.get("ts")
             row["home"] = obj.get("home")
             row["source"] = obj.get("source", "legacy")
+            # B-691: carried through, never defaulted. This projection drops every key it
+            # does not name, so a figure the writer recorded would otherwise be invisible
+            # to `render_trend`. `None` here means "this row does not say", which is a
+            # different answer from any number -- inventing one from `score` would read
+            # the ARRIVAL of a baseline as a fall (the self-healing idiom
+            # `monitordims/_score.py` states for the same pair of fields).
+            row["raw_score"] = obj.get("raw_score")
+            row["raw_scope"] = obj.get("raw_scope")
+            row["raw_ver"] = obj.get("raw_ver")
             rows.append(row)
     except OSError as exc:
         return HistoryRows(), exc
@@ -452,6 +501,11 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     # wordmark — collapsed to the one brand header line.
     lines = [brand.header(subtitle="Score Trend", ascii_only=ascii_only), ""]
     last_graded_score = None
+    last_graded_row: "dict | None" = None
+    # B-691: runs whose score held or rose while the uncapped pass-rate FELL, and runs
+    # where that comparison could not be made at all. Counted, not silently skipped.
+    pinned_falls = 0
+    uncorroborated = 0
     holes = 0
     # B-579: a "view" row is produced by the ACT of running --trend, not by a check the
     # user asked for (see history.record's B-579 call site). It still renders — every row
@@ -461,6 +515,7 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     # grade", which is the trend viewer reporting on rows it created by being run.
     checkable = 0
     for row in rows:
+        raw_clause = ""
         is_graded = row.get("graded", True) is not False and row.get("score") is not None
         is_view = row.get("source") == "view"
         label = row.get("ts") or row["date"]
@@ -478,14 +533,62 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
                 arrow = arrow_down
             else:
                 arrow = arrow_flat
-            last_graded_score = row["score"]
             line = f"{label}  {row['grade']}  {row['score']}  {arrow}  [{row.get('source', 'legacy')}]"
+            # B-691. The arrow above compares the CAPPED score, which an open FAIL pins at
+            # a floor -- so it can render flat across a run that got materially worse. The
+            # uncapped pass-rate still moves; `raw_backstop` is the same decision the
+            # monitor has made since B-273, shared rather than restated.
+            #
+            # Comparability is stricter than the monitor's because this store is. A
+            # `state.json` is single-slot and pinned to one subject by `--state`; a
+            # `history.jsonl` is an append-only timeline behind ONE default path for every
+            # `--home`, so two rows can describe different machines. Hence `home` and
+            # `raw_ver` on top of the scope hash: the hash is over check IDs while
+            # raw_score is severity-WEIGHTED, so a severity re-tune moves the figure with
+            # the hash byte-identical. `source` keeps a `test`-tagged row -- the suite
+            # appends thousands into the real store -- from corroborating a real one.
+            #
+            # Presence BEFORE equality, and a legacy row (no figure at all) counts as not
+            # comparable rather than as agreement: inventing a baseline from `score` would
+            # read the ARRIVAL of the figure as a fall. Absent = skip for one pair,
+            # self-healing, the idiom `monitordims/_score.py` states for the same fields.
+            if last_graded_row is not None:
+                _prev, _curr = last_graded_row, row
+                _same_subject = (
+                    all(isinstance(r.get(k), str) for r in (_prev, _curr)
+                        for k in ("raw_scope", "raw_ver", "home"))
+                    and _prev["raw_ver"] == _curr["raw_ver"]
+                    and _prev["home"] == _curr["home"]
+                    and _prev.get("source") in ("audit", "view")
+                    and _curr.get("source") in ("audit", "view")
+                )
+                _verdict, _p_raw, _c_raw = raw_backstop(
+                    _prev, _curr, "raw_scope", "raw_score")
+                if _same_subject and _verdict == RAW_DEGRADED:
+                    # Stated ONLY on a fall. RAW_HELD is deliberately not rendered as
+                    # "unchanged": raw_score is a rounded percentage over ~407 weight
+                    # units, so one integer is about four of them and a WARN->FAIL on a
+                    # LOW check costs half of one -- measured, B9, B12 and B20 each move
+                    # WARN->FAIL with score, raw AND scope all standing still. Saying
+                    # "pass-rate unchanged" there would be this bug again, one resolution
+                    # step down. A fall is sound: same scope and same build means the same
+                    # denominator, so the figure fell only if what was earned fell.
+                    pinned_falls += 1
+                    # Appended AFTER the home path below, not here: the home is the last
+                    # thing on the line, and a clause before it reads as if the path
+                    # belonged to the clause.
+                    raw_clause = f"  (pass-rate fell {_p_raw} -> {_c_raw})"
+                elif not (_same_subject and _verdict == RAW_HELD):
+                    uncorroborated += 1
+            last_graded_score = row["score"]
+            last_graded_row = row
 
         if not is_view:
             checkable += 1
         home = row.get("home")
         if home:
             line += f"  {home}"
+        line += raw_clause
         lines.append(line)
 
     if holes:
@@ -511,6 +614,38 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
                 f"the other {view_count} {noun}, tagged [view], {verb_record} only the act "
                 f"of looking at this trend and {verb_be} excluded from it."
             )
+
+    # B-691: the arrow answers "did the LETTER move", which an open FAIL pins at a floor.
+    # These two paragraphs answer what the arrow cannot, and they are separate because
+    # they are different claims: one says a figure fell, the other says a comparison was
+    # not possible. Merging them would let "we could not check" read as "we checked and it
+    # was fine", which is the shape of the bug this fixes.
+    if pinned_falls:
+        lines.append("")
+        _runs = "run" if pinned_falls == 1 else "runs"
+        _its = "its" if pinned_falls == 1 else "their"
+        lines.append(
+            f"{pinned_falls} {_runs} above kept or raised {_its} score while the "
+            "underlying pass-rate fell. The score is pinned at a cap by an open FAIL, so "
+            "it cannot follow that figure down — an unchanged or improved letter is NOT "
+            "evidence that nothing got worse. Read the findings for "
+            + ("that run." if pinned_falls == 1 else "those runs.")
+        )
+    if uncorroborated:
+        lines.append("")
+        _runs = "run" if uncorroborated == 1 else "runs"
+        _was = "was" if uncorroborated == 1 else "were"
+        # ONE neutral disjunctive sentence for every reason, on purpose. An earlier draft
+        # named the likely cause ("this happens when the tool is upgraded between runs")
+        # and it fired verbatim on a config that had gone dark — a cause the tool has no
+        # evidence for. State what could not be done, never why.
+        lines.append(
+            f"{uncorroborated} {_runs} above {_was} not compared against the underlying "
+            "pass-rate of the run before it: one or both runs did not record that figure, "
+            "recorded it for a different agent home, recorded it under a different version "
+            "of this tool, or covered a different set of checks. A flat or rising score on "
+            "those lines is not evidence that nothing got worse."
+        )
 
     # B-580: what this trend does NOT cover. Said after the rows, because it qualifies the
     # shape the reader has just looked at — the pruned runs are the OLDEST, i.e. the

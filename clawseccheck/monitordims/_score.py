@@ -13,8 +13,13 @@ from ._shared import (  # noqa: F401
     NOTE_RECORD_DAMAGED,
     NOTE_UNDETERMINED,
     _h,
+    RAW_DEGRADED,
+    RAW_NO_FIGURE,
+    RAW_NO_SCOPE,
+    RAW_SCOPE_MOVED,
     _num,
     _num_or_none,
+    raw_backstop,
 )
 
 
@@ -92,11 +97,15 @@ def _diff_score(
             # site had its own copy without the clause. `_num_or_none`, not `_num`: an
             # absent figure must SKIP the comparison, and `_num`'s default of 0 would
             # read the arrival of a baseline as a rise.
-            p_raw = _num_or_none(prev, "raw_score")
-            c_raw = _num_or_none(curr, "raw_score")
-            p_scope, c_scope = prev.get("raw_score_scope"), curr.get("raw_score_scope")
-            same_scope = (isinstance(p_scope, str) and isinstance(c_scope, str)
-                         and p_scope == c_scope)
+            #
+            # B-691: the DECISION moved to `_shared.raw_backstop`, unchanged. `--trend`
+            # makes the same temporal claim over the same two fields and had none of the
+            # rules above — it printed a flat arrow across a run that gained four HIGH
+            # FAILs. Keeping the rules here and restating them there is the shape B-689,
+            # B-692 and B-693 each turned out to be. The note TEXTS stay here: they address
+            # a monitor user, and the trend addresses its own reader.
+            verdict, p_raw, c_raw = raw_backstop(
+                prev, curr, "raw_score_scope", "raw_score")
             # C-418: this backstop is the ONLY thing that catches posture worsening once an
             # open FAIL has pinned the displayed score, so a run where it cannot fire is a
             # run with a real hole in it — and the hole was previously invisible.
@@ -105,21 +114,21 @@ def _diff_score(
             # states a specific fact the code has no evidence for — an older baseline
             # carries no scope hash at all, which says nothing about whether the check set
             # moved.
-            if not (isinstance(p_scope, str) and isinstance(c_scope, str)):
+            if verdict == RAW_NO_SCOPE:
                 note(NOTE_NO_PRIOR_RECORD,
                      "The underlying pass-rate was not compared — your saved record does "
                      "not say which checks its figure covered, so the two numbers cannot "
                      "be lined up.")
-            elif not same_scope:
+            elif verdict == RAW_SCOPE_MOVED:
                 note(NOTE_NO_PRIOR_RECORD,
                      "The underlying pass-rate was not compared with last time: this "
                      "version checks a different set of things than the run that saved "
                      "your baseline did.")
-            elif p_raw is None or c_raw is None:
+            elif verdict == RAW_NO_FIGURE:
                 note(NOTE_NO_PRIOR_RECORD,
                      "The underlying pass-rate was not compared — your saved record does "
                      "not carry that figure.")
-            if same_scope and p_raw is not None and c_raw is not None and c_raw < p_raw:
+            elif verdict == RAW_DEGRADED:
                 alerts.append((
                     "HIGH",
                     f"Security posture degraded while the displayed score stayed at "

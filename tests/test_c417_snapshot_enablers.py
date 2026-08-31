@@ -370,7 +370,14 @@ _SNAPSHOT_KEY_HELPERS = {"_dim": 1, "_frontier": 1, "_num": 1, "_num_or_none": 1
                          # whose only read went through the new wrapper — it is the guard
                          # doing its job across a refactor, which is the case it was built
                          # for and the one a name-based scan would have missed.
-                         "pair_or_note": 0}
+                         "pair_or_note": 0,
+                         # B-691 shares the raw-score backstop between the monitor and
+                         # `--trend`, so the two key names are arguments rather than
+                         # literals inside one arm. TWO positions, which is why the values
+                         # here are int-or-tuple: the helper reads a scope hash and a
+                         # figure, and a map that could only name one would have declared
+                         # the manifest complete while missing the other.
+                         "raw_backstop": (2, 3)}
 
 
 def _keys_read_from_a_stored_snapshot() -> set:
@@ -415,10 +422,12 @@ def _keys_read_from_a_stored_snapshot() -> set:
             out.add(node.args[0].value)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             pos = _SNAPSHOT_KEY_HELPERS.get(node.func.id)
-            if pos is not None and len(node.args) > pos:
-                arg = node.args[pos]
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    out.add(arg.value)
+            if pos is not None:
+                for one in ((pos,) if isinstance(pos, int) else pos):
+                    if len(node.args) > one:
+                        arg = node.args[one]
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                            out.add(arg.value)
         if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
                 and node.value.id in _SNAPSHOT_RECEIVERS
                 and isinstance(node.slice, ast.Constant)

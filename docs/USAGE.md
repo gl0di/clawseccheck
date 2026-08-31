@@ -1522,6 +1522,18 @@ python3 audit.py --log audit.log            # also write log to a local file
   Arrows on graded rows compare each run to the previous *graded* run, skipping over the gaps.
   A version of this tool older than 4.0 silently omits such rows from its own `--trend` rather
   than showing them; the rows themselves are intact and re-appear on a current build.
+
+  The arrow answers "did the **letter** move", and an open FAIL pins the score at a floor —
+  so it can read flat across a run that got materially worse. Each graded row therefore also
+  records the **uncapped pass-rate**, the check set behind it and the build that produced it,
+  and a row whose score held or rose while that figure FELL is marked
+  `(pass-rate fell 92 -> 74)` with a line under the table saying what it means. Only a fall is
+  ever stated: the figure is a rounded percentage, so a small real regression can leave it
+  standing still, and "pass-rate unchanged" would be the same false reassurance one step down.
+  When two rows cannot be lined up — one of them predates this field, or they were recorded for
+  a different agent home, under a different version of this tool, or over a different set of
+  checks — the comparison is skipped and counted, never guessed. Rows recorded before this
+  existed simply say so once and stop as soon as two comparable runs are on file.
 - **`--percentile`** compares your score against a bundled offline reference profile — no network,
   no telemetry. A run with no score is never ranked on its own number: it names the layers still to
   close, then ranks your most recent *complete* check from local history instead, labelled with
@@ -1775,7 +1787,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 696 test files and 17,500
+A security tool should be heavily tested — so it is: 717 test files and 17,900
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

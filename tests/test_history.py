@@ -40,12 +40,25 @@ def test_record_and_load_three_entries(tmp_path):
     # B-509: 'graded' is an additive key, the same shape 'ts'/'home'/'source' arrived in
     # under F-128 — load() materializes the graded/ungraded decision once, at the boundary
     # where it reads the row, so no consumer re-derives it from `score is None`.
+    # B-691: three more keys, and still EXACT equality rather than containment — the same
+    # restatement `graded` made under B-509. `load()` projects into a fixed set and drops
+    # everything it does not name, so a key the writer records but this projection forgets
+    # would be invisible to `render_trend`; only an exact assertion can see that.
+    #
+    # All three read None here because this test records through a duck-typed score with
+    # no `raw_score` and passes no `findings`/`version` — which is itself the pinned
+    # behaviour: a caller that cannot supply them writes no figure at all rather than a
+    # fabricated zero, and the 13 test modules that record this way keep working.
+    _blank_raw = {"raw_score": None, "raw_scope": None, "raw_ver": None}
     assert rows[0] == {"date": "2026-06-15", "score": 72, "grade": "C", "graded": True,
-                        "ts": "2026-06-15T00:00:00", "home": None, "source": "audit"}
+                        "ts": "2026-06-15T00:00:00", "home": None, "source": "audit",
+                        **_blank_raw}
     assert rows[1] == {"date": "2026-06-17", "score": 81, "grade": "B", "graded": True,
-                        "ts": "2026-06-17T00:00:00", "home": None, "source": "audit"}
+                        "ts": "2026-06-17T00:00:00", "home": None, "source": "audit",
+                        **_blank_raw}
     assert rows[2] == {"date": "2026-06-19", "score": 90, "grade": "A", "graded": True,
-                        "ts": "2026-06-19T00:00:00", "home": None, "source": "audit"}
+                        "ts": "2026-06-19T00:00:00", "home": None, "source": "audit",
+                        **_blank_raw}
 
 
 def test_record_creates_parent_dir(tmp_path):

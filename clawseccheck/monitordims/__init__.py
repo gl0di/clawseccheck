@@ -38,8 +38,14 @@ from ._shared import (  # noqa: F401
     _frontier,
     _h,
     _name_dimensions,
+    RAW_DEGRADED,
+    RAW_HELD,
+    RAW_NO_FIGURE,
+    RAW_NO_SCOPE,
+    RAW_SCOPE_MOVED,
     _num,
     _num_or_none,
+    raw_backstop,
 )
 
 from ._behavioral import _diff_behavioral  # noqa: F401

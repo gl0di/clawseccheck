@@ -300,7 +300,7 @@ def _record_run(capability: str, args) -> None:
     record_run(capability, path=_coverage_path(args))
 
 
-def _record_history_point(score, args, live_signal) -> None:
+def _record_history_point(score, args, live_signal, findings) -> None:
     """The ONE decision about whether a run's verdict reaches the score history.
 
     B-598: this guard used to be written out at the tail of the default path and
@@ -335,6 +335,14 @@ def _record_history_point(score, args, live_signal) -> None:
 
     ``tests/test_b598_dashboard_history.py`` pins the answer for every mode, so a future
     change has to come through that test and say so — which is exactly how B-601 arrived.
+
+    B-691: ``findings`` is a REQUIRED positional, deliberately undefaulted. The row now
+    carries the uncapped pass-rate plus a hash of the check set behind it, and without the
+    finding list that hash cannot be computed — so a defaulted ``findings=None`` would let a
+    future ``_mode`` branch record a permanently uncomparable row, silently, which is the
+    exact shape B-598 built this helper to stop. Every call site is downstream of the
+    ``audit()`` that produced ``score``, so the list is always in scope; a ``TypeError`` at
+    a new one is the point.
     """
     if getattr(args, "no_history", False) or args.trend or args.monitor:
         return
@@ -346,7 +354,14 @@ def _record_history_point(score, args, live_signal) -> None:
     # every time the harness is re-run with a fresh token.
     if live_signal is not None and live_signal.hit and not live_signal.reproducible:
         return
-    history_record(score, args.history)
+    # B-691: `home` was never passed by ANY call site, so every row ever written
+    # carries `home: None` — and `history.jsonl` sits behind one default path for
+    # every `--home`, so two rows can describe different machines and the trend
+    # would compare them. `--home` defaults to the string "~/.openclaw", so this is
+    # a real value on every run, and `_sanitize_home` keeps it the user-typed
+    # `~/...` form rather than an absolute path naming the operator (§8/B-381).
+    history_record(score, args.history, home=args.home, findings=findings,
+                   version=__version__)
 
 
 # Vet-MCP icon / verdict constants — shared by the standalone --vet-mcp path
@@ -3829,7 +3844,7 @@ def _main(argv=None) -> int:
         # F-155 gate exists to prevent.
         score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
         _emit(_risk.render_risk_paths(paths, ascii_only=ascii_only))
-        _record_history_point(score, args, _live_signal)
+        _record_history_point(score, args, _live_signal, findings)
         return 0
 
     def _report_dest(raw: str) -> Path:
@@ -3869,7 +3884,7 @@ def _main(argv=None) -> int:
             # Recorded on the success path only: a run that returns 1 because the file could
             # not be written is one the user will repeat, and two lines for one intended
             # audit is a worse timeline than none.
-            _record_history_point(score, args, _live_signal)
+            _record_history_point(score, args, _live_signal, findings)
             return _findings_exit_gate(args, findings, ctx)
         except OSError as exc:
             _emit(f"(could not write badge: {exc})")
@@ -3883,7 +3898,7 @@ def _main(argv=None) -> int:
                 render_html(findings, score, native=ctx.native, ctx=ctx),
             )
             _emit(f"(HTML report written to {args.html})")
-            _record_history_point(score, args, _live_signal)
+            _record_history_point(score, args, _live_signal, findings)
             return _findings_exit_gate(args, findings, ctx)
         except OSError as exc:
             _emit(f"(could not write HTML report: {exc})")
@@ -3894,7 +3909,7 @@ def _main(argv=None) -> int:
         try:
             secure_write_text(_report_dest(args.sarif), render_sarif(findings, score, __version__, ctx=ctx))
             _emit(f"(SARIF written to {args.sarif})")
-            _record_history_point(score, args, _live_signal)
+            _record_history_point(score, args, _live_signal, findings)
             return _findings_exit_gate(args, findings, ctx)
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
@@ -4127,7 +4142,7 @@ def _main(argv=None) -> int:
                 "chat, do not re-render its contents or paste the path; a mobile client "
                 "opens a PDF inline where an HTML attachment would just be a download)"
             )
-            _record_history_point(score, args, _live_signal)          # B-601
+            _record_history_point(score, args, _live_signal, findings)          # B-601
             return _findings_exit_gate(args, findings, ctx)
         if _mode != "dashboard" and pdf_written:
             # B-459: `and pdf_written` — everything in this block SPEAKS ABOUT A FILE. With
@@ -4188,7 +4203,9 @@ def _main(argv=None) -> int:
             # otherwise inflates itself every time this branch runs: three bare --trend
             # invocations into one fresh store used to read "3 of 3 runs have no grade" —
             # the tool grading its own look.
-            _write_err = history_record(score, args.history, source="view")
+            _write_err = history_record(score, args.history, source="view",
+                                         home=args.home, findings=findings,
+                                         version=__version__)
             if _write_err is not None:
                 # B-581: history.record() hands back the raw OSError text (e.g.
                 # "[Errno 13] Permission denied: '/home/dave/...'"), which — unlike
@@ -4232,7 +4249,7 @@ def _main(argv=None) -> int:
         # is no ordering dependency to protect. The record still comes after the emit, for
         # no stronger reason than that every sibling branch reads that way.
         _emit(_percentile_line(score, ascii_only, args.history))
-        _record_history_point(score, args, _live_signal)
+        _record_history_point(score, args, _live_signal, findings)
         return 0
 
     if _mode == "next":
@@ -4242,7 +4259,7 @@ def _main(argv=None) -> int:
         _emit(render_next_actions(suggest_actions(findings, score), ascii_only))
         # B-601: advice is what this mode RENDERS, but it measured a full verdict to get
         # there. The timeline records runs, not renderings.
-        _record_history_point(score, args, _live_signal)
+        _record_history_point(score, args, _live_signal, findings)
         return 0
 
     if _mode == "dashboard":
@@ -4270,7 +4287,7 @@ def _main(argv=None) -> int:
             _emit_paste_instruction(pdf_written, len(_card))
             _emit(_card)
             _emit_attach_instruction(pdf_written)
-            _record_history_point(score, args, _live_signal)
+            _record_history_point(score, args, _live_signal, findings)
             return _findings_exit_gate(args, findings, ctx)
         # F-153: Dave settled 2026-07-30 that --dashboard must fully render
         # everything --full does, in the fixed order (Skills · Plugins · MCP · RISK
@@ -4383,7 +4400,7 @@ def _main(argv=None) -> int:
         # recorded line carries the letter this run actually earned. This is the shape
         # SKILL.md's guided flow uses, and the one whose absence meant no graded run was
         # ever recorded by anyone following the documented path.
-        _record_history_point(score, args, _live_signal)
+        _record_history_point(score, args, _live_signal, findings)
         # The sweeps this branch ran are FAIL sources the default `--full` path already
         # feeds the gate; passing them keeps `--dashboard --full --exit-code` exactly as
         # strong as `--full --exit-code`, instead of quietly weaker on the same depth.
@@ -4876,7 +4893,8 @@ def _main(argv=None) -> int:
         # state. A frequent poll would have quietly padded the score trend with a row per
         # poll while claiming to write nothing.
         if not _skip_live_test_persist and not _probe:
-            history_record(score, args.history)
+            history_record(score, args.history, home=args.home,
+                           findings=findings, version=__version__)
         # F-180: a probe must SAY it did not record, or the user reads the alert as filed
         # and then sees the identical alert on the next ordinary run with no explanation.
         if _probe:
@@ -5283,7 +5301,7 @@ def _main(argv=None) -> int:
     # B-598: the guard this used to spell out inline now lives in
     # `_record_history_point`, which the --dashboard branch calls too. Its docstring
     # carries the F-155 seed-gate reasoning that was written here.
-    _record_history_point(score, args, live_signal)
+    _record_history_point(score, args, live_signal, findings)
 
     if _save_failed:
         return 1

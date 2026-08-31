@@ -186,3 +186,70 @@ def _num(snap: dict, key: str, default: int = 0) -> "int | float":
     """
     val = _num_or_none(snap, key)
     return default if val is None else val
+
+
+# B-691: the ONE decision about whether an uncapped pass-rate fell between two records, and
+# — when it did not — why the two figures could not be lined up.
+#
+# It lives here, in the leaf, because two subsystems make the same temporal claim over the
+# same pair of fields and only one of them had learned the rules. `monitordims/_score.py`
+# has carried them since B-273/C-135/C-418; `history.py`'s `--trend` had none of them and
+# printed a flat arrow across a run that gained four HIGH FAILs. Three bugs earlier in this
+# same series (B-689, B-692, B-693) were each one rule kept by hand in two places, so this
+# one is kept in one.
+#
+# What each verdict means, and why the order matters:
+#
+#   RAW_NO_SCOPE    one or both records do not say WHICH checks their figure covered.
+#                   Checked FIRST, and reported as its own answer rather than folded into
+#                   "the scopes differ": an older record carries no hash at all, and saying
+#                   "this version checks a different set of things" would state a fact the
+#                   code has no evidence for (C-418's presence-before-equality rule).
+#   RAW_SCOPE_MOVED both say, and they disagree. The denominator is the scored, non-UNKNOWN,
+#                   non-suppressed check set of that run, and it grows with every release —
+#                   measured on a real home, two new WARN checks alone fell raw 83 -> 82
+#                   with nothing on disk changed.
+#   RAW_NO_FIGURE   same scope, but one side holds no usable number. Absent is not zero:
+#                   inventing one from `score` would read the ARRIVAL of a baseline as a
+#                   fall. Skip for one run; self-healing.
+#   RAW_DEGRADED    same scope, both figures, and it fell. The only case that may be stated.
+#   RAW_HELD        same scope, both figures, and it did not fall.
+#
+# RAW_HELD is deliberately NOT "unchanged". `raw_score` is a rounded percentage over ~407
+# weight units on a real machine, so one integer is about four units and a WARN->FAIL on a
+# LOW check costs half of one: measured, B9, B12 and B20 each move WARN->FAIL with score,
+# raw AND scope all standing still. A caller that renders RAW_HELD as "nothing got worse"
+# would be making the same false claim this function exists to stop, one resolution step
+# down. A fall is sound in the other direction: same scope and same weights means the same
+# denominator, so raw fell only if earned fell.
+RAW_DEGRADED = "raw_degraded"
+RAW_HELD = "raw_held"
+RAW_NO_SCOPE = "raw_no_scope"
+RAW_SCOPE_MOVED = "raw_scope_moved"
+RAW_NO_FIGURE = "raw_no_figure"
+
+
+def raw_backstop(prev: dict, curr: dict, scope_key: str,
+                 score_key: str) -> "tuple[str, object, object]":
+    """``(verdict, prev_raw, curr_raw)`` — see the RAW_* constants above.
+
+    The key names are REQUIRED POSITIONAL arguments, with no defaults, for two reasons. The
+    two stores spell them differently and neither spelling is worth migrating — the
+    monitor's snapshot has said `raw_score_scope` since C-135, and `history.jsonl` is an
+    append-only hash-chained file whose existing rows cannot be rewritten. And a default
+    would hide the key from `tests/test_c417_snapshot_enablers.py`, which derives the set of
+    snapshot keys this subsystem reads by finding literals AT THE CALL SITE: a default is a
+    read the manifest guard cannot see, which is exactly the blindness that guard exists to
+    prevent. Naming the spelling where the call is made keeps it visible to the guard and to
+    the next reader at the same time.
+    """
+    p_scope, c_scope = prev.get(scope_key), curr.get(scope_key)
+    if not (isinstance(p_scope, str) and isinstance(c_scope, str)):
+        return RAW_NO_SCOPE, None, None
+    if p_scope != c_scope:
+        return RAW_SCOPE_MOVED, None, None
+    p_raw = _num_or_none(prev, score_key)
+    c_raw = _num_or_none(curr, score_key)
+    if p_raw is None or c_raw is None:
+        return RAW_NO_FIGURE, p_raw, c_raw
+    return (RAW_DEGRADED if c_raw < p_raw else RAW_HELD), p_raw, c_raw
