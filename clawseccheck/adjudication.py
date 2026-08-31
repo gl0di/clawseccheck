@@ -1121,6 +1121,42 @@ _CAP_LADDER = (
 )
 
 
+def caps_fired(score) -> list:
+    """Every cap signal active on *score*, as ``[{cap, what, reason?}]`` in cascade order.
+
+    B-690: split out of `run_state` because a SECOND machine artifact needs the same list.
+    `sarif.py` published exactly one of the six -- `configBlind` -- so a run capped by an
+    open CRITICAL, a fired behavioural detector, a corroborated runtime indicator or a
+    submitted VULNERABLE verdict emitted SARIF that said nothing about any of it, with
+    `configBlind.capped: false` sitting there looking like an answer.
+
+    One producer, two consumers, rather than a second ladder beside the first: B-689 was
+    exactly that shape in this module, B-692 in `pipeline.py`, B-693 across four emitters,
+    B-694 across three snapshot fields. The wording is shared too, and that is a decision
+    rather than an accident -- both readers are machine consumers with none of this tool's
+    context, which is the audience these labels were written for.
+
+    `cap` is the score attribute's own name, so a consumer keys on a stable identifier
+    rather than on prose; `reason` is present only where the engine defines a stable label
+    for that signal (`degraded_capped` has none -- its count rides `degradedChecks`).
+
+    An empty list is a real answer and must be emitted as one: it says nothing capped this
+    run. `sarif.py`'s own `selfExcludedSkills` comment states the rule (B-560) -- an absent
+    key would make "nothing to report" and "this producer is too old to say" identical to
+    a consumer.
+    """
+    caps = []
+    for flag, reason_attr, label in _CAP_LADDER:
+        if not getattr(score, flag, False):
+            continue
+        entry = {"cap": flag, "what": label}
+        reason = getattr(score, reason_attr, None) if reason_attr else None
+        if reason:
+            entry["reason"] = reason
+        caps.append(entry)
+    return caps
+
+
 def run_state(score) -> dict:
     """What a judge needs to know about the RUN, as opposed to any one finding.
 
@@ -1146,15 +1182,6 @@ def run_state(score) -> dict:
     """
     if score is None:
         return {"stated": False}
-    caps = []
-    for flag, reason_attr, label in _CAP_LADDER:
-        if not getattr(score, flag, False):
-            continue
-        entry = {"cap": flag, "what": label}
-        reason = getattr(score, reason_attr, None) if reason_attr else None
-        if reason:
-            entry["reason"] = reason
-        caps.append(entry)
     return {
         "stated": True,
         "graded": bool(getattr(score, "graded", True)),
@@ -1163,7 +1190,7 @@ def run_state(score) -> dict:
             for layer, status in (getattr(score, "missing_layers", ()) or ())
         ],
         "notChecked": list(getattr(score, "not_checked", ()) or ()),
-        "capsFired": caps,
+        "capsFired": caps_fired(score),
         "degradedChecks": int(getattr(score, "degraded_count", 0) or 0),
     }
 

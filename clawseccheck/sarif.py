@@ -184,6 +184,33 @@ def _build_analysis_completeness(
         "capped": bool(getattr(score, "config_blind_capped", False)),
         "reason": blind_reason,
     }
+    # B-690: `configBlind` is ONE of the six signals that can cap the score, and it was the
+    # only one this block published. A run capped by an open CRITICAL, a fired behavioural
+    # detector, a corroborated runtime indicator or a submitted VULNERABLE live-test verdict
+    # emitted SARIF saying nothing about any of it — with `configBlind.capped: false` present
+    # and looking like an answer. That matters more here than in a report a human reads: this
+    # artifact goes to CI and code-scanning consumers that act on it unaccompanied.
+    #
+    # ALWAYS present, empty list when nothing capped — the rule this block already states for
+    # `selfExcludedSkills` (B-560): an absent key would make "nothing capped this run" and
+    # "this producer is too old to say" the same thing to a consumer.
+    #
+    # The same `capsFired` name and shape the judge packet uses, from the same producer, not
+    # a second ladder beside it — B-689/B-692/B-693/B-694 were each one rule kept by hand in
+    # two places. Lazy import for the same reason `history._sanitize_home` gives for reaching
+    # into `report`: both modules are Layer 3 and the coupling is load-bearing only here.
+    #
+    # `configBlind` is kept unchanged rather than folded in. It is documented, it is the one
+    # signal a consumer may already read, and breaking it to tidy a duplication would trade a
+    # silence for a regression. `tests/test_b690_every_cap_reaches_sarif.py` pins that the two
+    # cannot disagree.
+    from .adjudication import caps_fired  # noqa: PLC0415 — see the comment above
+    block["capsFired"] = caps_fired(score)
+    if block["capsFired"]:
+        block["limitations"].append(
+            "the score was capped: " + ", ".join(c["what"] for c in block["capsFired"])
+            + " — it reports a ceiling, not a measurement of everything below it"
+        )
     if blind_reason:
         block["limitations"].append(
             f"openclaw.json was {blind_reason} this run — findings describe what could "

@@ -27,7 +27,16 @@ import pytest
 _ROOT = Path(__file__).resolve().parent.parent
 _SCHEMA = (_ROOT / "docs" / "OUTPUT_SCHEMA.md").read_text(encoding="utf-8")
 
-_LAYER_KEYS = {"graded", "layersRan", "layersTotal", "missingLayers", "notChecked", "configBlind"}
+# Every key the completeness block emits only when it has a `ScoreResult` — the block
+# returns early without one, so these are exactly the keys a `--vet` run cannot carry.
+#
+# The name says "layer" and the membership never did: `configBlind` has been here since
+# before B-690 and is a cap signal, not a layer. B-690 added `capsFired` for the same
+# reason — it is built from the score, so a vet run has nothing to build it from.
+# Restating the count rather than widening the criterion: the criterion was always
+# "needs a score", and it is what the vet-leak assertion below actually tests.
+_LAYER_KEYS = {"graded", "layersRan", "layersTotal", "missingLayers", "notChecked",
+               "configBlind", "capsFired"}
 
 
 def _section(start: str, end: str) -> str:

@@ -524,9 +524,10 @@ The block carries the run's reach.
 | `missingLayers` | `array[{"layer", "status"}]` | audit runs only | §2's `missing_layers`. |
 | `notChecked` | `array[str]` | audit runs only | §2's `not_checked`. |
 | `configBlind` | `object` | audit runs only | `{"capped", "reason"}`, where `reason` is `"unreadable"`, `"absent"` or `null`. |
+| `capsFired` | `array[{"cap", "what", "reason?"}]` | audit runs only | B-690: **every** signal that capped this run's score, in the engine's own cascade order — `live_injection_capped`, `config_blind_capped`, `degraded_capped`, `cap_severity`, `runtime_capped`, `behavioral_capped`. `cap` is the score attribute's name, so a consumer keys on a stable identifier rather than prose; `reason` appears only where the engine defines a stable label for that signal (`degraded_capped` has none — its count is `degradedChecks` in the judge packet, §12). **Always present, empty when nothing capped** — the same rule as `selfExcludedSkills`, so "nothing capped this run" is never confused with "this producer is too old to say". Identical shape and producer to §12's `runState.capsFired`: one list, two artifacts. Through v3.61.0 this block published `configBlind` alone, so a run capped by an open CRITICAL, a fired behavioural detector, a corroborated runtime indicator or a submitted VULNERABLE verdict emitted SARIF that said nothing about it. `configBlind` is unchanged and still carries that one signal — it is documented and consumers may read it; the two cannot disagree. |
 
-The six **five-layer state** keys (B-585) are **absent** on the `--vet` paths, where there is
-no `ScoreResult`: mode C produces no grade by construction, so `graded: false` there would
+The seven **score-derived** keys (B-585; `capsFired` joined them in B-690) are **absent** on
+the `--vet` paths, where there is no `ScoreResult`: mode C produces no grade by construction, so `graded: false` there would
 imply a letter was withheld when none ever existed.
 
 `checksRun`/`checksTotal` count **checks**, not the analysis: 187 of 187 checks can run on
