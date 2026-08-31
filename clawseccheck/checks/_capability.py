@@ -22,6 +22,7 @@ from ..catalog import (
 from ..collector import (
     LIMIT_DOMAIN_CONFIG,
     Context,
+    agent_roster,
     dig,
 )
 
@@ -171,11 +172,8 @@ def _has_heartbeat_signal(ctx: Context) -> bool:
     return (
         any(path.endswith("HEARTBEAT.md") for path in getattr(ctx, "bootstrap", []))
         or dig(cfg, "agents.defaults.heartbeat")
-        or any(
-            dig(agent, "heartbeat")
-            for agent in (dig(cfg, "agents.list") or [])
-            if isinstance(agent, dict)
-        )
+        # B-699: agents.entries as well as agents.list
+        or any(dig(agent.entry, "heartbeat") for agent in agent_roster(cfg))
     )
 
 
@@ -530,15 +528,11 @@ def _b68_fs_workspace_only_scopes(cfg: dict) -> list[tuple[str, object]]:
     global_val = dig(cfg, "tools.fs.workspaceOnly")
     if global_val is not None:
         scopes.append(("tools.fs.workspaceOnly", global_val))
-    agents = dig(cfg, "agents.list")
-    if isinstance(agents, list):
-        for idx, agent in enumerate(agents):
-            if not isinstance(agent, dict):
-                continue
-            val = dig(agent, "tools.fs.workspaceOnly")
-            if val is not None:
-                label = agent.get("name") or agent.get("id") or idx
-                scopes.append((f"agents.list[{label}].tools.fs.workspaceOnly", val))
+    for agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
+        val = dig(agent.entry, "tools.fs.workspaceOnly")
+        if val is not None:
+            name = agent.entry.get("name") or agent.id or agent.index
+            scopes.append((f"{agent.labelled(name)}.tools.fs.workspaceOnly", val))
     return scopes
 
 
@@ -593,15 +587,10 @@ def _agent_profile_widenings(cfg: dict) -> list:
         return []
 
     out: list = []
-    agents = dig(cfg, "agents.list")
-    if not isinstance(agents, list):
-        return out
-    for idx, entry in enumerate(agents):
-        if not isinstance(entry, dict):
-            continue
-        profile = dig(entry, "tools.profile")
+    for agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
+        profile = dig(agent.entry, "tools.profile")
         if isinstance(profile, str) and profile and _profile_is_powerful(profile):
-            out.append((f"agents.list[{idx}].tools.profile", profile))
+            out.append((f"{agent.path}.tools.profile", profile))
     return out
 
 
@@ -2027,20 +2016,21 @@ def _b351_resolvable_agents(agents) -> list:
     one is unreachable. Reporting a shadowed entry is a claim about an agent that cannot
     exist.
 
-    Returns ``[(normalized_id, entry), ...]``.
+    B-699: takes the roster from ``collector.agent_roster`` rather than a raw
+    ``agents.list``, so a 2026.8.1 ``agents.entries`` record resolves the same way. The
+    de-dup key is unchanged -- the normalised id, which is the record KEY on the new shape
+    and the entry's own ``id`` field on the legacy one.
+
+    Returns ``[(normalized_id, AgentEntry), ...]``.
     """
     out = []
-    if not isinstance(agents, list):
-        return out
     seen = set()
-    for entry in agents:
-        if not isinstance(entry, dict):
-            continue
-        aid = _b351_normalize_agent_id(entry.get("id"))
+    for agent in agents:
+        aid = _b351_normalize_agent_id(agent.id)
         if aid in seen:
             continue
         seen.add(aid)
-        out.append((aid, entry))
+        out.append((aid, agent))
     return out
 
 
@@ -2124,10 +2114,10 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
 
     on_agents: list[str] = []
     off_agents: list[str] = []
-    for aid, agent in _b351_resolvable_agents(dig(cfg, "agents.list")):
-        agent_raw = _b351_raw_code_mode(dig(agent, "tools.codeMode"))
+    for aid, agent in _b351_resolvable_agents(agent_roster(cfg)):
+        agent_raw = _b351_raw_code_mode(dig(agent.entry, "tools.codeMode"))
         merged = {**global_raw, **agent_raw} if agent_raw is not None else global_raw
-        label = f"agents.list[{aid}]"
+        label = agent.labelled(aid)
         (on_agents if _b351_enabled(merged) else off_agents).append(label)
 
     if not global_on and not on_agents:
@@ -2189,11 +2179,12 @@ def _b352_effective_prepends(cfg: dict) -> list:
     g = dig(cfg, "tools.exec") if isinstance(cfg, dict) else None
     g = g if isinstance(g, dict) else {}
     out = [("tools.exec", g.get("host"), g.get("pathPrepend"))]
-    for aid, agent in _b351_resolvable_agents(dig(cfg, "agents.list")):
-        a = dig(agent, "tools.exec")
+    for aid, agent in _b351_resolvable_agents(agent_roster(cfg)):
+        a = dig(agent.entry, "tools.exec")
         a = a if isinstance(a, dict) else {}
         entries = a.get("pathPrepend") if a.get("pathPrepend") is not None else g.get("pathPrepend")
-        out.append((f"agents.list[{aid}].tools.exec", a.get("host") or g.get("host"), entries))
+        out.append((f"{agent.labelled(aid)}.tools.exec",
+                    a.get("host") or g.get("host"), entries))
     return out
 
 

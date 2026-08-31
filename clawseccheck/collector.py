@@ -3149,6 +3149,128 @@ def _normalize_agent_id(value) -> str:
     return normalized.strip("-")[:64] or DEFAULT_AGENT_ID
 
 
+@dataclass(frozen=True)
+class AgentEntry:
+    """One agent from the roster, in whichever shape the config declares it.
+
+    ``id``    the agent's id: the RECORD KEY under ``agents.entries``, or the entry's own
+              ``id`` field under legacy ``agents.list`` (``None`` when it has none).
+    ``entry`` the agent's own config object. Under ``agents.entries`` this is a NEW dict
+              with ``id`` injected, so a caller that reads ``entry["id"]`` keeps working.
+    ``path``  the config path this entry actually sits at, for evidence strings:
+              ``agents.entries.web`` or ``agents.list[0]``. Never build that label by hand
+              -- a 2026.8.1 user pointed at ``agents.list[0]`` is pointed at a key their
+              file does not contain.
+    ``index`` position. For ``agents.list`` it is the ORIGINAL array index, matching the
+              vendor's ``source.index`` and the user's own file, so a label built from it
+              is byte-identical to the one this tool emitted before B-699. For
+              ``agents.entries`` there is no vendor equivalent: it is our own enumeration
+              order over the record, offered only as a last-resort display fallback for a
+              nameless entry.
+    """
+
+    id: "str | None"
+    entry: dict
+    path: str
+    index: int
+
+    def labelled(self, name) -> str:
+        """``agents.list[<name>]`` / ``agents.entries.<name>`` -- the CALLER's own name for
+        this agent, placed in the container it really came from.
+
+        Use this, not ``path``, wherever the existing label carries meaning that a position
+        does not. B351 labels an entry by the id the runtime RESOLVES it to, which is not
+        the same thing as where it sits: an entry with no ``id`` resolves to ``main``, and
+        ``agents.list[main]`` is the honest label while ``agents.list[0]`` is merely true.
+        Rewriting those to ``path`` erased that distinction and its own test caught it.
+        """
+        if self.path.startswith("agents.entries."):
+            return f"agents.entries.{name}"
+        return f"agents.list[{name}]"
+
+
+def agent_roster(cfg) -> "list[AgentEntry]":
+    """Every declared agent, from EITHER roster shape. The one place that knows both.
+
+    B-699. OpenClaw 2026.8.1 replaced ``agents.list`` (an ARRAY whose entries carry an
+    ``id`` field) with ``agents.entries`` (a RECORD keyed by id, which REJECTS an ``id``
+    field inside an entry). We read only the array, so on a 2026.8.1 config every
+    per-agent check saw an empty roster -- and several then asserted a clean verdict about
+    it. Measured on our own shipped bad-fixtures: `bad_b4_peragent_sandbox` went B4 FAIL ->
+    PASS "Execution is sandboxed", `warn_b409_profile_alsoallow_widening` went A1 WARN ->
+    PASS. Golden Rule #4, on configs our own fixtures call dangerous.
+
+    Both shapes are read, permanently. OpenClaw's migration is DEFERRED -- it runs inside
+    ``openclaw doctor --fix`` -- so an un-migrated config still carries ``agents.list`` on
+    disk while the new schema rejects it, and a user on an older OpenClaw is not migrating
+    at all. Switching outright would trade the fake PASS for a silent UNKNOWN on every
+    un-migrated config. Same rule and same shape as ``checks/_shared.py::_mcp_servers``,
+    which merges ``mcp.servers`` with the legacy spellings behind one accessor.
+
+    A faithful port of ``readAgentRosterProperty`` + ``listAgentEntriesWithSource``
+    (``dist/agent-scope-config-*.js``), whose semantics were EXECUTED rather than read --
+    the first reading of them was wrong twice:
+
+    * **The KEY wins over an entry's own ``id``.** ``listAgentEntriesWithSource`` builds
+      ``{...entry, id}``, so ``{web: {id: "OTHER"}}`` is agent ``web``. The legacy module
+      ``legacy-*.js`` still carries the opposite (``Object.assign({id}, entry)``, entry
+      wins); the modern one governs. Measured, not inferred.
+    * **``entries`` is chosen when the KEY is present, not when the value is usable.**
+      ``{"entries": null}`` and ``{"entries": "junk"}`` both yield an EMPTY roster and the
+      ``list`` beside them is NOT consulted. Reading it as "try entries, else list" would
+      make us disagree with the runtime about which agents exist.
+
+    The one deliberate divergence: an element of ``agents.list`` that is a JSON array is
+    kept by the vendor (its guard is ``typeof entry === "object"``) and dropped here, because
+    every consumer calls ``.get()`` on what it receives. Unreachable in a schema-valid
+    config -- ``safeParse`` rejects a non-object list element -- and dropping is the safe
+    direction for the one shape that can only arrive on a hand-edited file.
+
+    Index labels use the ORIGINAL array position, not the position after filtering: a
+    ``list`` of ``[null, {...}]`` labels the surviving entry ``agents.list[1]``, matching
+    the vendor's ``source.index`` and the user's own file.
+    """
+    if not isinstance(cfg, dict):
+        return []
+    agents = cfg.get("agents")
+    if not isinstance(agents, dict):
+        return []
+    if "entries" in agents:
+        value = agents["entries"]
+        if not isinstance(value, dict):
+            return []
+        return [
+            AgentEntry(id=key, entry={**val, "id": key},
+                       path=f"agents.entries.{key}", index=order)
+            for order, (key, val) in enumerate(
+                (k, v) for k, v in value.items()
+                if isinstance(k, str) and isinstance(v, dict))
+        ]
+    if "list" in agents:
+        # Read through `dig` so the legacy path stays a dig() path and keeps its entry in
+        # `tests/grounded_schema_paths.txt`. `agents.entries` is deliberately NOT read that
+        # way yet: adding it to the manifest requires it to be dist-verified, and
+        # `tests/dist_verified_paths.txt` is still stamped 2026.7.1-2. It gets its manifest
+        # entry when that snapshot is regenerated -- the LAST step of the upgrade, after
+        # every sibling read is fixed, or the re-baseline absorbs paths nobody diagnosed.
+        value = dig(cfg, "agents.list")
+        if not isinstance(value, list):
+            return []
+        out: "list[AgentEntry]" = []
+        for index, val in enumerate(value):
+            if not isinstance(val, dict):
+                continue
+            aid = val.get("id")
+            out.append(AgentEntry(
+                id=aid if isinstance(aid, str) else None,
+                entry=val,
+                path=f"agents.list[{index}]",
+                index=index,
+            ))
+        return out
+    return []
+
+
 def _default_agent_id(agents_list) -> str:
     """OpenClaw's `resolveDefaultAgentId`: the entry flagged `default`, else the FIRST one.
 
@@ -3208,15 +3330,20 @@ def _derived_agent_workspaces(cfg: dict) -> "list[str]":
     workspace becomes `workspace-{profile}`. The environment an agent runs under is not
     knowable from a config file, so that one stays a documented limit.
     """
-    agents_list = dig(cfg, "agents.list")
-    if not isinstance(agents_list, list) or not agents_list:
+    # B-699: BOTH roster shapes. Reading only `agents.list` made this return [] on a
+    # 2026.8.1 config, so every non-default agent's derived workspace stopped being
+    # scanned -- the same blind spot B-610 opened this function to close.
+    roster = agent_roster(cfg)
+    if not roster:
         return []
     default_workspace = dig(cfg, "agents.defaults.workspace")
     fallback = default_workspace.strip() if isinstance(default_workspace, str) else ""
-    default_id = _default_agent_id(agents_list)
+    # `agent_roster` injects the record KEY as `id` on the entries shape, so
+    # `_default_agent_id` keeps reading `entry["id"]` and needs no change.
+    default_id = _default_agent_id([a.entry for a in roster])
     out: list[str] = []
-    for entry in agents_list:
-        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+    for entry in (a.entry for a in roster):
+        if not isinstance(entry.get("id"), str):
             continue
         own = entry.get("workspace")
         if isinstance(own, str) and own.strip():
@@ -3256,13 +3383,13 @@ def _config_workspace_dirs(
     dv = dig(cfg, "agents.defaults.workspace")
     if isinstance(dv, str) and dv.strip():
         raw.append(dv)
-    agents_list = dig(cfg, "agents.list")
-    if isinstance(agents_list, list):
-        for a in agents_list:
-            if isinstance(a, dict):
-                w = a.get("workspace")
-                if isinstance(w, str) and w.strip():
-                    raw.append(w)
+    # B-699: BOTH roster shapes. This is a SCAN-SURFACE read, not a verdict: a per-agent
+    # workspace missed here takes its skills, bootstrap files and memory out of the audit
+    # entirely, and the content ring then reports clean about files it never opened.
+    for agent in agent_roster(cfg):
+        w = agent.entry.get("workspace")
+        if isinstance(w, str) and w.strip():
+            raw.append(w)
     # B-610: the two rules OpenClaw applies when an agent has NO explicit workspace.
     raw.extend(_derived_agent_workspaces(cfg))
     try:

@@ -17,6 +17,7 @@ from ..collector import (
     LIMIT_DOMAIN_AGENTS,
     LIMIT_DOMAIN_CONFIG,
     Context,
+    agent_roster,
     dig,
 )
 from ..textnorm import (
@@ -140,14 +141,15 @@ def _has_subagents(cfg: dict) -> bool:
         return True
     if dig(cfg, "agents.defaults.subagents"):
         return True
-    agent_list = dig(cfg, "agents.list")
-    if isinstance(agent_list, list):
-        if len(agent_list) > 1:
-            # Multiple agents in the list implies subagent delegation
+    # B-699: through `agent_roster`, so a 2026.8.1 `agents.entries` roster is seen too.
+    # Reading only `agents.list` made a multi-agent config look like a single-agent one.
+    roster = agent_roster(cfg)
+    if len(roster) > 1:
+        # Multiple agents in the roster implies subagent delegation
+        return True
+    for agent in roster:
+        if dig(agent.entry, "subagents"):
             return True
-        for agent in agent_list:
-            if isinstance(agent, dict) and dig(agent, "subagents"):
-                return True
     return False
 
 
@@ -945,17 +947,17 @@ def check_subagents_allow_agents(ctx: Context) -> Finding:
     """
     cfg = ctx.config
     defaults_allow = dig(cfg, "agents.defaults.subagents.allowAgents")
-    agent_list = dig(cfg, "agents.list") or []
     offenders = []
     if isinstance(defaults_allow, list) and "*" in defaults_allow:
         offenders.append('agents.defaults.subagents.allowAgents contains "*"')
-    for i, agent in enumerate(agent_list):
-        if not isinstance(agent, dict):
-            continue
-        per = dig(agent, "subagents.allowAgents")
+    for agent in agent_roster(cfg):
+        per = dig(agent.entry, "subagents.allowAgents")
         if isinstance(per, list) and "*" in per:
-            name = agent.get("name", str(i))
-            offenders.append(f'agents.list[{name}].subagents.allowAgents contains "*"')
+            # B-699: the agent's own NAME, in the container this config actually uses --
+            # `labelled`, not `path`. A position is true but not informative, and the same
+            # distinction is what B351's own test caught when `path` was used there.
+            name = agent.entry.get("name") or agent.id or agent.index
+            offenders.append(f'{agent.labelled(name)}.subagents.allowAgents contains "*"')
     if offenders:
         return _finding(
             "B72",
@@ -968,7 +970,7 @@ def check_subagents_allow_agents(ctx: Context) -> Finding:
             evidence=offenders,
         )
     has_config = isinstance(defaults_allow, list) or any(
-        isinstance(a, dict) and dig(a, "subagents.allowAgents") is not None for a in agent_list
+        dig(a.entry, "subagents.allowAgents") is not None for a in agent_roster(cfg)
     )
     if not has_config:
         return _finding(

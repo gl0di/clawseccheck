@@ -169,6 +169,18 @@ def test_the_two_copies_of_the_rule_agree(tmp_path):
         {"agents": {"list": [{"id": "main"}, {"id": "x", "workspace": "   "}]}},
         {"agents": {"defaults": {"workspace": "~/elsewhere"},
                     "list": [{"id": "main"}, {"id": "b"}]}},
+        # B-699: the 2026.8.1 record shape. Without these the battery pinned the two
+        # copies only on the shape the fix was NOT about, which is how a pin hides the
+        # defect it does not cover.
+        {"agents": {"entries": {"main": {}, "b": {}}}},
+        {"agents": {"entries": {}}},
+        {"agents": {"entries": None, "list": [{"id": "b"}]}},
+        {"agents": {"entries": "junk", "list": [{"id": "b"}]}},
+        {"agents": {"entries": {"main": {}}, "list": [{"id": "b"}]}},
+        {"agents": {"entries": {"main": {}, "b": {"workspace": "   "}}}},
+        {"agents": {"entries": {"main": {}, "web": {"id": "OTHER"}}}},
+        {"agents": {"defaults": {"workspace": "~/elsewhere"},
+                    "entries": {"main": {}, "b": {}}}},
     ]
     for cfg in battery:
         assert _collector_derive(cfg) == _prov_derive(cfg), cfg

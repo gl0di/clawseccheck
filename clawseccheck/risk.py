@@ -49,7 +49,7 @@ from .checks import (
     INPUT_TOOL_HINTS,
     OUTBOUND_TOOL_HINTS,
 )
-from .collector import Context, dig
+from .collector import Context, agent_roster, dig
 from .scanbudget import limits_for
 # B-483: `_asciify` was a SECOND, narrower copy of report.py's table (no ·, ×,
 # ≤, ≥, ≈, •) — the drift a duplicated table always produces. Both surfaces now
@@ -337,10 +337,8 @@ def _has_heartbeat_cfg(cfg: dict) -> bool:
     """Autonomous heartbeat configured at agents.defaults or any per-agent entry."""
     if dig(cfg, "agents.defaults.heartbeat"):
         return True
-    agents = dig(cfg, "agents.list")
-    if isinstance(agents, list):
-        return any(isinstance(a, dict) and dig(a, "heartbeat") for a in agents)
-    return False
+    # B-699: agents.entries as well as agents.list
+    return any(dig(a.entry, "heartbeat") for a in agent_roster(cfg))
 
 
 def _host_reaching_bind(cfg: dict) -> str | None:
@@ -548,32 +546,29 @@ def _fs_writes_contained(cfg: dict) -> bool:
         default_exec_host = "auto"
     if default_exec_host not in ("auto", "sandbox"):
         return False
-    agent_list = dig(cfg, "agents.list")
-    if isinstance(agent_list, list):
-        for a in agent_list:
-            if not isinstance(a, dict):
-                continue
-            eff_exec_host = _resolve_exec_host(a.get("tools"), default_exec_host)
-            if eff_exec_host not in ("auto", "sandbox"):
+    for _agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
+        a = _agent.entry
+        eff_exec_host = _resolve_exec_host(a.get("tools"), default_exec_host)
+        if eff_exec_host not in ("auto", "sandbox"):
+            return False
+        agent_sandbox = a.get("sandbox")
+        if not isinstance(agent_sandbox, dict):
+            continue  # no sandbox override declared -> fully inherits the safe default
+        eff_mode = agent_sandbox.get("mode")
+        if eff_mode is None:
+            eff_mode = default_mode
+        eff_access = agent_sandbox.get("workspaceAccess")
+        if eff_access is None:
+            eff_access = default_access
+        if not (eff_mode == "all" and eff_access in ("ro", "none")):
+            return False
+        if _resolve_sandbox_backend(agent_sandbox, default_backend) != "docker":
+            return False
+        # FP2: a shared-scope agent's OWN docker.binds never reaches the
+        # container (see _resolve_sandbox_scope), so only check it otherwise.
+        if _resolve_sandbox_scope(agent_sandbox, default_sandbox) != "shared":
+            if _sandbox_has_writable_bind(agent_sandbox):
                 return False
-            agent_sandbox = a.get("sandbox")
-            if not isinstance(agent_sandbox, dict):
-                continue  # no sandbox override declared -> fully inherits the safe default
-            eff_mode = agent_sandbox.get("mode")
-            if eff_mode is None:
-                eff_mode = default_mode
-            eff_access = agent_sandbox.get("workspaceAccess")
-            if eff_access is None:
-                eff_access = default_access
-            if not (eff_mode == "all" and eff_access in ("ro", "none")):
-                return False
-            if _resolve_sandbox_backend(agent_sandbox, default_backend) != "docker":
-                return False
-            # FP2: a shared-scope agent's OWN docker.binds never reaches the
-            # container (see _resolve_sandbox_scope), so only check it otherwise.
-            if _resolve_sandbox_scope(agent_sandbox, default_sandbox) != "shared":
-                if _sandbox_has_writable_bind(agent_sandbox):
-                    return False
     return True
 
 

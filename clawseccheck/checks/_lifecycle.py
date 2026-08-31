@@ -22,6 +22,7 @@ from ..catalog import (
 from ..collector import (
     LIMIT_DOMAIN_CONFIG,
     Context,
+    agent_roster,
     dig,
 )
 from ..safeio import walk_dir_safely
@@ -730,11 +731,8 @@ def check_autonomy(ctx: Context) -> Finding:
     # heartbeat (top-level) and schedule do NOT exist in OpenClaw schema — removed
     has_heartbeat_cfg = bool(
         dig(cfg, "agents.defaults.heartbeat")
-        or any(
-            dig(agent, "heartbeat")
-            for agent in (dig(cfg, "agents.list") or [])
-            if isinstance(agent, dict)
-        )
+        # B-699: agents.entries as well as agents.list
+        or any(dig(agent.entry, "heartbeat") for agent in agent_roster(cfg))
         or dig(cfg, "cron")
     )
     autonomous = has_heartbeat_file or has_heartbeat_cfg
@@ -3199,18 +3197,18 @@ def _skill_workshop_reachable(cfg: dict) -> bool:
     if isinstance(profile, str) and profile.strip().lower() in _WORKSHOP_SAFE_PROFILES:
         return False
 
-    agents_list = dig(cfg, "agents.list")
+    # B-699: agents.entries as well as agents.list.
     # Only trust a per-agent deny/allow when it is the SOLE declared agent — with
     # multiple agents a single agent's restriction doesn't prove the tool is
     # unreachable fleet-wide, so stay conservative and leave it reachable (FAIL).
-    if isinstance(agents_list, list) and len(agents_list) == 1:
-        agent = agents_list[0]
-        if isinstance(agent, dict):
-            if "skill_workshop" in _names(dig(agent, "tools.deny")):
-                return False
-            agent_allow = _names(dig(agent, "tools.allow"))
-            if agent_allow and "*" not in agent_allow and "skill_workshop" not in agent_allow:
-                return False
+    roster = agent_roster(cfg)
+    if len(roster) == 1:
+        agent = roster[0].entry
+        if "skill_workshop" in _names(dig(agent, "tools.deny")):
+            return False
+        agent_allow = _names(dig(agent, "tools.allow"))
+        if agent_allow and "*" not in agent_allow and "skill_workshop" not in agent_allow:
+            return False
 
     return True
 

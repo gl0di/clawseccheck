@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import re
 
-from .collector import dig
+from .collector import agent_roster, dig
 
 # ``TOOL_NAME_ALIASES`` (dist tool-policy-*.js). Nothing aliases TO "read", so this
 # matters here only so an aliased entry in allow/deny normalizes the way the dist
@@ -227,16 +227,17 @@ def _normalize_agent_id(value) -> str:
 
 
 def _agent_entries(cfg: dict) -> list:
-    """``listAgentEntries``: ``(normalized id, entry)`` for each object in ``agents.list``."""
-    agents = cfg.get("agents") if isinstance(cfg, dict) else None
-    entries = agents.get("list") if isinstance(agents, dict) else None
-    if not isinstance(entries, list):
-        return []
-    return [
-        (_normalize_agent_id(entry.get("id")), entry)
-        for entry in entries
-        if isinstance(entry, dict)
-    ]
+    """``listAgentEntries``: ``(normalized id, entry)`` for every declared agent.
+
+    B-699: the roster comes from ``collector.agent_roster``, which reads BOTH the 2026.8.1
+    ``agents.entries`` record and the legacy ``agents.list`` array. Reading only the array
+    made this module answer ``confined_scopes -> [True]`` for a roster it could not see --
+    an INVERSION, not a silence, because both layers it reads default to the permissive
+    end. Measured before the fix, with the global confined and one agent exposed:
+    ``scopes_reaching_outside_workspace`` returned ``[]`` where the truth was
+    ``["agent 'worker'"]``.
+    """
+    return [(_normalize_agent_id(agent.id), agent.entry) for agent in agent_roster(cfg)]
 
 
 def _scope_reaches_outside(global_tools, agent_tools) -> bool:

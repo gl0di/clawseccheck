@@ -23,6 +23,7 @@ from ..collector import (
     LIMIT_DOMAIN_CONFIG,
     SKILL_DIRS,
     Context,
+    agent_roster,
     dig,
     env_evidence_readable,
     persistent_env_evidence,
@@ -696,12 +697,16 @@ def _persistence_note(ctx: Context) -> str:
 
 
 def _multi_agent_note(ctx: Context) -> str:
-    agent_list = dig(ctx.config, "agents.list")
-    n = len(agent_list) if isinstance(agent_list, list) else 0
+    # B-699: both roster shapes, and the note names the one this config actually uses —
+    # telling a 2026.8.1 user their agents are "under agents.list" names a key their file
+    # does not contain.
+    roster = agent_roster(ctx.config)
+    n = len(roster)
     if n <= 1:
         return ""
+    where = "agents.entries" if roster[0].path.startswith("agents.entries.") else "agents.list"
     return (
-        f" Note: config declares {n} agents under agents.list — this trifecta view is"
+        f" Note: config declares {n} agents under {where} — this trifecta view is"
         f" the aggregated global surface, not any single agent's effective grants. This"
         f" check does not resolve or read a specific agent's own tool config, so if you"
         f" run one named agent, its real exposure may differ from this global reading."
@@ -714,16 +719,14 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
     reads only agents.defaults.sandbox, so a named agent that overrides a safe default is
     missed entirely (C-058). Returns attributed evidence strings; empty when none."""
     out = []
-    agent_list = dig(cfg, "agents.list")
-    if not isinstance(agent_list, list):
-        return out
-    for a in agent_list:
-        if not isinstance(a, dict):
-            continue
+    for _agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
+        a = _agent.entry
         sb = a.get("sandbox")
         if not isinstance(sb, dict):
             continue
-        name = a.get("name") or "<unnamed>"
+        # `id` is the record key on the 2026.8.1 shape, so it names the agent even when
+        # the entry carries no `name` — better evidence than "<unnamed>" for every agent.
+        name = a.get("name") or _agent.id or "<unnamed>"
         if sb.get("mode") == "off":
             out.append(f"agent '{name}': sandbox.mode=off (exec runs on the host)")
         docker = sb.get("docker") if isinstance(sb.get("docker"), dict) else {}
@@ -1241,14 +1244,11 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "(beyond gateway defaults; possible RCE surface)"
         )
 
-    agent_list = dig(cfg, "agents.list")
-    if isinstance(agent_list, list):
-        for i, agent in enumerate(agent_list):
-            if not isinstance(agent, dict):
-                continue
-            for flag, lbl in _DANGER_AGENT_SANDBOX:
-                if dig(agent, f"sandbox.docker.{flag}"):
-                    fails.append(f"agents.list[{i}].sandbox.docker.{flag} — sandbox escape: {lbl}")
+    for agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
+        for flag, lbl in _DANGER_AGENT_SANDBOX:
+            if dig(agent.entry, f"sandbox.docker.{flag}"):
+                fails.append(
+                    f"{agent.path}.sandbox.docker.{flag} — sandbox escape: {lbl}")
 
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict):

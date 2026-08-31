@@ -205,7 +205,7 @@ def _exec_policy_sig(ctx) -> dict:
     for that agent. Comparing the global alone reported an edit to an already-overridden
     global as `deny -> full` while nothing about what any agent could run had changed.
     """
-    from ..collector import dig  # noqa: PLC0415
+    from ..collector import agent_roster, dig  # noqa: PLC0415
 
     cfg = ctx.config
     if not isinstance(cfg, dict):
@@ -216,43 +216,44 @@ def _exec_policy_sig(ctx) -> dict:
     global_sandbox = dig(cfg, "agents.defaults.sandbox.mode")
     scopes = {}
 
-    entries = dig(cfg, "agents.list")
+    # B-699: the roster comes from `agent_roster`, so a 2026.8.1 `agents.entries` record is
+    # read as well as the legacy `agents.list`. The scope KEY is unchanged in both shapes —
+    # it is built from the agent id, which `agent_roster` injects from the record key — so a
+    # user migrating their config does not get a spurious "scope moved" alert out of it.
+    _listed = agent_roster(cfg)
     # The global scope is only recorded when something actually RUNS under it. With a
-    # non-empty `agents.list` whose every entry carries its own `tools.exec`, the global is
+    # non-empty roster whose every entry carries its own `tools.exec`, the global is
     # inert — and recording it anyway meant an edit to it produced a `deny -> full` HIGH
-    # about a policy no agent uses. When the list is absent, empty, or has any entry without
+    # about a policy no agent uses. When the roster is empty, or has any entry without
     # an override, the global is what that agent runs, so it stays.
-    _listed = entries if isinstance(entries, list) else []
     _all_overridden = bool(_listed) and all(
-        isinstance(e, dict) and isinstance(e.get("tools"), dict)
-        and isinstance(e["tools"].get("exec"), dict)
-        for e in _listed)
+        isinstance(a.entry.get("tools"), dict)
+        and isinstance(a.entry["tools"].get("exec"), dict)
+        for a in _listed)
     if not _all_overridden:
         scopes["global"] = _resolve_scope(global_exec, global_sandbox)
 
-    if isinstance(entries, list):
-        for index, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                continue
-            agent_exec = (entry.get("tools") or {}).get("exec") \
-                if isinstance(entry.get("tools"), dict) else None
-            if not isinstance(agent_exec, dict):
-                # No override: this agent runs the global policy, already recorded above.
-                continue
-            agent_id = entry.get("id")
-            name = str(agent_id) if isinstance(agent_id, (str, int)) else f"#{index}"
-            agent_sandbox = global_sandbox
-            own_sandbox = entry.get("sandbox")
-            if isinstance(own_sandbox, dict) and own_sandbox.get("mode") is not None:
-                agent_sandbox = own_sandbox.get("mode")
-            # `applyExecPolicyLayer(global, agent)`: a layer's `mode` replaces the whole
-            # triple, otherwise its security/ask override field by field.
-            merged = dict(global_exec)
-            merged.update({k: v for k, v in agent_exec.items() if v is not None})
-            if agent_exec.get("mode"):
-                merged.pop("security", None)
-                merged.pop("ask", None)
-            scopes[f"agent:{name}"] = _resolve_scope(merged, agent_sandbox)
+    for _agent in _listed:
+        entry, index = _agent.entry, _agent.index
+        agent_exec = (entry.get("tools") or {}).get("exec") \
+            if isinstance(entry.get("tools"), dict) else None
+        if not isinstance(agent_exec, dict):
+            # No override: this agent runs the global policy, already recorded above.
+            continue
+        agent_id = entry.get("id")
+        name = str(agent_id) if isinstance(agent_id, (str, int)) else f"#{index}"
+        agent_sandbox = global_sandbox
+        own_sandbox = entry.get("sandbox")
+        if isinstance(own_sandbox, dict) and own_sandbox.get("mode") is not None:
+            agent_sandbox = own_sandbox.get("mode")
+        # `applyExecPolicyLayer(global, agent)`: a layer's `mode` replaces the whole
+        # triple, otherwise its security/ask override field by field.
+        merged = dict(global_exec)
+        merged.update({k: v for k, v in agent_exec.items() if v is not None})
+        if agent_exec.get("mode"):
+            merged.pop("security", None)
+            merged.pop("ask", None)
+        scopes[f"agent:{name}"] = _resolve_scope(merged, agent_sandbox)
 
     return {"scopes": scopes}
 

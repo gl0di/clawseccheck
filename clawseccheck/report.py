@@ -2061,20 +2061,22 @@ def _agents_roster(ctx) -> tuple[list[str], bool]:
     `agents.list` config roster; fall back to a single-default-agent roster when neither
     is present -- never an empty roster (System is the only true singleton subject)."""
     from .attest import attested_agents  # noqa: PLC0415
-    from .collector import dig  # noqa: PLC0415
+    # B-699: both roster shapes. `index` is the ORIGINAL array position on the legacy
+    # shape, so the `agent[N]` fallback below renders exactly as it did before.
+    from .collector import agent_roster  # noqa: PLC0415
 
     att = attested_agents(getattr(ctx, "attestation", None) or {})
     if att:
         return [a["name"] for a in att], True
-    agents_list = dig(getattr(ctx, "config", None) or {}, "agents.list")
-    if isinstance(agents_list, list) and agents_list:
+    roster = agent_roster(getattr(ctx, "config", None) or {})
+    if roster:
         names: list[str] = []
-        for i, a in enumerate(agents_list):
-            name = a.get("name") if isinstance(a, dict) else None
+        for agent in roster:
+            name = agent.entry.get("name")
             if isinstance(name, str) and name.strip():
                 names.append(name.strip())
             else:
-                names.append(f"agent[{i}]")
+                names.append(f"agent[{agent.index}]")
         return names, False
     return ["(default)"], False
 

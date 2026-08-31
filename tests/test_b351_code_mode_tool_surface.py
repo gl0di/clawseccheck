@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from clawseccheck.catalog import BY_ID, MEDIUM, PASS, UNKNOWN, WARN
+from clawseccheck.collector import agent_roster
 from clawseccheck.checks import (
     CHECKS,
     _b351_enabled,
@@ -221,7 +222,9 @@ def test_an_unnamed_entry_collides_with_an_explicit_main(tmp_path):
     no id and one called `main` are the same agent."""
     cfg = {"agents": {"list": [{"id": "main"}, {"tools": {"codeMode": True}}]}}
     assert check_code_mode_tool_surface(_ctx(cfg, tmp_path)).status == PASS
-    ids = [aid for aid, _ in _b351_resolvable_agents(cfg["agents"]["list"])]
+    # B-699: the helper now takes the normalised roster, so the same collision is asserted
+    # through `agent_roster` — which is also what proves it holds for `agents.entries`.
+    ids = [aid for aid, _ in _b351_resolvable_agents(agent_roster(cfg))]
     assert ids == ["main"], ids
 
 

@@ -422,6 +422,39 @@ def _default_agent_id(agents_list) -> str:
     return _normalize_agent_id(chosen.get("id") if isinstance(chosen, dict) else None)
 
 
+def _agent_entries(config: dict) -> "list[dict]":
+    """Every declared agent, from EITHER roster shape -- the leaf's copy of the rule.
+
+    B-699. OpenClaw 2026.8.1 replaced ``agents.list`` (an array) with ``agents.entries`` (a
+    record keyed by id, which rejects an ``id`` field inside an entry). This module is a
+    LEAF and cannot import ``collector.agent_roster``, so the rule is duplicated here the
+    same way ``WORKSPACE_DIRS`` is -- and pinned the same way: the two copies are compared
+    over a battery in ``tests/test_b610_derived_agent_workspaces.py``.
+
+    Only the entries are returned: neither caller here emits an evidence label, so the
+    source path the collector's richer form carries would be dead weight.
+
+    Mirrors ``readAgentRosterProperty``: ``entries`` is chosen when the KEY is present, not
+    when its value is usable, and the ``list`` beside it is then NOT consulted. The record
+    KEY wins over an entry's own ``id`` (``{...entry, id}``).
+    """
+    agents = config.get("agents") if isinstance(config, dict) else None
+    if not isinstance(agents, dict):
+        return []
+    if "entries" in agents:
+        value = agents["entries"]
+        if not isinstance(value, dict):
+            return []
+        return [{**val, "id": key} for key, val in value.items()
+                if isinstance(key, str) and isinstance(val, dict)]
+    if "list" in agents:
+        value = agents["list"]
+        if not isinstance(value, list):
+            return []
+        return [entry for entry in value if isinstance(entry, dict)]
+    return []
+
+
 def _derived_agent_workspaces(config: dict) -> "list[str]":
     """Workspaces OpenClaw derives for agents that declare no `workspace` of their own (B-610).
 
@@ -429,13 +462,11 @@ def _derived_agent_workspaces(config: dict) -> "list[str]":
     that default is set, else ``workspace-<id>`` under the state dir. Neither was constructed
     before, so a non-default agent's install records were not read at all.
     """
+    listed = _agent_entries(config)  # B-699: agents.entries as well as agents.list
+    if not listed:
+        return []
     agents = config.get("agents")
-    if not isinstance(agents, dict):
-        return []
-    listed = agents.get("list")
-    if not isinstance(listed, list) or not listed:
-        return []
-    defaults = agents.get("defaults")
+    defaults = agents.get("defaults") if isinstance(agents, dict) else None
     fallback = ""
     if isinstance(defaults, dict) and isinstance(defaults.get("workspace"), str):
         fallback = defaults["workspace"].strip()
@@ -478,11 +509,9 @@ def workspace_roots(home: Path, config: "dict | None" = None, *,
             defaults = agents.get("defaults")
             if isinstance(defaults, dict) and isinstance(defaults.get("workspace"), str):
                 extra.append(Path(defaults["workspace"]).expanduser())
-            listed = agents.get("list")
-            if isinstance(listed, list):
-                for entry in listed:
-                    if isinstance(entry, dict) and isinstance(entry.get("workspace"), str):
-                        extra.append(Path(entry["workspace"]).expanduser())
+            for entry in _agent_entries(config):  # B-699: both roster shapes
+                if isinstance(entry.get("workspace"), str):
+                    extra.append(Path(entry["workspace"]).expanduser())
         # B-610: the two rules OpenClaw applies to an agent with no explicit workspace.
         extra.extend(Path(w).expanduser() for w in _derived_agent_workspaces(config))
     # A RELATIVE workspace string is resolved against *home*, never against the process's
