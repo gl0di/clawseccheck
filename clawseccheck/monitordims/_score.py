@@ -10,9 +10,11 @@ from __future__ import annotations
 from ..catalog import FAIL, UNKNOWN  # noqa: F401
 from ._shared import (  # noqa: F401
     NOTE_NO_PRIOR_RECORD,
+    NOTE_RECORD_DAMAGED,
     NOTE_UNDETERMINED,
     _h,
     _num,
+    _num_or_none,
 )
 
 
@@ -39,9 +41,23 @@ def _diff_score(
     # `_same_scope_flags`: a score taken with --no-host is not the same measurement as
     # one taken without it, so a fall between them is arithmetic, not drift.
     if not (prev_blind or curr_blind) and _same_scope_flags and _both_graded:
-        if _num(curr, "score") < _num(prev, "score"):
-            alerts.append(("HIGH", f"Security score dropped: {prev.get('grade')} {prev.get('score')} "
-                                   f"-> {curr.get('grade')} {curr.get('score')}."))
+        # B-694: `_num_or_none`, not `_num`. `_num`'s default of 0 is the hazard
+        # `monitor.py`'s own snapshot comment already names for an ABSENT score -- "would
+        # fabricate a catastrophic drop on a config that did not change" -- and a CORRUPTED
+        # score has the identical shape with no guard: `"score": true` or `"score": "49"`
+        # both default to 0 and fire "Security score dropped: F 49 -> F True", printing the
+        # corrupted value verbatim because the text read `.get()` rather than the checked
+        # number. Absence is handled one layer up by `_both_graded`; this is the case where
+        # the flag says graded and the field does not hold a number.
+        p_score = _num_or_none(prev, "score")
+        c_score = _num_or_none(curr, "score")
+        if p_score is None or c_score is None:
+            note(NOTE_RECORD_DAMAGED,
+                 "The security score was not compared — one of the two records does not "
+                 "hold a number there.")
+        elif c_score < p_score:
+            alerts.append(("HIGH", f"Security score dropped: {prev.get('grade')} {p_score} "
+                                   f"-> {curr.get('grade')} {c_score}."))
         else:
             # B-273: the displayed score is capped by the most severe open FAIL
             # (scoring.py FAIL_CAPS — CRITICAL pins it at 49), so on any config already
@@ -69,7 +85,15 @@ def _diff_score(
             # pointing at alerts that correctly do not exist. A scope mismatch — including an
             # absent hash from a pre-this-fix snapshot — skips the comparison for one run,
             # same self-healing idiom as the presence guard above.
-            p_raw, c_raw = prev.get("raw_score"), curr.get("raw_score")
+            # B-694: through the shared predicate, not a re-derived `isinstance(x, int)`.
+            # `isinstance(True, int)` is True, so the hand-rolled check let a corrupted
+            # `"raw_score": true` compare as 1 and fabricate a HIGH reading "fell 74 ->
+            # True". `_shared._num` had already learned that (B-270) and said why; this
+            # site had its own copy without the clause. `_num_or_none`, not `_num`: an
+            # absent figure must SKIP the comparison, and `_num`'s default of 0 would
+            # read the arrival of a baseline as a rise.
+            p_raw = _num_or_none(prev, "raw_score")
+            c_raw = _num_or_none(curr, "raw_score")
             p_scope, c_scope = prev.get("raw_score_scope"), curr.get("raw_score_scope")
             same_scope = (isinstance(p_scope, str) and isinstance(c_scope, str)
                          and p_scope == c_scope)
@@ -91,11 +115,11 @@ def _diff_score(
                      "The underlying pass-rate was not compared with last time: this "
                      "version checks a different set of things than the run that saved "
                      "your baseline did.")
-            elif not (isinstance(p_raw, int) and isinstance(c_raw, int)):
+            elif p_raw is None or c_raw is None:
                 note(NOTE_NO_PRIOR_RECORD,
                      "The underlying pass-rate was not compared — your saved record does "
                      "not carry that figure.")
-            if same_scope and isinstance(p_raw, int) and isinstance(c_raw, int) and c_raw < p_raw:
+            if same_scope and p_raw is not None and c_raw is not None and c_raw < p_raw:
                 alerts.append((
                     "HIGH",
                     f"Security posture degraded while the displayed score stayed at "

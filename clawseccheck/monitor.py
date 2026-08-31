@@ -148,6 +148,7 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _note_skills_prev_capped,
     _note_unmodelled_config_edit,
     _num,
+    _num_or_none,
     _plugin_id,
     _plugins_sig,
     _prov_comparable,
@@ -1034,7 +1035,15 @@ def diff_with_notes(prev: dict | None, curr: dict
     # five fabricated "removed" lines. Since fill order is filename order, an attacker can
     # choose which skills fall outside the audited set. An all-clear over that view is not
     # honest, so the truncation is stated explicitly.
-    _sk_capped_n = int(curr.get("skills_capped_count") or len(curr_sk_capped))
+    # B-694: through the shared predicate, not `int(...)` on the raw field. `int(True)`
+    # is 1 and `int("49")` is 49, so a corrupted count became a confident "1 installed
+    # skill(s) were NOT collected" on a run where nothing was capped. Same class as
+    # B-270 (`score`) and B-304 (`bootstrap`) right below — fixed case by case, and this
+    # was one of the two left. A non-number now falls back to the length of the capped
+    # list, which is THIS run's own observation rather than the record's claim; a
+    # recorded 0 falls back the same way it always did.
+    _recorded_capped = _num_or_none(curr, "skills_capped_count")
+    _sk_capped_n = int(_recorded_capped) if _recorded_capped else len(curr_sk_capped)
     _note_skills_capped(_sk_capped_n, alerts, curr_sk_capped)
 
     # B-304: same `_both_dims` reasoning as `skills` immediately above — a corrupted

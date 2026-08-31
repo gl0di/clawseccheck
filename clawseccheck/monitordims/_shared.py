@@ -155,6 +155,28 @@ def _frontier(snap: dict, key: str) -> set:
     return set()
 
 
+def _num_or_none(snap: dict, key: str) -> "int | float | None":
+    """B-694: the numeric value at *key*, or None when it is absent or not a number.
+
+    The same predicate `_num` applies, with a different answer for "not a number", because
+    the two callers need different things from that case. `_num`'s `default=0` is right
+    where a missing figure should compare as zero; it is wrong where the comparison must be
+    SKIPPED, since defaulting an absent baseline to 0 reads the ARRIVAL of a figure as a
+    rise. `raw_score`'s backstop needs the second — see `monitordims/_score.py`.
+
+    That backstop used to re-derive the predicate rather than call one, and dropped the bool
+    clause doing it: `isinstance(True, int)` is True and `True < 74` is `1 < 74`, so a
+    `state.json` corrupted to `"raw_score": true` fired a HIGH reading "the underlying
+    pass-rate fell 74 -> True" — a confident measurement of a degradation that did not
+    happen, from a file that carries no chain and no signature. One predicate, two answers,
+    so a third copy has nowhere to drift from.
+    """
+    val = snap.get(key)
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return val
+    return None
+
+
 def _num(snap: dict, key: str, default: int = 0) -> "int | float":
     """B-270: a numeric snapshot field, or *default* when absent or non-numeric.
 
@@ -162,7 +184,5 @@ def _num(snap: dict, key: str, default: int = 0) -> "int | float":
     string there; bool is excluded because ``True < 2`` compares as 1 and would silently
     fabricate a score-drop alert out of a corrupted field.
     """
-    val = snap.get(key)
-    if isinstance(val, (int, float)) and not isinstance(val, bool):
-        return val
-    return default
+    val = _num_or_none(snap, key)
+    return default if val is None else val

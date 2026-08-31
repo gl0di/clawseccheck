@@ -357,7 +357,13 @@ _SNAPSHOT_RECEIVERS = {"prev", "curr"}
 # it. And keyed to the key's POSITION rather than "any string in this call", because the
 # looser form swept prose into the manifest — `_emit(prev, curr, "MCP server appeared")`
 # made the guard demand that sentence be declared a watched dimension.
-_SNAPSHOT_KEY_HELPERS = {"_dim": 1, "_frontier": 1, "_num": 1, "_both_dims": 2,
+_SNAPSHOT_KEY_HELPERS = {"_dim": 1, "_frontier": 1, "_num": 1, "_num_or_none": 1,
+                         # B-694 split `_num` into a strict reader that answers None and a
+                         # defaulting one, so `raw_score`'s only read moved to the new name
+                         # and this guard went red with "declared but never read" — the same
+                         # shape as the `pair_or_note` entry below, and the same answer. The
+                         # helper takes its key first, exactly as `_num` does.
+                         "_both_dims": 2,
                          # C-418 wrapped the seven `_both_dims` presence guards in a helper
                          # that also records WHY a comparison was skipped. Its key is the
                          # first argument. This entry is why the guard kept seeing `host`,

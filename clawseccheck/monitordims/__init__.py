@@ -39,6 +39,7 @@ from ._shared import (  # noqa: F401
     _h,
     _name_dimensions,
     _num,
+    _num_or_none,
 )
 
 from ._behavioral import _diff_behavioral  # noqa: F401
