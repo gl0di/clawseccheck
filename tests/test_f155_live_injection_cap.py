@@ -389,11 +389,24 @@ class TestCliEndToEnd:
         without_bundle = json.loads(capsys.readouterr().out)
 
         # Same score either way (both ungraded here -- self_report never ran).
-        with_resistant_no_layers = dict(_drop_elapsed(with_resistant))
-        without_bundle_no_layers = dict(_drop_elapsed(without_bundle))
-        del with_resistant_no_layers["missing_layers"]
-        del without_bundle_no_layers["missing_layers"]
-        assert with_resistant_no_layers == without_bundle_no_layers
+        #
+        # B-692: the ledger is the ONE thing this test says should differ, and it now
+        # appears twice in the payload -- as the top-level `missing_layers` and, since
+        # `runState` joined the `--full --json` key list, as `runState.missingLayers`.
+        # Both are dropped here for the same reason, not because `runState` is exempt
+        # from the comparison: everything else in it is still compared. Excluding only
+        # the first would make this assert that the intended difference is absent.
+        # Rebuilt rather than `del`eted in place: `dict()` copies shallowly, so mutating
+        # the nested dict would also change `with_resistant`, which the assertions below
+        # still read.
+        def _without_the_ledger(payload):
+            trimmed = {k: v for k, v in _drop_elapsed(payload).items()
+                       if k != "missing_layers"}
+            trimmed["runState"] = {k: v for k, v in trimmed["runState"].items()
+                                   if k != "missingLayers"}
+            return trimmed
+
+        assert _without_the_ledger(with_resistant) == _without_the_ledger(without_bundle)
         assert with_resistant["graded"] is False
         assert without_bundle["graded"] is False
 

@@ -215,7 +215,7 @@ _EXEMPT = {
               "That is the argument for the split (flag registration -> its own module, and "
               "the mode branches -> a dispatch table) rather than a reason to defer it again; "
               "the entry has now been restated twice for the same cause.",
-    "pipeline.py": "~1,314 lines — the --full P7-P10 orchestration. Crossed the budget with "
+    "pipeline.py": "~1,550 lines — the --full P7-P10 orchestration. Crossed the budget with "
                    "C-425's PipelineResult.to_ledger(), which projects the run's phases onto "
                    "the five-layer ledger (layers.py). It belongs here and nowhere else: it "
                    "reads PhaseResult state, and layers.py must stay a leaf that scoring.py "

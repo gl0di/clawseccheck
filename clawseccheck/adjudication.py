@@ -1100,12 +1100,13 @@ def build_bundle_template() -> dict:
 # entries max, then `_sanitize()`. So it may cross this boundary exactly as the other
 # stable labels do.
 #
-# Be honest about what wiring it currently buys: NOTHING YET, and that is a separate gap
-# rather than a reason to leave the entry wrong. `--judge-packet` builds its score before
-# any bundle is resolved (`judge_packet` is not in `_MODE_HONORS`), so the flag is always
-# False on that path; `--full --json` DOES resolve it, and `PipelineResult.to_json`'s
-# allowlist then drops `runState` entirely. The entry is correct and becomes visible the
-# moment either is fixed.
+# Where this entry is actually observable, since the two routes differ. `--judge-packet`
+# builds its score before any bundle is resolved (`judge_packet` is not in `_MODE_HONORS`),
+# so the flag is always False on that path and the entry never fires there. `--full --json`
+# does resolve it, and B-692 put `runState` in `PipelineResult.to_json`'s key list, so that
+# is the route on which it reaches a reader. (When this was written the allowlist still
+# dropped `runState` and the comment said the entry bought nothing yet; B-692 is the change
+# that made it buy something, and this note moved with it.)
 #
 # `degraded_capped` genuinely has no reason attribute to surface -- scoring defines none --
 # and its count already rides the envelope as `degradedChecks`, so that None is correct

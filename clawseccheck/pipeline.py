@@ -1197,6 +1197,42 @@ def _b164_not_reached(findings) -> tuple:
 
 # ── the pipeline roll-up (P10) ───────────────────────────────────────────────
 
+# B-692: every key `run_adjudication` puts on its phase data, so the emitter cannot drop
+# one by omission. It used to be an inline five-tuple, and it silently dropped the two the
+# phase produces and nothing else reads back:
+#
+#   `runState` -- the run-level frame B-623 added precisely so a `--full` adjudication does
+#   not hand a judge a band of UNKNOWNs with no way to see the run was blind, capped or
+#   ungraded. The phase's own comment says that in as many words, and the emitter then threw
+#   it away; the standalone `--judge-packet` carried it while the composed route, which is
+#   the one `run_adjudication`'s operator text tells you to use, did not.
+#
+#   `verdictsSubmitted` -- set on every run and read by nobody, because it never left. It
+#   answers "did a verdict bucket of EITHER kind arrive", which no other key does: it is
+#   raised by the `judged` branch (which attaches `secondOpinion`) AND by the `vetJudged`
+#   branch (which attaches `vetSecondOpinion` instead), so it is not the same question as
+#   `"secondOpinion" in payload`. Measured: a bundle carrying only `liveTest` leaves it
+#   False, a `judged` bundle raises it, and a `vetJudged`-only bundle raises it with no
+#   `secondOpinion` present at all. Without it, "nothing was borderline" and "nobody
+#   judged" are indistinguishable.
+#
+# A named constant rather than a literal in the loop so the guard can be a CENSUS --
+# `tests/test_b692_the_phase_keys_all_reach_the_output.py` derives what the phase can produce
+# from its own source and requires this to cover it. An allowlist is a deliberate decision
+# about the public shape; the guard only makes leaving a key out a decision rather than an
+# oversight. Same shape as B-689's `_CAP_LADDER` and B-693's emitter census, for the same
+# reason: a hand-kept list beside a hand-kept producer is where these keep diverging.
+_ADJUDICATION_JSON_KEYS = (
+    "judgePacket",
+    "runState",
+    "vetPackets",
+    "attestTemplate",
+    "secondOpinion",
+    "vetSecondOpinion",
+    "verdictsSubmitted",
+)
+
+
 @dataclass
 class PipelineResult:
     """Every phase's outcome plus the roll-ups the three output paths read."""
@@ -1264,8 +1300,7 @@ class PipelineResult:
         }
         adj = self.by_name(PHASE_ADJUDICATION)
         if adj is not None and isinstance(adj.data, dict):
-            for key in ("judgePacket", "vetPackets", "attestTemplate", "secondOpinion",
-                       "vetSecondOpinion"):
+            for key in _ADJUDICATION_JSON_KEYS:
                 if key in adj.data:
                     payload[key] = adj.data[key]
         plugins = self.by_name(PHASE_PLUGIN_SWEEP)

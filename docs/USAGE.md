@@ -1313,8 +1313,11 @@ python3 audit.py --log audit.log            # also write log to a local file
   `--full --json` carries all of it structured: `skill_sweep` (§19), `pluginSweep`, `phases`
   (one entry per appended phase, with an honest status — `ran`/`skipped`/`not_reached`/
   `unavailable`/`error`, never silence), `complete`, `notScanned`, `judgePacket`,
-  `vetPackets`, and `coveragePage` (§20 — scanned-vs-total per subject, every gap named) —
-  see `docs/OUTPUT_SCHEMA.md` §1. The same coverage data prints as a `CLAWSECCHECK COVERAGE`
+  `vetPackets`, `attestTemplate`, `runState` (the run-level frame the judge packet needs —
+  what was graded, which layers ran, what capped the score), `verdictsSubmitted`,
+  `secondOpinion`/`vetSecondOpinion` when a `--judged-bundle` supplied verdicts, and
+  `coveragePage` (§20 — scanned-vs-total per subject, every gap named) —
+  see `docs/OUTPUT_SCHEMA.md` §1, which is the authoritative list. The same coverage data prints as a `CLAWSECCHECK COVERAGE`
   text section under plain `--full`.
   - **`--fast`** (only with `--full`) drops the plugin sweep, behavioral replay, and skill
     sweep — keeping just the audit, self-test, vet-mcp, and the (free) adjudication packet —
