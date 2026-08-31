@@ -1526,8 +1526,12 @@ python3 audit.py --log audit.log            # also write log to a local file
   The arrow answers "did the **letter** move", and an open FAIL pins the score at a floor —
   so it can read flat across a run that got materially worse. Each graded row therefore also
   records the **uncapped pass-rate**, the check set behind it and the build that produced it,
-  and a row whose score held or rose while that figure FELL is marked
-  `(pass-rate fell 92 -> 74)` with a line under the table saying what it means. Only a fall is
+  and any row where that figure FELL is marked `(pass-rate fell 92 -> 74)`, whether or not the
+  letter moved with it, with a line under the table saying what it means. Which line depends on
+  the score's own direction: a run that kept or raised its score is the case the mark exists
+  for, and is explained as a score pinned at a cap by an open FAIL; a run whose score fell too
+  is counted separately and simply told that both measures fell, because the pinned-score
+  wording would contradict the down arrow on that row's own line. Only a fall is
   ever stated: the figure is a rounded percentage, so a small real regression can leave it
   standing still, and "pass-rate unchanged" would be the same false reassurance one step down.
   When two rows cannot be lined up — one of them predates this field, or they were recorded for

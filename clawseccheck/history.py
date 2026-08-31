@@ -21,6 +21,7 @@ from .monitor import (
     verify_chain,
 )
 from .safeio import secure_append_text, secure_dir
+from .textnorm import asciify
 
 DEFAULT_HISTORY = "~/.clawseccheck/history.jsonl"
 
@@ -505,6 +506,10 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     # B-691: runs whose score held or rose while the uncapped pass-rate FELL, and runs
     # where that comparison could not be made at all. Counted, not silently skipped.
     pinned_falls = 0
+    # B-696: a pass-rate fall where the LETTER fell too. Counted apart from `pinned_falls`
+    # because the two need different sentences: one says an unchanged letter is not
+    # evidence, the other has a letter that already moved and must not be told otherwise.
+    compounded_falls = 0
     uncorroborated = 0
     holes = 0
     # B-579: a "view" row is produced by the ACT of running --trend, not by a check the
@@ -573,7 +578,25 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
                     # "pass-rate unchanged" there would be this bug again, one resolution
                     # step down. A fall is sound: same scope and same build means the same
                     # denominator, so the figure fell only if what was earned fell.
-                    pinned_falls += 1
+                    # B-696: split by the LETTER's own direction. B-691 counted every
+                    # pass-rate fall as "kept or raised its score", and on a run where the
+                    # score fell too the footer contradicted the arrow three lines above
+                    # it -- measured: `D 60 v` under `A 90`, with "1 run above kept or
+                    # raised its score" underneath. The clause is still right to fire
+                    # either way; only the sentence explaining it was written for one case.
+                    # `last_graded_score` is still the PREVIOUS row's here -- it is
+                    # reassigned below this block, together with `last_graded_row`. Because
+                    # the two are assigned on the same two lines, the enclosing
+                    # `last_graded_row is not None` already implies the score is present:
+                    # the None arm below cannot fire today and is kept only so a future
+                    # decoupling fails toward "pinned" loudly rather than raising here.
+                    # The comparison itself adds no new type exposure -- the ARROW above
+                    # already orders these same two values (`row["score"] < ...`), so a
+                    # non-numeric score raises there first, three branches earlier.
+                    if last_graded_score is not None and row["score"] < last_graded_score:
+                        compounded_falls += 1
+                    else:
+                        pinned_falls += 1
                     # Appended AFTER the home path below, not here: the home is the last
                     # thing on the line, and a clause before it reads as if the path
                     # belonged to the clause.
@@ -631,6 +654,14 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
             "evidence that nothing got worse. Read the findings for "
             + ("that run." if pinned_falls == 1 else "those runs.")
         )
+    if compounded_falls:
+        lines.append("")
+        _runs = "run" if compounded_falls == 1 else "runs"
+        lines.append(
+            f"{compounded_falls} {_runs} above fell on both measures: the score and the "
+            "underlying pass-rate. Read the findings for "
+            + ("that run." if compounded_falls == 1 else "those runs.")
+        )
     if uncorroborated:
         lines.append("")
         _runs = "run" if uncorroborated == 1 else "runs"
@@ -667,4 +698,16 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
             lines.append("")
             lines.append(note)
 
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    # B-696: `--ascii` promises pure ASCII and this renderer was leaking an em dash
+    # from B-691's own disclosure paragraph. Folded HERE, at the single exit, through
+    # the one table B-483 left standing -- not by hand-picking ASCII punctuation in
+    # each paragraph, which is the second-copy shape this session has fixed four times
+    # over (B-689/B-692/B-693/B-694). The glyph selection above stays as it is: it
+    # chooses `^ v =` rather than folding `▲ ▼ ·`, and those have no ASCII_MAP entry,
+    # so a future unicode glyph added there would fold to "?" and be caught by the
+    # guard rather than sail past it.
+    #
+    # Measured before shipping: on a store exercising every paragraph this changes
+    # exactly one line -- the em dash -- and nothing else.
+    return asciify(text) if ascii_only else text

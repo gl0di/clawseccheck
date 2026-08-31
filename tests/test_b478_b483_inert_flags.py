@@ -312,6 +312,31 @@ def test_ascii_mode_emits_pure_ascii(argv, capsys):
     assert not leaked, f"--ascii still emitted {leaked!r}"
 
 
+def test_trend_ascii_emits_pure_ascii(capsys, tmp_path):
+    """`--trend` belongs to the guard above and cannot sit in its list.
+
+    Every entry there passes `--no-history` to keep the run from touching a store.
+    `--trend` records unconditionally — that is its job, and C-251 makes it ignore
+    `--no-history` — so it needs a writable path of its own, which a static parametrize
+    cannot supply. Hence a sibling asserting the identical property rather than an
+    exemption.
+
+    Its absence from that list is exactly why B-696 shipped: B-691 added a disclosure
+    paragraph with an em dash, `--ascii` promised pure ASCII, and the one guard that
+    checks that promise was not looking at this surface. Two runs, because the first
+    writes the row the second renders — a single run has nothing to draw.
+    """
+    history = str(tmp_path / "history.jsonl")
+    data = str(tmp_path / "state")
+    argv = ["--trend", "--home", VULN, "--no-color", "--ascii",
+            "--history", history, "--data-dir", data]
+    _run(capsys, *argv)
+    _, out, _ = _run(capsys, *argv)
+    assert out.strip(), "the fixture rendered nothing — it exercises no paragraph"
+    leaked = sorted({ch for ch in out if ord(ch) > 127})
+    assert not leaked, f"--trend --ascii still emitted {leaked!r}"
+
+
 def test_advise_ascii_folds_its_hardcoded_dashes(capsys):
     """--advise read `ascii_only` for its icons and its `dash` variable, then emitted a
     hardcoded em dash in the verdict headline anyway."""

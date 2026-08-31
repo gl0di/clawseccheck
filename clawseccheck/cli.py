@@ -1153,22 +1153,31 @@ def _percentile_line(score, ascii_only: bool, history_path=None) -> str:
     never the distribution. The `--percentile` call site also emits before recording, so
     the current run's own row cannot be the one ranked.
     """
+    # B-696: BOTH ungraded branches compose their own prose — an em dash of their own,
+    # plus `_missing_layers_sentence`, whose "No grade yet — N of 5 layers…" carries two
+    # more — and neither folded, so `--percentile` and `--trend` (which prints this line)
+    # emitted non-ASCII under `--ascii`. Predates B-691; found by the guard B-696 added
+    # for B-691's own leak, which is the point of adding it. The graded branch below was
+    # always clean because `render_percentile` folds at its own exit — this brings the two
+    # early returns to the same discipline rather than adding a second rule per branch.
     if not getattr(score, "graded", True):
         opened = _missing_layers_sentence(score)
         row = _last_complete_history_row(history_path)
         if row is None:
-            return (
+            text = (
                 f"{opened} No rank yet — a percentile compares a score against a "
                 "reference profile of complete audits, and no complete check has been "
                 f"recorded here yet. Run '{command_prefix()} --full' to complete one, then "
                 "'--percentile' to rank it."
             )
-        when = row.get("date") or row.get("ts") or "an earlier run"
-        return (
-            f"{opened} Ranking your last COMPLETE check instead — {when}, scored "
-            f"{row['score']}/100, not this run: "
-            f"{render_percentile(row['score'], ascii_only)}"
-        )
+        else:
+            when = row.get("date") or row.get("ts") or "an earlier run"
+            text = (
+                f"{opened} Ranking your last COMPLETE check instead — {when}, scored "
+                f"{row['score']}/100, not this run: "
+                f"{render_percentile(row['score'], ascii_only)}"
+            )
+        return asciify(text) if ascii_only else text
     return render_percentile(score.score, ascii_only)
 
 
