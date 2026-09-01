@@ -822,6 +822,7 @@ from ._mcp import (
     _mcp_codex_is_loopback_server,
     _mcp_codex_normalize_mode,
     _mcp_codex_requires_approval,
+    _mcp_is_per_requester,
     _mcp_normalize_tool_filter,
     _mcp_tool_allowed,
     _mcp_tool_filter_matches,
@@ -848,6 +849,7 @@ from ._mcp import (
     check_mcp_server_exfil_host_in_args,
     check_mcp_tool_inheritance,
     check_mcp_tool_name_shadowing,
+    check_mcp_codex_preapproved_tools,
     check_mcp_unenforced_annotations,
     check_plugin_app_server_command,
     check_plugin_clawhub_trust,
@@ -1306,7 +1308,8 @@ CHECKS = [
     check_mcp_hardening,
     check_mcp_external_endpoint,
     check_mcp_server_exfil_host_in_args,
-    check_mcp_unenforced_annotations,  # B333 — declared MCP annotations OpenClaw never reads (F-143/W2.1)
+    check_mcp_unenforced_annotations,  # B333 — MCP safety-hint annotations, per build (F-143/W2.1)
+    check_mcp_codex_preapproved_tools,  # B353 — MCP server pre-approves every tool (F-185)
     check_mcp_host_sanitizer_gap,  # B331 — MCP tool-description injection past the host sanitizer (F-144/W2.2)
     check_mcp_tool_name_shadowing,  # B332 — cross-server tool-name collision/homoglyph/near-miss (F-145/W2.3)
     check_proxy_header_forging,

@@ -3188,6 +3188,154 @@ def _b333_modern_surface_verdict(
     return (WARN, waived) if waived else None
 
 
+def _mcp_is_per_requester(spec: dict) -> bool:
+    """True when a server is per-requester OAuth, which takes it out of the Codex config.
+
+    `partitionMcpServersByConnectionScope` (`dist/mcp-connection-resolver-*.js`) splits
+    configured servers into `staticServers` and `requesterScopedServerNames`, and
+    `codex-mcp-config-*.js` builds the Codex MCP config from the STATIC half only. A
+    per-requester server is therefore never in it, so its `codex` block -- approval mode
+    included -- never reaches the approval predicate.
+
+    BOTH conditions are required, measured rather than read: `identity: "per-requester"`
+    without `auth: "oauth"` leaves the server STATIC. Executed against openclaw@2026.8.2::
+
+        auth=oauth  identity=per-requester -> static=false, requesterScoped=["s"]
+        auth=oauth  identity=shared        -> static=true
+        NO auth     identity=per-requester -> static=true      <- the half a reading misses
+        auth=none   identity=per-requester -> static=true
+
+    Found by the C-135 pass on this check; keying on `identity` alone would have created
+    the mirror-image false negative.
+    """
+    if spec.get("auth") != "oauth":
+        return False
+    oauth = spec.get("oauth")
+    return isinstance(oauth, dict) and oauth.get("identity") == "per-requester"
+
+
+def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
+    """B353 (F-185): an MCP server set to pre-approve every one of its tools.
+
+    ``mcp.servers.<name>.codex.defaultToolsApprovalMode`` takes "auto" | "prompt" |
+    "approve", and **"approve" means pre-approved, not "requires approval"**:
+    ``requiresMcpCodexToolApproval`` returns false immediately for every tool on that
+    server, before any annotation is looked at. The consumer is unattended execution --
+    a scheduled run drops every MCP tool that would need approval, so this keeps all of
+    them, including destructive ones. The value's name reads like the safe one; that
+    inversion is why this is a check and not a docs line.
+
+    GROUNDED against **openclaw@2026.8.2**, the build installed when this was written, with
+    both controls the upgrade protocol requires -- a bogus sibling key, because an ACCEPTED
+    result on a passthrough object proves nothing, and a known-real sibling, because a probe
+    pointed at the wrong schema rejects everything:
+
+        mcp.servers.s.codex.defaultToolsApprovalMode  ACCEPTED   <- the subject
+        mcp.servers.s.codex.zzzBogusKey123            REJECTED   <- not a passthrough
+        mcp.servers.s.tools                           ACCEPTED   <- the probe is live
+        ...defaultToolsApprovalMode: "zzz"            REJECTED   <- a real enum
+        ...defaultToolsApprovalMode: "prompt"         ACCEPTED   <- the recommended value
+
+    The approval SEMANTICS this rests on come from the ports in this module, which are
+    replayed against whatever OpenClaw is installed by
+    tests/test_b706_codex_annotations_enforced.py -- they were validated on 2026.8.1 and
+    still agree on 2026.8.2 (86 cases, 0 disagreements), so the version above dates the
+    probe rather than bounding the claim.
+
+    Three things the task's own description asked for and the schema DISPROVED, so they
+    are deliberately NOT read here:
+
+    * ``nodeHost.mcp.servers.<name>.codex`` parses, but the bundle-MCP path that reaches
+      the approval predicate reads ``normalizeConfiguredMcpServers(params.cfg?.mcp?.servers)``
+      and nothing else (`dist/bundle-mcp-config-*.js`). A nodeHost server's codex block
+      never reaches it, so reporting one would be a finding about an inert key.
+    * the retired snake_case ``default_tools_approval_mode`` is REJECTED by the schema, so
+      a config carrying it does not load at all. The runtime still reads it as a
+      fallback, but no config can reach the runtime carrying it. A config that will not
+      load is a different problem with a different check.
+    * the legacy top-level ``mcpServers`` shape is likewise REJECTED, which is why this
+      reads ``mcp.servers`` directly rather than the merged ``_mcp_servers()``: that helper
+      unions shapes whose codex block this build never consults.
+
+    Two exclusions, both the reachability lesson from B-706's C-135 rounds:
+
+    * OpenClaw's OWN loopback server -- name exactly ``openclaw`` on a matching
+      ``127.0.0.1``/``localhost`` ``/mcp`` url -- is implicitly pre-approved by the vendor.
+      That is a default, not an operator mistake. A server merely NAMED ``openclaw`` on any
+      other url gets no exemption, which is the half that makes the exclusion safe.
+    * a server with ``enabled: false`` never reaches the runtime at all.
+
+    WARN, never FAIL, for a reason expected to change: the whole mechanism is on the Codex
+    app-server path, and this audit does not yet determine whether any configured agent
+    runs that harness (B-708). Asserting a live grant on a setup where the
+    block is inert is exactly the defect that round of C-135 found in B333.
+
+    WARN    -- a non-loopback, enabled server explicitly sets the mode to "approve".
+    PASS    -- servers were inspected and none does.
+    UNKNOWN -- no MCP servers configured under `mcp.servers`.
+    """
+    # A plain `.get()` walk, not `dig()`, and for the reason B-701 used one in this module:
+    # a new `dig()` path takes on a grounding obligation in tests/grounded_schema_paths.txt
+    # plus the dist snapshot, and this location needs none — `_mcp_servers()` two hundred
+    # lines up reads exactly `cfg["mcp"]["servers"]` the same way, and the key was verified
+    # against the installed schema with a bogus-key control (see this function's docstring).
+    _mcp = ctx.config.get("mcp") if isinstance(ctx.config, dict) else None
+    servers = _mcp.get("servers") if isinstance(_mcp, dict) else None
+    if not isinstance(servers, dict) or not servers:
+        return _finding(
+            "B353", UNKNOWN,
+            "No MCP servers are configured under mcp.servers, so there is no per-server "
+            "approval mode to inspect.",
+            "—",
+        )
+
+    hits: list[str] = []
+    for name, spec in sorted(servers.items()):
+        if not isinstance(spec, dict) or spec.get("enabled") is False:
+            continue
+        if _mcp_is_per_requester(spec):
+            continue
+        codex = spec.get("codex")
+        if not isinstance(codex, dict):
+            continue
+        # The EXPLICIT value, not the resolved mode: `_mcp_codex_approval_mode` also
+        # returns "approve" for the vendor's own loopback server, and conflating the two
+        # would report OpenClaw's default as the operator's mistake.
+        if _mcp_codex_normalize_mode(codex.get("defaultToolsApprovalMode")) != "approve":
+            continue
+        if _mcp_codex_is_loopback_server(name, spec):
+            continue
+        hits.append(str(name))
+
+    if hits:
+        ev = [f"mcp.servers.{n}.codex.defaultToolsApprovalMode=\"approve\"" for n in hits[:5]]
+        return _finding(
+            "B353", WARN,
+            "MCP server(s) are set to pre-approve every tool they expose (" +
+            ", ".join(hits[:5]) + "). Despite the name, \"approve\" does not mean "
+            "\"requires approval\" -- OpenClaw treats every tool on that server as already "
+            "approved, before any per-tool safety annotation is consulted, so a scheduled "
+            "run keeps all of them including destructive ones. WHETHER THAT IS LIVE HERE "
+            "depends on whether any of your agents runs the Codex app-server harness, "
+            "which this audit does not determine.",
+            "If you did not mean to waive approval for every tool on these servers, set "
+            "mcp.servers.<name>.codex.defaultToolsApprovalMode to \"prompt\" (always ask) or "
+            "remove the key (the default, \"auto\", decides per tool from the annotations "
+            "the server declares). If no agent runs a Codex app-server thread, this block "
+            "is inert on your setup and the setting changes nothing either way.",
+            evidence=ev,
+        )
+    return _finding(
+        "B353", PASS,
+        f"None of the {len(servers)} configured MCP server(s) pre-approves the tools it "
+        "exposes to an unattended run. A server can reach this either by not setting the "
+        "approval mode to \"approve\" or by being out of reach of that mechanism anyway -- "
+        "the reasons are not enumerated here because the list would be a completeness "
+        "promise this check cannot keep.",
+        "No action needed.",
+    )
+
+
 def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
     """B333: MCP tool safety-hint annotations, and what the installed build does with them.
 

@@ -530,7 +530,7 @@ The seven **score-derived** keys (B-585; `capsFired` joined them in B-690) are *
 the `--vet` paths, where there is no `ScoreResult`: mode C produces no grade by construction, so `graded: false` there would
 imply a letter was withheld when none ever existed.
 
-`checksRun`/`checksTotal` count **checks**, not the analysis: 187 of 187 checks can run on
+`checksRun`/`checksTotal` count **checks**, not the analysis: 188 of 188 checks can run on
 a home whose config was never found. Read `layersRan`/`graded` for whether the analysis
 itself was complete. `score`/`grade` are deliberately never emitted here — they are `null`
 on an ungraded run, and a consumer reading a `0` where `null` was meant would rank a blind

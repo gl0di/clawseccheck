@@ -345,6 +345,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B353 - MCP server pre-approves every tool for unattended runs
+
+- Severity: HIGH
+- Block: hardening
+- Framework: MCP Trust
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: MCP server pre-approves every tool for unattended runs
+- Remediation:
+  - none
+
 ### B332 - Cross-server MCP tool-name collision / homoglyph / near-miss (shadowing)
 
 - Severity: HIGH

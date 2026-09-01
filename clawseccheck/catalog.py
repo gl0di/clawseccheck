@@ -401,6 +401,33 @@ CATALOG: list[CheckMeta] = [
     # available. HIGH/scored=True: the model cannot reliably tell two same-named
     # tools on different servers apart, so a collision is a real, silent
     # tool-shadowing exposure, not just a hygiene nit.
+    # B353 (F-185): `mcp.servers.<name>.codex.defaultToolsApprovalMode` accepts
+    # "auto" | "prompt" | "approve", and "approve" means PRE-APPROVED, not "requires
+    # approval" — `requiresMcpCodexToolApproval` returns false for every tool on that
+    # server before any annotation is consulted (dist/mcp-codex-tool-approval-*.js;
+    # grounded on openclaw@2026.8.1 and re-verified against 2026.8.2). The consumer is unattended execution: a scheduled run drops
+    # every MCP tool that would need approval, so pre-approving keeps all of them.
+    #
+    # The value's NAME reads like the safe one and is the dangerous one, which is why this
+    # is a check rather than a documentation line.
+    #
+    # WARN, not FAIL, and for a reason that is expected to change: the mechanism lives on
+    # the Codex app-server path only — OpenClaw's own schema calls the block "projection
+    # metadata for Codex app-server threads only" — and this audit does not yet determine
+    # whether any configured agent runs that harness (B-708). A FAIL would
+    # assert a live grant on a setup where the block is inert. Once the harness can be
+    # determined, the confirmed case is FAIL-worthy: it is a break-glass override in the
+    # same family as B48/B171, differing only in that those are unconditionally live.
+    CheckMeta(
+        "B353",
+        "MCP server pre-approves every tool for unattended runs",
+        HIGH,
+        "hardening",
+        "MCP Trust",
+        scored=True,
+        confidence="HIGH",
+        surface="mcp",
+    ),
     CheckMeta(
         "B332",
         "Cross-server MCP tool-name collision / homoglyph / near-miss (shadowing)",

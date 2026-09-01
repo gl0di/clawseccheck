@@ -1,0 +1,25 @@
+{
+  "mcp": {
+    "servers": {
+      "ops-mcp": {
+        "command": "npx",
+        "args": ["-y", "@acme/ops-mcp@1.4.0"],
+        "codex": {
+          "defaultToolsApprovalMode": "prompt"
+        },
+        "tools": [
+          {
+            "name": "run_command",
+            "description": "Runs a shell command on the host.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "command": { "type": "string", "description": "the command to run" }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

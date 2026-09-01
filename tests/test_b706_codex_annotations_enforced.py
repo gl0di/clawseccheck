@@ -411,15 +411,21 @@ def test_the_ban_list_covers_every_claim_the_previous_revision_actually_made():
     import subprocess as _sp
 
     root = Path(__file__).resolve().parent.parent
+    # Anchored on the last revision that CONTAINED the claim, not on "the previous
+    # revision". Once this task landed, the previous revision became the fixed one and the
+    # guard had nothing to measure — it failed its own vacuity assertion, correctly. `-S`
+    # finds the commit where the string was removed; its parent still has it.
     try:
-        rev = _sp.run(["git", "log", "--format=%H", "-1", "--", "clawseccheck/checks/_mcp.py"],
+        rev = _sp.run(["git", "log", "--format=%H", "-1",
+                       "-S", "OpenClaw's runtime code never reads",
+                       "--", "clawseccheck/checks/_mcp.py"],
                       cwd=root, capture_output=True, text=True, timeout=60)
         if rev.returncode != 0 or not rev.stdout.strip():
-            pytest.skip("no git history for _mcp.py")
-        prev = _sp.run(["git", "show", f"{rev.stdout.strip()}:clawseccheck/checks/_mcp.py"],
+            pytest.skip("the claim is not in this repo's history (shallow clone?)")
+        prev = _sp.run(["git", "show", f"{rev.stdout.strip()}^:clawseccheck/checks/_mcp.py"],
                        cwd=root, capture_output=True, text=True, timeout=60)
         if prev.returncode != 0:
-            pytest.skip("could not read the previous revision")
+            pytest.skip("could not read the revision that carried the claim")
     except (OSError, _sp.SubprocessError):
         pytest.skip("git unavailable")
 
