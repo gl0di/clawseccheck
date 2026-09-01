@@ -289,6 +289,13 @@ def discover_log_sinks(ctx: Context) -> list[LogSink]:
     # `filePath` is optional — `enabled` alone starts tracing — so also probe the
     # conventional default. Deduplication by resolved path means a config that DOES set
     # `filePath` to this same location still yields one sink, not two.
+    #
+    # C-471: on OpenClaw 2026.8.1 that read above is always empty — `filePath` was removed
+    # and `diagnostics.cacheTrace` holds only `enabled`, so the schema has ZERO `filePath`
+    # leaves anywhere. The read stays for a 2026.7.x fleet, which still sets it; the
+    # default probe below is what finds the sink on a current build, which is why this
+    # discovery does not silently lose the trace file. Recorded so nobody reads the empty
+    # result above as a bug.
     default_cache_trace = _default_cache_trace_sink(home)
     if default_cache_trace is not None:
         _add_many([default_cache_trace])

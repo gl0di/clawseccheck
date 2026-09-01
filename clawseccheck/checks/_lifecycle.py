@@ -5710,6 +5710,37 @@ def check_marketplace_feed_provenance(ctx: Context) -> Finding:
             if name == _B325_DEFAULT_FEED_PROFILE_NAME:
                 bad_default_profile = True
 
+    if bad and _openclaw_generation(ctx) == "modern":
+        # C-471: `marketplaces` was REMOVED in OpenClaw 2026.8.1 — it is entry #2 in the
+        # vendor's own `RETIRED_TUNING_PATHS`, and `doctor --fix` deletes a stale block
+        # rather than erroring on it. So on a build we can see is newer, a configured feed
+        # profile is not a dormant supply-chain source; it is not a source at all. The hole
+        # this check was written for — a named config profile whose host joins the
+        # trusted-fetch allowlist with no vetting — cannot exist, because config can no
+        # longer name a profile. What remains is the `--feed-url` CLI override, which IS
+        # gated against OFFICIAL_EXTERNAL_PLUGIN_CATALOG_FEED_HOSTNAME_ALLOWLIST.
+        #
+        # PASS rather than an inert-worded WARN, deliberately: RISK-25 in `risk.py` is
+        # gated on `_finding_status(findings, "B325") == WARN`, so keeping the WARN would
+        # keep asserting a chain whose first leg no longer exists. Measured: with this
+        # branch the rule stops firing on a modern build and still fires on 2026.7.x, so
+        # the leg retires itself with no change needed in `risk.py`.
+        return _finding(
+            "B325",
+            PASS,
+            f"{len(bad)} marketplaces.feeds profile(s) are configured, but OpenClaw "
+            "2026.8.1 removed the marketplaces block entirely — the key is not part of "
+            "its config schema any more, so these profiles are not a supply-chain source "
+            "on this build: " + "; ".join(bad),
+            "Delete the marketplaces block (`openclaw doctor --fix` removes it). Custom "
+            "feed profiles no longer exist; the remaining override is the --feed-url flag, "
+            "which OpenClaw gates against its own clawhub.ai hostname allowlist.",
+            evidence=list(bad),
+            # `verified`, not `no_signal`: this PASS is not "we saw nothing". The profiles
+            # were read and named, and the build was identified as one whose schema has no
+            # `marketplaces` key at all. That is positive evidence that they cannot act.
+            pass_confidence="verified",
+        )
     if bad:
         sources = dig(ctx.config, "marketplaces.sources")
         evidence = list(bad)

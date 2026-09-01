@@ -1781,14 +1781,26 @@ def test_dist_layer_rejects_the_b262_phantom():
 
     `logging.cacheTrace.filePath` passed BOTH internal layers — the manifest listed it and
     the recon vouched for it — while OpenClaw's strict `logging` object rejects it outright.
-    A leaf-key sweep would rubber-stamp it too, since `filePath` is a real key of the real
-    `diagnostics.cacheTrace`. Only the full parent-chain walk separates them."""
+    A leaf-key sweep would rubber-stamp it too. Only the full parent-chain walk separates
+    them, and that is what this asserts.
+
+    C-471 RE-ANCHORED the second half. The original companion was the real
+    `diagnostics.cacheTrace.filePath`, whose leaf `filePath` the phantom shared — and
+    OpenClaw 2026.8.1 deleted that key, leaving ZERO `filePath` leaves in the whole schema
+    (measured: 0 of 5,254 paths). An anchor the vendor has removed cannot demonstrate
+    anything, so the pairing moved to `enabled`, which is a STRONGER demonstration of the
+    same point rather than a weaker substitute: `enabled` is the most common leaf in the
+    schema (277 real paths), so a leaf-only check would rubber-stamp `<anything>.enabled`.
+    `diagnostics.cacheTrace.enabled` is real and `logging.cacheTrace.enabled` is not, and
+    only the parent chain tells them apart."""
     consts = _require_dist()
     root = consts[DIST_ROOT_SCHEMA]
     assert not _resolves_in_dist("logging.cacheTrace.filePath", root, consts)
     assert not _resolves_in_dist("logging.cacheTrace", root, consts)
-    # The real path, and the shared leaf that makes a leaf-only check useless here.
-    assert _resolves_in_dist("diagnostics.cacheTrace.filePath", root, consts)
+    # The phantom and the real path now share the `enabled` leaf, and only the parent
+    # chain separates them — which is precisely what a leaf-only sweep cannot do.
+    assert not _resolves_in_dist("logging.cacheTrace.enabled", root, consts)
+    assert _resolves_in_dist("diagnostics.cacheTrace.enabled", root, consts)
     assert _resolves_in_dist("logging.file", root, consts)
 
 

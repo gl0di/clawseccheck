@@ -1647,7 +1647,18 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
             "commands.ownerAllowFrom/allowFrom not configured — any sender the connected, "
             "non-open channel(s) already authorize is treated as command-owner"
         )
-    if dig(cfg, "commands.useAccessGroups") is False:
+    # C-471: removed in OpenClaw 2026.8.1, and removed fail-SAFE. `useAccessGroups` appears
+    # in ZERO of the 5,254 paths of the 2026.8.1 config schema (one in 2026.7.1-2), so no
+    # config can turn it off any more, and the runtime reads
+    # `const useAccessGroups = command.useAccessGroups ?? true` — enforcement on by default
+    # with nothing left to override it. A key left on disk after an upgrade is inert, so
+    # counting it as a gap would manufacture a WARN about a layer that cannot be disabled.
+    #
+    # NOT remapped to the root `accessGroups` key: that coexisted with this one in
+    # 2026.7.1-2, which disqualifies it as a rename target by the same rule that killed
+    # `dangerouslyDisableDeviceAuth` as a candidate for `allowInsecureAuth`.
+    if (dig(cfg, "commands.useAccessGroups") is False
+            and _openclaw_generation(ctx) != "modern"):
         warn_ev.append(
             "commands.useAccessGroups=false — access-group enforcement layer disabled"
         )
@@ -2227,9 +2238,38 @@ def check_gateway(ctx: Context) -> Finding:
                 "(gateway.auth.mode=token, token >=24 chars)"
             )
     # gateway.http.no_auth does NOT exist in OpenClaw schema (auth is enforced by default)
+    # C-471: `gateway.controlUi.allowInsecureAuth` was REMOVED in OpenClaw 2026.8.1, and
+    # the removal is fail-SAFE — unusual enough to state, because the usual shape is the
+    # opposite. The escape hatch went from the config AND from the runtime:
+    # `evaluateMissingDeviceIdentity` (`message-handler-*.js`) now reads
+    #
+    #     if (params.isControlUi) return { kind: "reject-control-ui-insecure-auth" };
+    #
+    # with no config consulted at all. Grep confirms it: on 2026.8.1 the string survives
+    # only in `legacy-*.js`, the retired-path list, while on 2026.7.1-2 it is read by
+    # `audit-*.js`, `dangerous-config-flags-current-*.js` and `gateway-chat-*.js`.
+    #
+    # So the leg STAYS — a 2026.7.x fleet still has the weakened state — but on a build we
+    # can see is newer, a key left on disk after an upgrade is INERT, and reporting it as
+    # an exposure would describe a state the runtime cannot be in. Same treatment as every
+    # other stale key in this upgrade: the fact is reported, the verdict is not driven by
+    # it. NOT remapped to `dangerouslyDisableDeviceAuth` — that key coexisted with this one
+    # in 2026.7.1-2 (our own snapshot), so it is disqualified as a rename target.
+    retired_insecure_auth = ""
     if dig(cfg, "gateway.controlUi.allowInsecureAuth"):
-        ev.append("gateway.controlUi.allowInsecureAuth enabled")
-        fixes.append("Disable gateway.controlUi.allowInsecureAuth")
+        if _openclaw_generation(ctx) == "modern":
+            # Held back rather than appended here. B2's WARN is SCORED at CRITICAL, so a
+            # note that lands in `soft_ev` on its own manufactures a scored critical
+            # warning about a key that grants nothing — costing the user grade for a dead
+            # line. It rides along only where a real finding already exists (below).
+            retired_insecure_auth = (
+                "gateway.controlUi.allowInsecureAuth is set but OpenClaw 2026.8.1 removed "
+                "it — the Control-UI now requires device identity unconditionally, so this "
+                "line grants nothing. Delete it (`openclaw doctor --fix` does)."
+            )
+        else:
+            ev.append("gateway.controlUi.allowInsecureAuth enabled")
+            fixes.append("Disable gateway.controlUi.allowInsecureAuth")
     # Real field: gateway.tailscale.mode (string "funnel"/"serve"/"off")
     # gateway.tailscale.funnel boolean does NOT exist in OpenClaw schema
     if dig(cfg, "gateway.tailscale.mode") == "funnel":
@@ -2274,6 +2314,8 @@ def check_gateway(ctx: Context) -> Finding:
         ev.append(f"channel '{name}' has an open dm/group policy (anyone can command it)")
     if open_ch:
         fixes.append("Set every open channel's dmPolicy/groupPolicy to 'allowlist'")
+    if (ev or soft_ev) and retired_insecure_auth:
+        soft_ev.append(retired_insecure_auth)
     if ev:
         _insecure_auth_only = ev == ["gateway.controlUi.allowInsecureAuth enabled"]
         sev = WARN if _insecure_auth_only else FAIL
