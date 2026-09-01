@@ -12,7 +12,7 @@
 # Regenerate ONLY on a machine with the matching OpenClaw installed, as part of the
 # upgrade protocol's re-baseline step. Hand-adding a line here defeats the guard.
 #
-# openclaw-version: 2026.7.1-2
+# openclaw-version: 2026.8.1
 #
 agents.defaults.elevatedDefault
 agents.defaults.embeddedAgent.projectSettingsPolicy
@@ -31,8 +31,6 @@ agents.defaults.subagents.maxChildrenPerAgent
 agents.defaults.subagents.maxConcurrent
 agents.defaults.subagents.maxSpawnDepth
 agents.defaults.workspace
-agents.list
-audit.enabled
 auth.profiles
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
 channels
@@ -44,10 +42,7 @@ commands.debug
 commands.mcp
 commands.ownerAllowFrom
 commands.plugins
-commands.useAccessGroups
 cron
-cron.store
-diagnostics.cacheTrace.filePath
 discovery.mdns.mode
 env.shellEnv.enabled
 gateway.allowRealIpFallback
@@ -61,13 +56,10 @@ gateway.auth.trustedProxy.requiredHeaders
 gateway.auth.trustedProxy.userHeader
 gateway.bind
 gateway.controlUi.allowExternalEmbedUrls
-gateway.controlUi.allowInsecureAuth
 gateway.controlUi.allowedOrigins
 gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback
 gateway.controlUi.dangerouslyDisableDeviceAuth
 gateway.customBindHost
-gateway.nodes.allowCommands
-gateway.nodes.denyCommands
 gateway.nodes.pairing.autoApproveCidrs
 gateway.port
 gateway.tailscale.mode
@@ -84,18 +76,13 @@ hooks.enabled
 hooks.gmail.allowUnsafeExternalContent
 hooks.internal.enabled
 hooks.internal.entries
-hooks.internal.installs
 hooks.internal.load.extraDirs
 hooks.mappings
 hooks.token
 logging.file
-logging.redactSensitive
-marketplaces.feeds
-marketplaces.sources
 meta.lastTouchedVersion
 models.providers
 plugins.allow
-plugins.bundledDiscovery
 plugins.deny
 plugins.enabled
 plugins.entries
@@ -122,7 +109,6 @@ security.installPolicy
 session.dmScope
 skills.workshop.allowSymlinkTargetWrites
 skills.workshop.approvalPolicy
-skills.workshop.autonomous.enabled
 tools.allow
 tools.alsoAllow
 tools.codeMode

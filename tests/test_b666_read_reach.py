@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 
 import pytest
+
+import clawseccheck.toolpolicy as _toolpolicy
 from _realhome import REAL_HOME
 
 from clawseccheck import toolpolicy
@@ -168,10 +170,42 @@ def _dist_text(pattern: str) -> str:
 
 
 def test_dist_still_defaults_workspace_only_to_false():
-    text = _dist_text("local-roots-*.js")
-    assert "function createToolFsPolicy" in text, "the resolver was renamed — re-ground it"
-    body = text.split("function createToolFsPolicy", 1)[1][:200]
-    assert "workspaceOnly: params.workspaceOnly === true" in body, body
+    """The tripwire for the one semantic `toolpolicy.py` is built on: an ABSENT
+    `tools.fs.workspaceOnly` means NOT confined.
+
+    C-472 RE-ANCHORED this. It used to grep `local-roots-*.js` for
+    `function createToolFsPolicy`, and OpenClaw 2026.8.1 deleted that helper from the
+    entire dist — so the test failed on a NAME while the semantic it guards was untouched.
+    The lesson is in the assertion order below: a name is exactly what an upgrade moves, so
+    the BEHAVIOUR is asserted first and independently, and the source anchor second.
+
+    The `=== true` now lives one function further along, in `tool-fs-policy-*.js`:
+
+        function resolveToolFsConfig(params) {
+            const globalFs = cfg?.tools?.fs;
+            return { workspaceOnly: (agent fs)?.workspaceOnly ?? globalFs?.workspaceOnly };
+        }
+        function resolveEffectiveToolFsWorkspaceOnly(params) {
+            return resolveToolFsConfig(params).workspaceOnly === true;
+        }
+    """
+    # 1. The BEHAVIOUR we depend on, asserted against our own port. This survives any
+    #    rename in the dist, and it is the thing that would actually hurt if it flipped:
+    #    both layers default to the permissive end, so a wrong answer here INVERTS a
+    #    verdict rather than muting it.
+    assert _toolpolicy.workspace_only({}) is False
+    assert _toolpolicy.workspace_only({"tools": {"fs": {}}}) is False
+    assert _toolpolicy.workspace_only({"tools": {"fs": {"workspaceOnly": True}}}) is True
+    assert _toolpolicy.workspace_only({"tools": {"fs": {"workspaceOnly": "yes"}}}) is False
+
+    # 2. The source anchor, on the function that owns the comparison today.
+    text = _dist_text("tool-fs-policy-*.js")
+    assert "function resolveEffectiveToolFsWorkspaceOnly" in text, (
+        "the resolver moved again — re-ground it, and check whether the `=== true` "
+        "semantic moved with it"
+    )
+    body = text.split("function resolveEffectiveToolFsWorkspaceOnly", 1)[1][:200]
+    assert "workspaceOnly === true" in body, body
 
 
 def test_dist_profile_enum_matches_the_known_set():

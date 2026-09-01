@@ -895,9 +895,18 @@ def test_manifest_is_grounded_in_recon():
     dist_verified = _parse_dist_snapshot()
     manifest_paths = _parse_manifest_paths() - ALLOWLISTED_PATHS
 
+    # C-472: the disjunction gained a third term. A path REGISTERED in
+    # `_NOT_IN_CURRENT_SCHEMA` carries a measured `safeParse` disproof and the real path it
+    # sits beside — that is a STRONGER grounding than a mention in hand-written recon
+    # notes, not a weaker one, so it cannot be the term that fails. Without it,
+    # `plugins.bundledDiscovery` failed here: 2026.8.1 moved it out of the config into the
+    # machine-owned state store, so it is in neither the recon nor the (correctly)
+    # regenerated snapshot, while being deliberately read and fully documented.
     missing = sorted(
         p for p in manifest_paths
-        if p not in dist_verified and not _is_grounded(p, recon_paths)
+        if p not in dist_verified
+        and p not in _NOT_IN_CURRENT_SCHEMA
+        and not _is_grounded(p, recon_paths)
     )
 
     assert not missing, (
@@ -1291,12 +1300,104 @@ _DIST_MAX_DEPTH = 8
 # Verdicts below are from `OpenClawSchema.safeParse()` on the installed 2026.7.1-2 dist, not
 # from this file's reader — the reader was cross-checked against it, not trusted over it.
 _NOT_IN_CURRENT_SCHEMA = {
+    # C-472 re-grounded EVERY justification here against 2026.8.1, not only the new ones.
+    # This one had rotted in a way that only reading it against the current dist reveals:
+    # it said the agents object "holds exactly {defaults, list}", which was true when
+    # written and is now {defaults, entries, ownership}. The disproof still holds; the
+    # parenthetical describing WHY did not.
     "agents.subagents": (
-        "safeParse: unrecognized_keys@agents (the object holds exactly {defaults, list}); "
-        "the real path is agents.defaults.subagents. checks/_agents.py:119 tries it as the "
-        "first of three branches in _has_subagents(), which also tests the real "
-        "agents.defaults.subagents and a multi-entry agents.list — a dead branch, and the "
-        "function's answer does not depend on it."
+        "safeParse: unrecognized_keys@agents keys=[\"subagents\"] (the object holds exactly "
+        "{defaults, entries, ownership} on 2026.8.1); the real path is "
+        "agents.defaults.subagents. checks/_agents.py tries it as the first of three "
+        "branches in _has_subagents(), which also tests the real agents.defaults.subagents "
+        "and a multi-agent roster — a dead branch, and the function's answer does not "
+        "depend on it."
+    ),
+
+    # ---- OpenClaw 2026.8.1 retirements (C-470 epic) -----------------------------------
+    # Fourteen paths this tool reads that 2026.8.1 removed or moved. Every one is a
+    # DELIBERATE legacy read, kept because OpenClaw's migration runs inside
+    # `doctor --fix`: until the user runs it the old key sits on disk, and a user on an
+    # older build is not migrating at all. Dropping the reads would trade a stale path for
+    # a blind spot on the whole 2026.7.x fleet.
+    #
+    # Each disproof below was measured against the installed 2026.8.1 schema on
+    # 2026-09-01, not carried over from the triage notes.
+    "agents.list": (
+        "safeParse: unrecognized_keys@agents keys=[\"list\"]; the real path is "
+        "agents.entries (a RECORD keyed by id, where an entry's own `id` field is itself "
+        "rejected). collector.agent_roster() reads BOTH shapes and every consumer calls "
+        "it — B-699."
+    ),
+    "audit.enabled": (
+        "safeParse: unrecognized_keys@<root> keys=[\"audit\"]; the real path is "
+        "logging.audit.enabled. B10 reads the canonical key first and this one as the "
+        "fallback, with the vendor's own precedence (canonical wins per key) — B-700."
+    ),
+    "commands.useAccessGroups": (
+        "safeParse: unrecognized_keys@commands keys=[\"useAccessGroups\"]; REMOVED with no "
+        "replacement, fail-safe — the runtime reads `command.useAccessGroups ?? true` and "
+        "nothing in the 2026.8.1 schema can set it. B171 counts it as a gap only on a "
+        "build where it is live — C-471."
+    ),
+    "cron.store": (
+        "safeParse: unrecognized_keys@cron keys=[\"store\"]; the value moved OUT of the "
+        "config into the machine-owned state store (`config_machine_state`). The shadow "
+        "check reads the state first and this key as the fallback — F-183."
+    ),
+    "diagnostics.cacheTrace.filePath": (
+        "safeParse: unrecognized_keys@diagnostics.cacheTrace keys=[\"filePath\"]; REMOVED, "
+        "the parent now holds only `enabled`, and ZERO `filePath` leaves remain anywhere "
+        "in the schema. logdiscovery keeps the read for 2026.7.x and finds the sink via "
+        "the conventional default on newer builds — C-471."
+    ),
+    "gateway.controlUi.allowInsecureAuth": (
+        "safeParse: unrecognized_keys@gateway.controlUi keys=[\"allowInsecureAuth\"]; "
+        "REMOVED, and fail-safe — `evaluateMissingDeviceIdentity` rejects the Control-UI "
+        "unconditionally with no config consulted. B2 keeps the leg for 2026.7.x, where "
+        "three runtime modules still read it — C-471."
+    ),
+    "gateway.nodes.allowCommands": (
+        "safeParse: unrecognized_keys@gateway.nodes keys=[\"allowCommands\"]; the real path "
+        "is gateway.nodes.commands.allow. `_shared._node_commands` reads both, with the "
+        "vendor's precedence (`commands.allow === void 0` guards the copy) — B-698."
+    ),
+    "gateway.nodes.denyCommands": (
+        "safeParse: unrecognized_keys@gateway.nodes keys=[\"denyCommands\"]; the real path "
+        "is gateway.nodes.commands.deny. Same accessor and same precedence as "
+        "allowCommands above — B-698."
+    ),
+    "hooks.internal.installs": (
+        "safeParse: unrecognized_keys@hooks.internal keys=[\"installs\"]; the value moved "
+        "into the machine-owned state store. B179 reads the state first and this key as "
+        "the fallback, reporting only the COUNT either way — F-183."
+    ),
+    "logging.redactSensitive": (
+        "safeParse: unrecognized_keys@logging keys=[\"redactSensitive\"]; REMOVED with no "
+        "replacement. Redaction is unconditional on 2026.8.1 — `DEFAULT_REDACT_MODE` is a "
+        "constant config never feeds, and custom `redactPatterns` are UNIONED with the "
+        "built-ins. B9 keeps the read for 2026.7.x — B-700."
+    ),
+    "marketplaces.feeds": (
+        "safeParse: unrecognized_keys@<root> keys=[\"marketplaces\"]; the whole block was "
+        "retired (entry #2 of the vendor's RETIRED_TUNING_PATHS). B325 reports a present "
+        "block as inert on 2026.8.1 and as a real supply-chain risk on 2026.7.x — C-471."
+    ),
+    "marketplaces.sources": (
+        "safeParse: unrecognized_keys@<root> keys=[\"marketplaces\"]; same retired block as "
+        "marketplaces.feeds above, read only as supplementary evidence beside it — C-471."
+    ),
+    "plugins.bundledDiscovery": (
+        "safeParse: unrecognized_keys@plugins keys=[\"bundledDiscovery\"]; the value moved "
+        "into the machine-owned state store, where an UPGRADE can synthesise \"compat\" "
+        "without the user writing it. The monitor watches both the config key and the "
+        "state key under separate signature keys — F-183."
+    ),
+    "skills.workshop.autonomous.enabled": (
+        "safeParse: unrecognized_keys@skills.workshop.autonomous keys=[\"enabled\"]; the "
+        "real path is skills.workshop.autonomous.mode, an enum (off|propose|auto) rather "
+        "than a boolean. B175 reads both, and the DEFAULT flipped with the rename — "
+        "B-700 and B-702."
     ),
     "gateway.host": (
         "safeParse: unrecognized_keys@gateway; binding is configured via gateway.bind / "
@@ -1941,7 +2042,14 @@ def test_the_dist_snapshot_is_not_vacuous():
         + f"\n\n{DIST_SNAPSHOT_FILE.name} records which MANIFEST paths a real dist "
         "accepted; an entry outside the manifest is padding, not evidence."
     )
-    for expected in ("gateway.bind", "tools.exec.mode", "logging.redactSensitive"):
+    # C-472: `logging.redactSensitive` used to be the third canary here and 2026.8.1
+    # retired it, so this guard failed on its own ANCHOR while the snapshot it checks was
+    # perfectly real — the same shape as the B-262 phantom test's deleted companion. The
+    # replacements are chosen for structural centrality rather than convenience: a build
+    # that stops accepting the gateway bind, the exec mode or the tool profile is not a
+    # build this tool can audit at all, so a canary that dies there is reporting something
+    # worth failing on.
+    for expected in ("gateway.bind", "tools.exec.mode", "tools.profile"):
         assert expected in verified, f"{expected!r} missing — the snapshot is not a real one"
 
     header = DIST_SNAPSHOT_FILE.read_text(encoding="utf-8")

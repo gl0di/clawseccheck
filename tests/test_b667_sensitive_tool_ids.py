@@ -174,17 +174,65 @@ def _catalog_text() -> str:
     return files[0].read_text(encoding="utf-8", errors="replace")
 
 
-def test_every_id_is_a_real_core_tool():
+# C-472: ONE parser, because two copies of it drifted apart the moment the catalog moved.
+#
+# OpenClaw 2026.8.1 restructured the records. A tool is now
+#
+#     { id: "write", description: "Create or overwrite files",
+#       sectionId: "fs", profiles: ["coding"] }
+#
+# and `label:` survives only on the 14 CATEGORY records (`agents`, `coding`, `fs`, …).
+# The old regex anchored on `id:` + `label:` adjacency, so it stopped matching tools
+# entirely and matched categories instead: 14 ids, none of them a tool, while every
+# assertion below still read as if it were looking at the tool set.
+#
+# `sectionId` is the discriminator, and it is exact rather than convenient: no category
+# record carries one. Measured on the installed catalog — 67 distinct ids = 55 tools +
+# 14 categories, with ZERO in neither bucket. (The upgrade triage recorded "67 tool ids";
+# 67 is the id TOTAL, of which 55 are tools.)
+def _tool_ids(text: str) -> set:
+    """Ids of TOOL records — the ones carrying `sectionId`."""
+    return set(re.findall(
+        r'\n\t*id: "([a-z0-9_]+)",\n\t*description:[^\n]*\n\t*sectionId:', text))
+
+
+def _category_ids(text: str) -> set:
+    """Ids of CATEGORY records — the ones carrying `label`."""
+    return set(re.findall(r'\n\t*id: "([a-z0-9_]+)",\n\t*label:', text))
+
+
+def test_the_catalog_parse_accounts_for_every_id():
+    """The anti-vacuity guard, and deliberately stronger than a size floor.
+
+    A floor (`len(ids) > 20`) only catches a catastrophic reshape; this catches ANY of
+    them, because it requires the two record shapes to PARTITION the ids with nothing left
+    over. The 2026.8.1 reshape would have failed here immediately, where the floor let a
+    parse of 14 categories stand in for the tool set.
+    """
     text = _catalog_text()
-    ids = set(re.findall(r'\n\t*id: "([a-z0-9_]+)",\n\t*label:', text))
-    assert len(ids) > 20, f"the catalog parse found only {len(ids)} ids — it went stale"
+    tools, categories = _tool_ids(text), _category_ids(text)
+    every = set(re.findall(r'\n\t*id: "([a-z0-9_]+)",', text))
+    assert len(tools) > 20, f"only {len(tools)} tool ids — the parse went stale"
+    assert categories, "no category records — the parse went stale"
+    # NOT asserted: that the two sets are disjoint. Measured — `nodes` and `sessions` are
+    # each BOTH a tool and a category, so the catalog shares one id namespace between the
+    # two record kinds. An earlier version of this test assumed otherwise and failed on
+    # the real catalog; the assumption was mine, not a defect in the parse.
+    unaccounted = every - tools - categories
+    assert not unaccounted, (
+        f"{len(unaccounted)} catalog id(s) match neither record shape: "
+        f"{sorted(unaccounted)[:10]} — the catalog changed again, fix the parser"
+    )
+
+
+def test_every_id_is_a_real_core_tool():
+    ids = _tool_ids(_catalog_text())
     missing = sorted(SENSITIVE_TOOL_IDS - ids)
     assert not missing, f"not tools OpenClaw defines: {missing}"
 
 
 def test_the_excluded_tools_still_exist_so_the_exclusion_is_a_choice():
-    text = _catalog_text()
-    ids = set(re.findall(r'\n\t*id: "([a-z0-9_]+)",\n\t*label:', text))
+    ids = _tool_ids(_catalog_text())
     for name in ("write", "edit", "apply_patch", "sessions_history"):
         assert name in ids, f"{name} is gone from the catalog — revisit the exclusion"
 
