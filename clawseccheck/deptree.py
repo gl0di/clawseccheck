@@ -63,6 +63,7 @@ it is its own change with its own adversarial pass.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -178,7 +179,8 @@ class DepTreeScan:
 _ROOT_SEARCH_DEPTH = 6
 
 
-def find_package_root(binary_name: str, *, which=None) -> "Path | None":
+def find_package_root(binary_name: str, *, which=None,
+                      candidate_roots=None) -> "Path | None":
     """Locate an installed npm package's root directory from its executable on PATH.
 
     Nothing in this package could previously do this — ``checks/_config.py``'s
@@ -205,21 +207,58 @@ def find_package_root(binary_name: str, *, which=None) -> "Path | None":
     try:
         found = resolver(binary_name)
     except OSError:
-        return None
-    if not found:
-        return None
-    try:
-        cur = Path(found).resolve().parent
-    except OSError:
-        return None
-    for _ in range(_ROOT_SEARCH_DEPTH):
-        data = _read_manifest(cur / "package.json")
+        found = None
+    if found:
+        try:
+            cur = Path(found).resolve().parent
+        except OSError:
+            cur = None
+        for _ in range(_ROOT_SEARCH_DEPTH if cur is not None else 0):
+            data = _read_manifest(cur / "package.json")
+            if data is not None and data.get("name") == binary_name:
+                return cur
+            if cur.parent == cur:
+                break
+            cur = cur.parent
+    # B-703: PATH is not always there. A cron job inherits neither the user's PATH nor
+    # their cwd -- `invocation.py` exists for exactly that reason -- so a scheduled run
+    # resolved nothing here while an interactive run on the same machine resolved the
+    # install. Anything downstream that branches on the answer then flickers between two
+    # verdicts with nothing about the machine having changed.
+    #
+    # Conventional global roots only, and each one goes through the SAME name check: a
+    # directory sitting at the expected path proves nothing, and skipping the check here
+    # while enforcing it above would put the weaker evidence on the less-observed path.
+    # `npm root -g` would be authoritative and is a subprocess, which the doctrine forbids
+    # (CLAUDE.md §1/§2), so the prefix env vars npm itself honours stand in for it.
+    for root in (candidate_roots if candidate_roots is not None
+                 else _conventional_package_roots(binary_name)):
+        data = _read_manifest(Path(root) / "package.json")
         if data is not None and data.get("name") == binary_name:
-            return cur
-        if cur.parent == cur:
-            break
-        cur = cur.parent
+            return Path(root)
     return None
+
+
+def _conventional_package_roots(binary_name: str) -> "list[Path]":
+    """Where an npm global install lands when PATH cannot say.
+
+    Env first (npm honours these itself), then the usual prefixes. Read-only, no
+    subprocess, and every candidate is still name-verified by the caller.
+    """
+    roots: list = []
+    for var in ("npm_config_prefix", "NPM_CONFIG_PREFIX", "PREFIX"):
+        prefix = os.environ.get(var)
+        if prefix:
+            roots.append(Path(prefix) / "lib" / "node_modules" / binary_name)
+    home = Path(os.path.expanduser("~"))
+    roots.extend([
+        home / ".npm-global" / "lib" / "node_modules" / binary_name,
+        home / ".local" / "lib" / "node_modules" / binary_name,
+        Path("/usr/local/lib/node_modules") / binary_name,
+        Path("/usr/lib/node_modules") / binary_name,
+        Path("/opt/homebrew/lib/node_modules") / binary_name,
+    ])
+    return roots
 
 
 def _default_which():
