@@ -1241,7 +1241,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B71 - gateway.nodes.denyCommands ineffective patterns (non-exact entries)
+### B71 - Node command deny-list entries that are silently ineffective
 
 - Severity: MEDIUM
 - Block: hardening
@@ -1249,7 +1249,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: HIGH
 - OWASP: LLM06 Excessive Agency
-- What it checks: gateway.nodes.denyCommands ineffective patterns (non-exact entries)
+- What it checks: Node command deny-list entries that are silently ineffective
 - Remediation:
   - none
 
@@ -2849,16 +2849,16 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Chain: detail -> Skill Workshop authors + installs new skill code with no human review step -> persistent executable code on disk
 - Why:
   This install has the full unattended Skill Workshop pipeline configured and reachable:
-  skills.workshop.autonomous.enabled authors new skill proposals from conversation
+  the Skill Workshop autonomy setting authors new skill proposals from conversation
   signals, and approvalPolicy='auto' installs them with no human confirmation. At the same
   time, at least one ingress surface admits content from someone other than the owner:
   {detail}. A single inbound message can therefore cause the agent to author and install
   new executable code on disk with no review step in between.
 - Fix:
-  Set skills.workshop.approvalPolicy back to the default 'pending' so every generated
-  proposal needs an explicit `openclaw skills workshop apply` decision, and/or disable
-  skills.workshop.autonomous.enabled unless unattended authoring is genuinely intended.
-  Independently, close the flagged ingress surface(s): set
-  channels.<provider>.contextVisibility to 'allowlist'/'allowlist_quote' (B26), scope
-  commands.ownerAllowFrom/allowFrom to your own channel-native ID(s) (B171), or disable
-  hooks.enabled if it is not required (B179).
+  Set skills.workshop.approvalPolicy to 'pending' so every generated proposal needs an
+  explicit `openclaw skills workshop apply` decision, and/or turn off
+  skills.workshop.autonomous.mode (skills.workshop.autonomous.enabled before OpenClaw
+  2026.8.1) unless unattended authoring is genuinely intended. Independently, close the
+  flagged ingress surface(s): set channels.<provider>.contextVisibility to
+  'allowlist'/'allowlist_quote' (B26), scope commands.ownerAllowFrom/allowFrom to your own
+  channel-native ID(s) (B171), or disable hooks.enabled if it is not required (B179).

@@ -56,6 +56,8 @@ from ._shared import (
     _config_unreadable,
     _custom,
     _enabled_tools,
+    _key_advice,
+    _openclaw_generation,
     _finding,
     _has_approval_gate,
     _hint,
@@ -3218,7 +3220,47 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
         return f
 
     cfg = ctx.config
-    enabled = dig(cfg, "skills.workshop.autonomous.enabled") is True
+    # B-700: OpenClaw 2026.8.1 replaced the boolean `skills.workshop.autonomous.enabled`
+    # with the enum `.mode` ("off" | "propose" | "auto"). Reading only the boolean made
+    # this check blind to an explicitly dangerous setting on a current build. Both are read
+    # now; the enum wins where present, mirroring every other dual-shape accessor here.
+    #
+    #   "off"      keeps only the suggestion nudge          -> not enabled
+    #   "propose"  creates pending proposals                -> enabled
+    #   "auto"     APPLIES captured proposals and runs a daily cleanup that "can rewrite
+    #              or drop eligible writable skills"        -> enabled
+    #
+    # ⚠️ WHAT THIS DELIBERATELY DOES NOT FIX (B-702, critical): when NEITHER
+    # key is present, the line below still answers "not enabled". That encodes the
+    # 2026.7.x default. Measured in each build's own runtime bundle
+    # (`src/skills/workshop/config.ts`, DEFAULT_CONFIG):
+    #
+    #     2026.7.1-2   autonomous {enabled: false}   approvalPolicy "pending"
+    #     2026.8.1     autonomous {mode: "auto"}     approvalPolicy "auto"
+    #
+    # Both defaults flipped to the dangerous value, so on a STOCK 2026.8.1 config this
+    # check returns PASS "autonomous authoring is disabled" about a build that authors and
+    # auto-installs skill code. Fixing that changes the verdict for essentially every
+    # 2026.8.1 user, which is a severity/wording decision needing its own measured
+    # distribution and C-135 pass — B-702, not this change.
+    # Plain dict access, not `dig`: a dig() path needs a manifest entry and a manifest
+    # entry needs the dist snapshot, which is still stamped 2026.7.1-2 and cannot vouch
+    # for a key that build has no word for. It gets its entry when C-472 regenerates the
+    # snapshot — same arrangement as `collector.agent_roster` and `_node_commands`.
+    _node = cfg
+    for _key in ("skills", "workshop", "autonomous", "mode"):
+        _node = _node.get(_key) if isinstance(_node, dict) else None
+    workshop_mode = _node
+    if isinstance(workshop_mode, str):
+        enabled = workshop_mode in ("propose", "auto")
+        autonomy_key = "skills.workshop.autonomous.mode"
+        autonomy_value = workshop_mode
+    else:
+        enabled = dig(cfg, "skills.workshop.autonomous.enabled") is True
+        autonomy_key = _key_advice(
+            ctx, "skills.workshop.autonomous.enabled",
+            "skills.workshop.autonomous.mode")
+        autonomy_value = None
     is_auto = dig(cfg, "skills.workshop.approvalPolicy") == "auto"
     symlink_writes = dig(cfg, "skills.workshop.allowSymlinkTargetWrites") is True
 
@@ -3235,8 +3277,13 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
     reasons = []
     if enabled:
         reasons.append(
-            "skills.workshop.autonomous.enabled=true (agent auto-authors skill "
-            "proposals from conversation signals with no user request)"
+            (f"skills.workshop.autonomous.mode={autonomy_value!r}"
+             if autonomy_value is not None
+             else "skills.workshop.autonomous.enabled=true")
+            + " (agent auto-authors skill proposals from conversation signals with no "
+            "user request"
+            + (" AND applies them" if autonomy_value == "auto" else "")
+            + ")"
         )
     if is_auto:
         reasons.append(
@@ -3260,9 +3307,8 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                 + ".",
                 'Set skills.workshop.approvalPolicy to the default "pending" so every '
                 "generated proposal needs an explicit `openclaw skills workshop apply` "
-                "decision before it installs; also consider disabling "
-                "skills.workshop.autonomous.enabled if unattended skill authoring is not "
-                "intended.",
+                "decision before it installs; also consider turning off "
+                f"{autonomy_key} if unattended skill authoring is not intended.",
                 evidence=reasons,
             )
         # B-239: enabled+auto is set, but a separate tool-policy/sandbox control
@@ -3285,10 +3331,10 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
             + ". One tool-policy edit (removing the deny/allow restriction, dropping "
             "out of sandbox.mode=all, or widening tools.profile) re-arms the full "
             "unattended pipeline.",
-            'Keep skills.workshop.approvalPolicy at the default "pending" (never '
-            '"auto") and disable skills.workshop.autonomous.enabled unless unattended '
-            "authoring is genuinely intended — don't rely on tool-policy/sandboxing "
-            "alone to contain it, since either can be loosened independently later.",
+            'Set skills.workshop.approvalPolicy to "pending" (never "auto") and turn off '
+            f"{autonomy_key} unless unattended authoring is genuinely intended — don't "
+            "rely on tool-policy/sandboxing alone to contain it, since either can be "
+            "loosened independently later.",
             evidence=reasons,
         )
 
@@ -3296,10 +3342,10 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
         "B175",
         WARN,
         "Skill Workshop autonomy posture has a partial gap: " + "; ".join(reasons) + ".",
-        'Keep skills.workshop.approvalPolicy at the default "pending" (never "auto"), '
-        "disable skills.workshop.autonomous.enabled unless unattended authoring is "
-        "intended, and leave allowSymlinkTargetWrites at its default false unless a "
-        "shared/trusted skill root genuinely needs it.",
+        'Set skills.workshop.approvalPolicy to "pending" (never "auto"), turn off '
+        f"{autonomy_key} unless unattended authoring is intended, and leave "
+        "allowSymlinkTargetWrites at its default false unless a shared/trusted skill "
+        "root genuinely needs it.",
         evidence=reasons,
     )
 
@@ -5520,9 +5566,17 @@ def check_marketplace_feed_provenance(ctx: Context) -> Finding:
             PASS,
             "marketplaces.feeds is not configured -- only the built-in public "
             "https://clawhub.ai feed profile is in effect.",
-            "No action needed. If you add a custom marketplaces.feeds profile, keep "
-            "its url on https://clawhub.ai unless you deliberately run your own "
-            "self-hosted or enterprise feed mirror.",
+            # B-700: the PASS branch is the one place this check tells the user to ADD the
+            # key, and OpenClaw 2026.8.1 removed `marketplaces` outright -- `doctor --fix`
+            # deletes a stale block rather than erroring on it. Whether the CHECK still has
+            # a subject on that build is C-471's question; this only stops the advice from
+            # recommending a key the reader's build rejects.
+            ("No action needed. Custom marketplace feed profiles were removed in "
+             "OpenClaw 2026.8.1, so there is nothing to add on this build."
+             if _openclaw_generation(ctx) == "modern" else
+             "No action needed. If you add a custom marketplaces.feeds profile, keep "
+             "its url on https://clawhub.ai unless you deliberately run your own "
+             "self-hosted or enterprise feed mirror."),
         )
 
     canonical = 0

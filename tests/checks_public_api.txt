@@ -117,6 +117,7 @@ _install_host_is_public_ip
 _is_code_example
 _is_posix
 _is_wildcard_allow_entry
+_key_advice
 _levenshtein
 _local_sink_exfil_hits
 _loopback_ip
@@ -134,6 +135,7 @@ _node_commands
 _norm_group_policy
 _open_channels
 _open_wildcard_group_channels
+_openclaw_generation
 _other_can_reach_read
 _other_can_reach_write
 _parse_source_target
@@ -143,6 +145,7 @@ _persistence_note
 _read_jsonl_tail
 _reassembly
 _resolved_channel_nodes
+_retired_key_note
 _runtime_fetch_matches
 _secret_paths
 _skill_declared_tools

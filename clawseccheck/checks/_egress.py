@@ -32,6 +32,8 @@ from ._shared import (
     _config_unreadable,
     _custom,
     _enabled_tools,
+    _openclaw_generation,
+    _retired_key_note,
     _finding,
     _has_approval_gate,
     _hint,
@@ -1742,9 +1744,13 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
         if isinstance(trace_path, str) and trace_path.strip():
             where = f"diagnostics.cacheTrace.filePath={trace_path!r}"
         else:
+            # B-700: on 2026.8.1 `filePath` was removed and the parent holds only
+            # `enabled`, so "unset" is no longer something the user could change.
             where = (
-                "diagnostics.cacheTrace.filePath unset — written to "
-                "$OPENCLAW_CACHE_TRACE_FILE if set, else "
+                ("the trace file location is not configurable on this OpenClaw build"
+                 if _openclaw_generation(ctx) == "modern"
+                 else "diagnostics.cacheTrace.filePath unset")
+                + " — written to $OPENCLAW_CACHE_TRACE_FILE if set, else "
                 "$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl"
             )
         return _finding(
@@ -2723,15 +2729,83 @@ def check_egress_inventory(ctx: Context) -> Finding:
 
 
 def check_leak(ctx: Context) -> Finding:
+    """B9 — is sensitive output redacted?
+
+    B-700: the SUBJECT of this check is gone on OpenClaw 2026.8.1. `logging.redactSensitive`
+    was removed and the `logging` block is now the strict set
+    `{level, file, maxFileBytes, consoleLevel, consoleStyle, redactPatterns, audit}`.
+
+    The PASS below rests on the RUNTIME, not on the field's description -- a check that
+    stops warning has to earn it. From `dist/redact-*.js`::
+
+        const DEFAULT_REDACT_MODE = "tools";
+        function resolveConfigRedaction() {
+            const cfg = readLoggingConfig();
+            return { mode: DEFAULT_REDACT_MODE, patterns: cfg?.redactPatterns };
+        }
+        function resolveToolPayloadRedaction(loggingConfig = readLoggingConfig()) {
+            const userPatterns = loggingConfig?.redactPatterns;
+            return { mode: "tools", patterns: userPatterns && userPatterns.length > 0
+                     ? [...userPatterns, ...DEFAULT_REDACT_PATTERNS] : void 0 };
+        }
+
+    `mode` is a CONSTANT -- config feeds only `patterns`, so no configuration reaches the
+    module's `mode === "off"` branch. And custom patterns are UNIONED with the built-ins,
+    so a user list adds to the redaction set and cannot replace it; an empty list falls
+    through to the defaults. No env var disables it either -- the only `OPENCLAW_REDACT*`
+    symbol in the dist is the `OPENCLAW_REDACTED__` output marker.
+
+    That made this check actively harmful on a current build: the field is always absent,
+    so it emitted WARN on EVERY 2026.8.1 config, telling the user to "pin
+    logging.redactSensitive" -- an instruction their schema rejects
+    (`REJECTED unrecognized_keys@logging`). A warning that cannot be cleared, to fix a
+    risk that no longer exists.
+
+    So only the ABSENT case changes: on a build we can see is 2026.8.1+, absent is PASS,
+    because there is no setting that turns redaction off. On an older build, and on one
+    whose generation cannot be determined, the original reasoning stands and only the
+    advice is qualified -- a hermetic run must not silently pick a story.
+
+    A value that is PRESENT keeps its original verdict on every build, and the retirement
+    is appended as a note. The first version of this fix collapsed "off" and "tools" into
+    one WARN on a modern build, on the reasoning that an unrecognized key is not in effect
+    anyway; `scripts/monitor_detection_gate.py` answered `redaction-off: expected an
+    alert, got silence`, because a watch cannot see a change between two states that
+    render the same. Someone still WROTE "off" there, and that is what the monitor exists
+    to catch.
+    """
     # Valid values: "off" | "tools" (default when set: "tools")
     # Boolean False never occurs in real configs — the field is always a string or absent.
     redact = dig(ctx.config, "logging.redactSensitive")
+    modern = _openclaw_generation(ctx) == "modern"
+    if modern and redact is None:
+        return _finding(
+            "B9",
+            PASS,
+            "Sensitive redaction is unconditional on this OpenClaw build — the logging "
+            "block has no setting that turns it off.",
+            "Nothing to set. Use logging.redactPatterns only to ADD patterns; it cannot "
+            "disable the built-in redaction.",
+        )
+    # A PRESENT value keeps its original verdict on every build. An earlier version of this
+    # fix collapsed "off" and "tools" into one WARN on a modern build, reasoning that an
+    # unrecognized key is not in effect anyway — `scripts/monitor_detection_gate.py` then
+    # reported `redaction-off: expected an alert, got silence`, because a watch cannot see
+    # a change between two states that render identically. Whatever the runtime does with
+    # the key, someone WROTE "off" there, and that transition is exactly what the monitor
+    # exists to catch. The retirement is reported as an ADDED note, never by flattening the
+    # verdict — see [[reference_never_suppress_a_finding_for_presentation]] in spirit: the
+    # fact stays, only the framing changes.
+    stale = (" On OpenClaw 2026.8.1 and later this key was removed, so the value is not "
+             "in effect — delete it (`openclaw doctor --fix` does)." if modern else "")
     if redact == "off":
         return _finding(
             "B9",
             FAIL,
-            'logging.redactSensitive is "off" — secrets/system prompt can surface in tool output/logs.',
-            'Set logging.redactSensitive to "tools" to redact secrets from tool output and logs.',
+            'logging.redactSensitive is "off" — secrets/system prompt can surface in '
+            "tool output/logs." + stale,
+            'Set logging.redactSensitive to "tools" to redact secrets from tool output '
+            "and logs." + stale,
         )
     if redact is None:
         # B-128: the OpenClaw default when the field is unset is already "tools"
@@ -2743,22 +2817,25 @@ def check_leak(ctx: Context) -> Finding:
             "B9",
             WARN,
             'logging.redactSensitive not pinned — default "tools" already redacts '
-            "secrets; pin it explicitly for stability against a future default change.",
-            'Explicitly set logging.redactSensitive to "tools".',
+            "secrets; pin it explicitly for stability against a future default change." +
+            _retired_key_note(ctx, "logging.redactSensitive"),
+            'Explicitly set logging.redactSensitive to "tools".' +
+            _retired_key_note(ctx, "logging.redactSensitive"),
         )
     if redact == "tools":
         return _finding(
             "B9",
             PASS,
-            'Sensitive redaction is enabled (logging.redactSensitive="tools").',
-            "Keep redaction on.",
+            'Sensitive redaction is enabled (logging.redactSensitive="tools").' + stale,
+            "Keep redaction on." + stale,
         )
     # Unexpected value — be conservative
     return _finding(
         "B9",
         WARN,
-        f'logging.redactSensitive has unexpected value {redact!r} — expected "tools" or "off".',
-        'Set logging.redactSensitive to "tools".',
+        f'logging.redactSensitive has unexpected value {redact!r} — expected "tools" '
+        'or "off".' + stale,
+        'Set logging.redactSensitive to "tools".' + stale,
     )
 
 

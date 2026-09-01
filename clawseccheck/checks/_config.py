@@ -71,6 +71,7 @@ from ._shared import (
     _pattern_hits_real_secret,
     _mcp_leg_contributions,
     _node_commands,
+    _openclaw_generation,
     _norm_group_policy,
     _open_channels,
     _perms_loose,
@@ -260,7 +261,7 @@ _DANGER_FIXED = [
 # tests/grounded_schema_paths.txt, and a manifest entry must in turn be vouched by
 # tests/dist_verified_paths.txt — which is still stamped 2026.7.1-2 and cannot contain a
 # key that version has no word for. They get their manifest entries when that snapshot is
-# regenerated: the LAST step of the upgrade (CLAWSECCHECK-C-472), after every sibling read
+# regenerated: the LAST step of the upgrade (C-472), after every sibling read
 # is fixed, or the re-baseline absorbs paths nobody diagnosed. Same arrangement, for the
 # same reason, as `collector.agent_roster` and `checks/_shared._node_commands`.
 _DANGER_FIXED_2026_8_1 = [
@@ -1656,8 +1657,15 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
             WARN,
             "Privileged in-chat command(s) enabled with a broad or partially-configured "
             "gate: " + "; ".join(warn_ev),
-            "Scope commands.ownerAllowFrom/allowFrom to your own channel-native ID(s), and "
-            "keep commands.useAccessGroups enabled.",
+            "Scope commands.ownerAllowFrom/allowFrom to your own channel-native ID(s)."
+            # B-700: `commands.useAccessGroups` was REMOVED in OpenClaw 2026.8.1 with no
+            # replacement, so "keep it enabled" is an instruction a current build rejects.
+            # The evidence clause above still names it when it is literally in the user's
+            # file -- naming a key they already have is never wrong; telling them to add
+            # one is. Whether the concept moved to the new root `accessGroups`/`security`
+            # keys is C-471's question, not answered here.
+            + ("" if _openclaw_generation(ctx) == "modern"
+               else " Keep commands.useAccessGroups enabled."),
             evidence=warn_ev,
         )
 

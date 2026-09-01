@@ -1346,7 +1346,7 @@ CATALOG: list[CheckMeta] = [
     ),
     CheckMeta(
         "B71",
-        "gateway.nodes.denyCommands ineffective patterns (non-exact entries)",
+        "Node command deny-list entries that are silently ineffective",
         MEDIUM,
         "hardening",
         "Least Privilege / Node Commands",

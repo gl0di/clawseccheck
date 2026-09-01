@@ -2694,7 +2694,7 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
         ],
         why=(
             "This install has the full unattended Skill Workshop pipeline configured "
-            "and reachable: skills.workshop.autonomous.enabled authors new skill "
+            "and reachable: the Skill Workshop autonomy setting authors new skill "
             "proposals from conversation signals, and approvalPolicy='auto' installs "
             "them with no human confirmation. At the same time, at least one ingress "
             f"surface admits content from someone other than the owner: {detail}. A "
@@ -2702,9 +2702,10 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
             "install new executable code on disk with no review step in between."
         ),
         fix=(
-            "Set skills.workshop.approvalPolicy back to the default 'pending' so every "
+            "Set skills.workshop.approvalPolicy to 'pending' so every "
             "generated proposal needs an explicit `openclaw skills workshop apply` "
-            "decision, and/or disable skills.workshop.autonomous.enabled unless "
+            "decision, and/or turn off skills.workshop.autonomous.mode "
+            "(skills.workshop.autonomous.enabled before OpenClaw 2026.8.1) unless "
             "unattended authoring is genuinely intended. Independently, close the "
             "flagged ingress surface(s): set channels.<provider>.contextVisibility to "
             "'allowlist'/'allowlist_quote' (B26), scope commands.ownerAllowFrom/"

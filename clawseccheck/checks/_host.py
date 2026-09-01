@@ -34,6 +34,7 @@ from ._shared import (
     _dir_replaceable_by_others,
     _file_readable_by_others,
     _finding,
+    _key_advice,
     _plugins,
 )
 from ..invocation import command_prefix
@@ -273,8 +274,27 @@ def check_audit_log(ctx: Context) -> Finding:
     #   types.openclaw-CXjMEWAQ.d.ts:1658  audit?: AuditConfig
     #
     # So `audit.enabled: false` silently stops the agent-activity ledger — an
-    # anti-forensics switch this check was declining to look at. `logging.audit` IS a
-    # phantom; that half of the old note stood.
+    # anti-forensics switch this check was declining to look at.
+    #
+    # B-700: "`logging.audit` IS a phantom" was the other half of that note, and it has
+    # since gone stale — OpenClaw 2026.8.1 MOVED the block there. `audit` is rejected at
+    # the root and `logging.audit.enabled` is the real key, so reading only the old path
+    # made this check answer PASS "Nothing here turns it off" on a config that had
+    # explicitly turned it off. Measured, on the whole check set:
+    #
+    #   {"audit": {"enabled": false}}               -> B10 WARN   (ledger is off)
+    #   {"logging": {"audit": {"enabled": false}}}  -> B10 PASS   "Nothing here turns it off."
+    #
+    # Golden Rule #4, and the same shape as B-698. Both spellings are read now, permanently:
+    # OpenClaw's migration runs inside `doctor --fix`, so an un-migrated config still
+    # carries the old key while the schema rejects it. Precedence mirrors the vendor's own
+    # migration verbatim (`legacy-pGW3ZP3t.js`):
+    #
+    #   const canonicalAudit = getRecord(logging.audit) ?? {};
+    #   mergeMissing(canonicalAudit, audit);        // canonical wins per key
+    #
+    # i.e. `logging.audit.enabled` wins where it is present and the legacy block only
+    # fills a key the canonical one does not have.
     #
     # ABSENT is the DOCUMENTED DEFAULT (true), i.e. the safe state — warning on it would
     # be a false positive on every stock config. The default lives in the .d.ts, not in
@@ -291,7 +311,18 @@ def check_audit_log(ctx: Context) -> Finding:
     if (unreadable := _config_unreadable("B10", ctx)) is not None:
         return unreadable
     cfg = ctx.config
-    audit_enabled = dig(cfg, "audit.enabled")
+    # B-700: canonical first, legacy as the fallback — see the migration quoted above.
+    # The container is read with plain dict access, exactly as `_shared._node_commands`
+    # does, so no manifest entry is created for a path that only reaches a child.
+    logging_node = cfg.get("logging") if isinstance(cfg, dict) else None
+    audit_node = logging_node.get("audit") if isinstance(logging_node, dict) else None
+    if isinstance(audit_node, dict) and "enabled" in audit_node:
+        audit_enabled = audit_node["enabled"]
+        audit_key = "logging.audit.enabled"
+    else:
+        audit_enabled = dig(cfg, "audit.enabled")
+        audit_key = ("audit.enabled" if audit_enabled is not None
+                     else _key_advice(ctx, "audit.enabled", "logging.audit.enabled"))
     redact = dig(cfg, "logging.redactSensitive")
     redact_note = (
         ' logging.redactSensitive is also "off", so what is written may expose '
@@ -302,11 +333,11 @@ def check_audit_log(ctx: Context) -> Finding:
         return _finding(
             "B10",
             WARN,
-            "audit.enabled is false — the metadata audit ledger is switched OFF, so agent "
+            f"{audit_key} is false — the metadata audit ledger is switched OFF, so agent "
             "runs and tool actions stop being recorded to the shared state database. "
             "Existing records stay readable until they expire; nothing new is written, so "
             f"an incident from here on leaves no ledger to reconstruct.{redact_note}",
-            "Remove audit.enabled (its default is true) or set it back to true in "
+            f"Remove {audit_key} (its default is true) or set it back to true in "
             "openclaw.json. If something else set it to false, treat that as the finding.",
         )
     if redact == "off":
@@ -314,8 +345,7 @@ def check_audit_log(ctx: Context) -> Finding:
             "B10",
             WARN,
             'logging.redactSensitive is "off" — logs may expose secrets/PII '
-            "(Israel Amendment 13). Note `logging.audit` is not a real field; the audit "
-            "toggle is the top-level `audit.enabled`.",
+            f"(Israel Amendment 13). The audit toggle is a separate setting, {audit_key}.",
             'Set logging.redactSensitive to "tools" and run `openclaw security audit` '
             "periodically.",
         )
@@ -323,7 +353,7 @@ def check_audit_log(ctx: Context) -> Finding:
         return _finding(
             "B10",
             PASS,
-            "audit.enabled is true — the metadata audit ledger is switched on. This is "
+            f"{audit_key} is true — the metadata audit ledger is switched on. This is "
             "the config toggle only; that records are actually being written, retained "
             "and reachable by you is not observable from config.",
             "Confirm the ledger is really being produced and is retained somewhere you "
@@ -333,20 +363,20 @@ def check_audit_log(ctx: Context) -> Finding:
         return _finding(
             "B10",
             PASS,
-            "audit.enabled is not set, and its documented default is true — the metadata "
+            f"{audit_key} is not set, and its documented default is true — the metadata "
             "audit ledger records agent runs and tool actions unless something turns it "
             "off. Nothing here turns it off.",
             "Nothing to change. If you want the setting to be explicit rather than "
-            "inherited, set audit.enabled to true.",
+            f"inherited, set {audit_key} to true.",
             pass_confidence="no_signal",
         )
     return _finding(
         "B10",
         UNKNOWN,
-        f"audit.enabled is set to {audit_enabled!r}, which is not a boolean — OpenClaw's "
+        f"{audit_key} is set to {audit_enabled!r}, which is not a boolean — OpenClaw's "
         "schema expects true or false, so what the runtime does with this value cannot "
         "be read from the config.",
-        "Set audit.enabled to a real boolean (true), or remove it to inherit the "
+        f"Set {audit_key} to a real boolean (true), or remove it to inherit the "
         "documented default of true.",
     )
 

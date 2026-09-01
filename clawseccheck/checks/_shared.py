@@ -41,6 +41,7 @@ from ..iocdb import known_bad_host_records as _iocdb_known_bad_host_records
 from ..safeio import walk_dir_safely
 from .. import toolpolicy as _toolpolicy
 from .. import attest as _attest
+from .. import openclawdist as _openclawdist
 
 
 def _is_posix() -> bool:
@@ -776,6 +777,116 @@ OUTBOUND_TOOL_HINTS = (
 # second copy is exactly the drift that made B-450's consumer regexes miss every new class
 # member and left B-563's leg hints frozen at seven check ids.
 _B55_FS_WRITE_TOOLS = frozenset({"write", "edit", "apply_patch"})
+
+
+# ---------- B-700: advice that names a key the user's own OpenClaw accepts ----------
+#
+# OpenClaw 2026.8.1 moved or removed nine settings this tool hands out fix instructions
+# for. Proven by executing the real schema on what our own fix strings told users to
+# write:
+#
+#     logging.redactSensitive: "tools"   (B9's fix)   => REJECTED unrecognized_keys@logging
+#     audit.enabled: true                (B10's fix)  => REJECTED unrecognized_keys@<root>
+#     logging.audit.enabled: true        (the real path)  => valid
+#
+# So the advice itself was the defect: following it makes the user's config invalid.
+#
+# The fleet is MIXED and OpenClaw's migration is deferred to `doctor --fix`, so there is
+# no single wording that is right for everyone -- telling a 2026.7.x user to write
+# `logging.audit.enabled` is the mirror image of the bug. The advice therefore branches on
+# the version, while the READS stay dual-shape (CLAUDE.md §2.6, and `_node_commands` /
+# `collector.agent_roster` are the accessors that do it).
+
+# The two builds whose schemas were actually EXECUTED. Everything strictly between them is
+# unknown territory, not "probably legacy": we have two data points, not a timeline, and a
+# release in the gap could have made the move at any point. Guessing there would reproduce
+# this very bug for whoever is running 2026.7.5.
+_SCHEMA_LEGACY_MAX = (2026, 7, 1, 2)   # 2026.7.1-2 -- last build measured with the old keys
+_SCHEMA_MODERN_MIN = (2026, 8, 1)      # 2026.8.1   -- first build measured with the new ones
+
+
+def _openclaw_generation(ctx) -> str:
+    """Which key generation the user's OpenClaw accepts: ``modern``/``legacy``/``unknown``.
+
+    Version sources, in order, and the asymmetry between them is deliberate:
+
+    1. ``ctx.installed_dist_version`` -- what is installed NOW, which is what will accept
+       or reject the key we are about to name. `audit()` fills it only under
+       ``include_dist=True``; the CLI passes that, a hermetic library call does not, so
+       ``unknown`` is the normal answer in tests and the honest one there.
+    2. ``meta.lastTouchedVersion`` -- OpenClaw's own stamp for the build that last SAVED
+       the config, used ONLY when it lands in the modern range. A config stamped 2026.8.1+
+       was demonstrably written by a modern build, so modern keys are right for it. A
+       config stamped 2026.7.x proves nothing about what is installed now -- the user may
+       have upgraded five minutes ago and not re-saved -- so it does NOT decide anything.
+       Treating a stale stamp as authoritative is how you name the retired key to the very
+       user this task exists for.
+
+    ⚠️ KNOWN NARROW WINDOW, recorded rather than hidden. Source 1 resolves the install
+    through ``shutil.which``, and a cron job inherits neither the user's PATH nor their
+    cwd (the reason ``invocation.py`` exists). So on a machine that upgraded but has not
+    re-saved its config, an interactive run can answer ``modern`` while a scheduled run
+    answers ``unknown``. Where a consumer lets the generation change a STATUS rather than
+    only the wording — B9's absent-field branch is the one that does — that alternation
+    can raise a spurious ``--monitor`` alert. It does not arise once OpenClaw has written
+    the config even once (source 2 then settles it), which is why the window is narrow;
+    closing it properly means resolving the install without PATH, which belongs to
+    ``openclawdist``, not here.
+
+    Parsing goes through ``openclawdist._numeric_parts``, not ``_parse_version``: the
+    latter truncates at the first hyphen (B-264), so it cannot tell ``2026.7.1-2`` from
+    ``2026.7.1``, and it reads a ``2026.8.1-beta.3`` as the release. ``_numeric_parts``
+    keeps the correction suffix and returns None for a pre-release, which lands on
+    ``unknown`` -- the branch that names both keys.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if installed >= _SCHEMA_MODERN_MIN:
+            return "modern"
+        if installed <= _SCHEMA_LEGACY_MAX:
+            return "legacy"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _SCHEMA_MODERN_MIN:
+        return "modern"
+    return "unknown"
+
+
+def _numeric_version(value) -> "tuple | None":
+    if not isinstance(value, str) or not value:
+        return None
+    return _openclawdist._numeric_parts(value)
+
+
+def _key_advice(ctx, legacy: str, modern: str) -> str:
+    """The config key to NAME in advice, for a setting that moved.
+
+    Returns the one key when the generation is known, and both -- each qualified by the
+    version it belongs to -- when it is not. Never silently picks one: an unqualified key
+    is a claim about the reader's build, and on ``unknown`` we do not have one.
+    """
+    generation = _openclaw_generation(ctx)
+    if generation == "modern":
+        return modern
+    if generation == "legacy":
+        return legacy
+    return f"{modern} (OpenClaw 2026.8.1 and later; {legacy} before it)"
+
+
+def _retired_key_note(ctx, legacy: str) -> str:
+    """A trailing sentence for a setting 2026.8.1 removed OUTRIGHT, or ``""``.
+
+    Only the advice is this helper's business. Whether the check still has a subject at all
+    is a separate question, per check, and is not decided here.
+    """
+    generation = _openclaw_generation(ctx)
+    if generation == "modern":
+        return f" On OpenClaw 2026.8.1 and later, {legacy} no longer exists — do not add it."
+    if generation == "legacy":
+        return ""
+    return (f" Note: {legacy} exists only on OpenClaw releases before 2026.8.1; "
+            "newer builds reject it.")
 
 
 def _meta(cid: str):
