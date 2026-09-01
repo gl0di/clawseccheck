@@ -3372,6 +3372,64 @@ def _hooks_session_key_exposures(cfg: dict) -> list[tuple[str, str]]:
     return out
 
 
+def _node_commands(cfg: dict, kind: str) -> "tuple[object, str]":
+    """The gateway node command allow/deny list, from EITHER config shape.
+
+    ``kind`` is ``"allow"`` or ``"deny"``. Returns ``(value, path)`` — the value exactly
+    as found (callers type-check it themselves, as they did when they read ``dig()``
+    directly) and the config path to name in evidence.
+
+    B-698. OpenClaw 2026.8.1 moved ``gateway.nodes.allowCommands`` / ``denyCommands``
+    into a new strict object ``gateway.nodes.commands.{allow,deny}``. We read only the
+    old spelling, so on a 2026.8.1 config B48 saw nothing and then returned "No dangerous
+    break-glass override flags enabled." — a clean verdict about a grant it never read.
+    Measured, not inferred: the same ``["system.run"]`` grant gave WARN in the old shape
+    and PASS in the new one.
+
+    Both shapes are read, permanently. OpenClaw's migration is DEFERRED — it runs inside
+    ``openclaw doctor --fix`` — so an un-migrated config still carries ``allowCommands``
+    on disk, and a user on an older OpenClaw is not migrating at all. Switching outright
+    would trade the fake PASS for a silent UNKNOWN on every un-migrated config. Same rule
+    and same shape as ``_mcp_servers`` above, which merges ``mcp.servers`` with the legacy
+    spellings behind one accessor.
+
+    Precedence mirrors the vendor's own migration verbatim (``legacy-pGW3ZP3t.js``)::
+
+        const commands = getRecord(nodes.commands) ?? {};
+        if (Object.hasOwn(nodes, "allowCommands")) {
+            if (commands.allow === void 0) commands.allow = nodes.allowCommands;
+
+    so the NEW key wins whenever it is PRESENT — including an explicit ``null``, which
+    ``=== void 0`` does not treat as absent. Do not "improve" that into "new key if
+    truthy": a config carrying both would then be read one way by us and the other way by
+    OpenClaw, which is the disagreement this accessor exists to prevent.
+
+    The legacy spelling is read through ``dig`` so it keeps its entry in
+    ``tests/grounded_schema_paths.txt``. The new spelling is deliberately NOT read that
+    way yet: adding it to the manifest requires it to be dist-verified, and
+    ``tests/dist_verified_paths.txt`` is still stamped 2026.7.1-2. It gets its manifest
+    entry when that snapshot is regenerated — the LAST step of the upgrade, after every
+    sibling read is fixed, or the re-baseline absorbs paths nobody diagnosed. Same
+    arrangement, for the same reason, as ``collector.agent_roster``.
+    """
+    # The CONTAINER is read with plain dict access, not `dig` — same as `_mcp_servers`
+    # reading `cfg.get("mcp")`. A `dig("gateway.nodes")` would add a manifest entry whose
+    # only purpose is to reach a child, and the manifest's job is to vouch for the leaf
+    # paths a check actually reasons about.
+    gateway = cfg.get("gateway") if isinstance(cfg, dict) else None
+    nodes = gateway.get("nodes") if isinstance(gateway, dict) else None
+    new_path = f"gateway.nodes.commands.{kind}"
+    if isinstance(nodes, dict):
+        commands = nodes.get("commands")
+        if isinstance(commands, dict) and kind in commands:
+            return commands[kind], new_path
+    legacy = dig(cfg, "gateway.nodes.allowCommands") if kind == "allow" \
+        else dig(cfg, "gateway.nodes.denyCommands")
+    if legacy is not None:
+        return legacy, f"gateway.nodes.{kind}Commands"
+    return None, new_path
+
+
 _CANONICAL_IPV4_RE = re.compile(r"\A(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\Z", re.ASCII)
 
 

@@ -38,6 +38,7 @@ from ._shared import (
     _finding,
     _has_approval_gate,
     _hint,
+    _node_commands,
     _open_channels,
     _profile_is_powerful,
     _surface_absent,
@@ -118,7 +119,7 @@ def _b31_collect_deny_lists(cfg: dict) -> list[tuple[str, set[str]]]:
     Scopes inspected:
       - tools.deny  (global)
       - toolsBySender.<key>.deny  (top-level, global per-sender)
-      - agents.list[N].tools.toolsBySender.<key>.deny  (per-agent per-sender)
+      - <agent>.tools.toolsBySender.<key>.deny  (per-agent per-sender, either roster shape)
     """
     results: list[tuple[str, set[str]]] = []
 
@@ -139,29 +140,31 @@ def _b31_collect_deny_lists(cfg: dict) -> list[tuple[str, set[str]]]:
                 deny_set = {str(t).strip().lower() for t in deny_val}
                 results.append((f"toolsBySender.{key}.deny", deny_set))
 
-    # 3. Per-agent: agents.list[N].tools.toolsBySender.<key>.deny
-    agents_cfg = cfg.get("agents")
-    if isinstance(agents_cfg, dict):
-        agents_list = agents_cfg.get("list")
-        if isinstance(agents_list, list):
-            for idx, agent in enumerate(agents_list):
-                if not isinstance(agent, dict):
-                    continue
-                agent_tools = agent.get("tools")
-                if not isinstance(agent_tools, dict):
-                    continue
-                agent_tbs = agent_tools.get("toolsBySender")
-                if not isinstance(agent_tbs, dict):
-                    continue
-                for key, sender_cfg in agent_tbs.items():
-                    if not isinstance(sender_cfg, dict):
-                        continue
-                    deny_val = sender_cfg.get("deny")
-                    if isinstance(deny_val, list) and deny_val:
-                        deny_set = {str(t).strip().lower() for t in deny_val}
-                        results.append(
-                            (f"agents.list[{idx}].tools.toolsBySender.{key}.deny", deny_set)
-                        )
+    # 3. Per-agent: <agent>.tools.toolsBySender.<key>.deny
+    #
+    # B-699: through `agent_roster`, so BOTH roster shapes are seen. This site was missed
+    # by the first pass — it walked `agents.get("list")` by hand rather than digging the
+    # path, so a grep for the retired key did not surface it. Measured: with a per-agent
+    # `toolsBySender.deny` expressed the 2026.8.1 way, this returned NO scopes at all and
+    # B31 went UNKNOWN ("No tool deny-policy configured") instead of evaluating the policy
+    # that is actually there. The scope label comes from the entry, so it names the key the
+    # user's own file contains rather than a position in an array they may not have.
+    for agent in agent_roster(cfg):
+        agent_tools = agent.entry.get("tools")
+        if not isinstance(agent_tools, dict):
+            continue
+        agent_tbs = agent_tools.get("toolsBySender")
+        if not isinstance(agent_tbs, dict):
+            continue
+        for key, sender_cfg in agent_tbs.items():
+            if not isinstance(sender_cfg, dict):
+                continue
+            deny_val = sender_cfg.get("deny")
+            if isinstance(deny_val, list) and deny_val:
+                deny_set = {str(t).strip().lower() for t in deny_val}
+                results.append(
+                    (f"{agent.path}.tools.toolsBySender.{key}.deny", deny_set)
+                )
 
     return results
 
@@ -1718,44 +1721,52 @@ def check_elevated_default_full(ctx: Context) -> Finding:
 
 
 def check_node_denycommands_ineffective(ctx: Context) -> Finding:
-    """B71 — gateway.nodes.denyCommands ineffective patterns.
+    """B71 — node command deny-list entries that are silently ineffective.
 
-    Grounded (docs.openclaw.ai/gateway/nodes): denyCommands matching is exact command-name
+    Grounded (docs.openclaw.ai/gateway/nodes): deny matching is exact command-name
     only (e.g. 'system.run'); entries containing spaces, shell metacharacters, globs, or
     path separators are silently ineffective.
 
-    UNKNOWN — denyCommands absent or empty; no deny list configured.
-    WARN    — denyCommands non-empty and at least one entry looks non-exact.
+    Reads BOTH spellings via ``_node_commands`` (B-698) — ``gateway.nodes.commands.deny``
+    on OpenClaw 2026.8.1+, ``gateway.nodes.denyCommands`` before it — and every
+    user-facing string names the one actually found, so a reader is never pointed at a
+    key their own config does not contain.
+
+    UNKNOWN — deny list absent or empty; no deny list configured.
+    WARN    — deny list non-empty and at least one entry looks non-exact.
     PASS    — all entries are bare exact command names.
     """
     cfg = ctx.config
-    deny = dig(cfg, "gateway.nodes.denyCommands")
+    # B-698: both spellings — OpenClaw 2026.8.1 moved this under `gateway.nodes.commands`
+    # and its migration is deferred, so an un-migrated config still carries the old key.
+    deny, deny_path = _node_commands(cfg, "deny")
     if not deny or not isinstance(deny, list):
         return _finding(
             "B71",
             UNKNOWN,
-            "gateway.nodes.denyCommands is absent or empty — no node command deny list "
-            "is configured.",
-            "If you want to block specific node commands, set gateway.nodes.denyCommands "
-            "to bare exact command names (e.g. 'system.run').",
+            "gateway.nodes.commands.deny (pre-2026.8.1: gateway.nodes.denyCommands) is "
+            "absent or empty — no node command deny list is configured.",
+            "If you want to block specific node commands, set the node command deny list "
+            "to bare exact command names (e.g. 'system.run') — gateway.nodes.commands.deny "
+            "on OpenClaw 2026.8.1 and later, gateway.nodes.denyCommands before it.",
         )
     offenders = [str(e) for e in deny if isinstance(e, str) and _B71_INEFFECTIVE_RE.search(e)]
     if offenders:
         return _finding(
             "B71",
             WARN,
-            "gateway.nodes.denyCommands contains entries with spaces, shell metacharacters, "
+            f"{deny_path} contains entries with spaces, shell metacharacters, "
             "globs, or path separators — these patterns are silently ineffective because "
             "matching is exact command-name only.",
-            "Replace ineffective denyCommands entries with bare exact command names only "
+            f"Replace ineffective {deny_path} entries with bare exact command names only "
             "(e.g. 'system.run', not 'system.run --flag' or 'system*').",
-            evidence=[f"ineffective denyCommands entry: {e!r}" for e in offenders],
+            evidence=[f"ineffective {deny_path} entry: {e!r}" for e in offenders],
         )
     return _finding(
         "B71",
         PASS,
-        "All gateway.nodes.denyCommands entries are bare exact command names.",
-        "Keep gateway.nodes.denyCommands entries as bare exact command names without "
+        f"All {deny_path} entries are bare exact command names.",
+        f"Keep {deny_path} entries as bare exact command names without "
         "spaces, globs, or path separators.",
     )
 

@@ -36,6 +36,7 @@ _CRED_RE
 _CRED_STORE_MAX_BYTES
 _CRED_STORE_MAX_FILES
 _CRED_STORE_MAX_NAMES
+_DANGER_FIXED_2026_8_1
 _DESTRUCTIVE_CMD_RE
 _EXFIL_RE
 _FS_GOVERNED_TOOL_IDS
@@ -129,6 +130,7 @@ _mcp_servers
 _mcp_value_looks_secret
 _negation_context
 _negation_governs_trigger
+_node_commands
 _norm_group_policy
 _open_channels
 _open_wildcard_group_channels

@@ -70,6 +70,7 @@ from ._shared import (
     _is_secret_reference,  # noqa: F401 — re-exported for existing importers
     _pattern_hits_real_secret,
     _mcp_leg_contributions,
+    _node_commands,
     _norm_group_policy,
     _open_channels,
     _perms_loose,
@@ -221,6 +222,55 @@ _DANGER_FIXED = [
         "hooks.gmail.allowUnsafeExternalContent",
         "less-sanitized external Gmail content into processing (injection surface)",
         False,
+    ),
+]
+
+
+# B-701. Two SSRF break-glass flags that exist ONLY in the 2026.8.1+ schema, so B48 said
+# "No dangerous break-glass override flags enabled." with one of them on — measured, not
+# inferred. Both were confirmed by `safeParse` against the installed 2026.8.1 dist AND
+# absent from 2026.7.1-2, each with a bogus-key control at the same parent (`gateway.tls`
+# is a passthrough and accepts junk, so an ACCEPTED probe alone proves nothing).
+#
+# Vendor's own descriptions:
+#   cron.webhookSsrfPolicy.dangerouslyAllowPrivateNetwork — "Allows automation webhooks
+#     to private and internal network targets."
+#   tools.web.fetch.ssrfPolicy.dangerouslyAllowPrivateNetwork — "Allows web_fetch access
+#     to private and internal network targets. Keep disabled unless model-selected URLs
+#     are trusted in this deployment."  <- model-SELECTED, i.e. an injected prompt turns
+#     this into an SSRF primitive against the host's private network.
+#
+# C-135 pass, and the one judgement call it forced: neither row is gated on the surrounding
+# feature being enabled. `tools.web.fetch.enabled: false` + the flag PARSES, and a per-agent
+# scope cannot re-enable web fetch (`agents.entries.<k>.tools` rejects `web` -- measured), so
+# the flag really can sit there inert. It still warns, for two grounded reasons: every
+# sibling row behaves the same way (no `_DANGER_FIXED` entry gates on its feature, and B38
+# FAILs on a browser SSRF flag with no browser block at all), and an inert flag goes live the
+# moment the user flips `enabled` -- silently, with nothing to re-warn them. WARN, not FAIL,
+# is what makes that the right trade.
+#
+# Also measured, on the whole check set rather than on B48 alone: no other check moves on
+# either flag, so neither row double-counts.
+#
+# `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork` is deliberately NOT here: B38 already
+# FAILs on it (checks/_egress.py) and _egress.py's own no-double-count rule with B38
+# applies. That was checked by running the whole check set on it, not by reading the code.
+#
+# Read WITHOUT dig() on purpose. A dig() path must appear in
+# tests/grounded_schema_paths.txt, and a manifest entry must in turn be vouched by
+# tests/dist_verified_paths.txt — which is still stamped 2026.7.1-2 and cannot contain a
+# key that version has no word for. They get their manifest entries when that snapshot is
+# regenerated: the LAST step of the upgrade (CLAWSECCHECK-C-472), after every sibling read
+# is fixed, or the re-baseline absorbs paths nobody diagnosed. Same arrangement, for the
+# same reason, as `collector.agent_roster` and `checks/_shared._node_commands`.
+_DANGER_FIXED_2026_8_1 = [
+    (
+        "cron.webhookSsrfPolicy.dangerouslyAllowPrivateNetwork",
+        "automation webhooks may reach private/internal targets (SSRF)",
+    ),
+    (
+        "tools.web.fetch.ssrfPolicy.dangerouslyAllowPrivateNetwork",
+        "web_fetch may reach private/internal targets (SSRF via a model-selected URL)",
     ),
 ]
 
@@ -1214,6 +1264,13 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         if dig(cfg, path):
             (fails if is_fail else warns).append(f"{path} — {label}")
 
+    for path, label in _DANGER_FIXED_2026_8_1:
+        node = cfg
+        for key in path.split("."):
+            node = node.get(key) if isinstance(node, dict) else None
+        if node:
+            warns.append(f"{path} — {label}")
+
     owner_allow_from = dig(cfg, "commands.ownerAllowFrom")
     if _is_owner_wildcard_allow_from(owner_allow_from):
         wildcard_fails.append(
@@ -1232,15 +1289,18 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "still requires manual approval)"
         )
 
-    nc = dig(cfg, "gateway.nodes.allowCommands")
+    nc, nc_path = _node_commands(cfg, "allow")
     if isinstance(nc, list) and nc:
         # B-231: a literal "*" entry here is NOT given the wildcard-authority
-        # treatment above — grounded against node-command-policy-*.js, allowCommands
+        # treatment above — grounded against node-command-policy-*.js, the allow list
         # is folded into a plain Set of exact command-name strings with no wildcard
         # special-case (`allow.has(command)`), so "*" never matches a real node
         # command and is strictly inert, not a broader grant than a named command.
+        # Re-checked on 2026.8.1 (register-*.js): the new `commands.allow` spelling is
+        # read the same way — `allowCommands.forEach` over exact trimmed strings — so
+        # the inertness holds for both shapes, not just the one B-231 measured.
         warns.append(
-            "gateway.nodes.allowCommands — extra node.invoke commands enabled "
+            f"{nc_path} — extra node.invoke commands enabled "
             "(beyond gateway defaults; possible RCE surface)"
         )
 
@@ -2592,10 +2652,15 @@ def check_sandbox(ctx: Context) -> Finding:
             "one or more named agents override agents.defaults.sandbox with unsafe "
             "settings (see evidence) — a per-agent override can re-expose the host even "
             "when the defaults are safe.",
-            "Remove the unsafe per-agent sandbox overrides under agents.list[].sandbox "
-            "(set mode to 'non-main'/'all', docker.network to 'bridge', workspaceAccess "
-            "to 'none'/'ro', and drop host and docker.sock binds), or rely on "
-            "agents.defaults.sandbox.",
+            # B-699: no container key is named here on purpose. The evidence identifies
+            # each offending agent by id ("agent 'w': sandbox.mode=off"), which is true in
+            # either roster shape, while `agents.list[]` is true in only one -- 2026.8.1
+            # rejects that key, and a user on an older build has no `agents.entries`.
+            # Naming one of them would point half the fleet at a key their file lacks.
+            "Remove the unsafe per-agent sandbox overrides named in the evidence "
+            "(set sandbox.mode to 'non-main'/'all', sandbox.docker.network to 'bridge', "
+            "sandbox.workspaceAccess to 'none'/'ro', and drop host and docker.sock "
+            "binds), or rely on agents.defaults.sandbox.",
             ev + agent_ev,
         )
     # NOTE: the agents.defaults.sandbox.docker.dangerouslyAllow* break-glass trio is
