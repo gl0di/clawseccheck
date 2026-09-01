@@ -210,3 +210,38 @@ def test_a_home_with_no_version_manager_at_all_is_not_an_error(monkeypatch):
     let that escape would take down every consumer on the majority of machines."""
     monkeypatch.setenv("HOME", str(Path(tempfile.mkdtemp(prefix="b703-bare-"))))
     assert _conventional_package_roots("openclaw"), "the flat prefixes must still be listed"
+
+
+def test_the_newest_node_version_is_preferred(monkeypatch):
+    """`find_package_root` returns the FIRST name-verified hit, so ordering IS the choice.
+    On a machine carrying several node versions the active one is unknowable without PATH
+    and the newest is the better guess — returning the oldest would be a confident wrong
+    answer where the whole design prefers `None`."""
+    home = _nvm_home(["v9.0.0", "v22.4.0", "v18.20.0"])
+    monkeypatch.setenv("HOME", str(home))
+    for var in ("npm_config_prefix", "NPM_CONFIG_PREFIX", "PREFIX"):
+        monkeypatch.delenv(var, raising=False)
+    found = find_package_root("openclaw", which=lambda _n: None)
+    assert found == home / ".nvm/versions/node/v22.4.0/lib/node_modules/openclaw"
+
+
+def test_the_version_order_is_numeric_not_lexicographic(monkeypatch):
+    """The specific trap: `sorted()` puts `v9.0.0` AFTER `v22.0.0`, so a plain string sort
+    makes "newest" mean "oldest" on any machine whose versions straddle a digit boundary.
+    Asserted separately from the test above because that one passes under either sort when
+    the digit counts happen to match."""
+    from clawseccheck.deptree import _conventional_package_roots
+    home = _nvm_home(["v9.0.0", "v22.0.0"])
+    monkeypatch.setenv("HOME", str(home))
+    nvm = [r for r in _conventional_package_roots("openclaw") if ".nvm" in str(r)]
+    assert "v22.0.0" in str(nvm[0]), f"newest-first broken: {nvm[0]}"
+
+
+def test_a_version_directory_that_is_not_a_version_does_not_raise(monkeypatch):
+    """A directory here is user-controlled and need not look like a version at all."""
+    from clawseccheck.deptree import _conventional_package_roots
+    home = _nvm_home(["v22.0.0", "not-a-version", "system"])
+    monkeypatch.setenv("HOME", str(home))
+    nvm = [r for r in _conventional_package_roots("openclaw") if ".nvm" in str(r)]
+    assert "v22.0.0" in str(nvm[0]), "an unparseable name must sort oldest, not first"
+    assert len(nvm) == 6, "all three are still offered as candidates"

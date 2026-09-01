@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -274,23 +275,41 @@ def _version_manager_roots(home: "Path", binary_name: str) -> "list[Path]":
     function, finds nothing above.
 
     The version component is a directory name we do not know, so this is the one entry
-    that has to enumerate. Bounded and sorted: newest-looking last so it is preferred,
-    capped so a directory with a thousand entries cannot turn a scan into a walk. Still
-    name-verified by the caller like every other candidate.
+    that has to enumerate. Bounded, and ordered newest-first because the caller returns the
+    FIRST name-verified hit: on a machine carrying several node versions the active one is
+    unknowable without PATH, and the newest is the better guess. The cap then drops the
+    oldest rather than the likely-current one, so a directory with a thousand entries
+    cannot turn a scan into a walk. Still name-verified by the caller like every other
+    candidate.
+
+    Ordering is numeric, not lexicographic: `sorted()` puts `v9.0.0` after `v22.0.0`, which
+    would have made "newest" mean "oldest" on any machine whose versions straddle a digit
+    boundary -- i.e. most of them.
     """
     roots: list = []
     for base in (home / ".nvm" / "versions" / "node",
                  home / ".local" / "share" / "fnm" / "node-versions",
                  home / ".asdf" / "installs" / "nodejs"):
         try:
-            versions = sorted(p for p in base.iterdir() if p.is_dir())
+            versions = sorted((p for p in base.iterdir() if p.is_dir()),
+                              key=_version_sort_key, reverse=True)
         except OSError:
             continue
-        for version in versions[-_MAX_VERSION_MANAGER_ROOTS:]:
+        for version in versions[:_MAX_VERSION_MANAGER_ROOTS]:
             # fnm nests one level deeper: <version>/installation/lib/node_modules.
             roots.append(version / "lib" / "node_modules" / binary_name)
             roots.append(version / "installation" / "lib" / "node_modules" / binary_name)
     return roots
+
+
+def _version_sort_key(path: "Path") -> "tuple":
+    """Numeric ordering for a version directory name, with the name as the tie-break.
+
+    A directory here is user-controlled and need not be a version at all, so anything
+    unparseable sorts oldest rather than raising.
+    """
+    digits = re.findall(r"\d+", path.name)
+    return ([int(d) for d in digits[:4]] or [-1], path.name)
 
 
 def _default_which():
