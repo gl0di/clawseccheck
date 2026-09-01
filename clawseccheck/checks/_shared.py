@@ -912,6 +912,150 @@ def _meta(cid: str):
 # file secret scan, B11's file-permission check), call this immediately before the check's
 # own terminal "clean" verdict rather than at the top of the function, so the independent
 # signal still gets a chance to FAIL/WARN on its own merits.
+# ---------------------------------------------------------------------------------------
+# Docker-bind semantics, moved DOWN from risk.py (B-673).
+#
+# These three carry four C-135 rounds between them and were the only correct model of
+# `sandbox.docker.binds` in the tree -- but they lived in risk.py, which is Layer 3, so the
+# Layer-2 checks that need the same answer could not import them and grew cruder copies
+# instead. `checks/_config.py::_peragent_sandbox_evidence` had neither the scope gate nor the
+# `:ro` narrowing and produced two false FAILs because of it.
+#
+# Moved rather than copied, deliberately: a fourth independently-drifting copy is the disease,
+# not the cure. `risk.py` now imports these from here, so there is one implementation and one
+# place a future C-135 round has to land.
+# ---------------------------------------------------------------------------------------
+
+
+def _bind_mode_is_ro(bind: object) -> bool:
+    """True only when ONE docker bind entry's mode suffix is verifiably ``ro``.
+
+    ROUND 4 (C-135 found a false positive in round 3's blanket "any bind defeats
+    containment"): bind format is ``source:target[:mode]`` (OpenClaw's own
+    ``parseBindSpec``, dist/validate-sandbox-security-DQe7hw6K.js:41). The mode is
+    always the LAST colon-separated segment when present -- true for a plain POSIX
+    path and for a Windows drive-letter source alike, since a drive letter only ever
+    appears as the FIRST segment, never the last. A bind with no mode segment (only
+    ``source:target``) defaults to Docker's native read-write mode, same as one
+    explicitly suffixed ``:rw`` -- neither is read-only. Anything not a plain string
+    is unparseable and conservatively NOT read-only.
+
+    Deliberately does NOT replicate OpenClaw's own path-blocklist / bindSourceRoots
+    validation (``validateBindMounts``, dist/validate-sandbox-security-DQe7hw6K.js,
+    200+ lines: blocked host paths, docker.sock, ``$HOME`` credential subdirs,
+    reserved container targets, ``dangerouslyAllowExternalBindSources``) -- that is
+    a large, independently-drifting security surface unsuited to a narrow advisory
+    helper (the exact divergence class this task keeps finding), and it is not
+    needed here: RISK-12 is specifically a filesystem-WRITE/tamper concern, and a
+    verifiably ``:ro`` bind cannot be written through by Docker's own native
+    bind-mount enforcement regardless of which host path it exposes or whether
+    OpenClaw's own validator would also accept that path (a ``:ro`` bind onto a
+    sensitive path is an information-disclosure concern -- a different risk class,
+    out of scope for a write-tamper chain). Whether OpenClaw fails closed or falls
+    back to host exec when a DIFFERENT, non-``:ro`` bind is rejected by that
+    validator was investigated and left unresolved (bundled/minified call graph);
+    it does not matter for this function, because a non-``:ro`` bind already
+    returns "not read-only" here regardless of what OpenClaw's own validator would
+    do with it.
+
+    ROUND 4 FOLLOW-UP (C-135 found a second FP in the same helper): Docker's mode
+    field is a COMMA-SEPARATED option list (``ro``/``rw`` plus label/propagation
+    options such as ``z``/``Z``/``rshared``/``private``), not a single token --
+    ``:ro,z`` is the standard SELinux-host form (Fedora/RHEL) and was wrongly read
+    as writable by an equality check against the whole segment. Parsed as an option
+    set instead: read-only iff ``ro`` is present AND ``rw`` is absent (the latter
+    keeps a malformed ``rw,ro`` -- which Docker itself rejects outright -- on the
+    fail-closed side, since a rejected bind config is not something this function
+    should credit as "verified safe").
+
+    Five parsing divergences from real Docker/moby behaviour were investigated and
+    are DELIBERATELY not chased further: casing (``:Ro``/``:RO``), a stray space
+    (``: ro``), a bare 2-segment ``src:ro`` (parsed as `target=ro`, no mode segment
+    at all -- ambiguous with a literal target path named "ro"), and a colon inside
+    the source path. moby's ``ParseVolume``/``ValidMountMode`` (volume/volume.go)
+    is case-sensitive and rejects all of these outright -- a container that never
+    starts writes nothing -- so treating them as "not verifiably read-only" here
+    (this function's existing fail-closed default) cannot be a false negative
+    *from that angle*. Caveat carried forward honestly: that reasoning is from
+    knowledge of moby's source, not from running docker, and whether OpenClaw
+    falls back to host exec when a container fails to start at all is still
+    unresolved (grepping the dist for such a fallback returned nothing, which is a
+    weak negative, not a proof).
+    """
+    if not isinstance(bind, str):
+        return False
+    mode_segment = bind.strip().split(":")[-1].strip().lower()
+    opts = {t.strip() for t in mode_segment.split(",")}
+    return "ro" in opts and "rw" not in opts
+
+
+def _sandbox_has_writable_bind(sandbox: dict) -> bool:
+    """True when this ONE sandbox node (defaults, or one agent's own override)
+    declares at least one ``docker.binds`` entry that is NOT verifiably read-only
+    -- see ``_bind_mode_is_ro`` and ``_fs_writes_contained``'s ROUND 3/4 notes for
+    why a writable bind at either level defeats containment and why the two levels
+    are checked independently rather than merged first.
+
+    A ``docker`` key that is PRESENT but not a dict (a string, list, etc.) is
+    malformed/unparseable and, per this function's fail-closed-on-ambiguity
+    philosophy, is treated as a defeater rather than silently ignored -- an
+    ABSENT ``docker`` key (the normal case) is not, and returns False.
+
+    NOT READ HERE (flagged, filed separately, deliberately not chased in this
+    round): ``sandbox.browser.binds`` (``resolveSandboxBrowserConfig``) is a
+    SECOND, distinct bind surface this function never examines -- an unexamined
+    false-negative candidate independent of the ``docker.binds`` leg above.
+    """
+    docker = sandbox.get("docker") if isinstance(sandbox, dict) else None
+    if docker is None:
+        return False
+    if not isinstance(docker, dict):
+        return True  # present but malformed -- fail closed, cannot verify safety
+    binds = docker.get("binds")
+    if not binds:
+        return False
+    if isinstance(binds, str):
+        binds = [binds]
+    if not isinstance(binds, list):
+        return True  # unparseable binds shape -- fail closed
+    return any(not _bind_mode_is_ro(b) for b in binds)
+
+
+def _resolve_sandbox_scope(agent_sandbox: dict, default_sandbox: dict) -> str:
+    """Mirrors resolveSandboxScope as consulted by resolveSandboxConfigForAgent
+    (dist/config-Dy4vED5-.js): ``scope: resolveSandboxScope({scope: agentSandbox
+    ?.scope ?? agent?.scope, perSession: legacyAgentSandbox?.perSession ??
+    legacyDefaultSandbox?.perSession})``, where ``resolveSandboxScope`` itself is:
+
+    .. code-block:: js
+
+        if (params.scope) return params.scope;
+        if (typeof params.perSession === "boolean") return params.perSession ? "session" : "shared";
+        return "agent";
+
+    Used only to gate the per-agent ``docker.binds`` check (FP2, round 4): under
+    ``scope: "shared"`` (or the legacy boolean ``perSession: false``, at either
+    level), ``resolveSandboxDockerConfig`` discards this agent's OWN
+    ``sandbox.docker`` entirely (``agentDocker = params.scope === "shared" ? void 0
+    : params.agentDocker``, dist/config-Dy4vED5-.js:~36) -- its binds never reach
+    the container, so they must not defeat containment either. ``mode``,
+    ``workspaceAccess`` and ``backend`` are NOT scope-gated (they resolve per-field
+    independently of ``scope``), so this helper is deliberately narrow to just the
+    binds leg rather than threaded through the whole function.
+    """
+    scope = agent_sandbox.get("scope")
+    if scope is None:
+        scope = default_sandbox.get("scope")
+    if scope:
+        return scope
+    per_session = agent_sandbox.get("perSession")
+    if per_session is None:
+        per_session = default_sandbox.get("perSession")
+    if isinstance(per_session, bool):
+        return "session" if per_session else "shared"
+    return "agent"
+
+
 def _config_unreadable(cid: str, ctx: Context) -> "Finding | None":
     """UNKNOWN finding for *cid* when ctx.config could not actually be parsed, else None.
 

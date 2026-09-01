@@ -358,7 +358,15 @@ def test_mutants_are_caught_by_the_positive_controls(monkeypatch):
 
     # Mutant A: pretend every bind is read-only -- must flip FP1's positive control
     # (a real :rw bind) from "fires" to "wrongly silent".
-    monkeypatch.setattr(risk_mod, "_bind_mode_is_ro", lambda bind: True)
+    #
+    # Patched at `checks._shared`, not at `risk`: B-673 moved `_bind_mode_is_ro` and
+    # `_sandbox_has_writable_bind` DOWN into the Layer-2 leaf so `checks/_config.py` could
+    # stop keeping a cruder copy. The caller moved with it, so the name now resolves in
+    # `_shared`'s namespace and patching risk's re-export would no longer reach it -- a
+    # mutation that silently stops mutating is worse than no mutation test at all.
+    from clawseccheck.checks import _shared as shared_mod
+
+    monkeypatch.setattr(shared_mod, "_bind_mode_is_ro", lambda bind: True)
     sandbox = {"mode": "all", "workspaceAccess": "ro", "docker": {"binds": ["/srv/data:/data:rw"]}}
     assert _fires_full({"defaults": {"sandbox": sandbox}}) is False, (
         "mutant did not flip the FP1 positive control -- that control is vacuous"
