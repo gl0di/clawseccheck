@@ -289,6 +289,7 @@ from ._config import (
     _C015_TEXT_EXTS,
     _DANGER_AGENT_SANDBOX,
     _DANGER_FIXED,
+    _is_owner_wildcard_allow_from,
     _DANGER_FIXED_2026_8_1,
     _MISSING_LEG_ACTIVATORS,
     _c015_candidate_files,

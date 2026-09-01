@@ -279,13 +279,37 @@ _DANGER_FIXED_2026_8_1 = [
 # B-231: wildcard-authority detection for commands.ownerAllowFrom (FAIL/CRITICAL, above
 # the scoped-list case) and gateway.nodes.pairing.autoApproveCidrs (WARN only -- see the
 # NC-11 note below for why this one does NOT escalate to FAIL).
-#   * commands.ownerAllowFrom: command-auth-*.js resolveOwnerAuthorizationState() sets
+#   * commands.ownerAllowFrom: on 2026.7.x, command-auth-*.js
+#     resolveOwnerAuthorizationState() sets
 #     ownerAllowAll = hasWildcardAllowFrom(configOwnerAllowFromList), and
 #     isWildcardAllowFromEntry() is a literal `entry.trim() === "*"` check -- a bare
-#     "*" entry genuinely flips owner authority open to ANY sender. (The schema doc
-#     string "'*' is ignored" describes a narrower filter that drops "*" from the
-#     *explicit owner ID candidate* list built from the SAME array -- it does not
+#     "*" entry genuinely flips owner authority open to ANY sender:
+#
+#         const senderIsOwner = senderIsOwnerByIdentity || senderIsOwnerByScope
+#                            || ownerState.ownerAllowAll;
+#         const isOwnerForCommands = !requireOwner ? true
+#                                  : ownerState.ownerAllowAll ? true : ...;
+#
+#     (The schema doc string "'*' is ignored" describes a narrower filter that drops "*"
+#     from the *explicit owner ID candidate* list built from the SAME array -- it does not
 #     describe the ownerAllowAll gate, which is the actual authorization decision.)
+#
+#     B-705: that reasoning was correct when written and OpenClaw 2026.8.1 INVALIDATED it.
+#     `ownerAllowAll` is gone from the entire 2026.8.1 dist -- grep: zero files, against one
+#     in 2026.7.1-2 -- and the surviving code strips the wildcard before anything reads it:
+#
+#         const explicitOwners = Array.from(new Set(stripWildcardAllowFrom(configOwnerAllowFromList)));
+#         const ownerAllowlistConfigured = ownerState.explicitOwners.length > 0;
+#         const senderIsOwner = senderIsOwnerByIdentity || senderIsOwnerByScope;
+#
+#     So on 2026.8.1 `ownerAllowFrom: ["*"]` resolves to `explicitOwners = []`, which is
+#     EXACTLY the state of the key being absent -- a state this check calls PASS. Keeping
+#     the FAIL there would give two opposite verdicts to one configuration, at CRITICAL.
+#     The leg is therefore version-scoped, not retracted: the 2026.7.x grant is real.
+#
+#     Note what the schema description could NOT settle: "'*' is ignored" reads the same
+#     in both builds, so it was true of the candidate list in 7.x and became true of the
+#     authorization decision in 8.1 without the sentence changing. Only the code moved.
 #   * gateway.nodes.pairing.autoApproveCidrs: message-handler-*.js feeds the raw CIDR
 #     list straight into isTrustedProxyAddress() -- a literal 0.0.0.0/0 (or ::/0) entry
 #     matches every source IP, auto-approving first-time, ZERO-REQUESTED-SCOPE node
@@ -306,8 +330,15 @@ _DANGER_FIXED_2026_8_1 = [
 # would be a fabricated claim; the existing any-non-empty-list WARN (unchanged) already
 # covers the real risk (a *named* dangerous command actually being allowed).
 def _is_owner_wildcard_allow_from(value) -> bool:
-    """True when *value* (``commands.ownerAllowFrom``) contains the literal ``"*"``
-    sentinel that flips OpenClaw's owner-authorization gate open to any sender."""
+    """True when *value* (``commands.ownerAllowFrom``) contains the literal ``"*"`` entry.
+
+    PURE PREDICATE — it says what is in the list, not what OpenClaw does with it, because
+    that differs by build (B-705, see the grounding block above): on 2026.7.x the entry
+    sets `ownerAllowAll` and every sender becomes an owner; on 2026.8.1
+    `stripWildcardAllowFrom` removes it before anything reads it, leaving the same state
+    as an absent key. The version gate lives at the call site, so this stays a fact about
+    the config rather than a claim about the runtime.
+    """
     if isinstance(value, str):
         value = [value]
     if not isinstance(value, list):
@@ -1272,8 +1303,14 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         if node:
             warns.append(f"{path} — {label}")
 
+    # B-705: gated on the build, because the same entry means opposite things. On
+    # 2026.8.1 the wildcard is stripped before any authorization decision reads it, so
+    # `["*"]` is the same configuration as no key at all — which this check calls PASS.
+    # Nothing is emitted in its place: B48 is SCORED, and a warning about an entry that
+    # is inert AND safe would cost the user grade for a state that carries no risk.
     owner_allow_from = dig(cfg, "commands.ownerAllowFrom")
-    if _is_owner_wildcard_allow_from(owner_allow_from):
+    if (_is_owner_wildcard_allow_from(owner_allow_from)
+            and _openclaw_generation(ctx) != "modern"):
         wildcard_fails.append(
             "commands.ownerAllowFrom contains '*' — owner-only command authority is "
             "granted to ANY sender on any channel (not a scoped allowlist)"
@@ -1507,7 +1544,7 @@ def _b171_open_channels(cfg: dict) -> list[str]:
     return out
 
 
-def _b171_wildcard_allow_from_evidence(cfg: dict) -> list[str]:
+def _b171_wildcard_allow_from_evidence(cfg: dict, modern: bool = False) -> list[str]:
     """Wildcard-open commands.* gate entries.
 
     Reuses the B-231 wildcard-authority detector (``_is_owner_wildcard_allow_from``) over
@@ -1515,10 +1552,24 @@ def _b171_wildcard_allow_from_evidence(cfg: dict) -> list[str]:
     ``commands.allowFrom`` (a record keyed by provider id or the literal ``"*"`` for "all
     providers" -- ``resolveCommandsAllowFromList`` in the dist's ``command-auth-*.js``,
     grounded 2026-07-18).
+
+    B-705: the two halves are NOT the same claim any more, and only one of them is gated.
+
+    * ``ownerAllowFrom`` -- dropped on 2026.8.1. The wildcard is stripped before any
+      authorization decision reads it (``stripWildcardAllowFrom``), so the entry is the
+      same configuration as no key at all. B48 carries the full grounding.
+    * ``commands.allowFrom`` -- NEVER gated. The wildcard there is still honoured on
+      2026.8.1: ``const allowAll = !hadResolutionError && (allowFromList.length === 0 ||
+      hasWildcardAllowFrom(allowFromList))``. Gating both halves together would have
+      traded one false FAIL for a false NEGATIVE on a genuinely open gate, which is the
+      failure mode this fix was most at risk of.
+
+    ``modern`` is passed rather than read from a Context so this stays a pure function of
+    its arguments, like every other helper in this file.
     """
     out: list[str] = []
     owner_allow_from = dig(cfg, "commands.ownerAllowFrom")
-    if _is_owner_wildcard_allow_from(owner_allow_from):
+    if _is_owner_wildcard_allow_from(owner_allow_from) and not modern:
         out.append("commands.ownerAllowFrom contains '*'")
     allow_from = dig(cfg, "commands.allowFrom")
     if isinstance(allow_from, dict):
@@ -1592,7 +1643,8 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
         for k in enabled_all
     ]
 
-    wildcard_ev = _b171_wildcard_allow_from_evidence(cfg)
+    wildcard_ev = _b171_wildcard_allow_from_evidence(
+        cfg, modern=_openclaw_generation(ctx) == "modern")
     if wildcard_ev:
         severity = CRITICAL if enabled_high and set(enabled_high) & _B171_CRITICAL_COMMANDS else HIGH
         return _finding(
@@ -1610,7 +1662,24 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
 
     owner_allow_from = dig(cfg, "commands.ownerAllowFrom")
     allow_from = dig(cfg, "commands.allowFrom")
-    gate_configured = bool(owner_allow_from) or bool(allow_from)
+    # B-705: the EFFECTIVE owner list, not the raw one. On 2026.8.1 the runtime strips
+    # every "*" entry (`stripWildcardAllowFrom`) before deciding whether an owner allowlist
+    # exists, so `ownerAllowFrom: ["*"]` leaves `explicitOwners = []` — no gate at all.
+    # Testing the RAW list's truthiness counted that as a configured gate and, on an open
+    # channel, turned a CRITICAL FAIL into a PASS.
+    #
+    # This false negative did not exist before, and it is not hypothetical: it was created
+    # by the fix above, which removed the wildcard FAIL that used to catch this shape on
+    # its way past. Measured on `{channels.telegram.dmPolicy=open, commands.bash=true,
+    # ownerAllowFrom=["*"]}` — FAIL/CRITICAL on 2026.7.x, PASS on 2026.8.1 until this line.
+    # On 2026.7.x nothing changes: the wildcard FAILs earlier and never reaches here.
+    effective_owner_allow_from = owner_allow_from
+    if _openclaw_generation(ctx) == "modern" and isinstance(owner_allow_from, list):
+        effective_owner_allow_from = [
+            e for e in owner_allow_from
+            if not (isinstance(e, str) and e.strip() == "*")
+        ]
+    gate_configured = bool(effective_owner_allow_from) or bool(allow_from)
     open_ch = _b171_open_channels(cfg)
 
     if not gate_configured and open_ch:

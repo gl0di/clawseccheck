@@ -115,6 +115,7 @@ _in_fence
 _install_entry_findings
 _install_host_is_public_ip
 _is_code_example
+_is_owner_wildcard_allow_from
 _is_posix
 _is_wildcard_allow_entry
 _key_advice
