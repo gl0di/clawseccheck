@@ -91,7 +91,7 @@ def _static_str(node):
 
 
 def _executed_sql(root: Path):
-    """Yield (path, sql) for every literal passed to `.execute()`/`.executemany()`.
+    """Yield (path, sql, enclosing_function) per `.execute()`/`.executemany()` literal.
 
     Anchoring on the CALL, not on every string in the file, is what makes this
     sound. An earlier version walked all string constants and reported tables
@@ -104,6 +104,13 @@ def _executed_sql(root: Path):
             tree = ast.parse(path.read_text(errors="replace"))
         except SyntaxError:
             continue
+        # Remember the enclosing def for every node, so a statement can be
+        # attributed to the reader that issues it. See `expected_reads`.
+        enclosing = {}
+        for parent in ast.walk(tree):
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for child in ast.walk(parent):
+                    enclosing.setdefault(child, parent.name)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -116,22 +123,30 @@ def _executed_sql(root: Path):
                 continue
             sql = _static_str(node.args[0])
             if sql:
-                yield path, sql
+                yield path, sql, enclosing.get(node, "<module>")
 
 
 def expected_reads(pkg_root: Path) -> dict[str, list]:
-    """table -> list of {"columns": set, "site": str}, ONE ENTRY PER SELECT.
+    """reader -> list of {"table", "columns", "site"}, ONE ENTRY PER SELECT.
 
-    Grouping per statement rather than per table is what makes a dual-shape
-    reader legible. A reader that supports both the modern and the legacy schema
-    necessarily names the legacy columns in one of its branches; if the columns
-    of every branch were merged into one set per table, that reader would report
-    drift forever on both builds, and the gate would be crying wolf about the
-    very fix it asked for. The real question is not "does every column we ever
-    name still exist" but "is there a statement that can still read this table".
+    The unit of grouping is the READER FUNCTION, not the table, and that choice
+    is what makes the gate correct on both kinds of vendor move.
+
+    Grouping by table handles a dual-shape reader whose branches name the SAME
+    table (`cron_jobs` old columns vs new) but CANNOT handle a rename: when
+    `cron_run_logs` became `task_runs`, a per-table view saw only "a table we
+    read is absent" and reported drift forever, even though the same function
+    reads the successor two lines further down. A gate that cries wolf about the
+    fix it asked for teaches people to ignore it.
+
+    Asking instead "can this reader still read anything?" answers both. A
+    function with at least one satisfiable statement can see its surface, however
+    many retired names it also mentions; a function with none is blind. That is
+    the question the gate exists to answer, and it needs no hand-maintained map
+    of old name -> new name, which would rot exactly like the fixtures did.
     """
     found: dict[str, list] = {}
-    for path, text in _executed_sql(pkg_root):
+    for path, text, reader in _executed_sql(pkg_root):
         if "SELECT" not in text.upper():
             continue
         for match in _SELECT_RE.finditer(text):
@@ -140,8 +155,8 @@ def expected_reads(pkg_root: Path) -> dict[str, list]:
             if "*" not in collist:
                 columns = {i for i in _IDENT_RE.findall(collist)
                            if i.lower() not in _SQL_NOISE}
-            found.setdefault(table, []).append(
-                {"columns": columns, "site": path.name})
+            found.setdefault(f"{path.name}:{reader}", []).append(
+                {"table": table, "columns": columns, "site": path.name})
     return found
 
 
@@ -193,59 +208,57 @@ def main() -> int:
 
     live = live_schema(db_path)
 
-    absent_tables, absent_columns, dual_shape = [], [], []
-    for table in sorted(expected):
-        statements = expected[table]
-        sites = ", ".join(sorted({s["site"] for s in statements}))
-        if table not in live:
-            absent_tables.append((table, sites))
+    blind, dual_shape = [], []
+    for reader in sorted(expected):
+        statements = expected[reader]
+
+        def _unsatisfied(stmt):
+            """What stops this statement running here: a table, or columns."""
+            table = stmt["table"]
+            if table not in live:
+                return f"table '{table}' does not exist"
+            missing = sorted(c for c in stmt["columns"] if c not in live[table])
+            if missing:
+                return f"{table} is missing {', '.join(missing)}"
+            return None
+
+        reasons = [_unsatisfied(s) for s in statements]
+        if any(r is None for r in reasons):
+            # At least one statement runs, so this reader can see its surface.
+            # The statements that cannot are its other-generation branches.
+            if any(r for r in reasons):
+                dual_shape.append((reader, [r for r in reasons if r]))
             continue
-        # Per statement: which of its named columns are gone on this build.
-        gaps = [sorted(c for c in s["columns"] if c not in live[table])
-                for s in statements]
-        if any(not gap for gap in gaps):
-            # At least one statement is fully satisfiable, so the table IS
-            # readable here. If another statement is not, that is the legacy
-            # branch of a dual-shape reader doing its job, not drift.
-            if any(gap for gap in gaps):
-                dual_shape.append((table, sites))
-            continue
-        # No statement can be satisfied -- the reader is blind on this build.
-        widest = min(gaps, key=len)
-        absent_columns.append((table, widest, sites))
+        blind.append((reader, sorted(set(reasons))))
 
     print(f"state database : {db_path}")
     print(f"package        : {pkg_root}")
-    print(f"tables we read : {len(expected)}   tables present: {len(live)}")
+    print(f"state-DB readers: {len(expected)}   tables present: {len(live)}")
     print()
 
-    for table, sites in dual_shape:
-        print(f"dual-shape     {table} ({sites}) - one branch reads this build, "
-              "another names columns it does not have. Expected for a reader that "
-              "supports more than one OpenClaw generation; not drift.")
-    if dual_shape and not (absent_tables or absent_columns):
+    for reader, reasons in dual_shape:
+        print(f"dual-shape  {reader}")
+        for reason in reasons:
+            print(f"            other-generation branch: {reason}")
+        print("            -> reads this build via another statement. Not drift.")
+    if dual_shape and not blind:
         print()
 
-    if not absent_tables and not absent_columns:
-        print(f"OK - every one of the {len(expected)} tables we SELECT from exists, "
-              "and each has at least one statement this build can satisfy.")
+    if not blind:
+        print(f"OK - each of the {len(expected)} state-DB readers has at least one "
+              "statement this build can satisfy.")
         return 0
 
-    for table, sites in absent_tables:
-        print(f"TABLE ABSENT   {table}")
-        print(f"               read from: {sites}")
-        print("               -> bucket B: the table was renamed or retired. Find its "
-              "successor in the dist before changing any reader.")
-    for table, missing, sites in absent_columns:
-        print(f"COLUMNS ABSENT {table}: {', '.join(missing)}")
-        print(f"               read from: {sites}")
-        print("               -> bucket B: check whether the data moved into a JSON "
-              "column on the same table before assuming it is gone.")
+    for reader, reasons in blind:
+        print(f"BLIND       {reader}")
+        for reason in reasons:
+            print(f"            {reason}")
+        print("            -> bucket B: find the successor in the dist before "
+              "changing the reader. If the data moved into a JSON column on the "
+              "same table, it is a re-map, not a loss.")
     print()
-    print(f"DRIFT: {len(absent_tables)} absent table(s), "
-          f"{len(absent_columns)} table(s) with absent columns.")
-    print("A reader hitting either case renders no verdict about a surface that may "
-          "well be populated.")
+    print(f"DRIFT: {len(blind)} reader(s) cannot run a single statement on this build.")
+    print("Each renders no verdict about a surface that may well be populated.")
     return 1
 
 
