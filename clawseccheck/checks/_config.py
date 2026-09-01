@@ -43,49 +43,50 @@ from ._content import (
     _secrecy_credential_or_encoding_anchor,
 )
 from ._shared import (
-    EXPOSED_BINDS,
-    INPUT_TOOL_HINTS,
-    LOOPBACK,
-    OUTBOUND_TOOL_HINTS,
-    SECRET_PATTERNS,
-    SENSITIVE_TOOL_HINTS,
-    _LEG_KEYS,
     _b323_contains_env_var_reference,
+    _B55_FS_WRITE_TOOLS,
+    _C015_EXTRA_SECRET_PATTERNS,  # noqa: F401 — re-exported (moved to _shared, B-666)
+    _c015_has_secret,
     _canonical_ipv4,
     _channel_has_implicit_default_account,
     _channels,
     _config_unreadable,
+    _credential_store_state,
     _DM_POLICY_NESTED_ONLY_CHANNELS,
     _enabled_tools,
-    _real_exec_enabled,
-    _B55_FS_WRITE_TOOLS,
+    EXPOSED_BINDS,
     _external_input_channels,
     _finding,
     _gateway_remote_exposure_reason,
     _hint,
     _hooks_session_key_exposures,
-    _C015_EXTRA_SECRET_PATTERNS,  # noqa: F401 — re-exported (moved to _shared, B-666)
-    _c015_has_secret,
-    _credential_store_state,
+    INPUT_TOOL_HINTS,
     _is_secret_reference,  # noqa: F401 — re-exported for existing importers
-    _pattern_hits_real_secret,
+    _LEG_KEYS,
+    LOOPBACK,
     _mcp_leg_contributions,
     _node_commands,
-    _openclaw_generation,
     _norm_group_policy,
     _open_channels,
+    _openclaw_generation,
+    OUTBOUND_TOOL_HINTS,
+    parse_bind_host,
+    _pattern_hits_real_secret,
     _perms_loose,
     _plugins,
     _profile_is_powerful,
+    _real_exec_enabled,
+    _resolve_sandbox_scope,
     _resolved_channel_nodes,
     _resolved_default_input_channels,
     _secret_paths,
+    SECRET_PATTERNS,
+    SENSITIVE_TOOL_HINTS,
     _substituted_dm_policy_channels,
     _surface_absent,
     _trifecta_leg_sources,
     _trifecta_legs,
     _web_fetch_enabled,
-    parse_bind_host,
 )
 from ..invocation import command_prefix
 
@@ -801,6 +802,11 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
     reads only agents.defaults.sandbox, so a named agent that overrides a safe default is
     missed entirely (C-058). Returns attributed evidence strings; empty when none."""
     out = []
+    # `scope` resolves from the AGENT's sandbox first and the defaults second
+    # (`resolveSandboxScope`), so the defaults node has to be in hand for every agent.
+    _defaults_sandbox = dig(cfg, "agents.defaults.sandbox")
+    if not isinstance(_defaults_sandbox, dict):
+        _defaults_sandbox = {}
     for _agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
         a = _agent.entry
         sb = a.get("sandbox")
@@ -814,8 +820,49 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
         docker = sb.get("docker") if isinstance(sb.get("docker"), dict) else {}
         if docker.get("network") == "host":
             out.append(f"agent '{name}': sandbox.docker.network=host (no network isolation)")
+        # B-673: two false FAILs lived in the three lines this replaces, and both were
+        # Golden Rule #5 violations because `check_sandbox` turns any entry here into a
+        # hard FAIL.
+        #
+        # 1. NO SCOPE GATE. Under `sandbox.scope: "shared"` (at either level, or the legacy
+        #    `perSession: false`) OpenClaw DISCARDS this agent's whole `sandbox.docker`, so
+        #    its binds never reach a container. Executed against openclaw@2026.8.2 rather
+        #    than read -- `resolveSandboxConfigForAgent`, dist/config-*.js:
+        #        scope=shared at GLOBAL  -> binds ["/g:/g"]   (the agent's are gone)
+        #        scope=shared at AGENT   -> binds null
+        #        default (scope=agent)   -> binds ["/g:/g", "/a:/a"]  (a UNION, not override)
+        #    We were accusing a user of mounting docker.sock on a config where the mount
+        #    does not happen.
+        # The fix is to USE the vetted `_resolve_sandbox_scope` rather than write a third
+        # variant of it: it moved down out of `risk.py` into `_shared.py` in this change so a
+        # Layer-2 check can reach it. Validated against the vendor over 151 configs -- the
+        # shared/not-shared partition agreed 150/150, across both roster shapes, 17 `scope`
+        # values and 9 `perSession` values.
+        #
+        # 2. NO `:ro` NARROWING -- and this one is DELIBERATELY still not applied. The first
+        #    version of this fix also excused a verifiably read-only bind, borrowing
+        #    `_bind_mode_is_ro` from `risk.py`. The C-135 pass killed it, and was right:
+        #
+        #      * OpenClaw's own `getBlockedBindReason`
+        #        (dist/validate-sandbox-security-*.js) parses ONLY the source path and never
+        #        looks at the mode segment. Executed: `/var/run/docker.sock:...:ro` and the
+        #        same bind without `:ro` return an identical blocked verdict. **The vendor
+        #        assigns `:ro` zero security value here.**
+        #      * And the blocklist has a hole `:ro` walks straight through. `~/.ssh`,
+        #        `/etc`, `/` and `docker.sock` ARE blocked, but `~/.openclaw` is not -- it is
+        #        a sibling of the blocked `~/.config`/`~/.ssh` entries and matches none of
+        #        them. Executed: `/home/<user>/.openclaw:/oc:ro` is ALLOWED and mounts. That
+        #        directory holds `credentials/` and the state DB carrying live OAuth tokens
+        #        (F-183), so a read-only mount of it is a total credential read.
+        #
+        #    `risk.py`'s "a `:ro` bind is information disclosure, a different risk class" is
+        #    true for RISK-12, which is a write/tamper chain. It is FALSE for B4, whose own
+        #    remediation says "drop host and docker.sock binds" with no mode qualifier.
+        #    Importing a RISK-12-shaped helper into a general sandbox check was a category
+        #    error. tests/test_b673_peragent_bind_scope.py pins the read-only case as
+        #    REPORTED so nobody re-adds the narrowing.
         binds = docker.get("binds")
-        if binds:
+        if binds and _resolve_sandbox_scope(sb, _defaults_sandbox) != "shared":
             out.append(f"agent '{name}': sandbox.docker.binds exposes host paths")
             binds_str = " ".join(str(b) for b in binds) if isinstance(binds, list) else str(binds)
             if "docker.sock" in binds_str:
