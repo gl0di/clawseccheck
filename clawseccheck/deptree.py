@@ -258,6 +258,38 @@ def _conventional_package_roots(binary_name: str) -> "list[Path]":
         Path("/usr/lib/node_modules") / binary_name,
         Path("/opt/homebrew/lib/node_modules") / binary_name,
     ])
+    roots.extend(_version_manager_roots(home, binary_name))
+    return roots
+
+
+_MAX_VERSION_MANAGER_ROOTS = 24
+
+
+def _version_manager_roots(home: "Path", binary_name: str) -> "list[Path]":
+    """The per-node-version prefixes nvm/fnm/asdf use, which the flat list cannot name.
+
+    These matter precisely in the case this fallback exists for. nvm declines to set
+    `npm_config_prefix` at all -- it puts the active version's bin on PATH instead -- so a
+    shell finds the package and a cron job, which has neither PATH nor nvm's shell
+    function, finds nothing above.
+
+    The version component is a directory name we do not know, so this is the one entry
+    that has to enumerate. Bounded and sorted: newest-looking last so it is preferred,
+    capped so a directory with a thousand entries cannot turn a scan into a walk. Still
+    name-verified by the caller like every other candidate.
+    """
+    roots: list = []
+    for base in (home / ".nvm" / "versions" / "node",
+                 home / ".local" / "share" / "fnm" / "node-versions",
+                 home / ".asdf" / "installs" / "nodejs"):
+        try:
+            versions = sorted(p for p in base.iterdir() if p.is_dir())
+        except OSError:
+            continue
+        for version in versions[-_MAX_VERSION_MANAGER_ROOTS:]:
+            # fnm nests one level deeper: <version>/installation/lib/node_modules.
+            roots.append(version / "lib" / "node_modules" / binary_name)
+            roots.append(version / "installation" / "lib" / "node_modules" / binary_name)
     return roots
 
 

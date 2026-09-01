@@ -822,16 +822,22 @@ def _openclaw_generation(ctx) -> str:
        Treating a stale stamp as authoritative is how you name the retired key to the very
        user this task exists for.
 
-    ⚠️ KNOWN NARROW WINDOW, recorded rather than hidden. Source 1 resolves the install
-    through ``shutil.which``, and a cron job inherits neither the user's PATH nor their
-    cwd (the reason ``invocation.py`` exists). So on a machine that upgraded but has not
-    re-saved its config, an interactive run can answer ``modern`` while a scheduled run
-    answers ``unknown``. Where a consumer lets the generation change a STATUS rather than
-    only the wording — B9's absent-field branch is the one that does — that alternation
-    can raise a spurious ``--monitor`` alert. It does not arise once OpenClaw has written
-    the config even once (source 2 then settles it), which is why the window is narrow;
-    closing it properly means resolving the install without PATH, which belongs to
-    ``openclawdist``, not here.
+    ⚠️ WHAT REMAINS OF THE PATH WINDOW, recorded rather than hidden. Source 1 used to
+    resolve the install through ``shutil.which`` alone, and a cron job inherits neither
+    the user's PATH nor their cwd (the reason ``invocation.py`` exists) — so an
+    interactive run could answer ``modern`` while a scheduled one answered ``unknown``,
+    and B9's absent-field branch lets that alternation move a STATUS and raise a spurious
+    ``--monitor`` alert. ``deptree._conventional_package_roots`` now covers the
+    PATH-less case: the prefixes npm itself honours, the usual global roots, and the
+    per-version prefixes nvm/fnm/asdf use.
+
+    Not closed, in three shapes, all of which land on ``unknown`` rather than on a wrong
+    answer: an install under a custom prefix that is neither in the environment nor
+    conventional; a scheduled job running as a DIFFERENT user than the one who installed
+    (``~`` then expands elsewhere, and reading another user's home is not something this
+    tool does); and a version manager with a layout none of the three above match. Source
+    2 (``meta.lastTouchedVersion``) settles all three once OpenClaw has written the config
+    even once since the upgrade, which is why what is left is narrow rather than common.
 
     Parsing goes through ``openclawdist._numeric_parts``, not ``_parse_version``: the
     latter truncates at the first hyphen (B-264), so it cannot tell ``2026.7.1-2`` from

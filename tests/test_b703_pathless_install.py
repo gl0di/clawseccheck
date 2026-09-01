@@ -153,3 +153,60 @@ def test_the_resolver_runs_no_subprocess():
     code = "\n".join(ln for ln in code.splitlines() if not ln.lstrip().startswith("#"))
     for forbidden in ("subprocess", "popen", "os.system"):
         assert forbidden not in code.lower(), forbidden
+
+
+# ------------------------------------------------- version managers (the real gap)
+
+def _nvm_home(versions, package="openclaw", manifest_name=None):
+    """A home whose only install lives under an nvm-style per-version prefix."""
+    home = Path(tempfile.mkdtemp(prefix="b703-nvm-"))
+    for version in versions:
+        root = home / ".nvm" / "versions" / "node" / version / "lib" / "node_modules" / package
+        root.mkdir(parents=True)
+        (root / "package.json").write_text(json.dumps(
+            {"name": manifest_name if manifest_name is not None else package,
+             "version": "1.0.0"}))
+    return home
+
+
+def test_an_nvm_install_is_found_with_no_path(monkeypatch):
+    """The case the flat prefix list structurally cannot cover: nvm declines to set
+    `npm_config_prefix` and puts the active version's bin on PATH instead, so a shell finds
+    the package and a cron job — which has neither PATH nor nvm's shell function — does
+    not. Without this the fallback misses one of the commonest install shapes."""
+    home = _nvm_home(["v22.1.0"])
+    monkeypatch.setenv("HOME", str(home))
+    for var in ("npm_config_prefix", "NPM_CONFIG_PREFIX", "PREFIX"):
+        monkeypatch.delenv(var, raising=False)
+    found = find_package_root("openclaw", which=lambda _n: None)
+    assert found == home / ".nvm/versions/node/v22.1.0/lib/node_modules/openclaw"
+
+
+def test_an_nvm_candidate_is_name_verified_like_every_other(monkeypatch):
+    """The soundness gate, on the enumerating branch specifically — this is the one that
+    guesses a directory NAME, so it is the one where an unverified hit would be cheapest."""
+    home = _nvm_home(["v22.1.0"], manifest_name="something-else")
+    monkeypatch.setenv("HOME", str(home))
+    for var in ("npm_config_prefix", "NPM_CONFIG_PREFIX", "PREFIX"):
+        monkeypatch.delenv(var, raising=False)
+    assert find_package_root("openclaw", which=lambda _n: None) is None
+
+
+def test_the_version_enumeration_is_bounded(monkeypatch):
+    """A version directory is user-controlled, so the enumeration is capped rather than
+    trusted to be small. Newest-sorting last means the cap drops the oldest, not the one
+    most likely to be current."""
+    from clawseccheck.deptree import _MAX_VERSION_MANAGER_ROOTS, _conventional_package_roots
+    home = _nvm_home([f"v{n}.0.0" for n in range(10, 60)])
+    monkeypatch.setenv("HOME", str(home))
+    roots = _conventional_package_roots("openclaw")
+    nvm = [r for r in roots if ".nvm" in str(r)]
+    assert len(nvm) <= _MAX_VERSION_MANAGER_ROOTS * 2   # two layouts probed per version
+    assert any("v59.0.0" in str(r) for r in nvm), "the newest version must survive the cap"
+
+
+def test_a_home_with_no_version_manager_at_all_is_not_an_error(monkeypatch):
+    """The absent-directory path: `iterdir` on a missing base raises, and a resolver that
+    let that escape would take down every consumer on the majority of machines."""
+    monkeypatch.setenv("HOME", str(Path(tempfile.mkdtemp(prefix="b703-bare-"))))
+    assert _conventional_package_roots("openclaw"), "the flat prefixes must still be listed"
