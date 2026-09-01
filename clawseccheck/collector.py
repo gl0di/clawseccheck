@@ -687,11 +687,14 @@ class Context:
     config_machine_state_read: bool = False
     config_machine_state_unparsed: set = field(default_factory=set)
     cron_store_shadowed: bool = False
-    # B-294: the cron EXECUTION trail (cron_run_logs in ~/.openclaw/state/openclaw.sqlite),
-    # which deliberately OUTLIVES the job definition — one-shot (`kind:"at"`) jobs default
-    # to deleteAfterRun TRUE, cron_run_logs has no foreign key to cron_jobs, and the only
-    # cron_jobs delete in the dist (replaceCronRows) never touches cron_run_logs. Each entry
-    # is a plain dict: job_id, status, session_id, session_key, run_id, run_at_ms, ts.
+    # B-294: the cron EXECUTION trail (cron_run_logs in ~/.openclaw/state/openclaw.sqlite,
+    # OR (B-709) its task_runs successor on OpenClaw 2026.8.2+ -- see
+    # _collect_cron_run_logs's docstring), which deliberately OUTLIVES the job definition —
+    # one-shot (`kind:"at"`) jobs default to deleteAfterRun TRUE, the legacy table has no
+    # foreign key to cron_jobs, and the only cron_jobs delete in the dist (replaceCronRows)
+    # never touches it. Each entry is a plain dict: job_id, status, session_id, session_key,
+    # run_id, run_at_ms, ts -- the SAME keys regardless of which backing table it came from
+    # (session_id is always None on the task_runs path; it has no successor column there).
     # NOTE: the run record carries no copy of the job's original payload.message, so this is
     # a PIVOT (what ran, when, under which session) — never the erased job's content.
     cron_run_logs: list = field(default_factory=list)
@@ -4213,8 +4216,8 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
 
 
 def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
-    """B-294 (DISK-3): read-only collection of the cron EXECUTION trail
-    (``cron_run_logs`` in ~/.openclaw/state/openclaw.sqlite) into ``ctx.cron_run_logs``.
+    """B-294 (DISK-3): read-only collection of the cron EXECUTION trail into
+    ``ctx.cron_run_logs``.
 
     Grounded against the installed dist (openclaw-state-db-DzSsA9Ji.js:
     ``CREATE TABLE IF NOT EXISTS cron_run_logs`` — columns store_key, job_id, seq, ts,
@@ -4229,21 +4232,55 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     to ``deleteAfterRun`` TRUE (jobs-qB_gTO89.js:834, normalize-BMkddmz2.js:409), the runner
     deletes the row after a SUCCESSFUL run (server-cron-Cwg2hJro.js:1340), ``deleteAfterRun``
     is exposed to the AGENT ITSELF as a schedulable option (cron-tool-C9qaFGtt.js:495), and
-    ``cron_run_logs`` has NO foreign key to ``cron_jobs`` — the only cron_jobs delete in the
+    the legacy table has NO foreign key to ``cron_jobs`` — the only cron_jobs delete in the
     dist (``replaceCronRows``, store-ScQ9SjOe.js:648) never touches it. So a job that was
     added, ran, and self-erased leaves no definition for B168 to scan, but its run trail
     survives here.
 
-    DELIBERATELY NOT read: ``entry_json``. It is ``JSON.stringify(entry)`` of the RUN
-    RECORD (jobId/status/summary/session/model/timing — run-log-DIhrTrSU.js:97
-    ``bindCronRunLogRow``), NOT a copy of the job's original ``payload.message``.
-    Content-scanning it for the erased directive would be unreliable, so this collector
-    takes only the structural/pivot columns: which job ran, when, and under which session.
+    B-709: on the installed OpenClaw 2026.8.2, ``cron_run_logs`` DOES NOT EXIST AT ALL. The
+    live state DB carries a completed migration record whose id is literally
+    ``state:cron-run-logs-to-task-runs:v1`` — the vendor naming its own destination, not an
+    inference — and cron executions now live as rows in the generic ``task_runs`` table
+    (``runtime = 'cron'``, also ``task_kind = 'automation_run'``). Verified empirically: a
+    live ``task_runs`` row's ``source_id`` equals the ``job_id`` of a live ``cron_jobs`` row
+    for the same job, so ``source_id`` is the cron job_id. Column mapping onto the SAME
+    output dict keys this function has always produced:
+
+    ===============  =========================================
+    old (legacy)      task_runs (modern) successor
+    ===============  =========================================
+    job_id            source_id (filtered to runtime='cron')
+    status             status
+    run_id             run_id
+    session_key        child_session_key
+    run_at_ms          started_at
+    ts                 created_at
+    session_id         NO SUCCESSOR -- left None
+    ===============  =========================================
+
+    ``session_id`` has no analogue in ``task_runs`` and is deliberately left ``None`` on
+    the modern path rather than backfilled from a different column — inventing a value
+    there would misattribute a run to a session it was never recorded under.
+
+    Same dual-shape discipline as ``_collect_cron``'s ``cron_jobs`` reader: the two SQLite
+    TABLES are probed for existence via ``PRAGMA table_info(<name>)`` (zero rows back means
+    absent, no exception raised either way), not by trying one SELECT and catching
+    ``sqlite3.OperationalError``, which cannot distinguish "the other schema" from "a
+    genuine read failure". When BOTH tables exist (a mid-migration DB), the LEGACY table
+    wins — it is the one this reader was originally grounded against, and preferring it
+    keeps behaviour stable on such a machine.
+
+    DELIBERATELY NOT read on the legacy path: ``entry_json`` — it is
+    ``JSON.stringify(entry)`` of the RUN RECORD (jobId/status/summary/session/model/timing
+    — run-log-DIhrTrSU.js:97 ``bindCronRunLogRow``), NOT a copy of the job's original
+    ``payload.message``. Content-scanning it for the erased directive would be unreliable,
+    so this collector takes only the structural/pivot columns: which job ran, when, and
+    under which session. ``task_runs`` is never ``SELECT *``'d either — the same state DB
+    holds live OAuth tokens (§8).
 
     Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
-    ``_collect_plugin_trust`` uses on this exact database. A missing DB or a state DB that
-    predates the table leaves ``cron_run_logs_found`` False — UNKNOWN downstream, never a
-    fake PASS (Golden Rule #4).
+    ``_collect_plugin_trust`` uses on this exact database. Neither table present leaves
+    ``cron_run_logs_found`` False — UNKNOWN downstream, never a fake PASS (Golden Rule #4).
     """
     state_dir = home / "state"
     sqlite_candidates = (
@@ -4258,22 +4295,54 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
-            cur = conn.execute(
-                "SELECT job_id, status, session_id, session_key, run_id, run_at_ms, ts "
-                "FROM cron_run_logs ORDER BY ts DESC LIMIT ?",
-                # Same off-by-one fix as the cron_jobs read above: one extra row is the
-                # truncation probe, so a table holding EXACTLY the cap is not reported as
-                # having had "older run history NOT read" when all of it was read.
-                (_MAX_CRON_RUN_LOGS + 1,),
-            )
-            rows = cur.fetchall()
+            # B-709: PROBE which of the two tables exist before picking a SELECT -- do NOT
+            # try the legacy query and fall back to the modern one on
+            # `sqlite3.OperationalError: no such table`. An exception-driven fallback
+            # cannot tell "this DB uses the other schema" apart from "a genuine read
+            # failure" (a locked db, a corrupt page, an I/O error raise the same way), so
+            # it would silently swallow a real error as a shape mismatch -- the same
+            # fail-open family `_collect_cron`'s B-709 fix already guards against there.
+            # `PRAGMA table_info(name)` on a table that does not exist returns zero rows
+            # (no exception) -- the same presence-by-metadata idiom `_collect_cron` uses,
+            # and unlike a `SELECT ... FROM sqlite_master` probe it is not itself parsed by
+            # `scripts/state_db_drift_gate.py`'s SELECT/FROM extractor as a third table
+            # this reader expects to exist.
+            legacy_present = bool(list(conn.execute("PRAGMA table_info(cron_run_logs)")))
+            if legacy_present:
+                # LEGACY table -- unchanged from before B-709. Preferred even when
+                # task_runs also exists (a mid-migration DB): this is the table the
+                # reader was originally grounded against.
+                cur = conn.execute(
+                    "SELECT job_id, status, session_id, session_key, run_id, run_at_ms, ts "
+                    "FROM cron_run_logs ORDER BY ts DESC LIMIT ?",
+                    # Same off-by-one fix as the cron_jobs read: one extra row is the
+                    # truncation probe, so a table holding EXACTLY the cap is not reported
+                    # as having had "older run history NOT read" when all of it was read.
+                    (_MAX_CRON_RUN_LOGS + 1,),
+                )
+                rows = cur.fetchall()
+                modern = False
+            elif list(conn.execute("PRAGMA table_info(task_runs)")):
+                # MODERN successor (OpenClaw 2026.8.2+). Filtered to runtime='cron' so a
+                # non-cron task_runs row (e.g. runtime='subagent') is never mistaken for a
+                # cron execution -- that would invent cron history that never happened.
+                cur = conn.execute(
+                    "SELECT source_id, status, run_id, child_session_key, started_at, "
+                    "created_at FROM task_runs WHERE runtime = ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    ("cron", _MAX_CRON_RUN_LOGS + 1),
+                )
+                rows = cur.fetchall()
+                modern = True
+            else:
+                return  # neither table -> same honest "not found" as before B-709
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        # A state DB predating the run-log table is not a corrupt store -- same honest
+        # A state DB predating either table is not a corrupt store -- same honest
         # UNKNOWN as "not found" (mirrors _collect_cron / _collect_plugin_trust).
         if "no such table" not in str(exc).lower():
-            ctx.errors.append(f"could not read cron_run_logs from {db_path}: {exc}")
+            ctx.errors.append(f"could not read cron run logs from {db_path}: {exc}")
             ctx.cron_run_logs_found = True
             ctx.cron_run_logs_parse_error = True
         return
@@ -4281,16 +4350,28 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     ctx.cron_run_logs_found = True
     run_logs_truncated = len(rows) > _MAX_CRON_RUN_LOGS
     rows = rows[:_MAX_CRON_RUN_LOGS]  # discard the probe row; the scanned set stays capped
-    for job_id, status, session_id, session_key, run_id, run_at_ms, ts in rows:
-        ctx.cron_run_logs.append({
-            "job_id": job_id,
-            "status": status,
-            "session_id": session_id,
-            "session_key": session_key,
-            "run_id": run_id,
-            "run_at_ms": run_at_ms,
-            "ts": ts,
-        })
+    if modern:
+        for source_id, status, run_id, child_session_key, started_at, created_at in rows:
+            ctx.cron_run_logs.append({
+                "job_id": source_id,
+                "status": status,
+                "session_id": None,  # B-709: no successor column on task_runs
+                "session_key": child_session_key,
+                "run_id": run_id,
+                "run_at_ms": started_at,
+                "ts": created_at,
+            })
+    else:
+        for job_id, status, session_id, session_key, run_id, run_at_ms, ts in rows:
+            ctx.cron_run_logs.append({
+                "job_id": job_id,
+                "status": status,
+                "session_id": session_id,
+                "session_key": session_key,
+                "run_id": run_id,
+                "run_at_ms": run_at_ms,
+                "ts": ts,
+            })
     if run_logs_truncated:
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_CRON,
