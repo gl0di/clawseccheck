@@ -191,7 +191,7 @@ _EXEMPT = {
     "catalog.py": "~3,404 lines — the CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~5,907 lines — the read-only collection layer (config / bootstrap / skill "
+    "collector.py": "~6,420 lines — the read-only collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
                     "+ .pyc/.wasm sniffing), grew again with B-610 (deriving the workspace "
@@ -202,7 +202,15 @@ _EXEMPT = {
                     "module's worth on its own and every encoding fix lands in it. Splitting "
                     "byte-format sniffing + the decode ladder out to a leaf (the "
                     "workspace/agent-id resolution to another) has moved from 'a later cycle' "
-                    "to the next structural task on this file.",
+                    "to the next structural task on this file. FOURTH growth (+386): making "
+                    "three state-SQLite readers dual-shape after OpenClaw's state schema "
+                    "consolidated columns into JSON blobs and renamed a table. That growth is "
+                    "structural, not incidental — every one of those readers now carries a "
+                    "legacy branch AND a modern branch, and a fourth reader "
+                    "(_collect_plugin_trust) still has to follow. The state-DB readers are "
+                    "therefore a THIRD candidate seam alongside the two named above, and the "
+                    "one with the clearest boundary: they share a database handle, a "
+                    "read-only discipline, and nothing else with the file around them.",
     "cli.py": "~4,881 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "
