@@ -804,7 +804,14 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
     out = []
     # `scope` resolves from the AGENT's sandbox first and the defaults second
     # (`resolveSandboxScope`), so the defaults node has to be in hand for every agent.
-    _defaults_sandbox = dig(cfg, "agents.defaults.sandbox")
+    # A plain walk, not `dig()`: this reads a non-leaf NODE, and a non-leaf `dig()` path
+    # cannot be manifest-verified (`risk.py`'s own note on the same problem). The leaf
+    # children under it are dist-verified already; the container is not a config setting.
+    _defaults_sandbox = cfg.get("agents") if isinstance(cfg, dict) else None
+    _defaults_sandbox = (_defaults_sandbox or {}).get("defaults") \
+        if isinstance(_defaults_sandbox, dict) else None
+    _defaults_sandbox = (_defaults_sandbox or {}).get("sandbox") \
+        if isinstance(_defaults_sandbox, dict) else None
     if not isinstance(_defaults_sandbox, dict):
         _defaults_sandbox = {}
     for _agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
