@@ -288,3 +288,48 @@ def test_no_shadow_is_claimed_when_neither_source_names_a_store():
     """The control: without it, "always shadowed" passes both assertions above."""
     ctx = collect(_home_with_default_cron([]))
     assert ctx.cron_store_shadowed is False
+
+
+def test_a_capped_state_walk_is_disclosed_not_reported_as_no_store(tmp_path):
+    """The `walk_dir_safely(max_files=100)` that locates the DB can stop before reaching it.
+    Returning silently would make "we stopped looking" indistinguishable from "there is no
+    state store" — a silent completeness claim over a capped scan (GR#4), which is exactly
+    what tests/test_paired_call_sites.py exists to catch. It caught this one.
+
+    Five sibling readers sit in that guard's `_EXEMPT` list; the list says in its own words
+    that it is debt and must not be extended, so this discloses instead.
+    """
+    from clawseccheck.collector import Context, _collect_config_machine_state
+
+    home = tmp_path / "oc"
+    state = home / "state"
+    state.mkdir(parents=True)
+    for n in range(150):                      # over the cap of 100
+        (state / f"zz-{n:03d}.tmp").write_bytes(b"")
+
+    # Deliberately no `openclaw.sqlite`. An earlier draft of this test put one in the
+    # directory expecting the cap to hide it; the walk order is the filesystem's, not
+    # sorted, so the DB landed inside the first 100 and the test proved nothing. The
+    # property is not "the cap hid this specific file" — it is that after stopping early
+    # we cannot know whether the store was there, and must not answer as if we could.
+    ctx = Context(home=home, config={}, config_path=home / "openclaw.json")
+    _collect_config_machine_state(home, ctx)
+
+    assert ctx.config_machine_state_read is False, "nothing was read — that part is right"
+    assert any("stopped listing" in e and "openclaw.sqlite" in e for e in ctx.errors), \
+        f"the cap must be disclosed, got: {ctx.errors}"
+
+
+def test_an_ordinary_empty_state_dir_stays_quiet(tmp_path):
+    """The control. Without it, "always append an error" satisfies the test above, and the
+    UNDETERMINED path would grow a permanent false note on every machine with no state DB.
+    """
+    from clawseccheck.collector import Context, _collect_config_machine_state
+
+    home = tmp_path / "oc"
+    (home / "state").mkdir(parents=True)
+    ctx = Context(home=home, config={}, config_path=home / "openclaw.json")
+    _collect_config_machine_state(home, ctx)
+
+    assert ctx.config_machine_state_read is False
+    assert not [e for e in ctx.errors if "stopped listing" in e]

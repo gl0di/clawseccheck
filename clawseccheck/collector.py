@@ -4217,13 +4217,24 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     took the trouble to write one.
     """
     state_dir = home / "state"
+    capped: list = []
     candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
     if db_path is None:
-        return  # no state DB -> `read` stays False -> UNDETERMINED, never "not compat"
+        # `read` stays False -> UNDETERMINED, never "not compat". But a walk that stopped
+        # early is not the same fact as an empty state dir, and reporting them alike would
+        # be a silent completeness claim over a capped scan (GR#4). Five sibling readers
+        # take the `_EXEMPT` route in tests/test_paired_call_sites.py; that list says in
+        # its own words that it is debt and not to be extended, so this one discloses.
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the machine-owned config store was not read"
+            )
+        return
 
     placeholders = ",".join("?" for _ in CONFIG_MACHINE_STATE_KEYS)
     try:
