@@ -192,6 +192,12 @@ _MAX_SUBAGENT_RUNS = 50
 # (see its docstring), but the collector caps it independently so nothing downstream can
 # accidentally hold or print an unbounded blob.
 _MAX_SUBAGENT_TASK_CHARS = 500
+# B-709: on the MODERN (OpenClaw 2026.8.2+) subagent_runs shape, the only outcome signal is
+# `$.execution.outcome.status`, and the vendor itself constrains it to exactly these four
+# values (subagent-registry.store.sqlite-B_lUfEus.js:362). Anything else — including the
+# key being entirely absent, which is the normal in-flight-run shape — is treated as "no
+# outcome yet", never as a fifth value.
+_SUBAGENT_OUTCOME_STATUSES = frozenset({"ok", "error", "timeout", "unknown"})
 
 # F-134 (DISK-1, B191): OpenClaw's OWN runtime audit trail (``audit_events`` in the shared
 # state SQLite DB) is bounded on the WRITE side by the shipped runtime itself — pruned to a
@@ -741,6 +747,10 @@ class Context:
     # child_session_key, model, agent_dir, workspace_dir, spawn_mode, run_timeout_seconds,
     # task (capped, see _MAX_SUBAGENT_TASK_CHARS), outcome (parsed outcome_json dict, or None
     # when the run has not ended / no outcome was recorded yet), ended_reason, created_at.
+    # B-709: on the MODERN (OpenClaw 2026.8.2+) table shape, agent_dir/workspace_dir/
+    # spawn_mode/task are permanently None -- that schema does not carry them at all (see
+    # _collect_subagent_runs's docstring). A one-time LIMIT_DOMAIN_AGENTS disclosure names
+    # this per collection run; a consumer must not read the None as "no workspace recorded".
     # DISCLOSURE ONLY — see checks/_agents.py::_disk_subagent_disclosure for the consumer;
     # there is deliberately no FAIL-capable predicate anywhere over this data (CLAUDE.md GR#5,
     # the task's own out-of-tree-workspace_dir / model-fallback traps).
@@ -4936,6 +4946,40 @@ def _parse_subagent_outcome(raw) -> "tuple[dict | None, bool]":
     return None, True
 
 
+def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
+    """B-709: parse one MODERN ``subagent_runs.payload_json`` cell (the consolidated blob
+    that replaced the ``model``/``run_timeout_seconds``/``outcome_json``/``ended_reason``
+    columns on OpenClaw 2026.8.2+) into a plain dict, for named-key extraction only (§8 —
+    the blob carries far more than the handful of keys this collector takes, and the same
+    state DB holds live OAuth tokens under ``authProfiles.store``/``auth.sharedStore``, so
+    it is never stored or emitted whole).
+
+    Returns ``(fields, ok)``, mirroring ``_parse_subagent_outcome``'s contract but over the
+    WHOLE row rather than one sub-field: ``ok`` is False ONLY when *raw* is a non-empty
+    string that fails to parse as JSON, or is some other non-string, non-``None`` shape —
+    the row is then genuinely unreadable and the caller drops it whole, the same
+    whole-row-drop the legacy path already applies to an unparseable ``outcome_json``. A
+    ``None``/blank cell, or one that parses to the empty object (the column's own SQL
+    default, ``payload_json TEXT NOT NULL DEFAULT '{}'``, i.e. a freshly-registered run with
+    nothing recorded yet) is ``({}, True)`` — that is the NORMAL still-running shape, not
+    corruption. A syntactically valid but non-object payload (bare null/number/string) is
+    also ``({}, True)``: nothing to extract, but not an error either.
+    """
+    if raw is None:
+        return {}, True
+    if not isinstance(raw, str):
+        return {}, False
+    if not raw.strip():
+        return {}, True
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}, False
+    if isinstance(parsed, dict):
+        return parsed, True
+    return {}, True
+
+
 def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     """B-296 (DISK-5 increment 1): read-only collection of the OpenClaw subagent-spawn
     registry (``subagent_runs`` in ``~/.openclaw/state/openclaw.sqlite``) into
@@ -4989,6 +5033,51 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     with some good and some bad rows keeps the good ones (matches the tolerant per-record
     style ``_collect_plugin_trust`` already uses, rather than letting one corrupt cell blind
     the whole disclosure to otherwise-trustworthy sibling rows).
+
+    B-709: on the installed OpenClaw 2026.8.2, the real ``subagent_runs`` columns are ONLY
+    ``run_id, child_session_key, controller_session_key, requester_session_key, created_at,
+    payload_json`` — the old SELECT above threw ``sqlite3.OperationalError: no such column:
+    model`` on every run, so ``ctx.errors`` carried that line and B18 reported UNKNOWN even
+    on a machine that had really spawned subagents. Grounded against the vendor's OWN
+    canonical read of this table (``dist/subagent-registry.store.sqlite-B_lUfEus.js:341-351``,
+    which aliases the JSON payload straight back to the retired column names — as
+    authoritative a mapping as exists):
+
+    ===================  =========================================
+    old (legacy) column   MODERN payload_json JSON path
+    ===================  =========================================
+    model                  $.model
+    run_timeout_seconds    $.runTimeoutSeconds
+    ended_reason           $.endedReason
+    outcome_json           $.execution.outcome.status (a STATUS STRING, one of
+                            "ok"|"error"|"timeout"|"unknown" — :362 — not a blob)
+    child_session_key,     real columns, unchanged (:337, :340)
+    created_at
+    ===================  =========================================
+
+    ``agent_dir``, ``workspace_dir``, ``spawn_mode`` and ``task`` appear NOWHERE in that
+    canonical read — they are GONE, not moved (``task`` is literally the pre-v13 schema
+    marker in the migration gate, ``dist/openclaw-state-db-BYInL4sn.js:1900``). They are set
+    ``None`` on the modern path, and a consumer must not read that ``None`` as "no
+    workspace" — a ONE-TIME (per collection run, not per row) disclosure is emitted via
+    ``note_limit(ctx.limit_hits, LIMIT_DOMAIN_AGENTS, ...)`` naming exactly which fields are
+    unavailable on this schema, so ``limit_hits_for(ctx, LIMIT_DOMAIN_AGENTS)`` lets a
+    consumer tell "no workspace was ever recorded" apart from "this schema cannot say".
+
+    Which shape a given install has is decided by PROBING ``PRAGMA table_info(subagent_runs)``
+    once and branching on COLUMN PRESENCE — never by trying one SELECT and catching
+    ``sqlite3.OperationalError``, which cannot distinguish "this is the other schema" from "a
+    genuine read failure" (same reasoning as ``_collect_cron``'s ``cron_jobs`` dual-shape
+    reader). ``model`` present -> LEGACY (checked first: the one real fixture this repo has
+    seen that names both ``model`` and ``payload_json`` on the same table is the ORIGINAL
+    B-296 grounding, predating this migration, and legacy must keep winning on it — same
+    "legacy wins when both tables/shapes exist" precedent ``_collect_cron_run_logs`` uses).
+    ``payload_json`` present (and no ``model``) -> MODERN. Neither -> the same honest
+    found=True/``subagent_runs_parse_error``=True verdict a genuinely unreadable store
+    already gets, with the columns actually seen recorded (never a guessed mapping).
+
+    Named-key extraction only on the modern path (§8) — ``payload_json`` itself is never
+    stored or emitted whole, only the four keys above are pulled out of it.
     """
     state_dir = home / "state"
     sqlite_candidates = (
@@ -5003,20 +5092,59 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
             conn.execute("PRAGMA query_only = 1")
-            cur = conn.execute(
-                "SELECT child_session_key, model, agent_dir, workspace_dir, spawn_mode, "
-                "run_timeout_seconds, task, outcome_json, ended_reason, created_at "
-                "FROM subagent_runs ORDER BY created_at DESC LIMIT ?",
-                # Same off-by-one truncation probe every other capped SELECT here uses: one
-                # extra row is requested purely to detect "more exist", then discarded.
-                (_MAX_SUBAGENT_RUNS + 1,),
-            )
-            rows = cur.fetchall()
+            # B-709: probe the real column shape before picking a SELECT -- see the
+            # docstring above for why an exception-driven fallback is rejected.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(subagent_runs)")}
+            if not columns:
+                return  # no subagent_runs table at all -- same honest "not found" as before
+
+            if "model" in columns:
+                # LEGACY shape -- unchanged from before B-709. Preferred even when
+                # payload_json also exists (a mid-migration / dual-column table): this is
+                # the shape this reader was originally grounded against.
+                cur = conn.execute(
+                    "SELECT child_session_key, model, agent_dir, workspace_dir, spawn_mode, "
+                    "run_timeout_seconds, task, outcome_json, ended_reason, created_at "
+                    "FROM subagent_runs ORDER BY created_at DESC LIMIT ?",
+                    # Same off-by-one truncation probe every other capped SELECT here uses:
+                    # one extra row is requested purely to detect "more exist", discarded.
+                    (_MAX_SUBAGENT_RUNS + 1,),
+                )
+                rows = cur.fetchall()
+                modern = False
+            elif "payload_json" in columns:
+                # MODERN shape (OpenClaw 2026.8.2+). Only the real columns
+                # (child_session_key, created_at) plus the opaque payload_json blob exist;
+                # model/run_timeout_seconds/outcome_json/ended_reason are extracted from
+                # the blob per-row below (named-key extraction only, §8).
+                cur = conn.execute(
+                    "SELECT child_session_key, created_at, payload_json "
+                    "FROM subagent_runs ORDER BY created_at DESC LIMIT ?",
+                    (_MAX_SUBAGENT_RUNS + 1,),
+                )
+                rows = cur.fetchall()
+                modern = True
+            else:
+                # Neither shape recognised. Do NOT guess a mapping for an unknown layout --
+                # the same honest "found but could not be read" verdict a genuinely corrupt
+                # store already gets, reusing that flag rather than adding a third one a
+                # consumer would also have to learn. The columns actually seen are recorded
+                # (literal facts about the table, not invented data) for diagnosis.
+                ctx.errors.append(
+                    f"subagent_runs table in '{db_path}' has neither the legacy ('model') "
+                    f"nor the modern ('payload_json') column shape -- columns seen: "
+                    f"{sorted(columns)}; not read"
+                )
+                ctx.subagent_runs_found = True
+                ctx.subagent_runs_parse_error = True
+                return
         finally:
             conn.close()
     except sqlite3.Error as exc:
         # A state DB predating the subagent registry table is not a corrupt store -- same
-        # honest UNKNOWN as "not found" (mirrors _collect_cron/_collect_plugin_trust).
+        # honest UNKNOWN as "not found" (mirrors _collect_cron/_collect_plugin_trust). Now
+        # mostly defense-in-depth: the table_info probe above already returns early on a
+        # genuinely absent table before any SELECT runs.
         if "no such table" not in str(exc).lower():
             ctx.errors.append(f"could not read subagent_runs from {db_path}: {exc}")
             ctx.subagent_runs_found = True
@@ -5027,32 +5155,75 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     truncated = len(rows) > _MAX_SUBAGENT_RUNS
     rows = rows[:_MAX_SUBAGENT_RUNS]  # discard the probe row; scanned set stays capped
 
+    if modern and rows:
+        # B-709: the lost-field disclosure -- ONE per collection run (not per row), only on
+        # the modern path, only when at least one row was actually read. Wording matched as
+        # closely as the code allows to what other consumers of this schema-change expect.
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_AGENTS,
+            f"subagent_runs in '{db_path}' uses the consolidated payload schema: "
+            "agent_dir, workspace_dir, spawn_mode and task are not present on this "
+            "state schema — NOT read",
+        )
+
     good: list[dict] = []
     bad_count = 0
-    for (child_session_key, model, agent_dir, workspace_dir, spawn_mode,
-         run_timeout_seconds, task, outcome_json, ended_reason, created_at) in rows:
-        outcome, ok = _parse_subagent_outcome(outcome_json)
-        if not ok:
-            bad_count += 1
-            continue
-        task_text = task if isinstance(task, str) else None
-        if task_text is not None and len(task_text) > _MAX_SUBAGENT_TASK_CHARS:
-            task_text = task_text[:_MAX_SUBAGENT_TASK_CHARS] + "...(truncated)"
-        good.append({
-            "child_session_key": child_session_key,
-            "model": model,
-            "agent_dir": agent_dir,
-            "workspace_dir": workspace_dir,
-            "spawn_mode": spawn_mode,
-            "run_timeout_seconds": run_timeout_seconds,
-            "task": task_text,
-            "outcome": outcome,
-            "ended_reason": ended_reason,
-            "created_at": created_at,
-        })
+    if modern:
+        for child_session_key, created_at, payload_json in rows:
+            fields, ok = _parse_subagent_modern_payload(payload_json)
+            if not ok:
+                # Whole payload unreadable -- there is nothing else on this row to fall
+                # back on (unlike the legacy columns, every extracted field lives inside
+                # this one blob), so the whole row is dropped, same as an unparseable
+                # legacy outcome_json.
+                bad_count += 1
+                continue
+            model = fields.get("model")
+            run_timeout_seconds = fields.get("runTimeoutSeconds")
+            ended_reason = fields.get("endedReason")
+            execution = fields.get("execution")
+            outcome_obj = execution.get("outcome") if isinstance(execution, dict) else None
+            status = outcome_obj.get("status") if isinstance(outcome_obj, dict) else None
+            # Out-of-vocabulary / absent status (still running, or an unrecognised value)
+            # is "no outcome yet" -- normal, never surfaced as a fabricated fifth value.
+            outcome = {"status": status} if status in _SUBAGENT_OUTCOME_STATUSES else None
+            good.append({
+                "child_session_key": child_session_key,
+                "model": model,
+                "agent_dir": None,       # B-709: gone, not moved -- see docstring
+                "workspace_dir": None,   # B-709: gone, not moved -- see docstring
+                "spawn_mode": None,      # B-709: gone, not moved -- see docstring
+                "run_timeout_seconds": run_timeout_seconds,
+                "task": None,            # B-709: gone, not moved -- see docstring
+                "outcome": outcome,
+                "ended_reason": ended_reason,
+                "created_at": created_at,
+            })
+    else:
+        for (child_session_key, model, agent_dir, workspace_dir, spawn_mode,
+             run_timeout_seconds, task, outcome_json, ended_reason, created_at) in rows:
+            outcome, ok = _parse_subagent_outcome(outcome_json)
+            if not ok:
+                bad_count += 1
+                continue
+            task_text = task if isinstance(task, str) else None
+            if task_text is not None and len(task_text) > _MAX_SUBAGENT_TASK_CHARS:
+                task_text = task_text[:_MAX_SUBAGENT_TASK_CHARS] + "...(truncated)"
+            good.append({
+                "child_session_key": child_session_key,
+                "model": model,
+                "agent_dir": agent_dir,
+                "workspace_dir": workspace_dir,
+                "spawn_mode": spawn_mode,
+                "run_timeout_seconds": run_timeout_seconds,
+                "task": task_text,
+                "outcome": outcome,
+                "ended_reason": ended_reason,
+                "created_at": created_at,
+            })
 
     if not good and bad_count:
-        # Every row's outcome_json was unparseable -- nothing here can be asserted reliably
+        # Every row's payload was unparseable -- nothing here can be asserted reliably
         # (GR#4: no fabricated facts). Fall back to the honest UNKNOWN, matching the "table
         # absent" branch, rather than surface a disclosure built on undecodable data.
         ctx.subagent_runs_parse_error = True
