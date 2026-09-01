@@ -3242,6 +3242,14 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
     # Deliberately NOT silence: the 2026.8.1 default is stated in the text, so a reader with
     # no config still learns the fact -- they just are not told it as a verdict about a
     # setup that was never read.
+    #
+    # And deliberately NOT `engine_degraded=True`, unlike the `_config_unreadable` case just
+    # below. That flag means the ENGINE could not do its job; here it did, and there was
+    # nothing to read. The grade is capped either way -- `scoring._config_blind_signal`
+    # fires CONFIG_BLIND_CAP off `ctx.config_found` (B-363) without any help from a finding.
+    # Setting it here instead double-counts, and it moved `_degraded_signal` from (False, 0)
+    # to (True, 1) on three of tests/test_b455_degraded_scoring.py's cases, which are about
+    # B13 and have nothing to do with this.
     # Both halves are required. `config_found` is COLLECTOR state, so it is False on a
     # hand-built `Context` that was handed a real config dict directly -- reading it alone
     # made 28 tests answer UNKNOWN about configs they had explicitly supplied. And
@@ -3259,7 +3267,6 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
             "Point --home at the OpenClaw home you mean to audit, then re-run. If this IS "
             "the right home and OpenClaw has never written a config here, it is running on "
             "those defaults.",
-            engine_degraded=True,
         )
     if (f := _config_unreadable("B175", ctx)) is not None:
         return f

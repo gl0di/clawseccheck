@@ -30,9 +30,15 @@ from clawseccheck.collector import Context, collect
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
-def _ctx(cfg: dict, parse_error: bool = False) -> Context:
+def _ctx(cfg: dict, parse_error: bool = False, config_found: bool = True) -> Context:
+    """`config_found` defaults True because every case in this file supplies a config —
+    `_ctx({})` means "the user has an openclaw.json and configured nothing", which is not
+    the same question as "there is no openclaw.json". B175 distinguishes them: it cannot
+    reason from the build's defaults about a config it never read. Collector state is False
+    on a bare `Context`, so the helper has to say which one it means."""
     c = Context(home=Path("/nonexistent"))
     c.config = cfg
+    c.config_found = config_found
     c.config_parse_error = parse_error
     return c
 

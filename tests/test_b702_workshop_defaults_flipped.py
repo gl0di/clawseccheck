@@ -277,3 +277,33 @@ def test_an_empty_config_that_WAS_read_keeps_its_fail():
     f = check_skill_workshop_autonomy(_ctx({}, MODERN, config_found=True))
     assert f.status == FAIL
     assert "DEFAULT, not something set here" in (f.detail or "")
+
+
+def test_the_absent_case_does_not_claim_the_ENGINE_was_degraded():
+    """`engine_degraded` means the engine could not do its job. On a home with no config it
+    did its job and there was nothing to read, which is a different fact — and the grade is
+    capped without any help from a finding, because `scoring._config_blind_signal` fires
+    CONFIG_BLIND_CAP off `ctx.config_found` (B-363).
+
+    Setting the flag here cost three cases in tests/test_b455_degraded_scoring.py, which are
+    about B13 and moved from `(False, 0)` to `(True, 1)` because of a B175 finding. Pinned
+    so it is not re-added defensively.
+    """
+    f = check_skill_workshop_autonomy(_ctx({}, MODERN, config_found=False))
+    assert f.engine_degraded is False
+
+
+def test_the_cap_that_actually_protects_the_grade_still_fires():
+    """The control for the test above: without it, "never set engine_degraded" reads as if
+    the config-blind case went unprotected. Measured end to end through the real audit."""
+    import tempfile
+    from pathlib import Path as _P
+
+    import clawseccheck
+    from clawseccheck.scoring import _config_blind_signal
+
+    home = _P(tempfile.mkdtemp()) / "no-config"
+    home.mkdir(parents=True)
+    ctx, _findings, score = clawseccheck.audit(home)
+    assert _config_blind_signal(ctx) == (True, "absent")
+    assert score.config_blind_capped is True
