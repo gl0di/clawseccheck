@@ -238,8 +238,28 @@ def test_the_excluded_tools_still_exist_so_the_exclusion_is_a_choice():
 
 
 def test_sessions_history_is_still_described_as_sanitized():
-    """The one word the exclusion rests on."""
-    text = _catalog_text()
-    summary = re.search(r'SESSIONS_HISTORY_TOOL_DISPLAY_SUMMARY = "([^"]*)"', text)
-    assert summary, "the summary constant moved — re-ground the exclusion"
-    assert "sanitized" in summary.group(1).lower(), summary.group(1)
+    """The one word the exclusion rests on.
+
+    Searched across the WHOLE dist, not in `tool-catalog-*.js`. OpenClaw 2026.8.2 moved the
+    definition into `tool-description-presets-*.js` and left only an IMPORT behind in the
+    catalog, so a lookup anchored on that one file found the import line, matched no
+    assignment, and reported "the summary constant moved" about a constant that had merely
+    changed address. Same class of drift C-472 fixed for 8.1: an anchor on where a thing
+    happened to live rather than on the thing.
+
+    The distinction that still matters is DEFINITION vs mention — `= "..."` — so a file that
+    only imports or references the name cannot satisfy this.
+    """
+    pattern = re.compile(r'SESSIONS_HISTORY_TOOL_DISPLAY_SUMMARY\s*=\s*"([^"]*)"')
+    if not OPENCLAW_DIST.is_dir():
+        pytest.skip("installed OpenClaw dist not found")
+    found = []
+    for path in sorted(OPENCLAW_DIST.rglob("*.js")):
+        m = pattern.search(path.read_text(encoding="utf-8", errors="replace"))
+        if m:
+            found.append((path.name, m.group(1)))
+    assert found, (
+        "no dist module DEFINES SESSIONS_HISTORY_TOOL_DISPLAY_SUMMARY — the constant is "
+        "gone, not merely moved, so re-ground the exclusion")
+    for name, summary in found:
+        assert "sanitized" in summary.lower(), f"{name}: {summary}"
