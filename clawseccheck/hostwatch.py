@@ -648,6 +648,54 @@ def _detect_windows(root: Path, which) -> dict:
 # Public API
 # ──────────────────────────────────────────────────────────────────────────────
 
+# B-707: the conventional system locations, consulted when PATH resolution comes up empty.
+#
+# Every monitor above is located with `shutil.which`, and `shutil.which` answers a question
+# about the CURRENT PROCESS'S PATH -- not about the host. Those are different questions, and
+# for a scheduled run they give different answers: a classic user crontab runs with
+# `PATH=/usr/bin:/bin`, which excludes `/usr/sbin` and `/usr/local/bin`, and a `systemd`
+# timer inherits whatever its unit specifies, which is often nothing at all.
+#
+# Measured on this machine (openclaw 2026.8.2, monitors as actually installed):
+#     real shell PATH        tunnel_transport present ["Tailscale", "ngrok"]
+#     PATH=/usr/bin:/bin     tunnel_transport present ["Tailscale"]          <- ngrok lost
+#     PATH unset             tunnel_transport present ["Tailscale"]
+#     PATH=""                tunnel_transport unknown []                     <- class lost
+# `ngrok` lives at /usr/local/bin/ngrok and `ufw`/`nft`/`iptables` at /usr/sbin -- exactly the
+# directories a cron PATH drops. The host did not change between those runs; only the
+# question we asked did.
+#
+# This does NOT weaken any verdict. B-434's rule stands untouched: a bare `which` hit never
+# justifies RISK-24 on its own, and `active` is still corroborated per-binary by a signal that
+# needs more than mere installation (an enabled cloudflared.service, a persisted
+# tailscaled.state). What changes is only whether we can SEE the binary that corroboration is
+# then applied to.
+_SYSTEM_PATH_FALLBACK = (
+    "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin",
+)
+
+
+def _default_path_resolver(system: str):
+    """`shutil.which`, falling back to the conventional system directories.
+
+    POSIX only: the fallback list is meaningless on Windows, where `_detect_windows` also
+    corroborates through `winreg` rather than PATH alone, so there it stays exactly
+    `shutil.which`.
+    """
+    if system == "Windows":
+        return shutil.which
+
+    fallback = os.pathsep.join(_SYSTEM_PATH_FALLBACK)
+
+    def resolve(name):
+        # PATH first, always: an operator who put a monitor earlier on PATH than the system
+        # copy means that one, and this must not silently prefer a different binary.
+        hit = shutil.which(name)
+        return hit if hit else shutil.which(name, path=fallback)
+
+    return resolve
+
+
 def detect(root: str | Path = "/", system: str | None = None, which=None) -> dict:
     """Detect host defensive monitors, read-only.
 
@@ -663,7 +711,7 @@ def detect(root: str | Path = "/", system: str | None = None, which=None) -> dic
     """
     system = system or platform.system()
     rootp = Path(root)
-    resolver = which if which is not None else shutil.which
+    resolver = which if which is not None else _default_path_resolver(system)
     if system == "Linux":
         return _detect_linux(rootp, resolver)
     if system == "Darwin":
