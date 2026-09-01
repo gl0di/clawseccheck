@@ -645,7 +645,9 @@ class Context:
     # B-231 sub-item 1: normalized cron jobs (from ~/.openclaw/cron/jobs.json, or the
     # SQLite-backed cron_jobs table when the JSON file is absent). Each entry is a plain
     # dict: id, name, enabled, delete_after_run, trigger_script, payload_kind,
-    # payload_message — the same shape regardless of which backing store it came from.
+    # payload_message — the same shape regardless of which backing store it came from,
+    # and (B-709) regardless of which of the two observed cron_jobs COLUMN shapes the
+    # SQLite table itself has (see _collect_cron's docstring).
     cron_jobs: list = field(default_factory=list)
     cron_found: bool = False        # a cron store (JSON or SQLite) was found and read
     cron_parse_error: bool = False  # a cron store was found but could not be parsed/read
@@ -3799,11 +3801,32 @@ def _collect_cron(home: Path, ctx: Context) -> None:
     Two backing stores exist (grounded against the openclaw dist): the legacy JSON file
     ``~/.openclaw/cron/jobs.json`` (``{"version": 1, "jobs": [CronJobSchema, ...]}``,
     each job's ``payload``/``trigger`` sub-objects carrying ``message``/``script``), and
-    the SQLite-backed ``cron_jobs`` table in ``~/.openclaw/state/openclaw.sqlite``
-    (``job_id``, ``name``, ``enabled``, ``delete_after_run``, ``trigger_script``,
-    ``payload_kind``, ``payload_message`` columns). The JSON file is preferred when
-    present; the SQLite table is a read-only fallback. Neither present leaves
-    ``ctx.cron_found`` False, so a consuming check reports UNKNOWN, never a fake PASS.
+    the SQLite-backed ``cron_jobs`` table in ``~/.openclaw/state/openclaw.sqlite``. The
+    JSON file is preferred when present; the SQLite table is a read-only fallback. Neither
+    present leaves ``ctx.cron_found`` False, so a consuming check reports UNKNOWN, never a
+    fake PASS.
+
+    B-709: the SQLite table itself has TWO observed column shapes, and which one a given
+    install has is decided by PROBING ``PRAGMA table_info(cron_jobs)`` once, then branching
+    on COLUMN PRESENCE -- never by trying one SELECT and catching
+    ``sqlite3.OperationalError`` to fall back to the other, because an exception-driven
+    fallback cannot distinguish "this is the other schema" from "a genuine read failure"
+    (same failure shape as `agent_roster()`'s dual-shape read, which picks on key presence
+    for the identical reason):
+
+    * LEGACY -- ``job_id``, ``name``, ``enabled``, ``delete_after_run``, ``trigger_script``,
+      ``payload_kind``, ``payload_message`` columns, each holding its own scalar.
+    * MODERN (OpenClaw 2026.8.2+) -- ``delete_after_run``/``trigger_script``/
+      ``payload_message`` no longer exist as columns; they live inside the ``job_json``
+      TEXT column (``deleteAfterRun`` top-level, ``payload.script``/``payload.message``/
+      ``payload.text`` depending on ``payload.kind``). ``job_id``/``name``/``enabled``/
+      ``payload_kind`` stay real, unchanged columns. Only these three named keys are ever
+      pulled out of ``job_json`` -- the blob itself is never stored or emitted (§8; the
+      same state DB holds live OAuth tokens under ``authProfiles.store``).
+
+    Neither shape recognised (an unrelated ``cron_jobs`` table) is reported the same way a
+    genuinely corrupt store is -- ``cron_found=True`` + ``cron_parse_error=True`` -- rather
+    than inventing a third flag a consumer would also have to learn.
 
     Both branches resolve candidate files through ``safeio.walk_dir_safely`` — symlinks
     and path-escapes are skipped, matching every other collector read.
@@ -3880,22 +3903,74 @@ def _collect_cron(home: Path, ctx: Context) -> None:
     try:
         conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
         try:
-            cur = conn.execute(
-                "SELECT job_id, name, enabled, delete_after_run, trigger_script, "
-                "payload_kind, payload_message FROM cron_jobs LIMIT ?",
-                # W-DB2 round-3 off-by-one fix: ask for ONE MORE row than the cap and use
-                # its presence as the truncation probe. `LIMIT n` + `len(rows) >= n` cannot
-                # tell a store holding exactly n jobs (a COMPLETE read, nothing dropped)
-                # from one holding n+1, so exactly 200 jobs was reported truncated: the
-                # unread-remainder guard below then suppressed a genuine B189 orphan WARN
-                # and manufactured a limit_hits entry claiming rows were "NOT read" when
-                # every row had been read. The probe row is discarded (`rows[:cap]`), so
-                # the scanned set is still capped at _MAX_CRON_JOBS.
-                (_MAX_CRON_JOBS + 1,),
-            )
-            rows = cur.fetchall()
+            conn.execute("PRAGMA query_only = 1")
+            # B-709: PROBE the real column shape before picking a SELECT -- do NOT try the
+            # modern query and fall back to the legacy one on `sqlite3.OperationalError:
+            # no such column`. An exception-driven fallback cannot tell "this is the other
+            # schema" apart from "a genuine read failure" (a locked db, a corrupt page, an
+            # I/O error would raise the very same way), so it would silently swallow a real
+            # error as a shape mismatch and read nothing while reporting nothing wrong --
+            # the fail-open family this repo keeps getting bitten by. `agent_roster()`
+            # already picks its own dual shape this way: on KEY PRESENCE, never on whether
+            # a value turns out usable.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(cron_jobs)")}
+            if not columns:
+                return  # no cron_jobs table at all -- same honest "not found" as before
+
+            if "job_json" in columns:
+                # MODERN shape (OpenClaw 2026.8.2+). delete_after_run/trigger_script/
+                # payload_message no longer have their own columns -- they live inside the
+                # job_json blob, grounded against the installed dist:
+                #   deleteAfterRun  top-level bool, optional (plugin-entry-DhKN3bwq.d.ts:6380
+                #                   `CronJobBase.deleteAfterRun?: boolean`)
+                #   trigger_script  payload.script, only when payload.kind == "script"
+                #   payload_message payload.message when payload.kind == "agentTurn",
+                #                   payload.text when payload.kind == "systemEvent"
+                #                   (both: persisted-shape-C6m3w-m0.js:100)
+                # job_id/name/enabled/payload_kind stay real, unchanged columns.
+                cur = conn.execute(
+                    "SELECT job_id, name, enabled, payload_kind, job_json "
+                    "FROM cron_jobs LIMIT ?",
+                    (_MAX_CRON_JOBS + 1,),
+                )
+                rows = cur.fetchall()
+                modern = True
+            elif "delete_after_run" in columns:
+                # LEGACY shape -- unchanged from before B-709.
+                cur = conn.execute(
+                    "SELECT job_id, name, enabled, delete_after_run, trigger_script, "
+                    "payload_kind, payload_message FROM cron_jobs LIMIT ?",
+                    # W-DB2 round-3 off-by-one fix: ask for ONE MORE row than the cap and
+                    # use its presence as the truncation probe. `LIMIT n` + `len(rows) >= n`
+                    # cannot tell a store holding exactly n jobs (a COMPLETE read, nothing
+                    # dropped) from one holding n+1, so exactly 200 jobs was reported
+                    # truncated: the unread-remainder guard below then suppressed a genuine
+                    # B189 orphan WARN and manufactured a limit_hits entry claiming rows
+                    # were "NOT read" when every row had been read. The probe row is
+                    # discarded (`rows[:cap]`), so the scanned set is still capped at
+                    # _MAX_CRON_JOBS.
+                    (_MAX_CRON_JOBS + 1,),
+                )
+                rows = cur.fetchall()
+                modern = False
+            else:
+                # Neither shape recognised. Do NOT guess a mapping for an unknown layout --
+                # this is the same honest "found but could not be parsed/read" verdict
+                # `cron_parse_error` already produces for a genuinely corrupt store, so it
+                # reuses that flag rather than adding a third one a consumer would also
+                # have to learn. The actual columns seen are recorded (not invented data --
+                # they are literal facts about the table) so a human can diagnose it.
+                ctx.cron_found = True
+                ctx.cron_parse_error = True
+                ctx.errors.append(
+                    f"cron_jobs table in '{db_path}' has neither the legacy "
+                    "('delete_after_run') nor the modern ('job_json') column shape -- "
+                    f"columns seen: {sorted(columns)}; not read"
+                )
+                return
         finally:
             conn.close()
+
         ctx.cron_found = True
         if len(rows) > _MAX_CRON_JOBS:
             rows = rows[:_MAX_CRON_JOBS]
@@ -3911,21 +3986,80 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                 f"cron_jobs table in '{db_path}' returned the {_MAX_CRON_JOBS}-row cap "
                 "— further job definitions were NOT read",
             )
-        for job_id, name, enabled, delete_after_run, trigger_script, payload_kind, payload_message in rows:
-            ctx.cron_jobs.append({
-                "id": job_id,
-                "name": name,
-                "enabled": bool(enabled) if enabled is not None else None,
-                "delete_after_run": bool(delete_after_run) if delete_after_run is not None else None,
-                "trigger_script": trigger_script,
-                "payload_kind": payload_kind,
-                "payload_message": payload_message,
-            })
+
+        if modern:
+            for job_id, name, enabled, payload_kind, job_json in rows:
+                job_spec = None
+                if isinstance(job_json, (str, bytes)):
+                    try:
+                        parsed = json.loads(job_json)
+                    except (TypeError, ValueError):
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        job_spec = parsed
+                    else:
+                        # Malformed / non-object job_json for this one job -- record it
+                        # and move on. This is per-JOB (like the legacy JSON branch
+                        # silently skipping a non-dict array entry), never the store-level
+                        # cron_parse_error: one bad row must not blind the scan of every
+                        # other job in the same table.
+                        ctx.errors.append(
+                            f"job_json for cron job '{job_id}' in '{db_path}' is not "
+                            "valid JSON -- that job's deleteAfterRun/trigger_script/"
+                            "payload_message could not be extracted"
+                        )
+                        # ...but the row still enters ctx.cron_jobs with empty content, so
+                        # B168 would count it in "Scanned N cron job(s)" having read none
+                        # of it -- a completed-walk claim over a walk that did not finish.
+                        # A ctx.errors line alone cannot prevent that: no check reads
+                        # ctx.errors, whereas LIMIT_DOMAIN_CRON is the channel B168/B189
+                        # already consult via limit_hits_for(). Disclose it there.
+                        note_limit(
+                            ctx.limit_hits, LIMIT_DOMAIN_CRON,
+                            f"cron job '{job_id}' in '{db_path}' has unparseable "
+                            "job_json — its payload/trigger content was NOT scanned",
+                        )
+                # Named-key extraction only (§8) -- job_json is never stored or emitted
+                # whole; only the three grounded keys below are pulled out of it.
+                delete_after_run = job_spec.get("deleteAfterRun") if job_spec else None
+                payload_obj = job_spec.get("payload") if job_spec else None
+                payload_obj = payload_obj if isinstance(payload_obj, dict) else {}
+                trigger_script = (
+                    payload_obj.get("script") if payload_kind == "script" else None
+                )
+                if payload_kind == "agentTurn":
+                    payload_message = payload_obj.get("message")
+                elif payload_kind == "systemEvent":
+                    payload_message = payload_obj.get("text")
+                else:
+                    payload_message = None
+                ctx.cron_jobs.append({
+                    "id": job_id,
+                    "name": name,
+                    "enabled": bool(enabled) if enabled is not None else None,
+                    "delete_after_run": delete_after_run,
+                    "trigger_script": trigger_script,
+                    "payload_kind": payload_kind,
+                    "payload_message": payload_message,
+                })
+        else:
+            for job_id, name, enabled, delete_after_run, trigger_script, payload_kind, payload_message in rows:
+                ctx.cron_jobs.append({
+                    "id": job_id,
+                    "name": name,
+                    "enabled": bool(enabled) if enabled is not None else None,
+                    "delete_after_run": bool(delete_after_run) if delete_after_run is not None else None,
+                    "trigger_script": trigger_script,
+                    "payload_kind": payload_kind,
+                    "payload_message": payload_message,
+                })
         ctx.cron_store_empty = not ctx.cron_jobs  # B-294: read, but nothing to scan
     except sqlite3.Error as exc:
         # A state DB that exists but has no cron_jobs table yet (a fresh install where
         # cron was never touched) is not a corrupt store -- treat like "not found" so the
         # check reports the same honest UNKNOWN as no store at all, not a parse error.
+        # (Now mostly a defense-in-depth net: the table_info probe above already returns
+        # early on a genuinely absent table before any SELECT runs.)
         if "no such table" not in str(exc).lower():
             ctx.errors.append(f"could not read cron_jobs from {db_path}: {exc}")
             ctx.cron_found = True
