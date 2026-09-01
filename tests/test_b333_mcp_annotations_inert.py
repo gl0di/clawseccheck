@@ -1,4 +1,10 @@
-"""B333 (F-143/W2.1) — MCP tool safety-hint annotations declared but not enforced.
+"""B333 (F-143/W2.1) — MCP tool safety-hint annotations, on the build that ignores them.
+
+Scoped to the LEGACY leg since B-706: these cases run with no installed version resolved, so
+they take the 2026.7.x reading, where the annotations really were inert. The 2026.8.1 leg —
+where OpenClaw reads them and a server's own `readOnlyHint: true` waives its approval gate —
+lives in tests/test_b706_codex_annotations_enforced.py.
+
 
 Grounded against dist openclaw@2026.7.1-2 (2026-07-25): when OpenClaw registers an MCP
 tool it stores exactly {serverName, safeServerName, toolName, title, description,
@@ -126,9 +132,13 @@ def test_b333_warn_manifest_source_destructive_hint():
     assert f.status == WARN
     assert "files-mcp" in "".join(f.evidence)
     assert "delete_file" in "".join(f.evidence)
-    # The exact wording constraint from the spec: state the host fact, never accuse the
-    # server of lying.
-    assert "OpenClaw does not read destructiveHint" in f.detail
+    # The wording constraint from the spec is about the CLAIM, not the sentence: state the
+    # host fact, never accuse the server of lying. B-706 qualified the subject ("this
+    # OpenClaw build" rather than "OpenClaw"), because 2026.8.1 DOES read these — pinning
+    # the old phrasing verbatim would have made a true correction look like a regression.
+    assert "does not read destructiveHint/readOnlyHint" in f.detail
+    assert "not enforced" in f.detail
+    assert "lie" not in f.detail.lower()
     assert "readOnlyHint" in f.detail
     assert "lie" not in f.detail.lower()
     assert "lied" not in f.detail.lower()
@@ -176,7 +186,7 @@ def test_b333_clean_fixture_passes():
 def test_b333_bad_fixture_warns():
     f = check_mcp_unenforced_annotations(collect(FIXTURES / "bad_b333_mcp_annotation_ignored"))
     assert f.status == WARN
-    assert "OpenClaw does not read destructiveHint" in f.detail
+    assert "does not read destructiveHint/readOnlyHint" in f.detail
 
 
 def test_b333_registered_in_audit():

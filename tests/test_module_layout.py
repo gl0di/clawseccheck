@@ -69,7 +69,7 @@ _EXEMPT = {
                        "default). The extra lines are user-facing verdict text, not "
                        "machinery; squeezing them to hold a line count would trade the "
                        "report's clarity for a number. A finer split is a later cycle.",
-    "checks/_mcp.py": "~7,049 lines — the MCP / plugin checks + vet_mcp / vet_plugin (40 "
+    "checks/_mcp.py": "~7,597 lines — the MCP / plugin checks + vet_mcp / vet_plugin (40 "
                       "symbols); topic-faithful and over budget by design. A finer split is "
                       "a later cycle.",
     "checks/_egress.py": "~4,077 lines — the egress-hardening topic (proxy/TLS/SSRF/"

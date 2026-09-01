@@ -53,15 +53,16 @@ from ..textnorm import (
 )
 
 from ._shared import (
-    SECRET_KEY_RE,
     _config_unreadable,
+    _finding,
     _is_secret_reference,
     _KNOWN_EXFIL_HOST_RE,
-    _finding,
     _mcp_has_remote,
     _mcp_servers,
     _mcp_url_is_local,
+    _openclaw_generation,
     _plugins,
+    SECRET_KEY_RE,
     _surface_absent,
 )
 from ._content import (
@@ -2855,16 +2856,279 @@ def check_mcp(ctx: Context) -> Finding:
     )
 
 
-# B333 (F-143/W2.1): the four MCP tool safety-hint annotation keys. Grounded against dist
-# openclaw@2026.7.1-2 (2026-07-25): OpenClaw stores exactly {serverName, safeServerName,
-# toolName, title, description, inputSchema, fallbackDescription} when it registers a
-# tool -- `annotations` is never stored (0 occurrences). These four keys exist only in the
-# @modelcontextprotocol/sdk vendor .d.ts types (compile-time only); OpenClaw's runtime
-# never reads them, so a server declaring destructiveHint:true gets zero behavioral
-# effect -- no confirmation prompt, nothing.
+# B333 (F-143/W2.1): the four MCP tool safety-hint annotation keys.
+#
+# WHAT EACH BUILD DOES WITH THEM -- and they do OPPOSITE things, which is why everything
+# below is version-split (B-706).
+#
+# 2026.7.1-2 (grounded 2026-07-25): OpenClaw stored exactly {serverName, safeServerName,
+# toolName, title, description, inputSchema, fallbackDescription} when it registered a
+# tool -- `annotations` was never stored (0 occurrences). The four keys existed only in
+# the @modelcontextprotocol/sdk vendor .d.ts types (compile-time only), so a server
+# declaring destructiveHint:true got zero behavioral effect. Host limitation, not server
+# wrongdoing.
+#
+# 2026.8.1: BOTH halves of that are false. The registration entry in
+# `dist/agents/agent-bundle-mcp-runtime.js` now ends with
+# `codexAnnotations: normalizeMcpCodexToolAnnotations(tool.annotations)`, and
+# `requiresMcpCodexToolApproval` reads them to decide which MCP tools are exposed to an
+# UNATTENDED scheduled run (`isScheduledCodexApprovalAllowed` /
+# `filterScheduledCodexApproval` in `dist/agent-bundle-mcp-harness-*.js`; a tool that
+# requires approval is OMITTED from the run, which is the fail-safe direction).
+#
+# So on 2026.8.1 the hints are load-bearing IN THE SERVER'S FAVOUR: a server's own
+# `readOnlyHint: true` waives the approval gate for its tool. The advice this check used to
+# give -- treat the hints as inert and do not build a policy on them -- therefore pointed
+# the reader away from a live grant rather than merely going stale.
+#
+# The exact sentence is deliberately NOT reproduced here, in a comment or anywhere else in
+# the shipped tree: tests/test_b706_codex_annotations_enforced.py bans the phrasing outright
+# rather than trying to tell an assertion from a quotation of one. Third time this session a
+# guard read its own explanation as the violation (F-183's `SELECT *`, B-703's
+# "subprocess"); where the prose IS the subject, stripping comments is not available, so the
+# rule is "describe it, do not restate it".
+#
+# CORROBORATION IN OPENCLAW'S OWN WORDS, which is why the finding is framed the way it is.
+# `openclaw mcp probe --json` computes a per-server `approvalHint` and its literal text
+# (`MCP_CODEX_APPROVAL_ANNOTATION_HINT`, `dist/mcp-cli-*.js`) is:
+#
+#     "tools have no safety annotations; calls will require interactive approval"
+#
+# emitted exactly when `codexApprovalMode === "auto"` and every tool's `codexAnnotations` is
+# empty. The vendor is telling the operator that the ABSENCE of annotations is what keeps the
+# approval step -- i.e. their presence is what can remove it. That is this check's subject,
+# stated by OpenClaw itself.
+#
+# The same probe projection settles the SOURCE split, and settles it in favour of leaving it
+# alone: the probe emits `tools: projectedTools.map((tool) => tool.name).toSorted()` -- names
+# only, no annotations, on 2026.8.1 as before. So a probe- or trajectory-derived surface
+# still structurally cannot carry annotations, absence there still proves nothing, and those
+# sources stay UNKNOWN rather than becoming a clean PASS.
 _B333_HINT_KEYS = frozenset(
     {"readOnlyHint", "destructiveHint", "openWorldHint", "idempotentHint"}
 )
+
+# ---------------------------------------------------------------------------------------
+# Faithful port of OpenClaw 2026.8.1's `dist/mcp-codex-tool-approval-*.js`, the whole
+# module. Ported rather than approximated because the verdict rests on it, and VALIDATED
+# DIFFERENTIALLY against the installed dist rather than by reading -- see
+# tests/test_b706_codex_annotations_enforced.py, which replays every case below through
+# `node` and requires exact agreement. Reading it would have got at least three of these
+# wrong: an invalid camelCase mode falls THROUGH to the snake_case spelling rather than
+# ending the lookup; `destructiveHint: false` + `openWorldHint: false` waives the gate with
+# no `readOnlyHint` in sight; and a non-boolean hint value is dropped entirely, so
+# `readOnlyHint: "true"` grants nothing.
+# ---------------------------------------------------------------------------------------
+
+_MCP_CODEX_APPROVAL_MODES = frozenset({"auto", "prompt", "approve"})
+
+# `\A`/`\Z`, not `^`/`$`, and `[0-9]`, not `\d`. JavaScript's `$` without the `m` flag means
+# end-of-string and its `\d` is ASCII-only; Python's `$` also matches BEFORE a trailing
+# newline and its `\d` accepts every Unicode decimal digit. Both differences point the same
+# dangerous way -- they made the port answer "approve" where the runtime answers "auto", i.e.
+# they would have handed the vendor's implicit trust to a server named `openclaw` whose url
+# merely ends in a newline or uses Arabic-Indic/fullwidth/Devanagari digits for its port.
+# Found by an independent C-135 harness that ran 92 url cases against the real dist; 6
+# divergences, all in that direction. A second round found two more of the same shape:
+# JavaScript's `.` excludes \r and U+2028/U+2029 as well as \n, Python's excludes only \n,
+# so the optional query/fragment group over-matched on those three. Hence the explicit class.
+# tests/test_b706_codex_annotations_enforced.py replays every one.
+_MCP_CODEX_LOOPBACK_URL_RE = re.compile(
+    r"\Ahttps?://(?:127\.0\.0\.1|localhost):[0-9]+/mcp(?:[?#][^\n\r  ]*)?\Z"
+)
+
+
+# ---------------------------------------------------------------------------------------
+# Port of `dist/mcp-tool-filter-*.js` -- the per-server tool selection. B333's modern leg
+# needs it because a tool the operator filtered out is never materialized, so it cannot be
+# in a scheduled run and cannot have its approval gate waived. Reporting one is a false
+# WARN, and a pointed one: B333's own legacy advice tells the operator to enforce this
+# "via OpenClaw's own tool allowlist", so following the check's advice earned the check's
+# new finding. Found by the C-135 pass, verified through the real vendor pipeline.
+# ---------------------------------------------------------------------------------------
+
+# JavaScript `trim()` and Python `str.strip()` do not remove the same characters, and a
+# 220-case differential against the dist found 48 disagreements from exactly that: Python
+# strips the C1/field separators (\x1c-\x1f, \x85) which JS keeps, and JS strips U+FEFF
+# which Python keeps. Every disagreement changed whether a filter matched, i.e. whether this
+# check speaks. Spelled out rather than approximated.
+_JS_TRIM_CHARS = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009"
+    "\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _js_trim(value: str) -> str:
+    """`String.prototype.trim()`: WhiteSpace + LineTerminator, and nothing else."""
+    return value.strip(_JS_TRIM_CHARS)
+
+
+def _mcp_tool_filter_matches(pattern: str, value: str) -> bool:
+    """`matchesMcpToolFilterPattern`: exact text plus `*`, and NOT a regex or fnmatch.
+
+    Ported rather than approximated with `fnmatch` because the vendor's own algorithm has a
+    cursor and an end-bound that `fnmatch` does not reproduce for patterns with several
+    stars.
+    """
+    trimmed = _js_trim(pattern)
+    if not trimmed:
+        return False
+    if "*" not in trimmed:
+        return trimmed == value
+    parts = trimmed.split("*")
+    first, last = parts[0], parts[-1]
+    if first and not value.startswith(first):
+        return False
+    cursor = len(first)
+    end_bound = len(value) - len(last) if last else len(value)
+    if last and (not value.endswith(last) or end_bound < cursor):
+        return False
+    for part in parts[1:-1]:
+        if not part:
+            continue
+        index = value.find(part, cursor)
+        if index == -1 or index + len(part) > end_bound:
+            return False
+        cursor = index + len(part)
+    return True
+
+
+def _mcp_normalize_tool_filter(raw: object) -> "dict | None":
+    """`normalizeMcpToolFilter`: string entries only, and an all-empty filter is no filter."""
+    if not isinstance(raw, dict):
+        return None
+    include = [e for e in raw.get("include", []) if isinstance(e, str)] \
+        if isinstance(raw.get("include"), list) else []
+    exclude = [e for e in raw.get("exclude", []) if isinstance(e, str)] \
+        if isinstance(raw.get("exclude"), list) else []
+    if not include and not exclude:
+        return None
+    out: dict = {}
+    if include:
+        out["include"] = include
+    if exclude:
+        out["exclude"] = exclude
+    return out
+
+
+def _mcp_tool_allowed(tool_filter: "dict | None", tool_name: str) -> bool:
+    """`isMcpToolAllowed`: include-then-exclude, exclude wins."""
+    if not isinstance(tool_name, str):
+        return False
+    inc = (tool_filter or {}).get("include") or []
+    exc = (tool_filter or {}).get("exclude") or []
+    if inc and not any(_mcp_tool_filter_matches(p, tool_name) for p in inc):
+        return False
+    return not any(_mcp_tool_filter_matches(p, tool_name) for p in exc)
+
+
+def _mcp_codex_normalize_mode(value: object) -> "str | None":
+    """`normalizeApprovalMode`: only the three exact literals survive; anything else is
+    None, which lets the caller's `??` chain continue to the next source."""
+    return value if isinstance(value, str) and value in _MCP_CODEX_APPROVAL_MODES else None
+
+
+def _mcp_codex_is_loopback_server(name: str, spec: dict) -> bool:
+    """`isOpenClawLoopbackServer`: OpenClaw's OWN loopback MCP server, which the vendor
+    implicitly pre-approves. The match is exact and case-sensitive on both halves --
+    measured: `OpenClaw` does not match, and neither does a trailing path segment after
+    `/mcp`, a missing port, a non-loopback host, or a `ws://` scheme."""
+    url = spec.get("url") if isinstance(spec, dict) else None
+    return name == "openclaw" and isinstance(url, str) and bool(
+        _MCP_CODEX_LOOPBACK_URL_RE.match(url)
+    )
+
+
+def _mcp_codex_approval_mode(name: str, spec: dict) -> str:
+    """`resolveMcpCodexToolApprovalMode`: the effective mode for one server.
+
+    Both spellings are read. 2026.8.1 REMOVED `default_tools_approval_mode` from the
+    schema but the runtime still honours it, so a config carrying the retired spelling is
+    live -- the same dual-shape rule as `_mcp_servers`/`_node_commands`.
+    """
+    codex = spec.get("codex") if isinstance(spec, dict) else None
+    if not isinstance(codex, dict):
+        codex = {}
+    mode = _mcp_codex_normalize_mode(codex.get("defaultToolsApprovalMode"))
+    if mode is None:
+        mode = _mcp_codex_normalize_mode(codex.get("default_tools_approval_mode"))
+    if mode is None and _mcp_codex_is_loopback_server(name, spec):
+        mode = "approve"
+    return mode or "auto"
+
+
+def _mcp_codex_annotations(value: object) -> dict:
+    """`normalizeMcpCodexToolAnnotations`: keep the four keys, BOOLEAN VALUES ONLY.
+
+    The type filter is the whole point: `readOnlyHint: "true"` and `readOnlyHint: 1` are
+    dropped, so neither waives anything. A check that treated a truthy string as a grant
+    would report a finding the runtime does not produce.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items()
+            if k in _B333_HINT_KEYS and isinstance(v, bool)}
+
+
+def _mcp_codex_requires_approval(mode: str, annotations: dict) -> bool:
+    """`requiresMcpCodexToolApproval`: True when the tool still needs a human.
+
+    False means the tool is exposed to an unattended scheduled run with no gate. Note the
+    ORDER: `destructiveHint: true` wins over `readOnlyHint: true`, so a server cannot buy
+    the exemption by declaring both.
+    """
+    if mode == "approve":
+        return False
+    if mode == "prompt":
+        return True
+    if annotations.get("destructiveHint") is True:
+        return True
+    if annotations.get("readOnlyHint") is True:
+        return False
+    return (annotations.get("destructiveHint") is not False
+            or annotations.get("openWorldHint") is not False)
+
+
+def _b333_waived_tool_names(
+    surface: "_mcpsurface.ToolSurface", mode: str, spec: dict
+) -> list[str]:
+    """Tools whose approval gate the SERVER'S OWN annotations waive, on 2026.8.1.
+
+    Scoped to the annotation-driven case on purpose. Under `mode="approve"` every tool is
+    exempt for an operator-set reason that has nothing to do with what any server declared;
+    that is a different subject with a different verdict shape and it belongs to its own
+    check (the `codex.defaultToolsApprovalMode` surface). Attributing it here would tell
+    the reader an annotation caused something the operator caused.
+
+    REACHABILITY, and it is not optional. A waiver only matters for a tool that can actually
+    be in a scheduled run, and two ordinary config keys take a tool out of one entirely.
+    Both were false WARNs in the first version of this check, found by an independent C-135
+    pass that traced the vendor pipeline rather than reading it:
+
+    * ``enabled: false`` -- `bundle-mcp-config-*.js` builds `enabledConfiguredMcp` by
+      filtering on `server.enabled !== false`, so a disabled server never reaches the bundle
+      MCP runtime at all and none of its tools are ever materialized.
+    * ``toolFilter`` -- `agent-bundle-mcp-runtime.js` marks a filter-rejected tool
+      `excludedFromOpenClawCatalog` and keeps it out of `toolEntries` and out of
+      `catalog.tools`; `agent-bundle-mcp-materialize-*.js` builds the agent's tools from
+      `catalog.tools`, so `filterScheduledCodexApproval` never sees it.
+
+    The second is the sharper of the two, because B333's own legacy remediation tells the
+    operator to enforce read-only behaviour "via OpenClaw's own tool allowlist" -- an
+    operator who followed this check's advice would have earned this check's new finding.
+    """
+    if mode != "auto":
+        return []
+    if isinstance(spec, dict) and spec.get("enabled") is False:
+        return []
+    tool_filter = _mcp_normalize_tool_filter(
+        spec.get("toolFilter") if isinstance(spec, dict) else None
+    )
+    return [
+        t.name for t in surface.tools
+        if _mcp_tool_allowed(tool_filter, t.name)
+        and not _mcp_codex_requires_approval(mode, _mcp_codex_annotations(t.annotations))
+    ]
 
 
 def _b333_hinted_tool_names(surface: "_mcpsurface.ToolSurface") -> list[str]:
@@ -2899,40 +3163,93 @@ def _b333_surface_verdict(surface: "_mcpsurface.ToolSurface") -> "tuple[str, lis
     return None
 
 
+def _b333_modern_surface_verdict(
+    surface: "_mcpsurface.ToolSurface", name: str, spec: dict
+) -> "tuple[str, list[str]] | None":
+    """One ToolSurface's contribution to B333 on OpenClaw 2026.8.1 and later.
+
+    The question is no longer "did the server declare a hint" -- it is "does the server's
+    declaration WAIVE the approval gate", which is a different set of tools. A
+    `destructiveHint: true` declares the tool dangerous and OpenClaw responds by DROPPING
+    it from an unattended run, so reporting it would accuse a server of the opposite of
+    what it did.
+
+    The server's `codex.defaultToolsApprovalMode` is read first because `"prompt"`
+    short-circuits before any annotation is consulted: an operator who has already
+    hardened this server must not be told their annotations waive anything.
+
+    The source split is unchanged and for an unchanged reason: OpenClaw's own retained or
+    compiled forms (trajectory records, an `openclaw mcp probe --json` dump) never carry
+    annotations at all, so what they show proves nothing about what the server declared.
+    """
+    if surface.source != "manifest":
+        return (UNKNOWN, hinted) if (hinted := _b333_hinted_tool_names(surface)) else None
+    waived = _b333_waived_tool_names(surface, _mcp_codex_approval_mode(name, spec), spec)
+    return (WARN, waived) if waived else None
+
+
 def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
-    """B333: MCP tool safety-hint annotations declared but not enforced by OpenClaw.
+    """B333: MCP tool safety-hint annotations, and what the installed build does with them.
 
-    Grounded against dist openclaw@2026.7.1-2 (2026-07-25, verified 2026-07-25): when
-    OpenClaw registers an MCP tool it stores exactly {serverName, safeServerName,
-    toolName, title, description, inputSchema, fallbackDescription} -- `annotations` is
-    NEVER stored (0 occurrences in the dist). readOnlyHint/destructiveHint/openWorldHint/
-    idempotentHint exist only in the @modelcontextprotocol/sdk vendor .d.ts types
-    (compile-time only); OpenClaw's runtime code never reads them. So a server that
-    declares destructiveHint:true gets ZERO behavioral effect from OpenClaw -- no
-    confirmation prompt, nothing -- and any host policy that claims to key off these
-    hints is not enforced.
+    The subject is VERSION-SPLIT (B-706) because the two builds do opposite things with
+    the same four keys. The module-level comment on ``_B333_HINT_KEYS`` carries the
+    grounding for both; the short form:
 
-    This is a HOST LIMITATION, not server wrongdoing -- the server's declaration is
-    truthful, OpenClaw simply never reads it. WARN only, never FAIL, and worded as a
-    fact about OpenClaw's behaviour, never as an accusation against the server.
+    * **2026.7.x** -- registration stored exactly {serverName, safeServerName, toolName,
+      title, description, inputSchema, fallbackDescription} and the four hints lived only
+      in the @modelcontextprotocol/sdk vendor .d.ts types. A server declaring
+      destructiveHint:true got zero behavioural effect, so a host policy keyed on them was
+      not enforced. A HOST LIMITATION, not server wrongdoing -- the declaration was
+      truthful and this build simply did not consult it.
+    * **2026.8.1+** -- registration stores ``codexAnnotations`` and
+      ``requiresMcpCodexToolApproval`` consults them to decide which MCP tools are exposed
+      to an UNATTENDED scheduled run. The hints are load-bearing IN THE SERVER'S FAVOUR:
+      ``readOnlyHint: true`` (or ``destructiveHint: false`` together with
+      ``openWorldHint: false``) waives the approval gate, while ``destructiveHint: true``
+      keeps it and gets the tool dropped from the run. ``idempotentHint`` is extracted and
+      never consulted, so that one hint really is still inert.
+
+    WARN on both, for different reasons, and never FAIL on either. On the old build it is a
+    host limitation and the server did nothing wrong. On the new one most
+    ``readOnlyHint: true`` declarations are honest and nothing static can separate an honest
+    one from a lying one, so a FAIL would fire on every well-behaved server that annotates
+    truthfully -- Golden Rule #5.
 
     Only a raw manifest-shaped tool surface (config-embedded ``mcp.servers.<name>.tools``,
     the same ``tools/list``-shaped dicts a server itself returns) can show what a server
-    actually declared -- OpenClaw's own retained/compiled form (trajectory records, an
-    ``openclaw mcp probe --json`` dump) never carries annotations at all, so a surface
-    built from one of those sources proves nothing either way about what was originally
-    declared and is reported UNKNOWN, never guessed as clean.
+    actually declared. OpenClaw's own retained/compiled forms carry no annotations on
+    either build -- re-measured on 2026.8.1, where ``openclaw mcp probe --json`` projects
+    ``tools: projectedTools.map((tool) => tool.name).toSorted()``, names only -- so a
+    surface built from one of those proves nothing either way and is reported UNKNOWN,
+    never guessed as clean.
 
-    WARN    -- a config-embedded tool declares readOnlyHint/destructiveHint/
-               openWorldHint/idempotentHint.
-    UNKNOWN -- no MCP servers configured, no embedded tool definitions to inspect, or
-               the only annotation evidence available came from a source (trajectory /
-               probe-names) that structurally cannot carry it.
-    PASS    -- embedded tool definitions were inspected and none declare any hint.
+    LEGACY / UNKNOWN generation
+      WARN    -- a config-embedded tool declares any of the four hints.
+      PASS    -- embedded tool definitions were inspected and none declare any hint.
+
+    MODERN generation
+      WARN    -- a config-embedded tool's own annotations waive its approval gate, on a
+                 server whose tools can actually reach a scheduled run.
+      PASS    -- no tool waives its gate. That covers declaring nothing, declaring
+                 destructiveHint, and being out of reach because the server is disabled,
+                 filtered, or set to ``prompt``/``approve`` -- so the PASS text says
+                 "nothing waives", never "nothing was declared", which would be false.
+
+    BOTH
+      UNKNOWN -- no MCP servers configured, no embedded tool definitions to inspect, or
+                 the only annotation evidence available came from a source (trajectory /
+                 probe-names) that structurally cannot carry it.
     """
     servers = _mcp_servers(ctx.config)
     if not servers:
         return _finding("B333", UNKNOWN, "No MCP servers configured.", "—")
+
+    # B-706: the two builds do OPPOSITE things with these annotations, so the generation
+    # decides which question is even being asked. `unknown` keeps the legacy reading, the
+    # rule every version-split check in this epic follows: silence would be a claim about
+    # a build we cannot see, and being told your policy is unenforced is the safer thing
+    # to be wrong about.
+    modern = _openclaw_generation(ctx) == "modern"
 
     warn_hits: list[str] = []
     unknown_hits: list[str] = []
@@ -2943,7 +3260,8 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
         if surface is None:
             continue
         surfaces_seen += 1
-        verdict = _b333_surface_verdict(surface)
+        verdict = (_b333_modern_surface_verdict(surface, sname, spec) if modern
+                   else _b333_surface_verdict(surface))
         if verdict is None:
             continue
         status, hinted = verdict
@@ -2952,17 +3270,38 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
 
     if warn_hits:
         ev = warn_hits[:5]
+        if modern:
+            return _finding(
+                "B333",
+                WARN,
+                "MCP tool(s) declare annotations that ask OpenClaw to waive their own "
+                "approval gate (" + "; ".join(ev) + "). On OpenClaw 2026.8.1 these are "
+                "read, not ignored: on a Codex app-server thread a scheduled run drops "
+                "every tool that would need approval, and a tool whose own declaration "
+                "waives it is kept. WHETHER THAT IS LIVE HERE depends on whether any of "
+                "your agents runs the Codex app-server harness, which this audit does not "
+                "determine -- so treat this as a property of the servers you have "
+                "configured, not as a confirmed grant.",
+                "Check whether any agent runs a Codex app-server thread (an OpenAI/Codex "
+                "runtime). If one does and you did not mean to let a server waive its own "
+                "gate, set mcp.servers.<name>.codex.defaultToolsApprovalMode to \"prompt\", "
+                "which is read before any annotation. If none does, this block is inert on "
+                "your setup -- OpenClaw's own schema calls it \"projection metadata for "
+                "Codex app-server threads only\" -- and the setting would change nothing.",
+                evidence=ev,
+            )
         return _finding(
             "B333",
             WARN,
             "MCP server(s) declare readOnlyHint/destructiveHint/openWorldHint/"
-            "idempotentHint tool annotations (" + "; ".join(ev) + "), but OpenClaw does "
-            "not read destructiveHint/readOnlyHint, so any policy relying on them is not "
-            "enforced.",
-            "Do not rely on these annotations for a safety policy -- OpenClaw drops them "
-            "entirely when it registers the tool. Enforce destructive/read-only behaviour "
-            "through the server's own access controls, or via OpenClaw's own tool "
-            "allowlist, instead.",
+            "idempotentHint tool annotations (" + "; ".join(ev) + "), but this OpenClaw "
+            "build does not read destructiveHint/readOnlyHint, so any policy relying on "
+            "them is not enforced.",
+            "Do not rely on these annotations for a safety policy on this build -- it "
+            "drops them entirely when it registers the tool. Enforce destructive/read-only "
+            "behaviour through the server's own access controls, or via OpenClaw's own "
+            "tool allowlist, instead. (OpenClaw 2026.8.1 and later DO read them, in the "
+            "server's favour -- upgrading changes this from inert to load-bearing.)",
             evidence=ev,
         )
     if unknown_hits:
@@ -2987,6 +3326,28 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
             "annotation data is available to assess.",
             "Provide a raw tools/list dump for these servers (e.g. via an MCP inspector "
             "export) to check for unenforced safety-hint annotations.",
+        )
+    if modern:
+        # The modern leg asks a DIFFERENT QUESTION than the legacy one -- "does any
+        # declaration waive the approval gate", not "did anyone declare a hint" -- so the
+        # legacy PASS sentence became a false statement here. It read "declare no
+        # readOnlyHint/destructiveHint/openWorldHint/idempotentHint annotations" for a
+        # server that plainly declares `destructiveHint: true`, an `idempotentHint`, or a
+        # `readOnlyHint` under a `prompt` mode. Golden Rule #4: a PASS may say the danger is
+        # absent; it may not say the DATA is absent when we read it and it was there.
+        #
+        # Found by the C-135 pass, and my own tests could not see it: they asserted
+        # `f.status` and never `f.detail`, so the suite stayed green with the false sentence
+        # shipping on the repo's own `bad_b333_mcp_annotation_ignored` fixture.
+        return _finding(
+            "B333",
+            PASS,
+            f"No MCP tool on {surfaces_seen} server(s) with embedded tool definitions "
+            "asks OpenClaw to waive its approval gate. Some may still declare safety-hint "
+            "annotations -- destructiveHint, idempotentHint and openWorldHint on their own "
+            "all keep the gate -- and a server may be out of reach anyway because it is "
+            "disabled, filtered, or set to prompt.",
+            "No action needed.",
         )
     return _finding(
         "B333",

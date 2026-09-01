@@ -339,16 +339,20 @@ CATALOG: list[CheckMeta] = [
         surface="bootstrap",
     ),
     CheckMeta("B24", "MCP server hardening", HIGH, "hardening", "MCP Trust", surface="mcp"),
-    # B333 (F-143/W2.1, grounded against dist openclaw@2026.7.1-2, 2026-07-25): when
-    # OpenClaw registers an MCP tool it stores exactly {serverName, safeServerName,
-    # toolName, title, description, inputSchema, fallbackDescription} — `annotations`
-    # is NEVER stored (0 occurrences). readOnlyHint/destructiveHint/openWorldHint/
-    # idempotentHint exist only in the @modelcontextprotocol/sdk vendor .d.ts types
-    # (compile-time only); OpenClaw's runtime never reads them, so a server declaring
-    # destructiveHint:true gets zero behavioral effect — no confirmation prompt,
-    # nothing. This is a HOST LIMITATION, not server wrongdoing, hence WARN-only
-    # (never FAIL) and worded as a fact about what OpenClaw does, never "the server
-    # lied". MEDIUM/scored=True: an operator relying on these hints for a safety
+    # B333 (F-143/W2.1). The subject is version-split (B-706) because the two builds do
+    # OPPOSITE things with these annotations.
+    #   2026.7.1-2 (grounded 2026-07-25): registration stored exactly {serverName,
+    #     safeServerName, toolName, title, description, inputSchema, fallbackDescription}
+    #     — `annotations` was NEVER stored (0 occurrences), so a server declaring
+    #     destructiveHint:true got zero behavioral effect. A HOST LIMITATION.
+    #   2026.8.1: registration stores `codexAnnotations`, and
+    #     `requiresMcpCodexToolApproval` reads them to decide which MCP tools reach an
+    #     UNATTENDED scheduled run. A server's own `readOnlyHint: true` WAIVES the
+    #     approval gate for its tool — the hints are load-bearing in the server's favour.
+    # WARN-only (never FAIL) on both, for different reasons: on the old build it is a host
+    # limitation and not server wrongdoing; on the new one most `readOnlyHint: true`
+    # declarations are honest and nothing static can separate an honest one from a lying
+    # one, so a FAIL would fire on every well-behaved server that annotates truthfully. MEDIUM/scored=True: an operator relying on these hints for a safety
     # policy has a real, silent enforcement gap. Fires only when a raw manifest dump
     # (source == "manifest") shows the server DID declare a hint — OpenClaw's own
     # retained/compiled form (trajectory / probe-names) never carries annotations at
@@ -380,7 +384,7 @@ CATALOG: list[CheckMeta] = [
     ),
     CheckMeta(
         "B333",
-        "MCP tool safety-hint annotations declared but not enforced by OpenClaw",
+        "MCP tool safety-hint annotations and what this OpenClaw build does with them",
         MEDIUM,
         "hardening",
         "MCP Trust",

@@ -333,7 +333,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B333 - MCP tool safety-hint annotations declared but not enforced by OpenClaw
+### B333 - MCP tool safety-hint annotations and what this OpenClaw build does with them
 
 - Severity: MEDIUM
 - Block: hardening
@@ -341,7 +341,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: yes
 - Confidence: HIGH
 - OWASP: none
-- What it checks: MCP tool safety-hint annotations declared but not enforced by OpenClaw
+- What it checks: MCP tool safety-hint annotations and what this OpenClaw build does with them
 - Remediation:
   - none
 
