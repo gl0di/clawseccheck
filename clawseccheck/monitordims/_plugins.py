@@ -101,6 +101,20 @@ def _plugins_sig(ctx) -> dict:
     discovery = dig(cfg, "plugins.bundledDiscovery")
     if isinstance(discovery, str):
         out["bundled_discovery"] = discovery.strip().lower()
+    # F-183: from OpenClaw 2026.8.1 this value LEFT openclaw.json for the machine-owned
+    # state store, and the runtime reads it there —
+    # `readBundledDiscoveryMode` -> `readConfigMachineState("plugins.bundledDiscovery")`.
+    # Watching only the config key meant the arm below could never fire on a current
+    # build, however loudly the value changed.
+    #
+    # BOTH sources are recorded, under distinct signature keys, rather than one being
+    # picked by version: the arm then fires on whichever one moves, and a store that
+    # cannot be read simply leaves its key absent — the same shape as "not set", so an
+    # unreadable store can never manufacture an alert.
+    state_discovery = (getattr(ctx, "config_machine_state", None) or {}).get(
+        "plugins.bundledDiscovery")
+    if isinstance(state_discovery, str):
+        out["bundled_discovery_state"] = state_discovery.strip().lower()
     slots = dig(cfg, "plugins.slots")
     if isinstance(slots, dict):
         out["slots"] = {str(k): _plugin_id(v) for k, v in slots.items()
@@ -161,13 +175,24 @@ def _diff_plugins(pair, alerts, compare_config) -> None:
     # undefined so every bundled plugin becomes eligible
     # (`dist/bundled-compat-yOgFRqvZ.js`). One word turns the allowlist off, and the arms
     # watching the allowlist saw nothing because the list itself did not move.
-    if (_pp.get("bundled_discovery") != "compat"
-            and _cp.get("bundled_discovery") == "compat"):
-        alerts.append((
-            "MEDIUM",
-            "Plugin discovery switched to compat mode, which bypasses your "
-            "plugin allow list entirely — every bundled plugin can load again, whatever "
-            "the list says."))
+    #
+    # F-183: checked on BOTH the config key and the machine-state key, because 2026.8.1
+    # moved the value into the state store — and because it can arrive there without the
+    # user writing anything. `migrateLegacyConfigMachineState` synthesises
+    # `["plugins.bundledDiscovery", "compat"]` on upgrade when `plugins.allow` is
+    # non-empty and the config was last touched before 2026.7.2. The population that
+    # silently loses its allowlist is precisely the one that bothered to write one.
+    for _source in ("bundled_discovery", "bundled_discovery_state"):
+        if _pp.get(_source) != "compat" and _cp.get(_source) == "compat":
+            alerts.append((
+                "MEDIUM",
+                "Plugin discovery switched to compat mode, which bypasses your "
+                "plugin allow list entirely — every bundled plugin can load again, "
+                "whatever the list says."
+                + (" This was set in OpenClaw's own state store, not in openclaw.json, "
+                   "so an upgrade can have done it without you editing anything."
+                   if _source == "bundled_discovery_state" else "")))
+            break
     # A slot names the plugin that OWNS memory or the context engine and puts it in the
     # startup scope. Changing who holds one is a trust move that touches neither list.
     _ps, _cs = _pp.get("slots"), _cp.get("slots")

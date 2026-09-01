@@ -676,6 +676,14 @@ class Context:
     #                          WHERE store_key = ? (store-ScQ9SjOe.js:643-645): rows filed
     #                          under a DIFFERENT cron.store are not a shadow of this file.
     cron_jobs_truncated: bool = False
+
+    # F-183: the machine-owned config store (`config_machine_state` in the state DB).
+    # `_read` False means the store could not be consulted at all -- UNDETERMINED. An
+    # empty dict with `_read` True means it WAS consulted and none of the allowlisted
+    # keys is set, which is a different and much stronger statement.
+    config_machine_state: dict = field(default_factory=dict)
+    config_machine_state_read: bool = False
+    config_machine_state_unparsed: set = field(default_factory=set)
     cron_store_shadowed: bool = False
     # B-294: the cron EXECUTION trail (cron_run_logs in ~/.openclaw/state/openclaw.sqlite),
     # which deliberately OUTLIVES the job definition — one-shot (`kind:"at"`) jobs default
@@ -3970,7 +3978,14 @@ def _flag_cron_store_config_mismatch(ctx: Context, jobs_json: Path) -> None:
     runtime actually uses, full stop -- no SQLite lookup can rescue that, because the
     configured store might not even be SQLite-backed. Flag it unconditionally.
     """
-    configured = dig(ctx.config, "cron.store")
+    # F-183: `cron.store` left openclaw.json for the machine-owned state store in
+    # OpenClaw 2026.8.1, so reading only the config silently stopped this check firing on
+    # a current build — the shadow it exists to catch would go unreported. The state value
+    # wins where present; the config key remains authoritative on builds that still have
+    # one, and on any machine whose state store could not be read.
+    configured = (ctx.config_machine_state or {}).get("cron.store")
+    if not isinstance(configured, str) or not configured.strip():
+        configured = dig(ctx.config, "cron.store")
     if not isinstance(configured, str) or not configured.strip():
         return
     configured_abs = os.path.abspath(os.path.expanduser(configured))
@@ -4148,6 +4163,105 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
             f"cron run-log table in '{db_path}' returned the {_MAX_CRON_RUN_LOGS}-row cap "
             "— older run history was NOT read",
         )
+
+
+# F-183. The three machine-owned config values OpenClaw 2026.8.1 moved OUT of
+# openclaw.json and into its own state database. This is a new CATEGORY of schema change:
+# the setting did not move within the JSON, it left the JSON, so every `dig(cfg, ...)`
+# reader of these keys is looking somewhere the runtime no longer writes.
+#
+# An EXPLICIT allowlist, never a table dump. The same database holds live OAuth tokens
+# under `authProfiles.store` and `auth.sharedStore` -- measured on a real machine, both
+# rows present -- so a generic reader, a debug dump, or an evidence string carrying a
+# value would turn a security audit into a credential leak (§8).
+# A single value is read whole, so it needs a bound like every other reader here
+# (`_MAX_CRON_JOBS`, `_MAX_CONFIG_BYTES`). Measured: a hostile or corrupt store can hold a
+# multi-megabyte `hooks.internal.installs` record, and an unbounded read of it is the one
+# denial-of-service surface this reader has. 256 KB is far above any real record and far
+# below anything that matters for memory.
+_MAX_MACHINE_STATE_VALUE_BYTES = 256 * 1024
+
+CONFIG_MACHINE_STATE_KEYS = (
+    "plugins.bundledDiscovery",   # enum: compat | allowlist -- the allowlist OFF SWITCH
+    "cron.store",                 # JSON-encoded string: where the real cron store lives
+    "hooks.internal.installs",    # the record shape the old config key held
+)
+
+
+def _collect_config_machine_state(home: Path, ctx: Context) -> None:
+    """Read the allowlisted rows of ``config_machine_state`` into ``ctx``.
+
+    Three fields, because "could not look" and "looked, nothing there" are different
+    answers and collapsing them is exactly the lying-clean this exists to prevent:
+
+    * ``config_machine_state_read``      the table was opened and queried at all
+    * ``config_machine_state``           key -> parsed value, for the keys that were set
+    * ``config_machine_state_unparsed``  keys whose row exists but whose ``value_json``
+                                         is not valid JSON -- present, and NOT readable,
+                                         which is neither "set to X" nor "not set"
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
+    the cron and plugin-trust readers already use on this exact database.
+
+    Why it matters, grounded in the dist rather than argued: the runtime's own
+    ``readBundledDiscoveryMode`` calls ``readConfigMachineState("plugins.bundledDiscovery")``
+    (``bundled-discovery-state-*.js``) -- the STATE store, not the config -- and
+    ``withBundledPluginEnablementCompat`` then does
+    ``const bypassAllowlist = readBundledDiscoveryMode() === "compat"``, leaving ``allowSet``
+    undefined so every bundled plugin becomes eligible (``bundled-compat-*.js``). And the
+    value can appear without the user ever writing it: ``migrateLegacyConfigMachineState``
+    (``state-migrations.config-machine-state-*.js``) pushes ``["plugins.bundledDiscovery",
+    "compat"]`` on upgrade when ``plugins.allow`` is non-empty and
+    ``meta.lastTouchedVersion`` predates ``BUNDLED_DISCOVERY_STATE_CUTOVER_VERSION =
+    "2026.7.2"``. So the population that loses its allowlist is exactly the population that
+    took the trouble to write one.
+    """
+    state_dir = home / "state"
+    candidates = (
+        walk_dir_safely(state_dir, max_files=100)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        return  # no state DB -> `read` stays False -> UNDETERMINED, never "not compat"
+
+    placeholders = ",".join("?" for _ in CONFIG_MACHINE_STATE_KEYS)
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = 1")
+            rows = conn.execute(
+                # The key list is bound, not interpolated, and there is no `SELECT *`:
+                # this query cannot return a row this tool is not allowed to see.
+                f"SELECT state_key, value_json FROM config_machine_state "
+                f"WHERE state_key IN ({placeholders})",
+                CONFIG_MACHINE_STATE_KEYS,
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # A state DB predating the table is not a corrupt store -- the same honest
+        # UNDETERMINED as "no DB", mirroring _collect_cron_run_logs.
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(f"could not read config_machine_state from {db_path}: {exc}")
+        return
+
+    ctx.config_machine_state_read = True
+    for state_key, value_json in rows:
+        if not isinstance(state_key, str):
+            continue
+        if isinstance(value_json, (str, bytes)) and \
+                len(value_json) > _MAX_MACHINE_STATE_VALUE_BYTES:
+            # Over the cap is "present and not read", never "absent": a consumer must not
+            # answer "not set" about a row it declined to parse.
+            ctx.config_machine_state_unparsed.add(state_key)
+            continue
+        try:
+            ctx.config_machine_state[state_key] = json.loads(value_json)
+        except (TypeError, ValueError):
+            # Present but unreadable. Recording it as absent would let a consumer answer
+            # "not set" about a row that exists.
+            ctx.config_machine_state_unparsed.add(state_key)
 
 
 def _collect_capture_state(home: Path, ctx: Context) -> None:
@@ -5886,6 +6000,8 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     # Must precede _read_installed_skills: a bundled-skills-root relocation observed here
     # adds a load root that the content scanners then cover (B-289).
     _collect_systemd_unit_env(home, ctx)
+    # F-183: before _collect_cron -- its cron.store shadow check reads this.
+    _collect_config_machine_state(home, ctx)
     _collect_cron(home, ctx)
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)

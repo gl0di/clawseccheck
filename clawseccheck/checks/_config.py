@@ -2032,7 +2032,14 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
                 plural = "y" if len(enabled_names) == 1 else "ies"
                 evidence.append(f"hooks.internal.entries — enabled entr{plural}: {shown}{more}")
 
-        installs = dig(cfg, "hooks.internal.installs")
+        # F-183: `hooks.internal.installs` moved into OpenClaw's machine-owned state store
+        # in 2026.8.1, so the config read alone stops seeing registered internal hooks on a
+        # current build. Both are consulted; the state wins where present. Only the COUNT
+        # reaches the evidence line — the record's contents are never echoed (§8).
+        installs = (getattr(ctx, "config_machine_state", None) or {}).get(
+            "hooks.internal.installs")
+        if not isinstance(installs, dict) or not installs:
+            installs = dig(cfg, "hooks.internal.installs")
         if isinstance(installs, dict) and installs:
             evidence.append(
                 f"hooks.internal.installs — {len(installs)} internal hook install(s) registered"

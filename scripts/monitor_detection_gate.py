@@ -145,6 +145,37 @@ def _plugin_allowlist_bypassed(home):
     _write(home, c)
 
 
+def _plugin_allowlist_bypassed_via_state(home):
+    """F-183. The same bypass, written where OpenClaw 2026.8.1 actually keeps it.
+
+    `plugins.bundledDiscovery` left openclaw.json for the machine-owned state store, and
+    the runtime reads it there (`readBundledDiscoveryMode` ->
+    `readConfigMachineState`). Worse, `migrateLegacyConfigMachineState` SYNTHESISES
+    `compat` on upgrade for anyone whose `plugins.allow` is non-empty and whose config
+    predates 2026.7.2 — so this row can appear with nobody having edited anything.
+
+    The config-key scenario above cannot cover this: before F-183 the watch read only the
+    config, so this mutation moved nothing it was looking at.
+    """
+    import sqlite3
+    state = home / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    db = state / "openclaw.sqlite"
+    con = sqlite3.connect(db)
+    try:
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS config_machine_state "
+            "(state_key TEXT PRIMARY KEY, value_json TEXT, updated_at_ms INTEGER)"
+        )
+        con.execute(
+            "INSERT OR REPLACE INTO config_machine_state VALUES (?,?,?)",
+            ("plugins.bundledDiscovery", '"compat"', 0),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 def _sandbox_disabled(home):
     c = _cfg(home)
     c["agents"]["defaults"]["sandbox"] = {"mode": "off"}
@@ -320,6 +351,7 @@ DANGERS = {
     "mcp-command-swapped": (_mcp_command_swapped, True),
     "plugin-newly-allowed": (_plugin_newly_allowed, True),
     "plugin-allowlist-bypassed": (_plugin_allowlist_bypassed, True),
+    "plugin-allowlist-bypassed-via-state": (_plugin_allowlist_bypassed_via_state, True),
     "sandbox-disabled": (_sandbox_disabled, True),
     "bootstrap-injected": (_bootstrap_injected, True),
     "new-bootstrap-file": (_new_bootstrap_file, True),
