@@ -210,7 +210,13 @@ _EXEMPT = {
                     "(_collect_plugin_trust) still has to follow. The state-DB readers are "
                     "therefore a THIRD candidate seam alongside the two named above, and the "
                     "one with the clearest boundary: they share a database handle, a "
-                    "read-only discipline, and nothing else with the file around them.",
+                    "read-only discipline, and nothing else with the file around them. "
+                    "Read the +386 with this in mind, because it applies to every threshold "
+                    "guard here and not just this entry: the claim was ALREADY stale at "
+                    "~5,907 against a real 6,034 before that change. A threshold bills the "
+                    "growth to whoever crosses the line, not to whoever accumulated it, so "
+                    "the commit a staleness guard fires on is rarely the commit that caused "
+                    "most of the drift.",
     "cli.py": "~4,881 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "
