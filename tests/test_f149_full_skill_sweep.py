@@ -26,6 +26,8 @@ import json
 import os
 from pathlib import Path
 
+from _vendor_neutral import neutral_config
+
 import clawseccheck.cli as cli
 import clawseccheck.collector as collector
 from clawseccheck.cli import (
@@ -93,7 +95,7 @@ def _skill_sweep_section(out: str) -> str:
 
 def _home_with_skill(tmp_path: Path, name: str) -> Path:
     """A minimal auditable home carrying one clean installed skill."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     d = tmp_path / "skills" / name
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
@@ -253,7 +255,7 @@ def test_no_skills_directory_says_so_plainly(capsys):
 
 
 def test_empty_skills_directory_says_so_plainly(tmp_path, capsys):
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     (tmp_path / "skills").mkdir()
     rc, out = _run(capsys, str(tmp_path), ["--full"])
     section = _skill_sweep_section(out)
@@ -325,7 +327,7 @@ def _stub_sweep(monkeypatch, rows: list[tuple[str, str, int]], truncated: bool =
 
 
 def test_dangerous_skill_trips_exit_code(tmp_path, monkeypatch, capsys):
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     _stub_sweep(monkeypatch, [("evil", "FAIL", 1)])
     rc, _ = _run(capsys, str(tmp_path), ["--full", "--exit-code"])
     assert rc == 1
@@ -333,7 +335,7 @@ def test_dangerous_skill_trips_exit_code(tmp_path, monkeypatch, capsys):
 
 def test_suspicious_skill_does_not_trip_exit_code(tmp_path, monkeypatch, capsys):
     """FAIL-only, exactly as a WARN MCP server is treated."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     _stub_sweep(monkeypatch, [("iffy", "WARN", 1)])
     rc, _ = _run(capsys, str(tmp_path), ["--full", "--exit-code"])
     assert rc == 0
@@ -342,7 +344,7 @@ def test_suspicious_skill_does_not_trip_exit_code(tmp_path, monkeypatch, capsys)
 def test_truncated_sweep_does_not_trip_exit_code(tmp_path, monkeypatch, capsys):
     """An incomplete sweep is reported by the printed section, never by reddening a
     CI gate that would otherwise be green."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     _stub_sweep(monkeypatch, [("a", "SKIPPED", 0), ("b", "TRUNCATED", 0)],
                 truncated=True)
     rc, _ = _run(capsys, str(tmp_path), ["--full", "--exit-code"])
@@ -350,7 +352,7 @@ def test_truncated_sweep_does_not_trip_exit_code(tmp_path, monkeypatch, capsys):
 
 
 def test_exit_code_parity_quiet_vs_verbose_with_dangerous_skill(tmp_path, monkeypatch, capsys):
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     _stub_sweep(monkeypatch, [("evil", "FAIL", 1)])
     rc_verbose, _ = _run(capsys, str(tmp_path), ["--full", "--exit-code"])
     rc_quiet, _ = _run(capsys, str(tmp_path), ["--full", "--quiet", "--exit-code"])
@@ -554,7 +556,7 @@ def test_narrated_and_silent_sweeps_agree(tmp_path, capsys):
 
 
 def test_summary_lines_empty_when_no_targets(tmp_path, capsys):
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     sweep = sweep_installed_skills(tmp_path, narrate=False)
     assert sweep.no_roots is True
     assert sweep.no_targets is True
@@ -632,7 +634,7 @@ def test_aggregate_table_marks_truncation_on_a_fail_row_too():
 def _home_with_flat_and_grouped_skill(tmp_path: Path) -> Path:
     """A flat skill AND a skill nested one level deeper under a vendor-pack
     directory -- the exact grouped shape the old flat sweep silently missed."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     flat = tmp_path / "skills" / "flat-skill"
     flat.mkdir(parents=True)
     (flat / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
@@ -696,7 +698,7 @@ def test_permission_denied_subdirectory_forces_incomplete(tmp_path):
     flip complete=False, even though a SIBLING skill was found and scanned
     cleanly -- an enumeration failure is not localized to only the target it
     blinded."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     flat = tmp_path / "skills" / "flat-skill"
     flat.mkdir(parents=True)
     (flat / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
@@ -721,7 +723,7 @@ def test_permission_denied_skill_root_forces_incomplete_with_zero_targets(tmp_pa
     """The harder direction: discovery fails so completely that ZERO skills are
     found at all. An empty result from a walk that could not finish must not
     read the same as a genuinely-empty, complete walk (Golden Rule #4)."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     skills_root = tmp_path / "skills"
     hidden = skills_root / "hidden-skill"
     hidden.mkdir(parents=True)
@@ -822,7 +824,7 @@ def test_cyclic_symlink_under_plugin_skills_does_not_crash(tmp_path):
     one root that follows symlinks) must not hang or crash the sweep, and must
     not spuriously report incompleteness either -- the cycle is fully resolved
     (skilldiscovery dedups by resolved target), nothing was actually hidden."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     ps = tmp_path / "plugin-skills"
     ps.mkdir()
     real = ps / "real-skill"
@@ -842,7 +844,7 @@ def test_max_skills_cap_forces_incomplete_without_crashing(tmp_path, monkeypatch
     never a crash, never a silently clean result. Exercised cheaply via a
     monkeypatched cap rather than 300 real skill directories."""
     monkeypatch.setattr(collector, "_MAX_SKILLS", 2)
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     for i in range(4):
         d = tmp_path / "skills" / f"s{i}"
         d.mkdir(parents=True)

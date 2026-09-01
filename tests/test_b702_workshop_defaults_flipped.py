@@ -39,9 +39,16 @@ MODERN = "2026.8.1"
 LEGACY = "2026.7.1-2"
 
 
-def _ctx(config, installed=None):
+def _ctx(config, installed=None, config_found=True):
+    """A context whose config was READ. `config_found` is collector state and defaults to
+    False on a hand-built Context, which is not what these cases mean: `_ctx({}, MODERN)`
+    is "the user has an openclaw.json and configured nothing", not "there is no config".
+    B175 distinguishes the two — an absent config cannot support a verdict about defaults —
+    so the helper has to say which one it is instead of leaving it at the dataclass value.
+    """
     c = Context(home=Path("/nonexistent"))
     c.config = config
+    c.config_found = config_found
     c.installed_dist_version = installed
     return c
 
@@ -233,3 +240,40 @@ def test_the_pipeline_is_dormant_only_when_every_agent_blocks_the_tool(roster, l
     r = check_skill_workshop_autonomy(_ctx(cfg, MODERN))
     assert r.status == (FAIL if live else WARN)
     assert ("not currently reachable" in (r.detail or "")) is not live
+
+
+# ------------------------------------------------- the config that was never read
+
+def test_no_config_at_all_is_unknown_not_a_high_fail():
+    """B175's default leg reasons from the INSTALLED BUILD when the keys are absent. On a
+    home with no openclaw.json every key is absent, so it produced a HIGH FAIL about a
+    config the run never saw — the fabricated verdict test_b585_sarif_layer_state.py
+    forbids, and it was firing through the real CLI (measured: failCount 1 on an empty
+    directory).
+
+    `scoring._config_blind_signal` already settles the principle: unparseable (B-306) and
+    genuinely absent (B-363) are "the same real-world fact". This is that rule applied
+    here, not a new one.
+    """
+    f = check_skill_workshop_autonomy(_ctx({}, MODERN, config_found=False))
+    assert f.status == UNKNOWN
+    assert "No openclaw.json was found" in (f.detail or "")
+
+
+def test_the_absent_case_still_teaches_the_dangerous_default():
+    """Bailing to UNKNOWN must not become silence. A reader with no config still needs the
+    fact that a stock 2026.8.1 authors and installs unattended — they are just not told it
+    as a verdict about a setup that was never read."""
+    detail = check_skill_workshop_autonomy(_ctx({}, MODERN, config_found=False)).detail or ""
+    assert "2026.8.1" in detail
+    assert "unattended" in detail
+
+
+def test_an_empty_config_that_WAS_read_keeps_its_fail():
+    """The control, and the whole reason the guard is compound. A home with a literal `{}`
+    on disk was genuinely read; those defaults really are in force there. Without this,
+    "always UNKNOWN when the config is empty" satisfies the two tests above and silently
+    undoes B-702 for every user whose config does not mention the workshop."""
+    f = check_skill_workshop_autonomy(_ctx({}, MODERN, config_found=True))
+    assert f.status == FAIL
+    assert "DEFAULT, not something set here" in (f.detail or "")

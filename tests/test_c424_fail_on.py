@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from _vendor_neutral import neutral_config
+
 from clawseccheck import cli
 from clawseccheck.catalog import Finding
 from clawseccheck.cli import main
@@ -65,7 +67,7 @@ def _run(tmp_path: Path, monkeypatch, injected: list, extra_args: list,
          home_name: str = "home") -> int:
     home = tmp_path / home_name
     home.mkdir(exist_ok=True)
-    (home / "openclaw.json").write_text("{}", encoding="utf-8")
+    (home / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     _audit_with_injected(monkeypatch, injected)
     return main(["--home", str(home)] + BASE + extra_args)
 
@@ -255,7 +257,7 @@ def test_json_and_sarif_fail_counters_agree_and_are_correct(tmp_path, monkeypatc
     ]
     home = tmp_path / "home_counters"
     home.mkdir()
-    (home / "openclaw.json").write_text("{}", encoding="utf-8")
+    (home / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     _audit_with_injected(monkeypatch, injected)
 
     rc_json = main(["--home", str(home)] + BASE + ["--json"])

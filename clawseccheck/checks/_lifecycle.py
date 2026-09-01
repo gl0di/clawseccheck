@@ -3228,6 +3228,39 @@ def _agent_blocks_workshop(agent: dict, _names) -> bool:
 
 
 def check_skill_workshop_autonomy(ctx: Context) -> Finding:
+    # B-702 gave this check a leg that reasons from the INSTALLED BUILD'S DEFAULT when the
+    # keys are absent. On a home with no `openclaw.json` at all, every key is absent, so
+    # that leg fired and produced a HIGH FAIL about a config this run never saw -- the
+    # fabricated verdict `tests/test_b585_sarif_layer_state.py` exists to forbid.
+    #
+    # `scoring._config_blind_signal` already settles the principle: present-but-unparseable
+    # (B-306) and genuinely absent (B-363) are "the same real-world fact", and both fire
+    # CONFIG_BLIND_CAP. `_config_unreadable` covers only the first, so this covers the
+    # second rather than inventing a new rule. Structural collector state, never a string
+    # match on ctx.errors.
+    #
+    # Deliberately NOT silence: the 2026.8.1 default is stated in the text, so a reader with
+    # no config still learns the fact -- they just are not told it as a verdict about a
+    # setup that was never read.
+    # Both halves are required. `config_found` is COLLECTOR state, so it is False on a
+    # hand-built `Context` that was handed a real config dict directly -- reading it alone
+    # made 28 tests answer UNKNOWN about configs they had explicitly supplied. And
+    # `not ctx.config` alone is not enough either: a home with a literal `{}` on disk was
+    # genuinely read, and must keep its verdict.
+    if not ctx.config and not getattr(ctx, "config_found", True):
+        return _finding(
+            "B175",
+            UNKNOWN,
+            "No openclaw.json was found for this home, so which Skill Workshop settings "
+            "are in force cannot be read. On OpenClaw 2026.8.1 and later the defaults are "
+            "autonomous.mode=\"auto\" and approvalPolicy=\"auto\" -- the agent authors AND "
+            "installs new skill code unattended; on 2026.7.x they are disabled and "
+            "review-gated.",
+            "Point --home at the OpenClaw home you mean to audit, then re-run. If this IS "
+            "the right home and OpenClaw has never written a config here, it is running on "
+            "those defaults.",
+            engine_degraded=True,
+        )
     if (f := _config_unreadable("B175", ctx)) is not None:
         return f
 
