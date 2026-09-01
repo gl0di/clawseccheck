@@ -156,7 +156,15 @@ class TestRegressionGuardIsInert:
     # it below by asserting the UNKNOWN came from B68's OWN logic and not from
     # _config_unreadable() — a strictly stronger check than the old status-only assert.
     _GUARD_DETAIL = "openclaw.json present but unparseable/unreadable"
-    _OWN_UNKNOWN_ON_EMPTY_CONFIG = {"check_exec_applypatch_workspace"}
+    # B-702: `check_skill_workshop_autonomy` joined this set. An empty config leaves the
+    # Skill Workshop settings at the build's defaults, and those defaults are OPPOSITE on
+    # the two OpenClaw generations — `{mode: "auto", approvalPolicy: "auto"}` from 2026.8.1,
+    # `{enabled: false, approvalPolicy: "pending"}` before it. This test constructs its
+    # Context directly, so no installed version is resolved and the check cannot tell which
+    # default applies; its own UNKNOWN is the honest answer, not the B-228 guard firing.
+    # The guard's real assertion (its detail must not appear) stays live for it above.
+    _OWN_UNKNOWN_ON_EMPTY_CONFIG = {"check_exec_applypatch_workspace",
+                                    "check_skill_workshop_autonomy"}
 
     def test_readable_config_other_guarded_checks_still_pass(self, tmp_path):
         # A valid, fully-parsed "{}" config declares nothing dangerous, so every guarded

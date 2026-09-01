@@ -3106,7 +3106,9 @@ def check_self_modification(ctx: Context) -> Finding:
 # Real OpenClaw schema (grounded 2026-07-18, dist config-XlfFMqhc.js
 # resolveSkillWorkshopConfig + zod-schema-O9ml_nmo.js:1510-1516):
 #   skills.workshop.autonomous.enabled        bool,              default false
-#   skills.workshop.approvalPolicy            "pending" | "auto", default "pending"
+#   skills.workshop.approvalPolicy            "pending" | "auto"
+#     default "pending" on 2026.7.x, "auto" from 2026.8.1 (B-702 — measured in each
+#     build's own src/skills/workshop/config.ts DEFAULT_CONFIG)
 #   skills.workshop.allowSymlinkTargetWrites  bool,              default false
 #
 # Spec correction: the originating bug report assumed approvalPolicy
@@ -3200,19 +3202,29 @@ def _skill_workshop_reachable(cfg: dict) -> bool:
         return False
 
     # B-699: agents.entries as well as agents.list.
-    # Only trust a per-agent deny/allow when it is the SOLE declared agent — with
-    # multiple agents a single agent's restriction doesn't prove the tool is
-    # unreachable fleet-wide, so stay conservative and leave it reachable (FAIL).
+    # A per-agent deny/allow proves the tool unreachable only when EVERY declared agent
+    # carries one: the runtime resolves the capability profile per session and per agent
+    # (`resolveConversationCapabilityProfile(..., agentId)`), so one agent's restriction
+    # says nothing about the others, while all of them together do.
+    #
+    # B-702 widened this from "the SOLE declared agent" to "every declared agent". The
+    # original form was conservative in the safe direction while this check only fired on
+    # an EXPLICIT opt-in; now that it also fires on the 2026.8.1 defaults, a fleet whose
+    # agents all deny `skill_workshop` would have been a false FAIL — and Golden Rule #5
+    # makes that a blocker, not a rounding error.
     roster = agent_roster(cfg)
-    if len(roster) == 1:
-        agent = roster[0].entry
-        if "skill_workshop" in _names(dig(agent, "tools.deny")):
-            return False
-        agent_allow = _names(dig(agent, "tools.allow"))
-        if agent_allow and "*" not in agent_allow and "skill_workshop" not in agent_allow:
-            return False
+    if roster and all(_agent_blocks_workshop(a.entry, _names) for a in roster):
+        return False
 
     return True
+
+
+def _agent_blocks_workshop(agent: dict, _names) -> bool:
+    """True when this agent's own tool policy removes `skill_workshop`."""
+    if "skill_workshop" in _names(dig(agent, "tools.deny")):
+        return True
+    agent_allow = _names(dig(agent, "tools.allow"))
+    return bool(agent_allow) and "*" not in agent_allow and "skill_workshop" not in agent_allow
 
 
 def check_skill_workshop_autonomy(ctx: Context) -> Finding:
@@ -3220,58 +3232,152 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
         return f
 
     cfg = ctx.config
-    # B-700: OpenClaw 2026.8.1 replaced the boolean `skills.workshop.autonomous.enabled`
-    # with the enum `.mode` ("off" | "propose" | "auto"). Reading only the boolean made
-    # this check blind to an explicitly dangerous setting on a current build. Both are read
-    # now; the enum wins where present, mirroring every other dual-shape accessor here.
+    # B-700 / B-702: this check's two inputs both changed shape AND default in OpenClaw
+    # 2026.8.1, and the second half is the dangerous one.
+    #
+    # SHAPE. The boolean `skills.workshop.autonomous.enabled` became the enum `.mode`
+    # ("off" | "propose" | "auto"). Both are read; the enum wins where present.
     #
     #   "off"      keeps only the suggestion nudge          -> not enabled
     #   "propose"  creates pending proposals                -> enabled
     #   "auto"     APPLIES captured proposals and runs a daily cleanup that "can rewrite
     #              or drop eligible writable skills"        -> enabled
     #
-    # ⚠️ WHAT THIS DELIBERATELY DOES NOT FIX (B-702, critical): when NEITHER
-    # key is present, the line below still answers "not enabled". That encodes the
-    # 2026.7.x default. Measured in each build's own runtime bundle
-    # (`src/skills/workshop/config.ts`, DEFAULT_CONFIG):
+    # DEFAULT. Measured in each build's own runtime bundle (`src/skills/workshop/config.ts`,
+    # DEFAULT_CONFIG) — not read off a description, because this is what the verdict rests on:
     #
     #     2026.7.1-2   autonomous {enabled: false}   approvalPolicy "pending"
     #     2026.8.1     autonomous {mode: "auto"}     approvalPolicy "auto"
     #
-    # Both defaults flipped to the dangerous value, so on a STOCK 2026.8.1 config this
-    # check returns PASS "autonomous authoring is disabled" about a build that authors and
-    # auto-installs skill code. Fixing that changes the verdict for essentially every
-    # 2026.8.1 user, which is a severity/wording decision needing its own measured
-    # distribution and C-135 pass — B-702, not this change.
-    # Plain dict access, not `dig`: a dig() path needs a manifest entry and a manifest
-    # entry needs the dist snapshot, which is still stamped 2026.7.1-2 and cannot vouch
-    # for a key that build has no word for. It gets its entry when C-472 regenerates the
-    # snapshot — same arrangement as `collector.agent_roster` and `_node_commands`.
+    # BOTH flipped to the dangerous value, and this check's FAIL condition is exactly their
+    # conjunction. So on 2026.8.1 a config with no `skills.workshop` block at all is running
+    # unattended authoring AND unattended install — and this check used to answer PASS
+    # "autonomous authoring is disabled" about it. That is a positive assertion about a
+    # state the runtime is not in.
+    #
+    # An ABSENT setting therefore means different things on the two builds, which is why the
+    # generation has to be consulted for that case and only that case. An EXPLICIT value
+    # settles itself: `.mode` does not parse on 2026.7.x and `.enabled` does not parse on
+    # 2026.8.1, so the spelling the user wrote already names their build.
     _node = cfg
     for _key in ("skills", "workshop", "autonomous", "mode"):
         _node = _node.get(_key) if isinstance(_node, dict) else None
     workshop_mode = _node
-    if isinstance(workshop_mode, str):
-        enabled = workshop_mode in ("propose", "auto")
+    legacy_enabled = dig(cfg, "skills.workshop.autonomous.enabled")
+    approval = dig(cfg, "skills.workshop.approvalPolicy")
+    generation = _openclaw_generation(ctx)
+
+    # WHICH SPELLING IS IN EFFECT. The INSTALLED build decides, whenever we can see it: a
+    # key belonging to the other generation is rejected by that build's schema, so it is on
+    # disk but not in effect, and the build's DEFAULT applies instead.
+    #
+    # That is not a technicality — it is the sharpest case this check has. A user who set
+    # `autonomous.enabled: false` on 2026.7.x and then upgraded has silently LOST that
+    # protection: 2026.8.1 does not read the key, and its default is "auto". Reading the
+    # stale key as if it still worked would report exactly the safety they no longer have.
+    #
+    # The spelling only decides when the installed version is undeterminable, where it is
+    # the single piece of evidence available: `.mode` does not parse on 2026.7.x and
+    # `.enabled` does not parse on 2026.8.1.
+    if generation == "unknown":
+        if isinstance(workshop_mode, str):
+            generation = "modern"
+        elif isinstance(legacy_enabled, bool):
+            generation = "legacy"
+
+    # `readAutonomousMode(value, fallback)` keeps ONLY the three enum members and falls back
+    # otherwise, exactly as `readApprovalPolicy` does. So `mode: "zzz"` resolves to the
+    # build default, not to "off" — reading an unrecognised string as "not enabled" was a
+    # false negative in the first version of this fix, caught by the type-confusion pass.
+    in_effect_mode = (workshop_mode
+                      if generation == "modern"
+                      and workshop_mode in ("off", "propose", "auto")
+                      else None)
+    in_effect_enabled = legacy_enabled if generation == "legacy" else None
+    stale_key = None
+    if generation == "modern" and isinstance(legacy_enabled, bool):
+        stale_key = "skills.workshop.autonomous.enabled"
+    elif generation == "legacy" and isinstance(workshop_mode, str):
+        stale_key = "skills.workshop.autonomous.mode"
+
+    autonomy_default = False
+    if isinstance(in_effect_mode, str):
+        enabled = in_effect_mode in ("propose", "auto")
         autonomy_key = "skills.workshop.autonomous.mode"
-        autonomy_value = workshop_mode
-    else:
-        enabled = dig(cfg, "skills.workshop.autonomous.enabled") is True
-        autonomy_key = _key_advice(
-            ctx, "skills.workshop.autonomous.enabled",
-            "skills.workshop.autonomous.mode")
+        autonomy_value = in_effect_mode
+    elif isinstance(in_effect_enabled, bool):
+        enabled = in_effect_enabled is True
+        autonomy_key = "skills.workshop.autonomous.enabled"
         autonomy_value = None
-    is_auto = dig(cfg, "skills.workshop.approvalPolicy") == "auto"
+    elif generation == "modern":
+        enabled = True                       # DEFAULT_CONFIG.autonomous.mode == "auto"
+        autonomy_key = "skills.workshop.autonomous.mode"
+        autonomy_value = "auto"
+        autonomy_default = True
+    else:
+        # legacy default is false; on an undeterminable build we assert nothing here and
+        # let the `undecidable` branch below speak instead.
+        enabled = False
+        autonomy_key = ("skills.workshop.autonomous.enabled" if generation == "legacy"
+                        else _key_advice(ctx, "skills.workshop.autonomous.enabled",
+                                         "skills.workshop.autonomous.mode"))
+        autonomy_value = None
+
+    # `readApprovalPolicy(value, fallback)` keeps only "pending"/"auto" and falls back
+    # otherwise, so an invalid value resolves to the build's default exactly like an absent
+    # one — mirrored here rather than treated as its own state.
+    if approval in ("pending", "auto"):
+        is_auto = approval == "auto"
+        approval_default = False
+    else:
+        approval_default = True
+        is_auto = generation == "modern"     # 8.1 default "auto"; 7.x default "pending"
+
+    # The honest third answer: the config sets NOTHING this check reads, and we cannot see
+    # which build's default applies. PASS would assert a state we did not read; FAIL would
+    # assert a build we did not identify.
+    undecidable = (
+        generation == "unknown"
+        and workshop_mode is None
+        and legacy_enabled is None
+        and approval is None
+        and dig(cfg, "skills.workshop.allowSymlinkTargetWrites") is None
+    )
+
+    # A key the installed build ignores is worth saying out loud wherever this check
+    # speaks, because its whole point is that the user believes it is working.
+    stale_note = ("" if stale_key is None else
+                  f" NOTE: {stale_key} is present in the config but this OpenClaw build "
+                  "does not read it, so its value is NOT in effect — the build default "
+                  "applies instead.")
     symlink_writes = dig(cfg, "skills.workshop.allowSymlinkTargetWrites") is True
 
     if not (enabled or is_auto or symlink_writes):
+        if undecidable:
+            # B-702: nothing explicit, and the two builds disagree about what that means.
+            # PASS here would assert a state we did not read; FAIL would assert a build we
+            # did not identify. Golden Rule #4 — say so, and say what would settle it.
+            return _finding(
+                "B175",
+                UNKNOWN,
+                "No Skill Workshop settings are configured, and the installed OpenClaw "
+                "version could not be determined — so which default applies cannot be "
+                "read. On 2026.8.1 and later the defaults are autonomous.mode=\"auto\" "
+                "and approvalPolicy=\"auto\", i.e. the agent authors AND installs new "
+                "skill code unattended; on earlier releases they are off and \"pending\".",
+                "Set the values explicitly rather than inheriting them: on OpenClaw "
+                "2026.8.1 and later, skills.workshop.autonomous.mode=\"off\" and "
+                "skills.workshop.approvalPolicy=\"pending\"; before it, "
+                "skills.workshop.autonomous.enabled=false and the same approvalPolicy.",
+            )
         return _finding(
             "B175",
             PASS,
             "Skill Workshop autonomous authoring is disabled and lifecycle actions "
             "(propose/apply/reject/quarantine) require review — approvalPolicy is not "
-            '"auto".',
-            "—",
+            '"auto".' + stale_note,
+            "—" if not stale_note else
+            f"Remove {stale_key} and set the key this build actually reads.",
         )
 
     reasons = []
@@ -3280,6 +3386,8 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
             (f"skills.workshop.autonomous.mode={autonomy_value!r}"
              if autonomy_value is not None
              else "skills.workshop.autonomous.enabled=true")
+            + (" — the OpenClaw 2026.8.1 DEFAULT, not something set here"
+               if autonomy_default else "")
             + " (agent auto-authors skill proposals from conversation signals with no "
             "user request"
             + (" AND applies them" if autonomy_value == "auto" else "")
@@ -3287,8 +3395,11 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
         )
     if is_auto:
         reasons.append(
-            'skills.workshop.approvalPolicy="auto" (no human confirmation before a '
-            "skill_workshop proposal is applied/installed)"
+            'skills.workshop.approvalPolicy="auto"'
+            + (" — the OpenClaw 2026.8.1 DEFAULT, not something set here"
+               if approval_default else "")
+            + " (no human confirmation before a skill_workshop proposal is "
+            "applied/installed)"
         )
     if symlink_writes:
         reasons.append(
@@ -3304,11 +3415,14 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                 "Skill Workshop can autonomously AUTHOR new executable skill code from "
                 "conversation signals AND install it with no human review step: "
                 + "; ".join(reasons)
-                + ".",
-                'Set skills.workshop.approvalPolicy to the default "pending" so every '
-                "generated proposal needs an explicit `openclaw skills workshop apply` "
-                "decision before it installs; also consider turning off "
-                f"{autonomy_key} if unattended skill authoring is not intended.",
+                + "." + stale_note,
+                'Set skills.workshop.approvalPolicy to "pending" so every generated '
+                "proposal needs an explicit `openclaw skills workshop apply` decision "
+                f"before it installs, and set {autonomy_key} to "
+                + ('"off"' if generation == "modern" else "false")
+                + " unless unattended skill authoring is genuinely intended."
+                + (" Both are OpenClaw 2026.8.1 defaults, so leaving them unset is not "
+                   "the safe choice on this build." if generation == "modern" else ""),
                 evidence=reasons,
             )
         # B-239: enabled+auto is set, but a separate tool-policy/sandbox control
@@ -3327,7 +3441,7 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
             WARN,
             "Skill Workshop autonomy is fully configured for unattended authoring + "
             "install, but the skill_workshop tool is not currently reachable: "
-            + "; ".join(reasons)
+            + stale_note + "; ".join(reasons)
             + ". One tool-policy edit (removing the deny/allow restriction, dropping "
             "out of sandbox.mode=all, or widening tools.profile) re-arms the full "
             "unattended pipeline.",
@@ -3341,7 +3455,8 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
     return _finding(
         "B175",
         WARN,
-        "Skill Workshop autonomy posture has a partial gap: " + "; ".join(reasons) + ".",
+        "Skill Workshop autonomy posture has a partial gap: " + "; ".join(reasons)
+        + "." + stale_note,
         'Set skills.workshop.approvalPolicy to "pending" (never "auto"), turn off '
         f"{autonomy_key} unless unattended authoring is intended, and leave "
         "allowSymlinkTargetWrites at its default false unless a shared/trusted skill "
