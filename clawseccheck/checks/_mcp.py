@@ -6593,10 +6593,9 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
         return _finding(
             "B177",
             UNKNOWN,
-            "No persisted installed_plugin_index found in "
-            "~/.openclaw/state/openclaw.sqlite (the state database, the plugin index "
-            "row, or the install-records column is absent) — cannot determine OpenClaw's "
-            "own ClawHub trust verdict for installed plugins.",
+            "No persisted plugin index found in OpenClaw's state database "
+            "(~/.openclaw/state/openclaw.sqlite) — cannot determine OpenClaw's own "
+            "ClawHub trust verdict for installed plugins.",
             "If plugins are installed, ensure ~/.openclaw/state/openclaw.sqlite is "
             "present and owner-readable so a future audit can surface OpenClaw's own "
             "ClawHub trust verdicts.",
@@ -6605,9 +6604,10 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
         return _finding(
             "B177",
             UNKNOWN,
-            "installed_plugin_index was found in ~/.openclaw/state/openclaw.sqlite but "
-            "could not be read or parsed (locked or corrupt) — cannot determine OpenClaw's "
-            "own ClawHub trust verdict for installed plugins.",
+            "OpenClaw's persisted plugin index was found in "
+            "~/.openclaw/state/openclaw.sqlite but could not be read or parsed (locked "
+            "or corrupt) — cannot determine OpenClaw's own ClawHub trust verdict for "
+            "installed plugins.",
             "Ensure ~/.openclaw/state/openclaw.sqlite is not held open exclusively by "
             "another process and is a valid SQLite database, then re-run the audit.",
         )
@@ -6686,14 +6686,55 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
         "No installed plugin in the persisted plugin index carries an adverse "
         "ClawHub trust verdict."
     )
-    if clean_ids and not untracked_ids:
+    # The trust verdict (blocked/warn/clean/untracked, above) is only ever computed
+    # over ctx.plugin_trust_records -- the plugins that carry an install record. On a
+    # dual-shape read (OC-82) the fuller plugin population, ctx.plugin_index_records,
+    # can be much larger (2 vs 61 on the grounding machine): using trust_total as BOTH
+    # numerator and denominator (as this used to) renders "2 of 2" — a sentence that
+    # reads as a statement about the whole install when it is really a statement about
+    # 2 of 61 plugins. Use the index population as the denominator when it is known and
+    # larger; fall back to the trust-only count (the old behaviour) otherwise -- e.g. a
+    # legacy machine, or an index read that failed while the trust map still succeeded.
+    trust_total = len(clean_ids) + len(untracked_ids)
+    index_known = (
+        ctx.plugin_index_found
+        and not ctx.plugin_index_parse_error
+        and len(ctx.plugin_index_records) > trust_total
+    )
+    if index_known:
+        population = len(ctx.plugin_index_records)
+        no_data = len(untracked_ids) + (population - trust_total)
+    else:
+        population = trust_total
+        no_data = len(untracked_ids)
+
+    # DERIVE the with-a-verdict count from `no_data` rather than computing it
+    # independently. `trust_total` counts plugins carrying an install RECORD, which is
+    # not the same as carrying a ClawHub VERDICT: on the grounding machine 2 of 61 have
+    # a record and 0 of those 2 carry any clawhub* field. Using trust_total here
+    # rendered "defined for only 2 of 61 — 61 of 61 carry no ClawHub trust data",
+    # two halves of one sentence that cannot both be true. Subtracting keeps them
+    # arithmetically incapable of disagreeing.
+    with_data = population - no_data
+
+    if clean_ids and no_data == 0:
         detail += f" {len(clean_ids)} plugin(s) show an explicit 'clean' verdict."
-    elif untracked_ids:
+    elif no_data and with_data == 0:
         detail += (
-            f" Note: {len(untracked_ids)} of {len(clean_ids) + len(untracked_ids)} "
-            "installed plugin(s) carry no ClawHub trust data at all (not installed via "
-            "a ClawHub-scanned path, or the scan has not run yet) — this reflects "
-            "absence of a bad verdict for those, not a positive clean scan."
+            f" Note: NONE of the {population} installed plugin(s) carries any ClawHub "
+            "trust data (not installed via a ClawHub-scanned path, the scan has not "
+            "run yet, or no install record is on file) — so this PASS reflects the "
+            "absence of a bad verdict, not a positive clean scan, and says nothing "
+            "about their trust status."
+        )
+    elif no_data:
+        detail += (
+            f" Note: OpenClaw's ClawHub trust verdict is defined for only "
+            f"{with_data} of {population} installed plugin(s) — the other {no_data} "
+            "carry no ClawHub trust data at all (not installed via a ClawHub-scanned "
+            "path, the scan has not run yet, or no install record is on file for "
+            "them) — this reflects absence of a bad verdict for those, not a positive "
+            "clean scan, and says nothing about their trust status."
         )
     return _finding(
         "B177",
@@ -6750,9 +6791,8 @@ def check_plugin_tool_result_middleware(ctx: Context) -> Finding:
         return _finding(
             "B187",
             UNKNOWN,
-            "No persisted installed_plugin_index.plugins_json found in "
-            "~/.openclaw/state/openclaw.sqlite (the state database, the plugin index "
-            "row, or the plugins_json column is absent) — cannot determine whether any "
+            "No persisted plugin index found in OpenClaw's state database "
+            "(~/.openclaw/state/openclaw.sqlite) — cannot determine whether any "
             "installed plugin declares the agentToolResultMiddleware contract.",
             "If plugins are installed, ensure ~/.openclaw/state/openclaw.sqlite is "
             "present and owner-readable so a future audit can surface which plugins "
@@ -6762,7 +6802,7 @@ def check_plugin_tool_result_middleware(ctx: Context) -> Finding:
         return _finding(
             "B187",
             UNKNOWN,
-            "installed_plugin_index.plugins_json was found in "
+            "OpenClaw's persisted plugin index was found in "
             "~/.openclaw/state/openclaw.sqlite but could not be read or parsed (locked "
             "or corrupt) — cannot determine whether any installed plugin declares the "
             "agentToolResultMiddleware contract.",

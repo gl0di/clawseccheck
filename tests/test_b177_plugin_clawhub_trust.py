@@ -28,7 +28,7 @@ from pathlib import Path
 
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_plugin_clawhub_trust
-from clawseccheck.collector import collect
+from clawseccheck.collector import Context, collect
 
 
 # ---------------------------------------------------------------------------
@@ -164,13 +164,67 @@ def test_no_trust_data_at_all_passes(tmp_path):
     })
     r = check_plugin_clawhub_trust(collect(home))
     assert r.status == PASS
-    assert "no ClawHub trust data" in r.detail
+    # Assert the CLAIM, not one phrasing of it: the finding must disclose that no
+    # ClawHub trust data exists, and must not imply a verified-clean scan.
+    assert "ClawHub trust data" in r.detail
+    assert "not a positive clean scan" in r.detail
 
 
 def test_empty_install_records_passes(tmp_path):
     home = _make_home(tmp_path, {})
     r = check_plugin_clawhub_trust(collect(home))
     assert r.status == PASS
+
+
+def test_trust_only_covers_a_fraction_of_the_plugin_population(tmp_path):
+    """OC-82 (dual-shape read): the trust map is only populated for plugins that carry
+    an install record, while the full installed-plugin population,
+    ctx.plugin_index_records, is 61. The old "N of M" wording used
+    len(plugin_trust_records) as BOTH numerator and denominator, rendering the false
+    "2 of 2" -- as if only two plugins were installed at all.
+
+    ONE record here carries an explicit 'clean' disposition and one carries none. That
+    matters: a plugin having an install RECORD is not the same as it having a ClawHub
+    VERDICT, and an earlier version of this test conflated them -- it gave both records
+    a null disposition and then asserted "2" would appear, which would only be true if
+    a bare record counted as a verdict. It does not. With one real verdict the honest
+    rendering is "1 of 61 ... the other 60", and the two numbers must sum to the
+    population."""
+    ctx = Context(home=tmp_path)
+    ctx.plugin_trust_found = True
+    ctx.plugin_trust_records = [
+        {"plugin_id": "brave", "disposition": "clean", "reasons": [],
+         "pending": None, "stale": None},
+        {"plugin_id": "codex", "disposition": None, "reasons": [],
+         "pending": None, "stale": None},
+    ]
+    ctx.plugin_index_found = True
+    ctx.plugin_index_records = [
+        {"plugin_id": f"plugin-{i}", "origin": "bundled", "enabled": True,
+         "contracts": {}}
+        for i in range(61)
+    ]
+    r = check_plugin_clawhub_trust(ctx)
+    assert r.status == PASS
+    assert "2 of 2" not in r.detail
+    # One plugin carries a verdict, 61 are installed, so 60 carry none.
+    assert "1 of 61" in r.detail
+    assert "60" in r.detail
+    # The two halves of the sentence must be arithmetically incapable of disagreeing.
+    # The bug this replaced rendered "defined for only 2 of 61 -- 61 of 61 carry no
+    # ClawHub trust data", which cannot both be true; a substring check on "61" alone
+    # passed it happily, so assert the SUM instead of the presence of a digit.
+    import re
+    pairs = [(int(a), int(b)) for a, b in re.findall(r"(\d+) of (\d+)", r.detail)]
+    assert pairs, r.detail
+    for numerator, denominator in pairs:
+        assert numerator <= denominator, r.detail
+    others = [int(n) for n in re.findall(r"the other (\d+)", r.detail)]
+    for with_data, population in pairs:
+        for no_data in others:
+            assert with_data + no_data == population, r.detail
+    # Must not read as a clean-scan claim over the whole install.
+    assert "positive clean scan" in r.detail
 
 
 # ---------------------------------------------------------------------------
