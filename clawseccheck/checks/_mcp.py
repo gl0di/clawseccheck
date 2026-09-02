@@ -6575,13 +6575,20 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     field-by-field source citation). This is the highest-precision plugin-trust signal
     available locally without a network call, and was never previously read.
 
-    FAIL    — at least one installed plugin's ``clawhubTrustDisposition`` is "blocked" —
-              OpenClaw's own moderation explicitly blocked the install, yet it is
-              persisted (and, per the plugin index, may still be enabled).
+    FAIL    — at least one "blocked"-verdict plugin id IS in OpenClaw's current
+              installed-plugin index (``ctx.plugin_index_records``) — OpenClaw's own
+              moderation explicitly blocked the install, yet it is persisted (and, per
+              the plugin index, may still be enabled) — OR the index population cannot
+              be corroborated at all, in which case a "blocked" verdict is trusted as
+              installed by default (missing information never buys silence).
     WARN    — at least one installed plugin carries a non-clean, non-blocked disposition
               ("review-required", "review-recommended", or any other future value), or a
               ``clawhubTrustPending``/``clawhubTrustStale`` verdict (unverified/outdated) —
-              with no "blocked" verdict present.
+              with no FAIL-qualifying "blocked" verdict present; OR a "blocked" verdict
+              exists but its plugin id is ABSENT from a readable installed-plugin index
+              (OC-82) — OpenClaw itself keeps an install record whose owner no longer
+              appears in ``plugins`` until ``openclaw uninstall`` or ``doctor --fix``
+              runs, so an orphaned record reads as a stale verdict, not a live threat.
     UNKNOWN — the shared state database, the installed_plugin_index row, or the
               install-records column is absent, locked, or unreadable/unparseable.
     PASS    — the index was read and no installed plugin carries an adverse ClawHub
@@ -6620,6 +6627,41 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             return ""
         return " (" + _redact(", ".join(reasons[:2])) + ")"
 
+    # OC-82 (C-135 adversarial pass): a "blocked" verdict must be qualified against the
+    # population OpenClaw's own index says is actually INSTALLED
+    # (ctx.plugin_index_records) before it is trusted as a live threat.
+    # installed-plugin-index-store-C3LEu6Er.js:131-136 deliberately KEEPS an install
+    # record whose owner is absent from "plugins" until `openclaw uninstall`
+    # (plugins-uninstall-command-CsUWUrCG.js:177) or `doctor --fix`
+    # (doctor-plugin-registry-B2iBbCQF.js:500) prunes it -- a hand-deleted plugin
+    # directory leaves the trust record behind, so installRecords not-a-subset-of
+    # plugins is a modelled, tolerated state, not corruption.
+    #
+    # Build the population id set the same way the collector coerces plugin_id
+    # (collector._plugin_index_record_from): only a non-empty string counts.
+    index_ids: set[str] = set()
+    index_has_unidentifiable_record = False
+    for irec in ctx.plugin_index_records:
+        ipid = irec.get("plugin_id") if isinstance(irec, dict) else None
+        if isinstance(ipid, str) and ipid:
+            index_ids.add(ipid)
+        else:
+            # An index entry we cannot identify must not license a downgrade for ANY
+            # blocked id below -- it might BE the plugin we are about to call "absent".
+            index_has_unidentifiable_record = True
+
+    # The population is usable as a witness of ABSENCE only when the SAME authority
+    # that supplied the trust verdict also tells us the plugin is gone -- i.e. the
+    # index itself was actually read, cleanly, with every entry identifiable. THIS IS
+    # THE WHOLE REASON THE FIX IS NOT A SILENCER: missing information must never buy
+    # silence, so every "absent" branch below is gated on this predicate, and when it
+    # is False a "blocked" verdict is trusted as installed by default (conservative).
+    population_readable = (
+        ctx.plugin_index_found
+        and not ctx.plugin_index_parse_error
+        and not index_has_unidentifiable_record
+    )
+
     blocked_ev: list[str] = []
     warn_ev: list[str] = []
     clean_ids: list[str] = []
@@ -6630,15 +6672,30 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
         disposition = rec.get("disposition")
         pending = rec.get("pending")
         stale = rec.get("stale")
+        installed = (not population_readable) or (pid in index_ids)
+        orphan_note = (
+            "" if installed
+            else " (not in the current installed-plugin index -- stale record)"
+        )
 
         if disposition == "blocked":
-            blocked_ev.append(
-                f"{pid}: clawhubTrustDisposition=blocked{_reason_snippet(rec)}"
-            )
+            if installed:
+                blocked_ev.append(
+                    f"{pid}: clawhubTrustDisposition=blocked{_reason_snippet(rec)}"
+                )
+            else:
+                warn_ev.append(
+                    f"{pid}: ClawHub trust verdict on record is 'blocked', but {pid} "
+                    "is not in OpenClaw's current installed-plugin index — typically "
+                    "a plugin removed without `openclaw uninstall`, whose stale "
+                    "install record lingers until `openclaw uninstall` or "
+                    f"`doctor --fix`{_reason_snippet(rec)}."
+                )
             continue
         if disposition and disposition != "clean":
             warn_ev.append(
-                f"{pid}: clawhubTrustDisposition={disposition}{_reason_snippet(rec)}"
+                f"{pid}: clawhubTrustDisposition={disposition}"
+                f"{_reason_snippet(rec)}{orphan_note}"
             )
             continue
         if disposition == "clean":
@@ -6646,9 +6703,13 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
         else:
             untracked_ids.append(pid)
         if pending:
-            warn_ev.append(f"{pid}: ClawHub trust scan pending (not yet verified)")
+            warn_ev.append(
+                f"{pid}: ClawHub trust scan pending (not yet verified){orphan_note}"
+            )
         if stale:
-            warn_ev.append(f"{pid}: ClawHub trust verdict stale (needs recheck)")
+            warn_ev.append(
+                f"{pid}: ClawHub trust verdict stale (needs recheck){orphan_note}"
+            )
 
     if blocked_ev:
         ev = blocked_ev[:6] + warn_ev[: max(0, 6 - len(blocked_ev[:6]))]

@@ -4709,6 +4709,55 @@ def _plugin_index_record_from(rec: dict) -> dict:
     }
 
 
+def _plugin_index_object_is_valid(index_obj: object) -> bool:
+    """OC-82/C-135: does ``index_obj`` (the ``value_json -> index`` sub-object of
+    ``config_machine_state['plugins.installedIndex']``) pass the SAME acceptance test
+    the runtime's OWN parser applies before it trusts a row
+    (``installed-plugin-index-store-DjwtyXoa.js:75-93``)?
+
+    That parser requires, on top of a numeric top-level ``revision`` (checked
+    separately by the caller): ``version === 1``, a non-empty ``hostContractVersion``,
+    a non-empty ``compatRegistryVersion``, ``migrationVersion === 1``, a non-empty
+    ``policyHash``, a numeric ``generatedAtMs``, a valid ``plugins`` array, and (when
+    present) a valid ``installRecords`` map. ANY failure there returns null and the
+    runtime discards the WHOLE row — so a row failing this must not be trusted by this
+    tool either; checking ``revision`` alone let a row the runtime itself would reject
+    be treated here as authoritative (the concrete case: ``installRecords`` naming a
+    plugin absent from ``plugins`` is a MODELLED, tolerated runtime state — see
+    ``installed-plugin-index-store-C3LEu6Er.js:131-136`` — not evidence this row is
+    bad; it is the "index" object's OWN internal field validity that must be checked).
+
+    Measured on a real machine (2026.8.2): all nine ``index`` fields present with the
+    right types, zero orphan install records.
+    """
+    if not isinstance(index_obj, dict):
+        return False
+
+    def _is_exactly_one(v: object) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and v == 1
+
+    def _nonempty_str(v: object) -> bool:
+        return isinstance(v, str) and v != ""
+
+    generated_at_ms = index_obj.get("generatedAtMs")
+    plugins_val = index_obj.get("plugins")
+    install_records_val = index_obj.get("installRecords")
+    return (
+        _is_exactly_one(index_obj.get("version"))
+        and _is_exactly_one(index_obj.get("migrationVersion"))
+        and _nonempty_str(index_obj.get("hostContractVersion"))
+        and _nonempty_str(index_obj.get("compatRegistryVersion"))
+        and _nonempty_str(index_obj.get("policyHash"))
+        and isinstance(generated_at_ms, (int, float))
+        and not isinstance(generated_at_ms, bool)
+        and isinstance(plugins_val, list)
+        and (
+            "installRecords" not in index_obj
+            or isinstance(install_records_val, dict)
+        )
+    )
+
+
 def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     """B-240 (B177) + B-292 (RT-2) + OC-82: read-only collection of the persisted
     installed-plugin index into TWO independent ``ctx`` fields:
@@ -4739,25 +4788,33 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     an OpenClaw version string (the state DB's own migration ladder does not map onto
     OpenClaw releases 1:1):
 
-    * A returns a row whose parsed JSON is a dict with a NUMERIC ``revision`` -> A is the
-      source for BOTH ``plugin_trust_records`` and ``plugin_index_records``; B/C are never
+    * A returns a row whose parsed JSON is a dict with a NUMERIC ``revision`` AND an
+      ``index`` object that passes ``_plugin_index_object_is_valid`` -> A is the source
+      for BOTH ``plugin_trust_records`` and ``plugin_index_records``; B/C are never
       consulted (their ``SELECT``s stay in this source file only as the OTHER-generation
       branch a mid-migration/pre-OC-82 database satisfies — see
       ``scripts/state_db_drift_gate.py``). The numeric-``revision`` requirement mirrors
       the runtime's OWN rejection of a row it did not write
-      (``installed-plugin-index-store-DjwtyXoa.js:118``): a row the runtime itself would
-      discard must not be one this tool trusts either.
+      (``installed-plugin-index-store-DjwtyXoa.js:118``); the ``index``-object check
+      mirrors the runtime's OWN parser (``installed-plugin-index-store-
+      DjwtyXoa.js:75-93``), which additionally requires ``version === 1``,
+      ``hostContractVersion``, ``compatRegistryVersion``, ``migrationVersion === 1``,
+      ``policyHash``, ``generatedAtMs``, a valid ``plugins`` array, and a fully-valid
+      ``installRecords`` map — ANY failure there returns null and the runtime discards
+      the WHOLE row. A row the runtime itself would discard must not be one this tool
+      trusts either (C-135: checking ``revision`` alone let a downgraded/foreign-
+      generation row be trusted here and ignored by the runtime).
     * A absent (no ``config_machine_state`` table, or no row for that key, or the SELECT
       itself failed) -> legacy path, byte-for-byte as before OC-82.
     * Neither present -> both ``*_found`` pairs stay False -> UNKNOWN, exactly as today.
       This must never regress into a fake PASS (Golden Rule #4).
     * A PRESENT but its ``value_json`` is not valid JSON, or parses to something other
-      than a dict, or ``revision`` is missing/non-numeric -> ``plugin_trust_found =
-      plugin_trust_parse_error = True`` (and likewise the index pair). Present-and-
-      unreadable is reported as such, NEVER silently treated as absent-and-therefore-
-      falling-back to the legacy columns — a hand-downgraded DB can carry both shapes,
-      and a broken modern row must not be masked by a legacy read that happens to
-      succeed.
+      than a dict, or ``revision`` is missing/non-numeric, or ``index`` fails the
+      validity check above -> ``plugin_trust_found = plugin_trust_parse_error = True``
+      (and likewise the index pair). Present-and-unreadable is reported as such, NEVER
+      silently treated as absent-and-therefore-falling-back to the legacy columns — a
+      hand-downgraded DB can carry both shapes, and a broken modern row must not be
+      masked by a legacy read that happens to succeed.
     * A over the byte cap -> disclosed and marked unreadable WITHOUT attempting a
       partial parse (a mid-JSON slice makes ``json.loads`` raise, so slicing first would
       just relabel a truncation bug as a parse-error bug).
@@ -5015,20 +5072,30 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             revision_is_number = (
                 isinstance(revision, (int, float)) and not isinstance(revision, bool)
             )
+            # C-135: the runtime's own parser rejects the WHOLE row unless "index" also
+            # passes its field-validity check (see _plugin_index_object_is_valid) --
+            # checking "revision" alone let a row the runtime itself discards be
+            # trusted here, and let an unrelated "installRecords names a plugin absent
+            # from plugins" state (a MODELLED, tolerated runtime condition) be
+            # misread as corruption instead of what it actually is.
+            index_probe = state_obj.get("index") if isinstance(state_obj, dict) else None
+            index_probe_is_valid = _plugin_index_object_is_valid(index_probe)
 
-            if not isinstance(state_obj, dict) or not revision_is_number:
+            if not isinstance(state_obj, dict) or not revision_is_number or not index_probe_is_valid:
                 # Present but unusable: the row exists, but either it is not a JSON
-                # object or its "revision" is missing/non-numeric -- the same field the
+                # object, its "revision" is missing/non-numeric, or its "index" object
+                # fails the runtime's own validity check -- the same fields the
                 # runtime itself checks before trusting a row
-                # (installed-plugin-index-store-DjwtyXoa.js:118). Reported as
+                # (installed-plugin-index-store-DjwtyXoa.js:75-93,118). Reported as
                 # present-and-unreadable, NEVER silently as absent (which would fall
                 # through to the legacy columns above and mask a broken modern row with
                 # a legacy read that happens to still succeed).
                 if isinstance(state_obj, dict):
                     ctx.errors.append(
                         "config_machine_state['plugins.installedIndex'] in "
-                        f"{db_path} has a missing or non-numeric 'revision' -- not "
-                        "trusted"
+                        f"{db_path} has a missing/non-numeric 'revision' or an "
+                        "'index' object that fails OpenClaw's own field-validity "
+                        "check -- not trusted"
                     )
                 ctx.plugin_trust_found = True
                 ctx.plugin_trust_parse_error = True
@@ -5045,8 +5112,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     "currently has loaded",
                 )
 
-                index_obj = state_obj.get("index")
-                index_obj = index_obj if isinstance(index_obj, dict) else {}
+                index_obj = index_probe  # already validated as a dict above
                 plugins_list = index_obj.get("plugins")
                 plugins_list = plugins_list if isinstance(plugins_list, list) else []
 

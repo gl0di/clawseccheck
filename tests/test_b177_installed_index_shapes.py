@@ -80,11 +80,27 @@ def _build_home(tmp_path: Path, *, modern_row=None, legacy_row=None) -> Context:
     return ctx
 
 
-def _modern_index(install_records=None, plugins=None, revision=1):
-    obj = {"index": {"plugins": plugins if plugins is not None else []}, "revision": revision}
+def _modern_index(install_records=None, plugins=None, revision=1, index_overrides=None):
+    """Build a ``{"index": {...}, "revision": ...}`` object that passes
+    ``collector._plugin_index_object_is_valid`` by default -- the SAME nine ``index``
+    fields the real (2026.8.2) machine carries, per B177's C-135 hardening. Pass
+    ``index_overrides`` to deliberately break/omit one for a negative test.
+    """
+    index_obj = {
+        "version": 1,
+        "hostContractVersion": "2026.8.2",
+        "compatRegistryVersion": "v1",
+        "migrationVersion": 1,
+        "policyHash": "hash",
+        "generatedAtMs": 1,
+        "plugins": plugins if plugins is not None else [],
+        "diagnostics": [],
+    }
     if install_records is not None:
-        obj["index"]["installRecords"] = install_records
-    return obj
+        index_obj["installRecords"] = install_records
+    if index_overrides:
+        index_obj.update(index_overrides)
+    return {"index": index_obj, "revision": revision}
 
 
 # ---------------------------------------------------------------------------------
@@ -330,3 +346,38 @@ def test_oversized_value_json_no_partial_parse(tmp_path):
     assert ctx.plugin_index_records == []
     hits = limit_hits_for(ctx, LIMIT_DOMAIN_PLUGIN)
     assert any("exceeded the" in h and "cap" in h for h in hits), hits
+
+
+# ---------------------------------------------------------------------------------
+# 11. C-135 hardening: a row the runtime's OWN parser would reject (missing
+#     policyHash, or a non-1 version) must be present-and-unusable, not trusted.
+# ---------------------------------------------------------------------------------
+
+def test_index_missing_policy_hash_is_unusable_not_trusted(tmp_path):
+    modern = _modern_index(
+        install_records={"p1": {"clawhubTrustDisposition": "clean"}},
+        plugins=[{"pluginId": "p1"}],
+        index_overrides={"policyHash": None},
+    )
+    ctx = _build_home(tmp_path, modern_row=modern)
+    assert ctx.plugin_trust_found is True
+    assert ctx.plugin_trust_parse_error is True
+    assert ctx.plugin_index_found is True
+    assert ctx.plugin_index_parse_error is True
+    assert ctx.plugin_trust_records == []
+    assert ctx.plugin_index_records == []
+
+
+def test_index_wrong_version_is_unusable_not_trusted(tmp_path):
+    modern = _modern_index(
+        install_records={"p1": {"clawhubTrustDisposition": "clean"}},
+        plugins=[{"pluginId": "p1"}],
+        index_overrides={"version": 2},
+    )
+    ctx = _build_home(tmp_path, modern_row=modern)
+    assert ctx.plugin_trust_found is True
+    assert ctx.plugin_trust_parse_error is True
+    assert ctx.plugin_index_found is True
+    assert ctx.plugin_index_parse_error is True
+    assert ctx.plugin_trust_records == []
+    assert ctx.plugin_index_records == []
