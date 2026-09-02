@@ -4,7 +4,7 @@ of brand truth — so the README banner's accent colour can never drift from bra
 the way it previously could (the file matched brand.py's values only by hand-kept
 coincidence, not by construction).
 
-The logo MARK is a separate story (CLAWSECCHECK-B-441): it is embedded directly from
+The logo MARK is a separate story (B-441): it is embedded directly from
 docs/assets/logo.png — the real mascot art, base64-inlined — not from brand.LOGO_SVG.
 LOGO_SVG stays a small abstract vector because it is also re-nested inside the 14px
 shields.io badge icon (report.py's `_LOGO_INNER`), where the detailed shield/claws/
@@ -72,7 +72,7 @@ LOGO_PNG = ROOT / "docs" / "assets" / "logo.png"
 #
 # This is a deliberate design constant, not a stray magic number. The mark swapped
 # from the MASCOT emoji to LOGO_SVG's abstract vector to the real logo.png art
-# (CLAWSECCHECK-B-441) without ever changing size — 84x84 the whole time — so this
+# (B-441) without ever changing size — 84x84 the whole time — so this
 # slot geometry has outlived two mark swaps already and should outlive the next one.
 MARK_PX = 84
 SLOT_W_PX = 104.81
@@ -102,7 +102,7 @@ def build_banner_html() -> str:
     r, g, b = _hex_to_rgb(brand.BRAND_RED)
     rgb = f"{r},{g},{b}"
     red = brand.BRAND_RED
-    # CLAWSECCHECK-B-441: the banner is an HTML/badge-only surface (brand.py's Tier 3),
+    # B-441: the banner is an HTML/badge-only surface (brand.py's Tier 3),
     # so it carries the real graphical mark rather than the MASCOT emoji glyph — the
     # same img bytes every time, never hand-pasted/re-encoded here. Two details are
     # copied deliberately from the LOGO_SVG-based version this replaced (and from

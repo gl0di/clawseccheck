@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Dev-only static ReDoS audit over every `re.compile(...)` literal in `clawseccheck/
-checks/` (CLAWSECCHECK-C-214). Stdlib-only (`ast` + `re`), read-only, no network.
+checks/` (C-214). Stdlib-only (`ast` + `re`), read-only, no network.
 
 A security scanner whose own regex engine can be hung by a crafted input is itself an
 attack surface (B-192 was instance #1 of this class, in the AST effect simulator, not
