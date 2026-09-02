@@ -31,7 +31,15 @@ from clawseccheck.collector import (
     limit_hits_for,
 )
 
-# Column list + types copied verbatim from the dist CREATE TABLE so the fixture cannot drift.
+# B-710: this is deliberately the WIDE pre-2026.8.2 shape, carrying BOTH the flat legacy
+# columns (model, agent_dir, workspace_dir, spawn_mode, outcome_json, ...) AND
+# payload_json at once -- the only site anywhere that exercises "legacy columns win over
+# payload_json" (collector.py's _collect_subagent_runs) through a real check. It is
+# registered as LEGACY_COLS in tests/test_state_schema_grounding.py, and THAT
+# registration -- recomputed against the vendor schema every run, not copied once -- is
+# what actually prevents drift. The comment this replaced claimed the column list was
+# "copied verbatim from the dist CREATE TABLE so the fixture cannot drift"; it drifted
+# anyway (B-710), because a claim nothing enforces is not a guard.
 _SUBAGENT_RUNS_DDL = (
     "CREATE TABLE subagent_runs ("
     "run_id TEXT NOT NULL PRIMARY KEY, child_session_key TEXT NOT NULL, "
