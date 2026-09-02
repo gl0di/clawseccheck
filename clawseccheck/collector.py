@@ -721,26 +721,32 @@ class Context:
     exec_approvals_parse_error: bool = False  # present but could not be parsed/read
     # B-240 (B177): OpenClaw's OWN persisted per-plugin ClawHub trust verdict, read from
     # the installed_plugin_index.install_records_json column in the shared state SQLite DB
-    # (~/.openclaw/state/openclaw.sqlite). Each entry: {plugin_id, disposition, scan_status,
+    # (~/.openclaw/state/openclaw.sqlite) -- OR, since OpenClaw's state-consolidation-v13
+    # migration (2026.8.2+), the successor row config_machine_state.value_json where
+    # state_key = 'plugins.installedIndex' (index.installRecords, keyed by pluginId), which
+    # _collect_plugin_trust prefers when present and usable. See that function's docstring
+    # for the dual-shape selection rule. Each entry: {plugin_id, disposition, scan_status,
     # moderation_state, reasons (list[str]), pending, stale} — disposition is one of
     # "clean" | "review-recommended" | "review-required" | "blocked" | None (no verdict
-    # persisted for that install yet).
+    # persisted for that install yet). Same dict shape regardless of which sink it came from.
     plugin_trust_records: list = field(default_factory=list)
-    plugin_trust_found: bool = False        # installed_plugin_index row present and read
+    plugin_trust_found: bool = False        # a usable trust-index row was found and read
     plugin_trust_parse_error: bool = False  # present but could not be read/parsed (locked/corrupt)
-    # B-292 (RT-2): the SIBLING installed_plugin_index.plugins_json column (same row, same
-    # read-only connection _collect_plugin_trust already opens for plugin_trust_records
-    # above). Each entry is one installed plugin's full index record: {plugin_id, origin
-    # ("bundled" | "global" | ... -- OpenClaw's own provenance tag, NOT a trust verdict),
-    # enabled, manifest_path, manifest_hash, root_dir, source, contracts (dict: OpenClaw
-    # plugin-contract name -> list[str] of registered ids under that contract, e.g.
-    # {"agentToolResultMiddleware": [...]})}. This is an INVENTORY OF NAMES, never a
-    # behavior spec -- see checks/_mcp.py::check_plugin_tool_result_middleware for the full
-    # grounding, the mass-false-positive trap (67 of 69 plugins on a stock install are
-    # origin="bundled"), and the two attack narratives this column explicitly CANNOT
-    # support (custom baseURL, command-alias hijack target).
+    # B-292 (RT-2): the SIBLING plugins_json column -- installed_plugin_index.plugins_json,
+    # or (2026.8.2+) config_machine_state['plugins.installedIndex'].index.plugins, read over
+    # the exact same connection and the exact same row/state-key as plugin_trust_records
+    # above; see _collect_plugin_trust's docstring for the selection rule. Each entry is one
+    # installed plugin's full index record: {plugin_id, origin ("bundled" | "global" | ... --
+    # OpenClaw's own provenance tag, NOT a trust verdict), enabled, manifest_path, root_dir,
+    # source, contracts (dict: OpenClaw plugin-contract name -> list[str] of registered ids
+    # under that contract, e.g. {"agentToolResultMiddleware": [...]})}. This is an INVENTORY
+    # OF NAMES, never a behavior spec -- see checks/_mcp.py::check_plugin_tool_result_middleware
+    # for the full grounding, the mass-false-positive trap (67 of 69 plugins on a stock
+    # install are origin="bundled"), and the two attack narratives this column explicitly
+    # CANNOT support (custom baseURL, command-alias hijack target). Same dict shape
+    # regardless of which sink it came from.
     plugin_index_records: list = field(default_factory=list)
-    plugin_index_found: bool = False        # installed_plugin_index.plugins_json present and read
+    plugin_index_found: bool = False        # a usable plugin-index row was found and read
     plugin_index_parse_error: bool = False  # present but could not be read/parsed (locked/corrupt)
     # B-296 (DISK-5 increment 1): rows from the subagent-spawn registry (``subagent_runs`` in
     # the shared state SQLite DB), most-recent first. Each entry is a plain dict:
@@ -4644,24 +4650,160 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
         ctx.exec_approvals_parse_error = True
 
 
+def _plugin_trust_record_from(plugin_id, rec: dict) -> dict:
+    """Build one ``ctx.plugin_trust_records`` entry from a raw install-record dict.
+
+    Shared by BOTH sinks (legacy ``installed_plugin_index.install_records_json`` and the
+    OC-82 ``config_machine_state['plugins.installedIndex']`` successor, fallback leg
+    included) so the output shape cannot drift between them — see
+    ``_collect_plugin_trust``'s docstring for the selection rule.
+    """
+    disposition = rec.get("clawhubTrustDisposition")
+    reasons = rec.get("clawhubTrustReasons")
+    return {
+        "plugin_id": plugin_id if isinstance(plugin_id, str) else str(plugin_id),
+        "disposition": disposition if isinstance(disposition, str) else None,
+        "scan_status": rec.get("clawhubTrustScanStatus")
+        if isinstance(rec.get("clawhubTrustScanStatus"), str) else None,
+        "moderation_state": rec.get("clawhubTrustModerationState")
+        if isinstance(rec.get("clawhubTrustModerationState"), str) else None,
+        "reasons": [r for r in reasons if isinstance(r, str)]
+        if isinstance(reasons, list) else [],
+        "pending": rec.get("clawhubTrustPending")
+        if isinstance(rec.get("clawhubTrustPending"), bool) else None,
+        "stale": rec.get("clawhubTrustStale")
+        if isinstance(rec.get("clawhubTrustStale"), bool) else None,
+    }
+
+
+def _plugin_index_record_from(rec: dict) -> dict:
+    """Build one ``ctx.plugin_index_records`` entry from a raw plugin-index-array dict.
+
+    Shared by BOTH sinks -- see ``_plugin_trust_record_from`` and
+    ``_collect_plugin_trust``'s docstring.
+    """
+    plugin_id = rec.get("pluginId")
+    origin = rec.get("origin")
+    enabled = rec.get("enabled")
+    contributions = rec.get("contributions")
+    contracts_raw = (
+        contributions.get("contracts")
+        if isinstance(contributions, dict) else None
+    )
+    contracts: dict = {}
+    if isinstance(contracts_raw, dict):
+        for key, values in contracts_raw.items():
+            if isinstance(key, str) and isinstance(values, list):
+                contracts[key] = [v for v in values if isinstance(v, str)]
+    return {
+        "plugin_id": plugin_id if isinstance(plugin_id, str) else str(plugin_id),
+        "origin": origin if isinstance(origin, str) else None,
+        "enabled": enabled if isinstance(enabled, bool) else None,
+        "manifest_path": rec.get("manifestPath")
+        if isinstance(rec.get("manifestPath"), str) else None,
+        "root_dir": rec.get("rootDir")
+        if isinstance(rec.get("rootDir"), str) else None,
+        "source": rec.get("source")
+        if isinstance(rec.get("source"), str) else None,
+        "contracts": contracts,
+    }
+
+
 def _collect_plugin_trust(home: Path, ctx: Context) -> None:
-    """B-240 (B177) + B-292 (RT-2): read-only collection of the SINGLE persisted
-    ``installed_plugin_index`` row into TWO independent ``ctx`` fields, one per column:
+    """B-240 (B177) + B-292 (RT-2) + OC-82: read-only collection of the persisted
+    installed-plugin index into TWO independent ``ctx`` fields:
     ``ctx.plugin_trust_records`` (OpenClaw's own ClawHub trust verdict) and
     ``ctx.plugin_index_records`` (the full per-plugin index record — origin/enabled/
-    contracts). Both columns live on the exact same row and are read over the exact same
-    read-only connection (there is no reason to open the state DB twice) but via TWO
-    separate ``SELECT`` statements, one per column — see the independence note below.
+    contracts).
 
-    Grounded against the installed dist: OpenClaw persists a single-row
-    ``installed_plugin_index`` table (primary key ``index_key = 'installed-plugin-index'``)
-    in the shared state SQLite database, resolved to
-    ``~/.openclaw/state/openclaw.sqlite`` (openclaw-state-db-DzSsA9Ji.js:
-    resolveOpenClawStateSqlitePath -> <stateDir>/state/openclaw.sqlite; confirmed against
-    the real file: SQLite 3.x, table present). The table's ``CREATE TABLE`` statement
-    (openclaw-state-db-DzSsA9Ji.js:995-1008) declares BOTH ``install_records_json`` and
-    ``plugins_json`` ``TEXT NOT NULL`` in the one statement that defines this table — there
-    is no schema version where the table exists but either column is absent or NULL.
+    TWO backing shapes exist, probed in this order over the SAME read-only connection:
+
+    A. (OC-82, OpenClaw 2026.8.2+) ``config_machine_state.value_json`` where
+       ``state_key = 'plugins.installedIndex'``. The ``state-consolidation-v13``
+       migration folded the whole ``installed_plugin_index`` table into this one KV row.
+       Grounded against the installed dist: writer
+       ``installed-plugin-index-store-C3LEu6Er.js:63-71`` (``INSERT ... ON CONFLICT DO
+       UPDATE``), key constant ``installed-plugin-index-store-DjwtyXoa.js:10``, reader
+       ``installed-plugin-index-record-reader-DzjNCiwT.js:57-58``, and the vendor's own
+       shipped docs (``docs/reference/database-schemas.md:213`` states the fold plainly;
+       ``:723-741`` is a downgrade script reconstructing the old table by
+       ``json_extract`` from this exact key). Measured on a real machine: ``value_json``
+       decodes to ``{"index": {...}, "revision": <int>}``; ``index.installRecords`` is a
+       dict keyed by pluginId (2 entries observed); ``index.plugins`` is a list (61
+       entries observed); ``index.diagnostics`` is a list.
+    B/C. (legacy) ``installed_plugin_index.install_records_json`` /
+       ``.plugins_json`` where ``index_key = 'installed-plugin-index'`` — the original
+       table, unchanged from before OC-82. See the historical grounding kept below.
+
+    SELECTION RULE — a predicate over the OBSERVED ROW, never ``PRAGMA user_version`` or
+    an OpenClaw version string (the state DB's own migration ladder does not map onto
+    OpenClaw releases 1:1):
+
+    * A returns a row whose parsed JSON is a dict with a NUMERIC ``revision`` -> A is the
+      source for BOTH ``plugin_trust_records`` and ``plugin_index_records``; B/C are never
+      consulted (their ``SELECT``s stay in this source file only as the OTHER-generation
+      branch a mid-migration/pre-OC-82 database satisfies — see
+      ``scripts/state_db_drift_gate.py``). The numeric-``revision`` requirement mirrors
+      the runtime's OWN rejection of a row it did not write
+      (``installed-plugin-index-store-DjwtyXoa.js:118``): a row the runtime itself would
+      discard must not be one this tool trusts either.
+    * A absent (no ``config_machine_state`` table, or no row for that key, or the SELECT
+      itself failed) -> legacy path, byte-for-byte as before OC-82.
+    * Neither present -> both ``*_found`` pairs stay False -> UNKNOWN, exactly as today.
+      This must never regress into a fake PASS (Golden Rule #4).
+    * A PRESENT but its ``value_json`` is not valid JSON, or parses to something other
+      than a dict, or ``revision`` is missing/non-numeric -> ``plugin_trust_found =
+      plugin_trust_parse_error = True`` (and likewise the index pair). Present-and-
+      unreadable is reported as such, NEVER silently treated as absent-and-therefore-
+      falling-back to the legacy columns — a hand-downgraded DB can carry both shapes,
+      and a broken modern row must not be masked by a legacy read that happens to
+      succeed.
+    * A over the byte cap -> disclosed and marked unreadable WITHOUT attempting a
+      partial parse (a mid-JSON slice makes ``json.loads`` raise, so slicing first would
+      just relabel a truncation bug as a parse-error bug).
+
+    EXTRACTION from shape A's ``value_json -> index``:
+
+    * ``plugin_trust_records``: if the key ``installRecords`` is present and a dict,
+      iterate it exactly like legacy ``install_records_json``. ELSE (key absent)
+      assemble it from ``plugins[*].installRecord`` keyed by ``plugins[*].pluginId`` --
+      grounded in what the runtime itself does
+      (``installed-plugin-index-store-DjwtyXoa.js:92`` ->
+      ``installed-plugin-index-BAJAUL58.js:1214-1219``). Inert on the machine this was
+      grounded against (0 of 61 plugin entries carry ``installRecord``), implemented
+      anyway so this reader has no blind spot the runtime does not have.
+    * ``plugin_index_records``: iterate ``index.plugins`` (a LIST) -- a different
+      iteration idiom from ``installRecords`` (a DICT) on purpose; they are not
+      interchangeable shapes.
+
+    Per-record output keeps the EXACT keys/types/coercions the legacy path has always
+    produced (see ``_plugin_trust_record_from`` / ``_plugin_index_record_from``, shared by
+    both sinks) -- deliberately NOT extended with ``manifestHash`` even though shape A
+    carries it; that is a separate change to the record contract.
+
+    Disclosed via ``note_limit(ctx.limit_hits, LIMIT_DOMAIN_PLUGIN, ...)``, in addition to
+    the (unchanged) byte/record caps: (1) shape A is a persisted CACHE the runtime wrote at
+    its last refresh, not a live read of what the gateway currently has loaded; (2) when
+    ``len(installRecords) < len(plugins)``, that the ClawHub trust verdict is only defined
+    over the plugins that actually carry an install record -- on the grounding machine
+    that is 2 of 61, so without this line a "no untrusted plugin found" PASS reads as a
+    claim about all 61 when it is really a claim about 2.
+
+    ``config_machine_state`` is never ``SELECT *``'d: the same table holds live OAuth
+    tokens under ``authProfiles.store``/``auth.sharedStore`` (§8; ``collector.py``'s
+    module docstring), so the query below names ``value_json`` explicitly and binds the
+    state key as a parameter, never string-interpolated.
+
+    --- Historical grounding (legacy B/C path, unchanged) ---
+
+    OpenClaw persists a single-row ``installed_plugin_index`` table (primary key
+    ``index_key = 'installed-plugin-index'``) in the shared state SQLite database,
+    resolved to ``~/.openclaw/state/openclaw.sqlite`` (openclaw-state-db-DzSsA9Ji.js:
+    resolveOpenClawStateSqlitePath -> <stateDir>/state/openclaw.sqlite). The table's
+    ``CREATE TABLE`` statement (openclaw-state-db-DzSsA9Ji.js:995-1008) declares BOTH
+    ``install_records_json`` and ``plugins_json`` ``TEXT NOT NULL`` in the one statement
+    that defines this table — there is no schema version where the table exists but
+    either column is absent or NULL.
 
     ``install_records_json`` (B177) is a JSON object keyed by pluginId
     (installed-plugin-index-store-CWgFGnm0.js: readPersistedInstalledPluginIndexFromSqlite);
@@ -4694,7 +4836,8 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     The same state database also has ``auth_profile_stores``/``auth_profile_state`` tables
     (columns: store_key, store_json/state_json, updated_at) that plausibly hold live MCP
     OAuth credentials — this collector deliberately reads ONLY installed_plugin_index and
-    never touches those tables; openclaw.sqlite itself should stay 0600 regardless.
+    config_machine_state's allowlisted ``plugins.installedIndex`` key, never those tables;
+    openclaw.sqlite itself should stay 0600 regardless.
 
     B-293 corrected a factually WRONG claim that stood here: this comment used to assert
     that "B11 already covers general config/state-file permissions". It does not. B11 reads
@@ -4713,14 +4856,16 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     PASS (Golden Rule #4). ``ctx.plugin_trust_parse_error`` / ``ctx.plugin_index_parse_error``
     are set when the DB/table/row exist but that column could not be read or parsed (locked
     DB, corrupt file, malformed JSON) — also surfaced as UNKNOWN downstream, never a crash.
-    Each column's found/parse-error pair is independent: a corrupt ``plugins_json`` cell,
-    OR the ``plugins_json`` column being entirely absent from the table (an unexpected
-    schema shape, not one any known OpenClaw version ships, but not ruled out for a
-    hand-modified or pre-existing older table), does not blind the ``install_records_json``
-    (B177) reader, and vice versa. This is enforced by issuing the two columns' ``SELECT``s
-    separately (each in its own ``try``/``except sqlite3.Error``) rather than one combined
-    query — a combined query previously meant one column's "no such column" error failed
-    the query as a whole and incorrectly flipped BOTH ``*_found`` flags (B-292/RT-2 round 2).
+    On the legacy path each column's found/parse-error pair is independent: a corrupt
+    ``plugins_json`` cell, OR the ``plugins_json`` column being entirely absent from the
+    table (an unexpected schema shape, not one any known OpenClaw version ships, but not
+    ruled out for a hand-modified or pre-existing older table), does not blind the
+    ``install_records_json`` (B177) reader, and vice versa. This is enforced by issuing the
+    two columns' ``SELECT``s separately (each in its own ``try``/``except sqlite3.Error``)
+    rather than one combined query — a combined query previously meant one column's "no
+    such column" error failed the query as a whole and incorrectly flipped BOTH
+    ``*_found`` flags (B-292/RT-2 round 2). On the modern (shape A) path the two columns
+    necessarily share one fate, since both are extracted from the same JSON blob.
     """
     state_dir = home / "state"
     sqlite_candidates = (
@@ -4762,48 +4907,214 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             ctx.plugin_index_parse_error = True
             return
 
-        # ---- install_records_json (B177): its OWN SELECT, independent of plugins_json.
-        # B-292/RT-2 fix: a merged single-query read let a schema shape missing ONE
-        # column (e.g. "no such column: plugins_json") take down BOTH *_found flags,
-        # contradicting this function's own independence claim below. Two separate
-        # SELECTs mean a column-absence error (or a genuine per-column read failure)
-        # is attributed to that column's ctx fields only -- never its sibling's.
+        # ---- Probe A (OC-82, tried FIRST): the config_machine_state successor row.
+        # Named column only, key bound as a parameter -- never SELECT * (see docstring).
         try:
-            trust_row = conn.execute(
-                "SELECT install_records_json FROM installed_plugin_index "
-                "WHERE index_key = 'installed-plugin-index'"
+            state_row = conn.execute(
+                "SELECT value_json FROM config_machine_state WHERE state_key = ?",
+                ("plugins.installedIndex",),
             ).fetchone()
         except sqlite3.Error as exc:
-            trust_row = None
-            # "no such table" (state DB predates the plugin index entirely) is the same
-            # honest UNKNOWN as "not found" (mirrors _collect_cron's carve-out) -- not a
-            # parse error. Any other error, including "no such column", IS a genuine read
-            # failure for THIS column only.
+            state_row = None
+            # "no such table" (a pre-OC-82 state DB with no config_machine_state table
+            # at all) is the same honest "A absent" as no matching row -- falls through
+            # to the legacy probes below, same carve-out _collect_cron/_collect_cron_run_logs
+            # already use. Any other error is logged for diagnostics but treated the same
+            # way (we never obtained a row to call "present"), since we cannot yet call it
+            # a broken A row -- only a row we HAVE cannot be silently treated as absent.
             if "no such table" not in str(exc).lower():
                 ctx.errors.append(
-                    "could not read installed_plugin_index.install_records_json from "
-                    f"{db_path}: {exc}"
+                    "could not read config_machine_state for plugins.installedIndex "
+                    f"from {db_path}: {exc}"
                 )
-                ctx.plugin_trust_found = True
-                ctx.plugin_trust_parse_error = True
+        state_value_json = state_row[0] if state_row is not None else None
 
-        # ---- plugins_json (B-292 / RT-2): its OWN SELECT, independent of the above ----
-        try:
-            index_row = conn.execute(
-                "SELECT plugins_json FROM installed_plugin_index "
-                "WHERE index_key = 'installed-plugin-index'"
-            ).fetchone()
-        except sqlite3.Error as exc:
+        if state_value_json is None:
+            # ---- Probes B/C (legacy): install_records_json's OWN SELECT, independent of
+            # plugins_json. B-292/RT-2 fix: a merged single-query read let a schema shape
+            # missing ONE column (e.g. "no such column: plugins_json") take down BOTH
+            # *_found flags, contradicting this function's own independence claim below.
+            # Two separate SELECTs mean a column-absence error (or a genuine per-column
+            # read failure) is attributed to that column's ctx fields only -- never its
+            # sibling's.
+            try:
+                trust_row = conn.execute(
+                    "SELECT install_records_json FROM installed_plugin_index "
+                    "WHERE index_key = 'installed-plugin-index'"
+                ).fetchone()
+            except sqlite3.Error as exc:
+                trust_row = None
+                # "no such table" (state DB predates the plugin index entirely) is the
+                # same honest UNKNOWN as "not found" (mirrors _collect_cron's carve-out)
+                # -- not a parse error. Any other error, including "no such column", IS a
+                # genuine read failure for THIS column only.
+                if "no such table" not in str(exc).lower():
+                    ctx.errors.append(
+                        "could not read installed_plugin_index.install_records_json from "
+                        f"{db_path}: {exc}"
+                    )
+                    ctx.plugin_trust_found = True
+                    ctx.plugin_trust_parse_error = True
+
+            # ---- plugins_json (B-292/RT-2): its OWN SELECT, independent of the above ----
+            try:
+                index_row = conn.execute(
+                    "SELECT plugins_json FROM installed_plugin_index "
+                    "WHERE index_key = 'installed-plugin-index'"
+                ).fetchone()
+            except sqlite3.Error as exc:
+                index_row = None
+                if "no such table" not in str(exc).lower():
+                    ctx.errors.append(
+                        f"could not read installed_plugin_index.plugins_json from {db_path}: {exc}"
+                    )
+                    ctx.plugin_index_found = True
+                    ctx.plugin_index_parse_error = True
+        else:
+            trust_row = None
             index_row = None
-            if "no such table" not in str(exc).lower():
-                ctx.errors.append(
-                    f"could not read installed_plugin_index.plugins_json from {db_path}: {exc}"
-                )
-                ctx.plugin_index_found = True
-                ctx.plugin_index_parse_error = True
     finally:
         conn.close()
 
+    # ==================================================================================
+    # A present (a row came back from config_machine_state) -> A wins outright, for BOTH
+    # columns. B/C are never consulted here even if they would also succeed (a
+    # hand-downgraded DB can carry both shapes; the KV row is what the running gateway
+    # writes -- see docstring's selection rule).
+    # ==================================================================================
+    if state_value_json is not None:
+        byte_len = (
+            len(state_value_json) if isinstance(state_value_json, (str, bytes)) else None
+        )
+        if byte_len is not None and byte_len > _MAX_PLUGIN_TRUST_BYTES:
+            # Over the cap -- disclose and mark unreadable WITHOUT attempting a partial
+            # parse: slicing a JSON object blob mid-document makes json.loads raise, so a
+            # slice-then-parse would just relabel this same outcome as a "parse error"
+            # while pretending the cap wasn't the real cause.
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                "config_machine_state['plugins.installedIndex'] in "
+                f"{db_path} exceeded the {_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — "
+                "content was NOT scanned (no partial parse was attempted)",
+            )
+            ctx.plugin_trust_found = True
+            ctx.plugin_trust_parse_error = True
+            ctx.plugin_index_found = True
+            ctx.plugin_index_parse_error = True
+        else:
+            try:
+                state_obj = json.loads(state_value_json)
+            except (TypeError, ValueError) as exc:
+                ctx.errors.append(
+                    "could not parse config_machine_state['plugins.installedIndex'] in "
+                    f"{db_path}: {exc}"
+                )
+                state_obj = None
+
+            revision = state_obj.get("revision") if isinstance(state_obj, dict) else None
+            revision_is_number = (
+                isinstance(revision, (int, float)) and not isinstance(revision, bool)
+            )
+
+            if not isinstance(state_obj, dict) or not revision_is_number:
+                # Present but unusable: the row exists, but either it is not a JSON
+                # object or its "revision" is missing/non-numeric -- the same field the
+                # runtime itself checks before trusting a row
+                # (installed-plugin-index-store-DjwtyXoa.js:118). Reported as
+                # present-and-unreadable, NEVER silently as absent (which would fall
+                # through to the legacy columns above and mask a broken modern row with
+                # a legacy read that happens to still succeed).
+                if isinstance(state_obj, dict):
+                    ctx.errors.append(
+                        "config_machine_state['plugins.installedIndex'] in "
+                        f"{db_path} has a missing or non-numeric 'revision' -- not "
+                        "trusted"
+                    )
+                ctx.plugin_trust_found = True
+                ctx.plugin_trust_parse_error = True
+                ctx.plugin_index_found = True
+                ctx.plugin_index_parse_error = True
+            else:
+                # ---- A is the source for BOTH columns. ----
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                    "plugin trust/index data comes from a persisted CACHE -- "
+                    f"config_machine_state['plugins.installedIndex'] in {db_path}, "
+                    "written at the runtime's last refresh -- this collector reads "
+                    "that row and cannot certify it still matches what the gateway "
+                    "currently has loaded",
+                )
+
+                index_obj = state_obj.get("index")
+                index_obj = index_obj if isinstance(index_obj, dict) else {}
+                plugins_list = index_obj.get("plugins")
+                plugins_list = plugins_list if isinstance(plugins_list, list) else []
+
+                install_records_val = index_obj.get("installRecords")
+                if "installRecords" in index_obj and isinstance(install_records_val, dict):
+                    installs = install_records_val
+                else:
+                    # FALLBACK leg (grounded: installed-plugin-index-store-DjwtyXoa.js:92
+                    # -> installed-plugin-index-BAJAUL58.js:1214-1219) -- assemble the
+                    # trust map from each plugin's own installRecord when the top-level
+                    # installRecords key is absent. This is what the runtime itself does;
+                    # inert on the grounding machine (0 of 61 plugins carry
+                    # installRecord), implemented anyway so this reader has no blind spot
+                    # the runtime does not have.
+                    installs = {}
+                    for p in plugins_list:
+                        if not isinstance(p, dict):
+                            continue
+                        pid = p.get("pluginId")
+                        rec = p.get("installRecord")
+                        if isinstance(pid, str) and isinstance(rec, dict):
+                            installs[pid] = rec
+
+                ctx.plugin_trust_found = True
+                for plugin_id, rec in list(installs.items())[:_MAX_PLUGIN_TRUST_RECORDS]:
+                    if not isinstance(rec, dict):
+                        continue
+                    ctx.plugin_trust_records.append(_plugin_trust_record_from(plugin_id, rec))
+                if len(installs) > _MAX_PLUGIN_TRUST_RECORDS:
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                        "config_machine_state['plugins.installedIndex'] in "
+                        f"{db_path} has {len(installs)} install record(s) — only the "
+                        f"first {_MAX_PLUGIN_TRUST_RECORDS} were scanned",
+                    )
+
+                ctx.plugin_index_found = True
+                for rec in plugins_list[:_MAX_PLUGIN_INDEX_RECORDS]:
+                    if not isinstance(rec, dict):
+                        continue
+                    ctx.plugin_index_records.append(_plugin_index_record_from(rec))
+                if len(plugins_list) > _MAX_PLUGIN_INDEX_RECORDS:
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                        "config_machine_state['plugins.installedIndex'] in "
+                        f"{db_path} has {len(plugins_list)} plugin record(s) — only "
+                        f"the first {_MAX_PLUGIN_INDEX_RECORDS} were scanned",
+                    )
+
+                # THE MOST IMPORTANT disclosure: the ClawHub trust verdict is only
+                # defined over the plugins that actually carry an install record. On the
+                # grounding machine that is 2 of 61 -- without this, a "no untrusted
+                # plugin found" PASS reads as a claim about all 61 plugins when it is
+                # really a claim about 2.
+                if len(installs) < len(plugins_list):
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                        "config_machine_state['plugins.installedIndex'] in "
+                        f"{db_path} lists {len(plugins_list)} plugin(s) but carries "
+                        f"install records for only {len(installs)} — the ClawHub "
+                        "trust verdict is only defined over those; the rest have no "
+                        "verdict on record",
+                    )
+        return
+
+    # ==================================================================================
+    # Legacy path (A absent): behaviour byte-for-byte as before OC-82.
+    # ==================================================================================
     trust_raw = trust_row[0] if trust_row is not None else None
     index_raw = index_row[0] if index_row is not None else None
 
@@ -4836,22 +5147,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             for plugin_id, rec in list(installs.items())[:_MAX_PLUGIN_TRUST_RECORDS]:
                 if not isinstance(rec, dict):
                     continue
-                disposition = rec.get("clawhubTrustDisposition")
-                reasons = rec.get("clawhubTrustReasons")
-                ctx.plugin_trust_records.append({
-                    "plugin_id": plugin_id if isinstance(plugin_id, str) else str(plugin_id),
-                    "disposition": disposition if isinstance(disposition, str) else None,
-                    "scan_status": rec.get("clawhubTrustScanStatus")
-                    if isinstance(rec.get("clawhubTrustScanStatus"), str) else None,
-                    "moderation_state": rec.get("clawhubTrustModerationState")
-                    if isinstance(rec.get("clawhubTrustModerationState"), str) else None,
-                    "reasons": [r for r in reasons if isinstance(r, str)]
-                    if isinstance(reasons, list) else [],
-                    "pending": rec.get("clawhubTrustPending")
-                    if isinstance(rec.get("clawhubTrustPending"), bool) else None,
-                    "stale": rec.get("clawhubTrustStale")
-                    if isinstance(rec.get("clawhubTrustStale"), bool) else None,
-                })
+                ctx.plugin_trust_records.append(_plugin_trust_record_from(plugin_id, rec))
             if len(installs) > _MAX_PLUGIN_TRUST_RECORDS:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
@@ -4888,31 +5184,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             for rec in plugins[:_MAX_PLUGIN_INDEX_RECORDS]:
                 if not isinstance(rec, dict):
                     continue
-                plugin_id = rec.get("pluginId")
-                origin = rec.get("origin")
-                enabled = rec.get("enabled")
-                contributions = rec.get("contributions")
-                contracts_raw = (
-                    contributions.get("contracts")
-                    if isinstance(contributions, dict) else None
-                )
-                contracts: dict = {}
-                if isinstance(contracts_raw, dict):
-                    for key, values in contracts_raw.items():
-                        if isinstance(key, str) and isinstance(values, list):
-                            contracts[key] = [v for v in values if isinstance(v, str)]
-                ctx.plugin_index_records.append({
-                    "plugin_id": plugin_id if isinstance(plugin_id, str) else str(plugin_id),
-                    "origin": origin if isinstance(origin, str) else None,
-                    "enabled": enabled if isinstance(enabled, bool) else None,
-                    "manifest_path": rec.get("manifestPath")
-                    if isinstance(rec.get("manifestPath"), str) else None,
-                    "root_dir": rec.get("rootDir")
-                    if isinstance(rec.get("rootDir"), str) else None,
-                    "source": rec.get("source")
-                    if isinstance(rec.get("source"), str) else None,
-                    "contracts": contracts,
-                })
+                ctx.plugin_index_records.append(_plugin_index_record_from(rec))
             if len(plugins) > _MAX_PLUGIN_INDEX_RECORDS:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
