@@ -14,8 +14,29 @@ guessed. That step currently copies, across **all** of its `cp` lines:
 
 `clawseccheck` and `docs` are directories; we expand them to every `git ls-files`
 entry under those paths so new files added later are automatically covered without
-editing this test. Per the workflow, `__pycache__` is pruned from `clawseccheck/`
-after staging, so it is excluded here too (dev artifact, never actually ships).
+editing this test.
+
+The staging step does not only copy — it also DELETES, and modelling only the `cp`
+lines made this guard's picture of the release wrong in both directions at once
+(B-711). Both prunes are mirrored here and pinned against the workflow text:
+
+    find dist/clawseccheck -name '__pycache__' -type d -prune -exec rm -rf {} +
+    rm -rf dist/clawseccheck/docs/assets
+
+Everything that survives both prunes is scanned — **every file, not a suffix
+allowlist**. The previous rule was ".md anywhere, plus .py under clawseccheck/",
+which shipped three files past the guard: `audit.py` (the shim SKILL.md tells the
+host agent to run, at the repo root and so outside the `clawseccheck/` prefix),
+`LICENSE`, and `pyproject.toml`. It also scanned `docs/assets/src/README.md`, which
+the `rm -rf` above removes and which therefore never ships at all.
+
+A suffix allowlist is the wrong shape for this guard: the hole it opens is invisible
+(a file simply stops being checked, silently, which is the exact failure the
+`references/cli-flags.md` incident already taught once — one file type over). After
+the prunes the published set is 100% text, so scanning all of it costs nothing and
+cannot narrow again by accident. `test_the_published_set_is_all_text` pins the
+premise that makes that safe, so a future binary addition fails loudly here rather
+than crashing the marker scan with a decode error.
 
 Note the parser reads EVERY `cp` line into the staging dir, not just the `cp -r` one.
 It originally matched only `cp -r ... dist/clawseccheck/`, so when a second, plain
@@ -73,6 +94,36 @@ _EXPECTED_STAGED_SOURCES = [
     "audit.py",
     "references/cli-flags.md",
 ]
+
+# The staging step's post-copy DELETES, as literal fragments of the workflow. Pinned
+# by test_workflow_still_prunes_what_we_model: if a prune is removed from the workflow
+# the shipped set grows, and a guard modelling a prune that no longer happens would
+# under-scan exactly the files that just started shipping.
+_PRUNE_COMMANDS = [
+    "find dist/clawseccheck -name '__pycache__' -type d -prune -exec rm -rf {} +",
+    "rm -rf dist/clawseccheck/docs/assets",
+]
+
+# The corresponding path rule, applied to every staged file.
+#
+# `__pycache__` is currently INERT here and is kept deliberately: `_shipped_files()`
+# enumerates through `git ls-files`, which never lists an ignored directory, so removing
+# this entry changes nothing today (measured — the mutation passes the whole module). It
+# stays because it mirrors a real workflow step and because the enumeration's use of
+# `git ls-files` is the only reason it is inert; if that ever became a filesystem walk,
+# this rule becomes live again. Documented rather than deleted, and documented rather than
+# left looking load-bearing.
+_PRUNED_PARTS = ("__pycache__",)
+_PRUNED_PREFIXES = (("docs", "assets"),)
+
+
+def _is_pruned(rel: Path) -> bool:
+    """True when the workflow deletes this file after copying it."""
+    parts = rel.parts
+    if any(part in _PRUNED_PARTS for part in parts):
+        return True
+    return any(parts[: len(prefix)] == prefix for prefix in _PRUNED_PREFIXES)
+
 
 pytestmark = pytest.mark.skipif(
     not WORKFLOW_PATH.exists(),
@@ -146,8 +197,19 @@ def _shipped_files() -> list[Path]:
 
     Directories (`clawseccheck`, `docs`) are expanded via `git ls-files` (matching
     the pattern already used in tests/test_publish_workflow.py for reading repo
-    state without a subprocess-heavy or YAML-parsing dependency). `__pycache__` is
-    excluded to mirror the workflow's post-copy prune step.
+    state without a subprocess-heavy or YAML-parsing dependency).
+
+    **`git ls-files` is load-bearing, not a convenience.** It is what keeps ignored dev
+    artefacts out of this enumeration without a second rule -- notably `.ruff_cache/`,
+    which sits inside `clawseccheck/` and whose cache blob carries an absolute developer
+    path from an unrelated project. It cannot reach a release today: it is gitignored,
+    zero files are tracked, and CI publishes from a fresh checkout. Replace this with a
+    filesystem walk (`rglob`) and that stops being true for anyone who publishes from a
+    working tree -- the guard would enumerate the cache, the marker scan would hit a
+    binary, and the failure would look like a bug in this test rather than a leak.
+
+    Both of the staging step's post-copy prunes are applied, so this is the set the
+    release actually contains — not the set the `cp` lines name.
     """
     entries = _staged_source_paths()
     files: list[Path] = []
@@ -155,31 +217,29 @@ def _shipped_files() -> list[Path]:
         abs_entry = REPO_ROOT / entry
         if abs_entry.is_dir():
             for rel in _git_ls_files(entry):
-                if "__pycache__" in Path(rel).parts:
+                if _is_pruned(Path(rel)):
                     continue
                 files.append(REPO_ROOT / rel)
         else:
             assert abs_entry.is_file(), (
                 f"Workflow stages {entry!r} but it does not exist at {abs_entry}"
             )
+            if _is_pruned(Path(entry)):
+                continue
             files.append(abs_entry)
     return files
 
 
 def _shipped_md_and_py_files() -> list[Path]:
-    """The slice this test actually scans: shipped .md files (any of them) plus
-    shipped .py files under clawseccheck/ (task spec point 2)."""
-    scanned = []
-    for f in _shipped_files():
-        if f.suffix == ".md":
-            scanned.append(f)
-        elif f.suffix == ".py":
-            try:
-                f.relative_to(REPO_ROOT / "clawseccheck")
-            except ValueError:
-                continue
-            scanned.append(f)
-    return scanned
+    """Every file the release actually contains — the scan set.
+
+    Kept under its historical name so nothing that refers to it has to move; the
+    name is now narrower than the thing, which is the safe direction. It used to
+    return a suffix-filtered slice, and the three files that slice dropped
+    (`audit.py`, `LICENSE`, `pyproject.toml`) shipped unscanned. See the module
+    docstring for why an allowlist is the wrong shape here.
+    """
+    return _shipped_files()
 
 
 # --- the actual gate --------------------------------------------------------
@@ -193,25 +253,94 @@ def test_workflow_stages_expected_source_paths() -> None:
     assert "SKILL.md" in entries
 
 
-def test_every_staged_file_is_inside_the_marker_scan_set() -> None:
-    """Guard the guard's SCOPE: every shipped .md must actually get scanned.
+def test_the_scan_set_is_not_filtered_down_from_what_ships() -> None:
+    """Guard the guard's SCOPE: the scan set must BE the shipped set, not a slice of it.
 
-    The failure this pins down is a coverage hole, not a leak. A second `cp` line added
-    `references/cli-flags.md` to the published bundle, but the parser only understood the
-    `cp -r` line, so that file shipped without ever being checked for internal markers —
-    while this module's docstring promised it would "drift loudly rather than silently".
-    A guard that quietly stops covering new files is worse than no guard.
+    This replaces an earlier "every staged .md is scanned" test. That test was written after
+    a second `cp` line added `references/cli-flags.md` to the bundle and the parser only
+    understood `cp -r`, so a published file fell outside the scan — and it asked about `.md`
+    ONLY, which is why it could not see the identical hole one file type over: `audit.py` is
+    staged by its own name, ships in every release, and sat unscanned for exactly as long.
+
+    Once the suffix allowlist was dropped that test became tautological — it passed with the
+    coverage question narrowed straight back to `.md` (measured). A test that cannot fail is
+    worse than no test, so the property is now asserted where it still has teeth: the scan set
+    is every shipped file, and re-introducing ANY filter fails here and in
+    `test_the_scan_covers_the_files_a_suffix_allowlist_dropped` below.
     """
     scanned = {str(p.relative_to(REPO_ROOT)) for p in _shipped_md_and_py_files()}
-    missing = []
+    shipped = {str(p.relative_to(REPO_ROOT)) for p in _shipped_files()}
+    assert scanned == shipped, (
+        "These files ship but are not scanned for internal markers: "
+        f"{sorted(shipped - scanned)!r}. The scan set must not be filtered."
+    )
     for entry in _staged_source_paths():
         path = REPO_ROOT / entry
-        if path.is_file() and path.suffix == ".md" and entry not in scanned:
-            missing.append(entry)
+        if path.is_file() and not _is_pruned(Path(entry)):
+            assert entry in scanned, f"{entry} is staged by name but never scanned"
 
-    assert not missing, (
-        f"These files are published but never scanned for internal markers: {missing!r}.\n"
-        "Every shipped .md must be inside _shipped_md_and_py_files()."
+
+def test_workflow_still_prunes_what_we_model() -> None:
+    """Anchor the prunes on the producer, not on our own belief about them.
+
+    We EXCLUDE `docs/assets/**` and `__pycache__` from the scan because the workflow
+    deletes them after copying. If either `rm` is dropped from the workflow those files
+    start shipping again, and a guard still modelling the prune would skip precisely the
+    newly-shipped set — the failure would be silent, in the under-scanning direction.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    for command in _PRUNE_COMMANDS:
+        assert command in text, (
+            f"The publish workflow no longer runs {command!r}, so those files now ship. "
+            "Remove the matching rule from _PRUNED_PARTS/_PRUNED_PREFIXES so they get "
+            "scanned, rather than leaving this guard modelling a deletion that stopped "
+            "happening."
+        )
+
+
+def test_the_published_set_is_all_text() -> None:
+    """The premise that lets the scan drop its suffix allowlist.
+
+    Scanning every shipped file is only safe while every shipped file is decodable text.
+    Today it is — after the prunes the release is .py/.md plus LICENSE and pyproject.toml,
+    and the images live entirely under the pruned `docs/assets`. If a binary is ever added
+    to the published set this fails here, with a clear instruction, instead of surfacing
+    as an unexplained decode error inside the marker scan.
+    """
+    binaries = []
+    for path in _shipped_md_and_py_files():
+        try:
+            path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            binaries.append(str(path.relative_to(REPO_ROOT)))
+    assert not binaries, (
+        f"These shipped files are not text: {binaries!r}. The marker scan reads every "
+        "shipped file; give it an explicit binary skip-list before adding these."
+    )
+
+
+def test_the_scan_covers_the_files_a_suffix_allowlist_dropped() -> None:
+    """The regression, named. These three ship in every release and were never scanned:
+    `audit.py` is the shim SKILL.md tells the host agent to run — the most executable
+    thing in the bundle — and it sits at the repo root, outside the `clawseccheck/`
+    prefix the old rule required. Asserted by name so a future narrowing has to delete
+    this test rather than quietly satisfy it.
+    """
+    scanned = {str(p.relative_to(REPO_ROOT)) for p in _shipped_md_and_py_files()}
+    for name in ("audit.py", "LICENSE", "pyproject.toml"):
+        assert name in scanned, f"{name} ships but is not in the marker scan set"
+
+
+def test_a_file_the_workflow_deletes_is_not_treated_as_shipped() -> None:
+    """The other direction, and the reason this is not just "scan more". `docs/assets`
+    is copied and then removed, so anything under it never reaches a release — including
+    a README that the old scan set did include. Over-scanning is harmless for markers but
+    the enumeration is also this module's stated model of what ships, and a model that is
+    wrong in the generous direction is what makes the next narrowing look reasonable.
+    """
+    scanned = {str(p.relative_to(REPO_ROOT)) for p in _shipped_md_and_py_files()}
+    assert not [s for s in scanned if s.startswith("docs/assets/")], (
+        "docs/assets is deleted by the staging step; nothing under it ships"
     )
 
 
