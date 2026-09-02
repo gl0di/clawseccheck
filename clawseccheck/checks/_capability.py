@@ -10,6 +10,7 @@ import shutil
 from pathlib import Path
 from typing import NamedTuple
 from .. import attest as _attest
+from .. import toolpolicy as _toolpolicy
 from .. import trajectory as _trajectory
 from ..catalog import (
     BY_ID,
@@ -28,12 +29,13 @@ from ..collector import (
 
 from . import _shared
 from ._shared import (
-    _dir_replaceable_by_others,
-    _B55_FS_WRITE_TOOLS,
+    _fs_reads_are_confined,
     _b323_contains_env_var_reference,
+    _B55_FS_WRITE_TOOLS,
     _canon_tool,
     _config_unreadable,
     _custom,
+    _dir_replaceable_by_others,
     _external_input_channels,
     _finding,
     _has_approval_gate,
@@ -1263,10 +1265,41 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # B-376 C-135 fix: B68 (same file) treats either field as sufficient fs confinement
     # for this identical tool family (its own composite predicate, quoted there).
     # Confined-but-reachable writes are a real but lesser risk than "arbitrary".
-    fs_confined = (
-        dig(cfg, "tools.fs.workspaceOnly") is True
-        or dig(cfg, "agents.defaults.sandbox.mode") == "all"
-    )
+    #
+    # B-670: both disjuncts USED to be read at global scope only, and both are per-agent
+    # overridable — `resolveSandboxConfigForAgent` resolves `sandbox.mode` per FIELD with
+    # `??`, and `resolveToolFsConfig` does the same for `tools.fs.workspaceOnly`. So a
+    # global `sandbox.mode: "all"` beside a per-agent `sandbox.mode: "off"` fabricated
+    # confinement for an agent that has none. That matters because `fs_confined` DOWNGRADES
+    # a hard FAIL to WARN twenty lines below: the fabrication suppressed a real finding.
+    #
+    # The honest reading is per SCOPE -- one unconfined scope leaves the capability exposed
+    # -- and unioning the other way (any scope confined => confined) would make the
+    # suppression worse rather than better. Two attempts were retracted getting here:
+    #
+    # 1. Gating on `confined_scopes` alone made a hard FAIL out of an unconfined agent that
+    #    cannot write at all: one whose own `tools.deny` removes the write family, or which
+    #    runs `tools.profile: "messaging"` -- an ordinary notifier-bot layout beside a
+    #    sandboxed coding agent. No path from untrusted input to an arbitrary write existed.
+    # 2. Answering "can this scope write" inside `toolpolicy` was UNSOUND, and the full suite
+    #    proved it while a scoped run stayed green: that module's profile table and alias
+    #    table are both read-specific, so `fixtures/bad_b55_fs_write_broad` -- whose
+    #    `tools.allow: ["fs_write"]` uses a legacy alias -- resolved to "cannot write" and a
+    #    designed-bad config was DOWNGRADED to WARN. Trading a constructed false FAIL for a
+    #    real suppression is the worse deal, and `confined_scopes` had already documented the
+    #    same trap one tool over (`fs_read`).
+    #
+    # What survives asks only what can be answered soundly here: this check's own vetted
+    # resolver already established that a write tool is granted GLOBALLY, so the open question
+    # is which scopes inherit that grant unchanged AND are unconfined. A scope with no `tools`
+    # key of its own inherits it by the runtime's nullish-coalesce; a scope that sets `tools`
+    # may narrow the write family, and we decline to guess. Conservative in the quiet
+    # direction, but strictly narrower than the global read it replaces -- which missed every
+    # per-agent escape -- and it adds no false positive. The residual gap is F-186's.
+    fs_confined = _fs_reads_are_confined(cfg)
+    # Which unconfined scopes demonstrably inherit this global grant. Consumed at the FAIL
+    # escalation below, NOT here: an empty list must never be read as confinement (see there).
+    inheriting = _toolpolicy.unconfined_scopes_inheriting_global_tools(cfg)
     # DELIBERATE: _open_channels (open-only), NOT _external_input_channels. This feeds the
     # FAIL gate below; a hard FAIL ("arbitrary writes reachable by untrusted senders")
     # requires proven-broad reach — a wildcard sender or a truly-open/public channel. An
@@ -1364,8 +1397,9 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
         # exec-only gate doesn't scope write tools). See test_b315_unscored_never_fails.
         if fs_confined:
             ev.append(
-                "filesystem writes are confined to the workspace (tools.fs.workspaceOnly "
-                "or agents.defaults.sandbox.mode='all') -- not arbitrary write reach"
+                "filesystem writes are confined to the workspace in EVERY declared scope "
+                "(tools.fs.workspaceOnly or a fully-sandboxed session, resolved per agent) "
+                "-- not arbitrary write reach"
             )
             return _finding(
                 "B55",
@@ -1422,6 +1456,48 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 f"confirmation of real intent.",
                 "Set tools.allow explicitly (or a tools.profile) so the intended grant "
                 "is unambiguous, and lock the open channel(s) to 'allowlist'.",
+                evidence=ev,
+            )
+        # The unconfined scopes all narrow their OWN tools, so nothing here demonstrably
+        # carries the global write grant out of the workspace. Deliberately NOT expressed by
+        # making `fs_confined` true: a scope that sets `tools` is not a confined scope, and
+        # saying so would fabricate the confinement B-670 exists to stop fabricating -- an
+        # earlier attempt did exactly that, and claimed full confinement for a config where
+        # NOTHING was confined, because its only agent happened to set `tools`.
+        #
+        # This is the same argument the widening branch above already makes and this check
+        # already accepts: the per-agent allow/deny, channel/group, toolsBySender and
+        # byProvider layers can remove a granted tool for one agent, and none of them is
+        # readable here. Resolving it properly needs a vetted write-grant model (F-186);
+        # until then the honest answer is WARN with the reason on screen, not a FAIL whose
+        # premise this check cannot establish.
+        # The sentence below describes the NARROWING TEST, not `widenings`. An earlier version
+        # claimed "none of them widens toward the write family" while asserting it from
+        # `_agent_profile_widenings`, which is profile-only and cannot see an allow/alsoAllow
+        # widening -- so for `tools: {"allow": ["write"]}` the finding printed a claim the code
+        # had never checked, about an override that names the write tool outright.
+        #
+        # `not widenings` is load-bearing, and the over-correction it repairs was caught by
+        # test_b409_widening_still_applies_when_global_allow_is_a_wildcard: a scope whose own
+        # `tools` is `{"profile": "coding"}` has not NARROWED anything -- that profile is what
+        # GRANTS the write family. "Sets its own tools" is too coarse a proxy for "might have
+        # taken the grant away"; a detected widening is direct evidence of the opposite.
+        if inheriting is not None and not inheriting and not widenings:
+            ev.append(
+                "every unconfined scope narrows its own tool policy in a way that could "
+                "remove write/edit/apply_patch (a tools.profile, a tools.allow naming no "
+                "write tool, a tools.deny naming one, or a byProvider/toolsBySender layer "
+                "this static check cannot resolve), so none is shown to inherit this global "
+                "grant"
+            )
+            return _finding(
+                "B55",
+                WARN,
+                f"Filesystem-write capability ({label}) is reachable by untrusted senders "
+                f"and not confined to the workspace, but every unconfined scope narrows its "
+                f"own tool policy, so broad write reach is not established.",
+                "Confirm the per-agent tools.* narrowing really removes write/edit/"
+                "apply_patch for those agents, and lock the open channel(s) to 'allowlist'.",
                 evidence=ev,
             )
         return _finding(

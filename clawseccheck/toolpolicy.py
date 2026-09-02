@@ -241,12 +241,22 @@ def _agent_entries(cfg: dict) -> list:
 
 
 def _scope_reaches_outside(global_tools, agent_tools) -> bool:
-    """One resolved scope's answer.
+    """One resolved scope's answer, for the file-READ tool.
 
     Mirrors ``resolveEffectiveToolFsRootExpansionAllowed``: confinement first (the agent's
     own ``tools.fs.workspaceOnly`` if it set one, otherwise the global field), then the
     profile — taken from the AGENT when it names one, else the global — stacked with both
     the global and the agent allow/deny policies.
+
+    READ-ONLY BY CONSTRUCTION, and it must stay that way. B-670 briefly parametrised this by
+    tool name so the same stack could answer the WRITE question. It cannot: two of the three
+    layers below are read-specific. ``_PROFILES_GRANTING_READ`` answers only "does this
+    profile grant read", so every profile returned the read verdict whatever tool was asked
+    about; and ``_TOOL_NAME_ALIASES`` carries the aliases that matter for read, so
+    ``tools.allow: ["fs_write"]`` -- which a real fixture uses -- resolved to "write not
+    granted" and turned a designed-bad config into a WARN. ``confined_scopes`` documents this
+    exact trap one tool over (``fs_read``); the write family needs its own vetted model, not
+    a parameter here. See F-186.
     """
     fs_scope = agent_tools if _has_fs_flag(agent_tools) else global_tools
     if _workspace_only_of(fs_scope):
@@ -327,6 +337,112 @@ def _sandbox_confines(cfg: dict, agent_id: str, entry) -> bool:
         return True
     # Under "non-main" the main agent runs unsandboxed, so only the others are confined.
     return mode == _SANDBOX_NON_MAIN and agent_id != _default_agent_id(cfg)
+
+
+# Tokens whose presence in an allow/deny list touches the file-write family. `*` and the
+# fs group are included because they move the whole family at once. The legacy spellings come
+# from B55's own `_FS_WRITE_TOOL_HINTS`, which exists because real fixtures use them --
+# `fixtures/bad_b55_fs_write_broad` grants `fs_write`, and missing that alias is what made an
+# earlier version of this module downgrade a designed-bad config (see F-186).
+_WRITE_FAMILY_TOKENS = frozenset({
+    "write", "edit", "apply_patch", "fs_write", "write_file", "writefile",
+    "*", _GROUP_FS,
+})
+
+# Keys that can only ADD, never remove. `alsoAllow` is unioned into the allow side
+# (`pickSandboxToolPolicy` stamps IMPLICIT_ALLOW_ALL_FROM_ALSO_ALLOW for a non-empty one), and
+# `fs` carries confinement rather than tool grants -- `confined_scopes` already reads it.
+_NON_NARROWING_TOOL_KEYS = ("alsoAllow", "fs")
+
+# Layers this module does not resolve and that CAN restrict. Their presence is treated as
+# possible narrowing, which is the quiet direction: it can cost a finding, never invent one.
+_OPAQUE_NARROWING_KEYS = ("byProvider", "toolsBySender")
+
+
+def _tools_may_remove_write(tools) -> bool:
+    """Could this scope's own ``tools`` block have taken the write family away?
+
+    NOT a write-grant resolver and deliberately not one -- it never claims a scope CAN write,
+    only whether the block plausibly REMOVES the family. Answering the positive question needs
+    the vetted model F-186 tracks; two attempts to fake it here were retracted.
+
+    The rule replaces a much coarser one -- "the entry has a ``tools`` key at all" -- that an
+    adversarial pass broke seven ways by executing the vendor's own
+    ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies``: for ``tools: {}``,
+    ``{"deny": ["exec"]}``, ``{"alsoAllow": [...]}``, ``{"allow": ["write"]}`` and
+    ``{"fs": {"workspaceOnly": false}}`` the vendor answered ``writeAllowed=true`` while the
+    caller downgraded to WARN. The worst of those is the last: a per-agent
+    ``tools.fs.workspaceOnly: false`` IS one of the two escapes B-670 exists to catch, and it
+    can only be written inside a ``tools`` key -- so the coarse rule closed the sandbox half of
+    that task and silently left the workspaceOnly half open.
+    """
+    if not isinstance(tools, dict):
+        return False
+    if any(key in tools for key in _OPAQUE_NARROWING_KEYS):
+        return True
+    # A profile replaces the tool set wholesale, so it can remove the family whatever else
+    # is set. `tools.profile: "coding"` reaches here too — that one GRANTS write, and the
+    # caller's separate widening check is what keeps it a FAIL.
+    if isinstance(tools.get("profile"), str):
+        return True
+    allow = tools.get("allow")
+    if isinstance(allow, list):
+        return not any(_normalize(a) in _WRITE_FAMILY_TOKENS for a in allow)
+    deny = tools.get("deny")
+    if isinstance(deny, list):
+        return any(_normalize(d) in _WRITE_FAMILY_TOKENS for d in deny)
+    return False
+
+
+def unconfined_scopes_inheriting_global_tools(cfg: dict):
+    """Scopes that are UNCONFINED and carry no tool override of their own. ``None`` with no config.
+
+    The sound half of B-670. Its caller (B55) already knows, from its own vetted resolver,
+    that a write tool is granted GLOBALLY; what it could not see was that the confinement it
+    checked was read from `agents.defaults` and `tools.fs` globally, so a per-agent escape
+    read as safe. `confined_scopes` supplies the missing per-scope confinement answer.
+
+    Two fixes were tried and retracted before this one, and both retractions are the reason
+    it is shaped this way:
+
+    * Gating on `confined_scopes` alone made a hard FAIL out of an unconfined agent that
+      cannot write at all -- one whose own `tools.deny` removes the write family, or which
+      runs `tools.profile: "messaging"`, an ordinary notifier-bot layout.
+    * Answering "can this scope write" here, by parametrising `_scope_reaches_outside`, was
+      unsound: that predicate's profile table and alias table are both read-specific, and it
+      immediately downgraded `fixtures/bad_b55_fs_write_broad` -- a designed-bad config -- to
+      WARN, because its `tools.allow: ["fs_write"]` uses a legacy alias the read stack does
+      not resolve. Trading a constructed false FAIL for a real suppression is the worse deal.
+
+    So this asks a question it CAN answer soundly: does the scope inherit the global tool
+    grant unchanged? A scope with no `tools` key of its own does, by the runtime's own
+    nullish-coalesce; a scope that sets `tools` may narrow the write family, and we decline
+    to guess which. That is deliberately conservative -- an escaping agent whose `tools`
+    override does NOT remove write is a false negative here -- but it is strictly narrower
+    than the behaviour it replaces, which missed EVERY per-agent escape, and it adds no
+    false positive. The remaining gap is F-186's, and it wants a vetted write model rather
+    than another reading of this one.
+
+    Returns NAMES, so the caller can say which scope escaped.
+    """
+    if not isinstance(cfg, dict) or not cfg:
+        return None
+    confined = confined_scopes(cfg)
+    if confined is None:
+        return None
+    main = _default_agent_id(cfg)
+    entries = _agent_entries(cfg)
+    by_id = dict(entries)
+    scopes = [(main, by_id.get(main) or {})]
+    scopes += [(name, entry) for name, entry in entries if name != main]
+    out = []
+    for is_confined, (name, entry) in zip(confined, scopes):
+        if is_confined:
+            continue
+        if _tools_may_remove_write(entry.get("tools") if isinstance(entry, dict) else None):
+            continue
+        out.append(name)
+    return out
 
 
 def confined_scopes(cfg: dict):
