@@ -10,13 +10,25 @@ Two config layers decide it, and BOTH matter — reading only one is wrong by a 
 five on the local corpus (measured 2026-08-27: the fs layer alone says 483/581 homes are
 exposed; both layers together say 98):
 
-  1. ``tools.fs.workspaceOnly`` — confinement. The runtime normalizes it with
-     ``createToolFsPolicy``: ``{ workspaceOnly: params.workspaceOnly === true }``, so the
-     EFFECTIVE default when the field is absent is **false** — file tools are NOT confined
-     unless the user writes ``true``. Do not be misled by ``options.workspaceOnly !== false``
-     in ``agent-tools-*.js``: that reads an already-normalized strict boolean and never
-     sees ``undefined``. OpenClaw's own audit agrees (``fsWorkspaceOnly === true ? ... : "false"``),
-     as does its schema description ("default: false").
+  1. ``tools.fs.workspaceOnly`` — confinement. The runtime normalizes it with a strict
+     ``=== true``, so the EFFECTIVE default when the field is absent is **false** — file
+     tools are NOT confined unless the user writes ``true``. Do not be misled by
+     ``options.workspaceOnly !== false`` elsewhere: that reads an already-normalized strict
+     boolean and never sees ``undefined``. OpenClaw's own audit agrees
+     (``fsWorkspaceOnly === true ? ... : "false"``), as does its schema description
+     ("default: false").
+
+     Grounded on **openclaw@2026.8.2** (2026-09-02), ``resolveEffectiveToolFsWorkspaceOnly``:
+     ``resolveToolFsConfig(params).workspaceOnly === true``, where ``resolveToolFsConfig``
+     is the per-agent-then-global ``??`` chain. Cite those two SYMBOLS, not a file: bundle
+     names are content-hashed and 94% of them rotate per release.
+
+     This paragraph used to cite ``createToolFsPolicy``
+     (``{ workspaceOnly: params.workspaceOnly === true }``), which **no longer exists** —
+     2026.8.x inlined that normalization into the read site. Recorded because it is the
+     instructive case: the CLAIM survived the rename unchanged and only the citation died,
+     and from a dead citation alone a reader cannot tell that apart from the behaviour
+     having changed. Re-verify by executing the resolver, not by grepping the old name.
   2. the tool allow/deny policy — whether ``read`` is granted at all. An absent
      ``tools.profile`` pushes NO policy (``if (profilePolicy) policies.push(...)``), i.e.
      the permissive end again; ``minimal``/``messaging`` do not grant ``read``, ``coding``

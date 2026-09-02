@@ -191,6 +191,51 @@ In practice that means:
 - A run names the object it ran against. If a file could have changed underneath — an edit
   mid-run, a module cached at import — "green" has no subject.
 
+## Citing the OpenClaw dist: name the symbol, not the file
+
+Grounding a check means being able to point at what the runtime actually does. A citation that
+nobody can resolve provides the appearance of that without the substance.
+
+**Cite the SYMBOL. Treat `file:line` as a convenience, and stamp the version you read it on.**
+
+The reason is mechanical, not stylistic: OpenClaw's bundle filenames are content-hashed, so a
+release renames essentially all of them whether or not anything moved. Measured across the
+2026.7.1-2 → 2026.8.2 transition, of 206 distinct bundle names cited in this repo **194 no longer
+existed** — 94% — in a window where most of the behaviour they described had not changed at all.
+Over the same window, of 55 cited vendor symbols **47 still resolved**.
+
+So a `file:line` citation is written once and decays on the next release regardless of whether it
+was ever correct, while a symbol name stays greppable on any version.
+
+The damage is not untidiness. A dead citation collapses two very different situations into one
+appearance:
+
+- the bundle was renamed and the claim still holds, and
+- the behaviour was removed and the claim is now false.
+
+A reader cannot tell those apart without redoing the grounding, which is the work the citation
+existed to save. The eight symbols that genuinely vanished in that transition are exactly the
+cases a stale filename would have hidden behind "the file must have moved".
+
+In practice:
+
+- Name the function, constant or type: ``resolveEffectiveToolFsWorkspaceOnly``, not
+  `tool-fs-policy-CyOPYI8M.js:14`. Add the filename after it if it helps a reader navigate.
+- Stamp the version: *"Grounded on openclaw@2026.8.2 (2026-09-02)"*. That single clause converts
+  the citation into a claim that stays true as history instead of one that quietly rots. A dated
+  citation is never wrong — it says what was read, and when.
+- For a config field, cite the **path** (`gateway.controlUi.embedSandbox`) and check it against
+  the schema path list rather than a bundle line. Paths survive releases; line numbers do not.
+- When you find a cited symbol gone, that is a finding, not a chore. Re-establish what the runtime
+  does now before touching the check — a check written against a vanished predicate is the
+  phantom-path class Golden Rule #4 exists to stop.
+- Matching a leaf name against a new path list yields a **candidate**, never a proven rename. A
+  same-named leaf under a different parent is a different setting.
+
+`scripts/dist_citation_gate.py` enforces the floor: it fails on a NEW unqualified citation of a
+bundle the installed dist does not have. It cannot see a citation whose file still exists but
+whose line moved, so it is a backstop for the convention, not a substitute for it.
+
 ## Notes
 
 - Output is **English-only** (`i18n.py`/`--lang` were removed) — this convention
