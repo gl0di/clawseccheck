@@ -155,6 +155,43 @@ def test_foreign_traceschema_marks_incomplete_not_a_clean_negative(tmp_path):
     assert "INCIDENT SIGNAL" not in report
 
 
+def test_token_free_foreign_tracer_marks_incomplete_not_a_clean_negative(tmp_path):
+    """B-574 (widened): the task's actual headline scenario — a user with several agent
+    tools points --analyze-trajectory at another tool's `.jsonl` whose records NEVER
+    spell the `"tool.call"` substring at all (e.g. a Codex-style `{"timestamp","type",
+    "payload"}` shape). The original fix above only caught a foreign tracer that
+    coincidentally used OpenClaw's own event-type token; every line of a genuinely
+    different shape like this one skips the `'"tool.call"' not in line` pre-filter and
+    used to reach neither `__unreadable__` branch, producing the same clean
+    `tool_calls == 0` as an honestly quiet session. Reproduced against a real foreign
+    tracer sitting on disk before this fix landed."""
+    home = tmp_path
+    sess = home / "agents" / "main" / "sessions"
+    sess.mkdir(parents=True)
+    lines = [
+        json.dumps({"timestamp": "2026-06-27T08:53:56.278Z", "type": "response_item",
+                    "payload": {"type": "function_call", "name": "shell",
+                                "arguments": "{\"command\":[\"grep\",\"-n\",\"x\"]}"}}),
+        json.dumps({"timestamp": "2026-06-27T08:53:57.001Z", "type": "response_item",
+                    "payload": {"type": "function_call_output", "call_id": "call_1",
+                                "output": "no matches"}}),
+    ]
+    (sess / "s.trajectory.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    c = Context(home=home)
+    c.config = {}
+    c.bootstrap = {}
+    c.installed_skills = {"s": "read fake_secrets/db_token.txt"}
+    r = analyze(c)
+    assert r["present"] is True
+    assert r["unreadable"] is True, r
+    assert r["tool_calls"] == 0 and r["hits"] == [], r
+
+    report = render_trajectory_analysis(c, ledger_home=str(tmp_path / "no_ledger.json"))
+    assert "INCOMPLETE" in report
+    assert "not observed acted-on" in report
+    assert "INCIDENT SIGNAL" not in report
+
+
 def test_malformed_json_line_marks_incomplete(tmp_path):
     """B-574: a line that looks like a tool.call but fails to parse at all (e.g.
     truncated mid-write by a crash) is an unreadable RECORD, not an absent one."""

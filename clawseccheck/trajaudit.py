@@ -413,9 +413,23 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
     recognised event type, or a truly empty file) never reaches this branch, so this
     sentinel cannot fire on an honest zero. See `_analyze_scan`'s `unreadable` meta and
     `render_trajectory_analysis`'s use of it.
+
+    B-574 (widened): the pre-filter above only catches a foreign tracer that happens to
+    spell OpenClaw's own `"tool.call"` event token — a tracer whose records never do
+    (e.g. a `{"type","payload","timestamp"}` shape) drops every line before either
+    `__unreadable__` branch above is ever reached, and used to render a clean "no tool
+    calls" zero. So this also tracks, across the whole file and independent of that
+    pre-filter: `saw_any` (any non-blank line was present) and `saw_ours` (the literal
+    `_TRACE_SCHEMA` occurred as a SUBSTRING of some line — cheap, no json.loads, and
+    matches the `-pointer` variant too). If the file had content but NONE of it ever
+    carried our schema token, that is a failed read of the whole file, not an honest
+    zero — see the post-loop check below. Skipped when the loop ended via the
+    `__truncated__` break: that file already discloses INCOMPLETE for its own reason.
     """
     try:
         read = 0
+        saw_any = False
+        saw_ours = False
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 read += len(line)
@@ -425,6 +439,10 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
                     # this offset must not let a clean result read as complete.
                     yield ("__truncated__", "")
                     break
+                if line.strip():
+                    saw_any = True
+                if _TRACE_SCHEMA in line:
+                    saw_ours = True
                 if '"tool.call"' not in line:
                     continue
                 try:
@@ -457,6 +475,14 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
                 args = data.get("arguments")
                 blob = json.dumps(args, ensure_ascii=False) if args is not None else ""
                 yield (name.strip(), blob)
+            else:
+                # B-574 (widened): loop ran to completion (no `__truncated__` break).
+                # Content was present but none of it ever carried our schema token —
+                # e.g. a foreign tracer whose records never spell `"tool.call"` at all,
+                # so no per-record branch above ever saw them. A failed read of the
+                # whole file, not evidence it held nothing.
+                if saw_any and not saw_ours:
+                    yield ("__unreadable__", "")
     except OSError:
         return
 
