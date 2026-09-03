@@ -1111,6 +1111,32 @@ def build_bundle_template() -> dict:
 # `degraded_capped` genuinely has no reason attribute to surface -- scoring defines none --
 # and its count already rides the envelope as `degradedChecks`, so that None is correct
 # rather than an omission; the same is true of nothing else in this table.
+#
+# B-693 (follow-up): every OTHER free-text field this module puts in front of a judge is
+# length-capped at the boundary -- `_MAX_FIELD_PATH_LEN` (above), `_MAX_HOST_LEN`,
+# `_MAX_TARGET_LEN` -- but a cap `reason` crossed `_emit_json` verbatim: control chars,
+# ANSI/bidi and secrets get stripped there, length does not, so a 5,000-char
+# `runtime_cap_reason` reached the packet as a 5,000-char single line. Every real label
+# this ladder's `reason_attr`s can hold is short and engine-authored (`"unreadable"`/
+# `"absent"` from `_config_blind_signal`, scoring.py; `"T1 behavioral trifecta"` etc. from
+# `_BEHAVIORAL_LABELS`, scoring.py). Applied in `caps_fired` below, disclosed with a
+# marker rather than sliced silently, matching `_gate_target`'s own idiom.
+#
+# WHY 320 AND NOT 200. The first version of this cap was 200, chosen by INSPECTING the
+# static labels above -- and it was wrong, because one reason is COMPUTED, not a label:
+# `pipeline.live_test_cap_signal` builds `multiturn:<32 chars>` entries with a "(+N more)"
+# suffix. Measured, not inspected: that reason saturates at 273 characters and stays there
+# for 8, 20 and 100 verdicts, i.e. the producer is already self-bounded. A 200-cap
+# therefore truncated a legitimate, already-bounded value and `test_b689`'s
+# `test_the_widest_real_reason_stays_one_bounded_line` caught it -- a full-suite catch; the
+# scoped run of this module was green.
+#
+# 320 is that measured 273 plus headroom, and is the same bound `test_b689` had already
+# established for this field by measurement ("an earlier version of this test pinned 120
+# and passed only because 'canary:canary' is 13"). The cap still does its job: the defect
+# it exists for was a 5,000-character reason.
+_MAX_CAP_REASON_LEN = 320
+
 _CAP_LADDER = (
     ("live_injection_capped", "live_injection_cap_reason", "live injection test"),
     ("config_blind_capped", "config_blind_reason", "config could not be read"),
@@ -1140,6 +1166,13 @@ def caps_fired(score) -> list:
     rather than on prose; `reason` is present only where the engine defines a stable label
     for that signal (`degraded_capped` has none -- its count rides `degradedChecks`).
 
+    `reason` is bounded at `_MAX_CAP_REASON_LEN` (B-693 follow-up) -- `_emit_json`
+    strips control/ANSI/bidi chars and folds whitespace but never truncates, so this is
+    the one place a free-text reason is capped before it reaches that boundary. Only a
+    ``str`` reason is capped, so a duck-typed non-string producer keeps its own JSON type
+    rather than being coerced; a truncated reason carries a disclosed ``"...[truncated]"``
+    marker rather than being sliced silently, matching `_gate_target`'s own idiom.
+
     An empty list is a real answer and must be emitted as one: it says nothing capped this
     run. `sarif.py`'s own `selfExcludedSkills` comment states the rule (B-560) -- an absent
     key would make "nothing to report" and "this producer is too old to say" identical to
@@ -1152,6 +1185,8 @@ def caps_fired(score) -> list:
         entry = {"cap": flag, "what": label}
         reason = getattr(score, reason_attr, None) if reason_attr else None
         if reason:
+            if isinstance(reason, str) and len(reason) > _MAX_CAP_REASON_LEN:
+                reason = reason[:_MAX_CAP_REASON_LEN] + "...[truncated]"
             entry["reason"] = reason
         caps.append(entry)
     return caps

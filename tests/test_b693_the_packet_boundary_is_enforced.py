@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from clawseccheck.adjudication import _emit_json, render_judge_packet_json
+from clawseccheck.adjudication import _MAX_CAP_REASON_LEN, _emit_json, render_judge_packet_json
 from clawseccheck.catalog import Finding
 from clawseccheck.checks import run_all
 from clawseccheck.collector import collect
@@ -78,6 +78,20 @@ def test_a_hostile_reason_cannot_reach_the_packet_intact(hostile, forbidden):
     `run_state`, because the emitter is where the property lives."""
     assert forbidden in hostile          # the case is really hostile before it is emitted
     assert forbidden not in _reason_out(hostile)
+
+
+def test_a_long_reason_comes_out_bounded_and_single_line():
+    """The task's own repro (5,000 'A's + an embedded newline): the first pass closed
+    the "no filter" half (the newline case above) but left "no bound" untouched, so a
+    5,000-char reason still reached the packet verbatim at 5,012 chars. This is the
+    long-input case the task's own test plan demanded and the shipped fix skipped --
+    both the bound AND the single-line properties, from one repro."""
+    hostile = "A" * 5000 + "\n" + "second line"
+    out = _reason_out(hostile)
+    assert "\n" not in out, out
+    assert len(out) <= _MAX_CAP_REASON_LEN + len("...[truncated]"), len(out)
+    assert out.endswith("...[truncated]"), out
+    assert len(out) < len(hostile), (len(out), len(hostile))
 
 
 def test_a_secret_shaped_value_is_redacted_at_the_boundary():
