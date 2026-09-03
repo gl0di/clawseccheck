@@ -812,9 +812,9 @@ Sources folded into the packet:
 | `version` | `str` | Tool version string. |
 | `judgePacket` | `array[JudgePacketItem]` | The packet items. May be an empty array. |
 | `bundleTemplate` | `object` | B-596: the envelope a judge's answers have to arrive in, shipped WITH the packet so the return shape travels attached to the items it describes rather than as prose the agent has already summarised away. Its arrays are empty on purpose — a pre-filled `"verdict": "SAFE"` would round-trip just as well and invite the rubber-stamp the panel exists to prevent; the filled shapes sit beside them as `entryExample`, which no parser reads. The same skeleton is reproduced in `SKILL.md`, and the shape it must be filled to is §13's own input contract below; every value is derived from the constants the parser itself uses. |
-| `runState` | `object` | B-623: the state of the RUN that produced the packet, as opposed to any one item. `{"stated": false}` when the caller supplied no score — silence and health are different claims, and the packet must not make the second by omission. Otherwise `stated: true` plus `graded` (bool), `missingLayers` (`[{layer, status}]`), `notChecked` (`array[str]`, the running layers' own plain-English limits), `capsFired` (`[{cap, what, reason?}]`) and `degradedChecks` (int). `capsFired` lists **every** cap signal the scoring layer can set, in the engine's own priority order: `live_injection_capped`, `config_blind_capped`, `degraded_capped`, `cap_severity`, `runtime_capped`, `behavioral_capped`. `cap` is the score attribute's name, `what` is plain English for an adjudicator with none of this tool's context, and `reason` is present only where the engine defines a stable label for that signal (`degraded_capped` has none -- its count rides `degradedChecks` instead). An empty list is a positive claim that nothing capped the run, so completeness is enforced rather than maintained by hand: through v3.61.0 `cap_severity` was absent and an ordinary run capped by an open CRITICAL reported `capsFired: []`. Only STATE crosses this boundary — never config content, since the packet is pasted into a possibly third-party host agent. Rides the envelope rather than each item because it is per-run: a config-blind audit produces ~174 items that are ALL `UNKNOWN`, and repeating the one fact that explains all of them on every item would be noise. |
+| `runState` | `object` | B-623: the state of the RUN that produced the packet, as opposed to any one item. `{"stated": false}` when the caller supplied no score — silence and health are different claims, and the packet must not make the second by omission. Otherwise `stated: true` plus `graded` (bool), `missingLayers` (`[{layer, status}]`), `notChecked` (`array[str]`, the running layers' own plain-English limits), `capsFired` (`[{cap, what, reason?}]`) and `degradedChecks` (int). `capsFired` lists **every** cap signal the scoring layer can set, in the engine's own priority order: `live_injection_capped`, `config_blind_capped`, `degraded_capped`, `cap_severity`, `runtime_capped`, `behavioral_capped`. `cap` is the score attribute's name, `what` is plain English for an adjudicator with none of this tool's context, and `reason` is present only where the engine defines a stable label for that signal (`degraded_capped` has none -- its count rides `degradedChecks` instead). `reason` is length-capped at 200 chars (B-693 follow-up), with a disclosed `"...[truncated]"` marker rather than a silent slice when a producer hands it something longer -- the shared boundary below folds whitespace and strips control/secret content but never truncates, so this is the one field-level cap that bounds it. An empty list is a positive claim that nothing capped the run, so completeness is enforced rather than maintained by hand: through v3.61.0 `cap_severity` was absent and an ordinary run capped by an open CRITICAL reported `capsFired: []`. Only STATE crosses this boundary — never config content, since the packet is pasted into a possibly third-party host agent. Rides the envelope rather than each item because it is per-run: a config-blind audit produces ~174 items that are ALL `UNKNOWN`, and repeating the one fact that explains all of them on every item would be noise. |
 
-Every string in this envelope crosses one enforcing boundary on the way out (`report._sanitize_tree`): control characters, ANSI/OSC sequences and bidi overrides are removed, tabs and newlines become spaces, and secret-shaped values are redacted. That is deliberately independent of the per-field gating each producer already does (`target`, `redacted_evidence`, `safe_facts.*` and the rest) — this artifact is meant to be pasted into a possibly third-party host agent, so the guarantee is enforced at the edge rather than assumed from a dozen producers. It is inert on ordinary output: measured byte-identical on `fixtures/home_vuln`, `fixtures/home_safe` and a real config.
+Every string in this envelope crosses one enforcing boundary on the way out (`report._sanitize_tree`): control characters, ANSI/OSC sequences and bidi overrides are removed, tabs and newlines become spaces, and secret-shaped values are redacted. That shared boundary never truncates, so it does not by itself bound length — the per-field gating each producer already does is what caps that (`target`, `safe_facts.destination_host`, `config_field_paths`, and, since B-693's follow-up, `runState.capsFired[].reason` at 200 chars). This artifact is meant to be pasted into a possibly third-party host agent, so the character-class guarantee is enforced at the edge rather than assumed from a dozen producers, while length stays each field's own responsibility. It is inert on ordinary output: measured byte-identical on `fixtures/home_vuln`, `fixtures/home_safe` and a real config.
 
 ### JudgePacketItem fields
 
@@ -909,7 +909,7 @@ not-yet-reviewed.
 
 Dropping is not silent, though. When a **non-empty** payload yields **zero** usable
 entries, a `note:` line naming the reason (`0 of N submitted entries were usable`,
-`it is not valid JSON`, `it has no top-level "verdicts" array`, a `--vet-judged`
+`it is not valid JSON`, `it has no "verdicts" array`, a `--vet-judged`
 `targetFingerprint` mismatch, …) is written to **stderr** — never stdout, which
 carries the JSON artifact. This applies to all three consumers of the verdicts file
 (`--judged`, `--propose-ignore`, `--vet-judged`), which share one parser. An
@@ -1627,3 +1627,64 @@ document describes; reading both from one invocation is expected.
 - `alerts`/`notes` carry no filesystem paths beyond what the text report already
   redacts — see `_sanitize` in `report.py`, applied to both before they reach this
   document.
+
+## 23. `~/.clawseccheck/history.jsonl` Row Object (B-691)
+
+One JSON object per line, appended by `--trend` and by any run given `--history`. This
+is local state, not an output artifact: it is not part of the `--json` envelope (§1) and
+is not covered by its stability policy (§17). It is documented here because three of its
+keys are written, read back and rendered, and were described in no shipped document.
+
+Every field is inside the hash-chained payload, so a value planted by hand breaks the
+chain and `--trend` says so (see `SECURITY_MODEL.md` for the chain semantics).
+
+### Row fields
+
+| Field | Type | Description |
+|---|---|---|
+| `date` | `str` | The run's date. First key, always present. |
+| `score` | `int` | Present only on a **graded** row. Omitted entirely otherwise — never `null`, never `0`. |
+| `grade` | `str` | Present only on a graded row, alongside `score`. |
+| `ts` | `str` | The run's timestamp. |
+| `home` | `str` | The audited home, sanitized — a real path never reaches this file. |
+| `source` | `str` | What produced the row: `audit`, `test`/`dev` (via `CLAWSECCHECK_RUN_SOURCE`), `view` for a row written by `--trend` itself, or `legacy` when a pre-existing row recorded no source. |
+| `_schema` | `int` | Row schema version. Currently `1`. |
+| `graded` | `bool` | Present **only** when `false`, as an explicit ungraded marker. A graded row carries `score`/`grade` and omits this key rather than setting it `true`. |
+| `raw_score` | `int` | Optional, tail. The severity-weighted, **uncapped** pass rate. |
+| `raw_scope` | `str` | Optional, tail. A hash over exactly the check ids folded into this run's `raw_score` denominator. |
+| `raw_ver` | `str` | Optional, tail. The build that wrote the row. |
+
+### Skeleton
+
+```json
+{"date": "2026-09-03", "score": 71, "grade": "C", "ts": "2026-09-03T18:04:11Z",
+ "home": "~/.openclaw", "source": "audit", "_schema": 1,
+ "raw_score": 83, "raw_scope": "9f2c1ab4", "raw_ver": "3.61.0"}
+```
+
+### Notes
+
+**Why `raw_score` exists at all.** `score` is pinned at a floor by the most severe open
+FAIL, so a setup that got materially worse can record the same number twice and `--trend`
+prints a flat arrow across it. The uncapped pass rate still moves. The monitor has watched
+it since B-273; this store did not until B-691.
+
+**Three keys or none.** The triple is written only on a row that is graded AND assessable
+AND whose caller supplied both the findings and the version. A caller that cannot supply
+those writes no triple at all, and the row is simply not comparable — which is the honest
+outcome rather than a silent zero.
+
+**`raw_scope` is what makes two rows comparable.** The denominator grows every time a
+release ships new checks, so two rows straddling an upgrade are computed over different
+check sets even when nothing on disk changed. Compare `raw_score` across rows only when
+`raw_scope` matches; when it differs, the two numbers answer different questions and their
+difference is not a trend. `raw_ver` names the build for the same reason.
+
+**A missing key means "this row does not say".** The reader carries these through and
+never defaults them. It does not infer a value from the current score: doing so would read
+the ARRIVAL of a baseline as a fall.
+
+**Tail position is deliberate.** The triple is appended after `_schema` and the ungraded
+marker, so the graded prefix stays byte-identical to what earlier builds wrote, and journal
+rotation re-emits each parsed row in its own insertion order — so the position survives
+rotation.
