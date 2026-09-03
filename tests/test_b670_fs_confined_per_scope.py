@@ -400,3 +400,72 @@ def test_the_family_moves_as_a_whole_under_a_wildcard_or_group(w_tools, expected
     case on each side, or half the token set is decorative.
     """
     assert _b55_for(_escape(w_tools)).status == expected, why
+
+
+# ======================================================================================
+# 7. Evidence names WHICH scope escaped — positionally, never the raw id (B-670 evidence)
+# ======================================================================================
+#
+# `unconfined_scopes_inheriting_global_tools` has always computed the escaping scope
+# names (section 4 above already pins that), but until now `check_fs_write_exposure`
+# never put them on screen — the FAIL evidence said only that SOME scope escaped, not
+# which. This section is evidence-only: none of it may change a status already pinned
+# elsewhere in this file.
+#
+# The raw id is deliberately never printed (B-570 parked this task on an owner ruling
+# about exactly that). The label is POSITIONAL instead — the roster entry's own config
+# path (`agents.list[1]` / `agents.entries.web`), or "global scope" when there is no
+# roster row at all for the synthesised default agent — so no attacker-authorable string
+# reaches the report and the B-570 question does not arise.
+
+def test_the_fail_evidence_names_the_escaping_scope_by_position_not_by_id():
+    """The headline case: a legacy `agents.list` entry whose `id` differs from its index.
+    If the evidence ever printed the id, this would show the string "attackername" on
+    screen — the exact shape B-570 gated. It must show the entry's POSITION instead.
+    """
+    cfg = {**_OPEN, **_WRITE,
+           "agents": {"defaults": _SANDBOXED,
+                      "list": [{"id": "main", "default": True},
+                               {"id": "attackername", "sandbox": {"mode": "off"}}]}}
+    f = _b55_for(cfg)
+    assert f.status == FAIL
+    line = next(e for e in (f.evidence or []) if "inherit the global write grant" in e)
+    assert "agents.list[1]" in line
+    assert "attackername" not in line
+    # And not anywhere else in the evidence either — the id must never reach the report.
+    assert not any("attackername" in e for e in (f.evidence or []))
+
+
+def test_the_fail_evidence_names_an_entries_shape_scope_too():
+    """The other roster shape (B-699). `AgentEntry.path` for `agents.entries` echoes the
+    record's own key, the same way the roster reader surfaces it everywhere else in this
+    tool — this is not a second, id-shaped label, it is the same positional accessor.
+    """
+    f = _b55({"defaults": _SANDBOXED, "entries": {"main": _MAIN, "ops": {"sandbox": {"mode": "off"}}}})
+    assert f.status == FAIL
+    line = next(e for e in (f.evidence or []) if "inherit the global write grant" in e)
+    assert "agents.entries.ops" in line
+
+
+def test_the_fail_evidence_says_global_scope_when_no_roster_row_exists():
+    """No `agents` key at all: the escaping scope is the synthesised default agent, which
+    has no roster row for `AgentEntry.path` to describe. Falls back to a plain, non-id
+    label rather than inventing one.
+    """
+    f = _b55_for({**_OPEN, **_WRITE})
+    assert f.status == FAIL
+    line = next(e for e in (f.evidence or []) if "inherit the global write grant" in e)
+    assert "global scope" in line
+
+
+def test_the_evidence_line_is_absent_when_no_scope_is_shown_to_escape():
+    """The counterpart to the three cases above: when every unconfined scope narrows its
+    own tools (WARN, section 3 above), there is nothing to name, and the sentence must not
+    appear — it is gated on a non-empty `inheriting`, not printed unconditionally.
+    """
+    f = _b55({"defaults": _SANDBOXED,
+              "entries": {"main": _MAIN,
+                          "ops": {"sandbox": {"mode": "off"},
+                                  "tools": {"profile": "messaging"}}}})
+    assert f.status == WARN
+    assert not any("inherit the global write grant" in e for e in (f.evidence or []))

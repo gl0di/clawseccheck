@@ -334,3 +334,43 @@ def test_unknown_path_schema_drifted_dm_does_not_raise_end_to_end(tmp_path):
     f = check_trifecta(_ctx(tmp_path, cfg))
     assert f.status == WARN, f.status
     assert "Resolved default" in f.detail
+
+
+# --------------------------------------------------------- shipped corpus fixtures
+# Before this pair, `grep -rl '"dm"[[:space:]]*:' fixtures/` returned zero hits across
+# the whole 680-home corpus — every corpus-wide sweep (finding-fingerprint manifest,
+# the fleet FP gate) was structurally blind to a nested-dm channel, so a future edit to
+# `_declared_dm_policy` could drop nested reading entirely and only this module's inline
+# dicts (above) would notice. These two fixtures make the shape corpus-visible. Modelled
+# byte-for-byte on fixtures/clean_b283_dm_pairing_disabled / bad_b283_dm_pairing (same
+# gateway/tools/logging/models scaffolding, so no unrelated check fires) — differing only
+# in the channels block.
+
+
+def test_clean_fixture_nested_closed_is_not_reported_as_no_policy_set():
+    """fixtures/clean_b619_nested_dm_closed — googlechat closed via nested `dm.policy`
+    (nested-only channel, no flat `dmPolicy` field in its schema — see
+    ``_DM_POLICY_NESTED_ONLY_CHANNELS``) plus discord closed via `dm.enabled: false`
+    (the enabled-gate form, grounded for discord). Neither must read as "no policy
+    set", and the untrusted-input leg must not be counted for either channel."""
+    ctx = collect(home=str(FIXTURES / "clean_b619_nested_dm_closed"))
+    assert ctx.config, "collect() did not read the shipped fixture config"
+    assert _untrusted_input_channels(ctx.config) == []
+    assert _resolved_default_input_channels(ctx.config) == []
+    f = check_trifecta(ctx)
+    assert "Resolved default" not in f.detail
+    assert "set no dmPolicy" not in f.detail
+
+
+def test_bad_fixture_nested_open_still_counts_the_untrusted_input_leg():
+    """fixtures/bad_b619_nested_dm_open — googlechat opened via nested `dm.policy: "open"`
+    only (the paired OPEN direction of the clean fixture above, so a nested-open
+    channel is corpus-visible too). The trifecta ingress leg must still be counted —
+    teaching A1 to recognise a nested closure must never teach it to stop seeing a
+    nested open."""
+    ctx = collect(home=str(FIXTURES / "bad_b619_nested_dm_open"))
+    assert ctx.config, "collect() did not read the shipped fixture config"
+    assert _untrusted_input_channels(ctx.config) == ["googlechat"]
+    f = check_trifecta(ctx)
+    assert "untrusted input" in (f.evidence or [])
+    assert "channel 'googlechat' allows untrusted senders" in f.detail

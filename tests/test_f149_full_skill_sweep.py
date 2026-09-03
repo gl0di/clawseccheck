@@ -774,13 +774,18 @@ def test_hand_built_ctx_with_no_discovery_gap_stays_complete():
 
 
 def test_quiet_line_mentions_discovery_gap_when_present():
+    # B-553: LIMIT_DOMAIN_SKILL is not discovery-only (it also carries ~40
+    # content-scan reasons), so the suffix must not assert "discovery" as the
+    # cause -- it must name the true superset instead. Wording checked here,
+    # not "Skill discovery was incomplete" (the old, narrower and sometimes-false
+    # claim) -- see test_b553_advise_scan_wording.py for the dedicated coverage.
     sweep = SkillSweep(
         home_dir=Path("/nonexistent"), checked_dirs=[Path("/x")],
         rows=[("a", "PASS", 0)],
         discovery_incomplete_reasons=["skill discovery under '/x' stopped early"],
     )
     line = _sweep_quiet_line(sweep)
-    assert "Skill discovery was incomplete" in line
+    assert "could not cover everything (discovery or content)" in line
     assert "stopped early" in line
 
 
@@ -788,7 +793,7 @@ def test_quiet_line_silent_about_discovery_gap_when_absent():
     sweep = SkillSweep(home_dir=Path("/nonexistent"), checked_dirs=[Path("/x")],
                        rows=[("a", "PASS", 0)])
     line = _sweep_quiet_line(sweep)
-    assert "discovery was incomplete" not in line.lower()
+    assert "could not cover everything" not in line
 
 
 def test_vet_all_returns_nonzero_when_discovery_incomplete_with_no_targets(tmp_path, monkeypatch):

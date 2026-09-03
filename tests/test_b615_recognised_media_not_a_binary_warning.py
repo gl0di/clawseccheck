@@ -12,6 +12,14 @@ file (not a count); a native executable (F-054 "stowaway") still lands in BOTH
 `ctx.binary_files` and `ctx.stowaway_files`, with its own wording. PDF is deliberately
 excluded from the recognised-inert set — see the comment on
 `_RECOGNISED_INERT_MEDIA_FORMATS` in collector.py, pinned again below.
+
+A committed corpus fixture, `fixtures/clean_b615_bundled_media/`, bundles the exact
+same PNG bytes this file decodes from `_PNG_B64` -- so `check_installed_skills` (B13)
+and the fingerprint-manifest sweep actually see a recognised image, not just this
+file's tmp_path-constructed one. See
+`test_the_committed_b615_fixture_matches_the_inline_png_literal` and
+`test_the_committed_b615_fixture_skill_is_install_rc0` below: they pin the corpus
+fixture and this file's inline literal to the same bytes so the two cannot drift apart.
 """
 from __future__ import annotations
 
@@ -27,6 +35,8 @@ from clawseccheck.collector import (
 )
 from clawseccheck.cli import main
 from clawseccheck.dossier import build_profile
+
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 # The smallest possible valid PNG (1x1, greyscale): a real, well-formed image, decoded
 # from base64 at runtime rather than committed as a binary fixture file. This is public,
@@ -198,6 +208,36 @@ def test_the_png_fixture_is_real_and_was_actually_collected(tmp_path):
     assert ctx.binary_files == [], ctx.binary_files
     assert [d.kind for d in ctx.disclosures] == ["recognised_binary_media"], ctx.disclosures
     assert ctx.disclosures[0].subject == "logo.png"
+
+
+# ── 4b: the committed corpus fixture and this file's inline literal cannot drift ──
+
+def test_the_committed_b615_fixture_matches_the_inline_png_literal():
+    """`fixtures/clean_b615_bundled_media/workspace/skills/media-demo/logo.png` was
+    written out once from this exact `_PNG_B64` literal. Pin the two together so a
+    future edit to either the fixture bytes or the literal is caught immediately,
+    rather than the corpus and the unit test silently exercising different images."""
+    fixture_png = (
+        FIXTURES / "clean_b615_bundled_media" / "workspace" / "skills"
+        / "media-demo" / "logo.png"
+    )
+    assert fixture_png.read_bytes() == base64.b64decode(_PNG_B64)
+
+
+def test_the_committed_b615_fixture_skill_is_install_rc0(capsys):
+    """The committed corpus fixture itself, run end to end through the real
+    `--vet-skill` CLI (not a tmp_path copy), is INSTALL / rc 0 -- proving the fixture
+    the fingerprint-manifest sweep and `check_installed_skills` (B13) actually audit
+    behaves the same way test 1's inline copy does."""
+    sk = (
+        FIXTURES / "clean_b615_bundled_media" / "workspace" / "skills" / "media-demo"
+    )
+    rc, out = _vet_cli(capsys, sk)
+    assert rc == 0, out
+    assert "INSTALL" in out and "DO-NOT-INSTALL" not in out, out
+    assert "CAUTION" not in out, out
+    assert "Binary files found" not in out, out
+    assert "unrecognised binary" not in out, out
 
 
 # ── 2: an opaque blob still WARNs, and the evidence NAMES the file ──────────────

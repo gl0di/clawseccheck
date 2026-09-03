@@ -4791,8 +4791,17 @@ def render_advise(profile, ascii_only: bool = False) -> str:
             lines.append(f"  - (+{omitted} more FAIL/WARN finding(s) not shown)")
         lines.append("")
     elif verdict == "CAUTION":
-        lines.append("Reasons: assessment is inconclusive (UNKNOWN) — not enough signal "
-                      "to say INSTALL; review manually before trusting this source.")
+        # B-553: the generic UNKNOWN sentence used to fire even when the real cause was
+        # already known — coverage_notes (computed above) names exactly what could not be
+        # assessed, and that fact is rendered 12 lines below in the "Not assessed" block.
+        # Name it here too instead of leaving the reader with "not enough signal" alone.
+        if coverage_notes:
+            lines.append("Reasons: part of this target could not be assessed — see "
+                          "\"Not assessed\" below; review manually before trusting this "
+                          "source.")
+        else:
+            lines.append("Reasons: assessment is inconclusive (UNKNOWN) — not enough signal "
+                          "to say INSTALL; review manually before trusting this source.")
         lines.append("")
     else:
         lines.append("No FAIL/WARN findings across every assessable axis.")

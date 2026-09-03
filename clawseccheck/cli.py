@@ -497,13 +497,15 @@ class SkillSweep:
     truncated: bool = False
     worst: str = "PASS"
     budget_s: float = 0.0
-    # B-404: the concrete reason(s) skill DISCOVERY ITSELF could not be
-    # confirmed complete — collector.limit_hits_for(ctx, LIMIT_DOMAIN_SKILL), the same
-    # signal check_installed_skills (B13) already uses. Distinct from a per-target
-    # SKIPPED/TRUNCATED row (a target we KNOW about but could not finish scanning):
-    # this is "the walk that finds targets in the first place did not finish", which
+    # B-404: the concrete reason(s) the skill scan could not be confirmed complete —
+    # collector.limit_hits_for(ctx, LIMIT_DOMAIN_SKILL), the same signal
+    # check_installed_skills (B13) already uses. B-553: that domain is NOT
+    # discovery-only — it also carries ~40 CONTENT-scan reasons (a per-skill file
+    # cap, an unreadable file/dir, an oversize archive, the archive-expansion
+    # family), so a reason here can name either "the walk that finds targets in the
+    # first place did not finish" OR a target's own content scan being cut short; it
     # can be non-empty even when every row found so far scanned cleanly. Empty for a
-    # sweep whose discovery genuinely completed.
+    # sweep whose scan genuinely completed.
     discovery_incomplete_reasons: list[str] = field(default_factory=list)
     # B-521: names withheld from `rows`/`findings` above because they are
     # ClawSecCheck's OWN content-verified install (B-265, collector.py's
@@ -581,13 +583,20 @@ class SkillSweep:
 
 
 def _discovery_gap_note(reasons: list[str]) -> str:
-    """One narration line naming why skill DISCOVERY ITSELF — not any one target's own
-    scan — was incomplete (B-404). Printed before the per-skill/aggregate
-    output so the caveat is seen first, never buried after results that may themselves
-    look clean."""
+    """One narration line naming that the skill scan could not claim full coverage
+    (B-404). Printed before the per-skill/aggregate output so the caveat is seen
+    first, never buried after results that may themselves look clean.
+
+    B-553: ``reasons`` comes from ``limit_hits_for(ctx, LIMIT_DOMAIN_SKILL)``, and that
+    domain is not discovery-only — collector.py tags ~ 40 CONTENT-scan reasons with it
+    too (a per-skill file cap, an unreadable file/dir, an oversize archive, the whole
+    archive-expansion family). So this cannot assert "discovery was incomplete" as the
+    cause; it names the true superset instead — discovery OR a target's own content
+    scan — rather than a specific wrong one."""
     extra = f" (+{len(reasons) - 6} more)" if len(reasons) > 6 else ""
     return (
-        "(skill discovery was incomplete — this sweep cannot claim full coverage: "
+        "(the skill scan could not cover everything (discovery or content) — "
+        "this sweep cannot claim full coverage: "
         + "; ".join(reasons[:6]) + extra + ")"
     )
 
@@ -595,11 +604,15 @@ def _discovery_gap_note(reasons: list[str]) -> str:
 def _discovery_gap_suffix(sweep: SkillSweep) -> str:
     """A short trailing caveat for the ``--quiet`` one-liner, which (unlike the verbose
     branch) never sees ``sweep_installed_skills``'s own live narration. Empty when
-    discovery completed, so every pre-existing caller is unaffected."""
+    the scan completed, so every pre-existing caller is unaffected.
+
+    B-553: same superset wording as ``_discovery_gap_note`` — see its docstring;
+    kept identical on purpose so the verbose and quiet paths never diverge."""
     if not sweep.discovery_incomplete_reasons:
         return ""
     return (
-        " Skill discovery was incomplete — coverage may be missing target(s): "
+        " The skill scan could not cover everything (discovery or content) — "
+        "coverage may be missing target(s): "
         + sweep.discovery_incomplete_reasons[0] + "."
     )
 
@@ -636,11 +649,13 @@ def sweep_installed_skills(
     notion of "truncated" for this one CLI surface. Any genuine enumeration
     failure the collector recorded (a permission-denied skill root or
     sub-directory, the discovery engine's own directory-count cap, the
-    installed-skill collection cap) surfaces here as a named reason
-    (``SkillSweep.discovery_incomplete_reasons``) and forces ``complete`` to
-    False — even when zero skills were found at all, because an empty result
-    from a walk that could not finish is not the same claim as an empty result
-    from a walk that finished and genuinely found nothing.
+    installed-skill collection cap) — B-553: OR one of the ~40 CONTENT-scan
+    reasons the same domain also carries (a per-skill file cap, an unreadable
+    file/dir, an oversize archive, an archive-expansion limit) — surfaces here as
+    a named reason (``SkillSweep.discovery_incomplete_reasons``) and forces
+    ``complete`` to False — even when zero skills were found at all, because an
+    empty result from a walk that could not finish is not the same claim as an
+    empty result from a walk that finished and genuinely found nothing.
 
     With ``narrate`` (the default) it prints the per-skill verdict blocks as it
     goes — progress feedback matters on a sweep that can run for minutes — and

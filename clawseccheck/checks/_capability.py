@@ -1040,6 +1040,27 @@ def check_exec_strict_inline_eval(ctx: Context) -> Finding:
     )
 
 
+def _escaping_scope_label(cfg: dict, name: str) -> str:
+    """B-670: a POSITIONAL label for one name `unconfined_scopes_inheriting_global_tools`
+    returned — the roster entry's own config path (``agents.list[1]`` /
+    ``agents.entries.web``), or ``"global scope"`` for the synthesised default-agent scope
+    that has no roster row at all.
+
+    Deliberately not the raw agent id. B-570 gated printing an attacker-authorable id
+    string pending an owner ruling; this never constructs that string — it looks up the
+    matching entry through `collector.agent_roster` (the one reader of both roster shapes,
+    per B-699) and reports where the entry SITS, not what it is called. `AgentEntry.path`
+    is exactly this: for `agents.list` it is the original array INDEX, not the id; for
+    `agents.entries` it echoes the config's own record key, unmodified, the same way the
+    roster reader already surfaces it everywhere else. No new string is authored from
+    attacker input either way, so the B-570 question does not apply here.
+    """
+    for entry in agent_roster(cfg):
+        if _toolpolicy._normalize_agent_id(entry.id) == name:
+            return entry.path
+    return "global scope"
+
+
 def check_fs_write_exposure(ctx: Context) -> Finding:
     """B55 (C-013) — filesystem-write tool granted without scoping.
 
@@ -1500,6 +1521,16 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 "Confirm the per-agent tools.* narrowing really removes write/edit/"
                 "apply_patch for those agents, and lock the open channel(s) to 'allowlist'.",
                 evidence=ev,
+            )
+        if inheriting:
+            # B-670: name WHICH scopes escaped, positionally (never the raw agent id —
+            # see _escaping_scope_label). Evidence-only; the FAIL verdict above is
+            # unchanged whether or not this appends.
+            total_scopes = len(_toolpolicy.confined_scopes(cfg) or [])
+            labels = [_escaping_scope_label(cfg, name) for name in inheriting]
+            ev.append(
+                f"{len(inheriting)} of {total_scopes} declared scope(s) are unconfined "
+                f"and inherit the global write grant unchanged: {', '.join(labels)}"
             )
         return _finding(
             "B55",
