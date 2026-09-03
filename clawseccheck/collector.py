@@ -694,8 +694,11 @@ class Context:
     config_machine_state_unparsed: set = field(default_factory=set)
     cron_store_shadowed: bool = False
     # B-294: the cron EXECUTION trail (cron_run_logs in ~/.openclaw/state/openclaw.sqlite,
-    # OR (B-709) its task_runs successor on OpenClaw 2026.8.2+ -- see
-    # _collect_cron_run_logs's docstring), which deliberately OUTLIVES the job definition —
+    # OR (B-709) its task_runs successor on a database that has run the migration -- see
+    # _collect_cron_run_logs's docstring, and note it selects on the OBSERVED TABLES, not
+    # on an OpenClaw version: the state DB's migration ladder does not map onto the product
+    # version, which is why neither this comment nor the code names one), which deliberately
+    # OUTLIVES the job definition —
     # one-shot (`kind:"at"`) jobs default to deleteAfterRun TRUE, the legacy table has no
     # foreign key to cron_jobs, and the only cron_jobs delete in the dist (replaceCronRows)
     # never touches it. Each entry is a plain dict: job_id, status, session_id, session_key,

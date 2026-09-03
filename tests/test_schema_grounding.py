@@ -1300,11 +1300,28 @@ _DIST_MAX_DEPTH = 8
 # Verdicts below are from `OpenClawSchema.safeParse()` on the installed 2026.7.1-2 dist, not
 # from this file's reader — the reader was cross-checked against it, not trusted over it.
 _NOT_IN_CURRENT_SCHEMA = {
-    # C-472 re-grounded EVERY justification here against 2026.8.1, not only the new ones.
-    # This one had rotted in a way that only reading it against the current dist reveals:
-    # it said the agents object "holds exactly {defaults, list}", which was true when
-    # written and is now {defaults, entries, ownership}. The disproof still holds; the
-    # parenthetical describing WHY did not.
+    # C-472 re-grounded every SCHEMA DISPROOF here against 2026.8.1. It did not re-ground
+    # the CODE POINTERS beside them, and the original wording of this comment ("EVERY
+    # justification") did not distinguish the two -- so a claim that was true of one half
+    # was read as covering both. All fourteen pointers had rotted by the time anyone
+    # checked: they still resolved to real lines in real files, which is why nothing went
+    # red, but they landed on unrelated code and one of them (gateway.host) named a file
+    # that no longer contains the read at all -- the C-433 split moved it to
+    # monitordims/. Thirteen were line drift alone, up to 3,767 lines. None of the
+    # justifications was ever false: every subject still exists and every reason still
+    # holds. It was the ADDRESSES that rotted, not the claims.
+    #
+    # They are now written as `file::symbol`, and
+    # `test_every_code_pointer_in_the_register_resolves` fails the build when a named
+    # symbol stops existing. A line number cannot be checked -- any integer resolves --
+    # which is exactly why it rotted in silence for so long. Same lesson the state-schema
+    # guard learned from a bundle filename: anchor on what the code NAMES, never on where
+    # it happens to sit.
+    #
+    # The entry below is what re-grounding the disproofs caught: it said the agents object
+    # "holds exactly {defaults, list}", true when written and now
+    # {defaults, entries, ownership}. The disproof still holds; the parenthetical
+    # describing WHY did not.
     "agents.subagents": (
         "safeParse: unrecognized_keys@agents keys=[\"subagents\"] (the object holds exactly "
         "{defaults, entries, ownership} on 2026.8.1); the real path is "
@@ -1401,28 +1418,28 @@ _NOT_IN_CURRENT_SCHEMA = {
     ),
     "gateway.host": (
         "safeParse: unrecognized_keys@gateway; binding is configured via gateway.bind / "
-        "gateway.customBindHost. monitor.py:418 reads it as the last term of a fallback "
+        "gateway.customBindHost. monitordims/_gateway.py::_gateway_bind reads it as the last term of a fallback "
         "chain that already ends in a literal default, so it cannot change the outcome."
     ),
     "gateway.token": (
         "safeParse: unrecognized_keys@gateway; the real path is gateway.auth.token. Every "
         "read is `dig(cfg, 'gateway.auth.token') or dig(cfg, 'gateway.token')` "
-        "(report.py:298 and :521, checks/_config.py:809 and :1697) — legacy second term."
+        "(report.py::_capability_graph and ::_credential_surface_map; checks/_config.py::_gateway_config_token, ::check_credential_blast_radius and ::check_gateway) — legacy second term."
     ),
     "lastTouchedVersion": (
         "safeParse: unrecognized_keys@<root>; the real path is meta.lastTouchedVersion, and "
         "the root object is .strict(). Every read is "
         "`dig(cfg, 'meta.lastTouchedVersion') or dig(cfg, 'lastTouchedVersion')` "
-        "(checks/_lifecycle.py:1035, :1319, :3637) — legacy second term."
+        "(checks/_lifecycle.py::check_hook_policy_bypass, ::check_known_vulns, ::check_version) — legacy second term."
     ),
     "plugins.mcp": (
-        "safeParse: unrecognized_keys@plugins. checks/_shared.py:859 folds it into an MCP "
+        "safeParse: unrecognized_keys@plugins. checks/_shared.py::_mcp_servers folds it into an MCP "
         "server map that has already merged the real mcp.servers plus the mcpServers / "
         "mcp_servers legacy spellings, so it only ever adds servers, never hides any."
     ),
     "tools.mcp": (
         "safeParse: unrecognized_keys@tools. Same call site and same reasoning as "
-        "plugins.mcp (checks/_shared.py:859) — the two are the one `or` expression."
+        "plugins.mcp (checks/_shared.py::_mcp_servers) — the two are the one `or` expression."
     ),
     # --- relative namespace ------------------------------------------------------------
     # These are not absences at all: they are read off objects OpenClaw deliberately leaves
@@ -1430,38 +1447,38 @@ _NOT_IN_CURRENT_SCHEMA = {
     # to plugins, channels and skill authors, so no dist evidence can exist either way and
     # the unanchored walk necessarily comes back empty.
     RELATIVE_PREFIX + "config.allowPrivateNetwork": (
-        "Read off a plugin entry (checks/_config.py:981, over _plugins(cfg)). "
+        "Read off a plugin entry (checks/_config.py::check_dangerous_overrides, over _plugins(cfg)). "
         "PluginEntrySchema.config is `record(string(), unknown())` "
         "(zod-schema-O9ml_nmo.js:788-806) — an open, plugin-defined bag, so its keys are "
         "outside the schema by design."
     ),
     RELATIVE_PREFIX + "config.permissionMode": (
-        "Read off an MCP server entry (checks/_mcp.py:1660). MCP server entries carry "
+        "Read off an MCP server entry (checks/_mcp.py::check_plugin_permission_mode). MCP server entries carry "
         "server-defined config, not openclaw.json's own key space."
     ),
     RELATIVE_PREFIX + "config.appServer.command": (
-        "Read off an MCP server entry (checks/_mcp.py:1717) — same open server-defined "
+        "Read off an MCP server entry (checks/_mcp.py::check_plugin_app_server_command) — same open server-defined "
         "config object as config.permissionMode above."
     ),
     RELATIVE_PREFIX + "network.dangerouslyAllowPrivateNetwork": (
-        "Read off a channel's node entries (checks/_config.py:965). ChannelsSchema is "
+        "Read off a channel's node entries (checks/_config.py::check_dangerous_overrides). ChannelsSchema is "
         "`.passthrough()` (zod-schema.channels-config-ORTHga0n.js:68-78), so per-channel "
         "entries are open and their keys are not enumerable from the schema."
     ),
     RELATIVE_PREFIX + "openclaw.user-invocable": (
-        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py:4344), not "
+        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py::_skill_is_unreachable), not "
         "off openclaw.json. Skill frontmatter is a separate file format."
     ),
     RELATIVE_PREFIX + "openclaw.disable-model-invocation": (
-        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py:4349) — same "
+        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py::_skill_is_unreachable) — same "
         "file format as openclaw.user-invocable above."
     ),
     RELATIVE_PREFIX + "openclaw.install": (
-        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py:6460) for "
+        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py::check_install_directive_supply_chain) for "
         "B103's install-directive provenance check. Skill frontmatter, not openclaw.json."
     ),
     RELATIVE_PREFIX + "openclaw.install.npmSpec": (
-        "Read off a package/plugin manifest (checks/_mcp.py:236), not off openclaw.json."
+        "Read off a package/plugin manifest (checks/_mcp.py::vet_plugin), not off openclaw.json."
     ),
 }
 
@@ -1858,6 +1875,77 @@ def test_register_entries_are_still_absent_from_the_dist():
         "OpenClaw schema now resolves them:\n"
         + "\n".join(f"  - {p}" for p in resurrected)
         + "\n\nDrop the register entry so the path is grounded normally."
+    )
+
+
+# A code pointer in the register is `file::symbol`. It used to be `file:line`, and every
+# one of the fourteen had rotted without a single test noticing -- because a line number
+# cannot be validated. Any integer inside a long file "resolves"; the reader lands on
+# unrelated code and believes it. A symbol either exists or it does not.
+_CODE_POINTER_RE = re.compile(r"(?:([\w/]+\.py))?::(\w+)")
+
+# Non-vacuity floor. If a rewrite drops the pointers or breaks the pattern, the sweep below
+# would pass over an empty set and report nothing -- the exact shape of failure this whole
+# module exists to prevent.
+_MIN_CODE_POINTERS = 14
+
+
+def _defined_symbols(path: Path) -> "set[str]":
+    """Every def/class name in a module, at any nesting depth."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        n.name
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+
+
+def test_every_code_pointer_in_the_register_resolves():
+    """Each `file::symbol` in _NOT_IN_CURRENT_SCHEMA must name code that exists.
+
+    The justifications say WHERE a dead key is read and WHY that read is harmless. The
+    reasoning is only checkable if the address is, and this is the layer that checks it --
+    C-472 found all fourteen addresses stale at once, including one naming a file the read
+    had left entirely (gateway.host, moved to monitordims/ by the C-433 split).
+
+    A bare `::symbol` continues the file named before it, so one entry can cite several
+    call sites without repeating the path."""
+    pointers = []          # (key, file, symbol)
+    for key, why in sorted(_NOT_IN_CURRENT_SCHEMA.items()):
+        current_file = None
+        for m in _CODE_POINTER_RE.finditer(why):
+            named, symbol = m.group(1), m.group(2)
+            if named:
+                current_file = named
+            if current_file is None:
+                continue       # `::sym` with no file ever named -- not a code pointer
+            pointers.append((key, current_file, symbol))
+
+    assert len(pointers) >= _MIN_CODE_POINTERS, (
+        f"found only {len(pointers)} code pointer(s) in _NOT_IN_CURRENT_SCHEMA, expected "
+        f"at least {_MIN_CODE_POINTERS} -- the pattern stopped matching, so this test is "
+        "passing over an empty set rather than proving anything."
+    )
+
+    broken = []
+    for key, rel, symbol in pointers:
+        candidates = [REPO_ROOT / rel, REPO_ROOT / "clawseccheck" / rel]
+        target = next((c for c in candidates if c.is_file()), None)
+        if target is None:
+            broken.append(f"{key}: {rel}::{symbol} -- no such file")
+            continue
+        if symbol not in _defined_symbols(target):
+            broken.append(
+                f"{key}: {rel}::{symbol} -- file exists, but it defines no `{symbol}`"
+            )
+
+    assert not broken, (
+        "Code pointer(s) in _NOT_IN_CURRENT_SCHEMA name code that does not exist:\n"
+        + "\n".join(f"  - {b}" for b in broken)
+        + "\n\nThe justification beside each one explains why a dead config key is read "
+        "HERE and is harmless. If the code moved, repoint it at the symbol that does the "
+        "read now. If nothing reads the key any more, the register entry itself is what "
+        "should go."
     )
 
 
