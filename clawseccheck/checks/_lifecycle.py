@@ -6101,7 +6101,8 @@ def check_exec_safe_bin_trusted_dirs(ctx: Context) -> Finding:
                 "the global tools.exec.safeBins is explicitly set to an empty list, "
                 "which disables safe-bin authorization outright (no bin name can "
                 "ever match). It stays a disclosure, not a silent PASS, because a "
-                "per-agent agents.list.<id>.tools.exec.safeBins override -- not read "
+                f"per-agent {_key_advice(ctx, 'agents.list', 'agents.entries')}"
+                ".<id>.tools.exec.safeBins override -- not read "
                 "by this audit -- can independently re-enable the fast path for that "
                 "one agent while this writable directory stays configured.",
                 "If tools.exec.safeBins is meant to stay empty everywhere, this "
