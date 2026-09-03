@@ -94,10 +94,63 @@ _MODE_CASES = [
     ("other", {"url": "http://127.0.0.1:8080/mcp"}),
 ]
 
+# --------------------------------------------------------------------------------------
+# Binding vendor exports BY NAME, never by minified letter.
+#
+# These bundles export under one-letter aliases (`export { realName as r, ... }`), and
+# openclaw 2026.9.1 ROTATED them: `requiresMcpCodexToolApproval` went n -> r and
+# `normalizeMcpCodexToolAnnotations` t -> n, while `formatMcpCodexApprovalRemedy` took
+# over `t` and `resolveMcpCodexToolApprovalMode` was deleted outright. A harness that
+# destructured `{ n, t, r }` therefore kept running and compared our port against three
+# DIFFERENT functions — every case "disagreed", and the port was never at fault.
+#
+# That is the filename-hash hazard one level down (docs/CHECK_AUTHORING.md): the letters
+# rotate exactly like the bundle names do, and a letter is meaningless across versions.
+# `_export_aliases` parses the bundle's own `export {...}` statement so the binding is by
+# real name, and `_alias_map` FAILS LOUDLY on a missing name rather than letting a future
+# rename rebind silently — silent rebinding is what made this cost a diagnosis instead of
+# a test failure that says what it means.
+# --------------------------------------------------------------------------------------
+_EXPORT_RE = re.compile(r"^export \{(.+?)\};", re.M)
+
+
+def _export_aliases(js_path: Path) -> "dict[str, str]":
+    """realName -> minified alias, read from the bundle's own export statement."""
+    text = js_path.read_text(encoding="utf-8", errors="replace")
+    out: "dict[str, str]" = {}
+    for stmt in _EXPORT_RE.findall(text):
+        for part in stmt.split(","):
+            bits = part.strip().split(" as ")
+            if len(bits) == 2:
+                out[bits[0].strip()] = bits[1].strip()
+    return out
+
+
+def _alias_map(js_path: Path, names) -> str:
+    """JSON realName->alias for *names*, asserting each one is actually exported."""
+    aliases = _export_aliases(js_path)
+    missing = [n for n in names if n not in aliases]
+    assert not missing, (
+        f"{js_path.name} no longer exports {missing} — the vendor renamed or removed a "
+        f"symbol this differential binds. Re-ground it; do NOT rebind by letter. "
+        f"Exports present: {sorted(aliases)}"
+    )
+    return json.dumps({n: aliases[n] for n in names})
+
+
 _DIFF_SCRIPT = """
 import { readFileSync } from "node:fs";
 const mod = process.argv[2];
-const { n: requires, t: normalize, r: resolveMode } = await import(mod);
+const ns = await import(mod);
+const M = JSON.parse(process.argv[4]);
+const requires = ns[M.requiresMcpCodexToolApproval];
+const normalize = ns[M.normalizeMcpCodexToolAnnotations];
+// 2026.9.1 DELETED resolveMcpCodexToolApprovalMode. Its whole body was
+// `resolveProjectedMcpCodexToolApprovalMode(...) ?? "auto"`; the default did not vanish,
+// it moved to the callers, which now apply it independently in two places. Composing it
+// here keeps the case table meaningful across both versions.
+const resolveProjected = ns[M.resolveProjectedMcpCodexToolApprovalMode];
+const resolveMode = (name, srv) => resolveProjected(name, srv) ?? "auto";
 const payload = JSON.parse(readFileSync(process.argv[3], "utf8"));
 console.log(JSON.stringify({
   approval: payload.approval.map(([mode, ann]) => ({
@@ -133,7 +186,10 @@ def test_the_port_agrees_with_the_installed_dist_on_every_case():
         "modes": [[n, s] for n, s in _MODE_CASES],
     }), encoding="utf-8")
     proc = subprocess.run(
-        ["node", str(work / "diff.mjs"), str(module), str(work / "cases.json")],
+        ["node", str(work / "diff.mjs"), str(module), str(work / "cases.json"),
+         _alias_map(module, ("requiresMcpCodexToolApproval",
+                            "normalizeMcpCodexToolAnnotations",
+                            "resolveProjectedMcpCodexToolApprovalMode"))],
         capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
     dist = json.loads(proc.stdout)
@@ -461,19 +517,29 @@ def test_the_ban_list_covers_every_claim_the_previous_revision_actually_made():
 def test_openclaw_itself_says_annotations_are_what_removes_the_approval_step():
     """The strongest available grounding for how this finding is FRAMED, and it is the
     vendor's, not ours. `openclaw mcp probe --json` emits a per-server `approvalHint`
-    exactly when the mode is auto and every tool's `codexAnnotations` is empty, and its text
-    is "tools have no safety annotations; calls will require interactive approval".
+    exactly when the mode is auto and every tool's `codexAnnotations` is empty: OpenClaw is
+    telling the operator that the ABSENCE of annotations is what keeps the approval step,
+    so their presence is what can remove it.
 
-    OpenClaw is telling the operator that the ABSENCE of annotations is what keeps the
-    approval step — so their presence is what can remove it. If this string ever disappears,
-    the framing needs re-grounding, which is the whole point of anchoring on it.
+    ANCHORED ON THE CONDITION, NOT THE SENTENCE (2026-09-03). This used to assert the full
+    text, and 2026.9.1 reworded its tail — "calls will require interactive approval" became
+    "calls require approval in prompting session postures" — so the test failed while the
+    framing it defends had not moved at all. The emission condition is byte-identical
+    across 2026.8.2 and 2026.9.1, and it is the condition, not the phrasing, that the
+    framing rests on. The stable half of the sentence is kept because a disappearance of
+    the hint entirely is still worth catching; the reworded tail is not asserted, because
+    a vendor is free to rephrase its own advice.
     """
     cli = sorted(_DIST.glob("mcp-cli-*.js")) if _DIST.is_dir() else []
     if not cli:
         pytest.skip("no installed OpenClaw dist")
     text = cli[0].read_text(errors="replace")
+    # The hint still exists...
     assert "tools have no safety annotations" in text
-    assert "will require interactive approval" in text
+    # ...and still fires on exactly "mode is auto AND no tool carries annotations", which
+    # is the half the framing depends on.
+    assert 'codexApprovalMode === "auto"' in text
+    assert ".codexAnnotations ?? {}).length === 0" in text
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no node on this machine")
@@ -671,7 +737,10 @@ _FILTER_CASES = [
 
 _FILTER_SCRIPT = """
 import { readFileSync } from "node:fs";
-const { n: normalize, t: allowed } = await import(process.argv[2]);
+const ns = await import(process.argv[2]);
+const M = JSON.parse(process.argv[4]);
+const normalize = ns[M.normalizeMcpToolFilter];
+const allowed = ns[M.isMcpToolAllowed];
 const cases = JSON.parse(readFileSync(process.argv[3], "utf8"));
 console.log(JSON.stringify(cases.map(([raw, name]) => {
   const norm = normalize(raw ?? undefined);
@@ -695,7 +764,8 @@ def test_the_tool_filter_port_agrees_with_the_installed_dist():
     (work / "f.mjs").write_text(_FILTER_SCRIPT, encoding="utf-8")
     (work / "cases.json").write_text(json.dumps([[r, n] for r, n in _FILTER_CASES]),
                                      encoding="utf-8")
-    proc = subprocess.run(["node", str(work / "f.mjs"), str(hits[0]), str(work / "cases.json")],
+    proc = subprocess.run(["node", str(work / "f.mjs"), str(hits[0]), str(work / "cases.json"),
+                           _alias_map(hits[0], ("normalizeMcpToolFilter", "isMcpToolAllowed"))],
                           capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
     dist = json.loads(proc.stdout)

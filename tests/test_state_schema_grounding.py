@@ -32,12 +32,28 @@ by how much they actually know:
     installed (CI, B-106), exactly like `test_schema_grounding.py`'s dist layer.
 
 The vendor's schema lives as ONE string constant, `const OPENCLAW_STATE_SCHEMA_SQL`, in a
-content-hashed dist file matched by the glob `openclaw-state-db-readonly-*.js`. TRAP: a
-dist-wide grep for `CREATE TABLE` also finds `DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL` in a
-DIFFERENT file (`runtime-*.js`) — a legacy schema for an unrelated debug-proxy sidecar
-database that happens to declare a table also named `capture_events`. The glob here is
-narrow enough to never match that file, and `_find_state_db_readonly_js` asserts EXACTLY
-one match rather than trusting the first hit.
+content-hashed dist file. It is located by that CONSTANT, not by a filename glob.
+
+That changed on 2026-09-03. The locator used to glob `openclaw-state-db-readonly-*.js`,
+and openclaw 2026.9.1 moved the constant into `openclaw-state-db-cache-*.js` while
+KEEPING a file the old glob still matched — so the glob resolved happily to a bundle that
+no longer defines the schema, and the guard failed with "the dist no longer defines the
+state schema the way this guard expects". It was right to fail; the anchor was wrong.
+Bundle filenames are content-hashed and rotate ~94% per release (docs/CHECK_AUTHORING.md),
+so a filename is the one thing in the dist guaranteed not to survive.
+
+TRAP, unchanged and still guarded: a dist-wide grep for `CREATE TABLE` also finds
+`DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL` in a DIFFERENT file — a legacy schema for an
+unrelated debug-proxy sidecar database that happens to declare a table also named
+`capture_events`. Searching for the marker `const OPENCLAW_STATE_SCHEMA_SQL = "` cannot
+match it, because the marker names the constant. That is strictly stronger than the old
+glob: the glob avoided the trap by being narrow, this avoids it by being specific.
+
+A SECOND declaration of the same constant exists — `= process.getBuiltinModule("node:fs")
+.readFileSync(... "openclaw-state-schema.sql" ...)`. It is NOT the one to read: that .sql
+file ships in neither 2026.8.2 nor 2026.9.1 (checked both), so the form is a build-time
+artifact. The `= "` in the marker excludes it. `_find_state_schema_defining_js` asserts
+EXACTLY one match rather than trusting the first hit.
 
 Regenerating the snapshot is part of the OpenClaw-upgrade protocol's re-baseline, on a
 machine with the matching OpenClaw installed:
@@ -75,7 +91,6 @@ SNAPSHOT_FILE = Path(__file__).resolve().parent / "state_schema_snapshot.sql"
 # B-519: REAL_HOME, not Path.home() — see tests/_realhome.py. Mirrors test_schema_
 # grounding.py's OPENCLAW_DIST exactly (same installed package, same reasoning).
 OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
-STATE_DB_READONLY_GLOB = "openclaw-state-db-readonly-*.js"
 STATE_DB_CONTRACT_GLOB = "openclaw-state-db-contract-*.js"
 SCHEMA_SQL_CONST_MARKER = 'const OPENCLAW_STATE_SCHEMA_SQL = "'
 SCHEMA_VERSION_RE = re.compile(r"OPENCLAW_STATE_SCHEMA_VERSION\s*=\s*(\d+)")
@@ -138,19 +153,27 @@ def _unescape_js_double_quoted(raw: str) -> str:
     return "".join(out)
 
 
-def _find_state_db_readonly_js(dist_dir: Path) -> Path:
-    """Exactly one file matching `STATE_DB_READONLY_GLOB` under *dist_dir*. Raises loudly
-    on zero or more-than-one match rather than trusting the first glob hit — the TRAP
-    this guards against is `DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL` living in a
-    same-shaped `runtime-*.js` file that a broader `CREATE TABLE` grep would also find."""
-    matches = sorted(dist_dir.glob(STATE_DB_READONLY_GLOB))
+def _find_state_schema_defining_js(dist_dir: Path) -> Path:
+    """The one dist file that DEFINES `OPENCLAW_STATE_SCHEMA_SQL` as a string literal.
+
+    Located by the constant, never by filename: see this module's docstring for why a
+    filename glob broke on 2026.9.1 while still resolving to a real file. Raises loudly on
+    zero or more-than-one match rather than trusting the first hit — the TRAP is
+    `DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL`, an unrelated sidecar schema that also
+    declares a `capture_events` table. The marker names the constant, so that file cannot
+    match it at all.
+    """
+    matches = sorted(
+        p for p in dist_dir.rglob("*.js")
+        if SCHEMA_SQL_CONST_MARKER in p.read_text(encoding="utf-8", errors="replace")
+    )
     if len(matches) != 1:
         raise AssertionError(
-            f"expected exactly one {STATE_DB_READONLY_GLOB!r} file under {dist_dir}, "
-            f"found {len(matches)}: {matches}. A dist-wide CREATE TABLE grep also matches "
-            "DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL in an unrelated runtime-*.js file "
-            "(a different sidecar debug-proxy-capture database) — this glob must resolve "
-            "to exactly the state-db-readonly module, never that one."
+            f"expected exactly one file under {dist_dir} defining "
+            f"{SCHEMA_SQL_CONST_MARKER!r}, found {len(matches)}: {matches}. Zero means the "
+            "vendor changed how it declares the state schema — re-ground before trusting "
+            "anything downstream. More than one means the anchor is no longer unique and "
+            "picking either would be a coin toss."
         )
     return matches[0]
 
@@ -506,7 +529,7 @@ def _write_state_snapshot() -> int:
             f"OpenClaw dist not installed at {OPENCLAW_DIST} -- cannot regenerate a "
             "vacuous snapshot. Run this on a machine with the matching OpenClaw installed."
         )
-    js_path = _find_state_db_readonly_js(OPENCLAW_DIST)
+    js_path = _find_state_schema_defining_js(OPENCLAW_DIST)
     sql_text = _extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))
     ddl_texts = _dist_table_ddl_texts(sql_text)
     vendor_tables = set(ddl_texts)
@@ -890,7 +913,7 @@ def test_dist_table_ddl_texts_extracts_full_statement_text():
     )
 
 
-def test_find_state_db_readonly_js_ignores_the_legacy_capture_trap(tmp_path):
+def test_find_state_schema_defining_js_ignores_the_legacy_capture_trap(tmp_path):
     """The TRAP this module's docstring names: a DIFFERENT const declares its own
     capture_events in a same-directory file that does NOT match the readonly glob."""
     (tmp_path / "openclaw-state-db-readonly-XyZ123.js").write_text(
@@ -901,20 +924,27 @@ def test_find_state_db_readonly_js_ignores_the_legacy_capture_trap(tmp_path):
         'const DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL = "CREATE TABLE capture_events (b TEXT);";',
         encoding="utf-8",
     )
-    found = _find_state_db_readonly_js(tmp_path)
+    found = _find_state_schema_defining_js(tmp_path)
     assert found.name == "openclaw-state-db-readonly-XyZ123.js"
 
 
-def test_find_state_db_readonly_js_raises_on_zero_matches(tmp_path):
+def test_find_state_schema_defining_js_raises_on_zero_matches(tmp_path):
     with pytest.raises(AssertionError, match="expected exactly one"):
-        _find_state_db_readonly_js(tmp_path)
+        _find_state_schema_defining_js(tmp_path)
 
 
-def test_find_state_db_readonly_js_raises_on_multiple_matches(tmp_path):
-    (tmp_path / "openclaw-state-db-readonly-AAA.js").write_text("x", encoding="utf-8")
-    (tmp_path / "openclaw-state-db-readonly-BBB.js").write_text("y", encoding="utf-8")
+def test_find_state_schema_defining_js_raises_on_multiple_matches(tmp_path):
+    """Two files DEFINING the constant. Both must carry the marker: under the old
+    filename glob this test wrote two same-named files with dummy bodies, which after
+    the 2026-09-03 re-anchoring would have exercised the ZERO-match branch instead and
+    silently become a duplicate of the test above."""
+    for name in ("openclaw-state-db-cache-AAA.js", "openclaw-state-db-readonly-BBB.js"):
+        (tmp_path / name).write_text(
+            'const OPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS t (a TEXT);";',
+            encoding="utf-8",
+        )
     with pytest.raises(AssertionError, match="expected exactly one"):
-        _find_state_db_readonly_js(tmp_path)
+        _find_state_schema_defining_js(tmp_path)
 
 
 def test_require_dist_skips_cleanly_when_openclaw_is_not_installed(monkeypatch):
@@ -957,7 +987,7 @@ def test_snapshot_matches_installed_dist_and_stamped_version():
     to be inert, and rewriting `openclaw-version:` to `1999.1.1` by hand left every other
     test green, because nothing actually read the stamp back."""
     dist_dir = _require_dist()
-    js_path = _find_state_db_readonly_js(dist_dir)
+    js_path = _find_state_schema_defining_js(dist_dir)
     sql_text = _extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))
     live = _dist_table_columns(sql_text)
 

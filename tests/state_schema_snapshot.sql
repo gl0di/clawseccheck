@@ -1,8 +1,8 @@
 -- state_schema_snapshot.sql -- GENERATED. Do not hand-edit.
 --
--- openclaw-version: 2026.8.2
+-- openclaw-version: 2026.9.1
 -- state-schema-version: 15
--- generated: 2026-09-02
+-- generated: 2026-09-03
 -- tables: 7
 --
 -- What this is

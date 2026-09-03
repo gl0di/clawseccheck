@@ -3040,7 +3040,20 @@ def _mcp_codex_is_loopback_server(name: str, spec: dict) -> bool:
 
 
 def _mcp_codex_approval_mode(name: str, spec: dict) -> str:
-    """`resolveMcpCodexToolApprovalMode`: the effective mode for one server.
+    """The effective codex approval mode for one server.
+
+    Mirrors `resolveProjectedMcpCodexToolApprovalMode` plus the caller-applied `?? "auto"`
+    default. It used to mirror `resolveMcpCodexToolApprovalMode`, which openclaw 2026.9.1
+    DELETED -- its whole body was `resolveProjectedMcpCodexToolApprovalMode(...) ?? "auto"`,
+    and that default did not disappear, it moved to the callers, which now apply it
+    independently in two places. So this function's behaviour is unchanged; only the vendor
+    symbol it corresponds to is. Verified by differential over 55 cases against both the
+    2026.8.2 and 2026.9.1 dists, 0 disagreements on each.
+
+    2026.9.1 also gave the projected resolver two extra precedence layers, and they are
+    deliberately NOT modelled: both read `projectedServer`, a runtime-supplied object, not
+    `openclaw.json`. Nothing in the config -- which is this tool's entire input -- can
+    reach them.
 
     Both spellings are read. 2026.8.1 REMOVED `default_tools_approval_mode` from the
     schema but the runtime still honours it, so a config carrying the retired spelling is
