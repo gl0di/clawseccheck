@@ -41,7 +41,15 @@ arrives as a single constant and needs no re-joining.
 WHAT THIS CANNOT CATCH
 ----------------------
 * A table we do not read at all -- a NEW surface. That is bucket C and needs the
-  schema walk, not this gate.
+  schema walk, not this gate. Its column-level twin IS reported: a column on a
+  table we already read that no statement of ours selects is listed as `unread col`
+  and routed to the same bucket. That half was silently missing until 2026-09-03,
+  which made this gate an instance of the very thing it was built to expose --
+  green about the surface it models, mute about the one it does not.
+  Note what `unread col` does NOT claim: not that the column is NEW. This gate has
+  no baseline of a previous build, so it cannot separate "appeared in this upgrade"
+  from "never read since the reader was written". It reports present-tense coverage,
+  and the operator supplies the time axis by diffing two runs.
 * A column that still exists but changed MEANING or units.
 * A query built by string interpolation at runtime rather than a literal.
 * Drift on a machine whose state DB has not yet been migrated by the new build:
@@ -155,8 +163,16 @@ def expected_reads(pkg_root: Path) -> dict[str, list]:
             if "*" not in collist:
                 columns = {i for i in _IDENT_RE.findall(collist)
                            if i.lower() not in _SQL_NOISE}
+            # `SELECT *` and `SELECT COUNT(*)` both yield an empty column set,
+            # and they are OPPOSITES for the reverse difference: the first reads
+            # every column, the second reads none. Collapsing them would make the
+            # gate announce a `SELECT *` reader's whole table as unread -- a lie,
+            # in the one script written to catch exactly that kind of lie. No
+            # reader uses `SELECT *` today (measured: 0); this is here so that the
+            # day one does, the gate stays honest instead of quietly inverting.
             found.setdefault(f"{path.name}:{reader}", []).append(
-                {"table": table, "columns": columns, "site": path.name})
+                {"table": table, "columns": columns, "site": path.name,
+                 "reads_all": collist.strip() == "*"})
     return found
 
 
@@ -231,6 +247,31 @@ def main() -> int:
             continue
         blind.append((reader, sorted(set(reasons))))
 
+    # The column half of bucket C. The docstring's first limit routes a table we do
+    # not read AT ALL to the schema walk, so that gap has a home. A column we do not
+    # read on a table we DO had none -- the one spec item this gate dropped, and the
+    # same shape the gate exists to catch: green about the surface it models, silent
+    # about the one it does not. Advisory, never fatal: a column we do not read has
+    # not broken anything we do read, so it must not turn a clean build red. And it
+    # is deliberately NOT called "new": with no baseline of the previous build, this
+    # cannot tell an upgrade's addition from a column never read since day one.
+    read_columns: dict = {}
+    reads_all = set()
+    for statements in expected.values():
+        for stmt in statements:
+            if stmt["table"] not in live:
+                continue
+            if stmt.get("reads_all"):
+                reads_all.add(stmt["table"])
+            read_columns.setdefault(stmt["table"], set()).update(stmt["columns"])
+    grew = []
+    for table in sorted(read_columns):
+        if table in reads_all:
+            continue
+        added = sorted(live[table] - read_columns[table])
+        if added:
+            grew.append((table, added))
+
     print(f"state database : {db_path}")
     print(f"package        : {pkg_root}")
     print(f"state-DB readers: {len(expected)}   tables present: {len(live)}")
@@ -241,12 +282,21 @@ def main() -> int:
         for reason in reasons:
             print(f"            other-generation branch: {reason}")
         print("            -> reads this build via another statement. Not drift.")
-    if dual_shape and not blind:
+    for table, added in grew:
+        print(f"unread col  {table}: {', '.join(added)}")
+        print("            -> bucket C, on a table we already read. Nothing we read "
+              "broke, so this is not drift -- but confirm none of these carries a "
+              "signal we should be reading before closing the upgrade.")
+    if grew or (dual_shape and not blind):
         print()
 
     if not blind:
         print(f"OK - each of the {len(expected)} state-DB readers has at least one "
               "statement this build can satisfy.")
+        if grew:
+            print(f"     Not silent about the rest: {len(grew)} table(s) we read "
+                  "carry columns no statement of ours selects (above). Bucket C, "
+                  "not drift.")
         return 0
 
     for reader, reasons in blind:
