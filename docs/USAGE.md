@@ -1512,8 +1512,14 @@ python3 audit.py --log audit.log            # also write log to a local file
 - **`--trend`** records the current audit result to a local append-only history file and prints
   a table of past scores with per-run arrows. Every recorded row is shown, each tagged with the
   run that produced it (`[audit]`, or `[test]`/`[dev]` for a development/CI run picked up via
-  `CLAWSECCHECK_RUN_SOURCE`, or `[legacy]` for a pre-existing entry with no source recorded) —
-  nothing is ever hidden. History stays on your machine only.
+  `CLAWSECCHECK_RUN_SOURCE`, `[view]` for a row written by `--trend` itself, or `[legacy]` for
+  a pre-existing entry with no source recorded) — nothing is ever hidden. History stays on your
+  machine only.
+
+  A `[view]` row records only the act of looking at the trend: no check ran, so it carries no
+  score and no letter, and it is excluded from both sides of the "N of M runs have no grade"
+  ratio printed under the table — counting it would inflate the ungraded share with rows that
+  were never an audit in the first place.
 
   A run whose check did not complete all five layers has **no grade**, so its row records no
   score and no letter — it appears in the table as `no grade`, and carries no arrow, because a

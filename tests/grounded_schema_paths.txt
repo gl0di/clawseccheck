@@ -68,6 +68,8 @@ gateway.controlUi.dangerouslyDisableDeviceAuth
 gateway.customBindHost
 gateway.host
 gateway.nodes.allowCommands
+gateway.nodes.commands.allow
+gateway.nodes.commands.deny
 gateway.nodes.denyCommands
 gateway.nodes.pairing.autoApproveCidrs
 gateway.port

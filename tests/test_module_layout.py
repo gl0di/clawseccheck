@@ -79,7 +79,7 @@ _EXEMPT = {
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "
                          "posture across two topic files. A finer split is a later cycle.",
-    "checks/_shared.py": "~3,423 lines — the leaf every checks/_<topic> module (and "
+    "checks/_shared.py": "~3,932 lines — the leaf every checks/_<topic> module (and "
                          "risk.py) imports from: tool-hint constants, MCP-server helpers, "
                          "and _trifecta_legs, the single shared leg definition A1 and B46 "
                          "both read. Crossed the exact 1,200-line ceiling with B-247's MCP "

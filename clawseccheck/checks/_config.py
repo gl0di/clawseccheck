@@ -258,13 +258,18 @@ _DANGER_FIXED = [
 # FAILs on it (checks/_egress.py) and _egress.py's own no-double-count rule with B38
 # applies. That was checked by running the whole check set on it, not by reading the code.
 #
-# Read WITHOUT dig() on purpose. A dig() path must appear in
-# tests/grounded_schema_paths.txt, and a manifest entry must in turn be vouched by
-# tests/dist_verified_paths.txt — which is still stamped 2026.7.1-2 and cannot contain a
-# key that version has no word for. They get their manifest entries when that snapshot is
-# regenerated: the LAST step of the upgrade (C-472), after every sibling read
-# is fixed, or the re-baseline absorbs paths nobody diagnosed. Same arrangement, for the
-# same reason, as `collector.agent_roster` and `checks/_shared._node_commands`.
+# Read WITHOUT dig() on purpose -- but note the ORIGINAL reason has expired, so do not
+# re-derive it from this comment. The deferral was that a dig() path needs an entry in
+# tests/grounded_schema_paths.txt, which in turn needs vouching by
+# tests/dist_verified_paths.txt, and that snapshot was stamped 2026.7.1-2 and could not
+# contain a key that version has no word for. The snapshot has since been regenerated
+# against 2026.8.2, and these keys DO resolve there: measured via
+# `_dist_accepts("cron.webhookSsrfPolicy.dangerouslyAllowPrivateNetwork", root, consts)`
+# -> True, against a `gateway.nodes.zzzBogusControl` -> False control. So the blocker is
+# gone and this is now ordinary outstanding work, not a thing waiting on the upgrade.
+# `checks/_shared._node_commands` was the same arrangement and was converted once the
+# snapshot moved; this site and `collector.agent_roster` were left because they belong to
+# their own tasks, not because they still cannot be done.
 _DANGER_FIXED_2026_8_1 = [
     (
         "cron.webhookSsrfPolicy.dangerouslyAllowPrivateNetwork",

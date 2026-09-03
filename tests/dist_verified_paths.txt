@@ -60,6 +60,8 @@ gateway.controlUi.allowedOrigins
 gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback
 gateway.controlUi.dangerouslyDisableDeviceAuth
 gateway.customBindHost
+gateway.nodes.commands.allow
+gateway.nodes.commands.deny
 gateway.nodes.pairing.autoApproveCidrs
 gateway.port
 gateway.tailscale.mode

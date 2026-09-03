@@ -3665,13 +3665,19 @@ def _node_commands(cfg: dict, kind: str) -> "tuple[object, str]":
     truthy": a config carrying both would then be read one way by us and the other way by
     OpenClaw, which is the disagreement this accessor exists to prevent.
 
-    The legacy spelling is read through ``dig`` so it keeps its entry in
-    ``tests/grounded_schema_paths.txt``. The new spelling is deliberately NOT read that
-    way yet: adding it to the manifest requires it to be dist-verified, and
-    ``tests/dist_verified_paths.txt`` is still stamped 2026.7.1-2. It gets its manifest
-    entry when that snapshot is regenerated — the LAST step of the upgrade, after every
-    sibling read is fixed, or the re-baseline absorbs paths nobody diagnosed. Same
-    arrangement, for the same reason, as ``collector.agent_roster``.
+    BOTH spellings are read through ``dig`` so both keep an entry in
+    ``tests/grounded_schema_paths.txt`` and are covered by all three §2.4 grounding
+    layers. The new pair was deferred while ``tests/dist_verified_paths.txt`` was still
+    stamped 2026.7.1-2 and so could not vouch for a 2026.8.x-only key; that snapshot has
+    since been regenerated against 2026.8.2, where both paths resolve, so the deferral
+    is discharged rather than merely restated.
+
+    Note the ORDER this requires: the presence test stays outside ``dig``, because the
+    precedence above turns on ``kind in commands`` — present-but-null must win. ``dig``
+    cannot express that distinction (it returns None for absent and for explicit null
+    alike), so it supplies the VALUE and the ``in`` test supplies the DECISION. Reading
+    the value through ``dig`` was verified equivalent to ``commands[kind]`` inside this
+    branch over every value shape including explicit null and falsy scalars.
     """
     # The CONTAINER is read with plain dict access, not `dig` — same as `_mcp_servers`
     # reading `cfg.get("mcp")`. A `dig("gateway.nodes")` would add a manifest entry whose
@@ -3683,7 +3689,15 @@ def _node_commands(cfg: dict, kind: str) -> "tuple[object, str]":
     if isinstance(nodes, dict):
         commands = nodes.get("commands")
         if isinstance(commands, dict) and kind in commands:
-            return commands[kind], new_path
+            # Two literal dig() calls, not `dig(cfg, new_path)`: the manifest guard
+            # extracts STRING LITERALS reaching dig()'s 2nd argument, so an f-string
+            # would leave both paths unrepresented in the source it checks. It says so
+            # by name rather than dropping them silently (test_schema_grounding.py's
+            # `_parse_source_dig_paths` raises on the indirection). Same shape as the
+            # legacy pair below.
+            value = (dig(cfg, "gateway.nodes.commands.allow") if kind == "allow"
+                     else dig(cfg, "gateway.nodes.commands.deny"))
+            return value, new_path
     legacy = dig(cfg, "gateway.nodes.allowCommands") if kind == "allow" \
         else dig(cfg, "gateway.nodes.denyCommands")
     if legacy is not None:

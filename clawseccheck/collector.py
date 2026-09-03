@@ -3277,11 +3277,16 @@ def agent_roster(cfg) -> "list[AgentEntry]":
         ]
     if "list" in agents:
         # Read through `dig` so the legacy path stays a dig() path and keeps its entry in
-        # `tests/grounded_schema_paths.txt`. `agents.entries` is deliberately NOT read that
-        # way yet: adding it to the manifest requires it to be dist-verified, and
-        # `tests/dist_verified_paths.txt` is still stamped 2026.7.1-2. It gets its manifest
-        # entry when that snapshot is regenerated -- the LAST step of the upgrade, after
-        # every sibling read is fixed, or the re-baseline absorbs paths nobody diagnosed.
+        # `tests/grounded_schema_paths.txt` -- where it is registered in
+        # `_NOT_IN_CURRENT_SCHEMA`, because `agents.list` no longer resolves against
+        # 2026.8.2 (measured: `_dist_accepts("agents.list", ...)` -> False).
+        # `agents.entries` is still NOT read that way, but the ORIGINAL reason has
+        # expired: the deferral was that the manifest entry needed vouching by
+        # `tests/dist_verified_paths.txt` while that snapshot was stamped 2026.7.1-2. It
+        # has since been regenerated against 2026.8.2, where `agents.entries` DOES
+        # resolve (measured -> True, against a bogus-key control -> False). So this is
+        # now ordinary outstanding work with no blocker, not a step waiting on the
+        # upgrade -- do not read this comment as saying it cannot be done yet.
         value = dig(cfg, "agents.list")
         if not isinstance(value, list):
             return []
