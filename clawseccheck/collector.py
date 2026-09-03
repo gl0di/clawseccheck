@@ -4718,7 +4718,10 @@ def _plugin_index_object_is_valid(index_obj: object) -> bool:
     """OC-82/C-135: does ``index_obj`` (the ``value_json -> index`` sub-object of
     ``config_machine_state['plugins.installedIndex']``) pass the SAME acceptance test
     the runtime's OWN parser applies before it trusts a row
-    (``installed-plugin-index-store-DjwtyXoa.js:75-93``)?
+    (``installed-plugin-index-store-*.js:75-93`` — symbol
+    ``extractPluginInstallRecordsFromInstalledPluginIndex``, re-verified present in
+    openclaw@2026.9.1; line numbers read on 2026.8.2, filename globbed because it
+    rehashes every release)?
 
     That parser requires, on top of a numeric top-level ``revision`` (checked
     separately by the caller): ``version === 1``, a non-empty ``hostContractVersion``,
@@ -4729,7 +4732,7 @@ def _plugin_index_object_is_valid(index_obj: object) -> bool:
     tool either; checking ``revision`` alone let a row the runtime itself would reject
     be treated here as authoritative (the concrete case: ``installRecords`` naming a
     plugin absent from ``plugins`` is a MODELLED, tolerated runtime state — see
-    ``installed-plugin-index-store-C3LEu6Er.js:131-136`` — not evidence this row is
+    ``installed-plugin-index-store-*.js:131-136`` — not evidence this row is
     bad; it is the "index" object's OWN internal field validity that must be checked).
 
     Measured on a real machine (2026.8.2): all nine ``index`` fields present with the
@@ -4776,9 +4779,9 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
        ``state_key = 'plugins.installedIndex'``. The ``state-consolidation-v13``
        migration folded the whole ``installed_plugin_index`` table into this one KV row.
        Grounded against the installed dist: writer
-       ``installed-plugin-index-store-C3LEu6Er.js:63-71`` (``INSERT ... ON CONFLICT DO
-       UPDATE``), key constant ``installed-plugin-index-store-DjwtyXoa.js:10``, reader
-       ``installed-plugin-index-record-reader-DzjNCiwT.js:57-58``, and the vendor's own
+       ``installed-plugin-index-store-*.js:63-71`` (``INSERT ... ON CONFLICT DO
+       UPDATE``), key constant ``installed-plugin-index-store-*.js:10``, reader
+       ``installed-plugin-index-record-reader-*.js:57-58``, and the vendor's own
        shipped docs (``docs/reference/database-schemas.md:213`` states the fold plainly;
        ``:723-741`` is a downgrade script reconstructing the old table by
        ``json_extract`` from this exact key). Measured on a real machine: ``value_json``
@@ -4800,9 +4803,9 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
       branch a mid-migration/pre-OC-82 database satisfies — see
       ``scripts/state_db_drift_gate.py``). The numeric-``revision`` requirement mirrors
       the runtime's OWN rejection of a row it did not write
-      (``installed-plugin-index-store-DjwtyXoa.js:118``); the ``index``-object check
-      mirrors the runtime's OWN parser (``installed-plugin-index-store-
-      DjwtyXoa.js:75-93``), which additionally requires ``version === 1``,
+      (``installed-plugin-index-store-*.js:118``); the ``index``-object check
+      mirrors the runtime's OWN parser (``installed-plugin-index-store-*.js:75-93``),
+      which additionally requires ``version === 1``,
       ``hostContractVersion``, ``compatRegistryVersion``, ``migrationVersion === 1``,
       ``policyHash``, ``generatedAtMs``, a valid ``plugins`` array, and a fully-valid
       ``installRecords`` map — ANY failure there returns null and the runtime discards
@@ -4830,8 +4833,8 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
       iterate it exactly like legacy ``install_records_json``. ELSE (key absent)
       assemble it from ``plugins[*].installRecord`` keyed by ``plugins[*].pluginId`` --
       grounded in what the runtime itself does
-      (``installed-plugin-index-store-DjwtyXoa.js:92`` ->
-      ``installed-plugin-index-BAJAUL58.js:1214-1219``). Inert on the machine this was
+      (``installed-plugin-index-store-*.js:92`` ->
+      ``installed-plugin-index-*.js:1214-1219``). Inert on the machine this was
       grounded against (0 of 61 plugin entries carry ``installRecord``), implemented
       anyway so this reader has no blind spot the runtime does not have.
     * ``plugin_index_records``: iterate ``index.plugins`` (a LIST) -- a different
@@ -5091,7 +5094,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                 # object, its "revision" is missing/non-numeric, or its "index" object
                 # fails the runtime's own validity check -- the same fields the
                 # runtime itself checks before trusting a row
-                # (installed-plugin-index-store-DjwtyXoa.js:75-93,118). Reported as
+                # (installed-plugin-index-store-*.js:75-93,118). Reported as
                 # present-and-unreadable, NEVER silently as absent (which would fall
                 # through to the legacy columns above and mask a broken modern row with
                 # a legacy read that happens to still succeed).
@@ -5125,8 +5128,8 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                 if "installRecords" in index_obj and isinstance(install_records_val, dict):
                     installs = install_records_val
                 else:
-                    # FALLBACK leg (grounded: installed-plugin-index-store-DjwtyXoa.js:92
-                    # -> installed-plugin-index-BAJAUL58.js:1214-1219) -- assemble the
+                    # FALLBACK leg (grounded: installed-plugin-index-store-*.js:92
+                    # -> installed-plugin-index-*.js:1214-1219) -- assemble the
                     # trust map from each plugin's own installRecord when the top-level
                     # installRecords key is absent. This is what the runtime itself does;
                     # inert on the grounding machine (0 of 61 plugins carry
@@ -5400,7 +5403,9 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
 
     ``agent_dir``, ``workspace_dir``, ``spawn_mode`` and ``task`` appear NOWHERE in that
     canonical read — they are GONE, not moved (``task`` is literally the pre-v13 schema
-    marker in the migration gate, ``dist/openclaw-state-db-BYInL4sn.js:1900``). They are set
+    marker in the migration gate, ``dist/openclaw-state-db-*.js:1900`` — the
+    ``workspace_attestations`` marker re-verified present in openclaw@2026.9.1, line
+    read on 2026.8.2). They are set
     ``None`` on the modern path, and a consumer must not read that ``None`` as "no
     workspace" — a ONE-TIME (per collection run, not per row) disclosure is emitted via
     ``note_limit(ctx.limit_hits, LIMIT_DOMAIN_AGENTS, ...)`` naming exactly which fields are

@@ -6630,10 +6630,14 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     # OC-82 (C-135 adversarial pass): a "blocked" verdict must be qualified against the
     # population OpenClaw's own index says is actually INSTALLED
     # (ctx.plugin_index_records) before it is trusted as a live threat.
-    # installed-plugin-index-store-C3LEu6Er.js:131-136 deliberately KEEPS an install
+    # `extractPluginInstallRecordsFromInstalledPluginIndex` /
+    # `removePluginInstallRecordFromRecords`, all three symbols re-verified present in
+    # openclaw@2026.9.1. Line numbers below were read on 2026.8.2; the filenames are
+    # globbed because they rehash every release (docs/CHECK_AUTHORING.md).
+    # installed-plugin-index-store-*.js:131-136 deliberately KEEPS an install
     # record whose owner is absent from "plugins" until `openclaw uninstall`
-    # (plugins-uninstall-command-CsUWUrCG.js:177) or `doctor --fix`
-    # (doctor-plugin-registry-B2iBbCQF.js:500) prunes it -- a hand-deleted plugin
+    # (plugins-uninstall-command-*.js:177) or `doctor --fix`
+    # (doctor-plugin-registry-*.js:500) prunes it -- a hand-deleted plugin
     # directory leaves the trust record behind, so installRecords not-a-subset-of
     # plugins is a modelled, tolerated state, not corruption.
     #

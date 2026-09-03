@@ -1037,7 +1037,9 @@ def _resolve_sandbox_scope(agent_sandbox: dict, default_sandbox: dict) -> str:
     4, widened to ``network`` by B-673): under ``scope: "shared"`` (or the legacy boolean
     ``perSession: false``, at either level), OpenClaw discards this agent's OWN
     ``sandbox.docker`` object ENTIRELY (``scopedAgentDocker = scope === "shared" ? void 0
-    : agentSandbox?.docker``, dist/config-H0S_y_rW.js:150) before ``resolveSandboxDockerConfig``
+    : agentSandbox?.docker``, symbol ``scopedAgentDocker``, dist/config-*.js:150 — symbol
+    re-verified present in openclaw@2026.9.1, line read on 2026.8.2) before
+    ``resolveSandboxDockerConfig``
     reads either ``network`` (dist:66, falling back to the global default, not to "host")
     or ``binds`` off it -- neither leg reaches the container, so neither must defeat
     containment. ``mode`` and ``workspaceAccess`` are NOT scope-gated (they resolve off
