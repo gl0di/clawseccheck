@@ -461,8 +461,15 @@ _SNAPSHOT_HEADER = """\
 -- What this is
 -- ------------
 -- The vendor's own `CREATE TABLE` statements, copied byte-for-byte out of the installed
--- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL` (dist/openclaw-state-db-readonly-*.js), projected
--- to the state-SQLite tables this tree declares in a test DDL or that clawseccheck/ reads.
+-- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL`, projected to the state-SQLite tables this tree
+-- declares in a test DDL or that clawseccheck/ reads.
+--
+-- source-bundle: {source_file}
+--   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. The bundle
+--   carrying this constant is build output and its name rotates -- 2026.9.1 moved it from
+--   openclaw-state-db-readonly-*.js to openclaw-state-db-cache-*.js while BOTH files still
+--   existed, so a name written here by hand would have kept naming a real file that no
+--   longer holds the schema. The locator globs for the constant, never for a filename.
 --
 -- Why it exists (B-710)
 -- ----------------------
@@ -548,6 +555,7 @@ def _write_state_snapshot() -> int:
         generated=date.today().isoformat(),
         count=len(target),
         regen_cmd=REGENERATE_CMD,
+        source_file=js_path.name,
     )
     body = "\n\n".join(ddl_texts[t].rstrip() for t in sorted(target))
     SNAPSHOT_FILE.write_text(header + body + "\n", encoding="utf-8")
@@ -1019,4 +1027,12 @@ if __name__ == "__main__":
         n = _write_state_snapshot()
         print(f"wrote {SNAPSHOT_FILE} -- {n} tables")
     else:
-        print("usage: python3 tests/test_state_schema_grounding.py --write-state-snapshot")
+        # Exit NON-zero. This is a re-baseline step, and the upgrade protocol runs it
+        # chained behind other commands: a usage error that exits 0 lets a run that wrote
+        # NOTHING report success, after which an unchanged snapshot reads as "the vendor
+        # did not move" instead of "the generator never ran".
+        print(
+            "usage: python3 tests/test_state_schema_grounding.py --write-state-snapshot",
+            file=sys.stderr,
+        )
+        sys.exit(2)

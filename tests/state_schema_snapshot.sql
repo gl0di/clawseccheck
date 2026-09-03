@@ -2,14 +2,21 @@
 --
 -- openclaw-version: 2026.9.1
 -- state-schema-version: 15
--- generated: 2026-09-03
+-- generated: 2026-09-04
 -- tables: 7
 --
 -- What this is
 -- ------------
 -- The vendor's own `CREATE TABLE` statements, copied byte-for-byte out of the installed
--- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL` (dist/openclaw-state-db-readonly-*.js), projected
--- to the state-SQLite tables this tree declares in a test DDL or that clawseccheck/ reads.
+-- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL`, projected to the state-SQLite tables this tree
+-- declares in a test DDL or that clawseccheck/ reads.
+--
+-- source-bundle: openclaw-state-db-cache-AunrvrzG.js
+--   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. The bundle
+--   carrying this constant is build output and its name rotates -- 2026.9.1 moved it from
+--   openclaw-state-db-readonly-*.js to openclaw-state-db-cache-*.js while BOTH files still
+--   existed, so a name written here by hand would have kept naming a real file that no
+--   longer holds the schema. The locator globs for the constant, never for a filename.
 --
 -- Why it exists (B-710)
 -- ----------------------
