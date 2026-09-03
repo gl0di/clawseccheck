@@ -1581,9 +1581,9 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         return _finding(
             "B189",
             UNKNOWN,
-            "No cron run-log table found (the state SQLite database or its cron_run_logs "
-            "table is absent) — cannot determine whether any scheduled job ran and erased "
-            "itself.",
+            "No cron run-log table found (the state SQLite database is absent, or neither "
+            "its task_runs table (OpenClaw 2026.8.2+) nor the older cron_run_logs table "
+            "exists) — cannot determine whether any scheduled job ran and erased itself.",
             "No action needed if cron is unused. If cron jobs are configured, keep "
             "~/.openclaw/state/openclaw.sqlite owner-readable so a future audit can inspect "
             "the execution trail.",
