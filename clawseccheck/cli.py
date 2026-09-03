@@ -42,7 +42,7 @@ from .brand import WORDMARK
 from .checks import detect_vet_type_with_reason, resolve_skill_target
 from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
 from .checks import _credential_store_state
-from .invocation import command_prefix
+from .invocation import _display_path, command_prefix
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
 from .monitor import (
@@ -2693,6 +2693,43 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
     return 0
 
 
+#: B-606: a bare ``--pdf`` (flag given, no PATH) auto-resolves through
+#: ``_default_pdf_target`` instead of requiring a value. Any non-empty string works as
+#: the ``nargs="?"`` const EXCEPT the empty one, which ``_VALUE_REQUIRED_MODES`` already
+#: treats as a malformed invocation for every "opt" mode — this deliberately is not that
+#: string, and is not a value anyone would type as a real filename.
+_PDF_AUTO = "\0pdf-auto\0"
+
+
+def _default_pdf_target(home: str) -> "tuple[str, bool]":
+    """Where a bare ``--pdf`` writes, and whether that is the managed root.
+
+    B-606: OpenClaw parses a ``MEDIA:<path>`` directive off the assistant's own reply and
+    turns it into a real attachment — documented in OpenClaw's own system prompt, on by
+    default — but the path has to be one its read tool can open, and by
+    ``toolpolicy.py``'s own measurement most homes deny that for anything outside the
+    workspace. ``<home>/media/outbound`` is the one exception: OpenClaw seeds it into the
+    allowed roots unconditionally, ahead of every other permission check, because it is
+    the runtime's own managed area for outbound attachments — so writing there is the one
+    placement with a real chance of being read back.
+
+    The test is existence + writability, nothing else — deliberately not a product
+    version: a version number is a fact about the tool that made the directory, not about
+    whether THIS install still can, and an unusual host with the directory absent gets
+    the honest fallback rather than a default earned from misreading a version string.
+
+    Never CREATES the directory — an explicit, opt-in ``--pdf`` write is what CLAUDE.md
+    allows; auto-resolution must not manufacture the very precondition it is testing for.
+    """
+    managed = Path(home).expanduser() / "media" / "outbound"
+    try:
+        if managed.is_dir() and os.access(managed, os.W_OK):
+            return str(managed / "clawseccheck-report.pdf"), True
+    except OSError:
+        pass
+    return "~/.clawseccheck/report.pdf", False
+
+
 def _main(argv=None) -> int:
     _JUDGED_BUNDLE_CACHE.clear()
     p = argparse.ArgumentParser(
@@ -2890,10 +2927,12 @@ def _main(argv=None) -> int:
                    help="print the SHA-256 digest of the ClawSecCheck engine source for tamper detection")
     p.add_argument("--sarif", metavar="PATH",
                    help="write a SARIF 2.1.0 report to PATH")
-    p.add_argument("--pdf", metavar="PATH",
+    p.add_argument("--pdf", metavar="PATH", nargs="?", const=_PDF_AUTO,
                    help="write the complete audit as a paginated PDF to PATH — attach the "
                         "file itself into chat (a mobile client opens it inline; do not "
-                        "paste the path or re-render its contents)")
+                        "paste the path or re-render its contents). Given with no PATH, "
+                        "auto-resolves to OpenClaw's managed attachment directory when "
+                        "one exists and is writable, else ~/.clawseccheck/report.pdf")
     # C-426: `--fail-under N` was REMOVED here, not deprecated-in-place. It thresholded
     # the audit SCORE, and under the five-layer rule a run only carries one when all
     # five layers ran — so for the ordinary invocation there was nothing left for it to
@@ -3067,6 +3106,16 @@ def _main(argv=None) -> int:
                             ("history", DEFAULT_HISTORY)):
         if getattr(args, _attr) is None:
             setattr(args, _attr, _default)
+
+    # B-606: an explicit `--pdf <path>` always wins — this branch only fires for the bare
+    # form (`_PDF_AUTO`, this ``nargs="?"``'s const), never for a user-named path. Resolved
+    # here, once, before any mode dispatch, so every later reader of `args.pdf` (mode
+    # detection, the write site, the attach note) sees the same real path with no extra
+    # plumbing.
+    _pdf_used_managed_root = False
+    _pdf_was_auto = args.pdf == _PDF_AUTO
+    if _pdf_was_auto:
+        args.pdf, _pdf_used_managed_root = _default_pdf_target(args.home)
 
     # Surface (on stderr) any second mode flag or global modifier the resolved mode
     # won't honor, so nothing is dropped silently (B-066 / B-067). Warn-and-continue:
@@ -3990,10 +4039,38 @@ def _main(argv=None) -> int:
         stated preference and getting it right about half the time — not refusing an
         instruction, which is why naming the form is expected to work here where eight
         attempts at the card did not.
+
+        B-606 (this change): naming the anti-link rule was never the whole gap -- nothing
+        here told the agent HOW to attach a file at all, only that it should, so it kept
+        improvising the rest. OpenClaw documents exactly one mechanism to its own model: a
+        `MEDIA:<path>` line, alone on its own line, outside any code fence, parsed out of
+        the reply and turned into a real attachment. The note now hands over that literal
+        line instead of describing the goal. Whether the read behind it succeeds depends
+        on where the file landed -- `<home>/media/outbound` is the one directory OpenClaw
+        always allows its own read tool to reach, ahead of every other permission check;
+        anywhere else is gated the same way most of a user's files already are, and a
+        blocked read is dropped by the host silently, with nothing surfaced here to catch
+        it. That is why the path is still said in words below regardless -- it costs
+        nothing to include, and it is the only fallback a blocked read leaves.
         """
         if not path:
             return
-        print(f"note: report written to {path} — attach this PDF file itself into the "
+        _media_path = _display_path(path)
+        _fallback_line = (
+            "      This run could not confirm OpenClaw's managed attachment directory "
+            "(it did not exist, or was not writable), so the report fell back to a "
+            "location the read tool may not be allowed to open: the MEDIA line above "
+            "may be silently dropped. Say the path in words too, so the user still has "
+            "something to open.\n"
+            if _pdf_was_auto and not _pdf_used_managed_root else ""
+        )
+        print(f"note: report written to {path}. Send it now: on its own line, outside "
+              "any code fence, write exactly this line, verbatim (OpenClaw parses it "
+              "out of your reply and attaches the file for you; do not merely describe "
+              "doing so):\n"
+              f"      MEDIA:{_media_path}\n"
+              f"{_fallback_line}"
+              "      — attach this PDF file itself into the "
               "chat; that is the deliverable.\n"
               "      If your channel cannot attach files: say so plainly, offer the "
               "inline report (--dashboard --full, split across messages), and name the "

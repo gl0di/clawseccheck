@@ -73,10 +73,15 @@ OpenClaw setup — a private local audit history under `~/.clawseccheck/` (owner
 `--no-history`), any report files you explicitly request via a flag (`--save`, `--badge`, `--html`,
 `--sarif`, `--pdf`, `--monitor`, `--trend`, `--log`), and a small freshness ledger
 (`~/.clawseccheck/coverage.json`) recording when you last ran an opt-in active self-test
-(`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`). The one write that lands inside the
-audited OpenClaw home is `--apply-ignore-proposals` (opt-in, confirmation-gated): it appends
-entries a prior `--propose-ignore` run already proposed to `<home>/.clawseccheckignore`, never
-inventing one — see "Judge-panel fan-out" below. `--purge`
+(`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`). Two writes land inside the audited
+OpenClaw home, both user-requested and explicit — never on a bare/default run: `--apply-ignore-proposals`
+(opt-in, confirmation-gated) appends entries a prior `--propose-ignore` run already proposed to
+`<home>/.clawseccheckignore`, never inventing one — see "Judge-panel fan-out" below; and `--pdf`,
+when the OpenClaw home's own managed attachment directory (`<home>/media/outbound`) already exists
+and is writable, defaults its PDF there instead of `~/.clawseccheck/report.pdf`, so the file lands
+where OpenClaw's own read tool is always allowed to open it back up for a chat attachment — see
+"attachable report" below. Neither write ever touches `openclaw.json`, a skill, or a bootstrap file.
+`--purge`
 deletes its four known store files (history/events/state/coverage) plus their lock siblings in one
 step; a crash-artifact `.tmp` sibling, if one is ever left behind, is not touched by `--purge` and
 needs a manual `rm`. Scoping flags at a glance: `--no-history` (skip
@@ -493,7 +498,7 @@ in Step 2's internal pull — each invocation is its own fresh process, so `--at
 passed again) and folds in the mandatory judge panel's verdicts:
 
 ```
-python3 {baseDir}/audit.py --dashboard --full --attest <path-or- -> --judged-bundle <verdicts-path-or- -> --pdf ~/.clawseccheck/report.pdf
+python3 {baseDir}/audit.py --dashboard --full --attest <path-or- -> --judged-bundle <verdicts-path-or- -> --pdf
 ```
 
 **`--pdf` is what makes this fit a chat message (C-374).** With it, the run writes a
@@ -501,16 +506,29 @@ complete PDF — every finding with its why and evidence, *plus* the Skills/Plug
 RISK-chain, Behavioural, Second-opinion and Coverage blocks — and the card collapses to a
 chat-sized overview that points at that file. Without `--pdf` the same command pastes the
 whole pipeline inline (~11.5 KB), which a channel like Telegram will truncate or reject.
+Given with no PATH, as above, it picks the destination itself: if the OpenClaw home's own
+managed attachment directory (`<home>/media/outbound`) exists and is writable it writes
+there, else `~/.clawseccheck/report.pdf` as before — the check is existence and
+writability only, never a version.
 
-So: **paste the card, then attach `~/.clawseccheck/report.pdf` as a file.** Never paste
-its path at the user as if it were the deliverable, and never present it as a link —
-ClawSecCheck is local-only, so no URL exists — and any link you write will simply be
-broken. **Markdown link syntax counts**: `[report.pdf](path)` is a link, and a chat client
-strips the href off a local path and leaves a dead one the user can click forever (measured:
-3 of 7 live runs did exactly this — B-606). Write the path as plain text or inline code.
-If your channel cannot attach files, say so plainly, **name the path so the user
-can open it themselves**, and offer `--dashboard --full` (everything inline, split across
-messages) instead — the card names the most urgent findings either way, so the user is
+**Send it, don't describe it (B-606).** The stderr note this command prints hands you a
+literal directive line — `MEDIA:<the real path>`. Reproduce that exact line, alone, on
+its own line, outside any code fence, in your reply: OpenClaw parses `MEDIA:<path>` out of
+assistant replies and turns it into a real file attachment on its own, in both the Control
+UI and Telegram — this is a documented mechanism, not something to paraphrase. It can only
+reach a path its read tool is allowed to open, which is why the auto-resolved location
+above matters: `<home>/media/outbound` is always allowed, so writing there gives the
+directive its best chance of actually attaching; anywhere else may be silently dropped by
+the host with no error shown here. That is why the path is still worth saying in words
+too — free to include, and the only thing left if the attachment never arrives. Never
+present it as a link — ClawSecCheck is local-only, so no URL exists — and any link you
+write will simply be broken. **Markdown link syntax counts**: `[report.pdf](path)` is a
+link, and a chat client strips the href off a local path and leaves a dead one the user
+can click forever (measured: 3 of 7 live runs did exactly this — B-606). Write the path as
+plain text or inline code. If your channel cannot attach files, say so plainly, **name the
+path so the user can open it themselves**, and offer `--dashboard --full` (everything
+inline, split across messages) instead — the card names the most urgent findings either
+way, so the user is
 never left with only a grade.
 
 `<verdicts-path-or- ->` is the file (or `-` for stdin) carrying the verdicts map Step 2's
