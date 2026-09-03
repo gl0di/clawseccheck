@@ -291,16 +291,24 @@ def chain_provenance_note(ok: "bool | None", msg: str) -> "str | None":
     exists for it, so a planted row displayed as fact with rc 0 while
     ``--verify-history``/``--verify-events`` on the identical file said BROKEN.
 
-    Negative-only, deliberately. An earlier version of this also returned an
-    affirmative "Chain verified" line on ``ok is True``, and that was retracted
-    before shipping: a line present on every healthy machine, every run, is
-    exactly the "furniture within a week" shape ``report.py``'s coverage-note
-    renderer already documents a rule against — a standing line drowns out the
-    situational one it sits next to, which here is the one line that actually
-    matters. Silence means verified, the same way silence already means "nothing
-    was skipped" everywhere else in this tool. ``--verify-history``/
-    ``--verify-events`` are a different case (an explicit request to check the
-    chain, answered either way) and are untouched by this change.
+    Negative-only for a FULLY verified chain — not negative-only for every
+    ``ok is True``. An earlier version of this also returned an affirmative
+    "Chain verified" line on every ``ok is True``, and that was retracted before
+    shipping: a line present on every healthy machine, every run, is exactly the
+    "furniture within a week" shape ``report.py``'s coverage-note renderer
+    already documents a rule against — a standing line drowns out the situational
+    one it sits next to, which here is the one line that actually matters.
+    Silence means an UNQUALIFIED ``"OK"`` — the chain verified in full — the same
+    way silence already means "nothing was skipped" everywhere else in this
+    tool. It does NOT mean any ``ok is True``: ``verify_chain`` itself
+    distinguishes a third state — rows that predate F-094 chaining and so were
+    never hashed at all, plus unknown-schema/unparseable rows it also counts —
+    carried in its own parenthetical (e.g. ``"OK (2 entries not chain-verified
+    (legacy, no chain_hash))"``). B-582's own reviewer found that third state was
+    being flattened to the same silence as a fully-verified chain; the branch
+    below is the fix. ``--verify-history``/``--verify-events`` are a different
+    case (an explicit request to check the chain, answered either way) and are
+    untouched by this change.
 
     Two constraints on the broken branch, both deliberate:
 
@@ -314,12 +322,14 @@ def chain_provenance_note(ok: "bool | None", msg: str) -> "str | None":
       accusation, and calling it tampering on an ordinary machine is a false
       positive with an unusually high cost.
 
-    Returns ``None`` on both other outcomes: ``ok is True`` (verified — say
-    nothing) and ``ok is None`` (no chain to check at all — absent/empty/
-    unreadable; should not happen when a caller already loaded rows from the same
-    path moments earlier, and staying silent on a race is safer than a claim the
-    evidence does not support, same reasoning as ``verify_chain``'s own third
-    outcome).
+    Returns ``None`` on two outcomes: ``ok is True`` with an unqualified
+    ``"OK"`` (verified in full — say nothing) and ``ok is None`` (no chain to
+    check at all — absent/empty/unreadable; should not happen when a caller
+    already loaded rows from the same path moments earlier, and staying silent
+    on a race is safer than a claim the evidence does not support, same
+    reasoning as ``verify_chain``'s own third outcome). A THIRD outcome — ``ok
+    is True`` but ``msg`` carries a parenthetical qualifier — returns a
+    situational line naming it, below.
     """
     if not ok:
         if ok is None:
@@ -331,6 +341,16 @@ def chain_provenance_note(ok: "bool | None", msg: str) -> "str | None":
             "tampering — an ordinary cause (a hand edit, two racing writes, log rotation) "
             "breaks a link the same way an edit would. Rows recorded from that point on "
             "cannot be confirmed as written by this tool."
+        )
+    if msg != "OK":
+        # ok is True but qualified (legacy rows / unknown-schema entries /
+        # unparseable lines skipped) — the third state; say so rather than
+        # flattening it to the same silence as an unqualified OK.
+        detail = msg[len("OK ("):-1] if msg.startswith("OK (") and msg.endswith(")") else msg
+        return (
+            f"Chain verifies except: {detail}. Those rows' provenance is unconfirmed, "
+            "not evidence of tampering — the qualifier means they predate this tool's "
+            "chaining or could not be parsed/authenticated, not that they were altered."
         )
     return None
 def _rotate_journal(p: Path, max_lines: int = _JOURNAL_MAX_LINES,

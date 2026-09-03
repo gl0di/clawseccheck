@@ -665,6 +665,24 @@ whether you typed the flag. Nothing there at all reads as an ordinary first run;
 there that does not verify — an emptied, overwritten or unreadable store — says so plainly
 and tells you not to re-run the command that would overwrite it.
 
+**`--trend` and `--watch-log` disclose the same chain, inline, but on a different contract
+than the two verifiers above.** The verifiers were asked to check and answer either way —
+`chain OK`/`BROKEN`/`NOT VERIFIED`, always printed. The viewers were not asked; they render
+the store either way and only *add* a line when there is something to disclose:
+
+- **Silent** — the chain verified in full (an unqualified `OK`). This is the common case and
+  deliberately prints nothing extra, the same anti-furniture reasoning as the rest of this
+  tool: a line on every healthy run stops being read.
+- **A qualified line** — the chain verified, but `verify_chain()` itself flagged rows it could
+  not check at all (e.g. legacy rows recorded before this tool began chaining the journal).
+  Their provenance is unconfirmed, not evidence of tampering.
+- **A broken-chain line** — the chain does not verify from a named entry onward. Rows still
+  render in full; the line names an ordinary cause (a hand edit, two racing writes, log
+  rotation), never "tampering".
+
+See `SECURITY_MODEL.md` for the per-entry hash-chain semantics these three states are built
+from.
+
 Every run prints a short reference value for the baseline, and records it in that journal on the
 runs where it actually moved (a quiet machine adds no line). Copy it somewhere the machine cannot
 reach — that part is yours to do, from a run you took interactively — and check it later:

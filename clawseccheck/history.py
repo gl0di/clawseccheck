@@ -446,11 +446,18 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
         (or ``history.verify``, the same call), run over the SAME file these
         ``rows`` were just loaded from. ``None`` (the default) renders no
         provenance line at all — existing callers/tests that never pass this are
-        unaffected. Negative-only via ``monitor.chain_provenance_note``: a broken
-        chain appends one disclosure line (rows still render, never withheld, and
-        it is never called tampering — see that function's own docstring); a
-        verified chain appends nothing — silence means verified, the same as
-        every other "nothing to disclose" convention in this renderer.
+        unaffected. Three states via ``monitor.chain_provenance_note``, not two
+        (B-582 — this docstring said two until 2026-09-03): a broken chain appends
+        one disclosure line; a chain that verifies WITH A QUALIFIER (legacy rows
+        carrying no ``chain_hash``, an unknown schema, an unparseable row) appends
+        a different line naming what was not chain-verified; and only a chain that
+        verifies in full appends nothing. Rows always render in every state, are
+        never withheld, and none of the three is ever called tampering — see that
+        function's own docstring.
+
+        So silence means verified IN FULL, not merely "not broken". Collapsing the
+        qualified state into silence is what B-582 was filed for: it told the
+        reader every row was chain-verified when some had never been.
 
     Design note (this replaces a default-on filter): an earlier version of
     this function hid rows whose ``source`` wasn't "audit"/"legacy" and only
