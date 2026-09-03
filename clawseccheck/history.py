@@ -621,6 +621,10 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
         line += raw_clause
         lines.append(line)
 
+    # Computed before the branch: both arms need it, and it is the same quantity in
+    # each -- rows on screen that the ratio does not and cannot cover.
+    view_count = len(rows) - checkable
+
     if holes:
         lines.append("")
         lines.append(
@@ -633,7 +637,6 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
         # "view" row is present (see the loop above) — say so explicitly, or a reader
         # counting the rows above gets a different total than the sentence just gave them
         # and cannot tell whether that is a filter or a miscount. Named, not silent.
-        view_count = len(rows) - checkable
         if view_count:
             if view_count == 1:
                 noun, verb_record, verb_be = "row", "records", "is"
@@ -643,6 +646,41 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
                 f"{checkable} of {len(rows)} rows shown above are counted in that ratio; "
                 f"the other {view_count} {noun}, tagged [view], {verb_record} only the act "
                 f"of looking at this trend and {verb_be} excluded from it."
+            )
+    elif view_count:
+        # B-717: `holes` counts ungraded rows that are NOT view rows, so it is zero for
+        # two ordinary populations -- every real run completed the check, and a fresh
+        # store holding nothing but the looking itself. In both, the block above never
+        # ran and a [view] row rendered with its tag unexplained anywhere on screen; the
+        # all-view case showed a screen of tags and no prose at all. The sentence above
+        # cannot just be dedented to cover this: it points back at "that ratio", which is
+        # printed only when there are holes, and a dangling reference is not an
+        # explanation.
+        lines.append("")
+        if view_count == len(rows):
+            # Worth its own wording: with no graded row anywhere, saying what the tag
+            # means leaves the reader with an empty trend and no way out of it.
+            if view_count == 1:
+                lines.append(
+                    "The only row shown above is tagged [view]: it records the act of "
+                    "looking at this trend, not a check that was run. Run an audit to "
+                    "put a graded run in this history."
+                )
+            else:
+                lines.append(
+                    f"All {view_count} rows shown above are tagged [view]: they record "
+                    "the act of looking at this trend, not checks that were run. Run an "
+                    "audit to put a graded run in this history."
+                )
+        elif view_count == 1:
+            lines.append(
+                f"1 of the {len(rows)} rows shown above is tagged [view]: it records "
+                "the act of looking at this trend, not a check that was run."
+            )
+        else:
+            lines.append(
+                f"{view_count} of the {len(rows)} rows shown above are tagged [view]: "
+                "they record the act of looking at this trend, not checks that were run."
             )
 
     # B-691: the arrow answers "did the LETTER move", which an open FAIL pins at a floor.
