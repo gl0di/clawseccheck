@@ -181,12 +181,16 @@ def test_unreadable_config_never_fabricates_a_config_claim(tmp_path):
     """openclaw.json present but unparseable -> ctx.config falls back to {} for reasons that
     have nothing to do with subagent delegation. Asserting "config declares no delegation"
     over that would be a fabricated claim (GR#4) -- the disclosure must stay silent and let
-    B18 fall back to its ordinary UNKNOWN, even though subagent_runs holds rows."""
+    B18 fall back to an UNKNOWN that names the read failure (B-709), even though
+    subagent_runs holds rows -- never the "nothing configured" literal, which would be a
+    lying PASS-shaped claim over a read that never happened."""
     ctx = _ctx(tmp_path, runs=[{"run_id": "r1", "model": "claude-x"}])
     ctx.config_parse_error = True
     f = check_subagents(ctx)
     assert f.status == UNKNOWN
-    assert f.detail == "No subagent delegation configured."
+    assert f.detail != "No subagent delegation configured."
+    assert "could not be parsed" in f.detail
+    assert f.engine_degraded is True
 
 
 def test_config_declares_subagents_and_rows_corroborate_no_extra_finding(tmp_path):
@@ -336,13 +340,19 @@ def test_outcome_absent_when_run_still_in_flight(tmp_path):
 
 def test_unparseable_outcome_json_is_unknown(tmp_path):
     """Every row's outcome_json fails to parse -> nothing reliable to disclose -> falls
-    back to the honest UNKNOWN rather than fabricate a count from undecodable data."""
+    back to an honest UNKNOWN naming the incomplete read (B-709) rather than fabricate a
+    "nothing configured" claim over a registry that exists but could not be fully
+    decoded -- a single bad outcome_json row is enough to trip this
+    (see test_partial_bad_row_still_discloses_the_good_ones for the tolerant per-record
+    case that stays a WARN instead)."""
     ctx = _ctx(tmp_path, runs=[{"run_id": "r1", "outcome_json": "{not valid json"}])
     assert ctx.subagent_runs_parse_error is True
     assert ctx.subagent_runs == []
     f = check_subagents(ctx)
     assert f.status == UNKNOWN
-    assert f.detail == "No subagent delegation configured."
+    assert f.detail != "No subagent delegation configured."
+    assert "could not be read completely" in f.detail
+    assert f.engine_degraded is True
 
 
 def test_partial_bad_row_still_discloses_the_good_ones(tmp_path):

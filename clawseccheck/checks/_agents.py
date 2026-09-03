@@ -882,6 +882,35 @@ def check_subagents(ctx: Context) -> Finding:
         disk_finding = _disk_subagent_disclosure(ctx)
         if disk_finding is not None:
             return disk_finding
+        # B-709: `_disk_subagent_disclosure` returns None both for "genuinely nothing to
+        # disclose" AND for the two degraded-read causes it deliberately stays silent on
+        # (config_parse_error, subagent_runs_parse_error — see its own docstring). The flat
+        # "No subagent delegation configured." literal below is only true in the first
+        # case; asserting it over a read that FAILED would be exactly the fail-open shape
+        # GR#4 forbids. Distinguish the two causes here, engine-side UNKNOWN (B-399), and
+        # keep the wording honest about which one fired instead of claiming absence.
+        if ctx.config_parse_error:
+            return _finding(
+                "B18",
+                UNKNOWN,
+                "openclaw.json could not be parsed, so it was never consulted for "
+                "subagent delegation — this is not the same as delegation being absent.",
+                "Fix openclaw.json so it is valid JSON and owner-readable, then re-run "
+                "the audit.",
+                engine_degraded=True,
+            )
+        if ctx.subagent_runs_parse_error:
+            return _finding(
+                "B18",
+                UNKNOWN,
+                "The OpenClaw state database's subagent_runs registry exists but could "
+                "not be read completely, so recorded spawns could not be checked "
+                "against config — this is not the same as no spawns having occurred.",
+                "Re-run the audit once the state database is not being actively "
+                "written to; if this persists, the subagent_runs table (or an "
+                "individual row's outcome_json) may be corrupt.",
+                engine_degraded=True,
+            )
         return _finding(
             "B18",
             UNKNOWN,

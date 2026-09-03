@@ -1033,15 +1033,17 @@ def _resolve_sandbox_scope(agent_sandbox: dict, default_sandbox: dict) -> str:
         if (typeof params.perSession === "boolean") return params.perSession ? "session" : "shared";
         return "agent";
 
-    Used only to gate the per-agent ``docker.binds`` check (FP2, round 4): under
-    ``scope: "shared"`` (or the legacy boolean ``perSession: false``, at either
-    level), ``resolveSandboxDockerConfig`` discards this agent's OWN
-    ``sandbox.docker`` entirely (``agentDocker = params.scope === "shared" ? void 0
-    : params.agentDocker``, dist/config-Dy4vED5-.js:~36) -- its binds never reach
-    the container, so they must not defeat containment either. ``mode``,
-    ``workspaceAccess`` and ``backend`` are NOT scope-gated (they resolve per-field
-    independently of ``scope``), so this helper is deliberately narrow to just the
-    binds leg rather than threaded through the whole function.
+    Used to gate the per-agent ``docker.network`` AND ``docker.binds`` checks (FP2 round
+    4, widened to ``network`` by B-673): under ``scope: "shared"`` (or the legacy boolean
+    ``perSession: false``, at either level), OpenClaw discards this agent's OWN
+    ``sandbox.docker`` object ENTIRELY (``scopedAgentDocker = scope === "shared" ? void 0
+    : agentSandbox?.docker``, dist/config-H0S_y_rW.js:150) before ``resolveSandboxDockerConfig``
+    reads either ``network`` (dist:66, falling back to the global default, not to "host")
+    or ``binds`` off it -- neither leg reaches the container, so neither must defeat
+    containment. ``mode`` and ``workspaceAccess`` are NOT scope-gated (they resolve off
+    ``agentSandbox`` directly, outside the discarded ``docker`` object), so this helper
+    stays narrow to the two ``docker.*`` legs rather than threaded through the whole
+    function.
     """
     scope = agent_sandbox.get("scope")
     if scope is None:

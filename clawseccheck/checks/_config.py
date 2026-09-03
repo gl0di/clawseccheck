@@ -830,16 +830,21 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
         if sb.get("mode") == "off":
             out.append(f"agent '{name}': sandbox.mode=off (exec runs on the host)")
         docker = sb.get("docker") if isinstance(sb.get("docker"), dict) else {}
-        if docker.get("network") == "host":
+        # Computed once and reused for BOTH docker legs below (network and binds): the
+        # vendor discards this agent's entire `sandbox.docker` under shared scope, not
+        # just the binds half of it (see the comment block just below).
+        _scope = _resolve_sandbox_scope(sb, _defaults_sandbox)
+        if docker.get("network") == "host" and _scope != "shared":
             out.append(f"agent '{name}': sandbox.docker.network=host (no network isolation)")
-        # B-673: two false FAILs lived in the three lines this replaces, and both were
+        # B-673: two false FAILs lived in the four lines this replaces, and both were
         # Golden Rule #5 violations because `check_sandbox` turns any entry here into a
         # hard FAIL.
         #
         # 1. NO SCOPE GATE. Under `sandbox.scope: "shared"` (at either level, or the legacy
-        #    `perSession: false`) OpenClaw DISCARDS this agent's whole `sandbox.docker`, so
-        #    its binds never reach a container. Executed against openclaw@2026.8.2 rather
-        #    than read -- `resolveSandboxConfigForAgent`, dist/config-*.js:
+        #    `perSession: false`) OpenClaw DISCARDS this agent's whole `sandbox.docker` --
+        #    BOTH its `network` and its `binds` -- so neither reaches a container. Executed
+        #    against openclaw@2026.8.2 rather than read -- `resolveSandboxConfigForAgent`,
+        #    dist/config-*.js:
         #        scope=shared at GLOBAL  -> binds ["/g:/g"]   (the agent's are gone)
         #        scope=shared at AGENT   -> binds null
         #        default (scope=agent)   -> binds ["/g:/g", "/a:/a"]  (a UNION, not override)
@@ -874,7 +879,7 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
         #    error. tests/test_b673_peragent_bind_scope.py pins the read-only case as
         #    REPORTED so nobody re-adds the narrowing.
         binds = docker.get("binds")
-        if binds and _resolve_sandbox_scope(sb, _defaults_sandbox) != "shared":
+        if binds and _scope != "shared":
             out.append(f"agent '{name}': sandbox.docker.binds exposes host paths")
             binds_str = " ".join(str(b) for b in binds) if isinstance(binds, list) else str(binds)
             if "docker.sock" in binds_str:

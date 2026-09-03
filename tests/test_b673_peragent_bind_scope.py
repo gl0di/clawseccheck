@@ -53,6 +53,10 @@ def _bind_evidence(finding):
     return [e for e in (finding.evidence or []) if "binds" in e]
 
 
+def _network_evidence(finding):
+    return [e for e in (finding.evidence or []) if "network" in e]
+
+
 def _agent(sandbox, defaults=None):
     cfg = {"agents": {"entries": {"worker": {"sandbox": sandbox}}}}
     if defaults is not None:
@@ -78,6 +82,24 @@ def test_a_bind_that_cannot_bite_is_not_reported(cfg, why):
     assert f.status != FAIL, why
 
 
+@pytest.mark.parametrize("cfg,why", [
+    (_agent({"scope": "shared", "docker": {"network": "host"}}),
+     "scope=shared on the agent — the runtime drops the agent's whole sandbox.docker, "
+     "network included, before resolveSandboxDockerConfig ever reads it"),
+    (_agent({"docker": {"network": "host"}}, defaults={"scope": "shared"}),
+     "scope=shared inherited from defaults — same discard, same object"),
+], ids=["shared-agent", "shared-defaults"])
+def test_a_network_leg_that_cannot_bite_is_not_reported(cfg, why):
+    """The sibling of `test_a_bind_that_cannot_bite_is_not_reported`: `docker.network` sits
+    in the SAME `sandbox.docker` object as `docker.binds` and is discarded by the vendor
+    under the identical condition, so it needs the identical gate. Left ungated, this is a
+    HIGH FAIL asserting "no network isolation" about a config the runtime isolates
+    completely (shared scope with no global docker resolves network to "none")."""
+    f = _b4(cfg)
+    assert not _network_evidence(f), f"{why}\n  got: {_network_evidence(f)}"
+    assert f.status != FAIL, why
+
+
 # ======================================================================================
 # 2. The controls — without these, "never report a bind" passes everything above
 # ======================================================================================
@@ -98,6 +120,20 @@ def test_a_bind_that_really_mounts_is_still_a_fail(sandbox, expect_sock):
     ev = _bind_evidence(f)
     assert ev, "a bind that mounts must still be reported"
     assert any("docker.sock" in e for e in ev) is expect_sock
+
+
+@pytest.mark.parametrize("sandbox", [
+    {"docker": {"network": "host"}},
+    {"scope": "agent", "docker": {"network": "host"}},
+    {"scope": "session", "docker": {"network": "host"}},
+], ids=["default-scope", "scope-agent", "scope-session"])
+def test_a_network_leg_that_really_applies_is_still_a_fail(sandbox):
+    """Sibling control for the network leg: outside shared scope this agent's own
+    `docker.network` really does apply, so gating it must not silence a real "host"
+    network."""
+    f = _b4(_agent(sandbox))
+    assert f.status == FAIL
+    assert _network_evidence(f), "a network=host that applies must still be reported"
 
 
 def test_a_writable_bind_beside_a_read_only_one_is_still_reported():

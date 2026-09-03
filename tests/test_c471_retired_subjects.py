@@ -165,6 +165,60 @@ def test_the_same_key_is_still_a_gap_on_a_legacy_build():
     assert "useAccessGroups" in (finding.detail or "")
 
 
+# ---------------------------------------- 5. logging.redactSensitive redaction leg (B10)
+#
+# B-700 fixed only B10's AUDIT half (audit_key, via _key_advice); the redaction leg kept
+# handing out a byte-identical WARN and fix on every build, naming a key OpenClaw
+# 2026.8.1 removed outright and that this repo's own B-700 note measured as
+# `REJECTED unrecognized_keys@logging`. This is the same subject as B9 (checks/_egress.py)
+# but a different check, so it needed its own version split.
+
+_REDACT_OFF = {"logging": {"redactSensitive": "off"}}
+_AUDIT_OFF_AND_REDACT_OFF = {"audit": {"enabled": False},
+                             "logging": {"redactSensitive": "off"}}
+
+
+def test_a_stale_redact_off_key_stops_naming_a_key_the_runtime_rejects():
+    """The status stays WARN on every build (mirrors B9's deliberate no-flatten
+    reasoning: someone still wrote "off", and the monitor must still see that
+    transition) — only the fix stops instructing a rejected key."""
+    finding = _finding(_REDACT_OFF, MODERN, "B10")
+    assert finding.status == WARN
+    assert "Delete logging.redactSensitive" in finding.fix
+    assert '"tools"' not in finding.fix
+
+
+def test_the_same_stale_key_still_gets_the_original_advice_on_a_legacy_build():
+    finding = _finding(_REDACT_OFF, LEGACY, "B10")
+    assert finding.status == WARN
+    assert 'Set logging.redactSensitive to "tools"' in finding.fix
+
+
+def test_an_undeterminable_build_names_both_keys_rather_than_guessing():
+    """Silence or a one-sided guess would both be a claim about a build we cannot see —
+    `_key_advice`'s "never silently pick one" rule, applied to a removal instead of a
+    rename."""
+    finding = _finding(_REDACT_OFF, None, "B10")
+    assert finding.status == WARN
+    assert "delete logging.redactSensitive" in finding.fix
+    assert '"tools"' in finding.fix
+
+
+def test_the_retirement_note_also_rides_the_combined_audit_and_redact_warning():
+    """B10 folds a stale redact-off value into the AUDIT-off finding's own detail
+    (`redact_note`) rather than emitting a second finding — that combined sentence needs
+    the same generation split as the standalone redact branch."""
+    finding = _finding(_AUDIT_OFF_AND_REDACT_OFF, MODERN, "B10")
+    assert finding.status == WARN
+    assert "no longer exists" in (finding.detail or "")
+
+
+def test_the_combined_warning_keeps_the_original_advice_on_a_legacy_build():
+    finding = _finding(_AUDIT_OFF_AND_REDACT_OFF, LEGACY, "B10")
+    assert finding.status == WARN
+    assert "no longer exists" not in (finding.detail or "")
+
+
 # ---------------------------------------- already closed elsewhere, pinned here
 
 def test_the_redaction_subject_was_settled_in_b700():
@@ -189,7 +243,8 @@ def test_the_workshop_subject_was_settled_in_b700_and_b702():
     (_INSECURE, "B2"),
     (_BAD_FEED, "B325"),
     (_ACCESS_GROUPS_OFF, "B171"),
-], ids=["insecure-auth", "marketplaces", "access-groups"])
+    (_REDACT_OFF, "B10"),
+], ids=["insecure-auth", "marketplaces", "access-groups", "redact-off"])
 def test_no_leg_was_deleted_for_the_fleet_that_still_has_it(cfg, cid):
     """The DoD, as one assertion: every retired subject still produces its original verdict
     on a build where the setting is live. A check that stopped reporting on 2026.7.x would

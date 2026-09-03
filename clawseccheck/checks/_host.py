@@ -35,7 +35,9 @@ from ._shared import (
     _file_readable_by_others,
     _finding,
     _key_advice,
+    _openclaw_generation,
     _plugins,
+    _retired_key_note,
 )
 from ..invocation import command_prefix
 
@@ -324,9 +326,20 @@ def check_audit_log(ctx: Context) -> Finding:
         audit_key = ("audit.enabled" if audit_enabled is not None
                      else _key_advice(ctx, "audit.enabled", "logging.audit.enabled"))
     redact = dig(cfg, "logging.redactSensitive")
+    # C-471: B-700 fixed only this check's audit half (audit_key, above) — the
+    # redaction half kept naming logging.redactSensitive with no generation awareness,
+    # so a 2026.8.1 build got a byte-identical WARN/fix to a 2026.7.x one about a key
+    # that OpenClaw REMOVED outright. Grounded against the installed dist (2026.8.2):
+    # `legacy-B-ouzcdF.js` lists `["logging", "redactSensitive"]` in the retired-path
+    # table, and `redact-C9Jj-ryD.js` hard-codes `DEFAULT_REDACT_MODE = "tools"` as a
+    # constant no config path feeds — the same runtime fact B9 (checks/_egress.py)
+    # already reads. `_shared.py`'s own B-700 note measured B9's fix string
+    # (`logging.redactSensitive: "tools"`) as `REJECTED unrecognized_keys@logging` on a
+    # modern build, and this check's fix string was the same one.
+    stale = _retired_key_note(ctx, "logging.redactSensitive")
     redact_note = (
         ' logging.redactSensitive is also "off", so what is written may expose '
-        "secrets/PII (Israel Amendment 13)." if redact == "off" else ""
+        f"secrets/PII (Israel Amendment 13).{stale}" if redact == "off" else ""
     )
 
     if audit_enabled is False:
@@ -341,13 +354,32 @@ def check_audit_log(ctx: Context) -> Finding:
             "openclaw.json. If something else set it to false, treat that as the finding.",
         )
     if redact == "off":
+        generation = _openclaw_generation(ctx)
+        if generation == "modern":
+            fix = (
+                "Delete logging.redactSensitive — OpenClaw 2026.8.1 and later ignores "
+                "it and redaction is unconditional there. Run `openclaw security "
+                "audit` periodically."
+            )
+        elif generation == "legacy":
+            fix = (
+                'Set logging.redactSensitive to "tools" and run `openclaw security '
+                "audit` periodically."
+            )
+        else:
+            fix = (
+                'On OpenClaw 2026.8.1 and later, delete logging.redactSensitive — it '
+                'no longer exists there and redaction is unconditional; on releases '
+                'before that, set it to "tools" instead. Either way, run `openclaw '
+                "security audit` periodically."
+            )
         return _finding(
             "B10",
             WARN,
             'logging.redactSensitive is "off" — logs may expose secrets/PII '
-            f"(Israel Amendment 13). The audit toggle is a separate setting, {audit_key}.",
-            'Set logging.redactSensitive to "tools" and run `openclaw security audit` '
-            "periodically.",
+            f"(Israel Amendment 13). The audit toggle is a separate setting, "
+            f"{audit_key}.{stale}",
+            fix,
         )
     if audit_enabled is True:
         return _finding(
