@@ -141,7 +141,7 @@ def test_full_run_ledger_note_does_not_contradict_the_printed_verdicts():
 
     ledger = result.to_ledger(findings)
     score = scoring.compute(findings, ctx, ledger=ledger)
-    scope_lines, _live_tested = report._scope_note_lines(score)
+    scope_lines, _live_tested = report._scope_note_lines(score, findings)
     logs_clause = next(
         (ln for ln in scope_lines if "log/transcript scan ran" in ln), None)
     assert logs_clause is not None, scope_lines

@@ -760,7 +760,27 @@ _SCOPE_CLAUSES = (
 )
 
 
-def _scope_note_lines(score: ScoreResult) -> tuple[list[str], bool]:
+def _log_hunt_found_no_sink(findings: list[Finding]) -> bool:
+    """B-715: was B164 UNKNOWN because there was NOTHING to scan (no sink discovered at
+    all), as opposed to sinks existing but none readable/non-empty?
+
+    B164 (`checks/_egress.py::check_log_threat_hunt`) has two UNKNOWN branches and they
+    mean different things: ``if not sinks:`` (no logging.file/cacheTrace/trajectory
+    sidecar/session transcript/config-audit log/memory file/install backup found
+    anywhere) versus ``if not any_scanned:`` (sinks were found but none were readable or
+    non-empty). Only the first is "there was nothing to scan" — the second still has
+    sinks on disk the operator could fix permissions on, and telling them "nothing to
+    scan" there would be false and would bury the more actionable defect (permissions).
+    So this matches on the no-sinks branch's own detail text, not on UNKNOWN alone — a
+    crashed check (``ERR:check_log_threat_hunt``) or a PASS/WARN B164 is neither case.
+    """
+    for f in findings:
+        if f.id == "B164" and f.status == UNKNOWN:
+            return f.detail.startswith("No agent log/transcript sinks found")
+    return False
+
+
+def _scope_note_lines(score: ScoreResult, findings: list[Finding]) -> tuple[list[str], bool]:
     """The scope note under the score, branched on the run's own layer ledger (B-520).
 
     Returns ``(lines, live_tested)``. ``live_tested`` is True only on POSITIVE ledger
@@ -783,6 +803,12 @@ def _scope_note_lines(score: ScoreResult) -> tuple[list[str], bool]:
     carries a non-empty ``not_checked``) without ever inferring a ledger that is not
     there: with both empty the note falls back to the static-audit-only wording, which
     over-claims nothing in either direction.
+
+    ``findings`` is read for exactly one thing (B-715): whether B164's own UNKNOWN was
+    the no-sink-at-all case, so the logs/trajectories clause can say "nothing to scan"
+    plainly instead of the generic "ran, coverage not accounted for" wording, which reads
+    as a caveat about something left unaccounted for when the truth is there was nothing
+    there. See :func:`_log_hunt_found_no_sink`.
     """
     lines = [
         # C-423: found by reading a real ungraded run, not by a test — the tests assert
@@ -809,6 +835,18 @@ def _scope_note_lines(score: ScoreResult) -> tuple[list[str], bool]:
             # (tests/test_c423_* fails the build on a competing table).
             clauses.append(f" · not covered — {subject}: {describe_layer(layer, status)}."
                            f" {advice}.")
+        elif have_ledger and layer == LAYER_LOGS_TRAJECTORIES and _log_hunt_found_no_sink(findings):
+            # B-715: the layer genuinely `ran` (B164 always runs in the base audit) and
+            # what it found is that there is no log/transcript sink on this machine at
+            # all — a complete, actionable answer, not an accounting gap. Saying "ran,
+            # coverage not accounted for" here implied something existed that this run
+            # did not fully account for, which is false; say plainly that there was
+            # nothing to scan instead. This does NOT claim the agent is safe, and does
+            # NOT claim the layer failed — and the advice clause is unconditional, same
+            # as every other branch, so the reader still learns how to get a corpus next
+            # time (turn logging/the trajectory sidecar on).
+            clauses.append(f" · ran, nothing to scan — {subject}: no log or transcript"
+                           f" sink exists on this machine. {advice}.")
         elif have_ledger:
             # Proven the layer ran, and NOT proven that it covered its subject — the
             # ledger records a status, not a completeness. Saying "covered by this run"
@@ -2721,7 +2759,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # B-520: what this run did and did not cover, read off its own layer ledger — see
     # `_scope_note_lines`. This sentence used to be static, and on a `--full` run it told
     # the reader to run five modes whose output was already printed below it.
-    _scope_lines, _live_tested = _scope_note_lines(score)
+    _scope_lines, _live_tested = _scope_note_lines(score, findings)
     lines.extend(_scope_lines)
     # Capability-vs-behavior honesty (F-038): a static audit bounds what the agent CAN do,
     # not what it DOES at runtime. OpenClaw core ships no runtime egress/taint gate, so a
