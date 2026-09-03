@@ -1128,5 +1128,5 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
 
     lines.extend(render_self_test_corroboration(
         getattr(ctx, "home", None), explicit_path=explicit_path, ascii_only=ascii_only,
-        ledger_home=ledger_home, ctx=ctx))
+        ledger_home=ledger_home, ledger_path=ledger_path, ctx=ctx))
     return "\n".join(lines)

@@ -5038,7 +5038,8 @@ def _main(argv=None) -> int:
                 vet_targets=sweep.vet_targets() if sweep is not None else (),
                 deadline=full_deadline, budget_s=DEFAULT_FULL_BUDGET_S,
                 fast=args.fast, ascii_only=ascii_only, version=__version__,
-                bundle=judged_bundle, score=score)
+                bundle=judged_bundle, score=score,
+                ledger_path=_coverage_path(args))
             pipeline_has_fail = full_pipeline.has_fail
             if not args.fast:
                 _record_run("behavioral", args)
@@ -5275,7 +5276,8 @@ def _main(argv=None) -> int:
                 vet_targets=sweep.vet_targets() if sweep is not None else (),
                 deadline=full_deadline, budget_s=DEFAULT_FULL_BUDGET_S,
                 fast=args.fast, ascii_only=ascii_only, version=__version__,
-                bundle=judged_bundle, score=score)
+                bundle=judged_bundle, score=score,
+                ledger_path=_coverage_path(args))
             # C5: read from the SAME PipelineResult on both branches, so --exit-code cannot
             # diverge between quiet and verbose — the property the sweep already guarantees.
             pipeline_has_fail = full_pipeline.has_fail

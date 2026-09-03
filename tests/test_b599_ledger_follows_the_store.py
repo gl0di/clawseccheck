@@ -186,7 +186,14 @@ def _analyze(home_dir, data_dir, openclaw_home):
     return proc.stdout + proc.stderr
 
 
-def _ledger_fixture(tmp_path, *, home_says_run: bool, store_says_run: bool):
+def _ledger_fixture(tmp_path, *, home_says_run: bool, store_says_run: bool,
+                    trajectory_present: bool = False):
+    """``trajectory_present`` (B-599, second read path): with no sidecar, --analyze-
+    trajectory's early-return branch (trajaudit.py, the ``if not r["present"]`` arm)
+    is the ONLY one exercised, and that branch already threaded ``ledger_path``
+    correctly before this fix. The bug lived in the sibling branch taken when a
+    trajectory sidecar DOES exist (the function's tail call) — so this must be
+    parametrised True as well, or the fixed line is never reached by any test."""
     fake_home = tmp_path / "fakehome"
     (fake_home / ".clawseccheck").mkdir(parents=True)
     store = tmp_path / "store"
@@ -194,6 +201,10 @@ def _ledger_fixture(tmp_path, *, home_says_run: bool, store_says_run: bool):
     openclaw = tmp_path / "oc"
     openclaw.mkdir()
     (openclaw / "openclaw.json").write_text('{"mcp": {"servers": {}}}', encoding="utf-8")
+    if trajectory_present:
+        sess = openclaw / "agents" / "main" / "sessions"
+        sess.mkdir(parents=True)
+        (sess / "s.trajectory.jsonl").write_text("", encoding="utf-8")
     ran = '{"self_test": "2026-08-30", "_schema": "1"}'
     idle = '{"_schema": "1"}'
     (fake_home / ".clawseccheck" / "coverage.json").write_text(
@@ -206,22 +217,50 @@ def _ledger_fixture(tmp_path, *, home_says_run: bool, store_says_run: bool):
 _LEDGER_CLAIM = "local ledger shows a self-test capability was run"
 
 
-def test_the_reader_ignores_the_real_home_ledger(tmp_path):
+@pytest.mark.parametrize("trajectory_present", [False, True])
+def test_the_reader_ignores_the_real_home_ledger(tmp_path, trajectory_present):
     """The defect: `$HOME`'s ledger said a self-test ran, the run's own store said it did
-    not, and the report believed `$HOME`."""
+    not, and the report believed `$HOME`. Parametrised over whether a trajectory sidecar
+    exists — the two cases exercise the two different `render_self_test_corroboration`
+    call sites inside `render_trajectory_analysis` (present vs. absent), and only the
+    `trajectory_present=True` case reaches the one B-599 actually left broken."""
     fake_home, store, oc = _ledger_fixture(
-        tmp_path, home_says_run=True, store_says_run=False)
+        tmp_path, home_says_run=True, store_says_run=False,
+        trajectory_present=trajectory_present)
     out = _analyze(fake_home, store, oc)
     assert _LEDGER_CLAIM not in out, out[:1200]
 
 
-def test_the_reader_uses_the_store_this_run_was_given(tmp_path):
+@pytest.mark.parametrize("trajectory_present", [False, True])
+def test_the_reader_uses_the_store_this_run_was_given(tmp_path, trajectory_present):
     """The other direction, and the control: a fix that simply stopped reading any ledger
     would pass the test above and fail this one."""
     fake_home, store, oc = _ledger_fixture(
-        tmp_path, home_says_run=False, store_says_run=True)
+        tmp_path, home_says_run=False, store_says_run=True,
+        trajectory_present=trajectory_present)
     out = _analyze(fake_home, store, oc)
     assert _LEDGER_CLAIM in out, out[:1200]
+
+
+def test_run_behavioral_threads_the_ledger_path(tmp_path, monkeypatch):
+    """Third reach path (pipeline.py, not trajaudit.py): --full's P8 phase calls
+    `pipeline.run_behavioral` directly, which had NOTHING to thread a ledger path
+    through at all before this fix — `render_trajectory_analysis(ctx, ascii_only=...)`
+    always fell back to the real ``~/.clawseccheck``, and no caller could override it.
+    Drives `run_behavioral` directly (not the CLI subprocess) so this is a genuine unit
+    test of the plumbing, not a re-check of the trajaudit.py fix above."""
+    from clawseccheck.collector import collect
+    from clawseccheck import pipeline as pl
+
+    fake_home, store, oc = _ledger_fixture(
+        tmp_path, home_says_run=True, store_says_run=False,
+        trajectory_present=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    ctx = collect(oc)
+    phase = pl.run_behavioral(ctx, ledger_path=str(store / "coverage.json"))
+    joined = "\n".join(phase.lines)
+    assert _LEDGER_CLAIM not in joined, joined[:1200]
 
 
 def test_the_reader_and_the_writer_resolve_the_same_file(tmp_path):

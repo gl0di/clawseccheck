@@ -413,8 +413,14 @@ def run_plugin_sweep(home_dir, *, deadline: float | None = None,
 
 # ── P8: behavioural replay ───────────────────────────────────────────────────
 
-def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
+def run_behavioral(ctx, *, ascii_only: bool = False,
+                   ledger_path: str | None = None) -> PhaseResult:
     """P8 — the behavioural/trajectory detectors, over the audit's OWN ``ctx``.
+
+    ``ledger_path`` (B-599): forwarded to ``render_trajectory_analysis``'s B-300
+    self-test-corroboration ledger lookup, so a ``--data-dir`` run's coverage ledger
+    resolves under that store rather than the real ``~/.clawseccheck`` — ``None``
+    keeps today's default (see ``cli._coverage_path``).
 
     Reusing ``ctx`` is not a micro-optimisation: ``trajaudit``'s per-context memo lives
     on that object, so a fresh ``Context`` here would silently discard it and re-pay the
@@ -470,7 +476,8 @@ def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
 
     incident = False
     try:
-        traj_rendered = render_trajectory_analysis(ctx, ascii_only=ascii_only)
+        traj_rendered = render_trajectory_analysis(ctx, ascii_only=ascii_only,
+                                                   ledger_path=ledger_path)
         lines.append("")
         lines.extend(_sanitize(ln) for ln in traj_rendered.splitlines())
         # Structural substring check (not a security-relevant keyword match): the
@@ -1463,8 +1470,12 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
                  skill_sweep_elapsed_s: float = 0.0, vet_targets=(),
                  deadline: float | None = None, budget_s: float = DEFAULT_FULL_BUDGET_S,
                  fast: bool = False, ascii_only: bool = False, version: str = "",
-                 bundle: dict | None = None, score=None) -> PipelineResult:
+                 bundle: dict | None = None, score=None,
+                 ledger_path: str | None = None) -> PipelineResult:
     """Run P7-P9 and roll them up with the already-executed P6.
+
+    ``ledger_path`` (B-599): forwarded to P8's ``run_behavioral`` — see that
+    function's docstring. ``None`` keeps today's default.
 
     ``deadline`` is injectable so a test can pin the budget's behaviour without
     sleeping; when omitted, one is opened from ``budget_s``.
@@ -1518,7 +1529,7 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
     elif budget_exceeded(deadline):
         result.add(_not_reached(PHASE_BEHAVIORAL, budget_s))
     else:
-        result.add(run_behavioral(ctx, ascii_only=ascii_only))
+        result.add(run_behavioral(ctx, ascii_only=ascii_only, ledger_path=ledger_path))
 
     # P9 — adjudication. Deliberately NOT gated on --fast or on the budget: it re-runs
     # no check, so there is no expense to skip, and the borderline band is exactly what
