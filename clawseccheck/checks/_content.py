@@ -5729,7 +5729,9 @@ def _fence_ranges(blob: str) -> list[tuple[int, int]]:
     """Return a list of (start, end) byte positions of fenced code blocks in *blob*.
 
     A fence opens with a line starting with ``` or ~~~ (3+ chars) and closes with
-    the same fence character repeated.  Unclosed fences extend to end-of-blob.
+    the same fence character repeated.  An unclosed fence extends to the next
+    ``# file:`` section boundary, or to end-of-blob when there is none -- see B-526
+    below for why the boundary and not the blob.
     Conservative: only marks spans where the open fence is clearly a Markdown fence
     (at the start of a line -- column 0 only).
 
@@ -5744,6 +5746,22 @@ def _fence_ranges(blob: str) -> list[tuple[int, int]]:
     indented fence can hide without breaking the scalar. Widening this is a
     whole-ring behavioural change (dozens of call sites across `_content.py`,
     `_config.py`, `_mcp.py`, `_lifecycle.py`, `_vet.py`), not a one-line coherence fix.
+
+    B-526: an unclosed fence is CLAMPED AT THE NEXT ``# file:`` BOUNDARY, not run to
+    end-of-blob. `collector._read_skill_text` concatenates a skill's files into one blob
+    behind those headers, so running to EOF let ONE stray unclosed fence in SKILL.md
+    suppress every later FILE. Measured before the fix: a two-section blob whose second
+    file holds a same-line credential-read piped into a POST is detected, and stops being
+    detected once a stray "```bash" is added to the first section -- a CRITICAL finding
+    silenced by three backticks, and cheap for a hostile skill to place deliberately.
+
+    The clamp only ever SHRINKS a suppressed span, so it cannot manufacture a false
+    negative; it can surface findings in files that were previously swallowed, which is
+    per-file parity with scanning those files alone. With no ``# file:`` header present
+    the behaviour is byte-identical to before.
+
+    The boundary comes from ``_MANIFEST_HEADER_RE`` itself rather than a second
+    hand-written ``^# file:`` pattern -- one producer, so the two cannot drift apart.
     """
     ranges: list[tuple[int, int]] = []
     pos = 0
@@ -5758,7 +5776,11 @@ def _fence_ranges(blob: str) -> list[tuple[int, int]]:
         # Advance to end of the opening line.
         newline = blob.find("\n", open_end)
         if newline == -1:
-            # Unclosed fence reaching EOF — treat whole tail as fenced.
+            # Unclosed fence on the blob's last line — the tail IS the rest of the blob.
+            # No `# file:` clamp is possible here and none is needed: MULTILINE `^` only
+            # matches after a newline, and this branch means there is no newline left, so
+            # no later section header can exist. Stated rather than searched for, so a
+            # reader does not take the asymmetry with the branch below for an oversight.
             ranges.append((m.start(), length))
             break
         # Find the closing fence: a line starting with the same fence char,
@@ -5769,9 +5791,15 @@ def _fence_ranges(blob: str) -> list[tuple[int, int]]:
         )
         cm = close_re.search(blob, newline + 1)
         if cm is None:
-            # Unclosed — treat tail as fenced.
-            ranges.append((m.start(), length))
-            break
+            # Unclosed. Suppress only to the next `# file:` section boundary (B-526) —
+            # never to end-of-blob, which would let one stray fence blind every later
+            # file in the same skill. Then CONTINUE from that boundary instead of
+            # breaking, so fences in the following sections are still recognised.
+            nxt = _MANIFEST_HEADER_RE.search(blob, newline + 1)
+            boundary = nxt.start() if nxt is not None else length
+            ranges.append((m.start(), boundary))
+            pos = boundary
+            continue
         ranges.append((m.start(), cm.end()))
         pos = cm.end() + 1
     return ranges
