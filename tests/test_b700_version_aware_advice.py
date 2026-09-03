@@ -31,7 +31,8 @@ from pathlib import Path
 import pytest
 
 import clawseccheck.checks as C
-from clawseccheck.collector import collect
+from clawseccheck.checks._agents import _disk_subagent_disclosure
+from clawseccheck.collector import Context, collect
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -138,6 +139,12 @@ _CONFIGS = [
     ("cache-trace", {"diagnostics": {"cacheTrace": {"enabled": True}}}),
     ("commands-privileged", {"commands": {"enabled": True}}),
     ("agents-record", {"agents": {"entries": {"main": {"tools": {"profile": "full"}}}}}),
+    # B-700 reopen: these two reach B351/B352's fix strings, which still named the
+    # retired `agents.list` unqualified -- the sample list above reached neither
+    # `tools.codeMode` nor `tools.exec.pathPrepend`, so the always-on sweep never saw
+    # them even though its own `_offending()` flags both once asked.
+    ("code-mode", {"tools": {"codeMode": {"enabled": True}}}),
+    ("exec-path-prepend", {"tools": {"exec": {"pathPrepend": ["/tmp/bin"]}}}),
 ]
 
 
@@ -192,6 +199,30 @@ def test_naming_a_retired_key_the_user_actually_has_is_allowed():
         detail = "logging.redactSensitive is set."
         fix = "Delete logging.redactSensitive."
     assert not _offending([Fake()], {"logging": {"redactSensitive": "off"}})
+
+
+def test_disk_subagent_disclosure_names_the_modern_key():
+    """B18's disk-grounded disclosure (`_disk_subagent_disclosure`) fires only when the
+    state DB's `subagent_runs` table has rows the config does not explain -- unreachable
+    from a plain config sample, so `_CONFIGS` cannot exercise it. Pin it directly instead
+    of faking a state DB: this is the B18 fix string the B-700 reopen named as a live
+    offender (unqualified `agents.list` in `_agents.py`'s B18 fix)."""
+    cfg = {}
+    ctx = Context(home=Path("/nonexistent"), config=cfg)
+    ctx.installed_dist_version = _MODERN
+    ctx.subagent_runs_found = True
+    ctx.subagent_runs = [{
+        "child_session_key": "abc123",
+        "model": "gpt-x",
+        "agent_dir": "/tmp/agent",
+        "workspace_dir": "/tmp/ws",
+        "spawn_mode": "detached",
+        "outcome": None,
+    }]
+    finding = _disk_subagent_disclosure(ctx)
+    assert finding is not None, "the disclosure did not fire -- test setup is wrong"
+    offenders = _offending([finding], cfg)
+    assert not offenders, offenders
 
 
 # ---------------------------------------------------------------- local-only layer

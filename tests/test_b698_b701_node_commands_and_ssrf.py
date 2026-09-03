@@ -21,6 +21,7 @@ import pytest
 from clawseccheck.checks import (
     _DANGER_FIXED_2026_8_1,
     _node_commands,
+    check_browser_ssrf,
     check_dangerous_overrides,
     check_node_denycommands_ineffective,
 )
@@ -214,12 +215,16 @@ def test_the_new_schema_table_is_not_empty():
 
 def test_browser_ssrf_stays_out_of_b48():
     """`browser.ssrfPolicy.dangerouslyAllowPrivateNetwork` is B38's subject and B38 FAILs
-    on it. Measured before adding anything: running the whole check set on that config
-    moves B38 UNKNOWN -> FAIL. Adding it to B48 as well would double-count, which
-    checks/_egress.py's own no-double-count rule with B38 forbids.
+    on it. Adding it to B48 as well would double-count, which checks/_egress.py's own
+    no-double-count rule with B38 forbids. This is the sole justification for the
+    omission, so it is pinned by actually calling B38 (not just by asserting absence
+    from B48's table) -- if B38's browser branch ever regressed, this must go red.
     """
     paths = [p for p, _ in _DANGER_FIXED_2026_8_1]
     assert "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork" not in paths
+
+    cfg = {"browser": {"ssrfPolicy": {"dangerouslyAllowPrivateNetwork": True}}}
+    assert check_browser_ssrf(_ctx(cfg)).status == "FAIL"
 
 
 # ------------------------------------------------------------------- fixtures

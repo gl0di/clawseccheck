@@ -257,6 +257,9 @@ _DANGER_FIXED = [
 # `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork` is deliberately NOT here: B38 already
 # FAILs on it (checks/_egress.py) and _egress.py's own no-double-count rule with B38
 # applies. That was checked by running the whole check set on it, not by reading the code.
+# This was a PRE-EXISTING miss -- browser.ssrfPolicy existed before 2026.8.1 and B38 has
+# always owned it -- not 2026.8.1 drift like the two rows below it; do not re-derive it as
+# upgrade damage in a future triage.
 #
 # Read WITHOUT dig() on purpose -- but note the ORIGINAL reason has expired, so do not
 # re-derive it from this comment. The deferral was that a dig() path needs an entry in
@@ -1492,7 +1495,8 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
     return _finding(
         "B48",
         PASS,
-        "No dangerous break-glass override flags enabled.",
+        "None of the break-glass override flags checked here are enabled (browser "
+        "SSRF's dangerouslyAllowPrivateNetwork is B38's subject, not B48's -- see B38).",
         "Keep these break-glass toggles off unless an incident temporarily requires one.",
         pass_confidence="verified",
     )

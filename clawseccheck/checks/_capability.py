@@ -40,6 +40,7 @@ from ._shared import (
     _finding,
     _has_approval_gate,
     _hint,
+    _key_advice,
     _node_commands,
     _open_channels,
     _profile_is_powerful,
@@ -2237,7 +2238,8 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
         "If code mode is intentional, read the tool-policy findings in this report as "
         "describing the CATALOG rather than what the model is handed, and confirm the "
         "exec surface is governed by tools.exec.*. If it is not intentional, set "
-        "tools.codeMode.enabled to false (and check each agents.list entry, which can "
+        "tools.codeMode.enabled to false (and check each per-agent entry under "
+        f"{_key_advice(ctx, 'agents.list', 'agents.entries')}, which can "
         "turn it back on independently of the global setting).",
         evidence=sorted(on_agents)[:8] or None,
     )
@@ -2420,6 +2422,8 @@ def check_exec_path_prepend(ctx: Context) -> Finding:
         "approval prompt because the command text is unchanged." + tail,
         "Make each entry an absolute path to a directory only your account can write, or "
         "remove tools.exec.pathPrepend and let the host resolve binaries normally. Check "
-        "every agents.list[] entry too: an agent's own list replaces the global one.",
+        "every per-agent entry under "
+        f"{_key_advice(ctx, 'agents.list', 'agents.entries')} too: an agent's own entry "
+        "replaces the global one.",
         evidence=sorted(risky)[:8] or None,
     )

@@ -38,6 +38,7 @@ from ._shared import (
     _finding,
     _has_approval_gate,
     _hint,
+    _key_advice,
     _resolved_channel_nodes,
     _surface_absent,
     _trifecta_legs,
@@ -842,7 +843,8 @@ def _disk_subagent_disclosure(ctx: Context) -> "Finding | None":
         "delegation that has since been removed "
         "from config rather than a hidden capability that is still live.",
         "If subagent delegation is intentional, declare it explicitly under "
-        "agents.subagents / agents.defaults.subagents / agents.list so the normal "
+        "agents.subagents / agents.defaults.subagents / "
+        f"{_key_advice(ctx, 'agents.list', 'agents.entries')} so the normal "
         "approval-gate check (this same B18) applies to it going forward. If it is not "
         "intentional, use the child_session_key values below to find out what spawned "
         "these runs before assuming the capability is gone — it may simply be unrecorded "
