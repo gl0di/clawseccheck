@@ -226,3 +226,30 @@ def test_dist_still_grants_read_to_exactly_the_profiles_we_name():
     wildcard = re.search(r'full: \{ allow: \["\*"\] \}', text)
     assert wildcard, 'the "full" profile is no longer allow-all — re-ground'
     assert named | {"full"} == set(toolpolicy._PROFILES_GRANTING_READ), named
+
+
+def test_module_docstring_dist_citation_still_declares_the_predicate():
+    """C-477: the module docstring names the dist bundle
+    ``resolveEffectiveToolFsRootExpansionAllowed`` lives in. It used to pin a hash
+    (``local-roots-CAoJyC6u.js``) that both rotated on upgrade AND was the wrong file
+    even when current -- that bundle only IMPORTS the predicate; it is DECLARED in
+    ``tool-fs-policy-*.js``, beside ``resolveEffectiveToolFsWorkspaceOnly``. Re-derive
+    the citation from the docstring text itself, so a future re-pin that goes stale (or
+    wrong again) fails here instead of reading as grounded while being dead.
+    """
+    if not OPENCLAW_DIST.is_dir():
+        pytest.skip("installed OpenClaw dist not found")
+    doc = toolpolicy.__doc__ or ""
+    match = re.search(
+        r"``resolveEffectiveToolFsRootExpansionAllowed``[^(]*\(dist ``([^`]+)``",
+        doc,
+    )
+    assert match, "docstring no longer cites a dist location for the predicate"
+    pattern = match.group(1)
+    files = sorted(OPENCLAW_DIST.glob(pattern))
+    assert files, f"citation {pattern!r} does not resolve against the installed dist"
+    text = "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in files)
+    assert "function resolveEffectiveToolFsRootExpansionAllowed" in text, (
+        f"docstring cites {pattern!r} but the predicate is not declared there — "
+        "re-ground the citation"
+    )

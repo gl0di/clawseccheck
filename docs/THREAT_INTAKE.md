@@ -278,7 +278,9 @@ the `latest` our grounding is built on. It was unpacked and compared against the
   same no-op `system prompt` replacement. B331's verdict logic holds on both channels.
 - `BUNDLE_MCP_METADATA_TEXT_LIMIT` — **1200 in both**. B331's truncation boundary holds.
 - Annotation hints (`readOnlyHint` and siblings) — absent from the registration context in
-  both, so B333's "OpenClaw never reads these" claim holds.
+  2026.7.1-2 and the then-`latest` extended-stable dist (grounded 2026-07-25); **2026.8.1
+  falsified this** — the registration entry in `dist/agents/agent-bundle-mcp-runtime.js` now
+  stores `annotations`, so B333 is version-split (see `_mcp.py:2858`), not a standing claim.
 - `tests/grounded_schema_paths.txt` — **135 of 135** paths present in the extended-stable
   dist. (A first pass flagged two; that was a scripting artifact — `relative:` is a manifest
   namespace prefix, not part of the path. Both tokens are present.)

@@ -235,6 +235,8 @@ In practice:
 `scripts/dist_citation_gate.py` enforces the floor: it fails on a NEW unqualified citation of a
 bundle the installed dist does not have. It cannot see a citation whose file still exists but
 whose line moved, so it is a backstop for the convention, not a substitute for it.
+`tests/test_dist_citation_gate.py` runs it inside the suite (local-only — it skips cleanly when
+no OpenClaw dist is installed, e.g. in CI).
 
 ## Notes
 

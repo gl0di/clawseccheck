@@ -2051,7 +2051,27 @@ def _b349_assess_target(source: str, filename: str) -> "tuple[list, str | None]"
         # THE PULL. `obfuscation_signals` fires on any invisible character, and ZWNJ
         # (U+200C) is REQUIRED Persian orthography and is used in Khmer -- so an honest
         # installer can carry one. Measured over 112,421 published .js/.cjs/.mjs files from
-        # the real npm cache: 231 trip the raw signal.
+        # the real npm cache: 231 trip the raw signal. NOTE: that figure was taken against
+        # the THEN-6-MEMBER class (ZWSP/ZWNJ/ZWJ, BOM, soft hyphen, word joiner) -- textnorm's
+        # `_ZERO_WIDTH_CLASS_SRC` has since grown to 61 code points across 18 ranges (B-450
+        # Tier 1), so the raw-signal denominator above is stale, not current.
+        #
+        # RE-MEASURED FOR THE 61-MEMBER CLASS (B-450, 2026-09-03). Different corpus proxy --
+        # a developer machine's installed `node_modules` (37,068 published .js/.cjs/.mjs
+        # files under the global npm prefix), not the 112,421-file npm cache the figure
+        # above used, so the two counts are not directly comparable -- but the delta is what
+        # matters here: the old 6-member class hits 110 of those files; the widened 61-member
+        # class adds exactly 2 NEW-ONLY files, both driven solely by U+00AD SOFT HYPHEN
+        # (`@shikijs/langs/dist/gherkin.mjs`, `openclaw/dist/dist-izmUtNsp.js`), and neither is
+        # an install-time target. Re-run against THIS check's actual population -- packages
+        # declaring `scripts.{pre,,post}install` with a resolvable `node <file>` target (9
+        # packages, 6 resolved targets) plus `binding.gyp` command expansions (3 files) --
+        # found ZERO zero-width hits under either class size. So the widening is measured
+        # benign here: it costs nothing observed in this check's population and only adds an
+        # unreachable 0.005%-of-corpus proxy hit elsewhere. Narrowing the class to buy those 2
+        # files back is exactly the B-448 trade above (U+00AD can split a keyword inside a
+        # literal/comment same as ZWJ) and is refused for the same C-135 / GR#5 reason --
+        # see tests/test_b448_invisible_fn_guards.py::test_fn4_soft_hyphen_reachable_member_still_fails.
         #
         # THE NARROWING THAT WAS TRIED. Inherit C-038's invisible-channel discriminator
         # (`_mcp.py`: a channel is a consecutive RUN >= 4, or a TOTAL >= 32 the attacker

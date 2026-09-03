@@ -1,10 +1,12 @@
 """Does the agent's file-READ tool reach outside its workspace?
 
 A faithful, stdlib-only port of one OpenClaw runtime predicate —
-``resolveEffectiveToolFsRootExpansionAllowed`` (dist ``local-roots-CAoJyC6u.js``) — which
-answers exactly one question: can this config's ``read`` tool open a file that is not
-under the agent's workspace? That is the question A1's "sensitive data" leg needs and
-could not previously ask, so it read a directory NAME instead (B-666).
+``resolveEffectiveToolFsRootExpansionAllowed`` (dist ``tool-fs-policy-*.js`` — declared
+there, not in ``local-roots-*.js``, which only imports it; a hash-pinned
+``local-roots-CAoJyC6u.js`` cited here before both rotated AND named the wrong file) —
+which answers exactly one question: can this config's ``read`` tool open a file that is
+not under the agent's workspace? That is the question A1's "sensitive data" leg needs
+and could not previously ask, so it read a directory NAME instead (B-666).
 
 Two config layers decide it, and BOTH matter — reading only one is wrong by a factor of
 five on the local corpus (measured 2026-08-27: the fs layer alone says 483/581 homes are

@@ -381,9 +381,14 @@ def test_no_shipped_artifact_still_claims_openclaw_ignores_the_hints():
     MEASURED assertion ("0 occurrences in the dist") that 2026.8.1 falsified.
     """
     root = Path(__file__).resolve().parent.parent
-    targets = [root / "clawseccheck" / "checks" / "_mcp.py",
-               root / "clawseccheck" / "catalog.py",
-               root / "docs" / "THREAT_COVERAGE.md"]
+    # Swept, not enumerated: the first version of this guard hardcoded three paths, so the
+    # author's own ban list never saw docs/THREAT_INTAKE.md, which is exactly the
+    # enumerative-scope blindness C-135 kept finding elsewhere (B-706). CHANGELOG.md is the
+    # sole exclusion — it is a dated historical record, and its one hit (removed checks
+    # reading dead config fields) is a different subject from the annotation-hints claim.
+    targets = sorted(root.glob("*.md")) + sorted((root / "docs").rglob("*.md")) \
+        + sorted((root / "clawseccheck").rglob("*.py"))
+    targets = [p for p in targets if p.name != "CHANGELOG.md"]
     offenders = []
     for path in targets:
         if not path.exists():
