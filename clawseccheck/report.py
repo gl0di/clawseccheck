@@ -706,25 +706,59 @@ def _not_fully_covered_line(score: ScoreResult) -> str:
 # ARE evidenced and assert coverage nowhere. Three forms, one per evidence state:
 #
 #   proven not-ran  →  `· not covered — {subject}: {describe_layer}. {advice}.`
-#   proven ran      →  `· ran, coverage not accounted for — {subject}: {ran_note}. {advice}.`
+#   proven ran      →  `· ran, coverage not accounted for — {subject}: {ran_note}. {ran_advice}.`
 #   nothing known   →  `· not covered by the static audit — {subject}. {advice}.`
 #
-# `{advice}` is in ALL THREE by construction, and a test sweeps every ledger shape to
-# keep it that way. That is this change's answer to "what does it swallow": nothing. It
-# can only ever add a redundant "run it", never withhold one — which matters because
-# both release FP gates are structurally blind to a lost signal (`fleet_fp_gate.py`
-# compares FAIL sets on an unchanged config; `monitor_fp_gate.py` diffs two snapshots of
-# an unchanged home).
+# `{advice}` is unconditional on the "not covered" / "no ledger" branches, and a test
+# sweeps every ledger shape to keep it that way there. That is this change's answer to
+# "what does it swallow" on those two branches: nothing. It can only ever add a
+# redundant "run it", never withhold one — which matters because both release FP gates
+# are structurally blind to a lost signal (`fleet_fp_gate.py` compares FAIL sets on an
+# unchanged config; `monitor_fp_gate.py` diffs two snapshots of an unchanged home).
 #
-# Each entry is `(layer, subject, advice, ran_note)`:
+# B-547: the RAN branch drops the mode name in exactly ONE clause, and it is a narrower
+# carve-out than "any layer whose `ran` is derived from the advised mode itself" —
+# that broader rule was tried and retracted, because it is unsound for one of the two
+# candidate layers. Both LAYER_INSTALLED_SWEEP and LAYER_LIVE_BEHAVIOUR derive `ran`
+# from the advised mode having been invoked (sweep RAN iff both sweep phases RAN,
+# pipeline.py:~1368; live RAN iff a structurally-valid `--judged-bundle` entry arrived,
+# pipeline.py:~1401), but only LIVE_BEHAVIOUR's `ran` is the COMPLETE signal this
+# renderer will ever have for it: `pipeline.to_ledger` never attaches `not_reached` to
+# that layer at all (`LayerState(status=live_status)`, no other kwarg — structurally,
+# not just in today's fixtures). LAYER_INSTALLED_SWEEP is different: its `ran` genuinely
+# can coexist with real, per-item incompleteness (`sweep_not_reached`, the union of both
+# phases' `not_scanned`), and `ScoreResult.not_checked` — the only coverage signal this
+# module receives — is a FLAT, DE-DUPLICATED UNION across all five layers (see the
+# "three independent ways" note above), never attributable back to one layer. So a
+# sweep that ran with SIX skills silently unscanned is bit-for-bit identical, at this
+# renderer's inputs, to a sweep that ran and scanned everything — proven by
+# `tests/test_b520_scope_note_ledger.py::test_a_truncated_but_warn_sweep_is_not_vouched_for_either`,
+# which pins that a sweep can be genuinely incomplete while carrying NO disclosure to
+# tell the two cases apart. Suppressing the mode name there would be over-suppression:
+# it would silently drop the one piece of actionable advice a user with a truncated
+# sweep still needs, and no test or FP gate in the tree can see that loss (same
+# structural blindness noted above). Closing that gap soundly needs a per-layer
+# completeness signal plumbed through `pipeline.py`/`scoring.py` — out of scope here
+# (those files are not owned by this change) — so LAYER_INSTALLED_SWEEP's `ran_advice`
+# stays byte-identical to `advice`, same as LAYER_LOGS_TRAJECTORIES and for a related
+# reason: `ran` not proving "covered" is the whole point of this branch's wording
+# ("coverage not accounted for"), and only LIVE_BEHAVIOUR's architecture rules that
+# residual out entirely.
+#
+# Each entry is `(layer, subject, advice, ran_note, ran_advice)`:
 #   * `subject` — what the reader loses when this layer does not run, in their words.
-#   * `advice` — what actually makes it count. Unconditional, see above.
+#   * `advice` — what actually makes it count. Unconditional on "not covered"/"no
+#     ledger"; see `ran_advice` for the one clause where it is not repeated verbatim.
 #   * `ran_note` — what `status == "ran"` actually proves for THIS layer, and no more.
 #     The log/trajectory entry is the strongest case for why this must be per-layer and
 #     must not say "covered": pipeline.py marks that layer as having run on EVERY audit
 #     (B164 scans log sinks in the base run), so `ran` there does not even mean the
 #     replay modes were invoked, let alone that they exhausted the sinks — B164's own
 #     disclosure is "N log/transcript sink(s) not scanned".
+#   * `ran_advice` — used ONLY in the `ran` branch. Never empty: a layer that ran still
+#     owes the reader something. Byte-identical to `advice` for LAYER_INSTALLED_SWEEP
+#     and LAYER_LOGS_TRAJECTORIES (see above); only LAYER_LIVE_BEHAVIOUR's drops the
+#     mode name, because only that layer's `ran` can never coexist with a hidden gap.
 #
 #     B-558: which is also why that entry may not assert the NEGATIVE. It used to read
 #     "...; the replay analyses did not", and on a `--full` run that is simply false —
@@ -746,17 +780,46 @@ _SCOPE_CLAUSES = (
      "live prompt-injection resistance",
      "Run `--canary` / `--redteam` / `--dryrun`, then submit the agent's own verdict"
      " back with `--judged-bundle` — that submission is what makes this layer count",
-     "a live-behaviour result was submitted with this run"),
+     "a live-behaviour result was submitted with this run",
+     # B-547: this `ran` status IS that submission having arrived — naming the same
+     # commands again tells the operator to redo what this run just did. What `ran`
+     # does not prove is that every scenario TYPE was covered, only that one entry
+     # was.
+     "That submission already reached this run; what it does not prove is that"
+     " every scenario type was exercised, only that one structurally-valid entry"
+     " was submitted"),
     (LAYER_INSTALLED_SWEEP,
      "a deep vet of the skills, plugins and MCP servers sitting on disk",
      "Run `--full` (or `--vet-all` / `--vet-mcp` for one surface at a time)",
-     "the on-disk sweep phases ran"),
+     "the on-disk sweep phases ran",
+     # B-547: byte-identical to `advice`, deliberately — the retracted half of the
+     # first attempt at this fix. This `ran` status IS the sweep phases having run,
+     # same as LAYER_LIVE_BEHAVIOUR, but unlike that layer this one's `ran` can
+     # coexist with a REAL, undisclosed gap: a phase can finish `ran` while
+     # truncated or capped without tripping "Not fully covered" (see the big
+     # comment above `_SCOPE_CLAUSES`), and `ScoreResult.not_checked` cannot
+     # attribute that gap back to this layer even when it IS disclosed. Suppressing
+     # the mode name here would be over-suppression proven, not theoretical:
+     # `tests/test_b520_scope_note_ledger.py::test_a_ran_sweep_that_skipped_skills_does_not_vouch_for_them`
+     # and `::test_a_truncated_but_warn_sweep_is_not_vouched_for_either` both build a
+     # `ran` sweep that genuinely still needs `--vet-mcp` re-run, one with the gap
+     # disclosed and one without any disclosure at all — the second is exactly the
+     # case this renderer cannot tell apart from a truly complete sweep.
+     "Run `--full` (or `--vet-all` / `--vet-mcp` for one surface at a time)"),
     (LAYER_LOGS_TRAJECTORIES,
      "what your agent has already logged",
      "Run `--behavioral` (proven-by-log verb-sequence trifecta / outcome anomaly /"
      " capability drift) or `--analyze-trajectory` (skill-indicator correlation) to"
      " check whether a trifecta is already recorded in your trajectory sidecar",
-     "this audit's own log/transcript scan ran"),
+     "this audit's own log/transcript scan ran",
+     # B-547: byte-identical to `advice`, deliberately. `ran` here starts True on
+     # EVERY base audit (B164 scans log sinks unconditionally) and proves nothing
+     # about whether `--behavioral`/`--analyze-trajectory` ran — suppressing this
+     # would recreate the exact false-negative trap B-520/B-537's own tests pin
+     # (`test_the_replay_modes_survive_the_layer_being_marked_as_having_run`).
+     "Run `--behavioral` (proven-by-log verb-sequence trifecta / outcome anomaly /"
+     " capability drift) or `--analyze-trajectory` (skill-indicator correlation) to"
+     " check whether a trifecta is already recorded in your trajectory sidecar"),
 )
 
 
@@ -827,7 +890,7 @@ def _scope_note_lines(score: ScoreResult, findings: list[Finding]) -> tuple[list
     # itself, so a complete ledger and an absent one are no longer the same input here.
     have_ledger = bool(getattr(score, "ledger_present", False))
     clauses: list[str] = []
-    for layer, subject, advice, ran_note in _SCOPE_CLAUSES:
+    for layer, subject, advice, ran_note, ran_advice in _SCOPE_CLAUSES:
         status = missing.get(layer)
         if status is not None:
             # Proven absence. Layer/status wording comes from `layers.describe_layer`
@@ -851,8 +914,18 @@ def _scope_note_lines(score: ScoreResult, findings: list[Finding]) -> tuple[list
             # Proven the layer ran, and NOT proven that it covered its subject — the
             # ledger records a status, not a completeness. Saying "covered by this run"
             # here vouched for skills the sweep never opened.
+            #
+            # B-547: `ran_advice`, not `advice`. For LAYER_LIVE_BEHAVIOUR alone,
+            # `advice` names the very mode whose invocation this `ran` status already
+            # reflects — telling the operator to go run it is telling them to redo
+            # what this same invocation just did. LAYER_INSTALLED_SWEEP and
+            # LAYER_LOGS_TRAJECTORIES both keep `advice` unconditional on `ran` too, by
+            # giving each a byte-identical `ran_advice` — see `_SCOPE_CLAUSES` above
+            # for why the sweep layer is NOT included in the carve-out (its `ran` can
+            # hide a real, undisclosed gap that this renderer cannot see; suppressing
+            # there was tried and proven unsound by two tests in this file).
             clauses.append(f" · ran, coverage not accounted for — {subject}: {ran_note}."
-                           f" {advice}.")
+                           f" {ran_advice}.")
         else:
             # No ledger reached this render, so the only honest scope is the audit's
             # own: a purely static audit does not cover these by itself. Nothing is

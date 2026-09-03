@@ -47,9 +47,21 @@ missing" as proof of COVERAGE, which the ledger cannot support:
 
 None of the three had a test, and the first is why: no test in the tree exercised a
 complete ledger. The tests below now do, and the invariant that replaces the coverage
-claim is mechanical — EVERY clause, in EVERY ledger shape, still names the flag that
-would cover it (`test_no_ledger_shape_ever_drops_the_advice`). That is what keeps this
-repair from being the fourth fix in the family to trade an FP for an FN.
+claim is mechanical — every clause, in every ledger shape, still carries SOME
+actionable advice (`test_no_ledger_shape_ever_drops_the_advice`). That is what keeps
+this repair from being the fourth fix in the family to trade an FP for an FN.
+
+B-547 narrowed what "carries advice" means on exactly one branch. A layer whose `ran`
+status IS the advised mode having just run — LAYER_INSTALLED_SWEEP (`ran` iff both
+sweep phases ran) and LAYER_LIVE_BEHAVIOUR (`ran` iff a `--judged-bundle` live-test
+entry arrived) — used to keep naming that same mode on `ran`, i.e. telling the operator
+to go run what this very invocation just finished; that was the filed defect, not a
+feature the old test protected. LAYER_LOGS_TRAJECTORIES is the one layer where the old
+invariant still holds exactly: its `ran` starts True on every base audit (B164 scans
+log sinks unconditionally) and proves nothing about whether `--behavioral` ran, so
+suppressing its advice there would recreate the false-negative trap this file's second
+section exists to guard against
+(`test_the_replay_modes_survive_the_layer_being_marked_as_having_run`).
 
 Stdlib-only, offline, writes nothing.
 """
@@ -366,21 +378,68 @@ def test_the_header_does_not_promise_an_accounting_the_clauses_refuse_to_give():
                                     STATUS_NOT_REACHED])
 @pytest.mark.parametrize("subject_layer", list(SUBJECT_OF_LAYER))
 def test_no_ledger_shape_ever_drops_the_advice(subject_layer, status):
-    """The invariant that replaces the coverage claim, and this change's whole answer
-    to "what does it swallow": every clause names the flag that would cover it, in
-    every ledger shape, including the ones where the layer ran.
+    """The invariant that replaces the coverage claim: every clause carries SOME
+    actionable advice, in every ledger shape — but B-547 bounds what that advice may
+    say on `ran`, for exactly ONE layer.
 
-    This is deliberately mechanical. Both release FP gates are structurally blind to a
-    lost signal (`fleet_fp_gate.py` compares FAIL sets on an unchanged config;
-    `monitor_fp_gate.py` diffs two snapshots of an unchanged home), so an advice line
-    that quietly stops printing on some ledger shape would ship green — which is how
-    the previous three fixes in this family each traded an FP for an FN.
+    LAYER_LIVE_BEHAVIOUR's `ran` status IS the advised mode having just run (a
+    structurally-valid `--judged-bundle` entry arrived — see `report._SCOPE_CLAUSES`),
+    AND `pipeline.to_ledger` never attaches `not_reached` to this layer at all, so
+    `ran` is the complete signal this renderer will ever have for it: there is no
+    hidden-gap case to protect advice for. So on `ran` this one clause must NOT keep
+    naming the mode — that was the filed defect: a graded run telling the operator to
+    go run what this same invocation just finished. This is the one place this test
+    asserts the flag's ABSENCE rather than presence, and it is a narrow, evidenced
+    carve-out, not a general loosening — see the mirror check below that the subject is
+    still named and the "ran, coverage not accounted for" clause still fires, so
+    nothing about the layer having run goes unmentioned, only the already-run mode's
+    name.
+
+    LAYER_INSTALLED_SWEEP looks like the same shape — its `ran` also derives from the
+    advised mode (`--full`/`--vet-all`/`--vet-mcp`) having run — but is deliberately
+    EXCLUDED from the carve-out: unlike live-behaviour, a sweep's `ran` CAN coexist
+    with a real, undisclosed gap (a phase can finish `ran` while truncated/capped
+    without tripping "Not fully covered"), and `ScoreResult.not_checked` cannot
+    attribute a gap back to one layer even when it IS disclosed. Suppressing the mode
+    name there was tried and retracted as over-suppression — see
+    `test_a_ran_sweep_that_skipped_skills_does_not_vouch_for_them` (a disclosed gap
+    that still needs `--vet-mcp`) and `test_a_truncated_but_warn_sweep_is_not_vouched_for_either`
+    (the same gap, undisclosed, indistinguishable at this renderer's inputs from a
+    truly complete sweep). Both keep the flag on `ran`, same as before this task.
+
+    LAYER_LOGS_TRAJECTORIES is excluded from the carve-out for a different, sharper
+    reason: its `ran` starts True on every base audit (B164 scans log sinks
+    unconditionally) and proves nothing about `--behavioral` having run at all, so its
+    advice stays unconditional even on `ran` — see
+    `test_the_replay_modes_survive_the_layer_being_marked_as_having_run` for why
+    suppressing it there would be the false negative C-135 forbids.
+
+    Every non-`ran` status keeps the original, deliberately mechanical invariant: both
+    release FP gates are structurally blind to a lost signal (`fleet_fp_gate.py`
+    compares FAIL sets on an unchanged config; `monitor_fp_gate.py` diffs two snapshots
+    of an unchanged home), so an advice line that quietly stops printing on some ledger
+    shape would ship green — which is how three earlier fixes in this family each
+    traded an FP for an FN.
     """
     flags = {LAYER_LIVE_BEHAVIOUR: CANARY,
              LAYER_INSTALLED_SWEEP: VET_MCP,
              LAYER_LOGS_TRAJECTORIES: BEHAVIORAL}
-    block = _scope_block(_render(_ledger(**{subject_layer: status})))
+    ledger = _ledger(**{subject_layer: status})
+    block = _scope_block(_render(ledger))
     for layer, flag in flags.items():
-        assert flag in block, (
-            f"{layer}'s advice vanished when {subject_layer} was {status}:\n{block}")
         assert SUBJECT_OF_LAYER[layer] in block, (layer, block)
+        if ledger.status(layer) == STATUS_RAN and layer == LAYER_LIVE_BEHAVIOUR:
+            # B-547: this is the ONE layer whose `ran` status IS the advised mode
+            # having just run WITH no possible hidden gap — naming it again is the
+            # filed defect, not the invariant this test exists to protect.
+            assert flag not in block, (
+                f"{layer} ran this pass and the report still tells the operator to "
+                f"(re)run {flag}, the mode that produced that `ran` status:\n{block}")
+            assert RAN + SUBJECT_OF_LAYER[layer] in block, (
+                f"{layer} ran but its own 'ran' clause is missing — the layer having "
+                f"run must still be stated, just not with the already-run mode's name:"
+                f"\n{block}")
+        else:
+            assert flag in block, (
+                f"{layer}'s advice vanished when its status was "
+                f"{ledger.status(layer)}:\n{block}")
