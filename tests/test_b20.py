@@ -1,4 +1,5 @@
 """B20 Bootstrap / memory write protection tests."""
+import shutil
 from pathlib import Path
 
 from clawseccheck.checks import check_bootstrap_write_protection
@@ -146,25 +147,40 @@ def test_b20_group_writable_membership_unknown_stays_medium_warn(monkeypatch, tm
 
 
 # ---- B-127: end-to-end clean fixture via the real collector/audit path ----
-def test_b20_clean_fixture_singleton_group_write_end_to_end(monkeypatch):
+def test_b20_clean_fixture_singleton_group_write_end_to_end(monkeypatch, tmp_path):
     """clean_b127_singleton_group_write: a real on-disk MEMORY.md, chmod'd group-writable
     at runtime (perms are not portable through git) with the group-membership lookup
     mocked to a deterministic singleton, through the real collect() -> check ->
     LOW-severity, reworded-hygiene path (rather than an unmockable dependency on this
-    box's actual /etc/group contents)."""
+    box's actual /etc/group contents).
+
+    ISOLATED (2026-09-03): this operates on a COPY under ``tmp_path``, never on the
+    shipped fixture. It used to chmod the shipped file to 0664 and restore 0644 in a
+    ``finally`` — the only test in the suite that mutated the corpus in place, and
+    conftest's own B-127 note spelled out the cost: the file's mode, "and therefore the
+    whole corpus fingerprint", depended on whether this test had already run, i.e. on
+    test selection and ordering. Under a parallel runner that stops being an ordering
+    quirk and becomes a race: a worker walking the corpus for the fingerprint manifest
+    can observe 0664 mid-flight and fail non-deterministically. A `finally` restores
+    within one process; it cannot hold a shared file steady for another.
+
+    The copy is chmod'd to the corpus modes first so the only mode that differs from a
+    pristine corpus is the one under test — otherwise `copytree`'s inherited modes, not
+    the group-write bit, could be what drives the verdict.
+    """
     from clawseccheck import checks
     monkeypatch.setattr(checks._shared, "_group_has_other_members", lambda gid, uid: False)
-    fixture_dir = FIXTURES / "clean_b127_singleton_group_write"
-    mem = fixture_dir / "workspace" / "MEMORY.md"
-    mem.chmod(0o664)  # group-write
-    try:
-        ctx = collect(fixture_dir)
-        result = check_bootstrap_write_protection(ctx)
-        assert result.status == "WARN"
-        assert result.severity == LOW
-        assert "no other group members" in result.detail.lower()
-    finally:
-        mem.chmod(0o644)  # restore to a fixed, non-group-writable mode for git cleanliness
+    fixture_dir = tmp_path / "clean_b127_singleton_group_write"
+    shutil.copytree(FIXTURES / "clean_b127_singleton_group_write", fixture_dir)
+    for path in sorted(fixture_dir.rglob("*"), reverse=True):
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    (fixture_dir / "workspace" / "MEMORY.md").chmod(0o664)  # group-write, on the COPY
+
+    ctx = collect(fixture_dir)
+    result = check_bootstrap_write_protection(ctx)
+    assert result.status == "WARN"
+    assert result.severity == LOW
+    assert "no other group members" in result.detail.lower()
 
 
 # ---- tight perms on all bootstrap files -> PASS ----

@@ -96,13 +96,26 @@ _PINNED_FIXTURE_MODES = {
     #   test_the_shipped_bad_fixture_demonstrates_the_finding_in_place`` holds this pin.
     "bad_b182_clawhub_token_store/.config/clawhub/config.json": 0o644,
 
-    # B-127 -- pinned to the value ``tests/test_b20.py::
-    # test_b20_clean_fixture_singleton_group_write_end_to_end`` restores. That test is the
-    # only one that chmods a SHIPPED fixture at runtime: it sets 0664 to drive B20's
-    # singleton group-write branch through the real collect() path, then restores exactly
-    # 0644 in a ``finally``. If the session-start pin disagreed with that restore value,
-    # this file's mode -- and therefore the whole corpus fingerprint -- would depend on
-    # whether test_b20 had already run, i.e. on test selection and ordering.
+    # B-127 -- an ORDINARY pin now, and the history is worth keeping because the coupling
+    # it used to describe was a real hazard.
+    #
+    # ``tests/test_b20.py::test_b20_clean_fixture_singleton_group_write_end_to_end`` used
+    # to be the only test that chmod'd a SHIPPED fixture at runtime -- 0664 to drive B20's
+    # singleton group-write branch through the real collect() path, restored to 0644 in a
+    # ``finally``. So this pin had to AGREE with that restore value, or the file's mode --
+    # and therefore the whole corpus fingerprint -- depended on whether test_b20 had
+    # already run, i.e. on test selection and ordering.
+    #
+    # Isolated 2026-09-03: that test now copies the fixture into ``tmp_path`` and chmods
+    # the COPY, so nothing mutates the corpus in place and this value stands on its own.
+    # The ordering dependency is gone, and with it a race that a parallel runner would
+    # have made non-deterministic rather than merely order-dependent: a ``finally``
+    # restores within one process, but cannot hold a shared file steady while another
+    # worker walks the corpus for the fingerprint manifest.
+    #
+    # Verified by measurement, not by reading: the corpus mode-fingerprint is byte-equal
+    # before and after running test_b20, test_b182 and the fingerprint manifest together
+    # (729 tests), and no test anywhere still chmods a path rooted at ``fixtures/``.
     "clean_b127_singleton_group_write/workspace/MEMORY.md": 0o644,
 }
 
