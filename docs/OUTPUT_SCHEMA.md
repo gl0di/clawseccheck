@@ -1448,7 +1448,7 @@ value: `3` (bumped from `2` by B-568 — see the Notes below for what changed).
 | Field | Type | Description |
 |---|---|---|
 | `version` | `int` | This document's own schema version — currently `3`. Bump-on-breaking-change, the same discipline `SBOM_VERSION` in `sbom.py` documents in-source. A consumer pinning a specific version should treat a different value as a potentially incompatible shape. |
-| `generated_by` | `str` | `"clawseccheck v<package version>"`, e.g. `"clawseccheck v3.60.0"` — the tool identity/version that produced this document (distinct from `version` above, which is the document's own schema version). |
+| `generated_by` | `str` | `"clawseccheck v<package version>"`, e.g. `"clawseccheck v4.0.0"` — the tool identity/version that produced this document (distinct from `version` above, which is the document's own schema version). |
 | `scanned_home` | `str \| null` | Absolute path of the home this BOM was built from, or `null` when no home was supplied to the `Context` (library/unit use). Unlike the plugin path fields below, this one is NOT redacted — it echoes the `--home` value the operator themselves typed, and `tests/test_b462_b464_optout_honesty.py` pins the literal value to prove no silent fallback path was substituted. |
 | `config_found` | `bool` | `true` when an `openclaw.json` was present at `scanned_home` (B-463) — lets a consumer distinguish a real setup with zero components from a typo'd `--home` that found nothing at all; both would otherwise serialise as an empty `skills`/`mcp_servers`/`plugins` set. |
 | `self_excluded_skills` | `array[str]` | B-521: names of installed skills withheld from `skills` below because they are ClawSecCheck's OWN content-verified install (B-265, `collector.py` `_is_own_source`/`self_excluded_skills`) — a tool auditing itself is noise, so it is deliberately excluded, but the name(s) are shipped here so a consumer can tell WHICH component is missing rather than only that one is. Empty array (never omitted) when nothing was withheld. Sorted for deterministic output. |
@@ -1498,7 +1498,7 @@ value: `3` (bumped from `2` by B-568 — see the Notes below for what changed).
 ```json
 {
   "version": 3,
-  "generated_by": "clawseccheck v3.60.0",
+  "generated_by": "clawseccheck v4.0.0",
   "scanned_home": "/home/you/.openclaw",
   "config_found": true,
   "self_excluded_skills": [],

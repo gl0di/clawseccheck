@@ -36,7 +36,21 @@ _VERSION_REF = re.compile(r"(?<![\w./-])v(\d+)\.(\d+)")
 # {relative path: {exact matched text, ...}} — each entry needs a reason here.
 ALLOWLIST: dict = {
     # Historical contract baseline — the frozen-schema doc legitimately dates itself.
-    "docs/OUTPUT_SCHEMA.md": {"v2.0"},
+    #
+    # 4.0.0 widened this on the SAME reasoning the v2.0 entry already stands on, after
+    # reading each site rather than sweeping the file: OUTPUT_SCHEMA.md is a CONTRACT
+    # document, and every remaining reference tells a consumer of machine output what an
+    # OLDER artifact says differently — "through v3.61.0 this block published `configBlind`
+    # alone, so a run capped by an open CRITICAL emitted SARIF that said nothing about it",
+    # and §17's own "Not part of the public contract" list cites v3.60.0 replacing
+    # `inventory.system` as its worked example of a key set that legitimately moved in a
+    # minor. Deleting those would remove information a reader of a stored report needs;
+    # they are the document's subject, not stale prose about the living tool.
+    #
+    # What was NOT allowlisted, deliberately: the two `generated_by` EXAMPLE VALUES. An
+    # example exists to show the current shape, so a stale one misleads rather than
+    # records — those were updated to the release version instead.
+    "docs/OUTPUT_SCHEMA.md": {"v2.0", "v3.8", "v3.56", "v3.60", "v3.61"},
     # External OWASP document version ("v1.0 2026"), not a ClawSecCheck version.
     "docs/THREAT_COVERAGE.md": {"v1.0"},
 }

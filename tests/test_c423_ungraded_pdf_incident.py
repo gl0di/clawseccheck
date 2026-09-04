@@ -38,6 +38,7 @@ from clawseccheck.layers import (
     describe_layer,
 )
 from clawseccheck.pdf import _CONTENT_W, _text_width, render_pdf
+from _pdftext import content_text
 from clawseccheck.scoring import compute
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -79,16 +80,16 @@ def _all_missing_ledger() -> LayerLedger:
 
 
 def _content_text(data: bytes) -> str:
-    """All page content streams, decompressed and concatenated (tests/test_pdf.py's own
-    helper, reproduced here rather than imported across test modules)."""
-    import zlib
-    out = ""
-    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, re.S):
-        try:
-            out += zlib.decompress(m.group(1)).decode("latin-1", "replace")
-        except zlib.error:
-            continue
-    return out
+    """All page content streams, decompressed and concatenated.
+
+    Was a local copy of `test_pdf.py`'s regex, "reproduced here rather than imported across
+    test modules" — and the copy carried the bug: it parsed a BINARY stream by scanning for
+    `endstream`, so a compressed stream ending in `\r` lost its last byte and decompression
+    failed, which the copy then swallowed into an empty string. This test read that as "the
+    sentence is not in the PDF" when the sentence was there. Now one shared reader that
+    parses by `/Length` and refuses to turn a parse failure into absent content —
+    see `tests/_pdftext.py`."""
+    return content_text(data)
 
 
 def _tj_lines(text: str) -> list[str]:

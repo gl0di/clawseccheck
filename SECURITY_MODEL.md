@@ -387,13 +387,13 @@ analysis is stdlib `ast` (parse-only, never executed); the shell and JS/TS analy
 regex passes over text. Nothing this project reads from a third-party skill or plugin is
 ever imported, called, or run.
 
-This is a known, addressed false-positive class: v3.7.1 reworded the call-shaped prose
-and finding-text in `checks.py`, `skillast.py`, and `risk.py` (e.g. `exec (`, `exec()s`,
-`.then(eval)`, `eval(atob(...))`) purely so that a naive word-boundary scanner would stop
-tripping on the tool's own signature vocabulary — the detection regexes, the
-`"child_process" in masked` logic, and every check's label/severity were left completely
-unchanged, and the full test suite stayed green throughout. The project's own `--vet`
-run against its own source (`clawseccheck --vet .`) reports this honestly rather than
+This is a known, addressed false-positive class: the call-shaped prose and
+finding-text in `checks.py`, `skillast.py`, and `risk.py` (e.g. `exec (`, `exec()s`,
+`.then(eval)`, `eval(atob(...))`) has been reworded purely so that a naive word-boundary
+scanner would stop tripping on the tool's own signature vocabulary — the detection
+regexes, the `"child_process" in masked` logic, and every check's label/severity were
+left completely unchanged, and the full test suite stayed green throughout. The
+project's own `--vet` run against its own source (`clawseccheck --vet .`) reports this honestly rather than
 hiding it: a security tool necessarily ships attack signatures as data, and that is
 disclosed as a note, not papered over.
 
