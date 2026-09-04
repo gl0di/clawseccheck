@@ -465,6 +465,21 @@ class ScoreResult:
     # proxy to this field is the follow-up this addition makes possible.
     ledger_present: bool = False
 
+    # B-558: every layer paired with its `layers.LayerState.coverage`, in LAYER_ORDER —
+    # passed through verbatim from `LayerLedger.coverages` (ordering is the ledger's
+    # job, not this module's, exactly like `not_checked`). `()` whenever `ledger is
+    # None`, and tail-appended for the same positional-construction reason as every
+    # ledger-derived field above.
+    #
+    # A FIFTH question, and the one the four above cannot answer: `graded` /
+    # `missing_layers` say whether a layer RAN, and `not_checked` carries what was left
+    # unread as a FLAT UNION across all five layers — never attributable back to one.
+    # This field is that attribution. It is what lets `report._scope_note_lines` stop
+    # advising a mode whose layer provably exhausted its subject, which the union alone
+    # could never justify (see `report._SCOPE_CLAUSES`' own comment on why `ran` is not
+    # `covered`).
+    layer_coverage: tuple[tuple[str, str], ...] = ()
+
 
 def _degraded_signal(findings: list[Finding]) -> tuple[bool, int]:
     """B-313/B-399: count checks that could not reach a reliable verdict this run.
@@ -774,6 +789,8 @@ def compute(findings: list[Finding], ctx=None, *,
     )
     # B-547: fourth ledger-derived value — see `ScoreResult.ledger_present`.
     ledger_present = ledger is not None
+    # B-558: fifth — see `ScoreResult.layer_coverage`.
+    layer_coverage = () if ledger is None else ledger.coverages
 
     if total == 0:
         if (not config_blind and not runtime_hit and not degraded_hit and not live_hit
@@ -784,7 +801,7 @@ def compute(findings: list[Finding], ctx=None, *,
             return ScoreResult(
                 0, "N/A", False, 0, 0, 0, assessable=False,
                 graded=graded, not_checked=not_checked, missing_layers=missing_layers,
-                ledger_present=ledger_present,
+                ledger_present=ledger_present, layer_coverage=layer_coverage,
             )
         # B-306 (C-135 follow-up #2) / B-313 / F-155 / F-154: nothing else scored this
         # run, BUT a blind config (ctx.config_parse_error), a corroborated runtime
@@ -824,7 +841,7 @@ def compute(findings: list[Finding], ctx=None, *,
             graded=graded,
             not_checked=not_checked,
             missing_layers=missing_layers,
-            ledger_present=ledger_present,
+            ledger_present=ledger_present, layer_coverage=layer_coverage,
         )
 
     earned = 0.0
@@ -942,7 +959,7 @@ def compute(findings: list[Finding], ctx=None, *,
         graded=graded,
         not_checked=not_checked,
         missing_layers=missing_layers,
-        ledger_present=ledger_present,
+        ledger_present=ledger_present, layer_coverage=layer_coverage,
     )
 
 

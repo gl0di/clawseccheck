@@ -16,6 +16,7 @@ import re
 import shlex
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import brand
@@ -31,6 +32,8 @@ from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
 from .layers import (
+    COVERAGE_COMPLETE,
+    COVERAGE_PARTIAL,
     LAYER_INSTALLED_SWEEP,
     LAYER_LIVE_BEHAVIOUR,
     LAYER_LOGS_TRAJECTORIES,
@@ -775,8 +778,69 @@ def _not_fully_covered_line(score: ScoreResult) -> str:
 # broader than that run needed. The vet is not a pipeline phase and so has no ledger
 # layer of its own — inferring one from `--fast` inside a renderer is precisely the
 # re-derivation that produced this bug.
+#
+# B-558 (Dave's call, 2026-09-03) adds a FOURTH evidence state on top of the three
+# above: a layer that ran AND is known to have exhausted its subject. Until
+# `LayerState.coverage` existed there was no way to tell that from "ran, and nobody
+# asked", so this renderer had to treat every `ran` as the weaker of the two — which
+# is why a `--full` run printed "Run `--behavioral` ..." six hundred lines above the
+# BEHAVIOURAL REPLAY section that had already run. The clause now READS that signal
+# instead of assuming its weakest value:
+#
+#   ran + COVERAGE_COMPLETE  →  `· ran and covered — {subject}: {covered_note}.
+#                                {covered_advice}.`
+#   ran + COVERAGE_PARTIAL   →  `· ran, partly covered — {subject}: {ran_note}.
+#                                {ran_advice}.`
+#   ran + COVERAGE_UNKNOWN   →  today's text, byte for byte.
+#
+# The PARTIAL form is not cosmetic and does not collapse into UNKNOWN: it is the only
+# place in this renderer where a coverage hole is ATTRIBUTED to the layer that owns it.
+# `ScoreResult.not_checked` prints the hole's own words a few lines up, but as a flat
+# union across all five layers (see the "three independent ways" note above) — the
+# reader could not tell which surface it belonged to.
+#
+# What the COMPLETE form may NOT do is drop the whole advice clause. Only one layer can
+# reach COMPLETE today (`pipeline.to_ledger` pins the other four UNKNOWN, each for its
+# own stated reason), and even there the signal covers ONE of the two modes the advice
+# names: `behavioral_ran` is the `--behavioral` phase, while `--analyze-trajectory` is a
+# separate CLI branch that `--full` never invokes (pipeline.py's own docstring says so).
+# So `covered_advice` keeps the half that is still owed and drops only the half this run
+# provably already did. Suppressing both would be the over-suppression this file has
+# already retracted once, for LAYER_INSTALLED_SWEEP, and no FP gate in the tree can see
+# a withheld recommendation.
+#
+# A clause with `covered_note=None` cannot render the COMPLETE form at all. Should a
+# future producer start emitting COVERAGE_COMPLETE for such a layer, the renderer falls
+# back to the UNKNOWN wording rather than raising or inventing a sentence: it then
+# UNDER-claims — the safe direction — and `tests/test_b558_scope_note_coverage.py` pins
+# that, so the failure is a missing sentence someone must write, never a false one.
+@dataclass(frozen=True)
+class _ScopeClause:
+    #: The ledger layer this clause reports on.
+    layer: str
+    #: What the reader loses when this layer does not run, in their words.
+    subject: str
+    #: What actually makes it count. Unconditional on the "not covered" / "no ledger"
+    #: branches — it can only ever add a redundant "run it", never withhold one.
+    advice: str
+    #: What ``status == "ran"`` proves for THIS layer, and no more.
+    ran_note: str
+    #: Used only on the `ran` branches. Never empty: a layer that ran still owes the
+    #: reader something. Byte-identical to `advice` for every layer except
+    #: LAYER_LIVE_BEHAVIOUR — see the retraction recorded on the sweep entry below.
+    ran_advice: str
+    #: B-558: what a PROVEN-complete coverage signal lets this layer claim. ``None``
+    #: for a layer that cannot reach COVERAGE_COMPLETE today; see above for what the
+    #: renderer does if one ever does.
+    covered_note: str | None = None
+    #: B-558: the advice that survives a proven-complete layer — never empty, and never
+    #: the whole of `advice` unless every mode it names was genuinely exercised.
+    covered_advice: str | None = None
+
+
 _SCOPE_CLAUSES = (
-    (LAYER_LIVE_BEHAVIOUR,
+    _ScopeClause(
+     LAYER_LIVE_BEHAVIOUR,
      "live prompt-injection resistance",
      "Run `--canary` / `--redteam` / `--dryrun`, then submit the agent's own verdict"
      " back with `--judged-bundle` — that submission is what makes this layer count",
@@ -787,8 +851,10 @@ _SCOPE_CLAUSES = (
      # was.
      "That submission already reached this run; what it does not prove is that"
      " every scenario type was exercised, only that one structurally-valid entry"
-     " was submitted"),
-    (LAYER_INSTALLED_SWEEP,
+     " was submitted",
+    ),
+    _ScopeClause(
+     LAYER_INSTALLED_SWEEP,
      "a deep vet of the skills, plugins and MCP servers sitting on disk",
      "Run `--full` (or `--vet-all` / `--vet-mcp` for one surface at a time)",
      "the on-disk sweep phases ran",
@@ -805,8 +871,10 @@ _SCOPE_CLAUSES = (
      # `ran` sweep that genuinely still needs `--vet-mcp` re-run, one with the gap
      # disclosed and one without any disclosure at all — the second is exactly the
      # case this renderer cannot tell apart from a truly complete sweep.
-     "Run `--full` (or `--vet-all` / `--vet-mcp` for one surface at a time)"),
-    (LAYER_LOGS_TRAJECTORIES,
+     "Run `--full` (or `--vet-all` / `--vet-mcp` for one surface at a time)",
+    ),
+    _ScopeClause(
+     LAYER_LOGS_TRAJECTORIES,
      "what your agent has already logged",
      "Run `--behavioral` (proven-by-log verb-sequence trifecta / outcome anomaly /"
      " capability drift) or `--analyze-trajectory` (skill-indicator correlation) to"
@@ -819,7 +887,21 @@ _SCOPE_CLAUSES = (
      # (`test_the_replay_modes_survive_the_layer_being_marked_as_having_run`).
      "Run `--behavioral` (proven-by-log verb-sequence trifecta / outcome anomaly /"
      " capability drift) or `--analyze-trajectory` (skill-indicator correlation) to"
-     " check whether a trifecta is already recorded in your trajectory sidecar"),
+     " check whether a trifecta is already recorded in your trajectory sidecar",
+     # B-558: the only COMPLETE form in this table, because this is the only layer
+     # `pipeline.to_ledger` can prove complete. It states what that proof is worth and
+     # no more: the replay ran, and nothing it read was truncated or unreadable.
+     covered_note=(
+         "the replay analyses ran, and this run read every log sink it found"
+     ),
+     # The `--behavioral` half is dropped — this run just did it. The
+     # `--analyze-trajectory` half stays, because that mode is a separate CLI branch
+     # `--full` never invokes, so no coverage signal in this ledger speaks for it.
+     covered_advice=(
+         "`--analyze-trajectory` (skill-indicator correlation) is a separate pass over"
+         " the same sidecar and has not run"
+     ),
+    ),
 )
 
 
@@ -889,8 +971,16 @@ def _scope_note_lines(score: ScoreResult, findings: list[Finding]) -> tuple[list
     # run the modes that had just run. `ScoreResult.ledger_present` records the fact
     # itself, so a complete ledger and an absent one are no longer the same input here.
     have_ledger = bool(getattr(score, "ledger_present", False))
+    # B-558: per-layer coverage, the only ledger-derived field that is ATTRIBUTABLE to
+    # one layer. `getattr` with an empty default for the same reason every ledger read
+    # above uses one — a hand-built `ScoreResult` from before this field existed must
+    # render exactly as it did, and an absent entry falls through to today's wording.
+    coverage_of = dict(getattr(score, "layer_coverage", ()) or ())
     clauses: list[str] = []
-    for layer, subject, advice, ran_note, ran_advice in _SCOPE_CLAUSES:
+    for clause in _SCOPE_CLAUSES:
+        layer, subject = clause.layer, clause.subject
+        advice, ran_note, ran_advice = clause.advice, clause.ran_note, clause.ran_advice
+        coverage = coverage_of.get(layer)
         status = missing.get(layer)
         if status is not None:
             # Proven absence. Layer/status wording comes from `layers.describe_layer`
@@ -910,10 +1000,29 @@ def _scope_note_lines(score: ScoreResult, findings: list[Finding]) -> tuple[list
             # time (turn logging/the trajectory sidecar on).
             clauses.append(f" · ran, nothing to scan — {subject}: no log or transcript"
                            f" sink exists on this machine. {advice}.")
+        elif have_ledger and coverage == COVERAGE_COMPLETE and clause.covered_note:
+            # B-558: proven the layer ran AND that it exhausted its subject. This is
+            # the one branch allowed to stop advising a mode, and only the part of the
+            # advice this run's own evidence covers — see `_SCOPE_CLAUSES` above.
+            clauses.append(f" · ran and covered — {subject}: {clause.covered_note}."
+                           f" {clause.covered_advice}.")
+        elif have_ledger and coverage == COVERAGE_PARTIAL:
+            # B-558: proven the layer ran and proven it left something unread. The
+            # hole's own words are printed by `_not_fully_covered_line` above, but as a
+            # union across all five layers; this is where it gets attributed to the one
+            # that owns it. The advice is the full `ran_advice` — a partly-covered layer
+            # is exactly the case where re-running the mode is worth the reader's time.
+            clauses.append(f" · ran, partly covered — {subject}: {ran_note}."
+                           f" {ran_advice}.")
         elif have_ledger:
             # Proven the layer ran, and NOT proven that it covered its subject — the
             # ledger records a status, not a completeness. Saying "covered by this run"
             # here vouched for skills the sweep never opened.
+            #
+            # B-558: also the fall-back for a COVERAGE_COMPLETE on a layer this table
+            # has no `covered_note` for. That under-claims rather than inventing a
+            # sentence, which is the safe direction; a test pins it so the gap shows up
+            # as wording someone has to write, not as a false claim shipped quietly.
             #
             # B-547: `ran_advice`, not `advice`. For LAYER_LIVE_BEHAVIOUR alone,
             # `advice` names the very mode whose invocation this `ran` status already

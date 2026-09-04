@@ -218,6 +218,26 @@ class LayerLedger:
     def status(self, layer: str) -> str:
         return self.states[layer].status
 
+    def coverage(self, layer: str) -> str:
+        """B-558: one layer's coverage — see :data:`LAYER_COVERAGES`.
+
+        The sibling of :meth:`status`, and a DIFFERENT question: ``status`` says
+        whether the layer ran, ``coverage`` says whether a layer that ran exhausted
+        its subject. A reader that collapses the two loses the state this field was
+        built to preserve — "we did not ask" is not "we asked and found nothing left".
+        """
+        return self.states[layer].coverage
+
+    @property
+    def coverages(self) -> tuple[tuple[str, str], ...]:
+        """Every layer paired with its coverage, in :data:`LAYER_ORDER`.
+
+        Ordering lives here rather than in the consumer for the same reason
+        :attr:`not_checked`'s de-duplication does: a renderer that re-derives the
+        order is a second place for it to drift.
+        """
+        return tuple((layer, self.states[layer].coverage) for layer in LAYER_ORDER)
+
     @property
     def complete(self) -> bool:
         """True only when every one of the five layers actually ran."""

@@ -228,11 +228,10 @@ def test_the_logs_layer_note_asserts_nothing_about_the_replay():
     """It used to say "the replay analyses did not", which is false on any run that ran
     them. `ran` for this layer proves the log/transcript scan happened and nothing more,
     in either direction."""
-    # 5-tuple since B-547 added `ran_advice`, used only in the RAN branch. This layer's
-    # `ran_advice` is byte-identical to its `advice` (only the live-behaviour clause
-    # differs), so nothing this test asserts is affected by the widening.
-    note = next(n for layer, _subject, _advice, n, _ran_advice in _SCOPE_CLAUSES
-                if layer == "logs_trajectories")
+    # `_ScopeClause` since B-558 (it was a 5-tuple, and before B-547 a 4-tuple —
+    # positional unpacking here broke on both widenings, which is why it reads by name
+    # now). `ran_note` is the field this test is about: what `status == "ran"` proves.
+    note = next(c.ran_note for c in _SCOPE_CLAUSES if c.layer == "logs_trajectories")
     assert "did not" not in note, note
     assert "replay" not in note, note
 
@@ -240,6 +239,5 @@ def test_the_logs_layer_note_asserts_nothing_about_the_replay():
 def test_the_logs_layer_still_tells_the_reader_how_to_run_the_replay():
     """The actionable half must survive the wording fix — it is what the reader does
     next, and it is unconditional by design (see _SCOPE_CLAUSES' own comment)."""
-    advice = next(a for layer, _subject, a, _n, _ran_advice in _SCOPE_CLAUSES
-                  if layer == "logs_trajectories")
+    advice = next(c.advice for c in _SCOPE_CLAUSES if c.layer == "logs_trajectories")
     assert "--behavioral" in advice

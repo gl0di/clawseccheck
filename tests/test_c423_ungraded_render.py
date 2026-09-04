@@ -250,13 +250,21 @@ def test_monitor_graded_with_not_checked_shows_not_covered_line():
 def test_no_ledger_and_complete_ledger_agree_on_every_field_but_presence(findings):
     without_ledger = compute(findings)
     with_complete_ledger = compute(findings, ledger=_all_ran_ledger())
-    a = {k: v for k, v in vars(without_ledger).items() if k != "ledger_present"}
-    b = {k: v for k, v in vars(with_complete_ledger).items() if k != "ledger_present"}
+    # B-558 adds `layer_coverage` beside `ledger_present`: the second ledger-derived
+    # field that exists to make a supplied ledger distinguishable from an absent one,
+    # and — like the first — never an input to a score.
+    _ledger_only = ("ledger_present", "layer_coverage")
+    a = {k: v for k, v in vars(without_ledger).items() if k not in _ledger_only}
+    b = {k: v for k, v in vars(with_complete_ledger).items() if k not in _ledger_only}
     assert a == b, "a complete ledger changed a scoring field other than its own presence"
-    # Non-vacuity: the one field that MUST differ actually does, so the comparison above
-    # is not passing because both sides are trivially identical.
+    # Non-vacuity: the fields that MUST differ actually do, so the comparison above is
+    # not passing because both sides are trivially identical. Both are asserted, not
+    # just one — an excluded field that silently stopped being populated would leave
+    # this test green while the signal it carries never reached a renderer.
     assert without_ledger.ledger_present is False
     assert with_complete_ledger.ledger_present is True
+    assert without_ledger.layer_coverage == ()
+    assert len(with_complete_ledger.layer_coverage) == 5
 
 
 @pytest.mark.parametrize("findings", [FINDINGS_WITH_FAIL, FINDINGS_ALL_CLEAN, []])

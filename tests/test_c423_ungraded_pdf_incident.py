@@ -139,7 +139,12 @@ def test_pdf_graded_empty_not_checked_is_byte_identical_to_today():
     # for a change it was never meant to catch. The C-422 guarantee this test exists for
     # is about what a COMPLETE ledger does to the SCORE, and the byte-identical
     # render_pdf comparison immediately below is the real proof of it.
-    _ignored = {"ledger_present"}
+    # B-558 adds `layer_coverage` for the identical reason: it is ledger-derived
+    # metadata a renderer reads, and a supplied ledger must be distinguishable from an
+    # absent one. Neither is an input to a score — which is precisely what the
+    # byte-identical `render_pdf` comparison below proves, and it could not run at all
+    # while this loop failed first.
+    _ignored = {"ledger_present", "layer_coverage"}
     _fields = [f.name for f in dataclasses.fields(default_score) if f.name not in _ignored]
     assert _fields, "ScoreResult lost its fields — this guard is inert"
     for name in _fields:

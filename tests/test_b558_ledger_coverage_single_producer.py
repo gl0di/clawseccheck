@@ -128,6 +128,12 @@ def test_full_run_json_coverage_page_is_the_same_object_as_the_text_render():
     _assert_no_contradiction(printed, doc["coveragePage"]["logs"]["not_scanned"])
 
 
+def led_coverage(result, findings) -> str:
+    """The logs layer's coverage off the real producer — so the assertion above cannot
+    silently become vacuous if the fixture stops proving the COMPLETE branch."""
+    return result.to_ledger(findings).coverage("logs_trajectories")
+
+
 def test_full_run_ledger_note_does_not_contradict_the_printed_verdicts():
     """The SAME chain a real report renders through: PipelineResult.to_ledger ->
     scoring.compute -> report._scope_note_lines. Not the static _SCOPE_CLAUSES tuple
@@ -142,11 +148,30 @@ def test_full_run_ledger_note_does_not_contradict_the_printed_verdicts():
     ledger = result.to_ledger(findings)
     score = scoring.compute(findings, ctx, ledger=ledger)
     scope_lines, _live_tested = report._scope_note_lines(score, findings)
-    logs_clause = next(
-        (ln for ln in scope_lines if "log/transcript scan ran" in ln), None)
+    # Anchored on the layer's SUBJECT, not on one wording. The previous anchor was the
+    # `ran_note`'s own text, so B-558 step 4 — which moves this fixture onto the
+    # `covered_note` form — broke it for a reason that has nothing to do with the
+    # property under test. The subject string is the one part of the clause that is
+    # stable across all five evidence forms.
+    subject = next(c.subject for c in report._SCOPE_CLAUSES
+                   if c.layer == "logs_trajectories")
+    logs_clause = next((ln for ln in scope_lines if subject in ln), None)
     assert logs_clause is not None, scope_lines
+    # The property, stated directly rather than by banning a noun: the clause may not
+    # DENY what the report just printed. ("replay analyses" itself is no longer a
+    # forbidden phrase — the covered form says the replay analyses RAN, which is the
+    # opposite of the claim the ban was written to block.)
     assert "did not" not in logs_clause, logs_clause
-    assert "replay analyses" not in logs_clause, logs_clause
+    assert "not run" not in logs_clause.split("`--analyze-trajectory`")[0], logs_clause
+
+    # B-558 step 4 / Dave's 2026-09-03 call: this fixture's replay provably exhausted
+    # its subject (verified: no incompleteness reason, B164 leaves nothing unscanned),
+    # so the clause must stop telling the reader to run the mode this run just ran.
+    assert led_coverage(result, findings) == "complete", "fixture no longer proves the branch"
+    assert "Run `--behavioral`" not in logs_clause, logs_clause
+    # ...without dropping the half that genuinely has not run: `--analyze-trajectory`
+    # is a separate CLI branch `--full` never invokes, so no signal here speaks for it.
+    assert "`--analyze-trajectory`" in logs_clause, logs_clause
 
 
 # ------------------------------------------------------------- the opposite direction
