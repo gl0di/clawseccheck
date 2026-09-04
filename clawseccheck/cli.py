@@ -169,6 +169,10 @@ def _unicode_ok() -> bool:
 # this one output path. Always installed via _tee_emitted(), which restores it.
 _EMIT_TEE: list[str] | None = None
 
+# B-723: when set, _emit() diverts here INSTEAD of printing (and instead of
+# teeing). Installed only via _capture_emitted(); see its docstring.
+_EMIT_CAPTURE: list[str] | None = None
+
 
 #: B-605: above this many characters the Dashboard card stops being a thing a chat message
 #: can carry, and the note says so. Not a channel limit -- the tool cannot know the
@@ -235,6 +239,10 @@ def _with_next_actions(card: str, findings, score, ascii_only: bool,
 
 def _emit(text: str) -> None:
     """Print, falling back to ASCII-safe bytes if the console can't encode it."""
+    if _EMIT_CAPTURE is not None:
+        # B-723: intercepted, not copied — the line is replayed later, in its own slot.
+        _EMIT_CAPTURE.append(text)
+        return
     if _EMIT_TEE is not None:
         _EMIT_TEE.append(text)
     try:
@@ -257,6 +265,33 @@ def _tee_emitted(sink: list[str]):
         yield
     finally:
         _EMIT_TEE = prev
+
+
+@contextlib.contextmanager
+def _capture_emitted(sink: list[str]):
+    """Divert every ``_emit()`` line into *sink* WITHOUT printing it, for the block.
+
+    B-723: the twin of :func:`_tee_emitted`, and the difference is the whole point. The
+    tee copies; this one intercepts. It exists because the human ``--full`` report prints
+    its grade at the top while the sweeps that decide whether a grade may be issued at all
+    used to run a hundred and fifty lines further down — so the WORK has to move up while
+    the OUTPUT stays exactly where it is. ``run_pipeline`` is already pure computation
+    (it returns a ``PipelineResult``; ``render_sections`` prints it), so the only part
+    that had to be intercepted is ``sweep_installed_skills``, which narrates per-target as
+    it walks. Those lines are collected here and replayed verbatim into their established
+    slot once the body has been emitted.
+
+    The outer tee is suspended too, not just stdout. A captured line replayed later goes
+    through ``_emit`` again, so leaving the tee installed would put it into the ``--save``
+    transcript twice — once at capture, once at replay — and out of order the first time.
+    """
+    global _EMIT_TEE, _EMIT_CAPTURE
+    prev_tee, prev_cap = _EMIT_TEE, _EMIT_CAPTURE
+    _EMIT_TEE, _EMIT_CAPTURE = None, sink
+    try:
+        yield
+    finally:
+        _EMIT_TEE, _EMIT_CAPTURE = prev_tee, prev_cap
 
 
 def _store_dir(args) -> Path:
@@ -5299,6 +5334,53 @@ def _main(argv=None) -> int:
         # own `is not None` rule. A state file holding `{}` used to satisfy `is not None`
         # and earn full HIGH-weight tamper credit for a baseline that cannot detect
         # anything — measured on fixtures/home_safe as 24/100 vs 3/100 with no file at all.
+        # ── B-723: the work moves up, the output does not ────────────────────────
+        # This report prints its grade in the body below, and the sweeps that decide
+        # whether a grade may be issued at all used to run ~150 lines further down. So
+        # the ledger the body was scored against described phases that had not happened.
+        #
+        # The phases are computed here and RENDERED where they always were. That is only
+        # possible because `run_pipeline` is pure — it returns a `PipelineResult`;
+        # `render_sections` prints it — and because `sweep_installed_skills`, the one
+        # part that narrates inline as it walks, can have those lines intercepted and
+        # replayed verbatim into its own slot (`_capture_emitted`).
+        #
+        # Only `self_test` and `vet_mcp` are stamped early, and only because
+        # `run_pipeline` READS the coverage ledger for its self-test corroboration block:
+        # hoisting the pipeline above those writes would make the block silently vanish.
+        # Both are in the `_refreshed` set the freshness notice above skips under `--full`,
+        # so moving them changes no prose. `vet` and `behavioral` are NOT hoisted — they
+        # are outside that set, and stamping them before the notice is computed would
+        # rewrite it.
+        _hoisted_pipeline = None
+        _hoisted_sweep = None
+        _hoisted_sweep_lines: list[str] = []
+        if args.full and not args.json and not args.card:
+            sweep_home = Path(args.home).expanduser()
+            sweep_budget_s = _pipeline.sub_budget(full_deadline, DEFAULT_VET_ALL_BUDGET_S)
+            if not args.fast:
+                _record_run("self_test", args)
+                _record_run("vet_mcp", args)
+                with _capture_emitted(_hoisted_sweep_lines):
+                    _hoisted_sweep = sweep_installed_skills(
+                        sweep_home, ascii_only=ascii_only,
+                        sweep_budget_s=sweep_budget_s,
+                        narrate=not args.quiet, ctx=ctx)
+            _hoisted_pipeline = _pipeline.run_pipeline(
+                ctx, findings, home_dir=sweep_home, skill_sweep=_hoisted_sweep,
+                vet_targets=(_hoisted_sweep.vet_targets()
+                             if _hoisted_sweep is not None else ()),
+                deadline=full_deadline, budget_s=DEFAULT_FULL_BUDGET_S,
+                fast=args.fast, ascii_only=ascii_only, version=__version__,
+                bundle=judged_bundle, score=score,
+                ledger_path=_coverage_path(args))
+            layer_ledger = _hoisted_pipeline.to_ledger(
+                findings, degraded_count=score.degraded_count, attestation=attestation,
+                live_test_bucket=_live_test_bucket,
+                behavioral_analysis=_behavioral_analysis)
+            score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
+                            live_test_reason=live_signal.reason,
+                            behavioral_fired_ids=behavioral_fired_ids, ledger=layer_ledger)
         mon_present = read_baseline(args.state)[0] == BASELINE_OK
         tamper = tamper_subgrade(findings, mon_present)
         parts = [render_report(findings, score, ascii_only, native=ctx.native,
@@ -5386,11 +5468,9 @@ def _main(argv=None) -> int:
                 # prints its own honest "skipped — --fast was given" line in this slot, so
                 # the section never simply vanishes.
                 if not args.fast:
-                    # B-404: reuse the SAME ctx the audit above already collected —
-                    # see the matching comment at the --json call site above.
-                    sweep = sweep_installed_skills(
-                        sweep_home, ascii_only=ascii_only,
-                        sweep_budget_s=sweep_budget_s, narrate=False, ctx=ctx)
+                    # B-723: walked above the report body (silently, --quiet) — see the
+                    # verbose branch for why it is not re-run here.
+                    sweep = _hoisted_sweep
                     _emit(_sweep_quiet_line(sweep))
                     sweep_has_fail = sweep.has_fail
                     _record_run("vet", args)
@@ -5467,11 +5547,13 @@ def _main(argv=None) -> int:
                     _emit("Per-skill verdict for every installed skill. Not folded into "
                           + _sweep_not_folded_clause(score)
                           + "; per-skill dossier: --vet <path>.")
-                    # B-404: reuse the SAME ctx the audit above already collected —
-                    # see the matching comment at the --json call site above.
-                    sweep = sweep_installed_skills(
-                        sweep_home, ascii_only=ascii_only,
-                        sweep_budget_s=sweep_budget_s, narrate=True, ctx=ctx)
+                    # B-723: already walked, above the report body — the per-target
+                    # narration it produced is replayed here verbatim, in the slot it has
+                    # always occupied. Re-running it would sweep the fleet twice and could
+                    # disagree with the ledger the grade above was computed from.
+                    sweep = _hoisted_sweep
+                    for _sweep_line in _hoisted_sweep_lines:
+                        _emit(_sweep_line)
                     for _sweep_line in _sweep_summary_lines(sweep, ascii_only=ascii_only):
                         _emit(_sweep_line)
                     sweep_has_fail = sweep.has_fail
@@ -5482,13 +5564,9 @@ def _main(argv=None) -> int:
             # report body, SELF-TEST and VET-MCP keep the byte-for-byte shape and order they
             # have always had. Nothing new is printed between the report body and the
             # SELF-TEST line, which is the prefix --full --quiet is compared against.
-            full_pipeline = _pipeline.run_pipeline(
-                ctx, findings, home_dir=sweep_home, skill_sweep=sweep,
-                vet_targets=sweep.vet_targets() if sweep is not None else (),
-                deadline=full_deadline, budget_s=DEFAULT_FULL_BUDGET_S,
-                fast=args.fast, ascii_only=ascii_only, version=__version__,
-                bundle=judged_bundle, score=score,
-                ledger_path=_coverage_path(args))
+            # B-723: computed above the report body, so the ledger the grade rests on
+            # describes phases that ran. Rendered here, unchanged, in its own slot.
+            full_pipeline = _hoisted_pipeline
             # C5: read from the SAME PipelineResult on both branches, so --exit-code cannot
             # diverge between quiet and verbose — the property the sweep already guarantees.
             pipeline_has_fail = full_pipeline.has_fail
