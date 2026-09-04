@@ -1050,7 +1050,7 @@ def vet_all(
 
 def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
                         attestation: dict | None = None, live_test_bucket=None,
-                        behavioral_ran: bool = False,
+                        behavioral_ran: bool = False, behavioral_analysis: dict | None = None,
                         commit_full_phases: bool = False):
     """C-425/C-426: the ONE producer of the five-layer ledger (``layers.py`` via
     ``pipeline.PipelineResult.to_ledger``) — extracted from ``_resolve_runtime_caps``
@@ -1074,6 +1074,11 @@ def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
     not_reached/unavailable per its own docstring). Reading ``args.full`` directly
     here instead would fabricate a completed sweep for those runs — the one thing
     Golden Rule #4 forbids.
+
+    ``behavioral_analysis`` — B-558: the raw ``behavioral.analyze(ctx)`` result, when
+    this invocation actually ran it (paired with ``behavioral_ran=True``). Threaded
+    straight through to ``to_ledger`` unchanged; this function does not interpret it
+    itself — see that method's own docstring for the coverage rule it drives.
 
     Returns a ``layers.LayerLedger`` — never ``None``. A bare/incomplete ledger is
     exactly what a bare run's own ``to_ledger()`` mapping already produces; there is
@@ -1104,7 +1109,8 @@ def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
                 detail=("behavioral replay completed." if behavioral_ran
                         else "behavioral replay raised — see run_behavioral's own section.")))
     return prelim.to_ledger(findings, degraded_count=degraded_count,
-                            attestation=attestation, live_test_bucket=live_test_bucket)
+                            attestation=attestation, live_test_bucket=live_test_bucket,
+                            behavioral_analysis=behavioral_analysis)
 
 
 def _last_complete_history_row(path=None):
@@ -1325,12 +1331,20 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     # it already is for every non---full / --fast invocation above.
     behavioral_fired_ids: "frozenset[str]" = frozenset()
     _behavioral_ran = False
+    _behavioral_analysis: dict | None = None
     if args.full and not args.fast:
         try:
-            behavioral_fired_ids = _behavioral_grade_cap_signal(_behavioral_analyze(ctx))
+            # B-558: keep the analysis this call already produced instead of dropping
+            # it — it is the ledger's only source for logs_trajectories coverage
+            # (PipelineResult.to_ledger's behavioral_analysis kwarg), so a caller
+            # re-deriving it would be a second, driftable read of the same trajectory
+            # sidecar.
+            _behavioral_analysis = _behavioral_analyze(ctx)
+            behavioral_fired_ids = _behavioral_grade_cap_signal(_behavioral_analysis)
             _behavioral_ran = True
         except Exception:  # noqa: BLE001 — see run_behavioral's identical containment
             behavioral_fired_ids = frozenset()
+            _behavioral_analysis = None
 
     # C-425/C-426: build the five-layer ledger via the ONE shared producer
     # (`_build_layer_ledger`) — see that function's own docstring for why
@@ -1341,7 +1355,7 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     ledger = _build_layer_ledger(
         args, findings, degraded_count=score.degraded_count, attestation=attestation,
         live_test_bucket=live_test_bucket, behavioral_ran=_behavioral_ran,
-        commit_full_phases=args.full,
+        behavioral_analysis=_behavioral_analysis, commit_full_phases=args.full,
     )
 
     if args.full:

@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .attest import template as attest_template
+from .behavioral import analysis_incompleteness as behavioral_analysis_incompleteness
 from .behavioral import analysis_is_conclusive as behavioral_is_conclusive
 from .behavioral import analyze as behavioral_analyze
 from .behavioral import render_behavioral_analysis
@@ -72,6 +73,9 @@ from .layers import (
     LAYER_INSTALLED_SWEEP, LAYER_LIVE_BEHAVIOUR, LAYER_LOGS_TRAJECTORIES,
     LAYER_SELF_REPORT, LAYER_STATIC, LayerLedger, LayerState,
 )
+# B-558: the coverage vocabulary — same non-re-exported treatment as the ledger names
+# immediately above (only consumed inside to_ledger()).
+from .layers import COVERAGE_COMPLETE, COVERAGE_PARTIAL, COVERAGE_UNKNOWN
 from .report import _sanitize
 from .scanbudget import (
     DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, budget_deadline, budget_exceeded,
@@ -1317,7 +1321,8 @@ class PipelineResult:
         return _sanitize_tree(payload)
 
     def to_ledger(self, findings, *, degraded_count: int = 0,
-                 attestation: dict | None = None, live_test_bucket=None) -> LayerLedger:
+                 attestation: dict | None = None, live_test_bucket=None,
+                 behavioral_analysis: dict | None = None) -> LayerLedger:
         """C-425: project this pipeline's phases onto the five-layer ledger (layers.py).
 
         The mapping (decided; implemented as specified, not redesigned):
@@ -1360,6 +1365,46 @@ class PipelineResult:
           as ``not_reached`` and lose their grade for PASSING it. Presence +
           well-formedness only, never the verdict's value — that asymmetry stays
           exactly where it already lives, in the score's cap-only signal, not here.
+
+        B-558 adds a SECOND, independent axis on top of the mapping above:
+        ``LayerState.coverage`` — did a layer that *ran* also exhaust its subject?
+        This slice only answers it for ``logs_trajectories``, and only from
+        *behavioral_analysis* (the raw dict ``behavioral.analyze(ctx)`` returns, when
+        the caller actually ran it — never re-derived here):
+
+        * not ``behavioral_ran`` (no :data:`PHASE_BEHAVIORAL` phase, or one present but
+          not itself ``ran``) → :data:`~clawseccheck.layers.COVERAGE_UNKNOWN` — today's
+          behaviour, byte for byte. B164 scanning log sinks inside the base audit is
+          NOT proof the replay modes ran (the exact trap
+          ``test_the_replay_modes_survive_the_layer_being_marked_as_having_run`` pins),
+          so absent a real replay this layer's coverage stays unasked, same as every
+          other layer below.
+        * ``behavioral_ran`` and either ``behavioral.analysis_incompleteness(...)``
+          names a reason the replay could not reach a clean verdict, or B164's own
+          "not scanned" figure is non-empty → :data:`~clawseccheck.layers.
+          COVERAGE_PARTIAL`, and that reason is folded into ``not_reached`` alongside
+          B164's.
+        * otherwise → :data:`~clawseccheck.layers.COVERAGE_COMPLETE`.
+
+        The other four layers get an explicit :data:`~clawseccheck.layers.
+        COVERAGE_UNKNOWN` here — the field's own default — each for a DIFFERENT
+        reason, spelled out at each assignment below so a future reader does not
+        "fix" one of them into the wrong state:
+
+        * ``installed_sweep`` — cannot be reported at all yet. ``cli.py``'s
+          ``_build_layer_ledger`` fabricates this layer's phases from a
+          ``commit_full_phases`` PROMISE before the sweep actually runs (see that
+          function's own docstring), so a real completeness signal has nothing to
+          project from. Filed as B-723; out of scope here.
+        * ``live_behaviour`` — unobservable: this method never attaches
+          ``not_reached`` to it at all (below), and "were all scenario kinds
+          exercised" is not derivable from the raw bundle.
+        * ``self_report`` — its ``not_reached`` (above) is filled UNCONDITIONALLY
+          whenever ``ran``, because attestation freshness is unverifiable by
+          construction — completeness there is a constant, not a measurement, so it
+          stays UNKNOWN rather than a permanent, unearned PARTIAL.
+        * ``static`` — could be reported, but is excluded from the scope note by
+          ``test_static_layer_is_not_in_the_scope_note``; out of scope here.
         """
         skill = self.by_name(PHASE_SKILL_SWEEP)
         plugin = self.by_name(PHASE_PLUGIN_SWEEP)
@@ -1377,6 +1422,32 @@ class PipelineResult:
             _worse_status(STATUS_RAN, behavioral.status) if behavioral is not None
             else STATUS_RAN
         )
+        # B-558: the SAME presence-and-status check `logs_status` above already makes
+        # — the existing flag the coverage rule is required to reuse, not a second one.
+        behavioral_ran = behavioral is not None and behavioral.status == STATUS_RAN
+
+        b164_not_reached = _b164_not_reached(findings)
+        if not behavioral_ran:
+            logs_coverage = COVERAGE_UNKNOWN
+            logs_not_reached = b164_not_reached
+        else:
+            # `behavioral_analysis` is None only if a caller marks the phase `ran`
+            # without handing in the analysis it ran against — not a shape any real
+            # call site produces (cli.py threads the two together), but guarded so a
+            # hand-built PhaseResult in a test cannot crash this method.
+            incompleteness_reason = (
+                behavioral_analysis_incompleteness(behavioral_analysis)
+                if behavioral_analysis is not None else None
+            )
+            if incompleteness_reason is not None or b164_not_reached:
+                logs_coverage = COVERAGE_PARTIAL
+                logs_not_reached = (
+                    ((incompleteness_reason,) if incompleteness_reason is not None else ())
+                    + b164_not_reached
+                )
+            else:
+                logs_coverage = COVERAGE_COMPLETE
+                logs_not_reached = b164_not_reached
 
         static_not_reached: tuple = ()
         if degraded_count > 0:
@@ -1404,13 +1475,30 @@ class PipelineResult:
         )
 
         return LayerLedger(states={
-            LAYER_STATIC: LayerState(status=STATUS_RAN, not_reached=static_not_reached),
-            LAYER_INSTALLED_SWEEP: LayerState(status=sweep_status, not_reached=sweep_not_reached),
+            # B-558: could be reported, but excluded from the scope note by
+            # test_static_layer_is_not_in_the_scope_note — out of scope for this slice.
+            LAYER_STATIC: LayerState(
+                status=STATUS_RAN, not_reached=static_not_reached,
+                coverage=COVERAGE_UNKNOWN),
+            # B-558/B-723: this layer's phases are fabricated from a
+            # commit_full_phases PROMISE before the sweep runs (cli._build_layer_ledger)
+            # — there is no real PipelineResult to project a completeness signal from.
+            LAYER_INSTALLED_SWEEP: LayerState(
+                status=sweep_status, not_reached=sweep_not_reached,
+                coverage=COVERAGE_UNKNOWN),
             LAYER_LOGS_TRAJECTORIES: LayerState(
-                status=logs_status, not_reached=_b164_not_reached(findings)),
+                status=logs_status, not_reached=logs_not_reached, coverage=logs_coverage),
+            # B-558: not_reached is filled UNCONDITIONALLY whenever ran (below) because
+            # attestation freshness is unverifiable by construction — completeness here
+            # is a constant, not a measurement, so it stays UNKNOWN rather than a
+            # permanent, unearned PARTIAL.
             LAYER_SELF_REPORT: LayerState(
-                status=self_report_status, not_reached=self_report_not_reached),
-            LAYER_LIVE_BEHAVIOUR: LayerState(status=live_status),
+                status=self_report_status, not_reached=self_report_not_reached,
+                coverage=COVERAGE_UNKNOWN),
+            # B-558: unobservable — this method never attaches not_reached to this
+            # layer at all, and "were all scenario kinds exercised" is not derivable
+            # from the raw live-test bundle.
+            LAYER_LIVE_BEHAVIOUR: LayerState(status=live_status, coverage=COVERAGE_UNKNOWN),
         })
 
 

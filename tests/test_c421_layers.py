@@ -13,7 +13,11 @@ import pytest
 
 from clawseccheck import layers, pipeline
 from clawseccheck.layers import (
+    COVERAGE_COMPLETE,
+    COVERAGE_PARTIAL,
+    COVERAGE_UNKNOWN,
     INCOMPLETE_LAYER_STATUSES,
+    LAYER_COVERAGES,
     LAYER_INSTALLED_SWEEP,
     LAYER_LIVE_BEHAVIOUR,
     LAYER_LOGS_TRAJECTORIES,
@@ -193,3 +197,34 @@ def test_the_four_not_ran_statuses_read_differently() -> None:
                   layers.STATUS_UNAVAILABLE, layers.STATUS_ERROR)
     }
     assert len(phrases) == 4
+
+
+# ── B-558: LayerState.coverage — a third, independent axis ──────────────────────
+
+
+def test_coverage_defaults_to_unknown_and_every_preexisting_construction_stays_identical():
+    """The default must be UNKNOWN so every pre-existing `LayerState(...)` call in the
+    tree — including every fixture in this file — is untouched by this field existing."""
+    state = LayerState(status=STATUS_RAN)
+    assert state.coverage == COVERAGE_UNKNOWN
+
+
+def test_coverage_accepts_all_three_named_values():
+    for value in (COVERAGE_UNKNOWN, COVERAGE_COMPLETE, COVERAGE_PARTIAL):
+        state = LayerState(status=STATUS_RAN, coverage=value)
+        assert state.coverage == value
+    assert LAYER_COVERAGES == {COVERAGE_UNKNOWN, COVERAGE_COMPLETE, COVERAGE_PARTIAL}
+
+
+def test_coverage_rejects_an_unknown_value():
+    with pytest.raises(ValueError):
+        LayerState(status=STATUS_RAN, coverage="mostly")
+
+
+def test_coverage_is_independent_of_status_and_not_reached():
+    """Three states, not a bool: `coverage` must be settable regardless of `status` or
+    `not_reached` — it is not derived from either at construction time."""
+    state = LayerState(status=STATUS_ERROR, not_reached=("x",), coverage=COVERAGE_COMPLETE)
+    assert state.status == STATUS_ERROR
+    assert state.not_reached == ("x",)
+    assert state.coverage == COVERAGE_COMPLETE

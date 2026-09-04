@@ -126,6 +126,24 @@ STATUS_PHRASE = {
 }
 
 
+# ── layer coverage — did the layer exhaust its subject? ────────────────────────
+#
+# A THIRD axis, independent of `status`. `status` answers "did this layer run at
+# all"; `coverage` answers "when it ran, did it look at everything it could have".
+# Three states, not a bool -- a bool would glue "we did not ask" to "we asked and
+# found a hole", the same distinction `skillprovenance.corroborated: bool | None`
+# exists to preserve (B-558). The default is UNKNOWN, so every pre-existing
+# `LayerState(...)` construction stays byte-identical: nothing in the tree asked
+# this question before this field existed, so nothing may retroactively claim
+# COMPLETE on its behalf.
+
+COVERAGE_UNKNOWN = "unknown"    # default — we did not ask
+COVERAGE_COMPLETE = "complete"  # the layer exhausted its subject, and that was observed
+COVERAGE_PARTIAL = "partial"    # the layer left something unread, and it is named
+
+LAYER_COVERAGES = frozenset({COVERAGE_UNKNOWN, COVERAGE_COMPLETE, COVERAGE_PARTIAL})
+
+
 def describe_layer(layer: str, status: str) -> str:
     """One layer as a reader sees it, e.g. ``agent self-report (not available here)``.
 
@@ -147,12 +165,21 @@ class LayerState:
     #: What this layer did NOT cover, in plain English, e.g.
     #: "79 of 132 log sinks not read". Empty when the layer covered its subject.
     not_reached: tuple[str, ...] = ()
+    #: B-558: did this layer, having run, exhaust its subject? See LAYER_COVERAGES
+    #: above. Kept LAST so every pre-existing positional/keyword `LayerState(...)`
+    #: construction in the tree stays byte-identical.
+    coverage: str = COVERAGE_UNKNOWN
 
     def __post_init__(self) -> None:
         if self.status not in LAYER_STATUSES:
             raise ValueError(
                 f"unknown layer status {self.status!r}; must be one of "
                 f"{sorted(LAYER_STATUSES)}"
+            )
+        if self.coverage not in LAYER_COVERAGES:
+            raise ValueError(
+                f"unknown layer coverage {self.coverage!r}; must be one of "
+                f"{sorted(LAYER_COVERAGES)}"
             )
         # Normalise to a tuple so a caller who passes a list does not silently produce an
         # unhashable "frozen" state that also compares unequal to a tuple-built twin.

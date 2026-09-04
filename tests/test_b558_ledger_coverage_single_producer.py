@@ -167,3 +167,67 @@ def test_fast_run_prints_no_verdict_and_reports_them_all_unscanned():
 
     not_scanned = set(result.coverage_page["logs"]["not_scanned"])
     assert set(BEHAVIORAL_CHECK_IDS) <= not_scanned, sorted(not_scanned)
+
+
+# ------------------------------------------------------- B-558 steps 1-3: coverage
+#
+# The three tests below exercise the real `to_ledger` chain with a REAL
+# `behavioral.analyze(ctx)` result — the only tests in the tree that do; the unit
+# tests in test_c425_full_ledger.py hand-build `PhaseResult`s and never pass
+# `behavioral_analysis` at all (so they exercise the guarded "phase ran but no
+# analysis handed in" branch, not the coverage rule itself).
+
+
+def test_ledger_coverage_complete_with_real_conclusive_analysis():
+    """TRAJ_HOME gives T1/T2 conclusive verdicts and a clean B164 scan — the real
+    `behavioral.analyze(ctx)` result should read COMPLETE, not just RAN."""
+    from clawseccheck import behavioral
+    from clawseccheck.layers import COVERAGE_COMPLETE
+
+    ctx = collect(TRAJ_HOME)
+    findings = run_all(ctx)
+    result = pl.run_pipeline(ctx, findings, home_dir=ctx.home, ascii_only=True)
+    analysis = behavioral.analyze(ctx)
+
+    ledger = result.to_ledger(findings, behavioral_analysis=analysis)
+    state = ledger.states["logs_trajectories"]
+    assert state.status == "ran"
+    assert state.coverage == COVERAGE_COMPLETE
+
+
+def test_ledger_coverage_partial_when_real_analysis_is_incomplete():
+    """A fixture whose `behavioral.analyze(ctx)` genuinely can't reach a clean
+    verdict (every observed verb is outside the classifier's vocabulary) must read
+    PARTIAL, with `behavioral.analysis_incompleteness`'s own reason folded into
+    `not_reached` — not a fresh re-derivation of it."""
+    from clawseccheck import behavioral
+    from clawseccheck.layers import COVERAGE_PARTIAL
+
+    home = FIXTURES / "traj_b299_bootstrap_uncorrelated"
+    ctx = collect(str(home))
+    findings = run_all(ctx)
+    result = pl.run_pipeline(ctx, findings, home_dir=ctx.home, ascii_only=True)
+    analysis = behavioral.analyze(ctx)
+    reason = behavioral.analysis_incompleteness(analysis)
+    assert reason is not None, "non-vacuity: this fixture must exercise the PARTIAL branch"
+
+    ledger = result.to_ledger(findings, behavioral_analysis=analysis)
+    state = ledger.states["logs_trajectories"]
+    assert state.status == "ran"
+    assert state.coverage == COVERAGE_PARTIAL
+    assert reason in state.not_reached
+
+
+def test_ledger_coverage_unknown_when_behavioral_did_not_run():
+    """`--fast` drops the behavioural phase — `logs_trajectories` still reads
+    `skipped` (unchanged), but its coverage must stay UNKNOWN, never COMPLETE:
+    B164 alone proves nothing about whether the replay modes ran."""
+    from clawseccheck.layers import COVERAGE_UNKNOWN
+
+    ctx = collect(TRAJ_HOME)
+    findings = run_all(ctx)
+    result = pl.run_pipeline(ctx, findings, home_dir=ctx.home, ascii_only=True, fast=True)
+
+    ledger = result.to_ledger(findings)
+    state = ledger.states["logs_trajectories"]
+    assert state.coverage == COVERAGE_UNKNOWN

@@ -29,6 +29,8 @@ import inspect
 
 from clawseccheck.catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, Finding
 from clawseccheck.layers import (
+    COVERAGE_PARTIAL,
+    COVERAGE_UNKNOWN,
     LAYER_INSTALLED_SWEEP,
     LAYER_LIVE_BEHAVIOUR,
     LAYER_LOGS_TRAJECTORIES,
@@ -324,3 +326,71 @@ def test_project_ungraded_top1_none_case_still_suppresses_current_and_cumulative
     assert result["top1"] is None
     assert result["current"]["grade"] is None
     assert result["cumulative"]["projected_grade"] is None
+
+
+# ── B-558 guard: `coverage` must never reach the grade ──────────────────────────
+#
+# The whole point of adding a THIRD axis to LayerState (layers.py's `coverage`) is
+# that it must stay purely descriptive — `LayerLedger.complete`/`.missing`/
+# `.not_checked` and `scoring.compute` all read `.status`/`.not_reached` only (see
+# each's own source). If `coverage` ever changed whether/how a grade is issued, that
+# would be a WIDER decision than the one this slice was authorised to make.
+
+
+def _all_ran_ledger_with_coverage(coverage: str) -> LayerLedger:
+    return LayerLedger(states={
+        layer: LayerState(status=STATUS_RAN, coverage=coverage) for layer in LAYER_ORDER
+    })
+
+
+def test_all_partial_coverage_still_reads_complete_and_graded() -> None:
+    """All five layers `ran` but every one PARTIAL — `LayerLedger.complete` only
+    reads `.status`, so it must still be True, and the run must still be graded."""
+    findings = _SCENARIOS["all_pass"]
+    ledger = _all_ran_ledger_with_coverage(COVERAGE_PARTIAL)
+
+    assert ledger.complete is True
+    assert ledger.missing == ()
+
+    score = compute(findings, ledger=ledger)
+    assert score.graded is True
+    assert score.grade is not None
+    assert score.missing_layers == ()
+
+
+def test_coverage_value_never_changes_a_scoring_field() -> None:
+    """The tight form of the guard: two ledgers identical in every `status`/
+    `not_reached`, differing ONLY in `coverage` (UNKNOWN vs PARTIAL, on all five
+    layers), must produce `ScoreResult`s that are fully `==` — `coverage` is not
+    read anywhere in the scoring path. Non-vacuity: `coverage` itself really does
+    differ between the two ledgers built here, so this cannot pass by comparing a
+    ledger to an identical copy of itself."""
+    findings = _SCENARIOS["all_pass"]
+    unknown_ledger = _all_ran_ledger_with_coverage(COVERAGE_UNKNOWN)
+    partial_ledger = _all_ran_ledger_with_coverage(COVERAGE_PARTIAL)
+    assert (
+        unknown_ledger.states[LAYER_STATIC].coverage
+        != partial_ledger.states[LAYER_STATIC].coverage
+    )
+
+    with_unknown = compute(findings, ledger=unknown_ledger)
+    with_partial = compute(findings, ledger=partial_ledger)
+    assert with_unknown == with_partial
+
+
+def test_all_partial_coverage_ledger_scores_same_as_no_ledger() -> None:
+    """As `test_complete_ledger_agrees_with_no_ledger_on_every_scoring_field` above,
+    but for the new PARTIAL-everywhere shape: every scoring field must still agree
+    with `ledger=None` except `ledger_present`, which the B-547 fix deliberately
+    keeps distinguishable regardless of coverage."""
+    import dataclasses
+
+    findings = _SCENARIOS["all_pass"]
+    without = compute(findings)
+    with_partial = compute(findings, ledger=_all_ran_ledger_with_coverage(COVERAGE_PARTIAL))
+
+    without_fields = dataclasses.asdict(without)
+    partial_fields = dataclasses.asdict(with_partial)
+    del without_fields["ledger_present"]
+    del partial_fields["ledger_present"]
+    assert without_fields == partial_fields
