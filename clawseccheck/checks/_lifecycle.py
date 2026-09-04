@@ -5763,8 +5763,16 @@ def check_marketplace_feed_provenance(ctx: Context) -> Finding:
         return _finding(
             "B325",
             PASS,
-            "marketplaces.feeds is not configured -- only the built-in public "
-            "https://clawhub.ai feed profile is in effect.",
+            # B-714: the FIX below was already version-aware; this DETAIL was not, and
+            # "is not configured" reads as "you have not set this yet" about a key the
+            # reader's build does not have. The guard missed it for the same reason it
+            # missed RISK-15: `_names_key` could not see a key that ends a sentence.
+            ("Custom marketplace feed profiles (marketplaces.feeds) do not exist on "
+             "OpenClaw 2026.8.1 and later -- only the built-in public https://clawhub.ai "
+             "feed profile is in effect."
+             if _openclaw_generation(ctx) == "modern" else
+             "marketplaces.feeds is not configured -- only the built-in public "
+             "https://clawhub.ai feed profile is in effect."),
             # B-700: the PASS branch is the one place this check tells the user to ADD the
             # key, and OpenClaw 2026.8.1 removed `marketplaces` outright -- `doctor --fix`
             # deletes a stale block rather than erroring on it. Whether the CHECK still has

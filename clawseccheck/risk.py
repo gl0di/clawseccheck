@@ -31,6 +31,7 @@ from . import mcpsurface as _mcpsurface
 from . import trajectory as _trajectory
 from .catalog import CRITICAL, FAIL, HIGH, MEDIUM, WARN, Finding
 from .checks import (
+    _key_advice,
     _b62_actual_families,
     _b62_extract_declaration,
     _credential_store_state,
@@ -1429,8 +1430,21 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
         fix=(
             "Set channels.<provider>.contextVisibility (or channels.defaults) to 'allowlist' "
             "or 'allowlist_quote', and set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork "
-            "to false with an explicit browser.ssrfPolicy.hostnameAllowlist. Breaking either "
-            "leg breaks the chain."
+            "to false with an explicit "
+            # B-714: this named `hostnameAllowlist` unqualified. Measured by EXECUTING the
+            # installed 2026.9.1 root schema with a bogus-key control: that spelling returns
+            # `unrecognized_keys@browser.ssrfPolicy`, identical to the control, while
+            # `allowedHostnames` is ACCEPTED -- and `ssrfPolicy` is a `.strict()` object, so
+            # the WHOLE config is refused. A reader following this literally would have made
+            # OpenClaw unable to load their config while believing they had closed the SSRF
+            # leg. RISK-15 is reachable on a modern build (its own trigger key,
+            # dangerouslyAllowPrivateNetwork, is still current), which is what made this a
+            # live defect rather than a theoretical one -- RISK-25's equally stale
+            # `marketplaces.feeds` advice cannot reach a modern reader, because the key that
+            # fires it is itself rejected by the schema.
+            + _key_advice(ctx, "browser.ssrfPolicy.hostnameAllowlist",
+                          "browser.ssrfPolicy.allowedHostnames")
+            + ". Breaking either leg breaks the chain."
         ),
     )
 
