@@ -14,30 +14,29 @@ it) — never silently weakened into a false pass. Ground truth is **openclaw@20
 the time of writing; a filename cited here rotates on upgrade (content-hashed bundles), so
 re-locate a moved symbol with ``grep -rl '<symbolName>' dist/*.js``, not by trusting the
 literal glob below to still resolve.
+
+B-728: the locator is ``tests/_distgrounding.py``, shared, and it distinguishes "OpenClaw
+is not installed" (skip) from "installed, and this anchor no longer matches" (fail, naming
+the symbol). Each citation below therefore passes ``contains=`` — a constant the right
+bundle DECLARES — so the anchor is the symbol and the filename is only a prefilter. That
+is not cosmetic: ``tool-policy-match-*.js`` matches two bundles on 2026.9.1 and
+``agent-id-*.js`` four, exactly one of each declaring the symbol asserted here.
 """
 from __future__ import annotations
 
 import re
 
 import pytest
-from _realhome import REAL_HOME
+from _distgrounding import dist_text
 
 from clawseccheck import toolgrant
-
-OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
-
-
-def _dist_text(pattern: str) -> str:
-    files = sorted(OPENCLAW_DIST.glob(pattern))
-    if not files:
-        pytest.skip(f"installed OpenClaw dist not found ({pattern})")
-    return "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in files)
 
 
 # --------------------------------------------------------------------- alias table (3, not 2)
 
 def test_dist_tool_name_aliases_has_three_entries_including_cron():
-    text = _dist_text("tool-policy-shared-*.js")
+    text = dist_text("tool-policy-shared-*.js", symbol="TOOL_NAME_ALIASES",
+                     contains="TOOL_NAME_ALIASES")
     match = re.search(r"const TOOL_NAME_ALIASES = \{([^}]*)\}", text)
     assert match, "TOOL_NAME_ALIASES literal not found — re-ground toolgrant._TOOL_NAME_ALIASES"
     entries = {}
@@ -77,7 +76,8 @@ def test_cron_alias_resolves_the_same_as_automations():
 # --------------------------------------------------------------------- profile / group tables
 
 def test_dist_profile_enum_matches_the_known_set():
-    text = _dist_text("zod-schema.agent-runtime-*.js")
+    text = dist_text("zod-schema.agent-runtime-*.js", symbol="ToolProfileSchema",
+                     contains="ToolProfileSchema")
     block = re.search(r"ToolProfileSchema = union\(\[(.*?)\]\)", text, re.S)
     assert block, "ToolProfileSchema not found — re-ground _CORE_TOOL_PROFILES's key set"
     found = set(re.findall(r'literal\("([a-z]+)"\)', block.group(1)))
@@ -85,7 +85,8 @@ def test_dist_profile_enum_matches_the_known_set():
 
 
 def test_dist_read_and_write_are_coding_only_and_full_is_wildcard():
-    text = _dist_text("tool-catalog-*.js")
+    text = dist_text("tool-catalog-*.js", symbol="CORE_TOOL_DEFINITIONS",
+                     contains="CORE_TOOL_DEFINITIONS")
     for tool_id in ("read", "write", "edit", "apply_patch", "exec"):
         entry = re.search(r'id: "%s",(.*?)profiles: \[([^\]]*)\]' % tool_id, text, re.S)
         assert entry, f"the {tool_id!r} tool entry moved — re-ground CORE_TOOL_PROFILES"
@@ -98,7 +99,8 @@ def test_dist_read_and_write_are_coding_only_and_full_is_wildcard():
 
 
 def test_dist_group_fs_members_match_ours():
-    text = _dist_text("tool-catalog-*.js")
+    text = dist_text("tool-catalog-*.js", symbol="CORE_TOOL_DEFINITIONS",
+                     contains="CORE_TOOL_DEFINITIONS")
     for tool_id in ("read", "write", "edit", "apply_patch"):
         assert re.search(r'id: "%s",\s*\n\s*description: [^\n]*,\s*\n\s*sectionId: "fs"' % tool_id, text), (
             f"{tool_id} no longer sits in sectionId \"fs\" — re-ground group:fs"
@@ -109,7 +111,8 @@ def test_dist_group_fs_members_match_ours():
 # --------------------------------------------------------------------- write => apply_patch
 
 def test_dist_still_lets_write_allow_apply_patch():
-    text = _dist_text("tool-policy-match-*.js")
+    text = dist_text("tool-policy-match-*.js", symbol="writeAllowsApplyPatch",
+                     contains="writeAllowsApplyPatch")
     assert "writeAllowsApplyPatch" in text, "the implication flag moved — re-ground granted()"
     assert 'normalized === "apply_patch"' in text and 'matchesAnyGlobPattern("write", allow)' in text
 
@@ -124,7 +127,8 @@ def test_write_only_allowlist_grants_apply_patch_but_not_edit():
 # ------------------------------------------------------------------- agents.defaults.tools
 
 def test_dist_agent_tools_falls_back_to_agents_defaults_only_without_a_roster():
-    text = _dist_text("agent-tools.policy-*.js")
+    text = dist_text("agent-tools.policy-*.js", symbol="implicitDefaultTools",
+                     contains="implicitDefaultTools")
     assert "implicitDefaultTools" in text
     assert "hasAgentRosterProperty" in text
 
@@ -188,7 +192,8 @@ def test_normalize_agent_id_matches_our_own_port(raw, expected):
 
 
 def test_dist_normalize_agent_id_two_branch_shape_is_still_current():
-    text = _dist_text("agent-id-*.js")
+    text = dist_text("agent-id-*.js", symbol="normalizeAgentIdStrict",
+                     contains="normalizeAgentIdStrict")
     assert "VALID_ID_RE" in text and "normalizeAgentIdStrict" in text, (
         "normalizeAgentId's shape moved -- re-run the differential capture and re-pin "
         "_AGENT_ID_CASES above"

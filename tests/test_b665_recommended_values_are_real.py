@@ -31,12 +31,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
+from _distgrounding import dist_file
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PKG = REPO_ROOT / "clawseccheck"
-_DIST = Path("/home/glodi/.npm-global/lib/node_modules/openclaw/dist")
-_SCHEMA = _DIST / "zod-schema.agent-runtime-C02vY4RT.js"
 
 #: `ToolExecBaseShape`, as the installed dist declares it.
 _VALID = {
@@ -89,12 +87,17 @@ def test_every_recommended_value_is_in_the_shipped_table():
     )
 
 
-@pytest.mark.skipif(not _SCHEMA.exists(),
-                    reason="needs an installed OpenClaw dist — local-only layer")
 def test_the_shipped_table_matches_the_installed_dist():
     """The table above is a copy, and a copy rots. Where the real schema is present, it is
-    the authority — read out of `ToolExecBaseShape`, not from documentation."""
-    src = _SCHEMA.read_text(encoding="utf-8", errors="replace")
+    the authority — read out of `ToolExecBaseShape`, not from documentation.
+
+    B-728: the pin used to be the content-hashed filename
+    `zod-schema.agent-runtime-C02vY4RT.js` in a `skipif`, and 2026.9.1 rotated it away, so
+    this test was skipping on a machine that HAS the dist while blaming a missing install.
+    Anchored on `ToolExecBaseShape` now — the thing it actually reads."""
+    src = dist_file("zod-schema.agent-runtime-*.js", symbol="ToolExecBaseShape",
+                    contains="const ToolExecBaseShape = {").read_text(
+        encoding="utf-8", errors="replace")
     i = src.index("const ToolExecBaseShape = {")
     window = src[i:i + 900]
     for field, shipped in _VALID.items():

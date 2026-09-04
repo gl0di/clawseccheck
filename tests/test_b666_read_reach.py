@@ -28,7 +28,7 @@ import re
 import pytest
 
 import clawseccheck.toolpolicy as _toolpolicy
-from _realhome import REAL_HOME
+from _distgrounding import dist_text, require_dist
 
 from clawseccheck import toolpolicy
 from clawseccheck.checks import _shared
@@ -85,9 +85,8 @@ CASES = [
     ('allow_and_deny_empty', {'tools': {'allow': [], 'deny': []}}, True),
 ]
 
-# B-519: REAL_HOME, not Path.home() — conftest redirects $HOME for the session, so
-# Path.home() here would point at a throwaway dir, find no dist, and skip vacuously.
-OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
+# B-519 (why REAL_HOME, not Path.home()) and B-728 (why zero matches is a FAIL, not a
+# skip) both live in tests/_distgrounding.py — one locator, three outcomes.
 
 
 @pytest.mark.parametrize("label,cfg,expected", CASES, ids=[c[0] for c in CASES])
@@ -162,13 +161,6 @@ def test_alias_table_agrees_with_the_checks_leaf():
 # constants above going stale on an upgrade, which no amount of self-consistent unit
 # testing can. Skipped where the dist is absent (CI), never silently weakened.
 
-def _dist_text(pattern: str) -> str:
-    files = sorted(OPENCLAW_DIST.glob(pattern))
-    if not files:
-        pytest.skip(f"installed OpenClaw dist not found ({pattern})")
-    return "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in files)
-
-
 def test_dist_still_defaults_workspace_only_to_false():
     """The tripwire for the one semantic `toolpolicy.py` is built on: an ABSENT
     `tools.fs.workspaceOnly` means NOT confined.
@@ -199,7 +191,8 @@ def test_dist_still_defaults_workspace_only_to_false():
     assert _toolpolicy.workspace_only({"tools": {"fs": {"workspaceOnly": "yes"}}}) is False
 
     # 2. The source anchor, on the function that owns the comparison today.
-    text = _dist_text("tool-fs-policy-*.js")
+    text = dist_text("tool-fs-policy-*.js", symbol="resolveEffectiveToolFsWorkspaceOnly",
+                     contains="resolveEffectiveToolFsWorkspaceOnly")
     assert "function resolveEffectiveToolFsWorkspaceOnly" in text, (
         "the resolver moved again — re-ground it, and check whether the `=== true` "
         "semantic moved with it"
@@ -209,7 +202,8 @@ def test_dist_still_defaults_workspace_only_to_false():
 
 
 def test_dist_profile_enum_matches_the_known_set():
-    text = _dist_text("zod-schema.agent-runtime-*.js")
+    text = dist_text("zod-schema.agent-runtime-*.js", symbol="ToolProfileSchema",
+                     contains="ToolProfileSchema")
     block = re.search(r"ToolProfileSchema = union\(\[(.*?)\]\)", text, re.S)
     assert block, "ToolProfileSchema not found — re-ground _KNOWN_PROFILES"
     found = set(re.findall(r'literal\("([a-z]+)"\)', block.group(1)))
@@ -219,7 +213,8 @@ def test_dist_profile_enum_matches_the_known_set():
 def test_dist_still_grants_read_to_exactly_the_profiles_we_name():
     """`read` is a `coding` tool, and `full` is ``allow: ["*"]``. Any other profile
     gaining it would silently widen this predicate."""
-    text = _dist_text("tool-catalog-*.js")
+    text = dist_text("tool-catalog-*.js", symbol="CORE_TOOL_DEFINITIONS",
+                     contains="CORE_TOOL_DEFINITIONS")
     entry = re.search(r'id: "read",(.*?)profiles: \[([^\]]*)\]', text, re.S)
     assert entry, "the read tool entry moved — re-ground _PROFILES_GRANTING_READ"
     named = set(re.findall(r'"([a-z]+)"', entry.group(2)))
@@ -237,8 +232,7 @@ def test_module_docstring_dist_citation_still_declares_the_predicate():
     the citation from the docstring text itself, so a future re-pin that goes stale (or
     wrong again) fails here instead of reading as grounded while being dead.
     """
-    if not OPENCLAW_DIST.is_dir():
-        pytest.skip("installed OpenClaw dist not found")
+    dist = require_dist()
     doc = toolpolicy.__doc__ or ""
     match = re.search(
         r"``resolveEffectiveToolFsRootExpansionAllowed``[^(]*\(dist ``([^`]+)``",
@@ -246,7 +240,7 @@ def test_module_docstring_dist_citation_still_declares_the_predicate():
     )
     assert match, "docstring no longer cites a dist location for the predicate"
     pattern = match.group(1)
-    files = sorted(OPENCLAW_DIST.glob(pattern))
+    files = sorted(dist.glob(pattern))
     assert files, f"citation {pattern!r} does not resolve against the installed dist"
     text = "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in files)
     assert "function resolveEffectiveToolFsRootExpansionAllowed" in text, (

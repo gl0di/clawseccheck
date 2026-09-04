@@ -21,6 +21,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from _distgrounding import dist_file
 
 import clawseccheck.checks as C
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
@@ -37,7 +38,6 @@ from clawseccheck.collector import collect
 MODERN = "2026.8.1"
 LEGACY = "2026.7.1-2"
 
-_DIST = Path("/home/glodi/.npm-global/lib/node_modules/openclaw/dist")
 
 
 # ======================================================================================
@@ -163,8 +163,12 @@ console.log(JSON.stringify({
 
 
 def _dist_module():
-    hits = sorted(_DIST.glob("mcp-codex-tool-approval-*.js")) if _DIST.is_dir() else []
-    return hits[0] if hits else None
+    """B-728: `hits[0] if hits else None` answered "not installed" and "the bundle was
+    renamed" with the same None, and the caller skipped on both. Now: skip only when
+    OpenClaw is absent, fail (naming the symbol) when it is present and the anchor moved."""
+    return dist_file("mcp-codex-tool-approval-*.js",
+                     symbol="requiresMcpCodexToolApproval",
+                     contains="requiresMcpCodexToolApproval")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no node on this machine")
@@ -176,8 +180,6 @@ def test_the_port_agrees_with_the_installed_dist_on_every_case():
     `readOnlyHint: "true"` grants nothing.
     """
     module = _dist_module()
-    if module is None:
-        pytest.skip("no installed OpenClaw dist to differ against")
 
     work = Path(tempfile.mkdtemp(prefix="b706-"))
     (work / "diff.mjs").write_text(_DIFF_SCRIPT, encoding="utf-8")
@@ -530,10 +532,7 @@ def test_openclaw_itself_says_annotations_are_what_removes_the_approval_step():
     the hint entirely is still worth catching; the reworded tail is not asserted, because
     a vendor is free to rephrase its own advice.
     """
-    cli = sorted(_DIST.glob("mcp-cli-*.js")) if _DIST.is_dir() else []
-    if not cli:
-        pytest.skip("no installed OpenClaw dist")
-    text = cli[0].read_text(errors="replace")
+    text = dist_file("mcp-cli-*.js", symbol="codexApprovalMode").read_text(errors="replace")
     # The hint still exists...
     assert "tools have no safety annotations" in text
     # ...and still fires on exactly "mode is auto AND no tool carries annotations", which
@@ -550,10 +549,7 @@ def test_the_probe_still_cannot_carry_annotations_so_the_source_split_stands():
     would mean a probe-derived surface could carry annotations, and the UNKNOWN legs would be
     hiding real evidence instead of declining to guess.
     """
-    cli = sorted(_DIST.glob("mcp-cli-*.js")) if _DIST.is_dir() else []
-    if not cli:
-        pytest.skip("no installed OpenClaw dist")
-    text = cli[0].read_text(errors="replace")
+    text = dist_file("mcp-cli-*.js", symbol="codexApprovalMode").read_text(errors="replace")
     assert "tools: projectedTools.map((tool) => tool.name).toSorted()" in text, (
         "the probe's tool projection changed shape — re-check whether it now carries "
         "annotations, because B333's UNKNOWN source legs assume it cannot"
@@ -756,16 +752,15 @@ def test_the_tool_filter_port_agrees_with_the_installed_dist():
     Ported by reading it once and then checked by running it, because the reachability gate
     that decides whether B333 speaks now rests on it.
     """
-    hits = sorted(_DIST.glob("mcp-tool-filter-*.js")) if _DIST.is_dir() else []
-    if not hits:
-        pytest.skip("no installed OpenClaw dist to differ against")
+    module = dist_file("mcp-tool-filter-*.js", symbol="isMcpToolAllowed",
+                       contains="isMcpToolAllowed")
 
     work = Path(tempfile.mkdtemp(prefix="b706-filter-"))
     (work / "f.mjs").write_text(_FILTER_SCRIPT, encoding="utf-8")
     (work / "cases.json").write_text(json.dumps([[r, n] for r, n in _FILTER_CASES]),
                                      encoding="utf-8")
-    proc = subprocess.run(["node", str(work / "f.mjs"), str(hits[0]), str(work / "cases.json"),
-                           _alias_map(hits[0], ("normalizeMcpToolFilter", "isMcpToolAllowed"))],
+    proc = subprocess.run(["node", str(work / "f.mjs"), str(module), str(work / "cases.json"),
+                           _alias_map(module, ("normalizeMcpToolFilter", "isMcpToolAllowed"))],
                           capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
     dist = json.loads(proc.stdout)

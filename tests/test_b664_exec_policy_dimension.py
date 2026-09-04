@@ -32,6 +32,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from _distgrounding import dist_file
 
 from clawseccheck import monitor
 from clawseccheck.cli import main
@@ -42,8 +43,6 @@ from clawseccheck.monitordims._execpolicy import (
     _resolve_mode_from_policy,
 )
 
-_DIST = Path("/home/glodi/.npm-global/lib/node_modules/openclaw/dist")
-_VENDOR = _DIST / "exec-approvals-BIKWP8_V.js"
 
 
 class _Ctx:
@@ -95,14 +94,22 @@ def _p(exec_cfg, **extra):
 
 # ------------------------------------------------------------------ grounding
 
-@pytest.mark.skipif(not _VENDOR.exists() or not shutil.which("node"),
-                    reason="needs the installed OpenClaw dist and node — local-only layer")
+@pytest.mark.skipif(shutil.which("node") is None, reason="no node on this machine")
 def test_the_port_matches_the_installed_dist(tmp_path):
     """Execute the vendor's own resolver over every combination and require agreement.
 
     96 combinations: 6 modes (including absent) x 4 securities x 4 asks. A table copied by
     eye is exactly the kind of thing that is right in the cases someone thought about.
+
+    B-728: this used to pin the CONTENT-HASHED filename `exec-approvals-BIKWP8_V.js` in a
+    `skipif`. That file no longer exists — 2026.9.1 rotated it — so on a machine WITH the
+    dist installed this test was silently skipped, reporting "needs the installed OpenClaw
+    dist". Measured, not theorised: it was skipping on the maintainer's box. The anchor is
+    now the SYMBOL (18 bundles match `exec-approvals-*.js`; exactly one declares this
+    resolver), and a miss fails instead of standing down.
     """
+    vendor = dist_file("exec-approvals-*.js", symbol="resolveExecModePolicy",
+                       contains="function resolveExecModePolicy(")
     script = tmp_path / "vendor.mjs"
     script.write_text('''
 import { readFileSync } from "node:fs";
@@ -130,7 +137,7 @@ for (const mode of [undefined, "deny", "allowlist", "ask", "auto", "full"])
                         ask: r.ask ?? null, autoReview: r.autoReview ?? null } });
     }
 console.log(JSON.stringify(out));
-''' % json.dumps(str(_VENDOR)), encoding="utf-8")
+''' % json.dumps(str(vendor)), encoding="utf-8")
     proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr[-2000:]
     rows = json.loads(proc.stdout)

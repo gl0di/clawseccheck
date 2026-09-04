@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 
 import pytest
-from _realhome import REAL_HOME
+from _distgrounding import dist_file, require_dist
 
 from clawseccheck.checks import _shared
 from clawseccheck.checks._shared import (
@@ -27,7 +27,6 @@ from clawseccheck.checks._shared import (
 from clawseccheck.collector import Context
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
-OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
 
 
 def _sensitive(cfg, attestation=None):
@@ -168,10 +167,11 @@ def test_the_id_set_and_the_hint_tuple_stay_disjoint_in_kind():
 # deliberate rather than typos. Skipped where the dist is absent (CI).
 
 def _catalog_text() -> str:
-    files = sorted(OPENCLAW_DIST.glob("tool-catalog-*.js"))
-    if not files:
-        pytest.skip("installed OpenClaw dist not found")
-    return files[0].read_text(encoding="utf-8", errors="replace")
+    """B-728: `files[0]` used to pick a bundle by sort order and a zero match used to read
+    as "not installed". One file, chosen by the constant it declares, or a named failure."""
+    return dist_file("tool-catalog-*.js", symbol="CORE_TOOL_DEFINITIONS",
+                     contains="CORE_TOOL_DEFINITIONS").read_text(
+        encoding="utf-8", errors="replace")
 
 
 # C-472: ONE parser, because two copies of it drifted apart the moment the catalog moved.
@@ -251,10 +251,9 @@ def test_sessions_history_is_still_described_as_sanitized():
     only imports or references the name cannot satisfy this.
     """
     pattern = re.compile(r'SESSIONS_HISTORY_TOOL_DISPLAY_SUMMARY\s*=\s*"([^"]*)"')
-    if not OPENCLAW_DIST.is_dir():
-        pytest.skip("installed OpenClaw dist not found")
+    dist = require_dist()
     found = []
-    for path in sorted(OPENCLAW_DIST.rglob("*.js")):
+    for path in sorted(dist.rglob("*.js")):
         m = pattern.search(path.read_text(encoding="utf-8", errors="replace"))
         if m:
             found.append((path.name, m.group(1)))

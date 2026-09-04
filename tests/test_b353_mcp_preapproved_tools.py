@@ -17,13 +17,13 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from _distgrounding import dist_files
 
 import clawseccheck.checks as C
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
 from clawseccheck.collector import collect
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
-_DIST = Path("/home/glodi/.npm-global/lib/node_modules/openclaw/dist")
 
 MODERN = "2026.8.1"
 LEGACY = "2026.7.1-2"
@@ -157,9 +157,9 @@ def test_the_three_exclusions_are_what_the_schema_actually_says():
     produce went straight into the check's docstring. The conclusions turned out to be
     right, which is luck, not method.
     """
-    hits = sorted(_DIST.glob("zod-schema-*.js")) if _DIST.is_dir() else []
-    if not hits:
-        pytest.skip("no installed OpenClaw dist")
+    # B-728: zero matches with the dist INSTALLED is a renamed bundle, not a missing
+    # install — `dist_files` fails and names the symbol instead of standing down.
+    hits = dist_files("zod-schema-*.js", symbol="OpenClawSchema")
     script = """
 const z = await import(process.argv[2]);
 const P = Object.values(z).find(v => v && typeof v.safeParse === "function"
@@ -186,8 +186,19 @@ console.log(JSON.stringify({
             if payload.get("usable"):
                 found = payload
                 break
-    if found is None:
-        pytest.skip("no usable OpenClawSchema export in the installed dist")
+    # B-728, the same defect one level in: this used to skip, so a dist that stopped
+    # EXPORTING a parseable schema object turned the probe off silently and the three
+    # exclusions below went back to resting on the unrun first version this test exists to
+    # replace. 2026.9.1 builds the schema in a factory (`buildConfigSchemaCore`) rather
+    # than exporting it ready-made, so the shape this probe depends on is exactly the kind
+    # that moves. If it moves, say so.
+    assert found is not None, (
+        f"none of {[h.name for h in hits]} exports an object whose safeParse accepts a "
+        "minimal mcp config — the schema is no longer reachable the way this probe "
+        "assumes (2026.9.1 already moved it behind `buildConfigSchemaCore`). Re-ground "
+        "the probe; a skip here would leave the three exclusions below ungrounded while "
+        "reading as verified."
+    )
 
     assert found["subject"] is True, "the key this check reads must be a real schema key"
     assert found["bogus"] is False, (
