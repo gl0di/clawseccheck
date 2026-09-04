@@ -2104,9 +2104,28 @@ def _active_channels(cfg: dict) -> dict:
 # normalizer / consumer gate) B-609 already required, because they can disagree (Feishu's
 # schema omits "disabled" while its normalizer honors it — see _norm_dm_policy above).
 #
-# Exactly 4 channels define a nested `dm` config object ANYWHERE in the installed dist —
+# Exactly 4 channels define a nested `dm` config OBJECT anywhere in the installed dist —
 # verified exhaustively with `grep -rn '^\tdm: [A-Za-z]'` across every dist/*.js file, not
-# assumed:
+# assumed.
+#
+# B-720 — READ THE NEXT SENTENCE BEFORE USING THIS LIST. Defining a `dm` object is NOT the
+# same as defining `dm.policy` inside it, and conflating the two is exactly how googlechat
+# ended up misclassified for as long as this comment has existed. Of these 4, **only matrix
+# declares `dm.policy`**. Measured against the vendor's own generated config schema, across
+# all 25 channels it declares:
+#
+#     channel     flat dmPolicy   nested dm.policy
+#     matrix      no              YES          <- the only one
+#     discord     yes             no
+#     slack       yes             no
+#     googlechat  yes             no           <- `dm` object exists, but holds only `enabled`
+#
+# and `dmPolicy` is the ONLY key in the entire config surface with a nested `<stem>.policy`
+# twin at all (34 flat sites, 1 nested). So the nested form is a single exception, not a
+# pattern — treat any future "this channel is nested too" claim as needing the same
+# per-channel schema evidence, not an analogy to matrix.
+#
+# The 4 channels defining a `dm` object:
 #   discord     dm: DiscordDmSchema     bundled-channel-config-schema-CkfMA6sO.js:578
 #   slack       dm: SlackDmSchema       bundled-channel-config-schema-CkfMA6sO.js:859
 #   googlechat  dm: GoogleChatDmSchema  bundled-channel-config-schema-CkfMA6sO.js:1526
@@ -2130,14 +2149,42 @@ def _active_channels(cfg: dict) -> dict:
 #            grounding budget, so slack is scoped to the VALUE check only below, matching
 #            discord's grounded order, and explicitly NOT given a dm.enabled gate (next
 #            paragraph) since that specific consumer behavior is unconfirmed for Slack.
-#   googlechat  nestedOnly, and more than that: the real dispatch gate reads ONLY
-#            `dm.policy`, never falls back to flat at all — `const dmPolicy =
-#            account.config.dm?.policy ?? "pairing"` (channel2.runtime-Bb6oxd87.js:213).
-#            Consistent with the schema: GoogleChatAccountSchema is `.strict()` with no
-#            `dmPolicy` field whatsoever (bundled-channel-config-schema-CkfMA6sO.js:
-#            1490-1534) — a flat `dmPolicy` written there is rejected at validation AND
-#            silently ignored by the resolver that matters, so it must never be treated
-#            as a declaration for googlechat.
+#   googlechat  FLAT. This entry read "nestedOnly" until B-720, on reasoning that was
+#            wrong the day it was written — not stale, wrong. It claimed
+#            "GoogleChatAccountSchema is `.strict()` with no `dmPolicy` field whatsoever,
+#            so a flat `dmPolicy` is rejected at validation". The `.strict()` observation
+#            was REAL but attached to the wrong object, and that inverted the conclusion:
+#
+#                const GoogleChatDmSchema = object({ enabled: boolean().optional() }).strict();
+#
+#            It is the NESTED schema that is strict and holds only `enabled`. So `dm.policy`
+#            is the key `.strict()` rejects — the exact opposite of the claim — and the old
+#            classification made us read a path no valid config can contain, returning None
+#            for every googlechat channel however its DM policy was set.
+#
+#            The flat key is the one the vendor itself enforces, in its own validator:
+#
+#                GoogleChatConfigSchema = GoogleChatAccountSchemaBase.extend({...})
+#                  .superRefine((value, ctx) => requireOpenAllowFrom({
+#                      policy: value.dmPolicy, allowFrom: value.allowFrom,
+#                      message: 'channels.googlechat.dmPolicy="open" requires channels.googlechat...' }))
+#
+#            There is no stronger statement available than the product refusing to load a
+#            config on the basis of this key.
+#
+#            The cited runtime line (`account.config.dm?.policy ?? "pairing"`) cannot have
+#            meant what it was read to mean either: with `dm` accepting only `enabled`, that
+#            expression is undefined on every valid config, which would make googlechat's DM
+#            policy permanently "pairing" and unconfigurable — flatly contradicted by the
+#            superRefine above. Most likely a resolver misattributed from another channel.
+#            THE TELL, worth carrying forward: a grounding that concludes a security setting
+#            cannot be set at all deserves a second, independent authority before it is
+#            believed. Here that second authority was the generated config schema, and the
+#            two could only disagree because a second one existed.
+#
+#            Note the citations above still RESOLVE on 8.2 and the claim was still false —
+#            `dist_citation_gate.py` and the dist-grounded tests check that a citation is
+#            alive, never that it says what we claim. Liveness guards cannot catch this.
 #   matrix   nestedOnly, no flat field exists in the schema at all (grep for "dmPolicy"
 #            over config-schema-D6CA0P8M.js returns nothing); the real per-account
 #            resolver is `resolveMatrixDmPolicy = createScopedDmSecurityResolver({
@@ -2158,7 +2205,22 @@ def _active_channels(cfg: dict) -> dict:
 # this task's grounding budget, and a false "enabled:false closes it" claim there would
 # risk the false-negative direction this fix exists to avoid, not just the false-positive
 # one it fixes.
-_DM_POLICY_NESTED_ONLY_CHANNELS = frozenset({"googlechat", "matrix"})
+# matrix alone: it is the only channel in the vendor's config schema that declares
+# `dm.policy`, and the only one that declares no flat `dmPolicy`. See the B-720 block above
+# for the measurement and for why googlechat was removed.
+_DM_POLICY_NESTED_ONLY_CHANNELS = frozenset({"matrix"})
+# discord/slack: flat is canonical, `dm.policy` is the legacy fallback the vendor's own
+# `dmPolicy ?? dm?.policy ?? "pairing"` cross-check still writes.
+#
+# B-720, measured: NEITHER declares `dm.policy` in the current schema, so that fallback is
+# unreachable and this set is behaviourally identical to the flat-only default today. Two
+# consequences, and the second is the one worth writing down:
+#   * do NOT "simplify" the set away on that basis — it encodes the vendor's stated
+#     precedence, and a channel that starts declaring `dm.policy` would need it;
+#   * NO TEST CAN DISTINGUISH a correct implementation of this branch from a broken one,
+#     because no input reaches it. Mutating the fallback reddens nothing. That is a known,
+#     accepted blind spot rather than missing coverage, and it should be re-checked the
+#     moment any flat-primary channel gains a nested `dm.policy`.
 _DM_POLICY_FLAT_PRIMARY_CHANNELS = frozenset({"discord", "slack"})
 _DM_POLICY_ENABLED_GATE_CHANNELS = frozenset({"googlechat", "discord"})
 
@@ -2207,9 +2269,9 @@ def _untrusted_input_channels(cfg: dict) -> list[str]:
     false positive — so we key off the untrusted-policy allowlist only.
 
     B-619: ``dmPolicy`` is read via ``_declared_dm_policy`` rather than the raw flat key
-    directly, so a channel written only via a nested ``dm.policy`` (discord/slack/
-    googlechat/matrix — see ``_declared_dm_policy``'s grounding comment) is no longer
-    invisible to leg-counting. Before this fix a nested `dm.policy: "open"` was silently
+    directly, so a channel written via a nested ``dm.policy`` (matrix — the only one; see
+    ``_declared_dm_policy``'s grounding comment, and B-720 for why this list used to name
+    four) is no longer invisible to leg-counting. Before this fix a nested `dm.policy: "open"` was silently
     dropped here, which could under-count the trifecta's untrusted-input leg entirely on
     a config where no other source supplied it — a false negative, not just a wrong WARN
     string. This is a per-node, unmerged read (same shallow walk as before this fix,

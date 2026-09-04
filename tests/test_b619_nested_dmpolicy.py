@@ -3,13 +3,23 @@ was read identically to a channel that declared nothing at all: A1 told an owner
 explicitly closed DM ingress that they set no policy, CRITICAL-capping the grade, and
 recommended a flat `dmPolicy` key several of the affected channels' own schema rejects.
 
-Grounded against the installed dist (openclaw@2026.7.1-2). Exactly 4 channels define a
-nested `dm` config object anywhere in the dist (grep-verified exhaustively, not assumed —
-see ``_DM_POLICY_NESTED_ONLY_CHANNELS``'s comment in ``_shared.py`` for the file:line
-citations): discord, slack, googlechat, matrix. googlechat and matrix are NESTED-ONLY —
-their schema has no flat `dmPolicy` field at all, and their real per-account resolver
-(channel2.runtime-Bb6oxd87.js:213 for googlechat; channel-DVVz3Nzd.js:774-778 for matrix)
-never falls back to it. discord and slack are FLAT-PRIMARY (flat wins over nested when
+Grounded against the installed dist. Exactly 4 channels define a nested `dm` config
+OBJECT anywhere in the dist (grep-verified exhaustively, not assumed — see
+``_DM_POLICY_NESTED_ONLY_CHANNELS``'s comment in ``_shared.py`` for the file:line
+citations): discord, slack, googlechat, matrix.
+
+**B-720 corrected the next sentence, and this file asserted the wrong version of it while
+staying green — a test pins a false claim exactly as well as a true one.** It used to say
+googlechat and matrix are NESTED-ONLY because "their schema has no flat `dmPolicy` field
+at all". Measured against the vendor's generated config schema across all 25 channels,
+**matrix is the only channel declaring `dm.policy`, and the only one declaring no flat
+`dmPolicy`.** googlechat is the opposite: `GoogleChatDmSchema = object({enabled}).strict()`
+carries no `policy`, while the vendor's own validator enforces the FLAT key
+(`superRefine` -> `requireOpenAllowFrom({policy: value.dmPolicy})`, whose message names
+`channels.googlechat.dmPolicy="open"`). Defining a `dm` object is not the same as defining
+`dm.policy` inside it, and conflating the two is how this got written.
+
+discord and slack are FLAT-PRIMARY (flat wins over nested when
 both are written), grounded via the generic ``resolveChannelDmPolicy``
 (dm-access-j6yOoNfd.js:81-85, "topOnly" mode) that Discord's own
 ``resolveDiscordAccountDmPolicy`` (accounts-B2tNBeEr.js:39-48) calls, consumed at the real
@@ -65,24 +75,51 @@ def test_the_channel_family_enumeration():
     """The deliverable: exactly which channels get which closure form, pinned so it does
     not silently rot behind the next channel shipped (the risk this fix's own grounding
     comment names explicitly)."""
-    assert _DM_POLICY_NESTED_ONLY_CHANNELS == frozenset({"googlechat", "matrix"})
+    # B-720: googlechat was removed. It is the ONLY channel in the vendor's generated
+    # config schema that declares a flat `dmPolicy` while declaring no `dm.policy`, and
+    # this set had it backwards. matrix is the single genuinely nested channel.
+    assert _DM_POLICY_NESTED_ONLY_CHANNELS == frozenset({"matrix"})
     assert _DM_POLICY_FLAT_PRIMARY_CHANNELS == frozenset({"discord", "slack"})
     assert _DM_POLICY_ENABLED_GATE_CHANNELS == frozenset({"googlechat", "discord"})
-    # Every enabled-gate channel is also one that reads a dmPolicy value at all.
-    assert _DM_POLICY_ENABLED_GATE_CHANNELS <= (
-        _DM_POLICY_NESTED_ONLY_CHANNELS | _DM_POLICY_FLAT_PRIMARY_CHANNELS
-    )
+    # B-720 replaced the old invariant here. It asserted every enabled-gate channel is in
+    # one of the two named sets, which only held while googlechat was wrongly in
+    # nested-only: every channel not named reads the flat key by DEFAULT, so the named
+    # sets never were "the channels that read a policy". The real constraint is narrower
+    # and is the one that can actually fail -- `dm.enabled` needs a nested `dm` object,
+    # and exactly four channels define one.
+    _CHANNELS_WITH_A_DM_OBJECT = frozenset({"discord", "slack", "googlechat", "matrix"})
+    assert _DM_POLICY_ENABLED_GATE_CHANNELS <= _CHANNELS_WITH_A_DM_OBJECT
+    assert _DM_POLICY_NESTED_ONLY_CHANNELS <= _CHANNELS_WITH_A_DM_OBJECT
 
 
 # --------------------------------------------------------------- _declared_dm_policy
 
 
-def test_googlechat_reads_nested_only():
-    assert _declared_dm_policy("googlechat", {"dm": {"policy": "disabled"}}) == "disabled"
-    # The flat key is UNRECOGNIZED by googlechat's own schema and never read by its real
-    # runtime gate — recognising it here would be the same fabricated-fact shape B-609's
-    # Feishu correction already retracted once.
-    assert _declared_dm_policy("googlechat", {"dmPolicy": "disabled"}) is None
+def test_googlechat_reads_the_flat_key():
+    """B-720. This test asserted the exact opposite until 2026-09-04, and was green the
+    whole time — a test can pin a false claim as easily as a true one.
+
+    The flat key is the one googlechat's own schema declares and the one the vendor's own
+    validator enforces (`superRefine` -> `requireOpenAllowFrom({policy: value.dmPolicy})`,
+    whose message names `channels.googlechat.dmPolicy="open"`). The NESTED path is the one
+    that cannot exist: `GoogleChatDmSchema = object({enabled: ...}).strict()`.
+    """
+    assert _declared_dm_policy("googlechat", {"dmPolicy": "disabled"}) == "disabled"
+    # And the nested form is not invented into a declaration: `dm` on googlechat holds
+    # only `enabled`, so a `dm.policy` there is not a key any valid config can carry.
+    assert _declared_dm_policy("googlechat", {"dm": {"policy": "disabled"}}) is None
+
+
+def test_an_open_googlechat_dm_policy_is_no_longer_invisible():
+    """The user-visible defect B-720 closed, stated as the thing that was wrong.
+
+    `dmPolicy: "open"` on googlechat read as "nothing declared", so an open DM posture the
+    vendor itself refuses to load without an `allowFrom` was silently absent from the
+    ingress leg. Pinned separately from the reader test above because THIS is the finding;
+    the reader is only how it happened.
+    """
+    assert _declared_dm_policy("googlechat", {"dmPolicy": "open"}) == "open"
+    assert _declared_dm_policy("googlechat", {"dmPolicy": "allowlist"}) == "allowlist"
 
 
 def test_matrix_reads_nested_only():
@@ -193,13 +230,20 @@ def test_repro3_counterpart_live_implicit_default_account_is_still_checked():
 # leg is still counted — teaching A1 a closure must never teach it to stop seeing an open.
 
 
-def test_closed_googlechat_nested_is_not_an_untrusted_leg():
-    cfg = {"channels": {"googlechat": {"enabled": True, "dm": {"policy": "disabled"}}}}
+def test_closed_matrix_nested_is_not_an_untrusted_leg():
+    cfg = {"channels": {"matrix": {"enabled": True, "dm": {"policy": "disabled"}}}}
     assert _untrusted_input_channels(cfg) == []
 
 
-def test_open_googlechat_nested_still_counts_the_leg():
-    cfg = {"channels": {"googlechat": {"enabled": True, "dm": {"policy": "open"}}}}
+def test_open_matrix_nested_still_counts_the_leg():
+    cfg = {"channels": {"matrix": {"enabled": True, "dm": {"policy": "open"}}}}
+    assert _untrusted_input_channels(cfg) == ["matrix"]
+
+
+def test_open_googlechat_flat_counts_the_leg():
+    """B-720's user-visible half, at the leg level rather than the reader level: before
+    the fix this returned [] because the flat key was skipped for googlechat."""
+    cfg = {"channels": {"googlechat": {"enabled": True, "dmPolicy": "open"}}}
     assert _untrusted_input_channels(cfg) == ["googlechat"]
 
 
@@ -281,24 +325,40 @@ def test_repro2_a1_status_matches_between_nested_and_flat(tmp_path):
 
 
 def test_genuine_silence_still_warns_with_schema_correct_remediation(tmp_path):
-    """The remaining genuine-absence case on a nested-only channel must recommend the
-    NESTED key, never the flat one its schema rejects."""
+    """The remaining genuine-absence case on the nested-only channel must recommend the
+    NESTED key, never the flat one its schema does not carry."""
     cfg = {
-        "channels": {"googlechat": {"enabled": True}},
+        "channels": {"matrix": {"enabled": True}},
         "tools": {"allow": ["read_file", "web_fetch"]},
     }
     f = check_trifecta(_ctx(tmp_path, cfg))
     assert f.status == WARN, f.status
     assert "Resolved default" in f.detail
     assert 'dm.policy: "disabled"' in f.fix
-    assert 'Set `dmPolicy: "disabled"` on googlechat' not in f.fix
+    assert 'Set `dmPolicy: "disabled"` on matrix' not in f.fix
+
+
+def test_googlechat_is_steered_to_the_flat_key_the_vendor_enforces(tmp_path):
+    """B-720's harmful-advice half, pinned. Until 2026-09-04 a user with an open
+    googlechat was told to write the nested `dm.policy` -- a key `GoogleChatDmSchema`
+    (`.strict()`, `enabled` only) does not carry -- and told NOT to write the flat one,
+    which is the key the vendor's own validator enforces. Following that advice would
+    have left DM ingress open while the user believed they had closed it."""
+    cfg = {
+        "channels": {"googlechat": {"enabled": True}},
+        "tools": {"allow": ["read_file", "web_fetch"]},
+    }
+    f = check_trifecta(_ctx(tmp_path, cfg))
+    assert f.status == WARN, f.status
+    assert 'Set `dmPolicy: "disabled"` on googlechat' in f.fix
+    assert "dm.policy" not in f.fix
 
 
 def test_mixed_flat_and_nested_only_channels_get_separate_remediation(tmp_path):
     cfg = {
         "channels": {
             "telegram": {"enabled": True},
-            "googlechat": {"enabled": True},
+            "matrix": {"enabled": True},
         },
         "tools": {"allow": ["read_file", "web_fetch"]},
     }
@@ -348,9 +408,10 @@ def test_unknown_path_schema_drifted_dm_does_not_raise_end_to_end(tmp_path):
 
 
 def test_clean_fixture_nested_closed_is_not_reported_as_no_policy_set():
-    """fixtures/clean_b619_nested_dm_closed — googlechat closed via nested `dm.policy`
-    (nested-only channel, no flat `dmPolicy` field in its schema — see
-    ``_DM_POLICY_NESTED_ONLY_CHANNELS``) plus discord closed via `dm.enabled: false`
+    """fixtures/clean_b619_nested_dm_closed — matrix closed via nested `dm.policy`
+    (the one nested-only channel; see ``_DM_POLICY_NESTED_ONLY_CHANNELS``, and B-720 for
+    why this fixture used to model the shape on googlechat) plus discord closed via
+    `dm.enabled: false`
     (the enabled-gate form, grounded for discord). Neither must read as "no policy
     set", and the untrusted-input leg must not be counted for either channel."""
     ctx = collect(home=str(FIXTURES / "clean_b619_nested_dm_closed"))
@@ -363,14 +424,18 @@ def test_clean_fixture_nested_closed_is_not_reported_as_no_policy_set():
 
 
 def test_bad_fixture_nested_open_still_counts_the_untrusted_input_leg():
-    """fixtures/bad_b619_nested_dm_open — googlechat opened via nested `dm.policy: "open"`
+    """fixtures/bad_b619_nested_dm_open — matrix opened via nested `dm.policy: "open"`
     only (the paired OPEN direction of the clean fixture above, so a nested-open
     channel is corpus-visible too). The trifecta ingress leg must still be counted —
     teaching A1 to recognise a nested closure must never teach it to stop seeing a
-    nested open."""
+    nested open.
+
+    B-720: both b619 fixtures modelled this shape on googlechat, whose `dm` object is
+    `.strict()` with only `enabled` — so they encoded a config OpenClaw itself rejects.
+    Re-pointed at matrix, the one channel whose schema declares `dm.policy`."""
     ctx = collect(home=str(FIXTURES / "bad_b619_nested_dm_open"))
     assert ctx.config, "collect() did not read the shipped fixture config"
-    assert _untrusted_input_channels(ctx.config) == ["googlechat"]
+    assert _untrusted_input_channels(ctx.config) == ["matrix"]
     f = check_trifecta(ctx)
     assert "untrusted input" in (f.evidence or [])
-    assert "channel 'googlechat' allows untrusted senders" in f.detail
+    assert "channel 'matrix' allows untrusted senders" in f.detail

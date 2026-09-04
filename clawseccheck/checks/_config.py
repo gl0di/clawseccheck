@@ -611,6 +611,16 @@ def _resolved_default_fix(names: list) -> str:
     defect ``test_the_remediation_never_recommends_a_value_the_schema_rejects`` (B-499)
     already pins for the *value* axis (``"owner"``), now applied to the *path* axis.
     """
+    # B-720 wording note. This clause used to say the flat key "is rejected there". Only
+    # half of that is verified: matrix genuinely declares no flat `dmPolicy` (measured
+    # against the vendor's generated schema), but `MatrixConfigSchema` is NOT `.strict()`,
+    # and its wrapper's strictness was not traced. Absent `.strict()`, zod STRIPS an
+    # unknown key rather than rejecting it — so the user would get silence, not an error.
+    #
+    # "does not close anything" is true under BOTH behaviours, and it is also the safer
+    # message: told they would get an error, a user who sees none concludes it worked.
+    # Do not restore the stronger claim without tracing buildChannelConfigSchema — this
+    # whole check is being repaired from exactly one un-traced `.strict()` claim.
     nested_only = sorted(n for n in names if n in _DM_POLICY_NESTED_ONLY_CHANNELS)
     other = sorted(n for n in names if n not in _DM_POLICY_NESTED_ONLY_CHANNELS)
     parts = []
@@ -621,8 +631,8 @@ def _resolved_default_fix(names: list) -> str:
     if nested_only:
         parts.append(
             f'On {", ".join(nested_only)}, set the nested `dm.policy: "disabled"`'
-            " instead — those schemas have no flat `dmPolicy` field at all, so that"
-            " key is rejected there."
+            " instead — a flat `dmPolicy` is not part of that schema, so writing it"
+            " there does not close anything."
         )
     return (
         " ".join(parts) + ' Leaving it unset is not a restriction — OpenClaw resolves'
