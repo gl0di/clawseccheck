@@ -479,14 +479,28 @@ OpenClaw's skill schema ships such a field, at which point `SKILL.md` should gai
   grade**, on the reasoning that a check which could not look cannot rule out a CRITICAL.
   So a run that failed to read things does not score like a run that read them and found
   nothing.
+- **A capped grade and no grade are different outcomes.** The cap above applies *within* a
+  run that earned a letter: individual checks were degraded, so the letter cannot go above
+  a ceiling. Separately, and at a coarser level, a letter is issued **only when all five
+  check layers ran** — static, installed sweep, logs & trajectories, self-report, live
+  behaviour. A run that is missing a whole layer gets no letter at all rather than a capped
+  one, and names the layers it missed instead. The two mechanisms answer different
+  questions: "how much of what I checked came back undetermined" and "how much did I even
+  attempt".
 
 ## Release validation protocol
 
 A release must pass local validation before merge/tag:
 
 - `python3 -m ruff check .`
-- `python3 -m pytest`
+- `python3 -m pytest` — on the supported Python floor as well as the current
+  interpreter, because a stdlib predicate whose semantics shifted between them can
+  change a *verdict*, not merely crash.
 - targeted checks for the changed modules.
+- the gates that are not part of the test suite: the real-fleet false-positive gate,
+  the monitor detection gate, the dist-citation gate, and the state-DB drift gate.
+  A green suite does not stand in for these — each answers a question the suite
+  structurally cannot ask.
 
 Also verify that release documentation is synchronized:
 
