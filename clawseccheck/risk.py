@@ -33,6 +33,7 @@ from .catalog import CRITICAL, FAIL, HIGH, MEDIUM, WARN, Finding
 from .checks import (
     _b62_actual_families,
     _b62_extract_declaration,
+    _credential_store_state,
     _enabled_tools,
     _EVENT_HOOK_PATH_RE,
     _external_input_channels,
@@ -152,9 +153,38 @@ def _has_outbound(tools: list[str], cfg: dict) -> bool:
 
 
 def _has_sensitive_data(tools: list[str], ctx: Context) -> bool:
+    # B-730: this term read `(ctx.home / "credentials").is_dir()` -- the exact predicate
+    # B-666 disproved and replaced in A1's leg, left standing here because the fix
+    # landed in checks/_shared.py and never reached this module (git log: risk.py has
+    # commits on 08-25/27/31 and 09-01/02, none on 2026-08-28).
+    #
+    # The store exists on any home that ever paired a channel, so on the real fleet home
+    # -- where the directory is EMPTY, 0 files -- it raised this leg by itself and RISK-02
+    # asserted "All three legs of the Lethal Trifecta are active simultaneously" in the
+    # SAME --json document that reported `"trifecta": "2/3"` and A1 PASS. Measured
+    # disjunct-by-disjunct on that home: the hint term and the gateway term were both
+    # False, so this one term was the whole of a false-positive HIGH on the flagship
+    # chain. A directory name is not evidence; its contents are.
+    #
+    # `incomplete` is deliberately NOT folded in, and that is a real choice rather than
+    # an oversight. A1 has three states and routes an unreadable store to a WARN hedge
+    # ("nothing found in it means 'not found', not 'not there'"); a RISK chain has two,
+    # and its why-text ASSERTS the leg is active. Reading the hedge here would make the
+    # chain assert a leg nobody could confirm. The check hedges, the chain asserts, and
+    # the uncertainty still reaches the user -- through A1's WARN, not through a HIGH
+    # chain built on a store the audit could not read.
+    #
+    # KNOWN, UNSETTLED (B-730 follow-up): A1 excludes `gateway.auth.password` from this
+    # leg on the stated grounds that it is "the gateway's own auth secret, not
+    # agent-readable data" and that B1 flags it -- verified: check_secrets emits B1
+    # FAIL/CRITICAL on it. This module still counts it, so a home with only that key set
+    # reproduces the same A1-vs-RISK-02 disagreement through a different term. Left in
+    # place on purpose: removing it narrows detection, which is the false-negative
+    # direction, and it deserves its own measurement rather than a ride on this fix.
+    home = getattr(ctx, "home", None)
     return (
         _hint(tools, SENSITIVE_TOOL_HINTS)
-        or (ctx.home / "credentials").is_dir()
+        or bool(_credential_store_state(home)["secret_files"])
         or bool(dig(ctx.config, "gateway.auth.password"))
     )
 

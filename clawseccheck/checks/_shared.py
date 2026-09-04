@@ -2509,9 +2509,14 @@ def _agent_legs(tools: list) -> dict:
     expose per-agent tool config (agents.list[].tools.*), but this classifies the
     ATTESTED roster on purpose — attestation can reflect session-granted runtime tools
     that static per-agent config fields can't (see check_agent_separation for why). The
-    config-level signals A1 also consults (credentials dir, gateway password,
-    elevated.allowFrom) are GLOBAL, not attributable to one agent, so they are
-    intentionally not applied here.
+    config-level signals A1 also consults (the credential store's CONTENT -- B-666, not
+    the directory's existence -- and elevated.allowFrom) are GLOBAL, not attributable to
+    one agent, so they are intentionally not applied here. This sentence used to read
+    "credentials dir, gateway password": both were stale. A1 has not raised this leg on
+    the gateway password since B-666 (it is the gateway's own auth secret, not
+    agent-readable data, and B1 flags it), and the credential signal is a content scan.
+    report.py's capability graph applies these global signals to the `main` node only,
+    for the reason above; see B-730.
     """
     return {
         "untrusted input": _hint(tools, INPUT_TOOL_HINTS),

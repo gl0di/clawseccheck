@@ -1348,6 +1348,7 @@ def _capability_graph(ctx) -> dict:
         _agent_legs,
         _b55_write_tools_granted,
         _canon_tool,
+        _credential_store_state,
         _enabled_tools,
         _external_input_channels,
         _hint,
@@ -1387,10 +1388,22 @@ def _capability_graph(ctx) -> dict:
     # hints) keeps reading exactly what it read before.
     write_tools, _write_enumerable, _view, _legacy_write = _b55_write_tools_granted(cfg)
     main_tools = sorted({t for t in _enabled_tools(cfg)} | set(write_tools))
+    # B-730: the credential term read `(ctx.home / "credentials").is_dir()` -- the
+    # directory-existence test B-666 disproved and replaced in A1's leg. The store is
+    # created by any home that ever paired a channel, so this reported
+    # `secrets_visible: true` for the main node on a home whose credentials/ directory
+    # is EMPTY. Note the subagent nodes below already derive the SAME field from
+    # `_agent_legs`, i.e. A1's model -- so the graph was answering one question two ways
+    # depending on node kind. Content, not a directory name, for both now.
+    #
+    # The remaining asymmetry with `_agent_legs` is deliberate and documented there: the
+    # config-level signals (credential store, gateway secrets) are GLOBAL and not
+    # attributable to one subagent, so per-agent legs stay tool-name-only. `main` is the
+    # global agent, so it is the node those signals belong to.
     main_secrets = bool(
         dig(cfg, "gateway.auth.password")
         or dig(cfg, "gateway.token")
-        or (getattr(ctx, "home", None) and (ctx.home / "credentials").is_dir())
+        or _credential_store_state(getattr(ctx, "home", None))["secret_files"]
         or any(_hint([t], SENSITIVE_TOOL_HINTS) for t in main_tools)
     )
     main_write = bool(
