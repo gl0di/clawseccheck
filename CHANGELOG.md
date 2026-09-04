@@ -3,6 +3,92 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.0.0] — 2026-09-04
+
+Every run used to print a letter. It should not have: a run that skipped the
+installed-skill sweep, never replayed a trajectory and was handed no attestation was
+graded on the same scale as one that did all three. **4.0.0 stops issuing a grade the run
+did not earn** — and, separately, catches up to three OpenClaw releases that moved
+settings out from under the checks that read them.
+
+### Breaking
+
+- **A letter grade is issued only when all five check layers ran** — static, installed
+  sweep, logs & trajectories, self-report, live behaviour. Short of that the run names the
+  layers it missed instead of printing a number. There is no capped grade and no second
+  scale: a partial check reports what it covered, in words. Every renderer — report, chat
+  card, HTML, PDF, SARIF, JSON, history, the incident pack — carries the ungraded form.
+- **`--fail-under <score>` is removed.** A default run no longer carries a score to
+  threshold on. Use **`--fail-on <severity>`** for a CI gate that needs no grade, or
+  `--exit-code` to trip on any FAIL.
+- **`--vet` answers a decision, not a letter.** Vetting one package and grading a whole
+  setup are different questions; one letter standing for both read as the same thing.
+
+### OpenClaw 2026.8.1 / 8.2 / 9.1 compatibility
+
+Three OpenClaw releases moved things the audit reads. On an un-upgraded ClawSecCheck the
+result was not a crash — it was a clean verdict over ground the tool no longer looked at.
+
+- **The agent roster has two shapes.** 2026.8.1 writes `agents.entries` (a record) where
+  earlier builds wrote `agents.list` (an array). One reader now resolves both, ported from
+  the runtime and validated against it over 84 cases. Before this, a config using the new
+  shape produced no agents at all — and checks that walk the roster reported PASS.
+- **Three settings left `openclaw.json` entirely**, into OpenClaw's machine-owned config
+  store. Every `dig()` on those keys was reading where the runtime no longer writes. The
+  headline one is the bundled-plugin discovery mode, which can flip to a value that
+  bypasses the plugin allowlist on upgrade with nobody having written it.
+- **Retired keys are named rather than silently missed.** A check whose key no longer
+  exists says so, instead of resolving to nothing and rendering a verdict anyway.
+
+### Added
+
+- **`--monitor` watches the machine, not only the agent's settings** — host persistence
+  (systemd user units and the symlinks that arm them, shell startup files, world-readable
+  cron, `.pth`/`sitecustomize`), the installed OpenClaw package itself, and where each
+  installed skill came from, as a time series.
+- **`--monitor --json`**, `--brief` (is the watch still running, and did it speak while you
+  were away), `--probe` (report drift without consuming it), and `--cron-recipe` (hand the
+  agent a watch job instead of writing one).
+- **`--monitor` scopes its all-clear to what it actually compared**, and names what a first
+  run after an upgrade could not compare against.
+- **A per-dimension watch**: each watched surface now owns its snapshot and its diff in one
+  module, so a field added to one and not the other is a difference inside a single file.
+- **New checks** for surfaces that were unread: an MCP server that pre-approves every tool
+  it exposes, a hijackable directory placed ahead of every command the agent runs, the
+  gateway operator terminal (a config-declared shell on the host), code mode swapping the
+  model's tool surface for exec/wait, and the approval gate on unattended shell execution.
+- **A ported tool-grant predicate**, measured against the runtime over 3,354 cases — so
+  "is this tool granted, in this scope" is answered the way OpenClaw answers it rather than
+  by reading half the layers.
+- **Coverage is reported**: how much of the catalog reached no verdict, and why.
+- **The AI-BOM lists installed plugins** and names each skill's supplier.
+
+### Security
+
+- **Never a clean verdict over ground that was not read.** Five separate fixes, one bug.
+- **An unclosed code fence can no longer silence another file**, and a fence that hid
+  content is disclosed as hidden rather than read past.
+- **The output boundary is enforced on artifacts that leave the machine** — the operator's
+  home path is folded out of every SARIF field, the judge packet's target is bounded rather
+  than carrying attacker prose verbatim, and redaction happens at the journal boundary, not
+  only on the way to the screen.
+- **Install records are compared with themselves**, instead of one being elected the winner.
+
+### Fixed
+
+- 218 fixes. The recurring family — at least 32 of them by commit subject — is a verdict
+  that asserted more than the run observed: a truncated log read reported as the whole
+  history, a settings digest stored for a file the run never opened, a capability reported
+  as absent because only one of two policy layers was consulted, a crashed content check
+  reading as a clean axis.
+- Grounding guards that could switch themselves off on an OpenClaw upgrade and report a
+  missing install as the cause now fail, naming the symbol to re-locate.
+
+### Changed
+
+- `checks.py`'s successor, the monitor, and the scoring path continue to split into
+  per-topic and per-dimension modules; audit output is byte-identical across every move.
+
 ## [3.61.0] — 2026-08-06
 
 The report grew a shape and a PDF; five separate fixes turned out to be one bug — the tool
