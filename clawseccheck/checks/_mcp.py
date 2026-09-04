@@ -6608,6 +6608,43 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
               trust verdict (either every present disposition is "clean", or no
               installed plugin carries ClawHub trust data at all — that reflects
               absence of a bad verdict, not a positive clean scan for those installs).
+
+    WHY "blocked" JUSTIFIES A FAIL (C-479). The concern this answers: if only a
+    hand-edited config could produce ``clawhubTrustDisposition: "blocked"``, a FAIL would
+    be disproportionate — we would be reacting to a string the user typed. Grounded
+    against the installed dist, it is written by OpenClaw's own install path, from
+    ``params.assessment.disposition``:
+
+        function assessClawHubTrust(trust) {
+            if (riskReasons.length === 0 && notices.length === 0) return {disposition: "clean"};
+            if (isBlockingClawHubTrust(trust))                    return {disposition: "blocked"};
+            if (riskReasons.length > 0)                           return {disposition: "review-required"};
+            return {disposition: "review-recommended"};
+        }
+        function isBlockingClawHubTrust(trust) {
+            if (trust.blockedFromDownload) return true;
+            if (normalizeClawHubTrustToken(trust.scanStatus) === "malicious") return true;
+            if (CLAWHUB_BLOCKING_MODERATION_STATES.has(              // {blocked, quarantined, revoked}
+                    normalizeClawHubTrustToken(trust.moderationState))) return true;
+            return trust.reasons.some((r) => {
+                const n = normalizeClawHubTrustToken(r);
+                return n === "scan:malicious" || n === "static:malicious";
+            });
+        }
+
+    Every one of those four triggers is sourced from the REGISTRY's verdict — a download
+    block, a malicious scan status, a moderation state of blocked/quarantined/revoked, or
+    a ``scan:malicious``/``static:malicious`` reason token. So a FAIL here reports the
+    registry's own malicious verdict on an installed plugin, not a user-authored string.
+
+    The ladder is also why the WARN branch is written as "any non-clean, non-blocked
+    value" rather than an enumeration: the disposition set is exactly four today, and a
+    fifth would land in WARN, which is the safe direction.
+
+    Symbols, not filenames: ``assessClawHubTrust`` / ``isBlockingClawHubTrust`` /
+    ``CLAWHUB_BLOCKING_MODERATION_STATES`` are the anchors to re-locate this by. The
+    bundle hash rotates every release, and 2026.9.1 showed a whole family of bundles can
+    vanish outright (B-720) — a filename here would be evidence, never a locator.
     """
     if not ctx.plugin_trust_found:
         return _finding(
