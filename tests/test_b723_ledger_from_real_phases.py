@@ -34,7 +34,11 @@ from pathlib import Path
 import pytest
 
 from clawseccheck import cli
-from clawseccheck.layers import LAYER_INSTALLED_SWEEP, STATUS_RAN
+from clawseccheck.layers import (
+    LAYER_INSTALLED_SWEEP,
+    STATUS_NOT_REACHED,
+    STATUS_RAN,
+)
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 SAFE_HOME = FIXTURES / "home_safe"
@@ -175,3 +179,53 @@ def test_the_other_missing_layers_are_unchanged(tmp_path, monkeypatch, capsys, l
     """Guard against over-reach: this change is about the installed sweep only. The two
     layers that need `--attest` / `--judged-bundle` must still read exactly as before."""
     assert layer_line in _dashboard_run(tmp_path, monkeypatch, capsys)
+
+
+# ── the structural guard: the promise cannot come back ───────────────────────────────
+
+def test_the_early_ledger_can_never_be_complete_whatever_it_is_given():
+    """The invariant that makes the fabrication impossible to reintroduce by accident.
+
+    Every test above is BEHAVIOURAL: it drives a surface and checks what came out. All of
+    them would still pass if someone re-added a `STATUS_RAN` sweep phase to
+    `_build_layer_ledger` AND left the re-projection in place — the re-projection would
+    simply overwrite the fabrication on the three surfaces that have one, and a fourth
+    surface added later would silently inherit the lie.
+
+    So this asserts the property directly: a ledger built BEFORE any pipeline has run can
+    never be `complete`, no matter how generous its other inputs are. `complete` is the
+    gate that allows a letter, so this is the same statement as "the early ledger can
+    never authorise a grade".
+
+    Everything else here is maximally favourable on purpose — a real attestation, a valid
+    live-test bucket, a behavioural replay that ran. Four of the five layers can therefore
+    reach `ran`; the sweep is the one that cannot, because it has not happened.
+    """
+    from clawseccheck import audit
+    from clawseccheck.cli import _build_layer_ledger
+
+    class _Args:
+        fast = False
+        full = True
+
+    _, findings, _ = audit(SAFE_HOME)
+    ledger = _build_layer_ledger(
+        _Args(), findings,
+        attestation={"tools": ["read", "write"]},
+        live_test_bucket={"verdicts": [
+            {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]},
+        behavioral_ran=True, behavioral_analysis={},
+        commit_full_phases=True,
+    )
+    assert ledger.complete is False, (
+        "the pre-pipeline ledger reports a COMPLETE check, so it would authorise a letter "
+        "for work that has not happened — this is B-723 reintroduced")
+    assert ledger.status(LAYER_INSTALLED_SWEEP) != STATUS_RAN
+
+    # The positive control: with those same generous inputs, the ONLY thing missing is the
+    # sweep. Without this the assertion above would also pass if some unrelated layer had
+    # quietly regressed to un-run, and the test would be guarding the wrong thing.
+    assert tuple(ledger.missing) == (LAYER_INSTALLED_SWEEP,), (
+        f"more than the sweep is outstanding on a maximally-supplied early ledger "
+        f"({ledger.missing}) — this test is no longer measuring what it claims to")
+    assert ledger.status(LAYER_INSTALLED_SWEEP) == STATUS_NOT_REACHED
