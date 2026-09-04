@@ -86,13 +86,14 @@ capped one, not a partial one. You get the findings, led by the most urgent one 
 line naming exactly which layers did not run and why:
 
 ```text
-Most urgent: CRITICAL — Lethal trifecta reachable  [B1]
+Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)  [A1]
 No grade yet — 2 of 5 layers did not run: agent self-report (not submitted), live behaviour test (not submitted).
 ```
 
 This is deliberately stronger than capping the grade. A cap still prints a number, and a number
 gets read as a score; the absence of one cannot be misread as "fine". So a bare run leaves 3 of 5
-untouched, `--full` closes two of those and leaves 2 of 5, and you close the last two yourself.
+untouched, `--full` closes one of those — the installed sweep — and leaves 2 of 5, and you close
+the last two by submitting the agent's own answers (`--attest`, `--judged-bundle`).
 
 The six "did not run" phrasings mean different things and are worth reading — collapsing them
 into one would be its own small lie about how much the report is worth:

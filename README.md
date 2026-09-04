@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <b>Is your OpenClaw agent safe? Ask it — a full check earns an honest A–F grade; every other mode gives you a straight answer in words, right in the chat.</b><br>
+  <b>Is your OpenClaw agent safe? Ask it — you get a straight answer in words, right in the chat, and an honest A–F grade once all five audit layers have run.</b><br>
   <sub><i>The claw that checks your claws.</i></sub>
 </p>
 
@@ -20,6 +20,10 @@
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
     <img src="docs/assets/stats-light.svg" alt="188 security checks · 26 attack-chain detectors · 22,000 automated tests · 0 dependencies · 0 network calls" width="900">
   </picture>
+</p>
+
+<p align="center">
+  <sub>Verified against <b>OpenClaw 2026.9.1</b> on <b>Linux</b> · also reads the pre-2026.8.1 config shapes · Python 3.9+ · <a href="#-compatibility">details</a></sub>
 </p>
 
 ---
@@ -40,8 +44,9 @@ the most urgent finding in words and names what didn't run, never a guessed
 number. It reports, it doesn't
 remediate: it never touches your OpenClaw config, needs no API key, and the
 scanner itself makes **no network calls** — no telemetry, no uploads, ever.
-(One narrow, opt-in exception: `--apply-ignore-proposals` can append entries to
-its own suppression file — see [Safe to run](#-safe-to-run) below.)
+(Two narrow, opt-in exceptions write inside the audited home — its own
+suppression file, and a no-path `--pdf` into OpenClaw's managed attachment
+directory. Neither is your config; see [Safe to run](#-safe-to-run) below.)
 
 ## 🚀 Start in one minute — no terminal needed
 
@@ -59,17 +64,19 @@ its own suppression file — see [Safe to run](#-safe-to-run) below.)
 that run covered all five audit layers — and a plain-language note on what it
 didn't get to if it didn't. Done.
 
-*What you'll see — a real report against a deliberately vulnerable test setup:*
+*What you'll see — a real default run against the deliberately vulnerable test setup bundled
+with the repo. A default run reaches 2 of the 5 layers, so it names the most urgent finding
+in words and says which layers it skipped, rather than printing a grade it hasn't earned:*
 
 <p align="center">
-  <img src="docs/assets/report-compact.png" alt="A real ClawSecCheck report: Score 49/100, Grade F, two CRITICAL findings explained in plain language" width="720">
+  <img src="docs/assets/report-compact.png" alt="A real ClawSecCheck report: the most urgent finding named first, and an explicit note that 3 of the 5 audit layers did not run — so no grade is issued" width="720">
 </p>
 
 <details>
 <summary>See a longer excerpt of the same report</summary>
 
 <p align="center">
-  <img src="docs/assets/report.png" alt="A longer excerpt: score header, counts, an inventory-by-subject summary, and findings grouped by subject, most urgent first" width="740">
+  <img src="docs/assets/report.png" alt="A longer excerpt: the most-urgent header, the run's own ledger of what it did not reach, an inventory by subject, and findings grouped by subject, most urgent first" width="740">
 </p>
 
 </details>
@@ -121,9 +128,11 @@ Three things make this a watch rather than a re-run:
 - **It reports the change, not the state.** A run with nothing new says `No new
   threats among what was compared` — you are not asked to re-read a full report
   to spot what moved.
-- **It says what it could not compare.** Every run ends with a count of
-  dimensions it had no basis to diff (`ℹ️ 5 things could not be compared this
-  run`), so a quiet run is never mistaken for a clean one.
+- **It says what it could not compare.** Once a baseline exists, every run ends
+  with a count of dimensions it had no basis to diff (`ℹ️ 5 things could not be
+  compared this run`), so a quiet run is never mistaken for a clean one. (The
+  very first run has nothing to compare against yet and says *that* instead —
+  the block above is what it prints.)
 - **The baseline has a reference fingerprint.** Each run prints a short value;
   keep a copy off the machine and re-check it later with `--verify-baseline`.
   It moves whenever anything the watch recorded is different — so a copy you
@@ -163,18 +172,30 @@ and the other pokes your running agent live:
 | # | Layer | Runs on its own? | How you get it |
 |---|---|---|---|
 | 1 | Static: config, files, permissions | yes — the default run | (default) |
-| 2 | Sweep of what's installed: skills + plugins | yes | `--full` |
-| 3 | Logs and trajectories: what already happened | yes, budget-bounded | `--full` |
-| 4 | Agent self-report | **no** — the agent has to answer | `--ask` → `--attest` |
-| 5 | Live behaviour test | **no** — pokes the running agent | `--canary` / `--dryrun` / `--redteam` / `--multiturn` |
+| 2 | Sweep of what's installed: skills + plugins | no | `--full` |
+| 3 | Logs and trajectories: what already happened | yes, budget-bounded | (default) — given up by `--full --fast` |
+| 4 | Agent self-report | **no** — the agent has to answer | `--ask` → fill it in → `--attest <file>` |
+| 5 | Live behaviour test | **no** — pokes the running agent | run `--canary` / `--dryrun` / `--redteam` / `--multiturn`, have your agent judge the result, then feed the verdict back with `--judged-bundle <file>` |
 
 **A grade is issued only when all five ran.** Short of that there is no number
 at all — you get findings, led by the most urgent one in words, plus a line
 naming which layers didn't run. Concretely: a bare run leaves 3 of 5 untouched
-(the installed sweep, the self-report, the live test); `--full` closes two of
-those and leaves 2 of 5 (self-report, live test); `--full --fast` gives up the
-deep phases again for speed and leaves 4 of 5. Stack the opt-in flags above to
-close the remaining two and earn a grade.
+(the installed sweep, the self-report, the live test); `--full` closes one of
+those — the installed sweep — and leaves 2 of 5 (self-report, live test);
+`--full --fast` gives up the deep phases for speed and leaves 4 of 5.
+
+**The last two layers are submissions, not flags to stack.** Running a self-test
+*alongside* an audit does nothing: the self-test flags are standalone modes, and
+the CLI says so (`--full --canary` prints `note: --full has no effect with
+--canary` and runs only the canary). Layers 4 and 5 close when their **answers**
+come back in, so the one command that earns a grade is:
+
+```bash
+clawseccheck --full --attest filled-template.json --judged-bundle verdicts.json
+```
+
+Ask your agent to do it and it handles both round-trips for you — that is what
+*"audit my OpenClaw setup, all five layers"* means in chat.
 
 ## 🔍 What it checks
 
@@ -236,10 +257,16 @@ by default it writes only its own local history under `~/.clawseccheck/` —
 removable any time by asking your agent to *"purge the clawseccheck data"*.
 A few flags write local files only when you explicitly ask for them
 (`--save`, `--badge`, `--html`, `--sarif`, `--pdf`, `--monitor`, `--log`) — see the
-[User guide](docs/USAGE.md) for the full list. The one exception that touches
-the audited home itself is also opt-in and confirmation-gated:
-`--apply-ignore-proposals` can append entries — never invent them — to its
-own `.clawseccheckignore` suppression file there.
+[User guide](docs/USAGE.md) for the full list. Two of those writes can land
+**inside the audited home**, both only because you asked for them:
+`--apply-ignore-proposals` appends entries — never invents them — to its own
+`.clawseccheckignore` suppression file there, and is confirmation-gated on top;
+and `--pdf` **given with no path** puts the report in `<home>/media/outbound/`,
+which is the one directory OpenClaw always lets its own read tool open, so the
+file can be attached into your chat. It writes there only if that directory
+already exists and is writable — it is never created — and falls back to
+`~/.clawseccheck/report.pdf` otherwise. Name a path (`--pdf report.pdf`) and it
+goes exactly there instead. Neither touches your OpenClaw config.
 
 The widest read that reaches **outside** your OpenClaw home is on by default: to
 catch a dependency that would run code the moment it is installed, the tool
@@ -318,14 +345,17 @@ alarming-looking string live here on purpose:
 - **Nothing here fetches anything.** No network client is imported anywhere in
   the package — read the import lines. `urllib.parse` is string parsing; the
   single `import socket` (`clawseccheck/checks/_egress.py`) is used only for
-  `inet_aton`/`inet_ntoa` IP-string conversion; the only `.connect(` calls in
-  the tree are `sqlite3.connect(…, mode=ro)` against local files. The names
+  `inet_aton`/`inet_ntoa` IP-string conversion; and inside `clawseccheck/` the only
+  `.connect(` calls are `sqlite3.connect(…, mode=ro)` against local files. A
+  repo-wide grep does turn up real socket connects — every one of them is in a
+  deliberately vulnerable fixture skill under `fixtures/`, which is point 3. The names
   `urlopen`, `requests` and `httpx` *do* appear throughout
   `clawseccheck/skillast.py` — as string literals in the sink tables the AST
   layer uses to spot network calls in **your** skills. Data, not imports.
 - **The flagged URLs are inert.** `grep -rn "evil.example" clawseccheck/` returns
-  only comments and docstrings that *explain* a check; the executable
-  occurrences are all under `tests/`.
+  only comments and docstrings that *explain* a check; every executable
+  occurrence is under `tests/` or `fixtures/` — the deliberately vulnerable
+  payloads of point 3.
 - **The whole engine is stdlib.** `pyproject.toml` declares
   `dependencies = []`.
 
@@ -352,9 +382,11 @@ false FAIL here is a hard blocker and not a tuning preference. See the
 <summary><b>⚙️ For terminal users: CLI, JSON, SARIF, CI gates</b></summary>
 
 ClawSecCheck is also a full standalone CLI (zero dependencies, Python 3.9+).
-Nothing above replaced this: every flag still exists and still works — the
-three conversational modes sit on top of the same CI/power surface, they
-didn't shrink it.
+Nothing above replaced this: the three conversational modes sit on top of the
+same CI/power surface, they didn't shrink it. One flag did go in 4.0.0 —
+`--fail-under <score>`, because a default run no longer carries a score to
+threshold on. Use `--fail-on <severity>` instead, or `--exit-code` to trip on
+any FAIL.
 
 ```bash
 pipx install "git+https://github.com/gl0di/clawseccheck@vX.Y.Z"   # pin a release tag (recommended)
@@ -384,6 +416,24 @@ complete flag list.
 > what it did not check, and no mode prints "clear" about a subject it never
 > looked at. The full, unvarnished list of limitations is in the
 > [User guide](docs/USAGE.md#honest-limitations).
+
+## ✅ Compatibility
+
+Three different kinds of evidence, kept apart on purpose — "the code handles it" is
+not the same claim as "we ran it".
+
+| | |
+|---|---|
+| **Verified against a running install** | **OpenClaw 2026.9.1.** The schema snapshots this repo ships — `tests/dist_verified_paths.txt`, `tests/state_schema_snapshot.sql`, `tests/dist_citation_baseline.txt` — are generated from an installed 2026.9.1, and each records the version it was taken against so a stale one is visible rather than assumed. |
+| **Read by the code, each measured against a running install while it was written** | **2026.7.1-2, 2026.8.1, 2026.8.2** — the three builds that moved settings the audit reads. Every moved key is read in *both* spellings: the agent roster as `agents.list` *and* `agents.entries`, the gateway command lists under their old and new parents, and the three settings 2026.8.1 moved out of `openclaw.json` into OpenClaw's machine-owned store. An older or not-yet-migrated config is read, not silently skipped. |
+| **On anything else** | The audit still runs. This is deliberately *not* a claim of a contiguous supported range: the builds between the measured points (2026.7.2 – 2026.8.0) were never run against, so the tool treats a config it cannot date as undated — it names **both** key spellings in its fix advice rather than guessing which one your build accepts, and a key whose home this build does not have is reported as retired or `UNKNOWN`, never resolved to nothing and given a verdict anyway. |
+
+**Operating systems.** CI runs the full suite on **Linux** (Python 3.9 and 3.12) and
+**macOS** (Python 3.12) for every push. **Windows** runs the read-only audit and is
+advertised in the skill manifest, but it has **no CI job** and two protections degrade
+there: ClawSecCheck's own `~/.clawseccheck/` store is not owner-restricted (file modes are
+not enforced as NTFS ACLs) and the symlink-clobber guard is a no-op. Treat the local store
+as unprotected on Windows — see the [User guide](docs/USAGE.md) for the detail.
 
 ## 📚 Documentation
 

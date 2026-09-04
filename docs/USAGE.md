@@ -26,11 +26,12 @@ actually looked at.
 Everything below is **local against your OpenClaw setup**, and the scanner
 itself makes no network calls. Reading goes beyond just the config file — see
 ["trust no one"](#important--trust-no-one-including-this-skill) below for the
-full read scope. Writing is narrow: nothing here changes your OpenClaw config
-itself, with exactly one named, opt-in, confirmation-gated exception
-(`--apply-ignore-proposals`, covered where it's introduced below); every other
-write goes to ClawSecCheck's own files, noted inline as each flag is
-introduced. (When you run it through OpenClaw chat, the report text becomes
+full read scope. Writing is narrow: **nothing here ever changes your OpenClaw
+config, a skill, or a bootstrap file.** Two opt-in flags write a ClawSecCheck
+file *inside* the OpenClaw home — `--apply-ignore-proposals`
+(confirmation-gated) and a no-PATH `--pdf`, both covered where they're
+introduced below; every other write goes to ClawSecCheck's own files under
+`~/.clawseccheck/`, noted inline as each flag is introduced. (When you run it through OpenClaw chat, the report text becomes
 part of your conversation and is handled by the model provider your agent
 already uses.)
 
@@ -68,10 +69,10 @@ of the *audit* actually happened:
 | # | Layer | Automatic? | How you get it |
 | --- | --- | --- | --- |
 | 1 | Static: config, files, permissions | yes | the default run |
-| 2 | Sweep of what is installed: skills + plugins | yes | `--full` |
-| 3 | Logs and trajectories: what already happened | yes, budget-bounded | `--full` (also `--behavioral`, `--analyze-trajectory`) |
-| 4 | Agent self-report | **no** — the agent must answer | `--ask` → `--attest` |
-| 5 | Live behaviour test | **no** — pokes the running agent | `--canary` / `--dryrun` / `--redteam` / `--multiturn` |
+| 2 | Sweep of what is installed: skills + plugins | no | `--full` |
+| 3 | Logs and trajectories: what already happened | yes, budget-bounded | the default run — given up by `--full --fast`; `--behavioral` / `--analyze-trajectory` are separate deep modes |
+| 4 | Agent self-report | **no** — the agent must answer | `--ask` → fill it in → `--attest <file>` |
+| 5 | Live behaviour test | **no** — pokes the running agent | run `--canary` / `--dryrun` / `--redteam` / `--multiturn`, then submit the agent's verdict with `--judged-bundle <file>` — the self-test flags are standalone modes and do **not** combine with an audit run |
 
 **A letter grade is issued only when all five ran.** Short of that there is no number at
 all: the report leads with the most urgent finding, in words, plus a mandatory line
@@ -171,6 +172,16 @@ channel. The **canonical, deterministic output is always a saved file**: `--save
 phone/mobile chat client specifically, prefer `--pdf` over `--html` — most mobile clients hand an
 HTML attachment over as a download, while a PDF opens inline in the client's own viewer.
 
+**`--pdf` given with no PATH picks the one place OpenClaw can attach from.** OpenClaw parses a
+`MEDIA:<path>` directive off the agent's own reply and turns it into a real attachment, but only
+for a path its read tool is allowed to open — and on most homes that excludes anything outside the
+workspace. `<home>/media/outbound/` is the exception the runtime seeds unconditionally, so a bare
+`--pdf` writes `clawseccheck-report.pdf` there and prints `MEDIA:~/...`. Three guards on that:
+the directory must already exist and be writable, it is **never created**, and if it is missing
+the write falls back to `~/.clawseccheck/report.pdf` and says so. This is the only case where an
+output flag writes inside the audited home without you naming the path — give `--pdf <path>` and
+it goes exactly where you said.
+
 ## Guided mode
 
 When you run ClawSecCheck inside OpenClaw, the agent walks you through the entire audit
@@ -201,11 +212,11 @@ injection tests; and so on. Every suggestion is a further **check** — never re
 OpenClaw config.** The human report states what is wrong and why; acting on it
 is yours. For machine consumers, each finding still carries structured
 `"fix"`/`"remediation"` data in `--json` and SARIF — data for your own
-tooling, not something ClawSecCheck renders or offers. (The one exception to
-"never changes" anything in your OpenClaw home is `--apply-ignore-proposals`,
-which is not a fix — it only appends previously-proposed entries to
-ClawSecCheck's own suppression file there, opt-in and confirmation-gated; see
-below.)
+tooling, not something ClawSecCheck renders or offers. (Nothing here is a fix
+applied for you. The two flags that write anything into your OpenClaw home —
+`--apply-ignore-proposals` and a no-PATH `--pdf` — write ClawSecCheck's own
+suppression file and ClawSecCheck's own report; neither remediates a finding.
+Both are covered below.)
 
 ## Recipes / common prompts
 
@@ -361,9 +372,12 @@ ask: a report file (`--save`), the `--monitor` snapshot and change journal
 (`~/.clawseccheck/state.json`, `events.jsonl`), a badge (`--badge`),
 HTML/SARIF/PDF (`--html`/`--sarif`/`--pdf`), a log (`--log`), a small freshness ledger (`~/.clawseccheck/coverage.json`) recording when you
 last ran an active self-test (`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`), and —
-the one write that lands inside the audited OpenClaw home rather than under
+the two writes that land inside the audited OpenClaw home rather than under
 `~/.clawseccheck/` — `--apply-ignore-proposals`, opt-in and confirmation-gated, appending
-previously-proposed entries to `<home>/.clawseccheckignore` (never inventing one). It is
+previously-proposed entries to `<home>/.clawseccheckignore` (never inventing one), and a
+no-PATH `--pdf`, which puts the report in `<home>/media/outbound/` so it can be attached
+into chat — and only when that directory already exists and is writable; it is never
+created, and the fallback is `~/.clawseccheck/report.pdf`. It is
 idempotent and says so: re-applying the same proposals reports which entries were already
 present instead of asking you to confirm writes it is not going to make.
 
@@ -969,7 +983,7 @@ clawseccheck --monitor --json --data-dir ~/.clawseccheck
   "score": null,
   "grade": null,
   "graded": false,
-  "baseline_reference": "ab12cd34ef56ab78"
+  "baseline_reference": "4f660e3f33cf4d13ec634e1859c07e885698a50eac372820e92fbf39cb7ae896"
 }
 ```
 
@@ -1433,25 +1447,26 @@ python3 audit.py --log audit.log            # also write log to a local file
     Chains/Behavioural/Second opinion/Coverage/Worth a glance, in that fixed order):
 
     ```text
-    🦞 ClawSecCheck · OpenClaw Security Audit · Grade F · 49/100
-    ████████░░░░░░░░  ·  26 issues
-    ⚠️ capped from 70/100 — open CRITICAL finding
+    🦞 ClawSecCheck · OpenClaw Security Audit · Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)  [A1]
+    No grade yet — 2 of 5 layers did not run: agent self-report (not submitted), live behaviour test (not submitted).  ·  27 issues
+    Not fully covered: no trajectory sidecar was read
+    ⚠️ open CRITICAL finding — it would have capped the grade, but this run has no grade to cap.
 
     · Findings ·
-    ┌──────────────────────────────
+    ┌──────────
     │ ⚙️ OpenClaw core — 13 issue(s)
-    └──────────────────────────────
-    🔴 CRITICAL  Gateway exposure & channel authentication
-        why: gateway.bind=0.0.0.0 exposed with auth.mode=none; gateway.tailscale.mode=funnel exposes the gateway publicly
+    └──────────
+    🔴 CRITICAL  Secrets in plaintext config / bootstrap files
+        why: gateway.auth.password set in…
 
-    ┌──────────────────────────────
-    │ 🤖 Agents — 4 issue(s)
-    └──────────────────────────────
-    🔴 CRITICAL  Lethal Trifecta (untrusted input × sensitive data × outbound)
-        why: Active legs 3/3: untrusted input, sensitive data, outbound actions. All three legs are active — one injected prompt is enough to exfiltrate everything.
-    🟠 HIGH  Execution sandbox
-        why: agents.defaults.sandbox.mode is off (exec runs on the host)
+    🔴 CRITICAL  Gateway exposure & channel authentication
+        why: gateway.bind=0.0.0.0 exposed with…
     ```
+
+    That header is what the common case looks like: `--full` closes the installed sweep,
+    so 2 of the 5 layers are still open and no letter is issued. Supply `--attest` and
+    `--judged-bundle` in the same command and the header carries `Grade X · NN/100`
+    instead.
 
     This is a **sample for illustration only** — the guided flow ([`SKILL.md`](../SKILL.md)
     Step 3) always pastes the real command's actual stdout, never this text.
@@ -1709,8 +1724,10 @@ hard false positives on real configs.
   `--fail-on`, `--exit-code`, …).
 - **`--json` schema:** top-level `score`, `grade`, `capped`, `raw_score`, `trifecta`,
   `findings[]`, `next_actions[]`; each finding's `id`, `title`, `severity`, `status`, `detail`,
-  `fix`, `framework`, `confidence`, `evidence`. `score`/`grade`/`raw_score`/`capped` are `null`
-  on an ungraded run — see [Scoring](#scoring).
+  `fix`, `framework`, `confidence`, `evidence`. `score`/`grade`/`raw_score` are `null` on an
+  ungraded run; `capped`/`cap_severity` still report whether a cap condition exists, because
+  "an open CRITICAL is present" is a fact about the findings, not about the grade that run
+  did not issue — see [Scoring](#scoring).
 - **SARIF 2.1.0 output** shape (rule ids = check ids; `properties.confidence` + `.evidence`).
 - **Public Python API:** `clawseccheck.audit(...) -> (ctx, findings, ScoreResult)` and the
   `Finding` field names.

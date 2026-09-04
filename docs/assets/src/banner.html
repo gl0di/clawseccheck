@@ -36,13 +36,7 @@
   .g { width: 62px; height: 72px; border-radius: 12px; display: flex; align-items: center;
        justify-content: center; font-size: 38px; font-weight: 800;
        background: rgba(255,255,255,.05); color: #6d5f59; border: 1px solid #332723; }
-  .g.on { background: linear-gradient(160deg, #4ec96e, #2e9c50); color: #08140b;
-          border-color: transparent; box-shadow: 0 8px 26px rgba(78,201,110,.35); }
   .g.f { color: #a0524a; }
-  .meter { margin-top: 22px; height: 10px; border-radius: 6px; overflow: hidden;
-           background: #241a17; }
-  .meter div { height: 100%; width: 78%;
-               background: linear-gradient(90deg, #e34234, #e8a33d, #4ec96e); }
   .cfoot { margin-top: 20px; font-size: 18.5px; line-height: 1.5; color: #b4a59f;
            font-family: "DejaVu Sans Mono", monospace; }
   .cfoot .ok { color: #7ee787; }
@@ -69,12 +63,11 @@
     </div>
     <div class="clabel">$ clawseccheck</div>
     <div class="grades">
-      <div class="g on">A</div><div class="g">B</div><div class="g">C</div>
+      <div class="g">A</div><div class="g">B</div><div class="g">C</div>
       <div class="g">D</div><div class="g f">F</div>
     </div>
-    <div class="meter"><div></div></div>
-    <div class="cfoot">scores your setup <span class="ok">A–F</span><br>
-      finds the urgent holes<br>no API key · no network</div>
+    <div class="cfoot">grades <span class="ok">A–F</span> when all<br>
+      five layers ran<br>names what it skipped<br>no API key · no network</div>
   </div>
 </div>
 <div class="url">github.com/gl0di/clawseccheck</div>

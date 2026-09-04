@@ -30,7 +30,23 @@ Each PNG is a real capture, never hand-drawn. Three steps:
    each other in the README.
 
 3. **Rasterize** `report.html` at 2× and crop to the alpha bounding box (any headless browser
-   plus any image library will do; Pillow's `Image.getbbox()` does the crop).
+   plus any image library will do; Pillow's `Image.getbbox()` does the crop). What was actually
+   used, recorded so the next person does not reverse-engineer it a third time:
+
+   ```bash
+   google-chrome --headless --disable-gpu --no-sandbox --hide-scrollbars \
+     --force-device-scale-factor=2 --default-background-color=00000000 \
+     --window-size=816,2600 --screenshot=report.raw.png "file://$PWD/report.html"
+   python3 -c "from PIL import Image; im=Image.open('report.raw.png').convert('RGBA'); \
+     im.crop(im.getbbox()).save('report.png')"
+   ```
+
+   `816` is not arbitrary: it is the `760` frame plus the stylesheet's `28px` body padding on
+   each side. The frame's drop shadow spreads wider than that, so a *wider* window lets
+   `getbbox()` find the shadow's own edge and the PNG comes out 877 CSS px instead of 816 —
+   the two shipped images would stop matching each other and every earlier capture. Set the
+   window to the padding box and the shadow is clipped to it, which is what the committed
+   images (1632 px = 816 × 2) already are.
 
    **The rasterizer is not a project dependency, and must not become one.** ClawSecCheck has
    zero runtime *and* zero dev-tooling dependencies; this last step uses whatever happens to

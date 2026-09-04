@@ -8,9 +8,9 @@
 # grow: `compare` fails on any pair NOT in this file. Fixing an entry and
 # re-recording removes it here; that is progress, never a failure.
 #
-# openclaw-version: 2026.8.2
-# generated: 2026-09-02
-# violations: 296
+# openclaw-version: 2026.9.1
+# generated: 2026-09-04
+# violations: 295
 #
 clawseccheck/behavioral.py	server-runtime-subscriptions-OlWMLbPY.js
 clawseccheck/behavioral.py	tool-catalog-C8xbUFNe.js
@@ -151,7 +151,6 @@ clawseccheck/checks/_mcp.py	config-normalization-shared-w2iz0aeC.js
 clawseccheck/checks/_mcp.py	config-state-CtMlHVRM.js
 clawseccheck/checks/_mcp.py	gateway-startup-plugin-ids-COmsQTCi.js
 clawseccheck/checks/_mcp.py	installed-plugin-index-N4jxqS0-.js
-clawseccheck/checks/_mcp.py	installed-plugin-index-store-C3LEu6Er.js
 clawseccheck/checks/_mcp.py	npm-shrinkwrap.js
 clawseccheck/checks/_mcp.py	registry-B8eQDFB4.js
 clawseccheck/checks/_mcp.py	schema-DRyO1XBt.js

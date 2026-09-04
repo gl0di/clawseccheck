@@ -91,8 +91,13 @@ before assuming a nested key is part of the contract; notably, the subject keys 
   "total": 410,
   "graded": true,
   "not_checked": [],
+  "disclosures": [],
   "missing_layers": [],
   "cap_severity": null,
+  "fail_counts_by_severity": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "undetermined": {"scored_checks": 104, "undetermined": 52, "confirmed_absent": 17,
+                   "engine_degraded": 0, "no_signal": 35,
+                   "no_signal_by_severity": {"critical": 5, "high": 20, "medium": 9, "low": 1}},
   "runtime_capped": false,
   "runtime_cap_reason": null,
   "config_blind_capped": false,
@@ -134,6 +139,14 @@ before assuming a nested key is part of the contract; notably, the subject keys 
 ```
 
 `skill_sweep` is omitted from this skeleton (it appears only under `--full` — see §19).
+
+**The skeleton above shows the *graded* shape, which is not the common one.** A bare run,
+a `--fast` run and a plain `--full` run all come back `graded: false` — see the `graded`
+row in the table above. On such a run `score`, `grade` and `raw_score` are `null`,
+`missing_layers` names the layers that did not run, and `capped`/`cap_severity` still
+report whether a cap condition exists (that is a fact about the findings, not about a
+grade the run did not issue). Write your consumer against the ungraded shape and let the
+graded one be the special case, not the other way round.
 
 ---
 
@@ -449,11 +462,28 @@ Keys are the 7 security family slugs: `"exposure"`, `"privilege"`, `"supply_chai
 Always present in `--json` output. Estimates the score impact of fixing FAIL findings.
 Used by the Dashboard to render the "fix this one thing" call-to-action.
 
+On a **graded** run (all five layers ran):
+
 ```json
 {
   "current":    {"score": 52, "grade": "D"},
   "top1":       {"finding_id": "B1", "projected_score": 72, "projected_grade": "C", "delta": 20},
-  "cumulative": {"projected_score": 81, "projected_grade": "B", "delta": 29}
+  "cumulative": {"projected_score": 81, "projected_grade": "B", "delta": 29},
+  "graded":     true
+}
+```
+
+On an **ungraded** run — the common case, since a bare run, a `--fast` run and a plain
+`--full` run are all ungraded — every score and grade is `null`, `graded` is `false`, and
+the deltas remain, because "how many weight points this finding is worth" is a fact about
+the findings and does not need a grade to exist:
+
+```json
+{
+  "current":    {"score": null, "grade": null},
+  "top1":       {"finding_id": "A1", "projected_score": null, "projected_grade": null, "delta": 0},
+  "cumulative": {"projected_score": null, "projected_grade": null, "delta": 43},
+  "graded":     false
 }
 ```
 
@@ -698,7 +728,7 @@ as a reason string in a full audit's per-skill inventory (§18).
 ```json
 {
   "tool": "clawseccheck",
-  "version": "3.33.0",
+  "version": "4.0.0",
   "mode": "vet",
   "target": "/path/to/skill",
   "target_type": "skill",
@@ -835,7 +865,7 @@ Every string in this envelope crosses one enforcing boundary on the way out (`re
 ```json
 {
   "tool": "clawseccheck",
-  "version": "3.37.0",
+  "version": "4.0.0",
   "judgePacket": [
     {
       "finding_id": "TT4_FILE_NET",
@@ -1615,7 +1645,7 @@ document describes; reading both from one invocation is expected.
   "score": null,
   "grade": null,
   "graded": false,
-  "baseline_reference": "ab12cd34ef56ab78"
+  "baseline_reference": "4f660e3f33cf4d13ec634e1859c07e885698a50eac372820e92fbf39cb7ae896"
 }
 ```
 
@@ -1653,13 +1683,23 @@ chain and `--trend` says so (see `SECURITY_MODEL.md` for the chain semantics).
 | `raw_score` | `int` | Optional, tail. The severity-weighted, **uncapped** pass rate. |
 | `raw_scope` | `str` | Optional, tail. A hash over exactly the check ids folded into this run's `raw_score` denominator. |
 | `raw_ver` | `str` | Optional, tail. The build that wrote the row. |
+| `chain_hash` | `str` | 64-hex. The row's link in the hash chain — every field above is inside the hashed payload, so a hand-edited value breaks the chain and `--trend` says so. Always present on a row this build writes. |
 
 ### Skeleton
 
 ```json
 {"date": "2026-09-03", "score": 71, "grade": "C", "ts": "2026-09-03T18:04:11Z",
  "home": "~/.openclaw", "source": "audit", "_schema": 1,
- "raw_score": 83, "raw_scope": "9f2c1ab4", "raw_ver": "3.61.0"}
+ "raw_score": 83, "raw_scope": "9f2c1ab4", "raw_ver": "4.0.0",
+ "chain_hash": "d697620f5e3fe5026710113bb5044fb9c1ff254cb5794510f92ba150ac806ec6"}
+```
+
+An ungraded row — the common case — omits `score`/`grade` and carries the marker instead:
+
+```json
+{"date": "2026-09-04", "ts": "2026-09-04T23:18:18", "home": "~/.openclaw",
+ "source": "audit", "_schema": 1, "graded": false,
+ "chain_hash": "d697620f5e3fe5026710113bb5044fb9c1ff254cb5794510f92ba150ac806ec6"}
 ```
 
 ### Notes

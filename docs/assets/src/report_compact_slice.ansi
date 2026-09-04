@@ -1,10 +1,10 @@
 🦞 ClawSecCheck · OpenClaw Security Audit
 ============================================
-Score: 49/100   Grade: [31;1mF[0m
-[31m████████[0m[90m░░░░░░░░[0m
-(capped from 70 - open CRITICAL finding)
+Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)  [A1]
+No grade yet — 3 of 5 layers did not run: installed skills and plugins (not reached), agent self-report (not submitted), live behaviour test (not submitted).
+open CRITICAL finding — it would have capped the grade, but this run has no grade to cap.
         …
-26 issue(s), grouped by subject — most urgent first within each:
+27 issue(s), grouped by subject — most urgent first within each:
 
 ┌──────────────────────────────
 │ [1mOpenClaw core[0m — 13 issue(s)
@@ -16,4 +16,6 @@ Score: 49/100   Grade: [31;1mF[0m
 │ [1mAgents[0m — 6 issue(s)
 └──────────────────────────────
 🔴 [31;1mCRITICAL[0m  Lethal Trifecta (untrusted input × sensitive data × outbound)
-    why: Active legs 3/3: untrusted input, sensitive data, outbound actions. Rule: keep ≤2 of 3. All three legs are active — your agent takes outside input, can reach sensitive data, and can act outbound; one injected prompt is enough to exfiltrate everything.
+        …
+🟠 [31;1mHIGH[0m  Execution sandbox
+    why: agents.defaults.sandbox.mode is off (exec runs on the host)
