@@ -77,3 +77,63 @@ def test_dist_citation_gate_passes_against_the_installed_dist():
             f"{gate.BASELINE_DEFAULT} is missing/unreadable."
         )
     assert rc == gate.EXIT_OK
+
+
+# --- the extension boundary (B-734) --------------------------------------------------
+#
+# `_CITATION_RE` used to match a PREFIX of a longer extension, so `exec-approvals.json`
+# -- a real OpenClaw data file our checks read, named in a dozen source comments -- was
+# extracted as a citation of a bundle `exec-approvals.js` that does not exist. Twelve
+# such phantoms had accumulated in the recorded baseline, and a thirteenth (a README
+# command line naming `filled-template.json`) BLOCKED a CI run. These tests pin the
+# boundary in both directions: no `.json`/`.jsx` may be read as a citation, and every
+# real bundle shape must still be.
+
+_NOT_CITATIONS = [
+    "filled-template.json",       # the README example that tripped the gate
+    "exec-approvals.json",        # OpenClaw's own approvals store
+    "npm-shrinkwrap.json",        # an npm lockfile
+    "user-allowFrom.json",        # trajaudit.py's fixture names
+    "discord-allowFrom.json",
+    "some-bundle-Ab12Cd34.jsx",   # a .jsx file is not the .js bundle either
+]
+
+_REAL_CITATIONS = [
+    ("agent-scope-config-BxAUeF6t.js", "agent-scope-config-BxAUeF6t.js"),
+    ("installed-plugin-index-store-C3LEu6Er.js", "installed-plugin-index-store-C3LEu6Er.js"),
+    ("a-bundle-Ab12Cd34.mjs", "a-bundle-Ab12Cd34.mjs"),
+    ("types-Ab12Cd34.d.ts", "types-Ab12Cd34.d.ts"),
+    # the citing convention in this tree carries a :line or :range suffix
+    ("see agent-scope-config-BxAUeF6t.js:66-69 for the resolver",
+     "agent-scope-config-BxAUeF6t.js"),
+]
+
+
+@pytest.mark.parametrize("text", _NOT_CITATIONS)
+def test_a_longer_extension_is_not_read_as_a_bundle_citation(text):
+    gate = _load_gate()
+    assert gate._CITATION_RE.findall(text) == [], (
+        f"{text!r} was extracted as a dist-bundle citation. The gate would then check a "
+        f"bundle that never existed, find it absent, and block the build over a filename "
+        f"that has nothing to do with the dist."
+    )
+
+
+@pytest.mark.parametrize("text,expected", _REAL_CITATIONS)
+def test_the_boundary_does_not_cost_a_real_citation(text, expected):
+    """The positive control for the test above. Narrowing an extractor buys false
+    negatives if it goes one character too far, so every shape the tree actually cites
+    is asserted to still match."""
+    gate = _load_gate()
+    assert expected in gate._CITATION_RE.findall(text)
+
+
+def test_the_boundary_guard_bites_on_the_pattern_it_replaced():
+    """Without this, both tests above would pass against a pattern that never matched
+    anything at all. Reproduce the retired regex and show it DID extract the phantom --
+    so the fix is doing work, not the assertions agreeing with themselves."""
+    import re
+
+    retired = re.compile(r"[A-Za-z0-9._-]+-[A-Za-z0-9_-]{8,}\.(?:js|d\.ts|mjs)")
+    assert retired.findall("filled-template.json") == ["filled-template.js"]
+    assert retired.findall("exec-approvals.json") == ["exec-approvals.js"]

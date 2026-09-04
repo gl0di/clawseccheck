@@ -10,7 +10,7 @@
 #
 # openclaw-version: 2026.9.1
 # generated: 2026-09-04
-# violations: 295
+# violations: 283
 #
 clawseccheck/behavioral.py	server-runtime-subscriptions-OlWMLbPY.js
 clawseccheck/behavioral.py	tool-catalog-C8xbUFNe.js
@@ -24,7 +24,6 @@ clawseccheck/catalog.py	clawhub-install-trust-DdnykQnp.js
 clawseccheck/catalog.py	code-mode-D5mNEiYV.js
 clawseccheck/catalog.py	env-DNgUBPBb.js
 clawseccheck/catalog.py	exec-approvals-BIKWP8_V.js
-clawseccheck/catalog.py	exec-approvals.js
 clawseccheck/catalog.py	install-policy-Barp1EUw.js
 clawseccheck/catalog.py	installed-plugin-index-N4jxqS0-.js
 clawseccheck/catalog.py	installed-plugin-index-records-C_n191FN.js
@@ -36,7 +35,6 @@ clawseccheck/catalog.py	types.openclaw-CXjMEWAQ.d.ts
 clawseccheck/catalog.py	workspace-zj1TEEka.js
 clawseccheck/catalog.py	zod-schema-O9ml_nmo.js
 clawseccheck/catalog.py	zod-schema.core-DviqqtPj.js
-clawseccheck/checks/__init__.py	exec-approvals.js
 clawseccheck/checks/_agents.py	context-visibility-BVlvSMUZ.js
 clawseccheck/checks/_agents.py	selection-JInn13lc.js
 clawseccheck/checks/_agents.py	sessions-D8qGY7uC.js
@@ -51,7 +49,6 @@ clawseccheck/checks/_capability.py	code-mode-D5mNEiYV.js
 clawseccheck/checks/_capability.py	config-fy-53tqM.js
 clawseccheck/checks/_capability.py	dangerous-config-flags-current-CrOoyQT2.js
 clawseccheck/checks/_capability.py	dangerous-tools-1CBnzkwG.js
-clawseccheck/checks/_capability.py	exec-approvals.js
 clawseccheck/checks/_capability.py	io-By0s-a_s.js
 clawseccheck/checks/_capability.py	run-attempt-CXZNKJ6y.js
 clawseccheck/checks/_capability.py	sandbox-tool-policy-ClB7s2K0.js
@@ -128,7 +125,6 @@ clawseccheck/checks/_lifecycle.py	bash-tools-DHyGpWCr.js
 clawseccheck/checks/_lifecycle.py	clawhub-DxyvW6TD.js
 clawseccheck/checks/_lifecycle.py	device-pairing-Dw7KWdQ7.js
 clawseccheck/checks/_lifecycle.py	dotenv-eb21SB3p.js
-clawseccheck/checks/_lifecycle.py	exec-approvals.js
 clawseccheck/checks/_lifecycle.py	exec-safe-bin-runtime-policy-BXwdBwWP.js
 clawseccheck/checks/_lifecycle.py	exec-safe-bin-trust-BiuDT-_9.js
 clawseccheck/checks/_lifecycle.py	get-reply-OTG64ybi.js
@@ -151,7 +147,6 @@ clawseccheck/checks/_mcp.py	config-normalization-shared-w2iz0aeC.js
 clawseccheck/checks/_mcp.py	config-state-CtMlHVRM.js
 clawseccheck/checks/_mcp.py	gateway-startup-plugin-ids-COmsQTCi.js
 clawseccheck/checks/_mcp.py	installed-plugin-index-N4jxqS0-.js
-clawseccheck/checks/_mcp.py	npm-shrinkwrap.js
 clawseccheck/checks/_mcp.py	registry-B8eQDFB4.js
 clawseccheck/checks/_mcp.py	schema-DRyO1XBt.js
 clawseccheck/checks/_mcp.py	selection-JInn13lc.js
@@ -215,7 +210,6 @@ clawseccheck/collector.py	dotenv-global-mWLbBl_z.js
 clawseccheck/collector.py	env-CKdem44B.js
 clawseccheck/collector.py	env-DNgUBPBb.js
 clawseccheck/collector.py	exec-approvals-BIKWP8_V.js
-clawseccheck/collector.py	exec-approvals.js
 clawseccheck/collector.py	home-dir-CJKEsOtx.js
 clawseccheck/collector.py	host-env-security-CWC2ZCy4.js
 clawseccheck/collector.py	installed-plugin-index-N4jxqS0-.js
@@ -259,7 +253,6 @@ clawseccheck/monitordims/_channels.py	zod-schema.channels-config-ORTHga0n.js
 clawseccheck/monitordims/_execpolicy.py	bash-tools-DHyGpWCr.js
 clawseccheck/monitordims/_execpolicy.py	config-Dy4vED5-.js
 clawseccheck/monitordims/_execpolicy.py	exec-approvals-BIKWP8_V.js
-clawseccheck/monitordims/_execpolicy.py	exec-approvals.js
 clawseccheck/monitordims/_execpolicy.py	exec-defaults-BLH0Yltk.js
 clawseccheck/monitordims/_execpolicy.py	runtime-status-BRnZ3ffr.js
 clawseccheck/monitordims/_plugins.py	bundled-compat-yOgFRqvZ.js
@@ -267,7 +260,6 @@ clawseccheck/monitordims/_plugins.py	config-normalization-shared-w2iz0aeC.js
 clawseccheck/monitordims/_plugins.py	config-state-CtMlHVRM.js
 clawseccheck/monitordims/_plugins.py	legacy-config-migrations--PhUdsg4.js
 clawseccheck/monitordims/_plugins.py	zod-schema-O9ml_nmo.js
-clawseccheck/openclawdist.py	npm-shrinkwrap.js
 clawseccheck/risk.py	agent-tools-BD8WL7ny.js
 clawseccheck/risk.py	audit-UjVvFwCi.js
 clawseccheck/risk.py	audit.nondeep.runtime-C3y1Q5Fi.js
@@ -293,8 +285,6 @@ clawseccheck/risk.py	types-34KlOMUq.d.ts
 clawseccheck/risk.py	types.tools-CBCgJD1K.d.ts
 clawseccheck/risk.py	zod-schema.core-DviqqtPj.js
 clawseccheck/toolpolicy.py	local-roots-CAoJyC6u.js
-clawseccheck/trajaudit.py	discord-allowFrom.js
-clawseccheck/trajaudit.py	user-allowFrom.js
 clawseccheck/trajectory.py	agent-bundle-mcp-materialize-D9l-gQ5S.js
 clawseccheck/trajectory.py	agent-bundle-mcp-runtime--G82BMQs.js
 clawseccheck/trajectory.py	run-attempt-CXZNKJ6y.js
@@ -303,7 +293,5 @@ clawseccheck/trajectory.py	session-chat-type-shared-DlB0c25q.js
 clawseccheck/trajectory.py	session-create-service-14oZxrT5.js
 clawseccheck/trajectory.py	session-key-VWT_xzM9.js
 clawseccheck/trajectory.py	session-key-utils-A-JGvyXu.js
-docs/CHECKS.md	exec-approvals.js
-docs/THREAT_COVERAGE.md	exec-approvals.js
 docs/THREAT_COVERAGE.md	pw-ai-BHPU7V7C.js
 docs/THREAT_COVERAGE.md	resolve-configured-secret-input-string-BefspyML.js

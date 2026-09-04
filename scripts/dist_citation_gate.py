@@ -78,7 +78,17 @@ EXIT_CANNOT_RUN = 2
 # loose (any run of 8+ alnum/underscore/dash) because different bundlers/releases have
 # used different hash alphabets; being loose here is safe because existence is always
 # re-checked against the real dist, never assumed from the shape alone.
-_CITATION_RE = re.compile(r"[A-Za-z0-9._-]+-[A-Za-z0-9_-]{8,}\.(?:js|d\.ts|mjs)")
+#
+# The trailing lookahead is NOT cosmetic. Without it the extension alternation matches a
+# PREFIX of a longer extension, so any `<word>-<8+ chars>.json` in any scanned file --
+# `filled-template.json` in a README command line, say -- was read as a citation of a
+# bundle `filled-template.js` that of course does not resolve, and the gate blocked the
+# build over a filename that has nothing to do with the dist. Found when a README example
+# tripped it (2026-09-04). This narrows the match and cannot hide a real citation: a
+# `.json`/`.jsx` file is not the `.js` bundle the existence check would look for.
+_CITATION_RE = re.compile(
+    r"[A-Za-z0-9._-]+-[A-Za-z0-9_-]{8,}\.(?:js|d\.ts|mjs)(?![A-Za-z0-9])"
+)
 
 # A citation is "qualified" -- correct AS HISTORY -- when a dated or versioned anchor
 # appears in the surrounding block. Deliberately permissive (OR of four shapes) because
