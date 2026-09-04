@@ -1,0 +1,150 @@
+# vendor_state_tables.txt -- GENERATED. Do not hand-edit.
+#
+# openclaw-version: 2026.9.1
+# state-schema-version: 15
+# generated: 2026-09-04
+# tables: 121
+#
+# source-bundle: openclaw-state-db-cache-AunrvrzG.js
+#   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
+#   is build output and rotates between releases, so it is evidence, not a locator.
+#
+# What this is
+# ------------
+# Every table name the installed OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL` declares -- the
+# vendor's whole state-SQLite surface, NOT the part this tree models. Its sibling
+# state_schema_snapshot.sql is deliberately the opposite: full DDL, projected to the few
+# tables we read.
+#
+# Why it exists
+# -------------
+# Both state-DB oracles are projections of what this tree already reads, so neither can
+# report a table nobody reads. 2026.9.1 added a skill library to the state schema and
+# both stayed green. This file is the unprojected set they lacked; the delta against it
+# is what names a new vendor surface.
+#
+# Regenerate on a machine with the matching OpenClaw installed -- it is a step in the
+# upgrade protocol's re-baseline, never a hand edit:
+#   PYTHONPATH=tests:. python3 tests/test_state_schema_grounding.py --write-state-tables
+#
+acp_replay_events
+acp_replay_sessions
+acp_sessions
+agent_database_leases
+agent_databases
+agent_deletion_journal
+agent_provenance
+apns_registration_tombstones
+apns_registrations
+audit_events
+audit_identity_keys
+backup_runs
+capture_blobs
+capture_events
+capture_sessions
+channel_ingress_events
+channel_pairing_allow_entries
+channel_pairing_requests
+claw_cron_refs
+claw_installs
+claw_mcp_server_refs
+claw_package_refs
+claw_workspace_files
+clawhub_promotion_claims
+config_health_entries
+config_machine_state
+config_revision_keys
+cron_job_runtime_authorities
+cron_job_scratch
+cron_jobs
+cron_run_receipts
+current_conversation_bindings
+delivery_queue_entries
+device_auth_tokens
+device_bootstrap_tokens
+device_identities
+device_pair_setup_completions
+device_pairing_join_codes
+device_pairing_paired
+device_pairing_pending
+diagnostic_events
+exec_approvals_config
+execution_decision_facts
+execution_identity_contexts
+execution_owner_lifecycle_bindings
+fleet_cells
+flow_runs
+gateway_boot_lifecycle
+gateway_origin_device_tokens
+gateway_restart_handoff
+gateway_restart_intent
+gateway_restart_sentinel
+github_personal_publication_requests
+github_publication_requests
+macos_port_guardian_records
+managed_outgoing_image_records
+mcp_oauth_pending_authorizations
+mcp_oauth_stores
+meeting_transcript_sessions
+meeting_transcript_summaries
+meeting_transcript_utterances
+migration_runs
+migration_sources
+native_hook_relay_bridges
+node_worker_launch_containers
+node_worker_launches
+node_worker_turns
+official_external_plugin_catalog_snapshots
+operator_approval_execution_identities
+operator_approval_standing_grants
+operator_approvals
+outbound_media_provenance
+outbound_message_execution_bindings
+outbound_message_progress
+plugin_binding_approvals
+plugin_blob_entries
+plugin_state_entries
+projects
+sandbox_registry_entries
+schema_meta
+secret_store_entries
+session_groups
+session_state_events
+session_state_heads
+session_upstream_links
+session_watch_cursors
+skill_library_entries
+skill_library_events
+skill_library_revisions
+skill_library_uploads
+skill_upload_chunks
+skill_uploads
+skill_usage
+skill_workshop_collection_reviews
+skill_workshop_proposal_events
+skill_workshop_proposal_rollbacks
+skill_workshop_proposals
+state_leases
+subagent_runs
+task_delivery_state
+task_runs
+user_preferences
+web_push_approval_deliveries
+web_push_subscriptions
+worker_environment_credentials
+worker_environment_ssh_fallback_ports
+worker_environments
+worker_inference_turns
+worker_session_placement_moves
+worker_session_placements
+worker_session_tool_operations
+worker_transcript_commit_heads
+worker_transcript_commits
+worker_turn_tool_authorities
+worker_workspace_pending_results
+worker_workspace_reconciliations
+workspace_generated_bootstrap_hashes
+workspace_path_aliases
+workspace_setup_state
+worktree_provisioned_file_chunks
+worktrees

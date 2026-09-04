@@ -523,7 +523,14 @@ def _read_snapshot_tables() -> "dict[str, list]":
 
 
 def _header_field(header: str, name: str) -> "str | None":
-    m = re.search(rf"^--\s*{re.escape(name)}:\s*(\S+)", header, re.MULTILINE)
+    """A `-- name: value` (SQL) or `# name: value` (text) header line's value.
+
+    Both comment markers, because the two generated files this module ships are read by
+    the same accessor: state_schema_snapshot.sql must executescript, so its header is SQL
+    comments; vendor_state_tables.txt is a plain list, so its header is `#`. One parser
+    rather than a second copy that can disagree with this one.
+    """
+    m = re.search(rf"^(?:--|#)\s*{re.escape(name)}:\s*(\S+)", header, re.MULTILINE)
     return m.group(1) if m else None
 
 
@@ -982,6 +989,19 @@ def test_header_field_parses_the_stamped_version():
     assert _header_field(header, "state-schema-version") == "15"
     assert _header_field(header, "nonexistent-field") is None
 
+    # The `#` half. The two generated files use different comment markers -- SQL for the
+    # snapshot, which must executescript, and `#` for the plain table list -- and one
+    # parser reads both. Without this case the `#` branch is exercised only indirectly,
+    # by tests that would blame the baseline for a parser fault.
+    text_header = "# openclaw-version: 2026.9.1\n# tables: 121\n"
+    assert _header_field(text_header, "openclaw-version") == "2026.9.1"
+    assert _header_field(text_header, "tables") == "121"
+    assert _header_field(text_header, "nonexistent-field") is None
+
+    # Not a header line: the marker must start the line, or a table named `tables` in the
+    # body could answer for the stamp.
+    assert _header_field("openclaw-version: 9.9.9", "openclaw-version") is None
+
 
 # ========================================================================================
 # LOCAL-ONLY test (needs the dist). Skip is pinned as a skip.
@@ -1022,17 +1042,290 @@ def test_snapshot_matches_installed_dist_and_stamped_version():
     )
 
 
+# ========================================================================================
+# B-721: the vendor's TABLE SET -- the oracle that was missing entirely.
+#
+# 2026.9.1 added five tables to the state schema: four of them a skill library
+# (`skill_library_entries` / `_revisions` / `_uploads` / `_events`) and one recording
+# GitHub personal publication requests. Both state-DB oracles reported clean, and each
+# for its own structural reason:
+#
+#   * scripts/state_db_drift_gate.py derives its expectations from the SELECT statements
+#     clawseccheck/ actually issues, so a table no reader names is invisible to it. Its
+#     own docstring says exactly this ("A table we do not read at all -- a NEW surface").
+#   * this module's snapshot is a PROJECTION, not the vendor schema: _target_table_names()
+#     intersects with the tables this tree declares or reads, so a vendor table we neither
+#     declare nor read is excluded BY DESIGN. It regenerated across the upgrade with 7
+#     tables and only the version stamp moved, while the vendor schema grew by five.
+#
+# Two green oracles and one genuinely new surface. Measured on 2026.9.1: the vendor
+# declares 121 tables and this tree models 7. Neither oracle was WRONG -- each was green
+# about the surface it reads. Nothing enumerated the surface neither of them reads.
+#
+# So the baseline below is the vendor's table set, whole and unprojected, and the
+# local-only test compares against it as a SET. A table added by an upgrade then arrives
+# as a named delta instead of waiting for someone to notice it.
+#
+# It stores the SET but reports only the DELTA. The unmodelled set is 114 entries on this
+# build, and a permanently-long list is not a signal -- the same reasoning
+# state_db_drift_gate.py already applies to its `unread col` line.
+#
+# WHAT THIS DOES NOT CLAIM. Being in the baseline says the vendor DECLARES a table, not
+# that any database has one: measured on this machine, 13 declared tables (the whole
+# skill_library family among them) are absent from the live DB even though the DDL is all
+# `CREATE TABLE IF NOT EXISTS`. So a check built on this surface must treat an absent
+# table as UNKNOWN and never as a clean PASS -- "the table is not here" is not evidence
+# the feature is unused.
+# ========================================================================================
+
+VENDOR_TABLES_FILE = Path(__file__).resolve().parent / "vendor_state_tables.txt"
+
+REGENERATE_TABLES_CMD = (
+    "PYTHONPATH=tests:. python3 tests/test_state_schema_grounding.py --write-state-tables"
+)
+
+# Tables clawseccheck/ still SELECTs from that the current vendor schema no longer
+# declares. Names only -- the reasons are the disproofs already written for their
+# fixtures, so there is one copy of each, not two.
+# test_retired_tables_are_absent_from_the_vendor_baseline re-grounds both claims against
+# the CURRENT baseline on every run, which is what stops the version named inside those
+# strings from quietly going stale.
+_RETIRED_TABLES_STILL_READ = {
+    "cron_run_logs": _CRON_RUN_LOGS_RETIRED,
+    "installed_plugin_index": _INSTALLED_PLUGIN_INDEX_RETIRED,
+}
+
+_VENDOR_TABLES_HEADER = """\
+# vendor_state_tables.txt -- GENERATED. Do not hand-edit.
+#
+# openclaw-version: {version}
+# state-schema-version: {schema_version}
+# generated: {generated}
+# tables: {count}
+#
+# source-bundle: {source_file}
+#   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
+#   is build output and rotates between releases, so it is evidence, not a locator.
+#
+# What this is
+# ------------
+# Every table name the installed OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL` declares -- the
+# vendor's whole state-SQLite surface, NOT the part this tree models. Its sibling
+# state_schema_snapshot.sql is deliberately the opposite: full DDL, projected to the few
+# tables we read.
+#
+# Why it exists
+# -------------
+# Both state-DB oracles are projections of what this tree already reads, so neither can
+# report a table nobody reads. 2026.9.1 added a skill library to the state schema and
+# both stayed green. This file is the unprojected set they lacked; the delta against it
+# is what names a new vendor surface.
+#
+# Regenerate on a machine with the matching OpenClaw installed -- it is a step in the
+# upgrade protocol's re-baseline, never a hand edit:
+#   {regen_cmd}
+#
+"""
+
+
+def _read_vendor_table_baseline() -> "tuple[str, list]":
+    """(whole file text, table names in file order) from the shipped baseline."""
+    text = VENDOR_TABLES_FILE.read_text(encoding="utf-8")
+    names = [
+        line.strip() for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return text, names
+
+
+def _table_set_delta(vendor, baseline) -> "tuple[list, list]":
+    """(added, removed) -- what the vendor gained and lost relative to the baseline.
+
+    A plain set difference, kept as its own function so it can be exercised on synthetic
+    inputs. Without that control, "the baseline matches the dist" passes exactly as well
+    on a comparison that is incapable of reporting anything at all.
+    """
+    return sorted(set(vendor) - set(baseline)), sorted(set(baseline) - set(vendor))
+
+
+def _write_vendor_table_baseline() -> int:
+    """Regenerate VENDOR_TABLES_FILE from a real installed OpenClaw. Raises rather than
+    writing a vacuous file when no dist is present -- a script entry point, not a test."""
+    if not OPENCLAW_DIST.is_dir():
+        raise RuntimeError(
+            f"OpenClaw dist not installed at {OPENCLAW_DIST} -- cannot regenerate a "
+            "vacuous table baseline. Run this on a machine with the matching OpenClaw "
+            "installed."
+        )
+    js_path = _find_state_schema_defining_js(OPENCLAW_DIST)
+    sql_text = _extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))
+    tables = sorted(_dist_table_ddl_texts(sql_text))
+    if not tables:
+        raise RuntimeError(
+            "extracted ZERO tables from the vendor schema -- refusing to write an empty "
+            "baseline, which would make every later comparison vacuously clean."
+        )
+    header = _VENDOR_TABLES_HEADER.format(
+        version=_installed_openclaw_version(),
+        schema_version=_installed_state_schema_version(),
+        generated=date.today().isoformat(),
+        count=len(tables),
+        source_file=js_path.name,
+        regen_cmd=REGENERATE_TABLES_CMD,
+    )
+    VENDOR_TABLES_FILE.write_text(header + "\n".join(tables) + "\n", encoding="utf-8")
+    return len(tables)
+
+
+def test_the_vendor_table_baseline_is_well_formed():
+    """Always-on. A malformed or empty baseline would make the dist comparison below
+    vacuously clean, which is the failure this whole section exists to prevent."""
+    text, names = _read_vendor_table_baseline()
+
+    assert names, f"{VENDOR_TABLES_FILE.name} lists no tables. Regenerate: {REGENERATE_TABLES_CMD}"
+    assert names == sorted(names), "table names are not sorted -- the file is generated, not edited"
+    assert len(names) == len(set(names)), (
+        f"duplicate table names: {sorted({n for n in names if names.count(n) > 1})}"
+    )
+
+    stamped = _header_field(text, "tables")
+    assert stamped is not None, "the header does not stamp a table count"
+    assert int(stamped) == len(names), (
+        f"the header stamps {stamped} tables but the body lists {len(names)} -- one of "
+        f"the two was hand-edited. Regenerate: {REGENERATE_TABLES_CMD}"
+    )
+    for field in ("openclaw-version", "state-schema-version", "source-bundle"):
+        assert _header_field(text, field), f"header is missing {field}"
+
+
+def test_the_table_delta_reports_both_directions_and_is_quiet_when_nothing_moved():
+    """The negative control for the comparison itself.
+
+    An always-fires guard and a never-fires guard are indistinguishable from a single
+    green run against a matching dist, so the delta is exercised on synthetic sets in
+    both directions AND on the case where nothing changed.
+    """
+    baseline = {"a", "b", "c"}
+
+    added, removed = _table_set_delta(baseline, baseline)
+    assert (added, removed) == ([], []), "reported a delta between a set and itself"
+
+    added, removed = _table_set_delta(baseline | {"skill_library_entries"}, baseline)
+    assert added == ["skill_library_entries"] and removed == []
+
+    added, removed = _table_set_delta(baseline - {"b"}, baseline)
+    assert added == [] and removed == ["b"]
+
+
+def test_every_state_table_clawseccheck_reads_is_declared_by_the_vendor():
+    """Always-on, and it needs no dist: the baseline stands in for the vendor schema.
+
+    Catches a reader pointed at a table the vendor does not have -- a typo, or a table
+    retired by an upgrade -- on the CI floor as well as here. The two retired names our
+    dual-shape readers still mention are registered, with the disproof already written
+    for their fixtures.
+    """
+    _, names = _read_vendor_table_baseline()
+    unknown = sorted(_clawseccheck_read_tables() - set(names) - set(_RETIRED_TABLES_STILL_READ))
+    assert not unknown, (
+        f"clawseccheck/ SELECTs from table(s) the vendor schema does not declare: "
+        f"{unknown}. Either the vendor retired them -- register them in "
+        f"_RETIRED_TABLES_STILL_READ with the evidence -- or the reader is misspelled."
+    )
+
+
+def test_retired_tables_are_absent_from_the_vendor_baseline():
+    """The other half, and the one that keeps the registrations honest.
+
+    Each entry in _RETIRED_TABLES_STILL_READ asserts a table is GONE from the vendor
+    schema. That claim is written in prose naming a specific OpenClaw version, and prose
+    does not re-check itself. This re-grounds both against the current baseline on every
+    run: if a name comes back, the registration is stale and the test says so.
+    """
+    _, names = _read_vendor_table_baseline()
+    resurrected = sorted(set(_RETIRED_TABLES_STILL_READ) & set(names))
+    assert not resurrected, (
+        f"registered as retired but present in the current vendor schema: {resurrected}. "
+        "The disproof text for each is now false -- drop the registration and treat the "
+        "table as live."
+    )
+
+
+def test_the_baseline_captured_the_surface_that_prompted_it():
+    """Positive control for the generator, not a coverage pin.
+
+    A baseline built by accident from the projected 7-table set would satisfy every
+    assertion above and still be blind to exactly what B-721 is about. The skill-library
+    family is the concrete surface the two projecting oracles missed, so its presence is
+    what proves this file records the vendor's schema rather than our model of it.
+
+    Deliberately NOT asserted here: that these tables stay unmodelled. Reading them is
+    the improvement this file exists to prompt, and a guard that reddens when someone
+    makes it would be a tripwire pointed the wrong way.
+    """
+    _, names = _read_vendor_table_baseline()
+    missing = sorted({"skill_library_entries", "skill_library_revisions",
+                      "skill_library_uploads", "skill_library_events"} - set(names))
+    assert not missing, (
+        f"the baseline does not list {missing} -- it was generated from a projection "
+        f"rather than from the vendor schema. Regenerate: {REGENERATE_TABLES_CMD}"
+    )
+
+
+def test_vendor_table_baseline_matches_the_installed_dist():
+    """LOCAL-ONLY (needs the dist). The oracle itself.
+
+    This is the run that would have named `skill_library_*` on the 2026.8.2 -> 2026.9.1
+    upgrade, where both existing state-DB oracles came back clean.
+    """
+    dist_dir = _require_dist()
+    js_path = _find_state_schema_defining_js(dist_dir)
+    sql_text = _extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))
+    vendor = set(_dist_table_ddl_texts(sql_text))
+
+    text, names = _read_vendor_table_baseline()
+    added, removed = _table_set_delta(vendor, names)
+
+    modelled = _target_table_names(vendor)
+    coverage = f"{len(modelled)} of {len(vendor)} vendor tables are modelled by this tree"
+    assert not (added or removed), (
+        f"the vendor's state-schema table set moved.\n"
+        f"  added by the vendor : {added}\n"
+        f"  gone from the vendor: {removed}\n"
+        f"({coverage}.) Decide what each addition holds before re-baselining -- an added "
+        f"table may be a surface this tool should read. Then: {REGENERATE_TABLES_CMD}"
+    )
+
+    stamped = _header_field(text, "openclaw-version")
+    installed = _installed_openclaw_version()
+    assert stamped == installed, (
+        f"{VENDOR_TABLES_FILE.name} is stamped openclaw-version: {stamped!r} but the "
+        f"installed OpenClaw is {installed!r}. An unread stamp is how a stale baseline "
+        f"stays green. Regenerate: {REGENERATE_TABLES_CMD}"
+    )
+
+
+def test_write_vendor_table_baseline_raises_without_a_dist(monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "OPENCLAW_DIST", Path("/nonexistent/openclaw/dist"))
+    with pytest.raises(RuntimeError, match="cannot regenerate a vacuous table baseline"):
+        _write_vendor_table_baseline()
+
+
 if __name__ == "__main__":
     if "--write-state-snapshot" in sys.argv:
         n = _write_state_snapshot()
         print(f"wrote {SNAPSHOT_FILE} -- {n} tables")
+    elif "--write-state-tables" in sys.argv:
+        n = _write_vendor_table_baseline()
+        print(f"wrote {VENDOR_TABLES_FILE} -- {n} vendor tables")
     else:
         # Exit NON-zero. This is a re-baseline step, and the upgrade protocol runs it
         # chained behind other commands: a usage error that exits 0 lets a run that wrote
         # NOTHING report success, after which an unchanged snapshot reads as "the vendor
         # did not move" instead of "the generator never ran".
         print(
-            "usage: python3 tests/test_state_schema_grounding.py --write-state-snapshot",
+            "usage: python3 tests/test_state_schema_grounding.py "
+            "[--write-state-snapshot | --write-state-tables]",
             file=sys.stderr,
         )
         sys.exit(2)
