@@ -1086,10 +1086,20 @@ def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = F
     grade would assert something the run cannot back up. The returned dict therefore
     always carries a ``"graded": bool`` key, and when it is False, ``"current"``'s
     ``"grade"``, ``"top1"``'s ``"projected_grade"`` (when ``"top1"`` is not ``None``),
-    and ``"cumulative"``'s ``"projected_grade"`` are all set to ``None``. The numeric
-    ``score``/``projected_score``/``delta`` values are left exactly as computed — they
-    stay internal data; a later renderer (not this function) decides what, if anything,
-    to show alongside a suppressed letter.
+    and ``"cumulative"``'s ``"projected_grade"`` are all set to ``None``.
+
+    C-423/C-425 then extended that suppression to the SCORES beside those letters:
+    ``"current"``'s ``"score"``, ``"top1"``'s ``"projected_score"`` and
+    ``"cumulative"``'s ``"projected_score"`` are ``None`` on an ungraded run too, for the
+    same reason the top-level ``score`` is — no consumer may show a number for a run a
+    ledger layer never reached. (This paragraph used to say those numbers were "left
+    exactly as computed"; that was true of C-422 and stopped being true two changes later,
+    while the comment on the ``projected_score`` line still pointed here. Corrected
+    2026-09-04 after a shipped doc was nearly written from it.)
+
+    ``"delta"`` is the one number that survives, deliberately: it is a difference between
+    two withheld scores, which reveals no verdict, and "fixing this one is the biggest
+    win" is the actionable part a reader still needs.
 
     Returns a dict with three keys (plus the C-422 ``"graded"`` key described above):
 

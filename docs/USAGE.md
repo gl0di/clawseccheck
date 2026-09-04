@@ -31,9 +31,9 @@ config, a skill, or a bootstrap file.** Two opt-in flags write a ClawSecCheck
 file *inside* the OpenClaw home — `--apply-ignore-proposals`
 (confirmation-gated) and a no-PATH `--pdf`, both covered where they're
 introduced below; every other write goes to ClawSecCheck's own files under
-`~/.clawseccheck/`, noted inline as each flag is introduced. (When you run it through OpenClaw chat, the report text becomes
-part of your conversation and is handled by the model provider your agent
-already uses.)
+`~/.clawseccheck/`, noted inline as each flag is introduced. (When you run it
+through OpenClaw chat, the report text becomes part of your conversation and is
+handled by the model provider your agent already uses.)
 
 ## The three modes
 
@@ -1442,9 +1442,12 @@ python3 audit.py --log audit.log            # also write log to a local file
     line points at `--save PATH` / `--html PATH` for the full detail. (The spec's original
     suggested flag name was `--card` — already taken by the shareable grade+score+trifecta
     badge above, hence `--compact`.)
-  - **Worked example** of the Grade card + findings block (real box-drawing, real severity
-    dots — the real paste continues past this excerpt with Skills/Plugins/MCP/RISK
-    Chains/Behavioural/Second opinion/Coverage/Worth a glance, in that fixed order):
+  - **Worked example** of the headline card + findings block (real box-drawing, real
+    severity dots — the real paste continues past this excerpt with Skills/Plugins/MCP/RISK
+    Chains/Behavioural/Second opinion/Coverage/Worth a glance, in that fixed order). This is
+    the **ungraded** shape, which is the one you will normally see: `--dashboard --full`
+    closes the installed sweep but still leaves 2 of the 5 layers, so there is no letter, no
+    `/100` and no score-bar:
 
     ```text
     🦞 ClawSecCheck · OpenClaw Security Audit · Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)  [A1]

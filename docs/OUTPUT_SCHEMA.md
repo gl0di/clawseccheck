@@ -489,9 +489,10 @@ the findings and does not need a grade to exist:
 
 | Field | Type | Description |
 |---|---|---|
-| `current` | `object` | `{"score": int, "grade": str}` — current audit score (mirrors top-level `score`/`grade`). |
+| `current` | `object` | `{"score": int \| null, "grade": str \| null}` — current audit score (mirrors top-level `score`/`grade`), both `null` when `graded` below is `false`. |
 | `top1` | `object \| null` | The single highest-leverage fix. `null` when there are no fixable (scored, non-suppressed) FAIL findings. |
 | `cumulative` | `object` | Projected score after fixing all CRITICAL + HIGH FAILs simultaneously. `delta` is 0 when none exist. |
+| `graded` | `bool` | C-422: mirrors the top-level `graded`. When `false`, every letter in this object is suppressed — `current.grade`, `top1.projected_grade` and `cumulative.projected_grade` are all `null`, because projecting a target grade on a run that may not show a grade of its own would assert what the run cannot back up. The **numbers** are deliberately not suppressed with them: `delta` stays real, since a difference between two withheld scores reveals no verdict and "fixing this one is the biggest win" is the part a reader still needs. |
 
 ### `top1` fields
 
@@ -500,7 +501,7 @@ the findings and does not need a grade to exist:
 | `finding_id` | `str` | Check ID of the recommended fix (e.g. `"B1"`). |
 | `projected_score` | `int` | Estimated score if this finding were resolved. |
 | `projected_grade` | `str` | Corresponding letter grade. |
-| `delta` | `int` | `projected_score − current.score`. |
+| `delta` | `int` | `projected_score − current.score`, computed from the real underlying scores. Present and real even when `graded` is `false` and both of those fields render as `null` — see the `graded` row above. |
 
 ### `cumulative` fields
 
