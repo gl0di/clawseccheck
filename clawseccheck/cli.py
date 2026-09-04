@@ -1064,16 +1064,36 @@ def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
     running the installed-skill/plugin sweep and the behavioral replay LATER in
     THIS SAME invocation (today: only ``_resolve_runtime_caps``, itself gated on
     ``args.full``, for the default `--full` report/`--json` path and
-    `--dashboard --full`). Marking those phases "ran" is a promise the caller must
-    be able to keep: a `--full --badge`/`--html`/`--sarif`/`--risk-paths` run (or
-    any of `--trend`/`--monitor`/`--percentile`/`--next`) never runs the sweep or
-    the behavioral replay at all — `--full` is a documented no-op for every one of
-    them — so a call from `_main`'s early, pre-dispatch path (C-426) always leaves
-    this False and gets exactly the "no phases added" bare-run ledger
+    `--dashboard --full`). A `--full --badge`/`--html`/`--sarif`/`--risk-paths` run
+    (or any of `--trend`/`--monitor`/`--percentile`/`--next`) never runs the sweep
+    or the behavioral replay at all — `--full` is a documented no-op for every one
+    of them — so a call from `_main`'s early, pre-dispatch path (C-426) always
+    leaves this False and gets exactly the "no phases added" bare-run ledger
     ``to_ledger()`` already produces correctly (static ran, everything else
-    not_reached/unavailable per its own docstring). Reading ``args.full`` directly
-    here instead would fabricate a completed sweep for those runs — the one thing
-    Golden Rule #4 forbids.
+    not_reached/unavailable per its own docstring).
+
+    **B-723 (retracted argument):** this function used to ALSO mark
+    :data:`~clawseccheck.pipeline.PHASE_SKILL_SWEEP` and
+    :data:`~clawseccheck.pipeline.PHASE_PLUGIN_SWEEP` ``ran`` right here, on the
+    strength of ``commit_full_phases`` alone — the reasoning above (a caller that
+    has "committed" to running them later in the same invocation) sounded like
+    enough of a promise to justify it. It was not: the letter grade a ``ran``
+    ``installed_sweep`` layer unlocks is a claim about a sweep the caller had not
+    yet observed complete — an intention recorded as an outcome, which is exactly
+    the guessed-PASS Golden Rule #4 forbids, just one layer up from a single
+    check. This function now leaves those two phases OUT of the ledger entirely
+    when ``commit_full_phases`` is set (non-`--fast`); ``PipelineResult.to_ledger``
+    already derives the honest ``STATUS_NOT_REACHED`` for a phase absent from
+    ``self.phases`` (``pipeline.py:1411-1412``), so simply not adding the promise is
+    the whole fix — no new status invented. The caller that made the promise
+    (``_main``'s `--full --json` branch) is responsible for RE-PROJECTING the
+    ledger from the real ``pipeline.PipelineResult`` — via that object's own
+    ``to_ledger(...)`` — once ``pipeline.run_pipeline`` has actually executed the
+    sweep, and recomputing ``score`` against it before anything is rendered. The
+    behavioral phase below is unaffected and stays exactly as it was: it is marked
+    from ``behavioral_ran``, which reflects a replay this function's OWN caller has
+    ALREADY run (paid for, not merely scheduled) by the time it calls this
+    function — an observed outcome, not a promise.
 
     ``behavioral_analysis`` — B-558: the raw ``behavioral.analyze(ctx)`` result, when
     this invocation actually ran it (paired with ``behavioral_ran=True``). Threaded
@@ -1097,12 +1117,11 @@ def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
                 name=_pipeline.PHASE_BEHAVIORAL, status=_pipeline.STATUS_SKIPPED,
                 complete=False, detail="skipped — --fast was given."))
         else:
-            prelim.add(_pipeline.PhaseResult(
-                name=_pipeline.PHASE_SKILL_SWEEP, status=_pipeline.STATUS_RAN,
-                detail="scheduled this invocation (installed-skill sweep)."))
-            prelim.add(_pipeline.PhaseResult(
-                name=_pipeline.PHASE_PLUGIN_SWEEP, status=_pipeline.STATUS_RAN,
-                detail="scheduled this invocation (installed-plugin sweep)."))
+            # B-723: no PHASE_SKILL_SWEEP/PHASE_PLUGIN_SWEEP entries here any more —
+            # see the retracted-argument paragraph above. Leaving both phases OUT
+            # of `prelim` makes `to_ledger` derive STATUS_NOT_REACHED for
+            # `installed_sweep` on its own; the caller re-projects from the real
+            # `pipeline.PipelineResult` once the sweep has actually run.
             prelim.add(_pipeline.PhaseResult(
                 name=_pipeline.PHASE_BEHAVIORAL,
                 status=_pipeline.STATUS_RAN if behavioral_ran else _pipeline.STATUS_ERROR,
@@ -1239,7 +1258,13 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     grade for the same run. Pure extraction of the pre-existing `--full` logic;
     behaviour is unchanged for that call site.
 
-    Returns `(score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids)`.
+    Returns `(score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids,
+    ledger, live_test_bucket, behavioral_analysis)`. The last two (B-723) are this
+    function's own internal inputs to `_build_layer_ledger`, threaded OUT rather than
+    left as locals: a caller that later re-projects the ledger from a real
+    `pipeline.PipelineResult` (once the sweep this function only promised has actually
+    run) needs the SAME `live_test_bucket`/`behavioral_analysis` this function's own
+    `to_ledger` call used, not a second, independently re-derived copy of either.
     `score` is the SAME object passed in when neither cap fires, a freshly recomputed
     one otherwise (mirrors `scoring.compute`'s own "never mutate, always return"
     contract). `live_signal` is returned (not just consumed here) because the caller
@@ -1373,7 +1398,8 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     # compute() calls, and without the ledger `projection.current.score` published the
     # very number the top-level `score` key was withholding -- one key apart in the
     # same document. Caught by test_full_json_projection_current_matches_top_level_score.
-    return score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids, ledger
+    return (score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids, ledger,
+            live_test_bucket, _behavioral_analysis)
 
 
 def _apply_live_test_cap(ctx, findings, score, args):
@@ -4427,7 +4453,8 @@ def _main(argv=None) -> int:
         # --json branch below) so --dashboard --full shows the IDENTICAL F-154/F-155
         # capped grade a plain --full run of the same config would — and, C-425, the
         # IDENTICAL five-layer ledger / graded state too.
-        score, full_deadline, judged_bundle, _live_signal, _behavioral_fired_ids, _ledger = (
+        (score, full_deadline, judged_bundle, _live_signal, _behavioral_fired_ids, _ledger,
+         _live_test_bucket, _behavioral_analysis) = (
             _resolve_runtime_caps(ctx, findings, score, args, attestation=attestation)
         )
         # B-586: AFTER the recompute, never before. `score` above is the phase-aware,
@@ -4436,7 +4463,12 @@ def _main(argv=None) -> int:
         # the badge there produced the very "no grade yet" this task is about — on the
         # run that had just earned a grade. Same reason `--pdf` defers its own write
         # under `--full` (`_defer_pdf`), one line of cause apart.
-        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit)
+        # B-723: the write moved BELOW the ledger re-projection further down. B-586
+        # already established that these renderers must see the phase-aware score
+        # rather than the pre-dispatch one; the re-projection makes the score move a
+        # second time, once the sweeps this branch runs have actually finished, so the
+        # same reasoning puts the write after that too. Writing here would put a grade
+        # in the badge that the run had not yet earned.
         sweep_home = Path(args.home).expanduser()
         plugin_sweep = None
         # B-405: also swept for adjudication's own-target corpus (below) — NOT for a
@@ -4449,17 +4481,46 @@ def _main(argv=None) -> int:
         # exactly the way `--full` already does, closes that gap: both renderers now
         # union skills + plugins into the SAME corpus.
         skill_sweep = None
+        # B-723: WHY a sweep produced no object is not one fact but four, and the layer
+        # ledger below has to state the right one. `--fast`, a build without the plugin
+        # sweep, a budget spent before the phase started, and a phase that raised all
+        # leave `plugin_sweep is None` — but they are "the operator narrowed the run",
+        # "this build cannot", "we ran out of time" and "it broke". Collapsing them would
+        # be the same shape as the promise this task removed: one status standing in for
+        # states nobody observed apart.
+        _plugin_absent = _pipeline._skipped(
+            _pipeline.PHASE_PLUGIN_SWEEP, "skipped — --fast was given.", section=False)
+        _skill_absent = _pipeline._skipped(
+            _pipeline.PHASE_SKILL_SWEEP, "skipped — --fast was given.", section=False)
         if not args.fast:
             _plugin_sweep_fn = _pipeline.resolve_plugin_sweep()
-            if _plugin_sweep_fn is not None and not budget_exceeded(full_deadline):
+            if _plugin_sweep_fn is None:
+                _plugin_absent = _pipeline.PhaseResult(
+                    name=_pipeline.PHASE_PLUGIN_SWEEP, status=_pipeline.STATUS_UNAVAILABLE,
+                    complete=False, section=False,
+                    detail=("the installed-plugin sweep is not available in this build — "
+                            "no plugin was inspected. Vet a plugin directly with "
+                            "--vet-plugin."))
+            elif budget_exceeded(full_deadline):
+                _plugin_absent = _pipeline._not_reached(
+                    _pipeline.PHASE_PLUGIN_SWEEP, DEFAULT_FULL_BUDGET_S)
+            else:
                 _sweep_budget_s = _pipeline.sub_budget(full_deadline, DEFAULT_VET_ALL_BUDGET_S)
                 try:
                     plugin_sweep = _plugin_sweep_fn(
                         sweep_home, ascii_only=ascii_only,
                         sweep_budget_s=_sweep_budget_s, narrate=False)
-                except Exception:  # noqa: BLE001 — one phase must not break the whole card
+                except Exception as _exc:  # noqa: BLE001 — one phase must not break the card
                     plugin_sweep = None
-            if not budget_exceeded(full_deadline):
+                    _plugin_absent = _pipeline.PhaseResult(
+                        name=_pipeline.PHASE_PLUGIN_SWEEP, status=_pipeline.STATUS_ERROR,
+                        complete=False, section=False,
+                        detail=(f"the plugin sweep could not complete ({_sanitize(str(_exc))})"
+                                " — no plugin verdict below can be relied on."))
+            if budget_exceeded(full_deadline):
+                _skill_absent = _pipeline._not_reached(
+                    _pipeline.PHASE_SKILL_SWEEP, DEFAULT_FULL_BUDGET_S)
+            else:
                 _skill_sweep_budget_s = _pipeline.sub_budget(full_deadline, DEFAULT_VET_ALL_BUDGET_S)
                 try:
                     # B-404: reuse the SAME ctx the audit above already collected —
@@ -4467,11 +4528,39 @@ def _main(argv=None) -> int:
                     skill_sweep = sweep_installed_skills(
                         sweep_home, ascii_only=ascii_only,
                         sweep_budget_s=_skill_sweep_budget_s, narrate=False, ctx=ctx)
-                except Exception:  # noqa: BLE001 — one phase must not break the whole card
+                except Exception as _exc:  # noqa: BLE001 — one phase must not break the card
                     skill_sweep = None
+                    _skill_absent = _pipeline.PhaseResult(
+                        name=_pipeline.PHASE_SKILL_SWEEP, status=_pipeline.STATUS_ERROR,
+                        complete=False, section=False,
+                        detail=(f"the skill sweep could not complete ({_sanitize(str(_exc))})"
+                                " — no skill verdict below can be relied on."))
         behavioral_phase = None
         if not args.fast and not budget_exceeded(full_deadline):
             behavioral_phase = _pipeline.run_behavioral(ctx, ascii_only=ascii_only)
+        # B-723: the ledger this branch scores against is now projected from the phases
+        # that ACTUALLY ran, not from `_resolve_runtime_caps`'s pre-sweep promise. Built
+        # here rather than from a `run_pipeline` call because this branch runs its phases
+        # inline (it renders a card, not the pipeline's own sections), so there is no
+        # `PipelineResult` to inherit — the phases are folded through the same public
+        # recorders `run_pipeline` uses, so both paths derive `installed_sweep` from one
+        # rule. Placed BEFORE P9 on purpose: the adjudication packet carries `score`, and
+        # a judge reading a grade the run had not earned is the same defect one surface on.
+        _dashboard_phases = _pipeline.PipelineResult(fast=args.fast)
+        _dashboard_phases.add(_pipeline.record_skill_sweep(skill_sweep)
+                              if skill_sweep is not None else _skill_absent)
+        _dashboard_phases.add(_pipeline.record_plugin_sweep(plugin_sweep,
+                                                            absent=_plugin_absent))
+        if behavioral_phase is not None:
+            _dashboard_phases.add(behavioral_phase)
+        _ledger = _dashboard_phases.to_ledger(
+            findings, degraded_count=score.degraded_count, attestation=attestation,
+            live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis)
+        score = compute(findings, ctx, live_test_vulnerable=_live_signal.hit,
+                        live_test_reason=_live_signal.reason,
+                        behavioral_fired_ids=_behavioral_fired_ids, ledger=_ledger)
+        # B-586 + B-723: written only now, against the score the completed phases earned.
+        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit)
         # P9 (adjudication) is deliberately NOT gated on --fast or the budget, same as
         # --full's own P9: it re-runs no check, so there is no expense to skip.
         _dashboard_vet_targets = (
@@ -5103,7 +5192,8 @@ def _main(argv=None) -> int:
     # need the external input resolved right here. Now threaded through explicitly
     # (see the `render_json` call below) so `payload["projection"]["current"]` can
     # never disagree with `payload["score"]`/`payload["grade"]` for the same run.
-    score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids, layer_ledger = (
+    (score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids, layer_ledger,
+     _live_test_bucket, _behavioral_analysis) = (
         _resolve_runtime_caps(ctx, findings, score, args, attestation=attestation)
     )
     if args.json:
@@ -5149,6 +5239,21 @@ def _main(argv=None) -> int:
             pipeline_has_fail = full_pipeline.has_fail
             if not args.fast:
                 _record_run("behavioral", args)
+            # B-723: re-project the ledger from the REAL `full_pipeline` now that
+            # P6/P7 (installed-skill/plugin sweep) have actually run, instead of the
+            # pre-sweep PROMISE `_resolve_runtime_caps` built above (see
+            # `_build_layer_ledger`'s retracted-argument paragraph). Same kwargs that
+            # call already used — `live_test_bucket`/`behavioral_analysis` threaded
+            # out of `_resolve_runtime_caps` rather than re-derived, `degraded_count`
+            # off the same `score` object (a pure function of `findings`, so
+            # identical whichever ledger it was computed against), `attestation` the
+            # same local this function already threads into every ledger build.
+            layer_ledger = full_pipeline.to_ledger(
+                findings, degraded_count=score.degraded_count, attestation=attestation,
+                live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis)
+            score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
+                            live_test_reason=live_signal.reason,
+                            behavioral_fired_ids=behavioral_fired_ids, ledger=layer_ledger)
         body = render_json(findings, score, risk=paths, ctx=ctx, skill_sweep=full_sweep_json,
                            live_test_vulnerable=live_signal.hit,
                            live_test_reason=live_signal.reason,

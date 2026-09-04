@@ -53,7 +53,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .attest import template as attest_template
@@ -367,6 +367,39 @@ def _sweep_data(sweep) -> dict:
         "counts": dict(sweep.counts()),
         "not_scanned": [_sanitize(str(t)) for t in sweep.not_scanned()],
     }
+
+
+def record_plugin_sweep(sweep, *, elapsed_s: float = 0.0,
+                        absent: PhaseResult | None = None) -> PhaseResult:
+    """Fold an ALREADY-EXECUTED installed-plugin sweep into the phase ledger.
+
+    The symmetric twin of :func:`record_skill_sweep`, and it exists for the same caller
+    shape: ``--dashboard --full`` runs the plugin sweep itself (``cli.py``, inline)
+    rather than through :func:`run_pipeline`, so it holds a finished sweep object and no
+    ``PhaseResult`` for it. Before B-723 that did not matter, because the layer ledger was
+    built from a promise; now that the ledger must be projected from real phases, the
+    dashboard needs the same fold the pipeline path gets.
+
+    ``absent`` is what to record when *sweep* is ``None`` — and it is a REQUIRED thought,
+    not a default, because "no sweep object" has several causes that are not
+    interchangeable: the build ships no plugin sweep (``unavailable``), the budget was
+    spent before it started (``not reached``), ``--fast`` was given (``skipped``), or it
+    raised (``error``). Collapsing them into one status would tell the reader the wrong
+    thing about why nothing was inspected — the caller knows which happened, so the caller
+    says. Passing ``None`` for *absent* falls back to ``skipped``, the weakest claim.
+
+    Duck-typed on *sweep* for the same layering reason ``record_skill_sweep`` is; see its
+    docstring.
+    """
+    if sweep is None:
+        return absent if absent is not None else _skipped(
+            PHASE_PLUGIN_SWEEP, "not run.", section=False)
+    phase = _sweep_phase_from(PHASE_PLUGIN_SWEEP, sweep, unit="plugin",
+                              elapsed_s=elapsed_s,
+                              full_detail_flag="--vet-plugin <path>")
+    # ``section=False``: this caller has already rendered the plugin material in its own
+    # established position, exactly as ``record_skill_sweep`` documents for P6.
+    return replace(phase, section=False)
 
 
 def _run_plugin_sweep_with_sweep(home_dir, *, deadline: float | None = None,

@@ -47,7 +47,7 @@ from clawseccheck.layers import (
     STATUS_SKIPPED,
     STATUS_NOT_SUBMITTED,
 )
-from clawseccheck.scoring import LIVE_INJECTION_CAP
+from clawseccheck.scoring import LIVE_INJECTION_CAP, compute
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 SAFE = str(FIXTURES / "home_safe")
@@ -306,19 +306,67 @@ class TestResolveRuntimeCapsWiring:
         assert statuses["installed_sweep"] == STATUS_SKIPPED
         assert statuses["logs_trajectories"] == STATUS_SKIPPED
 
-    def test_everything_supplied_and_not_fast_is_graded(self, tmp_path):
+    def test_everything_supplied_and_not_fast_still_awaits_the_sweep(self, tmp_path):
+        """B-723 REVERSED THIS ASSERTION, and the reason is the point of the task.
+
+        This used to read `assert out_score.graded is True` — everything supplied, nothing
+        `--fast`, therefore a letter. That held only because `_build_layer_ledger` marked
+        the installed sweep `ran` from the caller's INTENTION to run it later in the same
+        invocation. `_resolve_runtime_caps` returns BEFORE any sweep executes, so the
+        letter rested on work that had not happened.
+
+        So the honest assertion at THIS point is that the run is not yet gradeable, and
+        that the one thing standing in the way is exactly the sweep — not some other layer
+        quietly going missing. The grade is earned back below, from a real
+        `PipelineResult`, which is what the shipping surfaces now do.
+        """
         bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
             {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}})
         ctx, findings, score = audit(SAFE)
         args = _args(full=True, fast=False, judged_bundle=bundle)
         out_score, *_rest = cli._resolve_runtime_caps(ctx, findings, score, args,
                                                        attestation={"tools": ["x"]})
-        assert out_score.graded is True
-        assert out_score.missing_layers == ()
-        # C-422 invariant: a fully-graded run must be score/grade-identical to the
-        # SAME run with no ledger at all.
-        assert out_score.score == score.score
-        assert out_score.grade == score.grade
+        assert out_score.graded is False
+        assert dict(out_score.missing_layers) == {"installed_sweep": STATUS_NOT_REACHED}, (
+            "the only layer still outstanding before the sweep runs must be the sweep "
+            "itself — anything else means a different layer regressed")
+
+    def test_the_grade_comes_back_once_the_real_sweep_phases_arrive(self, tmp_path):
+        """The other half of B-723, and the control that stops the fix being a removal.
+
+        Deleting the promise alone would leave every run permanently ungraded. Projecting
+        the SAME inputs onto a `PipelineResult` whose sweep phases really ran must restore
+        the letter — and restore it to the identical value, which is the C-422 invariant
+        this test carried before the reversal above: a fully-graded run is score- and
+        grade-identical to the same run with no ledger at all.
+        """
+        bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
+            {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}})
+        ctx, findings, score = audit(SAFE)
+        args = _args(full=True, fast=False, judged_bundle=bundle)
+        (out_score, _deadline, judged_bundle, live_signal, fired, _ledger,
+         live_bucket, behavioral_analysis) = cli._resolve_runtime_caps(
+            ctx, findings, score, args, attestation={"tools": ["x"]})
+        assert out_score.graded is False  # precondition, not decoration
+
+        result = pl.PipelineResult(fast=False)
+        result.add(pl.PhaseResult(name=pl.PHASE_SKILL_SWEEP, status=pl.STATUS_RAN,
+                                  detail="2 installed skill(s) vetted."))
+        result.add(pl.PhaseResult(name=pl.PHASE_PLUGIN_SWEEP, status=pl.STATUS_RAN,
+                                  detail="1 installed plugin(s) vetted."))
+        result.add(pl.PhaseResult(name=pl.PHASE_BEHAVIORAL, status=pl.STATUS_RAN,
+                                  detail="behavioral replay completed."))
+        ledger = result.to_ledger(findings, degraded_count=out_score.degraded_count,
+                                  attestation={"tools": ["x"]},
+                                  live_test_bucket=live_bucket,
+                                  behavioral_analysis=behavioral_analysis)
+        regraded = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
+                           live_test_reason=live_signal.reason,
+                           behavioral_fired_ids=fired, ledger=ledger)
+        assert regraded.graded is True
+        assert regraded.missing_layers == ()
+        assert regraded.score == score.score
+        assert regraded.grade == score.grade
 
     def test_a_phase_that_errored_is_never_swallowed_by_to_ledger(self):
         """Unit-level pin of scenario 6 at the mapping layer (to_ledger itself,

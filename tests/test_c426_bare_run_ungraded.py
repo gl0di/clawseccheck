@@ -33,6 +33,7 @@ from clawseccheck import audit
 from clawseccheck.cli import _build_layer_ledger, _percentile_line, main
 from clawseccheck.layers import (
     LAYER_ORDER,
+    STATUS_NOT_REACHED,
     STATUS_RAN,
     LayerLedger,
     LayerState,
@@ -279,10 +280,19 @@ def test_the_bare_ledger_is_built_by_the_one_shared_producer():
 def test_a_bare_call_never_claims_the_sweep_ran_even_under_full():
     """`--full --badge` and friends never run the sweep -- `--full` is a no-op there.
 
-    So the shared producer keys the optimistic 'sweep ran' marking on the CALLER
-    having committed to running those phases, not on `args.full` being set. Reading
-    the flag inside the helper would fabricate a completed sweep for every mode that
-    ignores `--full`.
+    So a bare (non-committed) call never marks these phases 'ran' regardless of
+    `args.full` being set -- reading the flag directly would fabricate a completed
+    sweep for every mode that ignores `--full`.
+
+    B-723 (retracted): a `commit_full_phases=True` call used to ALSO mark
+    `installed_sweep` 'ran' right here, on the strength of the caller's promise to
+    run the sweep LATER in the same invocation -- before that sweep had actually
+    run. That was itself a fabrication (an intention recorded as an outcome), so
+    this is now asserted in the OPPOSITE direction: `commit_full_phases=True`
+    leaves `installed_sweep` un-run too (`STATUS_NOT_REACHED`, `to_ledger`'s own
+    derivation for a phase absent from `self.phases`) -- the caller that made the
+    promise is responsible for re-projecting the ledger from the real
+    `pipeline.PipelineResult` once the sweep has actually executed.
     """
     _, findings, _ = audit(SAFE)
 
@@ -293,4 +303,9 @@ def test_a_bare_call_never_claims_the_sweep_ran_even_under_full():
     assert _build_layer_ledger(_Args(), findings).status("installed_sweep") != STATUS_RAN
     committed = _build_layer_ledger(_Args(), findings, commit_full_phases=True,
                                     behavioral_ran=True)
-    assert committed.status("installed_sweep") == STATUS_RAN
+    # B-723: never fabricated 'ran' -- the sweep this call promised has not run yet.
+    assert committed.status("installed_sweep") == STATUS_NOT_REACHED
+    # The behavioral phase is unaffected by the retraction: it reflects a replay the
+    # caller has ALREADY run (paid for, not merely scheduled) by the time it calls
+    # this function, so it is honestly markable 'ran' right here.
+    assert committed.status("logs_trajectories") == STATUS_RAN
