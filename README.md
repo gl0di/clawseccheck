@@ -165,9 +165,11 @@ every flag below — works the same way regardless of which mode you're in.
 
 ## 🧬 Five layers, one grade
 
-A full check (Mode A) is built from five layers. The first three run on their
-own; the last two only run if you ask, because one needs your agent to answer
-and the other pokes your running agent live:
+A full check (Mode A) is built from five layers, and they cost three different
+things. Two run on a bare command (1 and 3). One needs a flag (2, `--full`).
+The last two cannot run from a flag at all — one needs your agent to answer and
+the other pokes your running agent live, so each closes only when its **answer**
+is submitted back:
 
 | # | Layer | Runs on its own? | How you get it |
 |---|---|---|---|
@@ -424,7 +426,7 @@ not the same claim as "we ran it".
 
 | | |
 |---|---|
-| **Verified against a running install** | **OpenClaw 2026.9.1.** The schema snapshots this repo ships — `tests/dist_verified_paths.txt`, `tests/state_schema_snapshot.sql`, `tests/dist_citation_baseline.txt` — are generated from an installed 2026.9.1, and each records the version it was taken against so a stale one is visible rather than assumed. |
+| **Verified against a running install** | **OpenClaw 2026.9.1.** The schema snapshots this repo ships — `tests/dist_verified_paths.txt`, `tests/state_schema_snapshot.sql`, `tests/dist_citation_baseline.txt` — are generated from an installed 2026.9.1 and each carries that version in its header. The state-schema snapshot's stamp is enforced: on a machine with OpenClaw installed, the suite re-derives the schema and fails if the stamp does not match the running build. |
 | **Read by the code, each measured against a running install while it was written** | **2026.7.1-2, 2026.8.1, 2026.8.2** — the three builds that moved settings the audit reads. Every moved key is read in *both* spellings: the agent roster as `agents.list` *and* `agents.entries`, the gateway command lists under their old and new parents, and the three settings 2026.8.1 moved out of `openclaw.json` into OpenClaw's machine-owned store. An older or not-yet-migrated config is read, not silently skipped. |
 | **On anything else** | The audit still runs. This is deliberately *not* a claim of a contiguous supported range: the builds between the measured points (2026.7.2 – 2026.8.0) were never run against, so the tool treats a config it cannot date as undated — it names **both** key spellings in its fix advice rather than guessing which one your build accepts, and a key whose home this build does not have is reported as retired or `UNKNOWN`, never resolved to nothing and given a verdict anyway. |
 
