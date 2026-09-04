@@ -1772,6 +1772,14 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
     )
 
 
+# B-727: appended to B77's WARN when the journal exceeded the scan budget. The evidence
+# found is real either way — truncation never downgrades a WARN — but the count beside it
+# describes a window, not the file.
+_B77_WINDOW_NOTE = (
+    " Only the most recent 1 MB of the log was read, so earlier writes were not scanned."
+)
+
+
 def check_config_audit_log(ctx: Context) -> Finding:
     import json as _json
 
@@ -1785,7 +1793,7 @@ def check_config_audit_log(ctx: Context) -> Finding:
             "writes stay attributable and reviewable.",
         )
     try:
-        raw, _ = _read_jsonl_tail(log_path)
+        raw, truncated = _read_jsonl_tail(log_path)
     except OSError:
         return _finding(
             "B77",
@@ -1835,11 +1843,27 @@ def check_config_audit_log(ctx: Context) -> Finding:
             WARN,
             f"config-write audit log shows {n} entr{'y' if n == 1 else 'ies'} of concern "
             f"across {total} recorded write(s): suspicious markers and/or writes from an "
-            "unexpected process.",
+            "unexpected process." + (_B77_WINDOW_NOTE if truncated else ""),
             "Review each flagged config write. A write you did not initiate — or one "
             "carrying a suspicious marker — may indicate config tampering; restore from a "
             "known-good backup and rotate any exposed credentials.",
             evidence=evidence[:10],
+        )
+    if truncated:
+        # B-727: `_read_jsonl_tail` is bounded at `_JSONL_SCAN_CAP` because these journals
+        # reach GB (B-104). The bound is right; claiming completeness over it is not.
+        # "all N recorded config write(s) are clean" was false in both halves on an
+        # over-cap file — `total` counts the window, "all" covers only what was read — so
+        # a write from an unexpected process before the window was reported as absent.
+        # Golden Rule #4: the check cannot determine the file's state, so it says so.
+        return _finding(
+            "B77",
+            UNKNOWN,
+            f"the {total} most recent config write(s) are clean and openclaw-originated, "
+            "but the audit log is larger than this scan's budget and earlier writes were "
+            "not read — cannot verify the full config change history.",
+            "Review logs/config-audit.jsonl directly for writes older than the most "
+            "recent 1 MB, or rotate it so a full scan fits.",
         )
     return _finding(
         "B77",

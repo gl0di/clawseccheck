@@ -3525,6 +3525,14 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
     )
 
 
+# B-727: appended when a sampled session file exceeded the 1 MB scan budget. Wording is
+# deliberately narrower than B77's: this check already says "sampled", so the note names
+# the extra bound rather than retracting the verdict.
+_B79_WINDOW_NOTE = (
+    " Some session files exceeded the scan budget, so only their most recent 1 MB was read."
+)
+
+
 def check_session_approval_policy(ctx: Context) -> Finding:
     import json as _json
 
@@ -3555,6 +3563,20 @@ def check_session_approval_policy(ctx: Context) -> Finding:
     # Grand totals used only for the PASS finding message.
     grand_total = 0
     grand_never = 0
+    # B-727: `_read_jsonl_tail` is bounded at 1 MB and this loop used to discard the flag
+    # it returns. Unlike B77 — whose PASS said "all N recorded config write(s)" and was
+    # therefore false on an over-cap file — every verdict below already scopes itself to
+    # what it read ("sampled", three times), so truncation costs PRECISION here, not
+    # truth. The flag is captured and disclosed rather than left on the floor.
+    #
+    # Deliberately NOT a verdict change. Turning a truncated read into UNKNOWN would be a
+    # real behavioural change to a check that samples by design (last 5 session files by
+    # mtime), and it can hide a WARN: if the tail window happens to hold gated turns while
+    # the unread head was all approval=never, `a_never == a_total` fails and the finding
+    # does not fire. That is a genuine gap, it is the same class as the existing 5-file
+    # sampling bound, and it needs its own C-135 rather than riding along with a wording
+    # fix. Filed with B-727.
+    any_truncated = False
 
     for agent_dir in agent_dirs:
         sessions_dir = agent_dir / "agent" / "codex-home" / "sessions"
@@ -3572,9 +3594,10 @@ def check_session_approval_policy(ctx: Context) -> Finding:
         a_never = 0
         for fp in recent:
             try:
-                raw, _ = _read_jsonl_tail(fp)
+                raw, fp_truncated = _read_jsonl_tail(fp)
             except OSError:
                 continue
+            any_truncated = any_truncated or fp_truncated
             for ln in raw.splitlines():
                 ln = ln.strip()
                 if not ln:
@@ -3623,7 +3646,7 @@ def check_session_approval_policy(ctx: Context) -> Finding:
             WARN,
             f"all {worst_total} recent Codex turn(s) sampled (across {worst_files} session "
             f'file(s)) for agent "{worst_agent}" ran with approval_policy="never" — '
-            "human approval was never required.",
+            "human approval was never required." + (_B79_WINDOW_NOTE if any_truncated else ""),
             "If this agent performs sensitive or destructive actions, run at least some "
             'sessions with a human approval gate (approval_policy other than "never"). '
             "Fully unattended approval=never removes the human checkpoint before tool execution.",
@@ -3638,7 +3661,8 @@ def check_session_approval_policy(ctx: Context) -> Finding:
         "B79",
         PASS,
         f"recent Codex sessions include human-approval gates "
-        f"({grand_never}/{grand_total} sampled turns were approval=never).",
+        f"({grand_never}/{grand_total} sampled turns were approval=never)."
+        + (_B79_WINDOW_NOTE if any_truncated else ""),
         "Keep requiring human approval for sensitive actions; avoid defaulting all sessions "
         'to approval_policy="never".',
     )
