@@ -40,6 +40,24 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
+    # The first NON-checks/ entry, and the only one that is not a topic module. It is here
+    # because the module was already at 1,194 of 1,200 before B-558's fifth ledger-derived
+    # field — six lines of headroom is not a stable state, and the next field of any kind
+    # would have re-tripped it. Recorded rather than absorbed: shortening the field's own
+    # documentation to slip back under would have made the guard measure the comment
+    # instead of the module.
+    #
+    # The split, when someone takes it: the five cap-signal helpers (_degraded_signal,
+    # _config_blind_signal, _runtime_cap_signal, _live_injection_cap_signal,
+    # _behavioral_cap_signal, ~165 lines together) read Findings and answer one question
+    # each, and nothing else in the module reads their internals. Moving them to a leaf
+    # `scorecaps.py` that `scoring` imports leaves ~1,050 here and adds no cycle. NOT done
+    # in the change that added this entry: it lands mid-release, beside a second session
+    # working in the same tree, and it moves code whose outputs many tests pin.
+    "scoring.py": "~1,217 lines — score computation, the six cap signals, `project()` and "
+                  "`assessment_coverage()`. Over budget by 17 lines since B-558 added "
+                  "`layer_coverage`. Split candidate named above; tracked debt, not a "
+                  "design statement.",
     "checks/_config.py": "~4,410 lines — the config-hardening topic (15 checks + helpers); "
                          "topic-faithful and over budget by design. A finer split is a "
                          "later cycle (I-022 secondary target).",

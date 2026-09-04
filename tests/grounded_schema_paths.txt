@@ -29,6 +29,7 @@ agents.defaults.subagents.allowAgents
 agents.defaults.subagents.maxChildrenPerAgent
 agents.defaults.subagents.maxConcurrent
 agents.defaults.subagents.maxSpawnDepth
+agents.defaults.tools
 agents.defaults.workspace
 agents.list
 agents.subagents
