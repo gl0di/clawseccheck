@@ -202,8 +202,8 @@ auditor by construction** removes the class of risk such a gate would exist to c
 Other than `--apply-ignore-proposals` and a no-PATH `--pdf` (see "Allowed behavior"
 above), there is no code path anywhere in the shipped engine that writes to a file it
 did not open under `~/.clawseccheck/` (or a path the user explicitly named), and no code
-path that
-executes content it reads (skill/plugin source is parsed with the stdlib `ast` module
+path that executes content it reads (skill/plugin source is parsed with the stdlib `ast`
+module
 or scanned by regex/lexical passes — never imported, called, or `exec()`'d; see "A note
 for scanners auditing ClawSecCheck's own source" below). Removing the capability at the
 source is a stronger guarantee than gating it at runtime, and is verifiable by reading
@@ -419,8 +419,10 @@ reviewer can check every clause below directly against the cited module:
   cases inside the audited OpenClaw home: `--apply-ignore-proposals`
   (confirmation-gated) appends previously-proposed entries to
   `<home>/.clawseccheckignore`, and a no-PATH `--pdf` writes its report to
-  `<home>/media/outbound/` when that directory already exists. No other write reaches
-  there, and neither is the OpenClaw config. (`collector.py` performs no writes at all — it is read-only.)
+  `<home>/media/outbound/` when that directory already exists. Both go through
+  `safeio.secure_write_bytes`, like every other write. No other write reaches there, and
+  neither is the OpenClaw config. (`collector.py` performs no writes at all — it is
+  read-only.)
 - `--purge` deletes ClawSecCheck's own store files (a fixed filename list —
   history.jsonl, events.jsonl, state.json, coverage.json + lock sidecars), never
   recursive/glob, never outside `~/.clawseccheck/`.
