@@ -586,16 +586,21 @@ _CRON_JOBS_LEGACY = (
     "job_json NOT NULL and this fixture never declares it."
 )
 _CRON_RUN_LOGS_RETIRED = (
-    "cron_run_logs is not a table in the installed 2026.8.2 vendor schema at all -- "
-    "grep -c 'CREATE TABLE IF NOT EXISTS cron_run_logs' over OPENCLAW_STATE_SCHEMA_SQL is "
-    "0. The per-run log rows this table modelled now live on task_runs; kept as a "
-    "deliberate legacy-shape fixture for the pre-retirement disclosure path."
+    "cron_run_logs is not a table in the CURRENT vendor schema: it is absent from "
+    "vendor_state_tables.txt, which records every table OPENCLAW_STATE_SCHEMA_SQL "
+    "declares in the installed build. The per-run log rows this table modelled now live "
+    "on task_runs; kept as a deliberate legacy-shape fixture for the pre-retirement "
+    "disclosure path. Deliberately NOT pinned to the version this was first measured on "
+    "(2026.8.2): a dated claim in prose does not re-check itself, and this one is "
+    "re-grounded against the current baseline on every run by "
+    "test_retired_tables_are_absent_from_the_vendor_baseline."
 )
 _INSTALLED_PLUGIN_INDEX_RETIRED = (
-    "installed_plugin_index is not a table in the installed 2026.8.2 vendor schema -- "
-    "grep -c 'CREATE TABLE IF NOT EXISTS installed_plugin_index' over "
-    "OPENCLAW_STATE_SCHEMA_SQL is 0. Kept as a legacy-shape fixture for the plugin-trust "
-    "checks that still read this table on older builds."
+    "installed_plugin_index is not a table in the CURRENT vendor schema: it is absent "
+    "from vendor_state_tables.txt, which records every table OPENCLAW_STATE_SCHEMA_SQL "
+    "declares in the installed build. Kept as a legacy-shape fixture for the plugin-trust "
+    "checks that still read this table on older builds. Not pinned to a version, for the "
+    "reason given on _CRON_RUN_LOGS_RETIRED."
 )
 _UNRELATED_DECOY = (
     "a deliberately unrelated table (`unrelated`/`unrelated_table`), used by this test as "
