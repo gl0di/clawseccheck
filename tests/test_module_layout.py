@@ -217,7 +217,7 @@ _EXEMPT = {
                     "growth to whoever crosses the line, not to whoever accumulated it, so "
                     "the commit a staleness guard fires on is rarely the commit that caused "
                     "most of the drift.",
-    "cli.py": "~4,881 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
+    "cli.py": "~5,433 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "
               "the dispatch cascade: each `_mode` branch that returns early has to repeat "

@@ -63,17 +63,21 @@ _ADVICE_HELPER_NAMES = {"_key_advice", "_retired_key_note"}
 _LABEL_BUILDER_SITES = {
     # AgentEntry.labelled(): reached only when self.path does not start with
     # "agents.entries." -- i.e. this entry really did come from the legacy array.
-    ("clawseccheck/collector.py", 3218): "AgentEntry.labelled() legacy-array branch",
+    ("clawseccheck/collector.py", "labelled", "agents.list[]"):
+        "AgentEntry.labelled() legacy-array branch",
     # agent_roster()'s "list" branch: reads the raw legacy key, reached only after
     # the config's own `agents` object was found to carry "list" rather than "entries".
-    ("clawseccheck/collector.py", 3290): "agent_roster() legacy dig() key read",
+    ("clawseccheck/collector.py", "agent_roster", "agents.list"):
+        "agent_roster() legacy dig() key read",
     # Same branch: the per-entry path label, built from the real array index that
     # entry sits at on disk.
-    ("clawseccheck/collector.py", 3301): "agent_roster() legacy AgentEntry.path label",
+    ("clawseccheck/collector.py", "agent_roster", "agents.list[]"):
+        "agent_roster() legacy AgentEntry.path label",
     # The per-agent sandbox finding's `where` label: the ternary already tests the
     # roster's own shape and only falls to the else-branch when it genuinely is the
     # legacy array.
-    ("clawseccheck/checks/_config.py", 798): "per-agent sandbox finding's `where` label",
+    ("clawseccheck/checks/_config.py", "_multi_agent_note", "agents.list"):
+        "per-agent sandbox finding's `where` label",
 }
 
 
@@ -131,6 +135,23 @@ def _static_text(node) -> "str | None":
     return None
 
 
+def _enclosing_fn(tree) -> dict:
+    """{id(node): enclosing function name} for every node inside a def.
+
+    The allowlist is keyed on the SYMBOL that builds a label, not on the line it
+    sits at. A line number is not checkable: any integer resolves to some line, so
+    a pinned one goes stale silently and starts exempting whatever drifts onto it.
+    A function name that stops existing is a loud failure -- and a moved site keeps
+    its exemption for free, which is the behaviour we actually want.
+    """
+    out = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for node in ast.walk(fn):
+                out.setdefault(id(node), fn.name)
+    return out
+
+
 def _offending_sites() -> "list[str]":
     out = []
     for py_file in sorted(SOURCE_DIR.rglob("*.py")):
@@ -139,6 +160,7 @@ def _offending_sites() -> "list[str]":
         doc_ids = _docstring_node_ids(tree)
         helper_ids = _advice_helper_arg_ids(tree)
         piece_ids = _joinedstr_piece_ids(tree)
+        fn_of = _enclosing_fn(tree)
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if id(node) in piece_ids:
@@ -152,7 +174,7 @@ def _offending_sites() -> "list[str]":
                 continue
             if text is None or "agents.list" not in text or "agents.entries" in text:
                 continue
-            if (rel, node.lineno) in _LABEL_BUILDER_SITES:
+            if (rel, fn_of.get(id(node)), text) in _LABEL_BUILDER_SITES:
                 continue
             out.append(f"{rel}:{node.lineno}: {text[:160]!r}")
     return out
@@ -190,21 +212,29 @@ def test_the_ast_sweep_is_not_vacuous(tmp_path):
     assert offenders, "the sweep's own logic cannot detect an unqualified literal"
 
 
-def test_label_builder_allowlist_entries_still_exist_at_their_pinned_lines():
-    """A stale (path, lineno) entry silently stops exempting anything (the guard
-    would then have re-discovered the real, moved site as a fresh violation, which
-    test_no_shipped_string_names_agents_list_alone already proves) -- but a stale
-    entry could also, less obviously, exempt an unrelated new statement that
-    happens to land on the same line number after a future edit. Pin that every
-    allowlisted line still contains 'agents.list', so an edit that moves the real
-    site is forced to update this table rather than exempting whatever ends up there."""
-    for (rel_path, lineno), _why in _LABEL_BUILDER_SITES.items():
-        path = REPO_ROOT / rel_path
-        lines = path.read_text(encoding="utf-8").splitlines()
-        assert 1 <= lineno <= len(lines), f"{rel_path}:{lineno} is out of range"
-        assert "agents.list" in lines[lineno - 1], (
-            f"{rel_path}:{lineno} no longer contains 'agents.list' -- the allowlist "
-            "entry has drifted from the site it was meant to exempt"
+def test_every_allowlisted_label_builder_still_exists():
+    """A stale allowlist entry must fail loudly, not quietly stop exempting.
+
+    This table was first keyed on `(path, lineno)`. That was wrong for the reason a
+    sibling task spent hours proving on a different register: a line number cannot be
+    validated -- every integer names *some* line -- so a pinned one both goes stale
+    without complaint and, worse, silently exempts whatever unrelated statement drifts
+    onto that number later. Keyed on the enclosing function plus the literal, a moved
+    site keeps its exemption and a deleted one is reported by name.
+    """
+    for (rel_path, fn_name, literal), why in _LABEL_BUILDER_SITES.items():
+        tree = ast.parse((REPO_ROOT / rel_path).read_text(encoding="utf-8"))
+        fn_of = _enclosing_fn(tree)
+        found = any(
+            fn_of.get(id(n)) == fn_name and _static_text(n) == literal
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.Constant, ast.JoinedStr))
+        )
+        assert found, (
+            f"allowlist entry {rel_path}::{fn_name} ({literal!r}) -- {why} -- no longer "
+            "exists. Either the site moved to a different function (update the key) or "
+            "the exemption is obsolete (delete it). Do not leave it: an entry that "
+            "matches nothing is an exemption nobody can audit."
         )
 
 

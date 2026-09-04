@@ -28,8 +28,17 @@ here the same way `test_b670_fs_confined_per_scope.py` satisfies it: one entry m
 
 The pair is a controlled comparison, not two unrelated configs: they differ in exactly
 one fact, the escaping agent `"w"`'s own `tools.fs.workspaceOnly` — `false` (bad) vs.
-`true` (clean, so `w` inherits confinement rather than escaping it). Everything else
+`true` (confined, so `w` inherits confinement rather than escaping it). Everything else
 byte-identical (diffed in the test below).
+
+Neither fixture is named `clean_*`, and that is deliberate rather than an oversight.
+`clean_*` in this corpus means a full audit yields ZERO FAIL (`tests/test_fp_corpus.py`),
+and both of these carry `channels.telegram.dmPolicy: "open"` -- which B2 correctly reports
+as a CRITICAL FAIL. The open channel is not incidental: it is what makes the write grant
+reachable by an untrusted sender, and therefore what makes the escalation observable at
+all. So the confined twin is a `warn_*`, alongside its siblings `warn_b55_agent_profile_widens`
+and `warn_b409_profile_alsoallow_widening`. It was briefly named `clean_*`, and the FP gate
+caught the lie immediately.
 """
 import json
 from pathlib import Path
@@ -42,7 +51,7 @@ from clawseccheck.collector import collect
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 BAD = FIXTURES / "bad_b670_fs_confined_per_agent_escape"
-CLEAN = FIXTURES / "clean_b670_fs_confined_per_agent_escape"
+CONFINED = FIXTURES / "warn_b670_fs_confined_per_agent_escape"
 
 
 def _b55(home: Path):
@@ -53,12 +62,12 @@ def test_the_pair_differs_in_exactly_one_fact():
     """The controlled-comparison contract: everything but `w`'s own
     `tools.fs.workspaceOnly` is byte-identical between the two fixtures."""
     bad = json.loads((BAD / "openclaw.json").read_text(encoding="utf-8"))
-    clean = json.loads((CLEAN / "openclaw.json").read_text(encoding="utf-8"))
+    confined = json.loads((CONFINED / "openclaw.json").read_text(encoding="utf-8"))
     assert bad["agents"]["entries"]["w"]["tools"]["fs"]["workspaceOnly"] is False
-    assert clean["agents"]["entries"]["w"]["tools"]["fs"]["workspaceOnly"] is True
+    assert confined["agents"]["entries"]["w"]["tools"]["fs"]["workspaceOnly"] is True
     bad["agents"]["entries"]["w"]["tools"]["fs"]["workspaceOnly"] = None
-    clean["agents"]["entries"]["w"]["tools"]["fs"]["workspaceOnly"] = None
-    assert bad == clean, "the fixtures must differ in nothing else"
+    confined["agents"]["entries"]["w"]["tools"]["fs"]["workspaceOnly"] = None
+    assert bad == confined, "the fixtures must differ in nothing else"
 
 
 def test_the_per_agent_escape_escalates_to_fail():
@@ -72,16 +81,16 @@ def test_the_per_agent_escape_escalates_to_fail():
         "the evidence must name the escaping scope by its agents.entries path")
 
 
-def test_the_clean_twin_stays_a_warn_not_a_fail():
+def test_the_confined_twin_stays_a_warn_not_a_fail():
     """The control: with the single fact flipped back (the agent also confined), B55
     must NOT escalate — it downgrades to WARN with the confinement claim, same as
     `test_genuine_confinement_still_downgrades_to_warn` in the synthetic-config test."""
-    f = _b55(CLEAN)
+    f = _b55(CONFINED)
     assert f.status == WARN
     assert any("confined to the workspace" in e for e in (f.evidence or []))
 
 
-@pytest.mark.parametrize("home", [BAD, CLEAN])
+@pytest.mark.parametrize("home", [BAD, CONFINED])
 def test_both_fixtures_are_readable_agents_entries_rosters(home):
     """Structural: both fixtures actually exercise the `agents.entries` record shape
     (not `agents.list`), so this pair is real coverage for that roster shape too."""
