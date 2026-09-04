@@ -1593,8 +1593,23 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
     fast_note = "skipped — --fast was given; no target here was inspected."
 
     # P6 — recorded, not run (see the module docstring).
+    #
+    # B-719: the budget arm is NOT the one P7/P8 use, and the difference is deliberate.
+    # They decide whether to START their work, so a blown deadline is enough on its own.
+    # P6's sweep is executed by the CALLER and handed in, so by the time we look at the
+    # clock the work may already be done — gating on the deadline alone would discard a
+    # completed sweep's real result and invent a coverage hole out of a run that happened.
+    # Hence `skill_sweep is None and ...`: the budget only explains an ABSENT sweep.
+    #
+    # Without this arm an absent sweep fell through to record_skill_sweep(None), i.e.
+    # _skipped(..., "not run.") — and STATUS_SKIPPED means "the operator narrowed the run
+    # (e.g. --fast)", rendered as "skipped by this run's flags". So a user who asked for a
+    # full sweep and lost it to the clock was told they had asked for less, while P7 and
+    # P8, stopped by the very same deadline, correctly reported the budget.
     if fast:
         result.add(_skipped(PHASE_SKILL_SWEEP, fast_note))
+    elif skill_sweep is None and budget_exceeded(deadline):
+        result.add(_not_reached(PHASE_SKILL_SWEEP, budget_s))
     else:
         result.add(record_skill_sweep(skill_sweep, elapsed_s=skill_sweep_elapsed_s))
 
