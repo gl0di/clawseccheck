@@ -6601,8 +6601,11 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
 # --------------------------------------------------------------------------- #
 # analyze_javascript (F-064): lexical JS/TS pass — the JS blind spot.          #
 # Hybrid severity: eval/Function of a decoded blob and remote fetch-then-exec  #
-# are crit (obfuscated RCE, zero-FP); child_process-with-template and dynamic  #
-# require() are warn (often legit). No JS parser; stdlib regex only.           #
+# are crit (obfuscated RCE, zero-FP); every other rule is warn (often legit).  #
+# B-743: the warn set is NOT enumerated here — it was, as two, and went stale   #
+# when a third arrived, which is how the consuming bucket's advice went false.  #
+# The list lives in the function docstring below and in checks/_vet.py's        #
+# _JS_WARN_REMEDIATION, which a test keeps complete. No JS parser; stdlib re.   #
 # --------------------------------------------------------------------------- #
 # eval / new Function of a base64-decoded blob — obfuscated code execution.
 _JS_EVAL_DECODED_RE = re.compile(

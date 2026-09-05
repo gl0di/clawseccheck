@@ -3703,6 +3703,52 @@ _B13_WINNER_SUBSIGNAL = {
     "parse_error_paths": "a bundled file could not be parsed",
 }
 
+# B-743 note on the paragraph above: its "LIFTED FROM THE BRANCH'S OWN VERDICT HEADLINE"
+# contract still holds for `warns_js`, by the opposite construction. That branch's headline
+# is now DERIVED FROM the labels in `_JS_WARN_REMEDIATION` below (`_js_warn_headline`)
+# rather than the labels being copied out of a fixed headline — so the packet still cannot
+# describe the branch differently from the report, and a test measures exactly that: each
+# published label is a substring of the detail a human is shown.
+
+# B-743: `warns_js` is the one bucket fed by SEVERAL distinct rules — `analyze_shell` and
+# `analyze_python_package` route everything to the FAIL bucket, so only the JS pass has a
+# severity-based `else` that lands more than one cause in one place. Its rendered fix was a
+# single literal naming child_process and require(), and `analyze_javascript` has three
+# warn rules, not two. Measured: a skill whose only JS is `process.dlopen(module, "./x.node")`
+# printed the correct dlopen reason and, one line below it, advice to inspect a
+# `child_process` call that is not in the file — the B-714 / B-738 class, where a remediation
+# cannot clear the condition its own finding describes.
+#
+# So the fix and the sub-signal are derived from the rules that FIRED. Keyed by rule id, and
+# `tests/test_b743_js_warn_remediation.py` requires an entry for every warn-severity rule
+# `analyze_javascript` can emit — extracted from that function's own `add(...)` call sites —
+# so a fourth rule fails the build here instead of inheriting someone else's advice.
+_JS_WARN_REMEDIATION: dict[str, tuple[str, str]] = {
+    "JS_CHILD_PROCESS_DYNAMIC": (
+        "interpolated child_process command",
+        "A bundled .js/.ts file builds a child_process call from an interpolated value, "
+        "so which program runs — or which arguments it runs with — is decided at "
+        "runtime. Read the flagged call and confirm that value cannot carry anything "
+        "from outside the skill: a string the skill itself assembles from model or tool "
+        "output is not safe merely because the skill wrote the line.",
+    ),
+    "JS_DYNAMIC_REQUIRE": (
+        "arbitrary-module surface",
+        "A bundled .js/.ts file require()s a non-literal module path, so which module "
+        "loads is decided at runtime. Read the flagged call and confirm the path cannot "
+        "be influenced by input.",
+    ),
+    "JS_NATIVE_DLOPEN": (
+        "native addon loaded past the JS analysis boundary",
+        "A bundled .js/.ts file loads a native addon with process.dlopen(), and no "
+        "JS-level scan can analyse compiled code. Confirm the .node file is one this "
+        "skill is meant to ship — that it builds from sources in the package (a "
+        "binding.gyp / node-gyp target) or matches a checksummed upstream release. A "
+        ".node with neither is the finding.",
+    ),
+}
+
+
 
 def _sole_contributor(hosts_by_skill: dict, bucket_skills: set | None = None):
     """The one skill's host set, or None when zero or several skills contributed.
@@ -3760,6 +3806,84 @@ def _sole_contributor(hosts_by_skill: dict, bucket_skills: set | None = None):
     return hosts if len(hosts) == 1 else None
 
 
+def _js_warn_headline(rules: set) -> str:
+    """B-743: the detail's opening clause, from the rules that fired.
+
+    The fix and the sub-signal were derived first; this line was left as the literal
+    "Dynamic JS/TS execution surface in installed skill(s): " — which is the same
+    one-label-for-many-causes defect, on the line a reader meets FIRST. It is also the
+    least true of the three for `JS_NATIVE_DLOPEN`: loading a compiled addon is not a
+    "dynamic execution surface" in the sense the phrase was coined for (a command or a
+    module path chosen at runtime), it is code this scan cannot read at all.
+
+    One rule fired -> name it. Several -> say so plainly rather than picking one; the
+    specific reasons follow the colon either way, so nothing is lost by the generic form.
+    """
+    named = [lbl for rule, (lbl, _fix) in _JS_WARN_REMEDIATION.items() if rule in rules]
+    if len(named) == 1:
+        return f"Runtime JS/TS signal in installed skill(s) — {named[0]}: "
+    if len(named) > 1:
+        return "Several runtime JS/TS signals in installed skill(s): "
+    return "Runtime JS/TS signal in installed skill(s): "
+
+
+def _js_warn_fix(rules: set) -> str:
+    """B-743: the remediation for the JS warn bucket, from the rules that actually fired.
+
+    Every entry that fired is rendered, not one chosen for the group: a skill can trip two
+    of these at once, and telling the reader about one while the other sits unmentioned in
+    the same finding is the same defect one notch smaller. Order is the table's, so the
+    text is stable across runs rather than set-iteration order.
+
+    An unknown rule id — a fourth rule added without a table entry — falls back to naming
+    the situation instead of inventing a cause. `tests/test_b743_js_warn_remediation.py`
+    makes that unreachable by requiring an entry per warn rule, so this is a belt on top of
+    a brace: it must never produce a claim about a cause it does not know.
+    """
+    fixes = [fix for rule, (_lbl, fix) in _JS_WARN_REMEDIATION.items() if rule in rules]
+    if not fixes:
+        return (
+            "A bundled .js/.ts file tripped a runtime-behaviour signal. Read the flagged "
+            "call before trusting the skill."
+        )
+    return " ".join(fixes)
+
+
+def _js_warn_sub_signals(rules: set, contributing_skills: set) -> set:
+    """B-743: the adjudication packet's sub-signal names, from the rules that fired.
+
+    `_B13_WINNER_SUBSIGNAL["warns_js"]` is one fixed string, so the judge was told a dlopen
+    finding was a "dynamic JS/TS execution surface" — the wrong question. Falls back to the
+    bucket's own label when nothing is recognised, so the packet never loses the field.
+
+    ONLY WHEN ONE SKILL CONTRIBUTED, and that bound is the point rather than caution.
+    `sub_signals` is the one field here that is bound to a NAMED subject: the packet's
+    `target` comes from `adjudication._target_from_evidence`, i.e. the first evidence
+    line's skill, while B13 is a single finding spanning every installed skill. The
+    question shipped beside it reads "flagged THIS SKILL for the specific sub-signal
+    recorded in `safe_facts.sub_signals` — that is what fired, not the others B13 can
+    report."
+
+    So on a home with `alpha` (dlopen only) and `bravo` (child_process only), publishing the
+    union told the judge that `alpha` had an interpolated child_process command. It does
+    not. The generic label was vague and therefore true of any contributor; making it
+    specific without scoping it to the subject turned vagueness into a false statement
+    about a named skill — measured, on that exact two-skill home.
+
+    `_sole_contributor` (B-618) exists for this class and reaches the same conclusion for
+    `destination_hosts`. This is not routed through it only because that helper answers a
+    hosts-by-skill question; the rule is the same one.
+
+    Note `fix` and the detail headline are NOT scoped this way, deliberately: both describe
+    the finding, which really does span every contributor, and the detail lists each
+    `skill: reason` beside them. Only the packet binds a claim to one name.
+    """
+    if len(contributing_skills) > 1:
+        return {_B13_WINNER_SUBSIGNAL["warns_js"]}
+    named = {lbl for rule, (lbl, _fix) in _JS_WARN_REMEDIATION.items() if rule in rules}
+    return named or {_B13_WINNER_SUBSIGNAL["warns_js"]}
+
+
 def _b13_verdict(
     severity: str,
     status: str,
@@ -3770,6 +3894,7 @@ def _b13_verdict(
     winner: str,
     engine_degraded: bool = False,
     destination_hosts=None,
+    sub_signals_override: set | None = None,
 ) -> Finding:
     # B-455: *engine_degraded* defaults False (every existing caller unaffected) — see
     # the parse_error_paths call site below, and (B-458) the unreadable-file winner that
@@ -3797,8 +3922,14 @@ def _b13_verdict(
         destination_hosts=destination_hosts,
         # B-556: name the fired sub-signal. `winner` is already the answer to the
         # question the packet used to ask as a disjunction.
+        # B-743: a bucket fed by ONE cause is fully described by its winner name. A bucket
+        # fed by several is not — `warns_js` aggregates three distinct JS rules, so the
+        # single label named a cause that need not be the one that fired. Such a caller
+        # passes the set derived from what actually fired; everyone else is unchanged.
         sub_signals=(
-            {_B13_WINNER_SUBSIGNAL[winner]} if winner in _B13_WINNER_SUBSIGNAL else None
+            sub_signals_override
+            if sub_signals_override
+            else ({_B13_WINNER_SUBSIGNAL[winner]} if winner in _B13_WINNER_SUBSIGNAL else None)
         ),
     )
     # C-358: coverage disclosure only, appended to evidence (never detail) — every
@@ -3885,7 +4016,21 @@ def check_installed_skills(ctx: Context) -> Finding:
     warns_insecure_tempfile: list[str] = []  # C-199: hardcoded predictable /tmp write (CWE-377)
     warns_chunked_file_exec: list[str] = []  # B336: chunked multi-file-read helper -> exec/eval
     warns_install_curl: list[str] = []  # F-097: down-ranked install-doc curl|bash / fetch
-    warns_js: list[str] = []  # F-064: soft JS/TS signals (child_process template, dynamic require)
+    # F-064: the soft JS/TS signals — every analyze_javascript rule that is not crit.
+    # B-743: NOT enumerated here. This comment used to name two of them and went stale
+    # the moment a third arrived, which is the drift that let the bucket's advice go
+    # false. `_JS_WARN_REMEDIATION` is the list, and a test keeps it complete.
+    warns_js: list[str] = []
+    # B-743: which RULES produced those strings. Parallel to `warns_js` rather than folded
+    # into it: the list is read as rendered text at four sites in this module (`len(...)`,
+    # `"; ".join(...)`, passed as `ev`, and registered in `_signal_buckets`), and changing
+    # its element type would touch all four plus the bucket protocol they share with 21
+    # sibling buckets, to fix a prose bug in exactly one of them. (An earlier version of
+    # this comment said "~20 consumers"; measured, `warns_js` appears in one module. The
+    # 20 was the count of sibling BUCKETS, not of readers — corrected rather than kept,
+    # because an unmeasured number in a justification is the thing this file keeps
+    # getting wrong.)
+    warns_js_rules: set[str] = set()
     warns_content: list[
         str
     ] = []  # F-051/F-062 soft content signals (broad trigger, Tor/IP IOCs)
@@ -3959,11 +4104,15 @@ def check_installed_skills(ctx: Context) -> Finding:
     # presentation text (that path was tried and retracted: an evidence-prefix parser
     # cannot tell "owner" apart from "field path", and a skill DIRECTORY NAME
     # containing ": " can forge agreement with a different skill's prefix on purpose).
+    # B-743: which skills fed the JS warn bucket. B-618's idiom, and needed for the
+    # same reason: a per-skill CLAIM may only be made when one skill contributed.
+    js_skills: set = set()
     crit_skills: set = set()
     install_curl_skills: set = set()
     notify_skills: set = set()
     named_exfil_skills: set = set()
     for name, blob in skills.items():
+        _warns_js_len0 = len(warns_js)
         _crit_len0 = len(crit)
         _install_curl_len0 = len(warns_install_curl)
         _notify_len0 = len(warns_notify_host)
@@ -4629,8 +4778,11 @@ def check_installed_skills(ctx: Context) -> Finding:
             for af in analyze_shell(src, relpath):
                 crit.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
         # F-064: bundled JS/TS (.js/.ts/.mjs/.cjs) lexical pass. eval-of-decoded and
-        # remote fetch-then-exec are crit -> FAIL; child_process-with-template and
-        # dynamic require() are warn -> the JS WARN bucket below.
+        # remote fetch-then-exec are crit -> FAIL; every other rule is warn -> the JS WARN
+        # bucket below. B-743: this comment used to enumerate the warn rules as two, which
+        # went stale the moment JS_NATIVE_DLOPEN was added and is how the bucket's fixed
+        # advice drifted out of truth unnoticed. Stated as the RULE now, not as a list —
+        # `_JS_WARN_REMEDIATION` is the list, and a test keeps it complete.
         for relpath, src in ctx.installed_skill_js.get(name, []):
             for af in analyze_javascript(src, relpath):
                 msg = f"{name}: {af.reason} ({relpath}:{af.lineno})"
@@ -4638,8 +4790,11 @@ def check_installed_skills(ctx: Context) -> Finding:
                     crit.append(msg)
                 else:
                     warns_js.append(msg)
+                    warns_js_rules.add(af.rule)
         # B-618: this skill contributed if -- and only if -- one of the buckets above
         # actually grew during its own iteration. Structural, not text-parsed.
+        if len(warns_js) > _warns_js_len0:
+            js_skills.add(name)
         if len(crit) > _crit_len0:
             crit_skills.add(name)
         if len(warns_install_curl) > _install_curl_len0:
@@ -5078,15 +5233,14 @@ def check_installed_skills(ctx: Context) -> Finding:
         return _b13_verdict(
             HIGH,
             WARN,
-            "Dynamic JS/TS execution surface in installed skill(s): "
+            _js_warn_headline(warns_js_rules)
             + "; ".join(warns_js[:6])
             + extra,
-            "A bundled .js/.ts file runs child_process with an interpolated command or "
-            "require()s a non-literal module path — a command-injection / arbitrary-module "
-            "surface. Read the flagged call and confirm the inputs are trusted.",
+            _js_warn_fix(warns_js_rules),
             warns_js,
             _signal_buckets,
             "warns_js",
+            sub_signals_override=_js_warn_sub_signals(warns_js_rules, js_skills),
         )
 
     # F-051 / F-060 / F-062: soft content signals — broad activation trigger, delegation to a
