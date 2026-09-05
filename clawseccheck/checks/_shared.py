@@ -3240,7 +3240,16 @@ _FS_GOVERNED_TOOL_IDS = frozenset({"read"})
 
 
 def _fs_reads_are_confined(cfg: dict) -> bool:
-    """True when EVERY declared scope confines its file reads.
+    """True when EVERY declared scope is PROVEN to confine its file reads.
+
+    B-712 sharpened that sentence, and the change of proposition is the point. `confined_scopes`
+    now answers True / False / None per scope, where None means `sandbox.mode: "non-main"` — a
+    confinement the vendor resolves against the RUNNING session's key, which no config carries.
+    An undecided scope therefore does not satisfy this predicate: suppression requires proof,
+    and `all()` over a list containing None would have reached the same answer by coercion
+    rather than by decision. Written out so the decision is visible, because this feeds two
+    FAIL gates — A1's sensitive-data leg, and `_capability.py`, whose own comment notes that
+    `fs_confined` downgrades a hard FAIL to WARN.
 
     C-462: the two guards are OpenClaw's own, taken from the predicate its audit uses for
     `security.exposure.open_groups_with_runtime_or_fs`:
@@ -3254,7 +3263,7 @@ def _fs_reads_are_confined(cfg: dict) -> bool:
     unconfined scope is enough to leave the capability exposed.
     """
     scopes = _toolpolicy.confined_scopes(cfg)
-    return scopes is not None and all(scopes)
+    return scopes is not None and all(s is True for s in scopes)
 
 
 def _trifecta_leg_sources(ctx: Context) -> dict:
@@ -3327,8 +3336,23 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     granting_ids = SENSITIVE_TOOL_IDS
     if _fs_reads_are_confined(cfg):
         granting_ids = SENSITIVE_TOOL_IDS - _FS_GOVERNED_TOOL_IDS
-    sensitive.extend(_tool_id_sources(cfg, granting_ids))
-    sensitive.extend(_attested_tool_id_sources(ctx, granting_ids))
+    _fs_sources = _tool_id_sources(cfg, granting_ids) + _attested_tool_id_sources(
+        ctx, granting_ids
+    )
+    # B-712: when the ONLY reason a file-read counts is that confinement could not be
+    # resolved — `sandbox.mode: "non-main"`, whose answer depends on which session runs — the
+    # source says so. Keeping the leg is right (suppression requires proof); stating it
+    # without the qualifier would assert an exposure we did not establish, which is the same
+    # fabrication as the confident `True` this predicate used to return, pointed the other
+    # way. A scope PROVEN unconfined is real evidence and gets no hedge.
+    if _toolpolicy.confinement_undecided_only(cfg) and not _fs_reads_are_confined(cfg):
+        _fs_sources = [
+            f"{s} (confinement undecided: sandbox 'non-main')"
+            if any(tid in str(s) for tid in _FS_GOVERNED_TOOL_IDS)
+            else s
+            for s in _fs_sources
+        ]
+    sensitive.extend(_fs_sources)
     # getattr, not ctx.home directly: a few tests build Context via __new__ without
     # setting .home, relying on _trifecta_legs' original `or`-chain never reaching this
     # term once an earlier one is already True (test_b283_shallow_reads.py's

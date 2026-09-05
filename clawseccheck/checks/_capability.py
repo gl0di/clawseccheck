@@ -1561,6 +1561,22 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
         # `tools` is `{"profile": "coding"}` has not NARROWED anything -- that profile is what
         # GRANTS the write family. "Sets its own tools" is too coarse a proxy for "might have
         # taken the grant away"; a detected widening is direct evidence of the opposite.
+        # B-712: when a scope is in `inheriting` ONLY because its confinement could not be
+        # resolved -- `sandbox.mode: "non-main"`, whose answer depends on which session runs
+        # -- the FAIL below asserts "no write-specific scoping" and "arbitrary file writes"
+        # about ground this check did not read. Keeping the scope is right (declining to
+        # prove confinement is not proving it), but the evidence has to say which it is, or
+        # the verdict fabricates certainty in the direction opposite to the confident `True`
+        # the sandbox predicate used to return. Evidence-only: the verdict is unchanged.
+        _undecided = _toolpolicy.undecided_inheriting_scopes(cfg) or []
+        if _undecided:
+            ev.append(
+                f"{len(_undecided)} of the unconfined scope(s) are UNDECIDED rather than "
+                "proven unconfined: they run under sandbox.mode 'non-main', where OpenClaw "
+                "decides per session (the agent's own main session is unsandboxed, its "
+                "others are not), so the config does not settle whether the write reach is "
+                "real -- it only fails to rule it out"
+            )
         if inheriting is not None and not inheriting and not widenings:
             ev.append(
                 "every unconfined scope narrows its own tool policy in a way that could "

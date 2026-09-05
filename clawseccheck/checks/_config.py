@@ -30,7 +30,7 @@ from ..collector import (
 )
 from ..safeio import walk_dir_safely
 from ..textnorm import normalize_for_scan
-from ..toolpolicy import scopes_reaching_outside_workspace
+from ..toolpolicy import any_confinement_undecided, scopes_reaching_outside_workspace
 
 from ._content import (
     _B58_HTML_COMMENT_RE,
@@ -3269,11 +3269,18 @@ def check_trifecta(ctx: Context) -> Finding:
         if reach or store["incomplete"]:
             why = []
             if reach:
+                # B-712: when one of these scopes is `sandbox.mode: "non-main"`, whether it
+                # is confined depends on which SESSION runs, which no config states. Saying
+                # "are not confined" and "can read" would then assert what we have not
+                # established — the same fabrication in the other direction as the confident
+                # `True` this predicate used to return. The claim is weakened to match.
+                undecided = any_confinement_undecided(reach)
                 why.append(
-                    f"file tools are not confined to the workspace for {', '.join(reach)}"
+                    f"file tools are {'not proven confined' if undecided else 'not confined'}"
+                    f" to the workspace for {', '.join(reach)}"
                     " (tools.fs.workspaceOnly is not true there) and the `read` tool is"
-                    " still granted, so an injected prompt can read openclaw.json,"
-                    " credentials/ and any other file this account can"
+                    f" still granted, so an injected prompt {'may be able to' if undecided else 'can'}"
+                    " read openclaw.json, credentials/ and any other file this account can"
                 )
             if store["incomplete"]:
                 why.append(

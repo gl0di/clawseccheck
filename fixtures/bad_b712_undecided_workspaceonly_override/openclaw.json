@@ -1,0 +1,35 @@
+{
+  "agents": {
+    "list": [
+      {
+        "id": "main",
+        "default": true
+      },
+      {
+        "id": "helper",
+        "sandbox": {
+          "mode": "non-main"
+        },
+        "tools": {
+          "fs": {
+            "workspaceOnly": false
+          }
+        }
+      }
+    ]
+  },
+  "tools": {
+    "allow": [
+      "read",
+      "write"
+    ],
+    "fs": {
+      "workspaceOnly": true
+    }
+  },
+  "channels": {
+    "telegram": {
+      "dmPolicy": "open"
+    }
+  }
+}

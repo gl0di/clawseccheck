@@ -319,6 +319,23 @@ def read_reaches_outside_workspace(cfg: dict, agent_tools=None) -> bool:
 # | all. Anything else is not a value OpenClaw recognizes and confines nothing.
 _SANDBOX_ALL = "all"
 _SANDBOX_NON_MAIN = "non-main"
+_SANDBOX_OFF = "off"
+
+# B-712: appended to a scope label whose confinement the config does not decide, so the
+# uncertainty reaches the reader instead of being flattened into a bare assertion.
+_UNDECIDED_SUFFIX = " (sandbox 'non-main' — confinement depends on which session runs)"
+
+
+def any_confinement_undecided(labels) -> bool:
+    """Does this scope list contain a scope whose confinement the config does not decide?
+
+    B-712. A caller that renders `scopes_reaching_outside_workspace` into prose has to know
+    this: "these scopes are not confined" is a different sentence from "these scopes are not
+    PROVEN confined", and only the second one is true when a `non-main` scope is in the list.
+    Exposed as a predicate rather than leaving callers to substring-match the suffix, so the
+    marker stays this module's business.
+    """
+    return any(_UNDECIDED_SUFFIX in str(x) for x in (labels or ()))
 
 
 def _default_agent_id(cfg: dict) -> str:
@@ -345,12 +362,50 @@ def _sandbox_mode(cfg: dict, entry) -> str:
     return mode if isinstance(mode, str) else ""
 
 
-def _sandbox_confines(cfg: dict, agent_id: str, entry) -> bool:
+def _sandbox_confines(cfg: dict, agent_id: str, entry) -> "bool | None":
+    """Does the sandbox confine this scope? ``True`` / ``False`` / ``None`` for undecidable.
+
+    B-712. This used to return a confident boolean for a property the config does not
+    determine. The vendor's own predicate is four lines and says exactly where the boundary
+    falls (``runtime-status-*.js``)::
+
+        function shouldSandboxSession(cfg, sessionKey, mainSessionKey, sandboxRequired) {
+            if (sandboxRequired) return true;
+            if (cfg.mode === "off")  return false;
+            if (cfg.mode === "all")  return true;
+            return sessionKey.trim() !== mainSessionKey.trim();
+        }
+
+    ``all`` and ``off`` are decidable from config alone. ``non-main`` falls through to a
+    comparison against the RUNNING session's key, which has no representation in
+    ``openclaw.json`` — so the honest answer is that there is none.
+
+    Two corrections to what this function used to assert, both measured by executing
+    ``resolveSandboxRuntimeStatus`` for both session positions of each agent across 45
+    generated configs (``tests/data/sandbox_battery.json``):
+
+    * ``non-main`` is undecidable for EVERY agent, not only the non-default ones. The old
+      ``agent_id != _default_agent_id(cfg)`` came from reading "non-main" as "not the main
+      AGENT", but ``resolveMainSessionKeyForSandbox`` resolves per agent — so every agent has
+      its own main session that runs unsandboxed, and its other sessions that do not.
+    * An absent ``mode`` resolves to ``off``, not to "unknown". The vendor's effective mode
+      for an absent key is ``off``, so ``False`` there is a real answer, not a guess.
+
+    A value we do not recognise also yields ``None``. The schema restricts ``mode`` to the
+    three literals (probed: ``"bogus"`` is rejected as ``invalid_union`` at both the defaults
+    and the per-entry placement), so this is unreachable from a loadable config — it is the
+    Golden-Rule-#4 default rather than a live branch.
+
+    NOT modelled, and it matters for how a caller words itself: ``sandboxRequired`` is checked
+    FIRST and returns true unconditionally. It is a runtime flag with no config expression, so
+    even a ``False`` here means "not confined BY CONFIG", never "provably unconfined".
+    """
     mode = _sandbox_mode(cfg, entry)
     if mode == _SANDBOX_ALL:
         return True
-    # Under "non-main" the main agent runs unsandboxed, so only the others are confined.
-    return mode == _SANDBOX_NON_MAIN and agent_id != _default_agent_id(cfg)
+    if mode in ("", _SANDBOX_OFF):
+        return False
+    return None
 
 
 # Tokens whose presence in an allow/deny list touches the file-write family. `*` and the
@@ -451,7 +506,64 @@ def unconfined_scopes_inheriting_global_tools(cfg: dict):
     scopes += [(name, entry) for name, entry in entries if name != main]
     out = []
     for is_confined, (name, entry) in zip(confined, scopes):
-        if is_confined:
+        # B-712: `is True`, not truthiness. `confined_scopes` now yields None for a scope the
+        # config does not decide, and a bare `if is_confined:` read that as "not confined"
+        # without anyone choosing it. The choice IS to keep such a scope — declining to prove
+        # confinement is not the same as proving exposure, but silently subtracting it would
+        # restore exactly the fabricated containment this change removes. Which of them were
+        # undecided is available from `undecided_inheriting_scopes` below, so a caller
+        # driving a FAIL off this list can hedge instead of asserting what we did not resolve.
+        if is_confined is True:
+            continue
+        if _tools_may_remove_write(entry.get("tools") if isinstance(entry, dict) else None):
+            continue
+        out.append(name)
+    return out
+
+
+def confinement_undecided_only(cfg: dict) -> bool:
+    """True when nothing is PROVEN unconfined but something is UNDECIDED.
+
+    B-712. The distinction a verdict has to make before it words itself: a scope with the
+    sandbox demonstrably off is evidence; a scope on `sandbox.mode: "non-main"` is an absence
+    of evidence. Both stop `_fs_reads_are_confined` from suppressing a leg — correctly, since
+    suppression requires proof — but only the first justifies a sentence that asserts the
+    exposure outright. False when any scope is proven unconfined (there is real evidence, so
+    no hedge is owed) and False when everything is confined (nothing to say).
+    """
+    scopes = confined_scopes(cfg)
+    if not scopes:
+        return False
+    return any(s is None for s in scopes) and not any(s is False for s in scopes)
+
+
+def undecided_inheriting_scopes(cfg: dict):
+    """Of `unconfined_scopes_inheriting_global_tools`, which are UNDECIDED rather than proven
+    unconfined? ``None`` when there is no config.
+
+    B-712. The sibling above returns one flat list because its callers ask "did anything
+    escape". A caller that turns that list into a FAIL needs the finer answer: a scope kept
+    because `sandbox.mode: "non-main"` gives no static answer is not the same evidence as a
+    scope kept because the sandbox is demonstrably off, and a verdict that cannot tell them
+    apart will word itself as though it could.
+
+    Deliberately a second function rather than a richer return type: three call sites already
+    consume the flat list, and widening their contract to fix a wording problem would be a
+    larger change than the wording problem.
+    """
+    if not isinstance(cfg, dict) or not cfg:
+        return None
+    confined = confined_scopes(cfg)
+    if confined is None:
+        return None
+    main = _default_agent_id(cfg)
+    entries = _agent_entries(cfg)
+    by_id = dict(entries)
+    scopes = [(main, by_id.get(main) or {})]
+    scopes += [(name, entry) for name, entry in entries if name != main]
+    out = []
+    for is_confined, (name, entry) in zip(confined, scopes):
+        if is_confined is not None:
             continue
         if _tools_may_remove_write(entry.get("tools") if isinstance(entry, dict) else None):
             continue
@@ -491,7 +603,14 @@ def confined_scopes(cfg: dict):
     for name, entry in scopes:
         tools = entry.get("tools") if isinstance(entry, dict) else None
         fs_scope = tools if _has_fs_flag(tools) else cfg.get("tools")
-        out.append(bool(_workspace_only_of(fs_scope)) or _sandbox_confines(cfg, name, entry))
+        # B-712: three-state. `workspaceOnly: true` is proof on its own, so it wins outright;
+        # otherwise the answer is the sandbox's, INCLUDING its `None`. Written out rather
+        # than left as `a or b` — that expression happens to produce the same three values,
+        # and a security predicate should not depend on a reader noticing that.
+        if _workspace_only_of(fs_scope):
+            out.append(True)
+        else:
+            out.append(_sandbox_confines(cfg, name, entry))
     return out
 
 
@@ -499,20 +618,28 @@ def scopes_reaching_outside_workspace(cfg: dict) -> list:
     """Every declared scope whose file-read tool can reach files outside its workspace.
 
     ``"global"`` for the surface the main agent runs under, plus the id of each declared
-    agent that resolves the same way. A scope whose sessions are sandboxed is subtracted
-    (see above). Empty means no declared scope can read the OpenClaw home.
+    agent that resolves the same way. A scope PROVEN sandboxed is subtracted (see above).
+    Empty means no declared scope can read the OpenClaw home.
+
+    B-712: a scope whose confinement is UNDECIDABLE from config — `sandbox.mode: "non-main"`,
+    where the vendor's answer depends on which session is running — is NOT subtracted, and
+    says so in its own label. Subtracting it would fabricate a containment the config does
+    not establish; dropping the qualifier would assert a reach we have not established
+    either. The caller renders these labels into its evidence, so the uncertainty travels
+    with the finding instead of being resolved by whoever wrote the sentence.
     """
     if not isinstance(cfg, dict) or not cfg:
         return []
     out = []
     main = _default_agent_id(cfg)
     main_entry = dict(_agent_entries(cfg)).get(main)
-    if read_reaches_outside_workspace(cfg) and not _sandbox_confines(cfg, main, main_entry):
-        out.append("global")
+    confined = _sandbox_confines(cfg, main, main_entry)
+    if read_reaches_outside_workspace(cfg) and confined is not True:
+        out.append("global" + _UNDECIDED_SUFFIX if confined is None else "global")
     for name, entry in _agent_entries(cfg):
         tools = entry.get("tools")
-        if read_reaches_outside_workspace(cfg, agent_tools=tools) and not _sandbox_confines(
-            cfg, name, entry
-        ):
-            out.append(f"agent {name!r}")
+        confined = _sandbox_confines(cfg, name, entry)
+        if read_reaches_outside_workspace(cfg, agent_tools=tools) and confined is not True:
+            label = f"agent {name!r}"
+            out.append(label + _UNDECIDED_SUFFIX if confined is None else label)
     return out
