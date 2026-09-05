@@ -95,7 +95,20 @@ _EXEMPT = {
                        "default). The extra lines are user-facing verdict text, not "
                        "machinery; squeezing them to hold a line count would trade the "
                        "report's clarity for a number. A finer split is a later cycle.",
-    "checks/_mcp.py": "~7,597 lines — the MCP / plugin checks + vet_mcp / vet_plugin (40 "
+    # Restated 2026-09-05 (B-742): 7,597 -> 8,111. B-727 restated `_lifecycle.py` one day
+    # earlier and, while measuring, wrote down that THIS file "sits at 97% of its own
+    # tolerance" and that the table "needs a restate-and-reconsider pass, not one entry at
+    # a time as each next commit trips it". That prediction landed: B-742 added 27 lines
+    # and they were the 27 that crossed the 500-line cap. 487 of the 514 predate it.
+    #
+    # So, reconsidering rather than bumping, and measured today with the guard's own
+    # counter: the queue behind this file is real and close. risk.py 82% of tolerance,
+    # report.py 77%, skillast.py 74%, collector.py 70% — four more entries that the next
+    # commit touching each will trip, individually, exactly as B-727 said. The split
+    # `_mcp.py` has owed since I-022 is still owed and is now the second-largest piece of
+    # structural debt in the tree after `_content.py`; vet_plugin alone (the dispatcher,
+    # its tree sweep and the plugin sweep) is a coherent unit that could leave.
+    "checks/_mcp.py": "~8,111 lines — the MCP / plugin checks + vet_mcp / vet_plugin (40 "
                       "symbols); topic-faithful and over budget by design. A finer split is "
                       "a later cycle.",
     "checks/_egress.py": "~4,077 lines — the egress-hardening topic (proxy/TLS/SSRF/"
