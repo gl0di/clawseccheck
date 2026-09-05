@@ -440,7 +440,16 @@ jobs:
       # above, via the same `gh` CLI (`release upload`) rather than a second
       # release-management action, so there is one mechanism for release assets.
       - name: Create GitHub Release
-        if: github.ref_type == 'tag'
+        # Deliberately NOT gated on the publish step having succeeded. ClawHub has a
+        # measured false-failure mode: on 2026-08-06 `clawhub publish` uploaded v3.61.0
+        # successfully (that version answers 200 on the registry today) and then exited 1
+        # with "Version 3.61.0 already exists". Because this step sat downstream of that
+        # exit code, it was skipped for v3.59.0, v3.60.0 and v3.61.0 — all three lost
+        # their cosign bundle, and the releases were completed by hand with
+        # SHA256SUMS.txt alone, while README/FAQ tell users to verify the install with
+        # `cosign verify-blob --bundle`. The signed digest is a property of the TAGGED
+        # TREE, not of the registry, so it must land whatever the registry replied.
+        if: ${{ !cancelled() && github.ref_type == 'tag' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
