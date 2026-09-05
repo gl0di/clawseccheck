@@ -3279,8 +3279,15 @@ REMEDIATION = {
                 # B-738: was "non-main". This is the MACHINE-APPLICABLE remediation — a fixer
                 # or a host agent writes it without reading prose — and "non-main" does not
                 # do what the note promised: OpenClaw keeps the agent's own MAIN session on
-                # the host under it (dist/launch-BmPwk1y9.js:37, quoted in risk.py's
-                # containment docstring), which is the session an operator actually uses.
+                # the host under it, which is the session an operator actually uses.
+                # Re-grounded against the INSTALLED openclaw@2026.9.1 (2026-09-05): the
+                # bundle name B-738 cited (launch-BmPwk1y9.js) rotated away in 9.1, but the
+                # behaviour did not. The vendor states it itself, as advice for ESCAPING the
+                # sandbox: runtime-status-hcw0I7bE.js:153 offers "Use the agent main session
+                # instead of a non-main session" when sandbox.mode === "non-main", and
+                # sandbox-cli-W3C8RnNf.js:283 branches on the same mode against
+                # payload.sandbox.sessionIsSandboxed. Cite the STRINGS above, not the bundle
+                # names, when re-checking after an upgrade — the names rotate every release.
                 # OpenClaw's own audit remediation says "all" too
                 # (dist/audit-*.js: "use sandbox mode \"all\" and workspaceAccess \"ro\" or
                 # \"none\""). Applying the old value cleared B4 and RISK-03 while leaving

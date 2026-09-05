@@ -58,11 +58,14 @@ TRANSLATABLE = (
     "bad_b351_codemode_agent_only",
     "bad_b351_codemode_global_on_agent_narrowed",
     "bad_b352_agent_only_prepend",
+    "bad_b712_undecided_scope_escape",
+    "bad_b712_undecided_workspaceonly_override",
     "clean_agent_profile_narrower",
     "clean_b409_real_allowlist_intersection_unaffected",
     "clean_b409_weak_agent_profile_no_widening",
     "warn_b409_profile_alsoallow_widening",
     "warn_b55_agent_profile_widens",
+    "warn_b712_every_scope_sandboxed",
 )
 
 #: Named, not skipped. Every one of these has a list entry with no ``id``, so it has no
