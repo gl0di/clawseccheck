@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NamedTuple
 from .. import attest as _attest
 from .. import toolpolicy as _toolpolicy
+from .. import toolgrant as _toolgrant
 from .. import trajectory as _trajectory
 from ..catalog import (
     BY_ID,
@@ -802,9 +803,65 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
             # here exactly as before.
             granted |= set(_B68_FS_TOOLS) & set(view.named)
 
-    if not view.enumerable and not widenings:
+    # B-668 (S3): resolve what the PER-AGENT scopes grant, resolved by the ported vendor
+    # predicate rather than by the accumulator above.
+    #
+    # Everything above this line models the GLOBAL layer. A grant that exists only inside an
+    # `agents.*` entry was therefore invisible, and the checks built on it returned a
+    # confident "no filesystem-write tool is granted" on configs the runtime grants write on
+    # — reproduced on `clean_b409_weak_agent_profile_no_widening` (scope `reader`) and
+    # `toolscope_case6_per_agent_alsoallow_widens_with_profile` (scope `helper`), both
+    # confirmed by EXECUTING the vendor's own resolveConfiguredToolPolicies +
+    # isToolAllowedByPolicies against the installed 2026.9.1 dist.
+    #
+    # ONLY agents that DECLARE their own `tools` are consulted, and that restriction is the
+    # whole design, not a shortcut. `toolgrant` is a faithful port, so asking it about an
+    # agent that declares nothing returns the VENDOR DEFAULT — and that default is
+    # permissive: measured, a config with no `tools` block at all grants read/write/edit/
+    # apply_patch. Consulting every scope unconditionally therefore imports a second,
+    # far larger change: 65 of 541 fixtures would newly count as granting write, none of
+    # them because of a per-agent grant. That is a real blindness (B55 does not see the
+    # permissive default) but it is a decision about what the tool asserts, not this
+    # migration — see B-736. Restricted to declaring agents the blast radius is exactly the
+    # two fixtures above, which is what a fix for B-668 should touch and nothing more.
+    scoped: set = set()
+    _roster = agent_roster(cfg)
+    for _entry in _roster:
+        if not _entry.id or not isinstance(_entry.entry, dict):
+            continue
+        if not _entry.entry.get("tools"):
+            continue
+        scoped |= {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t, _entry.id)}
+
+    # `agents.defaults.tools` is the second DECLARED per-agent surface, and it is a scope
+    # only when NO roster exists -- measured against the vendor: declared with no roster it
+    # grants, declared alongside `agents.entries` it is ignored entirely, which is what the
+    # shipped fixture `toolscope_case9_agents_defaults_tools_ignored_with_roster` is named
+    # for. Consulted at global scope because that is where the vendor surfaces it in that
+    # shape, and gated on the key being DECLARED for the same reason the loop above is gated
+    # on `entry["tools"]`: an ungated global query returns the permissive vendor default and
+    # reintroduces the 65-fixture expansion this migration is deliberately not making.
+    if not _roster and dig(cfg, "agents.defaults.tools"):
+        scoped |= {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t)}
+
+    # The enumerability gate has to see `scoped`, and that ordering is the whole point of
+    # computing it above rather than below. An independent C-135 pass on the first draft of
+    # this change found the gate short-circuiting ahead of the per-agent resolution: on a
+    # config with NO global `tools` block whose only grant is per-agent
+    # (`agents.entries.main.tools.allow = ["write"]`), `view.enumerable` is False and
+    # `widenings` is empty, so the early return fired and the migration never ran. The vendor
+    # grants write and apply_patch there; we answered UNKNOWN. A config we CAN resolve must
+    # not be reported as unresolvable, so a per-agent grant makes the answer enumerable on
+    # its own.
+    if not view.enumerable and not widenings and not scoped:
         return [], False
-    return sorted(granted - view.denied), True
+
+    # `view.denied` is the GLOBAL deny list and is applied only to the globally-derived set.
+    # `scoped` already came from the vendor predicate, which applies every deny layer itself
+    # (verified: global `deny:["write"]` with a per-agent `allow:["write"]` resolves to
+    # nothing at that agent's scope) -- subtracting it a second time could only remove a
+    # grant the runtime keeps.
+    return sorted((granted - view.denied) | scoped), True
 
 
 def _b55_write_tools_granted(
