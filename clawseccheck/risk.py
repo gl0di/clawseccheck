@@ -885,10 +885,15 @@ def _rule_sandbox_off_untrusted_exec(ctx: Context, tools: list[str], cfg: dict) 
             "the host without any containment."
         ),
         fix=(
-            "Enable the sandbox: set agents.defaults.sandbox.mode to 'non-main' or "
-            "'all', and configure agents.defaults.sandbox.docker (network='bridge', "
-            "no broad host binds). If sandboxing is not possible, remove exec/write "
-            "tools or lock all ingress channels to a strict allowlist."
+            # B-738: this used to offer 'non-main' as an equal alternative. It clears
+            # this very chain while leaving it live — see _sandbox_off's docstring above,
+            # which already required exactly 'all' and cited the dist for why.
+            "Enable the sandbox: set agents.defaults.sandbox.mode to 'all', and configure "
+            "agents.defaults.sandbox.docker (network='bridge', no broad host binds). "
+            "'non-main' is not sufficient here: it keeps the agent's own main session on "
+            "the host, which is the session this chain runs through. If sandboxing is not "
+            "possible, remove exec/write tools or lock all ingress channels to a strict "
+            "allowlist."
         ),
     )
 

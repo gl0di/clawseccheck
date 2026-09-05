@@ -2861,8 +2861,10 @@ def check_sandbox(ctx: Context) -> Finding:
             # either roster shape, while `agents.list[]` is true in only one -- 2026.8.1
             # rejects that key, and a user on an older build has no `agents.entries`.
             # Naming one of them would point half the fleet at a key their file lacks.
+            # B-738: 'non-main' dropped from the offer — it leaves each agent's own main
+            # session on the host, so it does not remove the override's danger.
             "Remove the unsafe per-agent sandbox overrides named in the evidence "
-            "(set sandbox.mode to 'non-main'/'all', sandbox.docker.network to 'bridge', "
+            "(set sandbox.mode to 'all', sandbox.docker.network to 'bridge', "
             "sandbox.workspaceAccess to 'none'/'ro', and drop host and docker.sock "
             "binds), or rely on agents.defaults.sandbox.",
             ev + agent_ev,
@@ -2879,8 +2881,11 @@ def check_sandbox(ctx: Context) -> Finding:
     # a user who configured the wrong key doesn't think the tool missed it (C-057).
     phantom_sandbox = isinstance(cfg.get("sandbox"), dict)
     _move_fix = (
+        # B-738: names 'all' only. The point of this hint is that the user configured a
+        # phantom key and has NO sandbox; sending them to a value that leaves their main
+        # session on the host would answer that with a half-measure.
         "Move the sandbox settings under agents.defaults.sandbox "
-        "(e.g. set agents.defaults.sandbox.mode to 'non-main' or 'all')."
+        "(set agents.defaults.sandbox.mode to 'all')."
     )
     # B-024: a populated defaults-evidence list is a definite FAIL (docker.sock bind,
     # network=host, workspaceAccess=rw, mode=off). Surface it BEFORE the softer "mode not
@@ -2889,7 +2894,12 @@ def check_sandbox(ctx: Context) -> Finding:
     if ev:
         fixes = []
         if mode == "off":
-            fixes.append("Set agents.defaults.sandbox.mode to 'non-main' or 'all'")
+            fixes.append(
+                # B-738: 'all'. 'non-main' would clear this finding without containing the
+                # agent's own main session, which is where exec actually runs.
+                "Set agents.defaults.sandbox.mode to 'all' ('non-main' keeps the agent's "
+                "own main session on the host)"
+            )
         if docker_network == "host":
             fixes.append("Set agents.defaults.sandbox.docker.network to 'bridge' (not 'host')")
         if binds:
@@ -2922,7 +2932,9 @@ def check_sandbox(ctx: Context) -> Finding:
             WARN,
             "exec tooling present but agents.defaults.sandbox.mode not set — "
             "likely host execution.",
-            "Set agents.defaults.sandbox.mode (e.g. 'non-main' or 'all') and "
+            # B-738: see the structured remediation in catalog.py for the grounding.
+            "Set agents.defaults.sandbox.mode to 'all' ('non-main' sandboxes only an "
+            "agent's non-main sessions, leaving its own main session on the host) and "
             "configure agents.defaults.sandbox.docker for network isolation.",
         )
     if mode is None:

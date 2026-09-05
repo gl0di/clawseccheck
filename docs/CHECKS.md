@@ -77,7 +77,7 @@ Advisory checks are recorded for coverage but are not scored.
 - OWASP: LLM06 Excessive Agency
 - What it checks: Execution sandbox
 - Remediation:
-  - config: `agents.defaults.sandbox.mode` = `"non-main"` - run exec tools in a sandbox
+  - config: `agents.defaults.sandbox.mode` = `"all"` - run exec tools in a sandbox — 'all' sandboxes every session; 'non-main' leaves the agent's own main session on the host
 
 ### B5 - Plugin / skill supply-chain integrity
 
@@ -2451,10 +2451,11 @@ These paths are computed from multiple checks. They fire only when every leg is 
   ingress channel, a prompt-injection payload delivered via that channel can execute code
   or write files on the host without any containment.
 - Fix:
-  Enable the sandbox: set agents.defaults.sandbox.mode to 'non-main' or 'all', and
-  configure agents.defaults.sandbox.docker (network='bridge', no broad host binds). If
-  sandboxing is not possible, remove exec/write tools or lock all ingress channels to a
-  strict allowlist.
+  Enable the sandbox: set agents.defaults.sandbox.mode to 'all', and configure
+  agents.defaults.sandbox.docker (network='bridge', no broad host binds). 'non-main' is
+  not sufficient here: it keeps the agent's own main session on the host, which is the
+  session this chain runs through. If sandboxing is not possible, remove exec/write tools
+  or lock all ingress channels to a strict allowlist.
 
 ### RISK-04 - Mutable agent identity + elevated/privileged tools
 
@@ -2653,8 +2654,8 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Fix:
   Set channels.<provider>.contextVisibility (or channels.defaults) to 'allowlist' or
   'allowlist_quote', and set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false
-  with an explicit browser.ssrfPolicy.hostnameAllowlist. Breaking either leg breaks the
-  chain.
+  with an explicit browser.ssrfPolicy.allowedHostnames (OpenClaw 2026.8.1 and later;
+  browser.ssrfPolicy.hostnameAllowlist before it). Breaking either leg breaks the chain.
 
 ### RISK-16 - Sandbox host-reach + plaintext gateway credential = control-plane takeover
 

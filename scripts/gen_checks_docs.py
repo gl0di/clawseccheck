@@ -43,6 +43,16 @@ def _literal_text(node: ast.AST | None) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _callee_name(node: ast.Call) -> str:
+    """The bare function name of a call, however it was imported."""
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
 def _expr_text(node: ast.AST | None) -> str:
     if node is None:
         return ""
@@ -58,6 +68,22 @@ def _expr_text(node: ast.AST | None) -> str:
         return "".join(parts)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _expr_text(node.left) + _expr_text(node.right)
+    if isinstance(node, ast.Call) and _callee_name(node) == "_key_advice":
+        # B-738: a fix string may resolve its config key against the READER's OpenClaw
+        # generation via `checks/_shared.py::_key_advice(ctx, legacy, modern)`. The fallback
+        # below would `ast.unparse` that call and put Python source into a user-facing
+        # remediation — which it did: RISK-15 shipped
+        # "...with an explicit _key_advice(ctx, 'browser.ssrfPolicy.hostnameAllowlist', ...)"
+        # into docs/CHECKS.md, caught only because markdownlint read the underscore as
+        # emphasis. A document has no reader's build, so it gets the same text the helper
+        # itself produces when the generation is undeterminable: both keys, each qualified.
+        # Rendered by CALLING the helper, not by restating its format, so the doc cannot
+        # drift from the advice the tool actually prints.
+        args = [_expr_text(a) for a in node.args[1:]]
+        if len(args) == 2:
+            from clawseccheck.checks import _key_advice  # local: keeps import cost off startup
+
+            return _key_advice(None, args[0], args[1])
     if isinstance(node, (ast.List, ast.Tuple)):
         return ", ".join(_expr_text(elt) for elt in node.elts)
     try:

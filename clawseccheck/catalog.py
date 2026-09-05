@@ -3276,8 +3276,20 @@ REMEDIATION = {
         "config": [
             {
                 "path": "agents.defaults.sandbox.mode",
-                "set": "non-main",
-                "note": "run exec tools in a sandbox",
+                # B-738: was "non-main". This is the MACHINE-APPLICABLE remediation — a fixer
+                # or a host agent writes it without reading prose — and "non-main" does not
+                # do what the note promised: OpenClaw keeps the agent's own MAIN session on
+                # the host under it (dist/launch-BmPwk1y9.js:37, quoted in risk.py's
+                # containment docstring), which is the session an operator actually uses.
+                # OpenClaw's own audit remediation says "all" too
+                # (dist/audit-*.js: "use sandbox mode \"all\" and workspaceAccess \"ro\" or
+                # \"none\""). Applying the old value cleared B4 and RISK-03 while leaving
+                # exec on the host — a fix that satisfied the check and not the threat.
+                "set": "all",
+                "note": (
+                    "run exec tools in a sandbox — 'all' sandboxes every session; "
+                    "'non-main' leaves the agent's own main session on the host"
+                ),
             }
         ]
     },
