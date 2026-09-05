@@ -71,7 +71,19 @@ def test_loose_manifest_in_a_junk_drawer_folder_is_not_widened(tmp_path):
     assert _MARKER not in f.detail
     assert "unrelated_script.sh" not in f.detail
     assert f.status != FAIL
-    assert "Scope note" in f.detail and "kept to the manifest file alone" in f.detail
+    # B-741: the disclosure is unchanged in substance but no longer carries the "Scope
+    # note:" label here. A refused widen now emits the shared coverage-gap verdict
+    # (`coverage_gap_finding`), which outranks the clean B13 base and becomes the primary
+    # finding — so this sentence IS the detail rather than an aside appended to one, and
+    # the label would read as a doubled prefix. Assert the substance, not the label.
+    #
+    # This assertion is also why B-741 survived: in its original form it asserted the note
+    # existed on `.detail` and stayed green for the whole life of the defect, because the
+    # dossier renders a canned per-axis reason for a PASS and never showed it to anyone.
+    # The rendered-surface and exit-code assertions live in
+    # tests/test_b741_narrowed_manifest_is_not_clean.py; keep both.
+    assert "were left unread" in f.detail
+    assert "Re-run --vet-skill against the folder itself" in f.detail
 
 
 def test_a_genuinely_bundled_script_still_widens_scans_and_fails(tmp_path):

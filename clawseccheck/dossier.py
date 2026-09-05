@@ -599,6 +599,12 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     #     scan truncated, code present but unseen -- still printed "no executable code to
     #     analyze". Reviewer's repro reached it at the DEFAULT 900s budget through the
     #     file cap, with no clock pressure at all.
+    # B-741 adds a THIRD producer of a VET-COVERAGE UNKNOWN, and it is not a truncation:
+    # `vet_skill` holds a loose-`SKILL.md` scan to the manifest alone, so nothing was cut
+    # short -- no budget, no cap, no clock. The name is kept (it is read in several
+    # places) but the wording below now says what is true of all three: the scan did not
+    # cover the whole target. Do not restore "cut short" -- it would be a false statement
+    # of cause on the held-back path, which is the class of defect B-741 fixed.
     scan_truncated = any(
         getattr(f, "id", None) == "VET-COVERAGE" and f.status == UNKNOWN for f in pool
     )
@@ -834,10 +840,10 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
         )
     if truncated:
         if axis == "connections":
-            return "the scan was cut short before the outbound surface could be measured"
+            return "the scan did not cover the whole target, so the outbound surface was never measured"
         if axis == "persistence":
-            return "the scan was cut short before staged / persistent behavior could be measured"
-        return "the scan was cut short before this could be measured"
+            return "the scan did not cover the whole target, so staged / persistent behavior was never measured"
+        return "the scan did not cover the whole target, so this was never measured"
     if unanalysed:
         if axis == "connections":
             return ("executable code is present that this scan has no reader for, so the "

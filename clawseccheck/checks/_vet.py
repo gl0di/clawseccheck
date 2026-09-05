@@ -5621,7 +5621,7 @@ def _run_content_ring(
     return out
 
 
-def coverage_gap_finding(detail: str) -> Finding:
+def coverage_gap_finding(detail: str, fix: str | None = None) -> Finding:
     """The synthetic verdict that says "part of this target was never inspected".
 
     Shared so every producer of a truncated scan says it the same way — the ring's own
@@ -5655,9 +5655,17 @@ def coverage_gap_finding(detail: str) -> Finding:
         # actionable: no CLI flag or env var exposes the budget, and a re-run spends the
         # same budget on the same content for the same result. This says what they can
         # act on, matching how check_installed_skills phrases its own coverage-gap fix.
-        "Part of this skill was never inspected, so this is not a clean verdict. "
-        "Scan cost is driven by content size — review the skill's largest files by "
-        "hand before trusting it.",
+        #
+        # B-741: `fix` is overridable because the remediation is not the same for every
+        # producer of a gap. The default speaks to a SIZE-driven truncation; a scope that
+        # was deliberately held back is cleared by naming a different target, and telling
+        # that reader to "review the largest files by hand" would be advice that cannot
+        # clear the condition its own finding describes (the B-714 / B-738 class).
+        fix or (
+            "Part of this skill was never inspected, so this is not a clean verdict. "
+            "Scan cost is driven by content size — review the skill's largest files by "
+            "hand before trusting it."
+        ),
         "Skill Trust",
         False,
         engine_degraded=True,
@@ -5881,11 +5889,41 @@ def _narrowed_scope_note(root: Path) -> str:
     (personal/downloaded files beside the manifest) rather than the skill's own
     directory — so only the manifest text itself was scanned.
     """
+    return f"Scope note: {_narrowed_scope_body(root)}"
+
+
+def _narrowed_scope_body(root: Path) -> str:
+    """The sentence itself, without the "Scope note:" label.
+
+    Split out for B-741: the same words are now also the DETAIL of the coverage-gap
+    finding the refusal emits, where they are the whole message rather than an aside
+    appended to an unrelated verdict — so the label would read as a doubled prefix
+    ("coverage is incomplete: Scope note: ..."). One body, two framings — the aside is
+    still emitted, on the branch where a real FAIL/WARN in the manifest text outranks
+    the gap — so both surfaces are live and cannot drift.
+
+    IT STATES ONLY WHAT WAS NOT READ, DELIBERATELY. An earlier draft said the manifest
+    "sits in '<root>' alongside files that don't look like they belong to one skill
+    package". B-741's C-135 pass measured that against the real ClawHub corpus and it is
+    FALSE about 29 of the 32 packages the refusal fires on: the trip is a branding or
+    diagram asset (icon.svg ×12, banner.svg ×5, logo.svg ×3, favicon.svg, flow.svg …)
+    sitting beside `skill-card.md` and `_meta.json`, which ARE the ClawHub packaging
+    convention. B-523 could carry that misclassification as a footnote on a PASS; B-741
+    promotes this sentence to the headline reason of a CAUTION and an exit code, where a
+    false claim about the artifact is exactly the defect B-741 exists to remove. So the
+    text asserts the one thing that is always true — those files were not opened.
+
+    The remedy is followable for the same reason. "Point --vet-skill at the skill's own
+    dedicated directory" is unfollowable advice for a reader already pointing at exactly
+    that directory (via its manifest). Naming the DIRECTORY is what resolves it: a
+    directory target never reaches ``_resolved_parent_is_plausible_skill_root`` at all,
+    so the whole folder is scanned.
+    """
     return (
-        f"Scope note: 'SKILL.md' sits in '{root.name}' alongside files that don't look "
-        "like they belong to one skill package, so the scan was kept to the manifest "
-        "file alone — nothing else in that folder was read. If this skill ships its own "
-        "code, point --vet-skill at the skill's own dedicated directory instead."
+        f"only 'SKILL.md' was read — the other files in '{root.name}' were left "
+        "unread. A manifest can sit in a folder that is not the skill's own (a "
+        "downloads folder, say), so naming the file alone scans that file alone. "
+        "Re-run --vet-skill against the folder itself to scan every file in it."
     )
 
 
@@ -5904,7 +5942,97 @@ def vet_skill(path: str | Path) -> Finding:
     if is_loose_manifest and p != original:
         finding.detail = f"{finding.detail} {_widened_scope_note(finding, p)}".strip()
     elif is_loose_manifest and p == original and original.parent.is_dir():
-        finding.detail = f"{finding.detail} {_narrowed_scope_note(original.parent)}".strip()
+        finding = _merge_narrowed_scope_gap(finding, original.parent)
+    return finding
+
+
+def _merge_narrowed_scope_gap(finding: Finding, root: Path) -> Finding:
+    """B-741: a REFUSED widen is a coverage gap, not a clean result.
+
+    ``_resolved_parent_is_plausible_skill_root`` decides not to read the manifest's
+    siblings. That decision stays — it is B-523's protection, and no structural signal
+    separates a download drop from a minimal skill (that function's own docstring, and
+    the fact that ``len(siblings) <= 1`` already widens on the identical ambiguity).
+    What was wrong is the CLAIM the refusal produced.
+
+    Measured at ``ec77291``, on ``SKILL.md`` + an exfiltrating ``run.sh`` + one
+    ``sample.pdf``::
+
+        --vet-skill BUNDLE/SKILL.md  ->  INSTALL, Danger PASS, exit 0
+        --vet-skill BUNDLE           ->  DO-NOT-INSTALL, exfil at run.sh:2-3, exit 1
+
+    Removing only the ``.pdf`` flips the manifest form back. So declining to look BOUGHT
+    a cleaner verdict than looking — which is, one instance further out, exactly the bug
+    ``coverage_gap_finding``'s own docstring records for the ring ceiling ("hitting the
+    ceiling BOUGHT a cleaner verdict") and B-485 records for the AST parse-error branch
+    ("rolled all the way up to INSTALL, one line under the Danger axis printing that it
+    never got to look"). Same class, third producer.
+
+    Routing rather than a new mechanism, and the routing is what does the work. Flipping
+    the base verdict to UNKNOWN on its own is NOT enough and was verified not to be:
+    ``_grade_profile`` takes ``any(a.status == PASS)`` before it considers UNKNOWN, so
+    the build/behavior axes keep the headline at PASS/INSTALL. It is
+    ``dossier._danger_coverage_gap`` — leg 1, ``engine_degraded`` on an UNKNOWN in the
+    danger bucket — that floors the roll-up to WARN, which ``verdict_for`` renders as
+    CAUTION and ``cli.py``'s EXISTING exit rule (``FAIL/WARN -> 1``) already turns into a
+    non-zero status. So no exit-code rule changes here: the documented
+    ``--vet ... || fail`` gate starts working because the verdict became honest, not
+    because the gate was special-cased.
+
+    MEASURED COST, because a refusal that changes an exit code has to be counted. Over the
+    real ClawHub corpus: 32 of 35,738 top-level packages (0.09%) are held back, and 11 of
+    those are clean under a full directory scan — so they see a CAUTION they would not get
+    by naming the directory. 29 of the 32 trip on a branding or diagram asset (icon.svg
+    ×12, banner.svg ×5, logo.svg ×3 …) beside ``skill-card.md`` and ``_meta.json``. That
+    is the accepted price of declining to read, and it is why the text above states only
+    which files went unread instead of judging them. Dropping ``.svg``/``.png`` from
+    ``_GENERIC_DOWNLOAD_EXTS`` would recover 29 of the 32 and was REJECTED: fitting the
+    suffix list to a corpus is precisely what the real-fleet gate exists to stop, and the
+    verdict is honest at any tuning. Note no existing gate can see this population — 0
+    narrowed across ``fixtures/``, ``~/.openclaw`` and ``~/.claude``, and
+    ``fleet_fp_gate.py`` scans directories — so the shape is pinned as a fixture in
+    ``tests/test_b741_narrowed_manifest_is_not_clean.py`` instead.
+
+    The gap OUTRANKS a clean base verdict and becomes primary (``_VET_MERGE_RANK``:
+    UNKNOWN 1 > PASS 0) so the danger axis reads it; a real FAIL/WARN found in the
+    manifest text still outranks the gap and keeps it on ``ring_findings``, which is the
+    same shape the ring merge uses so a coverage-gap UNKNOWN is never filtered out of the
+    pool.
+    """
+    gap = coverage_gap_finding(
+        f"skill-bundle coverage is incomplete: {_narrowed_scope_body(root)}",
+        # Not the default size-driven advice: nothing here was too big to read. And not
+        # "point at the skill's own dedicated directory" either — measured against the
+        # real corpus, the reader is usually already pointing at exactly that, so the
+        # instruction cannot be followed (the B-714 / B-738 class this parameter exists
+        # for). Naming the DIRECTORY is the action that actually clears it.
+        "This is not a clean verdict — the files beside the manifest were never read. "
+        "Re-run --vet-skill against the folder itself rather than its SKILL.md: naming "
+        "the directory is what tells the scanner the whole folder is the skill, and it "
+        "then scans every file in it.",
+    )
+    # `ctx` is internal bookkeeping — the engine Context rides along so downstream
+    # readers (checks/_mcp.py's `bundled_contexts`, the file manifest a test asserts on)
+    # see the same collection this scan made. It is not rendered by report.py, sarif.py
+    # or the dossier, and no consumer treats it as evidence. Same channel, same reason as
+    # the budget-escape branch below; recorded here too because tests/test_c452_channel_
+    # registry.py anchors the `ctx` channel on the FIRST assignment site in file order,
+    # and this function is now that site.
+    gap.ctx = getattr(finding, "ctx", None)
+    carried = list(getattr(finding, "ring_findings", None) or [])
+    if _VET_MERGE_RANK.get(gap.status, 0) > _VET_MERGE_RANK.get(finding.status, 0):
+        gap.ring_findings = [finding, *carried]
+        return gap
+    # DEMOTED: a real FAIL/WARN found in the manifest text outranks the gap and stays
+    # primary. The gap still rides along so the roll-up keeps the coverage signal — but
+    # `ring_findings` reaches only `--json`, while the dossier, `--advise` and SARIF all
+    # render the PRIMARY finding's detail. The first version of this function returned
+    # here without the append below, which silently dropped the disclosure from every
+    # human surface on this branch — a regression on the pre-B-741 behaviour, and the
+    # same defect class B-741 exists to close, reopened one branch over. Found by the
+    # C-135 pass; the branch had no test, which is why it shipped green.
+    finding.detail = f"{finding.detail} {_narrowed_scope_note(root)}".strip()
+    finding.ring_findings = [*carried, gap]
     return finding
 
 

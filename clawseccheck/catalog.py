@@ -3410,7 +3410,13 @@ class Finding:
     # tried to run it) and could not reach a verdict for an ENGINE-SIDE reason — a crash,
     # a timeout/scan-budget escape, or an input the check expected to read that turned out
     # unreadable/corrupt/malformed (e.g. `_config_unreadable()`'s openclaw.json-present-
-    # but-unparseable case, checks/_shared.py). False (the default) covers everything
+    # but-unparseable case, checks/_shared.py). B-741 adds a fourth shape the list did not
+    # anticipate: a DELIBERATE refusal to open files that are readable — `vet_skill` holds
+    # a loose-`SKILL.md` scan to the manifest so a folder that may not be the skill's own
+    # is never read. The flag still fits, because its real contrast is engine-side versus
+    # GENUINELY ABSENT, and files present-but-unread are emphatically not absent; the cap
+    # below ("cannot rule out a CRITICAL") is exactly the right consequence for them.
+    # False (the default) covers everything
     # else, including the very common "genuinely absent" case — there is simply nothing to
     # check (no openclaw.json at all, a feature/file that legitimately does not exist for
     # this subject). Meaningless outside `status == UNKNOWN`; every producer of a FAIL/

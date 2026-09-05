@@ -52,6 +52,14 @@ _REPO = Path(__file__).resolve().parent.parent
 _FIXTURES = _REPO / "fixtures"
 _EMPTY_SCHEMA = {"type": "object", "additionalProperties": False}
 
+# B-741 retired the "cut short" phrasing: it stated a CAUSE, and a third producer of this
+# axis text does not truncate anything — `vet_skill` holds a loose-`SKILL.md` scan to the
+# manifest, with no budget, no cap and no clock involved. The wording now says what is true of
+# all three producers. Assert that substance rather than the retired label; the real guard in
+# these tests is `_NO_CODE not in reason` (a truncated scan must never deny the code), which is
+# unchanged.
+_INCOMPLETE = "did not cover the whole target"
+
 _NO_CODE = "no executable code to analyze"
 
 
@@ -251,7 +259,7 @@ def test_g_a_truncated_scan_is_unknown_and_does_not_deny_the_code(tmp_path):
         assert _NO_CODE not in axis.reason, (
             f"{name} denies code exists when the real reason is an unfinished scan: {axis.reason}"
         )
-        assert "cut short" in axis.reason, axis.reason
+        assert _INCOMPLETE in axis.reason, axis.reason
 
 
 def test_h_a_truncated_scan_says_so_even_when_no_code_was_established():
@@ -287,7 +295,7 @@ def test_h_a_truncated_scan_says_so_even_when_no_code_was_established():
         assert _NO_CODE not in axis.reason, (
             f"{name} says there is no code when the truth is the scan stopped: {axis.reason}"
         )
-        assert "cut short" in axis.reason, axis.reason
+        assert _INCOMPLETE in axis.reason, axis.reason
 
 
 def test_i_a_single_unparseable_file_does_not_read_as_a_truncated_scan(tmp_path):
@@ -331,7 +339,7 @@ def test_i_a_single_unparseable_file_does_not_read_as_a_truncated_scan(tmp_path)
             f"{name} read {axis.status} on a scan that COMPLETED — one file failed to "
             f"parse, which the danger axis already reports in its own words: {axis.reason}"
         )
-        assert "cut short" not in axis.reason, axis.reason
+        assert _INCOMPLETE not in axis.reason, axis.reason
 
 
 def _plugin_with_unread_python(root: Path, *, at_root: bool) -> Path:
@@ -432,4 +440,4 @@ def test_k_a_truncated_scan_holds_even_when_a_definite_finding_is_present(tmp_pa
             f"{name} read {axis.status}: a truncated scan must not yield an affirmative "
             "claim even when other findings prove the run reached the artifact"
         )
-        assert "cut short" in axis.reason, axis.reason
+        assert _INCOMPLETE in axis.reason, axis.reason

@@ -1292,7 +1292,14 @@ python3 audit.py --log audit.log            # also write log to a local file
   the malware scan **plus** the content-security ring (capability-intent mismatch, cross-agent
   snooping, silent-instruction / jailbreak / forged-provenance directives) the full audit runs on
   installed skills (point it at a
-  downloaded folder or `SKILL.md`; for a URL, clone it first, then vet the local copy). The output
+  downloaded folder or `SKILL.md`; for a URL, clone it first, then vet the local copy).
+  Pointing at a `SKILL.md` scans the **whole folder around it**, because the manifest is the
+  skill's manifest and not the skill — except when that folder already holds ordinary
+  downloaded content (photos, PDFs, installers), which is the shape of a personal downloads
+  drop rather than a skill's own source tree. There the scan is held to the manifest alone so
+  unrelated personal files are never read, and the verdict is `CAUTION` with the scope stated,
+  never `INSTALL` — declining to look is not a clean bill of health. Point `--vet-skill` at the
+  skill's own dedicated directory to scan the bundle. The output
   is a **risk dossier** over five axes: **danger** (how dangerous to use), **build**
   (how it's built), **behavior** (how it thinks / behaves), **persistence** (what it stages for
   later), and **connections** (whom it reaches out to) — with an overall **INSTALL / CAUTION /
@@ -1322,13 +1329,15 @@ python3 audit.py --log audit.log            # also write log to a local file
   way to switch the scanner off.
   If the scan hits its own per-target budget, or a collector size/file cap, or a file that
   is present but cannot be **opened** (permissions, a dangling link, an I/O error), or a
-  content-security check itself **raises** before finishing, that is **never** reported as a
+  content-security check itself **raises** before finishing, or the scan is deliberately
+  **held to a lone `SKILL.md`** because the folder around it does not look like one skill
+  package (see the note on manifest targets below), that is **never** reported as a
   clean result. An unreadable file is not an absent one, and a check that crashed is not a
   check that found nothing: each is named, and the danger axis degrades to `UNKNOWN` rather
   than claiming no malware signature was found in content nothing ever read. The gap lands on
   the `danger` axis — as a synthetic `VET-COVERAGE` finding when the content-ring budget runs
-  out, a `VET-RING-CHECK-ERROR` finding naming the checks that raised, and a
-  `"coverage is incomplete"` detail otherwise — which keeps the internal score capped (never a
+  out **or when the scan was held to a lone `SKILL.md`**, a `VET-RING-CHECK-ERROR` finding
+  naming the checks that raised, and a `"coverage is incomplete"` detail otherwise — which keeps the internal score capped (never a
   confident "clean") and makes the overall verdict `CAUTION`, so a partially-scanned target
   *does* exit `1` here. (The `--full` skill sweep treats truncation the
   opposite way — see `--full` below.)

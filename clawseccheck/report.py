@@ -4718,6 +4718,21 @@ def _restatements_of_other_findings(pool) -> set:
     return out
 
 
+def _advise_danger_gap_reason(profile) -> str:
+    """B-741: the danger axis's own words when it is UNKNOWN, for --advise.
+
+    ``_advise_reasons`` collects FAIL/WARN findings only, so a target whose single signal
+    is an UNKNOWN coverage gap produced an empty reason list and fell through to the
+    generic "not enough signal" line — on the one surface whose entire job is the install
+    decision, and while the exit code was 1. Returns "" when the axis is absent, not
+    UNKNOWN, or carries no reason, so the caller's existing fallback still applies.
+    """
+    for a in getattr(profile, "axes", None) or []:
+        if getattr(a, "axis", None) == "danger" and getattr(a, "status", None) == "UNKNOWN":
+            return (getattr(a, "reason", "") or "").strip()
+    return ""
+
+
 def _advise_reasons(profile, limit: int = 5) -> "tuple[list[str], int]":
     """The FAIL/WARN findings behind the verdict, worst-first, plus how many were cut.
 
@@ -4921,6 +4936,14 @@ def render_advise(profile, ascii_only: bool = False) -> str:
             lines.append("Reasons: part of this target could not be assessed — see "
                           "\"Not assessed\" below; review manually before trusting this "
                           "source.")
+        elif _advise_danger_gap_reason(profile):
+            # B-741: the same principle one producer further out. A coverage gap that
+            # rides on the danger axis rather than on `coverage_notes` — the held-back
+            # loose-manifest scope, or a ring budget escape — left this surface saying
+            # "not enough signal" while the dossier printed the actual reason and the
+            # exit code went to 1. --advise is the surface whose entire job is the
+            # install decision (B-621); a reader told only "inconclusive" cannot act.
+            lines.append(f"Reasons: {_advise_danger_gap_reason(profile)}")
         else:
             lines.append("Reasons: assessment is inconclusive (UNKNOWN) — not enough signal "
                           "to say INSTALL; review manually before trusting this source.")

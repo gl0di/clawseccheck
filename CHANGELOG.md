@@ -65,7 +65,22 @@ result was not a crash — it was a clean verdict over ground the tool no longer
 
 ### Security
 
-- **Never a clean verdict over ground that was not read.** Five separate fixes, one bug.
+- **Never a clean verdict over ground that was not read.** Six separate fixes, one bug.
+- **`--vet-skill <folder>/SKILL.md` no longer recommends installing a bundle it declined to
+  read.** Pointing at a manifest scans the folder around it — unless that folder also holds
+  ordinary downloaded content, in which case the scan is held to the manifest so unrelated
+  personal files are never opened. That refusal still reported `INSTALL` and exit `0`: a
+  bundle whose `run.sh` exfiltrated credentials came back clean through the manifest, and
+  `DO-NOT-INSTALL` through the directory, with one inert `sample.pdf` as the only
+  difference. The refusal stands — no structural signal separates a downloads folder from a
+  minimal skill — but it now reports `CAUTION`, states on the plain terminal surface that
+  the siblings were not read, and exits `1`, so the documented `--vet … || fail` gate holds.
+  Measured cost, on 35,738 real ClawHub packages: 32 (0.09%) are held back, of which 11 are
+  clean under a full directory scan and now see a `CAUTION` they would not get by naming the
+  directory. That is the price of declining to read, and the finding says only what is true —
+  which files went unread — rather than classifying them. Re-tuning the suffix list to
+  recover those 11 was rejected: it is corpus-fitted tuning of exactly the kind the
+  real-fleet gate exists to stop.
 - **An unclosed code fence can no longer silence another file**, and a fence that hid
   content is disclosed as hidden rather than read past.
 - **The output boundary is enforced on artifacts that leave the machine** — the operator's
