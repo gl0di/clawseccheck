@@ -122,9 +122,11 @@ check needs:
 
 ## Contributor License Agreement
 
-Your first pull request will get a bot comment asking you to sign
-[CLA.md](CLA.md) by replying with a single sentence. It takes a moment and you
-only ever do it once.
+Your first pull request needs a one-time sign-off on [CLA.md](CLA.md): reply on
+the pull request with the single sentence quoted there. It takes a moment and you
+only ever do it once. The check is currently manual — the automated CLA gate is
+switched off while every pull request so far has been the maintainer's — so if
+you open one and hear nothing, say so on the PR and it will be picked up.
 
 Being upfront about why, because a contributor should know before signing rather
 than discover it later:
