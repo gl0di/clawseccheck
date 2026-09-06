@@ -1,8 +1,8 @@
 -- state_schema_snapshot.sql -- GENERATED. Do not hand-edit.
 --
--- openclaw-version: 2026.9.1
+-- openclaw-version: 2026.9.2
 -- state-schema-version: 15
--- generated: 2026-09-04
+-- generated: 2026-09-06
 -- tables: 7
 --
 -- What this is
@@ -11,7 +11,7 @@
 -- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL`, projected to the state-SQLite tables this tree
 -- declares in a test DDL or that clawseccheck/ reads.
 --
--- source-bundle: openclaw-state-db-cache-AunrvrzG.js
+-- source-bundle: openclaw-state-db-cache-C7ljO0xP.js
 --   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. The bundle
 --   carrying this constant is build output and its name rotates -- 2026.9.1 moved it from
 --   openclaw-state-db-readonly-*.js to openclaw-state-db-cache-*.js while BOTH files still

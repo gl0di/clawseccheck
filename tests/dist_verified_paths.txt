@@ -12,7 +12,7 @@
 # Regenerate ONLY on a machine with the matching OpenClaw installed, as part of the
 # upgrade protocol's re-baseline step. Hand-adding a line here defeats the guard.
 #
-# openclaw-version: 2026.9.1
+# openclaw-version: 2026.9.2
 #
 agents.defaults.elevatedDefault
 agents.defaults.embeddedAgent.projectSettingsPolicy
