@@ -26,6 +26,7 @@ security property it cannot deliver on a platform it advertises.
 from __future__ import annotations
 
 import os
+import posixpath
 import tempfile
 from pathlib import Path
 
@@ -172,13 +173,102 @@ def secure_append_text(path: Path, data: str) -> None:
 
 
 def is_safe_tar_member(base_dir: Path, member_name: str) -> bool:
+    """True when an archive member's DECLARED NAME stays inside the extraction root.
+
+    B-747: this is answered LEXICALLY, and never against the filesystem. The previous
+    version did ``Path(base_dir / member_name).resolve()``, which follows symlinks that
+    happen to exist on disk — so it answered "where would this land given the current
+    state of this machine", not "does this name escape". Those are different questions,
+    and the second is the one an archive scan is asking: nothing is being extracted.
+
+    What that cost, measured end to end through ``--vet-skill``: a skill holding an
+    ordinary editable checkout beside its own built wheel —
+
+        mypkg -> ../src/mypkg          (a symlink, benign)
+        mypkg-1.0-py3-none-any.whl     (members: mypkg/__init__.py, ...dist-info/...)
+
+    read ``DO-NOT-INSTALL`` with "Archive path traversal detected:
+    mypkg-1.0-py3-none-any.whl::mypkg/__init__.py". ``mypkg/__init__.py`` is the most
+    ordinary path in Python packaging, and the collision is not bad luck: for a Python
+    package the source directory and the wheel's top-level package have the SAME NAME by
+    construction. Removing the symlink alone restored ``CAUTION``, which is how the cause
+    was isolated. A false-positive FAIL on a benign skill is the Golden Rule #5 class.
+
+    Deliberately NOT fixed by checking whether ``base_dir`` contains symlinks: that treats
+    the symptom. Resolving at all is the defect here.
+
+    ``base_dir`` is retained in the signature and read by nothing — that is the point of
+    the change, not an oversight: the answer must not depend on what is on disk, so there
+    is nothing for it to contribute. Kept so the two collector call sites and any future
+    one keep expressing "member, relative to this root", and so a reader who expects the
+    root to matter meets this sentence.
+
+    A name is unsafe if it escapes on ANY platform this tool runs on, which is why the
+    backslash is folded to a separator before the check. SKILL.md declares
+    ``os: [darwin, linux, win32]``, and on Windows the predicate this replaced joined and
+    normalised through ``ntpath``, so ``..\\..\\evil`` landed outside the root and WAS
+    flagged. A first draft of this function used ``posixpath`` unconditionally and called
+    that a "pre-existing false negative preserved" — which was true on POSIX and FALSE on
+    Windows, where it silently dropped detection on twelve shapes (``..\\..\\evil``,
+    ``sub\\..\\..\\evil``, ``\\evil``, ``C:/evil``, ``C:\\evil``, UNC ``\\\\srv\\share\\evil``,
+    ``\\\\?\\C:\\evil`` …). ``C:/evil`` contains no backslash at all, so the disclosure did not
+    even gesture at it. Caught by this change's own C-135 pass; modelled with
+    ``ntpath.normpath(ntpath.join(...))``, which is what ``Path.resolve()`` degrades to
+    there.
+
+    The cost of folding is a false POSITIVE on a POSIX file literally named
+    ``..\\..\\evil`` — a legal but bizarre filename that escapes on Windows anyway. For a
+    security predicate that is the right direction, and it does not touch the ordinary
+    case: ``dir\\file.txt`` folds to ``dir/file.txt`` and stays safe, as the battery pins.
+
+    One pre-existing FALSE NEGATIVE genuinely is preserved rather than silently changed,
+    and is filed on its own: the tar branch checks only ``member.name``, never
+    ``member.linkname``, so a link member with a traversing target and a safe name is
+    invisible to both this predicate and the one it replaces.
+
+    KNOWN AND ACCEPTED, with its mitigation stated exactly: a skill can ship both halves of
+    an escape itself — a real symlink ``data -> ../outside`` beside an archive member
+    ``data/payload.txt``. The old predicate caught that as a traversal; this one cannot,
+    because it is statically indistinguishable from the benign case above (the wheel's own
+    ``mypkg -> ../src/mypkg`` escapes the skill directory too, so even "does the symlink
+    point outside?" does not separate them). What covers it, MEASURED rather than assumed —
+    an earlier draft of this paragraph claimed a WARN always fires and that was wrong:
+
+      * symlink escaping the HOME  -> B87 WARNs, "Skill/workspace symlink escapes the
+        tree: workspace/skills/demo/data -> /…". The dangerous half is disclosed; only the
+        archive-member FAIL is gone.
+      * symlink escaping only the SKILL DIRECTORY but staying inside the home -> B87 PASSes
+        and B13 PASSes. That case is genuinely silent, and it is the residual this trade
+        buys. It is the milder half — extraction lands elsewhere inside the user's own
+        OpenClaw home rather than at an arbitrary host path — but it is not nothing, and it
+        is filed rather than papered over.
+
+    Verified against the predicate it replaces over a 32-shape battery on a clean base
+    directory — where the old one was correct — with zero disagreements, plus the shapes
+    that only differ once a symlink exists.
+    """
     try:
-        # Resolve absolute path without writing to disk
-        target_path = Path(base_dir / member_name).resolve()
-        # Ensure target path resides within the base directory
-        return base_dir.resolve() in target_path.parents or base_dir.resolve() == target_path
-    except (OSError, ValueError):
+        name = str(member_name)
+    except Exception:  # pragma: no cover - a member name that will not stringify
         return False
+    # A NUL cannot appear in a legitimate path and breaks downstream C-level calls.
+    if "\x00" in name:
+        return False
+    # Fold the Windows separator before any judgement — see the docstring: a name that
+    # escapes on a supported platform is unsafe on every one of them.
+    name = name.replace("\\", "/")
+    # A drive-qualified name ("C:/evil", "C:evil") is rooted on Windows and is never a
+    # legitimate archive member; posixpath cannot see it as absolute.
+    if len(name) >= 2 and name[1] == ":" and name[0].isalpha():
+        return False
+    # Absolute ("/etc/passwd", "//etc/passwd", UNC "//srv/share/x") escapes by definition.
+    if posixpath.isabs(name):
+        return False
+    # Purely textual `..` collapse. "a/b/../../../c" -> "../c"; "foo/.." -> "."; "./" -> ".".
+    normalised = posixpath.normpath(name)
+    return normalised == "." or not (
+        normalised == ".." or normalised.startswith("../")
+    )
 
 
 _VCS_DIR_NAMES = (".git", ".hg", ".svn")
