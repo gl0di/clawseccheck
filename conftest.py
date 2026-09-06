@@ -146,8 +146,16 @@ def expected_mode(path: Path) -> int:
 
 def iter_fixture_paths():
     """Every real fixture path, deepest-last. Symlinks are skipped: ``Path.chmod()``
-    follows them, so chmod'ing one would reach outside the corpus (there are none today,
-    and this keeps it that way)."""
+    follows them, so chmod'ing one would change the mode of its target rather than of the
+    link, and a link that ever points outside ``fixtures/`` would reach out of the corpus.
+
+    There ARE symlinks now -- B-747 added two (the editable-checkout-beside-a-wheel pair),
+    where the symlink is not incidental but the whole subject of the fixture. Both point
+    inside their own home, and ``tests/test_b746_b747_corpus_fixtures.py`` asserts that
+    property so a future one cannot quietly point elsewhere. Skipping them stays correct
+    either way, and costs nothing: ``rglob`` does not descend into a symlinked directory,
+    so each target is still visited by its own real path and still gets its mode pinned.
+    """
     for p in sorted(_FIXTURES.rglob("*")):
         if p.is_symlink():
             continue
