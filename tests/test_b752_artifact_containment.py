@@ -15,17 +15,22 @@ Two escapes are now refused, and both are provable from the source text alone:
   relpath.
 
 WHAT THIS FILE IS FOR, beyond the two families above: the fix NARROWS an exemption, so its
-whole risk is in the other direction — a benign skill that now FAILs. THREE such shapes
-were produced while writing it, each by the same mistake at a different level, and all
-three are pinned below as regressions rather than as trivia: reading the path expression
-for slashes and dots instead of for path SEGMENTS. Two of the three convicted defensive
-code — a sanitiser stripping `/`, and a sanitiser stripping `..` — so the drafts FAILed
-the code written to prevent the attack they hunt. If a later change widens either rule
-back to "any string constant in the expression", they go red immediately.
+whole risk runs the other way — a benign skill that now FAILs. FOUR such shapes were
+produced while writing it, all four by one mistake worn at different depths: reading the
+path expression for slashes and dots instead of resolving it as a path. Two of the four
+convicted defensive code — a sanitiser stripping `/`, and a sanitiser stripping `..` — so
+those drafts FAILed the code written to prevent the very attack they hunt. The fourth
+convicted a path that cancels itself (`assets/../data`) and goes nowhere. Every one is
+pinned below.
 
-None of the three was found by review. The first came from testing the wired verdict
-rather than the helper, the second from probing the rule with ordinary code, and the third
-from an adversarial pass run after two rounds had already declared the family closed.
+A fifth defect ran the opposite way and is pinned too: crediting the anchor once in the
+depth calculation and again as a walked segment re-absolved a real escape.
+
+None of the five was found by reading the diff. In order: testing the wired verdict rather
+than the helper; probing the rule with ordinary code; an adversarial pass run after two
+rounds had already declared the family closed; that pass's remaining families, read only
+after the first fix had been committed; and a matrix re-run of controls that had passed a
+round earlier.
 
 Offline, read-only, stdlib only.
 """
@@ -259,4 +264,57 @@ def test_nested_dirname_climbs_two_components_not_one():
         'with open(os.path.join(here, "..", "..", "..", "tmp", "s.py"), "rb") as f:\n'
         "    exec(f.read().decode())\n",
         relpath="a/b/tests/conftest.py",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Counting tokens is not walking a path. Found after the first fix was committed.
+# ---------------------------------------------------------------------------
+
+
+def test_a_traversal_that_cancels_itself_stays_inside():
+    """REGRESSION PIN. `join(here, "assets", "..", "data", "v.py")` goes nowhere.
+
+    The `..` cancels `assets`; the read never leaves the artifact. Summing raw `..`
+    tokens convicted it, and every net-zero variant with it — two cancels, and the same
+    path written as one combined literal. HEAD absolves all three, so this was damage the
+    fix introduced rather than a pre-existing gap.
+
+    The repair is to WALK the segments and ask whether the depth ever goes negative,
+    which is the difference between counting a token and resolving a path.
+    """
+    for expr in (
+        'os.path.join(here, "assets", "..", "data", "v.py")',
+        'os.path.join(here, "assets/../data/v.py")',
+        'os.path.join(here, "pkg", "..", "pkg2", "..", "data", "v.py")',
+    ):
+        assert not _convicts(
+            _exec_reading(expr, prelude="here = os.path.dirname(__file__)\n"),
+            relpath="mod.py",
+        ), expr
+
+
+def test_a_cancel_followed_by_a_real_escape_still_convicts():
+    """The walk must not be fooled in the other direction either: cancelling once and
+    then climbing out is still climbing out."""
+    assert _convicts(
+        _exec_reading('os.path.join(here, "a", "..", "..", "..", "tmp", "s.py")',
+                      prelude="here = os.path.dirname(__file__)\n"),
+        relpath="mod.py",
+    )
+
+
+def test_the_anchor_is_not_counted_twice():
+    """REGRESSION PIN for the repair's own first draft.
+
+    The anchor's position is carried by the depth calculation, so pushing the anchor
+    expression through the segment walk as well credits it twice — which silently
+    cancelled one `..` and re-absolved a genuine escape from a root-level file. Caught by
+    a control that had passed in the previous round, which is the only reason it did not
+    ship: a matrix re-run beats re-reading the diff.
+    """
+    assert _convicts(
+        _exec_reading('os.path.join(here, "..", "x.py")',
+                      prelude="here = os.path.dirname(__file__)\n"),
+        relpath="mod.py",
     )

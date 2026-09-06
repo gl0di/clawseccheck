@@ -4247,34 +4247,81 @@ def _path_expr_escapes_artifact(node: ast.AST, scope_assigns: dict, relpath: str
     ``.joinpath``) or an operand of pathlib's ``/``. One hop through a local, and only
     when the local IS a string literal -- a computed name says nothing statically.
     """
-    def _ups_in(x: ast.AST) -> int:
+    def _components(x: ast.AST) -> "list[str] | None":
+        """The literal path components *x* contributes, in order, or None if unknowable."""
+        lit = None
         if isinstance(x, ast.Constant) and isinstance(x.value, str):
-            return x.value.replace("\\", "/").split("/").count("..")
-        if isinstance(x, ast.Name) and x.id in scope_assigns:
+            lit = x.value
+        elif isinstance(x, ast.Name) and x.id in scope_assigns:
             rhs = scope_assigns[x.id]
             if isinstance(rhs, ast.Constant) and isinstance(rhs.value, str):
-                return rhs.value.replace("\\", "/").split("/").count("..")
-        return 0
+                lit = rhs.value
+        if lit is None:
+            return None
+        return [p for p in lit.replace("\\", "/").split("/") if p not in ("", ".")]
 
-    nodes = list(ast.walk(node))
-    for n in list(nodes):
-        if isinstance(n, ast.Name) and n.id in scope_assigns:
-            nodes.extend(ast.walk(scope_assigns[n.id]))
+    def _is_anchor(x: ast.AST) -> bool:
+        """True when *x* IS the `__file__` anchor rather than a component joined onto it.
 
-    ups = 0
-    for n in nodes:
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
-            base = n.func.value
-            is_path_join = n.func.attr == "join" and not (
+        The anchor's own position is already carried by `_anchor_depth_below_root`, so
+        pushing it again as a segment double-counts it. That is not hypothetical: doing so
+        silently cancelled one `..` and re-absolved `join(here, "..", "x.py")` from a
+        root-level file -- an escape the previous draft convicted correctly.
+        """
+        if any(isinstance(y, ast.Name) and y.id == "__file__" for y in ast.walk(x)):
+            return True
+        if isinstance(x, ast.Name) and x.id in scope_assigns:
+            return any(
+                isinstance(y, ast.Name) and y.id == "__file__"
+                for y in ast.walk(scope_assigns[x.id])
+            )
+        return False
+
+    def _ordered_segments(x: ast.AST) -> "list[str] | None":
+        """Segments of a path expression, left to right, or None when not a join shape."""
+        if isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute):
+            base = x.func.value
+            is_path_join = x.func.attr == "join" and not (
                 isinstance(base, ast.Constant) and isinstance(base.value, str)
             )
-            if is_path_join or n.func.attr == "joinpath":
-                ups += sum(_ups_in(a) for a in n.args)
-        elif isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div):
-            ups += _ups_in(n.right)
-    if ups == 0:
+            if is_path_join or x.func.attr == "joinpath":
+                out: "list[str]" = []
+                for a in x.args:
+                    if _is_anchor(a):
+                        continue
+                    comps = _components(a)
+                    out.extend(comps if comps is not None else ["?"])
+                return out
+        if isinstance(x, ast.BinOp) and isinstance(x.op, ast.Div):
+            left = [] if _is_anchor(x.left) else (_ordered_segments(x.left) or [])
+            comps = None if _is_anchor(x.right) else _components(x.right)
+            right = [] if _is_anchor(x.right) else (comps if comps is not None else ["?"])
+            return left + right
+        if isinstance(x, ast.Name) and x.id in scope_assigns:
+            return _ordered_segments(scope_assigns[x.id])
+        return None
+
+    segments = _ordered_segments(node)
+    if not segments:
         return False
-    return ups > _anchor_depth_below_root(node, relpath, scope_assigns)
+
+    # WALK the segments, never count them. `join(dirname(__file__), "assets", "..",
+    # "data", "v.py")` contains a `..` and goes nowhere: it cancels `assets` and the read
+    # stays inside the artifact. Summing raw `..` tokens convicted that -- and every
+    # net-zero variant of it, including two cancels and a single combined literal
+    # "assets/../data/v.py" -- which the adversarial pass reproduced as a regression this
+    # change had introduced. Only a walk that goes NEGATIVE has actually left the root.
+    # An unknowable segment ("?") is treated as one ordinary component: it can only push
+    # the depth up, never down, so an unknown can never manufacture an escape.
+    depth = _anchor_depth_below_root(node, relpath, scope_assigns)
+    for seg in segments:
+        if seg == "..":
+            depth -= 1
+            if depth < 0:
+                return True
+        else:
+            depth += 1
+    return False
 
 
 def _path_expr_is_dunder_file_relative(
