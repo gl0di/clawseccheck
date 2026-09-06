@@ -39,6 +39,14 @@ result was not a crash — it was a clean verdict over ground the tool no longer
   bypasses the plugin allowlist on upgrade with nobody having written it.
 - **Retired keys are named rather than silently missed.** A check whose key no longer
   exists says so, instead of resolving to nothing and rendering a verdict anyway.
+- **Remediation advice names the key your build actually has.** The browser-SSRF chain told
+  every reader to set `browser.ssrfPolicy.hostnameAllowlist` — a spelling newer builds reject,
+  and because that block is strict they refuse the whole config with it, so anyone who followed
+  the line would have left OpenClaw unable to load their settings while believing the leg was
+  closed. Advice now resolves per build: `allowedHostnames` on 2026.8.1 and later, the older
+  key before it, and both with their versions attached when the build cannot be determined. The
+  marketplace-feed all-clear was corrected the same way, and no longer describes a key that
+  build does not have as merely unset.
 
 ### Added
 
@@ -76,6 +84,36 @@ result was not a crash — it was a clean verdict over ground the tool no longer
   next-actions guide advised on a hardcoded temp-file path while saying nothing about the
   escape beside it. The vocabulary is now one shared set, and a guard drives every consumer
   with it, so a status added to the check later cannot silently fall through again.
+- **An archive member is judged by the name it declares, not by what happens to sit on disk
+  beside it.** Traversal detection resolved each member against the extraction root, following
+  symlinks that already existed there — so a skill holding an ordinary editable checkout next
+  to its own built wheel (`mypkg -> ../src/mypkg` beside `mypkg-1.0-py3-none-any.whl`) read
+  `DO-NOT-INSTALL` with "Archive path traversal detected", because a Python package's source
+  directory and its wheel's top-level package carry the same name by construction. Nothing is
+  extracted during a scan, so the only question is whether the declared name escapes, and that
+  is now answered from the name alone — on every supported platform at once, so Windows-shaped
+  `..\..\evil` and drive-qualified `C:/evil` are rejected wherever the scan runs. The trade is
+  stated rather than absorbed: a skill that ships both halves of an escape itself — a real
+  symlink out of its own directory plus a member that lands through it — is no longer caught
+  here, and is disclosed only when that symlink also leaves the OpenClaw home.
+- **A lower-severity warning can no longer bury a confirmed zip-slip.** The installed-skill
+  sweep reports its first match, and the archive-escape test was ranked below every ordinary
+  warning. A skill shipping an archive that escapes its own directory *and* one line of routine
+  caching code came back `CAUTION` for insecure temp-file handling, with "traversal" absent
+  from the whole report; the same skill without that one line came back `DO-NOT-INSTALL` with
+  the escaping member named. It now reports `DO-NOT-INSTALL` either way. A sweep that could not
+  read everything still takes precedence, so an incomplete scan is never upgraded into a
+  confident verdict, and a guard now holds the ordering so an escape-level finding cannot be
+  demoted by position again.
+- **A `__file__` in the path is no longer proof the code came from inside the skill.** Reading
+  a file and handing it to `exec` was exempt from the hidden-payload finding whenever the path
+  expression mentioned `__file__` — a token an attacker writes as easily as an author does. Two
+  ways of keeping the token while reading elsewhere are now refused: an absolute segment passed
+  to a path join, which discards the anchor entirely, and `..` segments that climb past the
+  skill's own root. A skill decoding and running code from outside its folder used to come back
+  clean; it is now flagged. Paths that cancel themselves out, and segments whose value the
+  source does not state, keep the exemption — an expression the scan cannot resolve is never
+  turned into an escape.
 - **Never a clean verdict over ground that was not read.** Six separate fixes, one bug.
 - **`--vet-skill <folder>/SKILL.md` no longer recommends installing a bundle it declined to
   read.** Pointing at a manifest scans the folder around it — unless that folder also holds
@@ -99,6 +137,46 @@ result was not a crash — it was a clean verdict over ground the tool no longer
   than carrying attacker prose verbatim, and redaction happens at the journal boundary, not
   only on the way to the screen.
 - **Install records are compared with themselves**, instead of one being elected the winner.
+- **A `--vet` conviction that rests on a paste or file-transfer host now says what that signal
+  cannot tell.** An upload command written to tell a human where to send a build log is the
+  same static shape as one the skill runs by itself — one command, one local file, one host,
+  one upload flag — and no static scan separates them. The verdict does not soften: both still
+  FAIL and the uninstall instruction still leads. The advice now names that limit, and for a
+  skill you authored or already trust it points at the flagged line so you can confirm who it
+  addresses and which file it sends. A critical finding with no such host carries no such
+  sentence.
+- **A plugin whose own code raises a signal no longer vets as `INSTALL`.** `--vet-plugin`
+  already detected remote or obfuscated `eval`, command injection and an attacker-influenced
+  require path, and already raised the verdict to `WARN` — but those signals were attached to
+  no axis, so the vet read the container as having found nothing and rendered `INSTALL`, Danger
+  `PASS` / `no malware signature or known-bad indicator`, exit `0`. A plugin whose entire
+  content is `fetch(url).then(r => r.text()).then(eval)` came back clean. They now land on the
+  Danger axis: measured across 61 real installed plugins, one that reported `INSTALL` over
+  three command-injection surfaces reads `CAUTION`. The entries are `WARN`, never `FAIL`, so a
+  lexical hit on a minified bundle still cannot decide the verdict on its own. The
+  credential-exfiltration shape this was found on still reads `INSTALL` — a missing rule rather
+  than a dropped verdict, and the rule drafted for it was withdrawn after it missed 30 of 40
+  evasions.
+- **The sandbox setting the tool tells you to apply now actually contains the agent.** Every
+  place that recommended `agents.defaults.sandbox.mode` = `non-main` — the sandbox check's
+  advice, the fix for the untrusted-ingress-plus-host-exec chain, and the machine-applicable
+  remediation carried in the JSON report and SARIF that a fixer applies without reading prose —
+  now names `all`. OpenClaw keeps the agent's own main session on the host under `non-main`,
+  the session an operator actually drives, so a user who followed the old advice got a report
+  saying the problem was gone while exec still ran on the host. `non-main` is still named, as
+  insufficient rather than as an option, so a reader who already set it learns why. The verdict
+  half is unchanged and stated plainly: choosing `non-main` unprompted still clears the
+  finding. Separately, the generated check catalog had started printing a line of Python source
+  where one chain's config key belonged; it now names the real key for both OpenClaw
+  generations.
+- **A sandbox set to `non-main` is no longer read as containment.** OpenClaw settles that mode
+  against the running session's key — each agent has its own main session, and that one runs
+  unsandboxed — so no config file decides it. Agents on that mode used to be subtracted from
+  the file-read reach as though they were sandboxed: a setup that confined the main scope and
+  left an agent on `non-main` came back clean on the lethal trifecta's sensitive-data leg, and
+  filesystem-write exposure warned where it now fails. Those scopes are kept, and the findings
+  that name them state that the confinement is undecided rather than asserting the reach is
+  real.
 
 ### Fixed
 
@@ -109,6 +187,19 @@ result was not a crash — it was a clean verdict over ground the tool no longer
   reading as a clean axis.
 - Grounding guards that could switch themselves off on an OpenClaw upgrade and report a
   missing install as the cause now fail, naming the symbol to re-locate.
+- **The bundled-JavaScript warning names the signal that actually fired.** A skill whose only
+  JavaScript loads a native addon used to be told to inspect a `child_process` call that is not
+  in the file — one fixed piece of advice stood for three different signals, and that same
+  wording was the question put in the judge packet. The finding's headline and its advice are
+  now built from the signals that fired, and the packet names the specific one only when a
+  single skill raised it.
+- **A tagged release attaches its signed digest even when the registry upload reports a
+  failure.** ClawHub's publish command has a measured false-failure mode — it can upload a
+  version successfully and still exit non-zero saying that version already exists — and release
+  creation sat downstream of that exit code, so v3.59.0 through v3.61.0 shipped without
+  `SHA256SUMS.txt.bundle` and could not be checked with the `cosign verify-blob` command the
+  README and User guide document. The signature describes the tagged tree, not the registry, so
+  it now lands whatever the registry replied.
 
 ### Changed
 
