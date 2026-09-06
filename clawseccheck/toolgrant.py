@@ -55,16 +55,19 @@ reading alone —
   ``agents.defaults.tools`` is then dead weight (``toolscope_case9``).
 
 GROUNDED TABLES. ``CORE_TOOL_PROFILES`` / ``CORE_TOOL_GROUPS`` below are not hand-transcribed
-off ``CORE_TOOL_DEFINITIONS`` (dist ``tool-catalog-CsKMGPc2.js``) — they are the two tables
+off ``CORE_TOOL_DEFINITIONS`` (dist ``tool-catalog-79RBtNnN.js``) — they are the two tables
 that module ITSELF builds (``CORE_TOOL_PROFILES`` object literal; ``CORE_TOOL_GROUPS`` via
 ``buildCoreToolGroupMap()``), dumped by executing them against the installed dist so a
 mis-transcription of ~50 tool ids across 11 groups cannot happen. Re-grind by re-running that
-dump on upgrade, not by re-reading the source.
+dump on upgrade, not by re-reading the source. Re-ground against openclaw@2026.9.2
+(2026-09-06): both tables were re-dumped by executing the installed dist and compared
+field-for-field against the literals below — 12/12 groups and all four profiles IDENTICAL.
+Only the content-hashed filenames cited here moved.
 
 ALIAS TABLE — THREE ENTRIES, GROUNDED, NOT TWO. ``checks/_shared.py``'s ``_TOOL_NAME_ALIASES``
 and ``toolpolicy.py``'s copy of the same table both carry only ``{"bash": "exec",
 "apply-patch": "apply_patch"}``. The real ``TOOL_NAME_ALIASES`` (dist
-``tool-policy-shared-D_3SrG-g.js:10-14``) has a third: ``"cron": "automations"`` — a
+``tool-policy-shared-DIyS0iQC.js:10-14``) has a third: ``"cron": "automations"`` — a
 "permanently accepted alias ... same contract as bash -> exec" per the dist's own comment
 (``automations-tool-name-*.js``). Neither existing copy is wrong for what it covers (bash/
 apply-patch), but a guard comparing them to EACH OTHER (a peer) would stay green while both
@@ -125,13 +128,14 @@ from .collector import agent_roster, dig
 
 GLOBAL_SCOPE = "global"
 
-# TOOL_NAME_ALIASES (dist tool-policy-shared-D_3SrG-g.js:10-14). Three entries — see the
+# TOOL_NAME_ALIASES (dist tool-policy-shared-DIyS0iQC.js:10, grounded against
+# openclaw@2026.9.2 on 2026-09-06). Three entries — see the
 # module docstring's "ALIAS TABLE" section for why this is not a copy of
 # checks/_shared.py's/_toolpolicy.py's two-entry tables. Grounded directly against the dist
 # in tests/test_toolgrant_dist_grounding.py, never against either sibling copy.
 _TOOL_NAME_ALIASES = {"bash": "exec", "apply-patch": "apply_patch", "cron": "automations"}
 
-# CORE_TOOL_GROUPS (dist tool-catalog-CsKMGPc2.js, buildCoreToolGroupMap() — executed, not
+# CORE_TOOL_GROUPS (dist tool-catalog-79RBtNnN.js, buildCoreToolGroupMap() — executed, not
 # transcribed from CORE_TOOL_DEFINITIONS by hand). "group:openclaw" plus one "group:<section>"
 # per CORE_TOOL_SECTION_ORDER entry.
 _CORE_TOOL_GROUPS = {
@@ -168,7 +172,8 @@ _CORE_TOOL_GROUPS = {
     "group:media": ["view_image", "image_generate", "music_generate", "video_generate", "tts"],
 }
 
-# CORE_TOOL_PROFILES (dist tool-catalog-CsKMGPc2.js — the literal object, dumped by calling
+# CORE_TOOL_PROFILES (dist tool-catalog-79RBtNnN.js, grounded against openclaw@2026.9.2 on
+# 2026-09-06 — the literal object, dumped by calling
 # resolveCoreToolProfilePolicy(profile) for each of the four known profiles against the
 # installed dist). "full" is allow-all; the other three are the exact tool-id lists the
 # runtime grants, not a hand-picked "these are the fs/exec ones" subset.
@@ -267,7 +272,8 @@ def _policy_allows(name: str, policy) -> bool:
 
 
 def _union_allow(base, extra):
-    """unionAllow (sandbox-tool-policy-bkx-xmDc.js): alsoAllow-only (or onto an empty allow)
+    """unionAllow (sandbox-tool-policy-G7E6RfNN.js, grounded against openclaw@2026.9.2 on
+    2026-09-06): alsoAllow-only (or onto an empty allow)
     injects an implicit "*"; alsoAllow onto a real non-empty allow just unions in."""
     if not isinstance(extra, list) or not extra:
         return base
