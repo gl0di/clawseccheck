@@ -5022,15 +5022,18 @@ def check_installed_skills(ctx: Context) -> Finding:
     # tables that decide a VERDICT — `_VET_MERGE_RANK` here and `dossier._STATUS_RANK` —
     # both put at 3, the same as FAIL.
     #
-    # There is a THIRD table and it disagrees: `report._VET_STATUS_RANK` ranks this status
-    # 1 (UNKNOWN-level), and `scoring.compute` correspondingly leaves it out of the scored
-    # set. An earlier draft of this comment said "both rank tables", which was wrong by
-    # omission — found by B-746's own C-135 pass. The move is still right, because the two
-    # tables it turns on are the ones that pick the winner and the dossier verdict; the
-    # third governs rendering and scoring, was measured not to move the score on any of
-    # the four trav/warn combinations, and is a pre-existing inconsistency filed on its
-    # own rather than quietly resolved here. Do not cite "the rank tables agree" without
-    # naming which.
+    # B-751 resolved a third table that used to disagree here, and BOTH claims this comment
+    # once made about it were false. `report._VET_STATUS_RANK` ranked the status 1
+    # (UNKNOWN-level), and this comment said it "governs rendering and scoring" and that the
+    # score "was measured not to move". Measured: it governed NEITHER — grep found zero
+    # consumers, it was a dead constant — and the score moved two grades, 96/A to 79/C, once
+    # the real gate (scoring.py's severity-cap tally) counted the conviction. The constant is
+    # deleted rather than re-ranked; see the note at its former site in report.py.
+    #
+    # So every table that still exists agrees at rank 3, and the shared set is
+    # `catalog.FAIL_WEIGHT_STATUSES`. Import it rather than re-spelling the literal, and do
+    # not cite "the rank tables agree" without naming which — that phrasing is what hid the
+    # disagreement for two releases.
     #
     # It used to be
     # arm 22 of 25, below nineteen rank-<=2 arms, so cascade POSITION overrode the tree's
@@ -5522,7 +5525,7 @@ def check_installed_skills(ctx: Context) -> Finding:
 # B-201 (found via its own test suite, not a separate report): "SKILL_ARCHIVE_PATH_
 # TRAVERSAL" is a real third status check_installed_skills emits (a confirmed
 # known-bad zip-slip signal, ranked with FAIL everywhere else it's merged --
-# dossier.py's _STATUS_RANK and report.py's _VET_STATUS_RANK both already treat it
+# dossier.py's _STATUS_RANK already treats it
 # this way). This table alone was missing it, so `.get(fx.status, 0)` silently fell
 # back to rank 0 -- the SAME rank as PASS -- letting any ordinary content-ring WARN
 # (e.g. B88, once B-201 made it fire more often) outrank and hide a detected path-

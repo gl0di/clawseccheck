@@ -24,7 +24,10 @@ _CONF_MAP = {
 }
 
 # Sort order for status (primary) and severity (secondary) in the final output.
-_STATUS_ORDER = {"FAIL": 0, "WARN": 1, "PASS": 2, "UNKNOWN": 3}
+# B-751: SKILL_ARCHIVE_PATH_TRAVERSAL was absent, so `.get(status.upper(), 9)` scored it 9
+# and a confirmed zip-slip sorted BELOW every PASS in every deduplicated list. Keys are
+# upper-cased at the call site, and the status is already upper-case.
+_STATUS_ORDER = {"FAIL": 0, "SKILL_ARCHIVE_PATH_TRAVERSAL": 0, "WARN": 1, "PASS": 2, "UNKNOWN": 3}
 _SEV_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
 

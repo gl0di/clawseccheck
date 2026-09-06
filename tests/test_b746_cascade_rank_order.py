@@ -234,12 +234,17 @@ def test_the_verdict_rank_tables_agree_and_the_render_table_is_known_to_differ()
     calling it agreement is the shape this repo keeps getting caught by, so the third is
     pinned explicitly rather than left out of the sentence.
 
-    The two that decide a VERDICT agree at rank 3. `report._VET_STATUS_RANK` ranks it 1
-    (UNKNOWN-level) and `scoring.compute` leaves it out of the scored set accordingly.
-    That inconsistency is pre-existing, was measured not to move the audit score on any
-    trav/warn combination, and is filed separately. If it is ever reconciled, this test
-    should be updated — not deleted, because the reconciliation is exactly the event a
-    reader of the cascade needs to know about.
+    RESOLVED BY B-751, and this test is updated rather than deleted, exactly as the
+    sentence it replaces asked. Two things it used to assert turned out to be false:
+
+      * `report._VET_STATUS_RANK` did not "govern rendering and scoring" — it had ZERO
+        consumers and was deleted, not re-ranked.
+      * the score "was measured not to move on any trav/warn combination" — it moved two
+        grades, 96/A to 79/C, once the real gate (scoring.py's severity-cap tally, not the
+        rank table) counted the conviction.
+
+    So this now pins the resolution: every rank table that still exists agrees at 3, the
+    dead one is gone, and the shared vocabulary is `catalog.FAIL_WEIGHT_STATUSES`.
     """
     from clawseccheck.checks._vet import _VET_MERGE_RANK
     from clawseccheck.dossier import _STATUS_RANK
@@ -252,11 +257,13 @@ def test_the_verdict_rank_tables_agree_and_the_render_table_is_known_to_differ()
             "file is derived from that equality"
         )
 
-    render = getattr(report, "_VET_STATUS_RANK", None)
-    assert render is not None, "report._VET_STATUS_RANK vanished — re-ground this test"
-    assert render.get(key) != render.get("FAIL"), (
-        "report._VET_STATUS_RANK now ranks the traversal status with FAIL, i.e. the "
-        "three-way disagreement this test documents has been resolved. Good news — "
-        "update this assertion and the comment in checks/_vet.py's path-traversal arm, "
-        "which tells the reader the render table differs."
+    assert not hasattr(report, "_VET_STATUS_RANK"), (
+        "report._VET_STATUS_RANK is back. It was deleted by B-751 because it had zero "
+        "consumers while ranking a confirmed zip-slip at UNKNOWN level, and two source "
+        "comments quoted it as authority for claims that were false. If a render-side rank "
+        "is genuinely needed again, derive it from catalog.FAIL_WEIGHT_STATUSES rather than "
+        "hand-writing a fourth table."
     )
+    from clawseccheck.catalog import FAIL_WEIGHT_STATUSES
+    assert key in FAIL_WEIGHT_STATUSES
+    assert {s for s, r in _VET_MERGE_RANK.items() if r == _VET_MERGE_RANK["FAIL"]} == FAIL_WEIGHT_STATUSES

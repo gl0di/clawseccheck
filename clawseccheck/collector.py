@@ -237,6 +237,30 @@ def _note_skill_gap(ctx, skill_dir: Path, entry: str) -> None:
     ctx.skill_coverage_gaps.setdefault(owner, []).append(entry)
 
 
+def _note_skill_traversal(ctx, skill_dir: Path, entry: str) -> None:
+    """Attribute an archive path-traversal violation to the skill it belongs to.
+
+    B-751, and the same shape as :func:`_note_skill_gap` directly above — which is the point.
+    B-551 found that `report._skill_inventory` builds a FRESH per-skill Context copying only
+    the content maps, so a signal recorded on the main ctx is structurally invisible to it. It
+    fixed that for coverage gaps and nobody carried it to this signal, so the inventory row for
+    a skill shipping a CONFIRMED zip-slip read `SUSPICIOUS - Insecure temp-file handling`: the
+    cascade could not see the escape, so it fell through to the next arm.
+
+    Keyed by the skill DIRECTORY's PATH, deliberately NOT by its name the way
+    `_note_skill_gap` above keys its own map. That difference is the finding: colliding
+    basenames are de-duplicated into `skills/<name>` / `<name>#2` before they reach
+    `installed_skills`, so a name-keyed map joins to the wrong entry on any home carrying the
+    same skill name under two load roots — and this map drives a CONVICTION, so a slipped
+    join convicts an innocent skill rather than misplacing a note. `_note_skill_gap` has the
+    same latent slip with a milder payload; filed separately rather than changed here.
+    """
+    if ctx is None:
+        return
+    owner = skill_dir if skill_dir.is_dir() else skill_dir.parent
+    ctx.skill_traversal_violations.setdefault(str(owner), []).append(entry)
+
+
 def _exists_but_not_regular(path: Path) -> bool:
     """True for a directory entry that is present but is not a regular file.
 
@@ -839,6 +863,20 @@ class Context:
     excluded_binary_files_count: int = 0
     archives_unpacked: int = 0
     path_traversal_violations: list[str] = field(default_factory=list)
+    #: B-751: the same list, keyed by the owning skill DIRECTORY's path (``str(Path)``).
+    #: The flat list above holds `<path relative to the skill dir>::<member>`, so two
+    #: skills that each ship a `bundle.zip` produce identical strings and neither can be
+    #: attributed. Exactly the B-551 problem one signal over.
+    #:
+    #: Keyed by PATH and not by the directory's NAME, which is how `_note_skill_gap` keys
+    #: its own map and was how this started. That is wrong here and its own C-135 caught
+    #: it: `installed_skills` de-duplicates colliding basenames into `skills/archive-demo`,
+    #: `...#2` and so on (see the key computation below), so on a home with the same skill
+    #: name under two load roots the name-keyed map lined up with the WRONG entry —
+    #: measured, it convicted a skill shipping nothing but a SKILL.md as DANGEROUS while
+    #: the one that really shipped the zip-slip rendered the old temp-file WARN. A path is
+    #: unique by construction, so the join cannot slip.
+    skill_traversal_violations: dict[str, list[str]] = field(default_factory=dict)
     file_manifest: dict[str, str] = field(default_factory=dict)  # file relpath -> status
     # B-616: relpaths whose text came from one of the decode ladder's ASSUMED rungs
     # (`latin-1`, or — B-537 — a guessed legacy multi-byte codec such as `shift_jis`;
@@ -1600,6 +1638,7 @@ def decompress_and_classify(
                     if not is_safe_tar_member(skill_dir, member_name):
                         if ctx is not None:
                             ctx.path_traversal_violations.append(f"{file_relpath}::{member_disp}")
+                            _note_skill_traversal(ctx, skill_dir, f"{file_relpath}::{member_disp}")
                             ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "unsafe-path"
                         return [(file_relpath, file_bytes, classification, format_name)]
 
@@ -1694,6 +1733,7 @@ def decompress_and_classify(
                     if not is_safe_tar_member(skill_dir, member.name):
                         if ctx is not None:
                             ctx.path_traversal_violations.append(f"{file_relpath}::{member_disp}")
+                            _note_skill_traversal(ctx, skill_dir, f"{file_relpath}::{member_disp}")
                             ctx.file_manifest[f"{file_relpath}::{member_disp}"] = "unsafe-path"
                             return [(file_relpath, file_bytes, classification, format_name)]
 

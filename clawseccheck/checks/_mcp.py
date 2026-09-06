@@ -14,6 +14,7 @@ from .. import attest as _attest
 from .. import mcpsurface as _mcpsurface
 from .. import trajectory as _trajectory
 from ..catalog import (
+    FAIL_WEIGHT_STATUSES,
     CRITICAL,
     FAIL,
     HIGH,
@@ -887,7 +888,10 @@ def vet_plugin(
 
     n_mcp = sum(1 for f in subs if f.id == "MCP-VET")
     summary = f"plugin '{pid}' ({len(skill_dirs)} bundled skill(s), {n_mcp} embedded MCP spec(s))"
-    actionable = [f for f in subs if f.status in (FAIL, WARN, UNKNOWN)]
+    # B-751: sub_rank above already promotes the plugin to FAIL via _VET_MERGE_RANK, but the
+    # traversal sub-finding was dropped here — plugin convicted, reason unstated.
+    actionable = [f for f in subs
+                  if f.status in FAIL_WEIGHT_STATUSES or f.status in (WARN, UNKNOWN)]
     evidence = (
         warns + js_signals + py_signals
         + [f"{f.status}: {f.detail}" for f in actionable] + notes

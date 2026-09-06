@@ -21,6 +21,8 @@ from pathlib import Path
 
 from . import brand
 from .catalog import (
+    ACTIONABLE_STATUSES,
+    FAIL_WEIGHT_STATUSES,
     BY_ID,
     SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER,
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, WEIGHT, Finding, ast_for, owasp_for,
@@ -540,9 +542,13 @@ def _cap_primary_reason_text(primary: str, score: ScoreResult, *,
 
 _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
 # Within a family: FAIL/WARN (the actionable items) before PASS/UNKNOWN (context).
-_STATUS_ORDER = {FAIL: 0, WARN: 1, UNKNOWN: 2, PASS: 3}
-_ICON = {FAIL: "⛔", WARN: "⚠️", PASS: "✅", UNKNOWN: "❔", "SKILL_ARCHIVE_PATH_TRAVERSAL": "❔"}
-_ICON_ASCII = {FAIL: "[X]", WARN: "[!]", PASS: "[OK]", UNKNOWN: "[?]", "SKILL_ARCHIVE_PATH_TRAVERSAL": "[?]"}
+# B-751: the traversal status sits with FAIL here, not below PASS. It was absent, and
+# `_worst_of_statuses` drops anything absent — so a rolled-up home whose ONLY bad status
+# was a confirmed zip-slip returned "PASS" (measured). Same table is the sort key at
+# :3237/:3435/:3666/:3787/:4816, where a missing key scored 9 and sorted it under PASS.
+_STATUS_ORDER = {FAIL: 0, "SKILL_ARCHIVE_PATH_TRAVERSAL": 0, WARN: 1, UNKNOWN: 2, PASS: 3}
+_ICON = {FAIL: "⛔", WARN: "⚠️", PASS: "✅", UNKNOWN: "❔", "SKILL_ARCHIVE_PATH_TRAVERSAL": "⛔"}
+_ICON_ASCII = {FAIL: "[X]", WARN: "[!]", PASS: "[OK]", UNKNOWN: "[?]", "SKILL_ARCHIVE_PATH_TRAVERSAL": "[X]"}
 
 # Severity dot for FAIL/WARN finding lines (Component-2 mock, B-077): the glyph carries
 # SEVERITY, not status — FAIL-before-WARN ordering plus the breakdown counts already carry
@@ -2150,6 +2156,14 @@ def _skill_inventory(ctx) -> list[dict]:
         skill_ctx.installed_skill_py = {name: py_map.get(name, [])}
         skill_ctx.installed_skill_shell = {name: sh_map.get(name, [])}
         skill_ctx.installed_skill_js = {name: js_map.get(name, [])}
+        # B-751: carry this skill's archive-traversal violations across the same bridge
+        # B-551 built for coverage gaps. Without it the cascade in check_installed_skills
+        # cannot see the escape and falls through to the next arm, so the row for a skill
+        # shipping a CONFIRMED zip-slip read "SUSPICIOUS - Insecure temp-file handling" —
+        # B-746's original symptom, still live on the default report path.
+        skill_ctx.path_traversal_violations = list(
+            getattr(ctx, "skill_traversal_violations", {}).get(str(dir_map.get(name, "")), [])
+        )
         # B-551: carry THIS skill's coverage gaps into its own Context. Without them the
         # fresh Context looks like a complete scan, and `check_installed_skills` duly
         # returned `NO KNOWN ISSUE / PASS` for the skill whose payload directory the same
@@ -2247,7 +2261,11 @@ def _skill_inventory(ctx) -> list[dict]:
         out.append({
             "name": name,
             "verdict": _VET_VERDICT.get(primary.status, str(primary.status)),
-            "status": primary.status if primary.status in (FAIL, WARN, PASS, UNKNOWN) else UNKNOWN,
+            # B-751: was coerced to UNKNOWN, so a row whose reason named a confirmed escape
+            # still rendered grey "could not assess".
+            "status": (primary.status
+                       if primary.status in (FAIL, WARN, PASS, UNKNOWN)
+                       or primary.status in FAIL_WEIGHT_STATUSES else UNKNOWN),
             "reasons": shown_reasons,
         })
     return out
@@ -2518,7 +2536,14 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     # self-excluded wording inline. `_subject_summary_rows` spelled out its own, simpler
     # version of the same sentence and fell behind. Both read it from one place now.
     installed_text = _skills_roster_text(inv, ctx)
-    flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
+    # B-751: this bare tuple was missed by the first pass and it is the one that matters
+    # most — a row whose status is FAIL-weight but not the literal "FAIL" fell out of
+    # `flagged`, so it landed in the `clean` roster below and the detail loop never printed
+    # it. Measured on a home whose ONLY installed skill is a confirmed zip-slip, the block
+    # printed "Skills (1 installed) — 1 issue(s)" and then "1 clean: archive-demo",
+    # contradicting itself in consecutive lines.
+    flagged = [s for s in skills
+               if s.get("status") in ACTIONABLE_STATUSES or s.get("status") == UNKNOWN]
     flagged_names = {s["name"] for s in flagged}
     # B-506: fold in findings filed against the SUBJECT rather than against one skill.
     # Without this the marker and the count are derived from the per-item roster alone,
@@ -2888,12 +2913,12 @@ def render_report(findings: list[Finding], score: ScoreResult,
 
     # --- "Why this score" breakdown ---
     scored_findings = [f for f in findings if getattr(f, "scored", True)
-                       and f.status not in (UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL")
+                       and f.status != UNKNOWN   # B-751: moves with scoring.py's gate
                        and not getattr(f, "suppressed", False)]
     n_scored = len(scored_findings)
     n_pass = sum(1 for f in scored_findings if f.status == PASS)
     n_warn = sum(1 for f in scored_findings if f.status == WARN)
-    n_fail = sum(1 for f in scored_findings if f.status == FAIL)
+    n_fail = sum(1 for f in scored_findings if f.status in FAIL_WEIGHT_STATUSES)
     # Use the RAW (uncapped) pass-rate as the explained number so the arithmetic
     # reconciles with the pass/warn/fail counts. When a cap fired, the separate
     # `report.capped` line above already discloses raw -> capped, so showing the
@@ -4431,8 +4456,18 @@ def render_svg(score: ScoreResult, findings: list[Finding]) -> str:
 
 
 # Verdict words for the vetting modes (--vet / --vet-mcp), keyed by worst status.
-_VET_VERDICT = {FAIL: "DANGEROUS", WARN: "SUSPICIOUS", PASS: "NO KNOWN ISSUE", UNKNOWN: "UNKNOWN", "SKILL_ARCHIVE_PATH_TRAVERSAL": "UNKNOWN"}
-_VET_STATUS_RANK = {FAIL: 3, WARN: 2, UNKNOWN: 1, "SKILL_ARCHIVE_PATH_TRAVERSAL": 1, PASS: 0}
+# B-751: the traversal status reads DANGEROUS, not UNKNOWN. It is a confirmed escape, and
+# rendering a conviction as "could not assess" is the reassuring-but-false answer Golden
+# Rule #4 forbids.
+_VET_VERDICT = {FAIL: "DANGEROUS", WARN: "SUSPICIOUS", PASS: "NO KNOWN ISSUE", UNKNOWN: "UNKNOWN",
+                "SKILL_ARCHIVE_PATH_TRAVERSAL": "DANGEROUS (archive escapes its directory)"}
+# B-751: `_VET_STATUS_RANK` was DELETED here, not re-ranked. It had zero consumers —
+# grep found only its own definition, two comments in checks/_vet.py citing it as
+# authority, and two tests — while ranking a confirmed zip-slip at UNKNOWN level. A dead
+# constant with a wrong value that other code quotes is worse than no constant: it is
+# where the "the third table governs rendering and scoring" claim came from, and that
+# claim was false in both halves. Rendering is _ICON/_VET_VERDICT; scoring is
+# scoring.py:741 and the severity-cap tally beneath it.
 
 
 def _finding_to_dict(f: Finding) -> dict:

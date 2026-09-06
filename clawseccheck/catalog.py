@@ -7,6 +7,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+#: Statuses that carry FAIL's weight. B-751.
+#:
+#: ``check_installed_skills`` can return ``SKILL_ARCHIVE_PATH_TRAVERSAL`` — a confirmed
+#: zip-slip in an installed skill — and ``_VET_MERGE_RANK``/``dossier._STATUS_RANK`` both
+#: rank it with FAIL. Nothing else did. Thirty-odd sites across eight modules compared
+#: against the bare literal ``"FAIL"``, so the status matched none of them and every one
+#: degraded toward "fine" rather than toward "unknown". Measured, on a home whose only
+#: installed skill ships a confirmed escape:
+#:
+#:     scoring.compute()              96 / grade A   (79 / C once it counts)
+#:     report._worst_of_statuses()    "PASS"
+#:     risk_paths()                   []             (RISK-09, CRITICAL, never fires)
+#:     render_sarif()                 7 results, none naming the escape
+#:     render_pdf()                   the word "traversal" absent from the document
+#:
+#: This lives in ``catalog`` because it is the one layer-1 leaf that both ``checks/`` and
+#: every renderer already import, so the check layer and the report layer can share one
+#: definition without a cycle. Import it; do not re-spell the set, and do not write a bare
+#: ``in (FAIL, WARN)`` in a status-filtering position — ``tests/test_b751_fail_weight.py``
+#: fails the build on both.
+FAIL_WEIGHT_STATUSES: frozenset = frozenset({"FAIL", "SKILL_ARCHIVE_PATH_TRAVERSAL"})
+
+#: FAIL-weight or WARN: the statuses that are "something to act on". The second most
+#: repeated literal after the one above, and it fails the same way.
+ACTIONABLE_STATUSES: frozenset = FAIL_WEIGHT_STATUSES | {"WARN"}
+
 CRITICAL = "CRITICAL"
 HIGH = "HIGH"
 MEDIUM = "MEDIUM"

@@ -40,7 +40,18 @@ from __future__ import annotations
 import zlib
 
 from .brand import BRAND_RED, GRADE_HEX, SEVERITY, WORDMARK, grade_hex
-from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
+from .catalog import (
+    CRITICAL,
+    FAIL,
+    FAIL_WEIGHT_STATUSES,
+    HIGH,
+    LOW,
+    MEDIUM,
+    PASS,
+    UNKNOWN,
+    WARN,
+    Finding,
+)
 from .layers import LAYER_ORDER, describe_layer
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
@@ -335,8 +346,13 @@ class _PageFlow:
 # ---------------------------------------------------------------------------
 _KAPPA = 0.5522847498  # cubic-bezier control-point factor for a quarter-circle arc
 
-# status -> swatch colour for the subject-summary table (grade ramp; UNKNOWN neutral grey)
-_STATUS_HEX = {FAIL: GRADE_HEX["F"], WARN: GRADE_HEX["C"], PASS: GRADE_HEX["B"], UNKNOWN: "#9f9f9f"}
+# status -> swatch colour for the subject-summary table (grade ramp; UNKNOWN neutral grey).
+# B-751: SKILL_ARCHIVE_PATH_TRAVERSAL (a confirmed zip-slip) is FAIL-weight but isn't the
+# literal "FAIL", so a plain literal dict left it in the ``.get(status, "#9f9f9f")``
+# fallback below — the same grey as UNKNOWN. Built from the shared set so every
+# FAIL-weight status gets FAIL's own colour, never an invented one.
+_STATUS_HEX = {status: GRADE_HEX["F"] for status in FAIL_WEIGHT_STATUSES}
+_STATUS_HEX.update({WARN: GRADE_HEX["C"], PASS: GRADE_HEX["B"], UNKNOWN: "#9f9f9f"})
 
 
 def _circle_path(cx: float, cy: float, r: float) -> str:
@@ -487,7 +503,9 @@ def _pipeline_block(flow: "_PageFlow", title: str, lines) -> None:
 def _finding_block(flow: _PageFlow, f: Finding) -> None:
     sev_style = SEVERITY.get(f.severity)
     sev_hex = sev_style.hex if sev_style else "#999999"
-    status_word = "FAIL" if f.status == FAIL else "WARN"
+    # B-751: a confirmed zip-slip is FAIL-weight, not the literal "FAIL", so it was
+    # labelled WARN here once the filter below let it through.
+    status_word = "FAIL" if f.status in FAIL_WEIGHT_STATUSES else "WARN"
     # Keep a finding's title (and the start of its detail) from being orphaned alone at
     # the very bottom of a page — everything past that still breaks losslessly line by
     # line via `_PageFlow.line`'s own `ensure_space`.
@@ -532,7 +550,11 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
 
     flow = _PageFlow(doc, font_helv, font_bold)
 
-    issues = [f for f in findings if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
+    # B-751: this bare tuple dropped SKILL_ARCHIVE_PATH_TRAVERSAL, so a confirmed escape
+    # was absent from the PDF entirely — the word "traversal" did not appear in the file.
+    issues = [f for f in findings
+              if (f.status in FAIL_WEIGHT_STATUSES or f.status == WARN)
+              and not getattr(f, "suppressed", False)]
     issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
 
     # Lazy import: __version__ is assigned in __init__.py AFTER `from .pdf import

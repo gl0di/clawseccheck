@@ -81,9 +81,9 @@ def test_fail_weight_is_derived_from_the_rank_tables_not_asserted():
     """``_SWEEP_FAIL_STATUSES`` must be exactly the statuses ranked with FAIL.
 
     Pins the set against the two tables that decide the winner and the dossier verdict, so
-    it cannot drift into a hand-maintained list. ``report._VET_STATUS_RANK`` is deliberately
-    NOT used: it ranks the traversal at 1, a pre-existing disagreement filed under B-746 and
-    left standing rather than quietly reconciled here.
+    it cannot drift into a hand-maintained list. The third table this docstring used to name
+    (``report._VET_STATUS_RANK``) was deleted by B-751: it had zero consumers and ranked the
+    traversal at 1. ``catalog.FAIL_WEIGHT_STATUSES`` is now the shared vocabulary.
     """
     fail_rank = _VET_MERGE_RANK["FAIL"]
     expected = {s for s, r in _VET_MERGE_RANK.items() if r == fail_rank}

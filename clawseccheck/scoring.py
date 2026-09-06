@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace as dc_replace
 
-from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, WEIGHT, Finding
+from .catalog import CRITICAL, FAIL_WEIGHT_STATUSES, Finding, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, WEIGHT
 
 GRADES = [(90, "A"), (80, "B"), (70, "C"), (50, "D"), (0, "F")]
 
@@ -738,8 +738,12 @@ def compute(findings: list[Finding], ctx=None, *,
     scored = [
         f for f in findings
         if f.scored
-        and f.status not in (UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL")
-        and (not getattr(f, "suppressed", False) or f.status == FAIL)
+        # B-751: the traversal status used to be excluded here alongside UNKNOWN, so a
+        # home whose installed skill ships a CONFIRMED zip-slip scored 96/grade A.
+        # Measured: 96/A with the exclusion, 79/C without it. It is a conviction, not a
+        # non-answer, and every other layer now weights it with FAIL.
+        and f.status != UNKNOWN
+        and (not getattr(f, "suppressed", False) or f.status in FAIL_WEIGHT_STATUSES)
     ]
     total = sum(WEIGHT[f.severity] for f in scored)
 
@@ -855,7 +859,14 @@ def compute(findings: list[Finding], ctx=None, *,
 
     raw = round(earned / total * 100)
 
-    failed = {sev: sum(1 for f in scored if f.status == FAIL and f.severity == sev)
+    # B-751: this is the REAL score gate for the traversal status, and it is not the
+    # `scored` filter above. A traversal contributes 0 earned weight either way (it is
+    # neither PASS nor WARN), so including it in `scored` alone moved the fixture only
+    # 96 -> 94. What was missing is the SEVERITY CAP: with `== FAIL` here a confirmed
+    # zip-slip counted as no failure at all, so FAIL_CAPS never applied and the home kept
+    # an A. Measured: 96/A before, 94/A with only the filter fixed, 79/C with this line.
+    failed = {sev: sum(1 for f in scored
+                       if f.status in FAIL_WEIGHT_STATUSES and f.severity == sev)
               for sev in _SEV_ORDER}
 
     score = raw
@@ -1019,7 +1030,8 @@ def assessment_coverage(findings: list[Finding]) -> dict:
     in_scope = [
         f for f in findings
         if (f.scored or f.id.startswith("ERR:") or getattr(f, "engine_degraded", False))
-        and f.status != "SKILL_ARCHIVE_PATH_TRAVERSAL"
+        # B-751: kept in scope. Excluded from the coverage denominator, a check that had
+        # just CONVICTED was reported as "never checked".
         and not getattr(f, "suppressed", False)
     ]
     scored_total = len(in_scope)
@@ -1157,7 +1169,8 @@ def project(findings: list[Finding], ctx=None, *, live_test_vulnerable: bool = F
 
     fixable = [
         f for f in findings
-        if f.scored and not getattr(f, "suppressed", False) and f.status == FAIL
+        if f.scored and not getattr(f, "suppressed", False)
+        and f.status in FAIL_WEIGHT_STATUSES
     ]
 
     # ── top1: the single highest-leverage fix ────────────────────────────────

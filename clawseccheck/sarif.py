@@ -14,7 +14,17 @@ import json
 from typing import TYPE_CHECKING
 
 from . import brand
-from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding, remediation_for
+from .catalog import (
+    CATALOG,
+    CRITICAL,
+    FAIL_WEIGHT_STATUSES,
+    HIGH,
+    PASS,
+    UNKNOWN,
+    WARN,
+    Finding,
+    remediation_for,
+)
 from .dossier import axis_for
 from .layers import LAYER_ORDER
 from .report import (
@@ -137,7 +147,10 @@ def _build_analysis_completeness(
         "notApplicableCount": sum(1 for f in findings if getattr(f, "not_applicable", False)),
         "passCount": sum(1 for f in findings if f.status == PASS),
         "warnCount": sum(1 for f in findings if f.status == WARN),
-        "failCount": sum(1 for f in findings if f.status == FAIL),
+        # B-751: bare `== FAIL` left SKILL_ARCHIVE_PATH_TRAVERSAL (FAIL-weight, not the
+        # literal "FAIL") in none of the four buckets above, so they stopped summing to
+        # len(findings). Folded into failCount, where its weight already says it belongs.
+        "failCount": sum(1 for f in findings if f.status in FAIL_WEIGHT_STATUSES),
         "suppressedCount": sum(1 for f in findings if f.suppressed),
         # I3: per-severity counts of UNSUPPRESSED FAIL findings — the same numbers
         # `--fail-on SEVERITY` (cli.py) gates on and report.py's --json carries as
@@ -280,9 +293,12 @@ def render_sarif(
         surfaced_suppressed = surfaced_despite_suppression(f)
         if f.suppressed and not surfaced_suppressed:
             continue
-        if f.status not in (FAIL, WARN):
+        # B-751: SKILL_ARCHIVE_PATH_TRAVERSAL (a confirmed zip-slip) is FAIL-weight but
+        # isn't the literal "FAIL", so this bare tuple check dropped it silently — a CI
+        # gate consuming SARIF never saw a confirmed escape.
+        if f.status not in FAIL_WEIGHT_STATUSES and f.status != WARN:
             continue
-        level = "error" if f.status == FAIL else "warning"
+        level = "error" if f.status in FAIL_WEIGHT_STATUSES else "warning"
         message_text = _sarif_text(f.detail if f.detail else f.title)
         result = {
             "ruleId": f.id,

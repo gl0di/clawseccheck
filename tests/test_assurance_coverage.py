@@ -102,17 +102,38 @@ class TestAssessmentCoverageHelper:
         assert cov["assessable_frac"] == 1.0
         assert cov["unknown_frac"] == 0.0
 
-    def test_skill_archive_path_traversal_excluded_like_compute(self):
-        """SKILL_ARCHIVE_PATH_TRAVERSAL is a real third status compute() excludes
-        from its scored selection (same as UNKNOWN) — the helper must mirror that."""
+    def test_skill_archive_path_traversal_counted_like_compute(self):
+        """The helper must mirror ``compute``'s selection — B-751 moved both together.
+
+        This test used to assert the opposite, and its old name said so: the status was
+        EXCLUDED from the scored selection, like UNKNOWN. B-751 changed that — a confirmed
+        zip-slip is a conviction, not a non-answer, and excluding it meant a check that had
+        just convicted was reported as "never checked" by the one metric that answers "how
+        much of the catalog could we assess".
+
+        The mirroring is now asserted against ``compute`` itself rather than against
+        hard-coded counts, so the pair cannot drift apart again: the previous version went
+        stale the moment ``compute`` moved, and a number written by hand is exactly what
+        made this a suite failure rather than a caught divergence.
+        """
         findings = [
             _f("P1", PASS),
             _f("B13", "SKILL_ARCHIVE_PATH_TRAVERSAL"),
         ]
         cov = assessment_coverage(findings)
-        assert cov["scored_total"] == 1
-        assert cov["assessable"] == 1
-        assert cov["unknown"] == 0
+
+        assert cov["scored_total"] == 2, cov
+        assert cov["assessable"] == 2, cov
+        assert cov["unknown"] == 0, cov
+
+        # the mirror, stated as a relationship rather than as a constant
+        from clawseccheck.scoring import compute
+        scored_by_compute = sum(
+            1 for f in findings
+            if f.scored and f.status != "UNKNOWN" and not getattr(f, "suppressed", False)
+        )
+        assert cov["scored_total"] == scored_by_compute, (cov, scored_by_compute)
+        assert compute(findings).score < 100, "the conviction must cost something"
 
     def test_invariant_holds_across_random_ish_mixes(self):
         """assessable + unknown == scored_total for several shapes."""

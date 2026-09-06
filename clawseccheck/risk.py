@@ -29,7 +29,7 @@ from typing import Callable
 from . import attest as _attest
 from . import mcpsurface as _mcpsurface
 from . import trajectory as _trajectory
-from .catalog import CRITICAL, FAIL, HIGH, MEDIUM, WARN, Finding
+from .catalog import CRITICAL, FAIL, FAIL_WEIGHT_STATUSES, HIGH, MEDIUM, WARN, Finding
 from .checks import (
     _key_advice,
     _b62_actual_families,
@@ -1071,7 +1071,11 @@ def _rule_malicious_skill_exfil(ctx: Context, findings: list[Finding],
     reach out (messaging channels, external-service skills, outbound tools), the
     malicious skill has a live path to read secrets/data and send them out.
     """
-    if _finding_status(findings, "B13") != FAIL:
+    # B-751: was `!= FAIL`, so a CONFIRMED zip-slip (B13 status
+    # SKILL_ARCHIVE_PATH_TRAVERSAL) silently disabled this whole CRITICAL chain —
+    # measured: risk_paths() returned [] on a traversal home and ['RISK-09'] on the
+    # same findings with the status swapped to FAIL.
+    if _finding_status(findings, "B13") not in FAIL_WEIGHT_STATUSES:
         return None
     has_egress = (
         _has_outbound(tools, cfg)

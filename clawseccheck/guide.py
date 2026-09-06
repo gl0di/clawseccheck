@@ -12,7 +12,7 @@ import json
 
 from dataclasses import dataclass
 
-from .catalog import BY_ID, FAIL, WARN, Finding
+from .catalog import ACTIONABLE_STATUSES, BY_ID, FAIL, FAIL_WEIGHT_STATUSES, WARN, Finding
 from .invocation import cmd, machine_command_prefix
 from .scoring import ScoreResult
 from .textnorm import asciify
@@ -53,7 +53,9 @@ def _surface_failed(findings: list[Finding], surface: str) -> bool:
         if getattr(f, "suppressed", False):
             continue
         meta = BY_ID.get(f.id)
-        if meta is not None and meta.surface == surface and f.status == FAIL:
+        # B-751: FAIL-weight, not the literal — a confirmed zip-slip could drop the whole
+        # surface block, not just one line.
+        if meta is not None and meta.surface == surface and f.status in FAIL_WEIGHT_STATUSES:
             return True
     return False
 
@@ -93,7 +95,10 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
     # action before stops reaching it; the surface term only ADDS the FAILs that reached
     # nothing. See _surface_failed for why that term is FAIL-only.
     b13 = idx.get("B13")
-    b13_hit = b13 is not None and b13.status in (FAIL, WARN)
+    # B-751: B13 is the SOLE producer of SKILL_ARCHIVE_PATH_TRAVERSAL, so this was False
+    # exactly when B13 convicted: the guide advised on a hardcoded temp-file path and said
+    # nothing about a confirmed zip-slip (measured against that WARN as a positive control).
+    b13_hit = b13 is not None and (b13.status in ACTIONABLE_STATUSES)
     if b13_hit or _surface_failed(findings, "skills"):
         actions.append(Action(
             id="vet_skills",

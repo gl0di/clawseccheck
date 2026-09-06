@@ -7,7 +7,7 @@ its absence from a baseline suppresses the drop alert outright.
 """
 
 from __future__ import annotations
-from ..catalog import FAIL, UNKNOWN  # noqa: F401
+from ..catalog import FAIL, FAIL_WEIGHT_STATUSES, UNKNOWN  # noqa: F401
 from ._shared import (  # noqa: F401
     NOTE_NO_PRIOR_RECORD,
     NOTE_RECORD_DAMAGED,
@@ -171,10 +171,11 @@ def _raw_score_scope(findings) -> str:
     ids = sorted(
         f.id for f in findings
         if f.scored
-        # C-135/FIX1: mirrors scoring.compute()'s literal exclusions; "SKILL_ARCHIVE_
-        # PATH_TRAVERSAL" is a real third status the checks engine emits (see catalog's
-        # Finding.status), not a typo — scoring.py excludes it from the denominator too.
-        and f.status not in (UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL")
-        and (not getattr(f, "suppressed", False) or f.status == FAIL)
+        # B-751: mirrors scoring.compute()'s exclusions, which is why this moved with it.
+        # The traversal status was excluded alongside UNKNOWN, so the drift signature did
+        # not move when a zip-slip appeared in a watched home.
+        and f.status != UNKNOWN
+        and (not getattr(f, "suppressed", False)
+             or f.status in FAIL_WEIGHT_STATUSES)
     )
     return _h(",".join(ids))
