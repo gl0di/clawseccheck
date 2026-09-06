@@ -174,3 +174,81 @@ def test_an_unreadable_store_hedges_in_a1_and_stays_silent_in_the_chain(tmp_path
         assert _a1_leg(ctx) is False
     finally:
         (store / "unreadable.json").chmod(0o600)
+
+
+# --------------------------------------------------------------------------- #
+# B-730 item: the gateway-secret terms. The reviewer blocked this task because   #
+# `risk.py::_has_sensitive_data` had no token term while `report.py`'s           #
+# `main_secrets` had one, and nothing pinned the difference. What the difference #
+# actually was, measured rather than read: report.py tested `gateway.token`      #
+# ALONE -- a key the current schema does not have. The dist resolver answers     #
+# False for it on 2026.9.1 and True for `gateway.auth.token`;                    #
+# `tests/dist_verified_paths.txt` carries `gateway.auth.password` and not this;  #
+# `_NOT_IN_CURRENT_SCHEMA` records `unrecognized_keys@gateway`. Over 600 real     #
+# and corpus configs, `gateway.token` is set on 0 and `gateway.auth.token` on    #
+# 479, so the term was dead and the two models agreed on 600/600 by accident.    #
+#                                                                               #
+# Re-spelling it to the live key was the obvious repair and the wrong one: it    #
+# would raise `main_secrets` on 479 of those 600 while risk.py still has no      #
+# token term, dropping agreement to 121/600 -- manufacturing this task's own     #
+# A1-vs-RISK-02 contradiction at 80% scale. The term was removed instead.        #
+# --------------------------------------------------------------------------- #
+
+
+def _gw_ctx(tmp_path: Path, gateway: dict) -> Context:
+    """A home with an empty store, so the gateway config is the only thing that can move
+    a model. Same reasoning as CFG's exec/fs gating: hold every other source constant."""
+    ctx = _ctx(_home(tmp_path))
+    ctx.config = {**CFG, "gateway": gateway}
+    return ctx
+
+
+def test_neither_gateway_token_spelling_moves_any_model(tmp_path):
+    """The fixture the DoD asked for and the block cited as missing.
+
+    Both spellings are covered deliberately. `gateway.token` is the dead legacy key the
+    capability graph used to read; `gateway.auth.token` is the live one it could not see.
+    Neither may raise the sensitive-data leg for anybody, because a gateway's own auth
+    secret is not agent-readable data -- the ground A1 already states -- and a stale
+    legacy key sitting in a config file is B1's subject, not this leg's.
+    """
+    for label, gateway in (
+        ("legacy gateway.token", {"token": _token("B")}),
+        ("live gateway.auth.token", {"auth": {"token": _token("C")}}),
+    ):
+        ctx = _gw_ctx(tmp_path / label.replace(" ", "_").replace(".", "_"), gateway)
+        assert _a1_leg(ctx) is False, label
+        assert _risk02_present(ctx) is False, label
+        assert _graph_main_secrets(ctx) is False, label
+
+
+def test_respelling_the_dead_token_key_would_break_agreement(tmp_path):
+    """The landmine guard, and the reason this test exists at all.
+
+    Nothing stops a future reader from noticing that `main_secrets` names a key the schema
+    does not have and "correcting" it. This pins the consequence: with the live key set,
+    the capability graph must still agree with the chain. If someone re-adds a token term
+    to report.py alone, this reddens -- which the three single-model tests would not.
+    """
+    ctx = _gw_ctx(tmp_path, {"auth": {"token": _token("D")}})
+    assert _graph_main_secrets(ctx) == _risk02_present(ctx) == _a1_leg(ctx)
+
+
+def test_the_gateway_password_asymmetry_is_the_one_known_divergence(tmp_path):
+    """Pinned as a DELIBERATE state, not left unmeasured -- B-730 item 2.
+
+    `risk.py` and `report.py` both count `gateway.auth.password`; A1 excludes it, on the
+    stated ground that it is the gateway's own auth secret rather than agent-readable
+    data, and that B1 already emits FAIL/CRITICAL on it. That is a real divergence and it
+    is NOT fixed here: unlike the token term, this key IS in the schema, so removing it is
+    an observable narrowing that needs its own measurement and its own C-135 pass.
+
+    Asserting the disagreement rather than skipping it means the day someone settles it,
+    this test reddens and forces the decision to be recorded instead of drifting in.
+    """
+    ctx = _gw_ctx(tmp_path, {"auth": {"password": _token("E")}})
+    assert _a1_leg(ctx) is False, "A1 excludes the gateway's own auth secret"
+    assert _graph_main_secrets(ctx) is True, "the capability graph counts it"
+    assert _risk02_present(ctx) == _graph_main_secrets(ctx), (
+        "whatever is decided, the chain and the graph must not diverge from each other"
+    )

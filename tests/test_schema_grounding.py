@@ -1448,7 +1448,12 @@ _NOT_IN_CURRENT_SCHEMA = {
     "gateway.token": (
         "safeParse: unrecognized_keys@gateway; the real path is gateway.auth.token. Every "
         "read is `dig(cfg, 'gateway.auth.token') or dig(cfg, 'gateway.token')` "
-        "(report.py::_capability_graph and ::_credential_surface_map; checks/_config.py::_gateway_config_token, ::check_credential_blast_radius and ::check_gateway) — legacy second term."
+        "(report.py::_credential_surface_map; checks/_config.py::_gateway_config_token, ::check_credential_blast_radius and ::check_gateway) — legacy second term. "
+        "B-730 follow-up removed the one read that BROKE that rule: report.py::_capability_graph "
+        "read this legacy key ALONE, with no gateway.auth.token first, so the capability graph's "
+        "sensitive-data term was blind on every config the current schema accepts (measured: 0 of "
+        "600 real configs set gateway.token, 479 set gateway.auth.token). It now reads neither — "
+        "see the comment there for why re-spelling it would have been the wrong repair."
     ),
     "lastTouchedVersion": (
         "safeParse: unrecognized_keys@<root>; the real path is meta.lastTouchedVersion, and "

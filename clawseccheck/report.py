@@ -1406,9 +1406,38 @@ def _capability_graph(ctx) -> dict:
     # config-level signals (credential store, gateway secrets) are GLOBAL and not
     # attributable to one subagent, so per-agent legs stay tool-name-only. `main` is the
     # global agent, so it is the node those signals belong to.
+    # B-730 follow-up: the `gateway.token` term is REMOVED, not re-spelled, and the
+    # difference matters. `gateway.token` is not a path the current schema has -- the
+    # dist resolver answers False for it on 2026.9.1 while `gateway.auth.token` answers
+    # True, `tests/dist_verified_paths.txt` carries the password but not this, and
+    # `_NOT_IN_CURRENT_SCHEMA` records the measured disproof (`unrecognized_keys@gateway`;
+    # the real path is `gateway.auth.token`). Measured over 600 real and corpus configs:
+    # `gateway.token` is set on ZERO of them and `gateway.auth.token` on 479.
+    #
+    # So this term was dead, and "fixing" the spelling is the trap. Reading the real key
+    # here would flip `main_secrets` on 479 of those 600 configs (79.8%) while
+    # `risk.py::_has_sensitive_data` has no token term at all -- manufacturing, at 80%
+    # scale, exactly the A1-vs-RISK-02 contradiction this task exists to remove. Today
+    # the two models agree on 600/600 configs; the re-spelling would drop that to 121.
+    #
+    # Removing it is not a narrowing anyone can observe: the key cannot appear in a config
+    # OpenClaw accepts, and if a stale one survives from an older version it is a secret
+    # sitting in a config file -- which is B1's subject (`check_secrets` emits B1
+    # FAIL/CRITICAL), not evidence that the agent can reach sensitive data. That is the
+    # same ground A1 already states for excluding gateway secrets from its leg.
+    #
+    # LIMIT, stated rather than glossed: the root schema is not reachable outside the
+    # OpenClaw runtime, so safeParse could not be re-executed on 2026.9.1 to distinguish
+    # "rejected" from "silently ignored". The conclusion does not depend on which it is --
+    # rejected means the term is unreachable, ignored means the key is not agent-reachable
+    # either -- but the stronger claim is not made here.
+    #
+    # `gateway.auth.password` deliberately STAYS, and stays divergent from A1. It is the
+    # same question as this one and it is tracked as B-730 item 2; settling it is a
+    # narrowing on a key that IS in the schema, so it needs its own measurement and its
+    # own C-135, not a ride on this change.
     main_secrets = bool(
         dig(cfg, "gateway.auth.password")
-        or dig(cfg, "gateway.token")
         or _credential_store_state(getattr(ctx, "home", None))["secret_files"]
         or any(_hint([t], SENSITIVE_TOOL_HINTS) for t in main_tools)
     )
