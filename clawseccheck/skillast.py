@@ -4084,9 +4084,215 @@ def _scope_own_assigns(scope: ast.AST) -> dict:
     return out
 
 
-def _path_expr_is_dunder_file_relative(node: ast.AST, scope_assigns: dict) -> bool:
+def _path_expr_swallows_its_anchor(node: ast.AST, scope_assigns: dict) -> bool:
+    """True when a literal ABSOLUTE segment in *node* discards the `__file__` anchor.
+
+    B-752. `os.path.join` keeps only what follows its last absolute argument, so
+    ``os.path.join(os.path.dirname(__file__), "assets", "/tmp/.cache/stage2.py")``
+    resolves to ``/tmp/.cache/stage2.py`` -- measured, not reasoned -- while the AST
+    still carries a real `__file__`. A carve-out that reads the TOKEN rather than the
+    resolved path therefore absolves reading and executing an arbitrary absolute path,
+    with no traversal and no obfuscation: one extra argument.
+
+    Scoped to LITERAL segments on purpose. A computed segment could also be absolute at
+    runtime, and this says nothing about that case -- refusing on a non-literal would
+    turn every dynamically-built in-artifact path into a conviction, which is the false
+    FAIL the carve-out exists to prevent. What is claimed here is only what is provable
+    from the source text.
+
+    One hop of local assignment is resolved, matching the anchor lookup below, so a
+    segment parked in a variable first is not a bypass.
+
+    SCOPED TO ACTUAL PATH SEGMENTS, and that scoping is not cosmetic. The first version
+    of this predicate accepted any string constant anywhere in the expression, which
+    convicted two measured benign shapes outright: ``"/".join(["data", "v.py"])`` and
+    ``raw.replace("/", "_")`` -- the second being sanitising code, i.e. the change would
+    have punished the defensive habit it wants people to have. A separator is not a
+    segment. Only the arguments of a path join (``os.path.join`` / ``.joinpath``) and the
+    operands of pathlib's ``/`` are read as segments here.
+    """
+    def _absolute_literal(x: ast.AST) -> bool:
+        return isinstance(x, ast.Constant) and isinstance(x.value, str) and x.value.startswith("/")
+
+    def _segment_is_absolute(seg: ast.AST) -> bool:
+        if _absolute_literal(seg):
+            return True
+        # One hop, and only when the variable IS a literal. Asking whether its RHS
+        # merely CONTAINS an absolute-looking constant is what convicted
+        # ``name = "/".join(["data", "v.py"])`` -- a computed value whose absoluteness
+        # is not statically knowable, so nothing is claimed about it.
+        if isinstance(seg, ast.Name) and seg.id in scope_assigns:
+            return _absolute_literal(scope_assigns[seg.id])
+        return False
+
+    # The path is routinely bound first (`p = Path(__file__).parent / "/tmp/x"`) and only
+    # then opened, so the structural rules below must see the RHS too -- one hop, the same
+    # budget the anchor lookup uses. Expanding first and matching after is what keeps the
+    # two halves from disagreeing; keeping them separate is how the pathlib forms were
+    # missed on the first attempt.
+    nodes = list(ast.walk(node))
+    for n in list(nodes):
+        if isinstance(n, ast.Name) and n.id in scope_assigns:
+            nodes.extend(ast.walk(scope_assigns[n.id]))
+
+    for n in nodes:
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            base = n.func.value
+            is_path_join = n.func.attr == "join" and not (
+                isinstance(base, ast.Constant) and isinstance(base.value, str)
+            )
+            if (is_path_join or n.func.attr == "joinpath") and any(
+                _segment_is_absolute(a) for a in n.args
+            ):
+                return True
+        elif isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div):
+            if _segment_is_absolute(n.right):
+                return True
+    return False
+
+
+def _anchor_depth_below_root(expr: ast.AST, relpath: str, scope_assigns: dict | None = None) -> int:
+    """How many components separate the artifact root from this expression's anchor.
+
+    B-752. `..` segments only escape the artifact once they exceed the anchor's own
+    depth, so the count is meaningless without knowing where the anchor sits -- and that
+    depends on which anchor form the source used:
+
+        <root>/a/b/mod.py     `os.path.dirname(__file__)` / `Path(__file__).parent` -> 2
+                              bare `__file__`                                       -> 3
+                              `Path(__file__).parent.parent`                        -> 1
+
+    An unrecognised form falls back to the DEEPEST reading (bare `__file__`), which is
+    the permissive end: it under-convicts rather than inventing an escape. A wrong guess
+    in the other direction would be a false FAIL on a skill doing nothing wrong, and this
+    predicate exists to remove exactly that.
+    """
+    parts = [p for p in relpath.replace("\\", "/").split("/") if p not in ("", ".")]
+    file_depth = len(parts)  # <root>/a/b/mod.py -> 3
+    if file_depth == 0:
+        return 0
+
+    # The anchor is routinely parked in a local first -- `here = os.path.dirname(__file__)`
+    # then `open(os.path.join(here, ...))` -- which is the very shape the rest of this
+    # carve-out already resolves one hop for. Searching only the path expression finds no
+    # anchor form there and silently falls back to the permissive reading, which is how
+    # the first version of this function left the traversal family open. Measured, not
+    # reasoned: it was caught by testing the wired verdict, never by the helper's own
+    # unit cases, which passed the anchor in directly.
+    nodes = list(ast.walk(expr))
+    for n in list(nodes):
+        if isinstance(n, ast.Name) and scope_assigns and n.id in scope_assigns:
+            nodes.extend(ast.walk(scope_assigns[n.id]))
+
+    def _dirname_hops(call: ast.AST) -> int:
+        """How many nested `dirname(...)` wrappers sit between the call and `__file__`.
+
+        `os.path.dirname(os.path.dirname(__file__))` climbs TWO components, not one.
+        Counting it as one over-states the anchor's depth, which absolves a real escape --
+        found by the adversarial pass, in the under-convicting direction.
+        """
+        hops = 0
+        cur = call
+        while (
+            isinstance(cur, ast.Call)
+            and isinstance(cur.func, ast.Attribute)
+            and cur.func.attr == "dirname"
+            and cur.args
+        ):
+            hops += 1
+            cur = cur.args[0]
+        return hops if any(
+            isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(cur)
+        ) else 0
+
+    dirname_hops = [
+        h for h in (
+            _dirname_hops(n) for n in nodes
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "dirname"
+        ) if h
+    ]
+    if dirname_hops:
+        return max(file_depth - max(dirname_hops), 0)
+
+    # `Path(__file__).parent`, `.parent.parent`, ... -- count the chain.
+    best = None
+    for n in nodes:
+        if isinstance(n, ast.Attribute) and n.attr == "parent":
+            hops, cur = 0, n
+            while isinstance(cur, ast.Attribute) and cur.attr == "parent":
+                hops += 1
+                cur = cur.value
+            if any(isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(cur)):
+                depth = max(file_depth - hops, 0)
+                best = depth if best is None else min(best, depth)
+    if best is not None:
+        return best
+    return file_depth
+
+
+def _path_expr_escapes_artifact(node: ast.AST, scope_assigns: dict, relpath: str) -> bool:
+    """True when the literal `..` segments in *node* provably leave the artifact root.
+
+    SCOPED TO REAL PATH SEGMENTS, for the same reason its sibling above is, and this is
+    the third time that scoping had to be learned rather than the first. Counting every
+    string constant in the expression convicted a traversal SANITISER --
+    ``name = raw.replace("..", "_")`` and ``name = raw if ".." not in raw else "_"`` --
+    because the literal `".."` sits there as a replace argument or a comparator, not as a
+    component being joined. Both are the OWASP-recommended defence against exactly the
+    attack this predicate hunts, so counting them convicted the fix for the bug.
+
+    A segment counts when it is an argument of a path join (``os.path.join`` /
+    ``.joinpath``) or an operand of pathlib's ``/``. One hop through a local, and only
+    when the local IS a string literal -- a computed name says nothing statically.
+    """
+    def _ups_in(x: ast.AST) -> int:
+        if isinstance(x, ast.Constant) and isinstance(x.value, str):
+            return x.value.replace("\\", "/").split("/").count("..")
+        if isinstance(x, ast.Name) and x.id in scope_assigns:
+            rhs = scope_assigns[x.id]
+            if isinstance(rhs, ast.Constant) and isinstance(rhs.value, str):
+                return rhs.value.replace("\\", "/").split("/").count("..")
+        return 0
+
+    nodes = list(ast.walk(node))
+    for n in list(nodes):
+        if isinstance(n, ast.Name) and n.id in scope_assigns:
+            nodes.extend(ast.walk(scope_assigns[n.id]))
+
+    ups = 0
+    for n in nodes:
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            base = n.func.value
+            is_path_join = n.func.attr == "join" and not (
+                isinstance(base, ast.Constant) and isinstance(base.value, str)
+            )
+            if is_path_join or n.func.attr == "joinpath":
+                ups += sum(_ups_in(a) for a in n.args)
+        elif isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div):
+            ups += _ups_in(n.right)
+    if ups == 0:
+        return False
+    return ups > _anchor_depth_below_root(node, relpath, scope_assigns)
+
+
+def _path_expr_is_dunder_file_relative(
+    node: ast.AST, scope_assigns: dict, relpath: str = ""
+) -> bool:
     """True when *node* (an open()-style path argument) is built from `__file__`,
-    directly or through one hop of local assignment resolved via *scope_assigns*."""
+    directly or through one hop of local assignment resolved via *scope_assigns*.
+
+    B-752: an anchor that a literal absolute segment has already discarded is not an
+    anchor, and neither is one the `..` segments have already climbed past -- in both
+    cases the answer is False regardless of how visible `__file__` is in the expression.
+    `relpath` defaults to empty so a caller that cannot say where the file sits gets the
+    old, anchor-only behaviour rather than a guessed escape.
+    """
+    if _path_expr_swallows_its_anchor(node, scope_assigns):
+        return False
+    if relpath and _path_expr_escapes_artifact(node, scope_assigns, relpath):
+        return False
     if any(isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(node)):
         return True
     for n in ast.walk(node):
@@ -4097,18 +4303,25 @@ def _path_expr_is_dunder_file_relative(node: ast.AST, scope_assigns: dict) -> bo
     return False
 
 
-def _decode_call_reads_artifact_relative_file(node: ast.Call, scope: ast.AST) -> bool:
+def _decode_call_reads_artifact_relative_file(
+    node: ast.Call, scope: ast.AST, relpath: str = ""
+) -> bool:
     """True when *node* is `<expr>.decode(...)` and <expr>'s receiver chain resolves
     to a LOCAL file opened at a `__file__`-relative path -- either the direct chain
     `open(<path>).read().decode(...)`, or through a handle bound in *scope*'s own body
-    (`with open(<path>) as h: ... h.read().decode(...)` / `h = open(<path>); ...`)."""
+    (`with open(<path>) as h: ... h.read().decode(...)` / `h = open(<path>); ...`).
+
+    B-752: *relpath* is the scanned file's own path inside the artifact, which is what
+    makes "does this climb out of the artifact?" answerable at all. Every production
+    caller of `analyze_python()` already passes one; the default keeps the old behaviour
+    for a caller that cannot."""
     receiver = node.func.value
     scope_assigns = _scope_own_assigns(scope)
     for n in ast.walk(receiver):
         if (
             _is_open_call(n)
             and n.args
-            and _path_expr_is_dunder_file_relative(n.args[0], scope_assigns)
+            and _path_expr_is_dunder_file_relative(n.args[0], scope_assigns, relpath)
         ):
             return True
     handle_names = {n.id for n in ast.walk(receiver) if isinstance(n, ast.Name)}
@@ -4122,12 +4335,14 @@ def _decode_call_reads_artifact_relative_file(node: ast.Call, scope: ast.AST) ->
                     and isinstance(item.optional_vars, ast.Name)
                     and item.optional_vars.id in handle_names
                     and item.context_expr.args
-                    and _path_expr_is_dunder_file_relative(item.context_expr.args[0], scope_assigns)
+                    and _path_expr_is_dunder_file_relative(
+                        item.context_expr.args[0], scope_assigns, relpath
+                    )
                 ):
                     return True
         elif isinstance(stmt, ast.Assign) and _is_open_call(stmt.value):
             if stmt.value.args and _path_expr_is_dunder_file_relative(
-                stmt.value.args[0], scope_assigns
+                stmt.value.args[0], scope_assigns, relpath
             ):
                 for t in stmt.targets:
                     if isinstance(t, ast.Name) and t.id in handle_names:
@@ -4135,7 +4350,9 @@ def _decode_call_reads_artifact_relative_file(node: ast.Call, scope: ast.AST) ->
     return False
 
 
-def _decode_signal_is_only_artifact_relative_reads(node: ast.AST, scope: ast.AST) -> bool:
+def _decode_signal_is_only_artifact_relative_reads(
+    node: ast.AST, scope: ast.AST, relpath: str = ""
+) -> bool:
     """True when EVERY decode-shaped call `_subtree_has_decode` would match inside
     *node* is a bare `.decode(...)` on a local sibling-file read anchored on
     `__file__` (see `_decode_call_reads_artifact_relative_file`), and nothing
@@ -4156,7 +4373,7 @@ def _decode_signal_is_only_artifact_relative_reads(node: ast.AST, scope: ast.AST
             return False  # a real _DECODE_FUNCS primitive called bare, e.g. b64decode(x)
         if not (isinstance(nf, ast.Attribute) and nf.attr == "de" + "code"):
             return False  # fromhex/join, or a _DECODE_FUNCS primitive as a method
-        if not _decode_call_reads_artifact_relative_file(n, scope):
+        if not _decode_call_reads_artifact_relative_file(n, scope, relpath):
             return False
     return found_any
 
@@ -4277,7 +4494,7 @@ def analyze_python(
             # bare-decode signal; a real content-hiding primitive elsewhere in the
             # same expression still convicts.
             if has_decode_signal and _decode_signal_is_only_artifact_relative_reads(
-                arg, owner_map.get(node, tree)
+                arg, owner_map.get(node, tree), filename
             ):
                 has_decode_signal = False
             if (
