@@ -10,8 +10,9 @@ third entry, ``"cron": "automations"``. Every test below reads the INSTALLED DIS
 either of those files.
 
 Local-only: skipped wherever the installed OpenClaw dist is absent (CI, a machine without
-it) — never silently weakened into a false pass. Ground truth is **openclaw@2026.9.1** at
-the time of writing; a filename cited here rotates on upgrade (content-hashed bundles), so
+it) — never silently weakened into a false pass. Ground truth is **openclaw@2026.9.2**
+(re-grounded 2026-09-06); a filename cited here rotates on upgrade (content-hashed bundles),
+and so, as 2026.9.2 showed, can the SHAPE of a literal — so
 re-locate a moved symbol with ``grep -rl '<symbolName>' dist/*.js``, not by trusting the
 literal glob below to still resolve.
 
@@ -37,18 +38,18 @@ from clawseccheck import toolgrant
 def test_dist_tool_name_aliases_has_three_entries_including_cron():
     text = dist_text("tool-policy-shared-*.js", symbol="TOOL_NAME_ALIASES",
                      contains="TOOL_NAME_ALIASES")
-    match = re.search(r"const TOOL_NAME_ALIASES = \{([^}]*)\}", text)
+    # BOTH declaration shapes, because the vendor changed the container without changing
+    # the contract: 2026.9.1 declared an object literal, 2026.9.2 declares
+    # `/* @__PURE__ */ new Map([["bash", "exec"], ...])`. The three pairs are byte-identical
+    # across that move — verified 2026-09-06 — so a shape-only assertion would have reported
+    # a drift that did not happen. The symbol is the anchor (B-728); its container is not.
+    match = re.search(
+        r"const TOOL_NAME_ALIASES = (?:/\*[^*]*\*/\s*)?(?:new Map\(\[(.*?)\]\)|\{(.*?)\})",
+        text, re.S)
     assert match, "TOOL_NAME_ALIASES literal not found — re-ground toolgrant._TOOL_NAME_ALIASES"
-    entries = {}
-    for raw in match.group(1).split(","):
-        raw = raw.strip()
-        if not raw:
-            continue
-        key, _, value = raw.partition(":")
-        key = key.strip().strip('"')
-        value = value.strip().strip('"')
-        if key and value:
-            entries[key] = value
+    body = match.group(1) if match.group(1) is not None else match.group(2)
+    # `"k": "v"` (object) and `["k", "v"]` (Map) both reduce to a quoted pair.
+    entries = dict(re.findall(r'"([^"]+)"\s*[:,]\s*"([^"]+)"', body))
     assert entries == {"bash": "exec", "apply-patch": "apply_patch", "cron": "automations"}, entries
     assert toolgrant._TOOL_NAME_ALIASES == entries
 
