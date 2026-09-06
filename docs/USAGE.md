@@ -102,6 +102,21 @@ openclaw skills install git:gl0di/clawseccheck  # or straight from GitHub
 
 Skill page on ClawHub: **<https://clawhub.ai/gl0di/skills/clawseccheck>**.
 
+Both paths are here on purpose, and neither is "the" one: a single vendor route means a
+registry outage or a version that never surfaces leaves you unable to install or update.
+
+**What differs is what the audit can later prove about the install.** A ClawHub install
+writes `<workspace>/.clawhub/lock.json` — the digests and the registry's own verdict,
+recorded at install time. Install any other way and that record does not exist, so the
+checks that read it have nothing to compare against and say so: measured on a skill
+installed without it, **B181 and B184 report `UNKNOWN`, and B135 reports `PASS`** — not a
+FAIL. `UNKNOWN` is this tool's answer for "could not determine", never a verdict against
+you, but it does mean those checks are not contributing evidence, and a run carrying
+unresolved layers reports what it did not reach instead of a grade.
+
+So: use the registry path when you want the install itself to be verifiable afterwards,
+and the others when you need to not depend on the registry. Neither is unsafe.
+
 Or install it as a standalone CLI (zero dependencies):
 
 ```bash
