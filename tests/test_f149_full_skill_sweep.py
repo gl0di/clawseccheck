@@ -30,6 +30,7 @@ from _vendor_neutral import neutral_config
 
 import clawseccheck.cli as cli
 import clawseccheck.collector as collector
+from clawseccheck.checks._vet import _VET_MERGE_RANK
 from clawseccheck.cli import (
     _SWEEP_ICON_ASCII, _SWEEP_ICON_UNI, _SWEEP_VERDICT,
     _VET_ICON_ASCII, _VET_ICON_UNI, _VET_VERDICT,
@@ -486,10 +487,31 @@ def test_full_still_suppresses_the_coverage_gap_notice(tmp_path, monkeypatch, ca
 # ---------------------------------------------------------------------------
 
 def test_sweep_vocabulary_has_the_two_incomplete_states():
-    expected = {"FAIL", "WARN", "PASS", "UNKNOWN", "SKIPPED", "TRUNCATED"}
+    """The sweep's own two states exist, and the three tables agree on their key set.
+
+    B-750 changed the upper half of this from a frozen literal to a derived one, and the
+    reason is that the literal is what let a real crash through. This asserted the set was
+    exactly {FAIL, WARN, PASS, UNKNOWN, SKIPPED, TRUNCATED} while
+    ``check_installed_skills`` could already return a seventh status
+    (``SKILL_ARCHIVE_PATH_TRAVERSAL``), which the sweep indexes these tables with — so
+    ``--full`` and ``--vet-all`` died with ``KeyError`` on any home holding a zip-slip
+    skill, and this test stayed green the whole time.
+
+    The intent this test was written for is kept verbatim: the sweep needs SKIPPED and
+    TRUNCATED, which vet-mcp has no concept of (its sibling
+    ``test_vet_mcp_vocabulary_was_not_widened`` guards that boundary from the other side).
+    What is dropped is the accidental promise that the set never grows. Coverage of the
+    cascade's statuses is now derived from ``_VET_MERGE_RANK`` in
+    ``tests/test_b750_sweep_renders_every_status.py``; keeping it here as a literal would
+    just reinstate the freeze one key later.
+    """
+    expected = set(_VET_MERGE_RANK) | {"SKIPPED", "TRUNCATED"}
     assert set(_SWEEP_ICON_ASCII) == expected
     assert set(_SWEEP_ICON_UNI) == expected
     assert set(_SWEEP_VERDICT) == expected
+
+    # the two states this test is named for, asserted directly rather than implied
+    assert {"SKIPPED", "TRUNCATED"} <= set(_SWEEP_VERDICT)
     assert _SWEEP_VERDICT["SKIPPED"] == "not scanned (budget exceeded)"
 
 

@@ -419,17 +419,34 @@ _VET_VERDICT: dict[str, str] = {"FAIL": "DANGEROUS", "WARN": "SUSPICIOUS", "PASS
 _SWEEP_ICON_ASCII: dict[str, str] = {
     "FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?]",
     "SKIPPED": "[-]", "TRUNCATED": "[~]",
+    "SKILL_ARCHIVE_PATH_TRAVERSAL": "[X]",
 }
 _SWEEP_ICON_UNI: dict[str, str] = {
     "FAIL": "⛔", "WARN": "⚠️", "PASS": "✅", "UNKNOWN": "❔",
     "SKIPPED": "⏭️", "TRUNCATED": "⏳",
+    "SKILL_ARCHIVE_PATH_TRAVERSAL": "⛔",
 }
 _SWEEP_VERDICT: dict[str, str] = {
     "FAIL": "DANGEROUS", "WARN": "SUSPICIOUS",
     "PASS": "looks like no known issue", "UNKNOWN": "could not assess",
     "SKIPPED": "not scanned (budget exceeded)",
     "TRUNCATED": "partially scanned — coverage incomplete",
+    "SKILL_ARCHIVE_PATH_TRAVERSAL": "DANGEROUS (archive escapes its directory)",
 }
+
+# B-750: every status the cascade can return that carries FAIL's weight. The sweep
+# compared against the bare literal "FAIL" in eight places, so
+# `SKILL_ARCHIVE_PATH_TRAVERSAL` — which `_VET_MERGE_RANK` and `dossier._STATUS_RANK`
+# both rank equal to FAIL — matched none of them: it crashed the two renderers above and
+# was silently absent from the other six. The crash was not the worst of them. `counts()`
+# derives `safe` as `total - fails - warns - truncated`, so a confirmed zip-slip skill was
+# tallied as SAFE, and `has_fail` (which feeds `--exit-code` under `--full`) stayed False.
+# Named once here so a ninth site cannot reintroduce the literal, and pinned structurally
+# by tests/test_b750_sweep_renders_every_status.py against the rank tables themselves.
+_SWEEP_FAIL_STATUSES: frozenset = frozenset({"FAIL", "SKILL_ARCHIVE_PATH_TRAVERSAL"})
+#: FAIL-weight or WARN — the rows already excluded from "safe", which must not be demoted
+#: to TRUNCATED nor lose their partial-coverage marker.
+_SWEEP_ACTIONABLE_STATUSES: frozenset = _SWEEP_FAIL_STATUSES | {"WARN"}
 
 # The wording every producer of an incomplete scan uses in its finding detail —
 # load-bearing elsewhere too (dossier.py's _danger_coverage_gap matches the same
@@ -585,7 +602,7 @@ class SkillSweep:
         reddening a CI gate that would otherwise be green. The honest signal for
         "we did not look at everything" is the section, not the exit code.
         """
-        return any(status == "FAIL" for _name, status, _ev in self.rows)
+        return any(status in _SWEEP_FAIL_STATUSES for _name, status, _ev in self.rows)
 
     @property
     def complete(self) -> bool:
@@ -599,7 +616,7 @@ class SkillSweep:
         Golden Rule #4 forbids."""
         scanned = [r for r in self.rows if r[1] != "SKIPPED"]
         truncated_n = sum(1 for _n, s, _e in scanned if s == "TRUNCATED")
-        fails = sum(1 for _n, s, _e in scanned if s == "FAIL")
+        fails = sum(1 for _n, s, _e in scanned if s in _SWEEP_FAIL_STATUSES)
         warns = sum(1 for _n, s, _e in scanned if s == "WARN")
         total = len(scanned)
         return {
@@ -856,7 +873,7 @@ def sweep_installed_skills(
             results.append((skill_name, "UNKNOWN", 0))
             continue
 
-        if f.status == "FAIL":
+        if f.status in _SWEEP_FAIL_STATUSES:
             worst = "FAIL"
         elif f.status == "WARN" and worst != "FAIL":
             worst = "WARN"
@@ -895,7 +912,7 @@ def sweep_installed_skills(
                 "incomplete; not counted as safe)"
             )
             truncated = True
-            if row_status not in ("FAIL", "WARN"):
+            if row_status not in _SWEEP_ACTIONABLE_STATUSES:
                 row_status = "TRUNCATED"
         if narrate:
             _emit("\n".join(lines))
@@ -945,7 +962,7 @@ def _sweep_summary_lines(sweep: SkillSweep, ascii_only: bool = False) -> list[st
     partial_marker = "[~ partial: coverage incomplete]" if ascii_only else "⏳ partial: coverage incomplete"
     for name, status, ev_count in results:
         marker = ""
-        if status in ("FAIL", "WARN"):
+        if status in _SWEEP_ACTIONABLE_STATUSES:
             f = findings_by_name.get(name)
             if f is not None and _vet_coverage_incomplete(f):
                 marker = f"  {partial_marker}"
@@ -1002,7 +1019,7 @@ def _sweep_quiet_line(sweep: SkillSweep) -> str:
     if c["skipped"]:
         line += f", {c['skipped']} not scanned (budget exceeded)"
     line += "."
-    dangerous = [n for n, s, _e in sweep.rows if s == "FAIL"]
+    dangerous = [n for n, s, _e in sweep.rows if s in _SWEEP_FAIL_STATUSES]
     if dangerous:
         named = ", ".join(dangerous[:3])
         if len(dangerous) > 3:
