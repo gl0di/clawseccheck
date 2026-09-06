@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <sub>Verified against <b>OpenClaw 2026.9.1</b> on <b>Linux</b> · also reads the pre-2026.8.1 config shapes · Python 3.9+ · <a href="#-compatibility">details</a></sub>
+  <sub>Verified against <b>OpenClaw 2026.9.2</b> on <b>Linux</b> · also reads the pre-2026.8.1 config shapes · Python 3.9+ · <a href="#-compatibility">details</a></sub>
 </p>
 
 ---
@@ -426,7 +426,7 @@ not the same claim as "we ran it".
 
 | | |
 |---|---|
-| **Verified against a running install** | **OpenClaw 2026.9.1.** The schema snapshots this repo ships — `tests/dist_verified_paths.txt`, `tests/state_schema_snapshot.sql`, `tests/dist_citation_baseline.txt` — are generated from an installed 2026.9.1 and each carries that version in its header. The state-schema snapshot's stamp is enforced: on a machine with OpenClaw installed, the suite re-derives the schema and fails if the stamp does not match the running build. |
+| **Verified against a running install** | **OpenClaw 2026.9.2.** The schema snapshots this repo ships — `tests/dist_verified_paths.txt`, `tests/state_schema_snapshot.sql`, `tests/vendor_state_tables.txt` — are generated from an installed 2026.9.2 and each carries that version in its header. The state-schema snapshot's stamp is enforced: on a machine with OpenClaw installed, the suite re-derives the schema and fails if the stamp does not match the running build. `tests/dist_citation_baseline.txt` is deliberately NOT in that set and still stamps 2026.9.1: it is a frozen ledger of pre-existing citation debt, re-recorded as a separate deliberate act rather than on every upgrade, so a lagging stamp there is its design and not drift. |
 | **Read by the code, each measured against a running install while it was written** | **2026.7.1-2, 2026.8.1, 2026.8.2** — the three builds that moved settings the audit reads. Every moved key is read in *both* spellings: the agent roster as `agents.list` *and* `agents.entries`, the gateway command lists under their old and new parents, and the three settings 2026.8.1 moved out of `openclaw.json` into OpenClaw's machine-owned store. An older or not-yet-migrated config is read, not silently skipped. |
 | **On anything else** | The audit still runs. This is deliberately *not* a claim of a contiguous supported range: the builds between the measured points (2026.7.2 – 2026.8.0) were never run against, so the tool treats a config it cannot date as undated — it names **both** key spellings in its fix advice rather than guessing which one your build accepts, and a key whose home this build does not have is reported as retired or `UNKNOWN`, never resolved to nothing and given a verdict anyway. |
 
