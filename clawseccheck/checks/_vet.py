@@ -5015,6 +5015,57 @@ def check_installed_skills(ctx: Context) -> Finding:
             "skill_limit_hits",
         )
 
+    # Path traversal check.
+    #
+    # B-746: this arm sits HERE — below the crit/high FAILs and the coverage UNKNOWNs,
+    # above every WARN — because it emits SKILL_ARCHIVE_PATH_TRAVERSAL, which the two rank
+    # tables that decide a VERDICT — `_VET_MERGE_RANK` here and `dossier._STATUS_RANK` —
+    # both put at 3, the same as FAIL.
+    #
+    # There is a THIRD table and it disagrees: `report._VET_STATUS_RANK` ranks this status
+    # 1 (UNKNOWN-level), and `scoring.compute` correspondingly leaves it out of the scored
+    # set. An earlier draft of this comment said "both rank tables", which was wrong by
+    # omission — found by B-746's own C-135 pass. The move is still right, because the two
+    # tables it turns on are the ones that pick the winner and the dossier verdict; the
+    # third governs rendering and scoring, was measured not to move the score on any of
+    # the four trav/warn combinations, and is a pre-existing inconsistency filed on its
+    # own rather than quietly resolved here. Do not cite "the rank tables agree" without
+    # naming which.
+    #
+    # It used to be
+    # arm 22 of 25, below nineteen rank-<=2 arms, so cascade POSITION overrode the tree's
+    # own severity ranking and any earlier WARN hid a confirmed zip-slip.
+    #
+    # Measured before the move, two homes differing by one ordinary-looking file:
+    #     SKILL.md + bundle.zip(../../../tmp/escape.txt)
+    #       -> DO-NOT-INSTALL, Danger FAIL, the traversal named
+    #     the same + cache.py: open("/tmp/demo_cache.txt", "w")
+    #       -> CAUTION, Danger WARN "insecure temp-file handling", and the word
+    #          "traversal" absent from the whole report
+    # One line of caching code demoted a zip-slip. Same defect B-201 fixed one layer up at
+    # the vet merge and B-160 fixed in the dossier rank table; it survived in the cascade
+    # those two layers merge from.
+    #
+    # NOT promoted above the coverage arms, deliberately: `parse_error_paths` /
+    # `skill_limit_hits` / the unreadable-file branch answer "the scan could not see
+    # everything", and they carry `engine_degraded`, which caps the audit score. Measured
+    # on a home holding BOTH an unreadable file and a traversal archive: the coverage arm
+    # wins and the finding keeps engine_degraded=True. Promoting a rank-3 arm above them
+    # would trade a capped, honest UNKNOWN for a confident FAIL that hides the gap — a
+    # worse trade than the one being fixed here.
+    _path_traversal = getattr(ctx, "path_traversal_violations", None) or []
+    _signal_buckets["path_traversal"] = _path_traversal
+    if _path_traversal:
+        return _b13_verdict(
+            HIGH,
+            "SKILL_ARCHIVE_PATH_TRAVERSAL",
+            "Archive path traversal detected: " + "; ".join(_path_traversal[:6]),
+            "Ensure archives inside skills do not attempt path traversal.",
+            None,
+            _signal_buckets,
+            "path_traversal",
+        )
+
     # F-097: install-doc curl|bash / remote-fetch — capability, not malice. WARN, not FAIL.
     # Ranked below crit/high FAIL and the parse/truncation UNKNOWNs above (so a real danger
     # or an incomplete scan still wins), among the WARN buckets.
@@ -5348,20 +5399,6 @@ def check_installed_skills(ctx: Context) -> Finding:
             warns_local_exfil,
             _signal_buckets,
             "warns_local_exfil",
-        )
-
-    # Path traversal check
-    _path_traversal = getattr(ctx, "path_traversal_violations", None) or []
-    _signal_buckets["path_traversal"] = _path_traversal
-    if _path_traversal:
-        return _b13_verdict(
-            HIGH,
-            "SKILL_ARCHIVE_PATH_TRAVERSAL",
-            "Archive path traversal detected: " + "; ".join(_path_traversal[:6]),
-            "Ensure archives inside skills do not attempt path traversal.",
-            None,
-            _signal_buckets,
-            "path_traversal",
         )
 
     # Mismatch/polyglot/binary warnings
