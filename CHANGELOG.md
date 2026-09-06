@@ -65,6 +65,17 @@ result was not a crash — it was a clean verdict over ground the tool no longer
 
 ### Security
 
+- **A confirmed zip-slip is no longer read as clean, anywhere.** One installed skill shipping
+  an archive that escapes its own directory used to score **96/A**: the status the check emits
+  carries FAIL's weight, but ~30 sites across eight modules compared against the bare literal
+  `"FAIL"`, so it matched none of them and every one failed toward "fine". On such a home the
+  score is now **79/C**, the CRITICAL exfiltration chain fires, and SARIF, the PDF, the text
+  report and the next-actions list all name the escaping member. Previously the skills block
+  printed `1 installed — 1 issue(s)` and then `1 clean` on consecutive lines, `--vet-all` and
+  `--full` crashed with an internal error before printing anything at all, and the
+  next-actions guide advised on a hardcoded temp-file path while saying nothing about the
+  escape beside it. The vocabulary is now one shared set, and a guard drives every consumer
+  with it, so a status added to the check later cannot silently fall through again.
 - **Never a clean verdict over ground that was not read.** Six separate fixes, one bug.
 - **`--vet-skill <folder>/SKILL.md` no longer recommends installing a bundle it declined to
   read.** Pointing at a manifest scans the folder around it — unless that folder also holds
