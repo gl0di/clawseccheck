@@ -439,3 +439,66 @@ def test_bad_fixture_nested_open_still_counts_the_untrusted_input_leg():
     f = check_trifecta(ctx)
     assert "untrusted input" in (f.evidence or [])
     assert "channel 'matrix' allows untrusted senders" in f.detail
+
+
+# ------------------------------------------------- B-720: the flat googlechat corpus pair
+# B-720 re-pointed both fixtures above from googlechat to matrix, because they encoded
+# `dm.policy` on a channel whose `GoogleChatDmSchema` is `.strict()` with only `enabled` —
+# a config OpenClaw itself rejects. That was the right move and it left a hole: after it,
+# `grep -rl googlechat fixtures/` returned ZERO across the whole corpus. googlechat's
+# coverage was not "never added", it was REMOVED, so the channel whose classification this
+# task actually corrected became invisible to every corpus-wide sweep (the finding
+# fingerprint manifest, the fleet FP gate). These two fixtures restore it in the FLAT form
+# the vendor really enforces.
+#
+# `allowFrom: ["*"]` in the bad fixture is load-bearing, not decoration. The vendor's own
+# validator (bundled-channel-config-schema.js, googlechat's `superRefine`) reads verbatim:
+#
+#     requireOpenAllowFrom({ policy: value.dmPolicy, allowFrom: value.allowFrom, ctx,
+#       message: 'channels.googlechat.dmPolicy="open" requires
+#                 channels.googlechat.allowFrom to include "*"' })
+#
+# and its shared predicate is `policy === "open" && !allow.includes("*")` ->
+# "open_requires_wildcard" (`evaluateDmPolicyAllowFromDependency`, zod-schema.core-*.js).
+# So an open googlechat DM policy is INSEPARABLE from a wildcard allowlist in OpenClaw:
+# there is no way to write "open to a named few", and a fixture omitting the wildcard would
+# repeat exactly the not-loadable-config defect B-720 was filed about.
+#
+# HONEST LIMIT, recorded rather than papered over: that refinement could not be EXECUTED
+# against this dist. `channels.*` is passthrough in the core `OpenClawSchema` — proven with
+# a bogus-key control, `{channels: {googlechat: {zzzBogus123: true}}}` and even a wholly
+# invented channel both parse ACCEPTED, while a bogus TOP-LEVEL key is rejected — and the
+# per-channel schemas load through a plugin facade that raises MissingPublicSurfaceError
+# outside the runtime (no `config-api.js` ships in the dist at all). The claim above rests
+# on the vendor's source read directly, which is why it quotes it verbatim instead of
+# citing a parse result. Do not "verify" these fixtures by parsing them against the core
+# schema and reading ACCEPTED as confirmation: it accepts anything under `channels`.
+
+
+def test_clean_fixture_googlechat_flat_closed_is_not_counted_as_untrusted_input():
+    """fixtures/clean_b720_googlechat_flat_dm_closed — googlechat closed via the FLAT
+    `dmPolicy: "disabled"`, the form the vendor enforces. The ingress leg must not be
+    counted, and the channel must not read as having set no policy."""
+    ctx = collect(home=str(FIXTURES / "clean_b720_googlechat_flat_dm_closed"))
+    assert ctx.config, "collect() did not read the shipped fixture config"
+    assert _declared_dm_policy("googlechat", ctx.config["channels"]["googlechat"]) == "disabled"
+    assert _untrusted_input_channels(ctx.config) == []
+    assert _resolved_default_input_channels(ctx.config) == []
+    f = check_trifecta(ctx)
+    assert "Resolved default" not in f.detail
+    assert "set no dmPolicy" not in f.detail
+
+
+def test_bad_fixture_googlechat_flat_open_still_counts_the_untrusted_input_leg():
+    """fixtures/bad_b720_googlechat_flat_dm_open — the paired OPEN direction, so a flat-open
+    googlechat is corpus-visible too. Reading the flat key correctly must not cost the
+    trifecta its ingress leg: this is the pairing that would catch a future edit which
+    "fixes" the classifier by making it read nothing at all, which is the state B-720 found
+    (`_declared_dm_policy` returned None for every googlechat channel however it was set)."""
+    ctx = collect(home=str(FIXTURES / "bad_b720_googlechat_flat_dm_open"))
+    assert ctx.config, "collect() did not read the shipped fixture config"
+    assert _declared_dm_policy("googlechat", ctx.config["channels"]["googlechat"]) == "open"
+    assert _untrusted_input_channels(ctx.config) == ["googlechat"]
+    f = check_trifecta(ctx)
+    assert "untrusted input" in (f.evidence or [])
+    assert "channel 'googlechat' allows untrusted senders" in f.detail
