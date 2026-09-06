@@ -213,8 +213,20 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~6,628 lines — the python/shell/js parser families; its own split is "
-                   "deferred to a later cycle (I-022 secondary target).",
+    "skillast.py": "~7,267 lines — the python/shell/js parser families; its own split is "
+                   "deferred to a later cycle (I-022 secondary target). Restated "
+                   "2026-09-06 (B-752), and the guard's own instruction is to reconsider "
+                   "the split rather than bump the number, so here is where the growth "
+                   "actually came from, measured: the last ten commits touching this file "
+                   "added ~1,230 lines, of which ~1,225 landed in the PYTHON taint / "
+                   "decode / exec-sink layer and 5 in the js bucket. The shell family does "
+                   "not appear in that window at all. The three parser families are not "
+                   "growing together — one of them is the file, and the other two are "
+                   "along for the ride. That is a seam the original deferral could not "
+                   "see, and it is cheap to state: python-taint out, shell/js parsers "
+                   "left behind. Recorded because the previous restate (B-727, 5,662 -> "
+                   "6,172) logged the drift without logging its source, and a debt record "
+                   "that cannot say which half is growing cannot argue for where to cut.",
     "report.py": "~5,641 lines — the output renderers; grew further with F-131's "
                  "Inventory-by-subject block (its own additive presentation layer, not "
                  "branching check logic), then with the B-617 inert-disclosure channel "
