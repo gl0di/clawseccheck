@@ -220,6 +220,26 @@ result was not a crash — it was a clean verdict over ground the tool no longer
   closed by their own layers: a status-keyed table that painted a confirmed escape the grey
   this palette reserves for "could not assess", and the raw status reaching text a person
   reads.
+- **The published check catalogue no longer prints Python source where advice belongs.** Each
+  check's Why and Fix text is generated from the expression in its source, and anything that
+  was not a plain string fell back to unparsing the code — so the shipped catalogue carried
+  `str(len(fired))`, two `'; '.join(...)` calls and two more inside f-string placeholders, in
+  exactly the two sections a reader consults for what to do. This is the second instance of the
+  class, and the first one is why: it had been patched by special-casing the single callee that
+  caused it, so a different call sailed through. The rule changed instead — an expression
+  containing a call now renders as an ellipsis, while a bare name is deliberately kept, because
+  in the schematic chain lines a name is what tells a reader which position it fills. A guard
+  renders the whole catalogue and rejects any user-facing line that reads like source, with
+  controls in both directions: the three lines that really shipped must be convicted, and
+  ordinary advice must not.
+- **An archive member named like a Windows drive is still refused, and the finding now says why
+  that cannot be softened.** A member such as `D:data.tar` at archive root is convicted, which
+  can catch a plausible ordinary filename. A narrowing was written for it and withdrawn on
+  measurement: a drive-relative name escapes whenever its drive differs from the extraction
+  root's, and the root's drive is not knowable from the member name — so the change would have
+  traded a plausible false positive for a proven false negative on `D:evil`. The limit is
+  disclosed in the advice rather than left for the reader to discover, and the two extractor
+  behaviours that cut against each other are recorded beside the check.
 
 ### Fixed
 
