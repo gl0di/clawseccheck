@@ -15,6 +15,7 @@ from .. import mcpsurface as _mcpsurface
 from .. import trajectory as _trajectory
 from ..catalog import (
     FAIL_WEIGHT_STATUSES,
+    display_status,
     CRITICAL,
     FAIL,
     HIGH,
@@ -894,7 +895,12 @@ def vet_plugin(
                   if f.status in FAIL_WEIGHT_STATUSES or f.status in (WARN, UNKNOWN)]
     evidence = (
         warns + js_signals + py_signals
-        + [f"{f.status}: {f.detail}" for f in actionable] + notes
+        # B-755: this wrote the RAW status into evidence a person reads, so a confirmed
+        # archive escape appeared as "SKILL_ARCHIVE_PATH_TRAVERSAL: ..." beside siblings
+        # labelled "FAIL". It is also the live case for the oracle's one known
+        # unsoundness — a status folded AFTER a length-sensitive step cannot be folded
+        # back — so folding it at the source removes both problems at once.
+        + [f"{display_status(f.status)}: {f.detail}" for f in actionable] + notes
     )
 
     if status == FAIL:

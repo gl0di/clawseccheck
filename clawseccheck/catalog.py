@@ -33,6 +33,35 @@ FAIL_WEIGHT_STATUSES: frozenset = frozenset({"FAIL", "SKILL_ARCHIVE_PATH_TRAVERS
 #: repeated literal after the one above, and it fails the same way.
 ACTIONABLE_STATUSES: frozenset = FAIL_WEIGHT_STATUSES | {"WARN"}
 
+
+def display_status(status: str) -> str:
+    """The status as a HUMAN should see it: every FAIL-weight status reads ``FAIL``.
+
+    B-755. Presentation is the one place the raw enum must not survive. A status table keyed on
+    the literal silently falls through to its default — which for the inventory swatch was the
+    grey reserved for "not assessed" — and an f-string interpolating the status prints the enum
+    itself. Neither is a wrong verdict; both tell the reader the wrong thing.
+
+    It lives in ``catalog`` rather than in ``report`` because the check layer needs it too:
+    ``checks/_mcp.py`` writes a status into evidence text a person reads, and ``checks/`` may
+    not import ``report``.
+    """
+    return "FAIL" if status in FAIL_WEIGHT_STATUSES else status
+
+
+def fail_weight_rows(value):
+    """Every FAIL-weight status mapped to ``value`` — for a status-keyed table.
+
+    B-755. A table that spells ``"FAIL"`` as a key and stops there hands the FAIL-weight
+    statuses to its own default, which in every case measured was the value meaning "nothing
+    to see here" — the grey reserved for "could not assess", or no entry at all. Spelling the
+    extra keys by hand fixes today and rots tomorrow: the next status added to the cascade
+    needs an edit in every table. Splat this instead::
+
+        _VERDICT = {**fail_weight_rows("DANGEROUS"), WARN: "SUSPICIOUS", ...}
+    """
+    return {status: value for status in FAIL_WEIGHT_STATUSES}
+
 CRITICAL = "CRITICAL"
 HIGH = "HIGH"
 MEDIUM = "MEDIUM"

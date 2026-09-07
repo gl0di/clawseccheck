@@ -42,7 +42,6 @@ import zlib
 from .brand import BRAND_RED, GRADE_HEX, SEVERITY, WORDMARK, grade_hex
 from .catalog import (
     CRITICAL,
-    FAIL,
     FAIL_WEIGHT_STATUSES,
     HIGH,
     LOW,
@@ -59,6 +58,7 @@ from .report import (
     _plugins_inventory_lines, _risk_chain_lines, _sanitize, _second_opinion_item_lines,
     _second_opinion_lines,
     _SEV_ORDER, _UNGRADED_CAP_TAIL, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
+    display_status,
     issue_population_line,
     _worth_a_glance_lines, build_inventory,
 )
@@ -447,7 +447,10 @@ def _draw_subject_summary(flow: "_PageFlow", rows) -> None:
         y = flow.y
         flow.rect(_MARGIN, y - 10.0, 7.0, 7.0, _STATUS_HEX.get(status, "#9f9f9f"))
         flow.text_abs(_MARGIN + 13.0, y - 9.0, label, 10)
-        right = f"{count}    {status}"
+        # B-755: the swatch colour comes from a table built over FAIL_WEIGHT_STATUSES and
+        # was already right; the WORD beside it was the raw field, so the document read
+        # "2 issue(s)    SKILL_ARCHIVE_PATH_TRAVERSAL" to a human.
+        right = f"{count}    {display_status(status)}"
         flow.text_abs(_PAGE_W - _MARGIN - _text_width(right, 9), y - 9.0, right,
                       9, rgb=(0.42, 0.42, 0.42))
         flow.y = y - 16.0
@@ -555,7 +558,10 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     issues = [f for f in findings
               if (f.status in FAIL_WEIGHT_STATUSES or f.status == WARN)
               and not getattr(f, "suppressed", False)]
-    issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
+    # B-755: a FAIL-weight status that is not the literal sorted BELOW every real FAIL of
+    # the same severity, which pushed a confirmed escape off the end of the document.
+    issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9),
+                               f.status not in FAIL_WEIGHT_STATUSES))
 
     # Lazy import: __version__ is assigned in __init__.py AFTER `from .pdf import
     # render_pdf` runs, so a module-level import here would be a circular-import

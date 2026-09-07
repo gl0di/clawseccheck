@@ -23,6 +23,8 @@ from . import brand
 from .catalog import (
     ACTIONABLE_STATUSES,
     FAIL_WEIGHT_STATUSES,
+    display_status,
+    fail_weight_rows,
     BY_ID,
     SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER,
     ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, WEIGHT, Finding, ast_for, owasp_for,
@@ -257,7 +259,7 @@ def self_excluded_line(names) -> str:
 def surfaced_despite_suppression(f: Finding) -> bool:
     """True when a suppressed finding must still be surfaced (score-capping or sensitive)."""
     return bool(getattr(f, "suppressed", False)) and (
-        (f.status == FAIL and f.severity in (CRITICAL, HIGH))
+        (f.status in FAIL_WEIGHT_STATUSES and f.severity in (CRITICAL, HIGH))
         or f.id in SENSITIVE_SUPPRESSED_IDS
     )
 
@@ -276,7 +278,7 @@ def finding_counts_by_severity(findings: list[Finding]) -> dict[str, int]:
     """Counts of unsuppressed FAIL findings by severity (critical/high/medium/low)."""
     counts = {CRITICAL.lower(): 0, HIGH.lower(): 0, MEDIUM.lower(): 0, LOW.lower(): 0}
     for f in findings:
-        if f.status != FAIL:
+        if f.status not in FAIL_WEIGHT_STATUSES:
             continue
         if getattr(f, "suppressed", False) and not surfaced_despite_suppression(f):
             continue
@@ -547,6 +549,10 @@ _SEV_ORDER = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3}
 # was a confirmed zip-slip returned "PASS" (measured). Same table is the sort key at
 # :3237/:3435/:3666/:3787/:4816, where a missing key scored 9 and sorted it under PASS.
 _STATUS_ORDER = {FAIL: 0, "SKILL_ARCHIVE_PATH_TRAVERSAL": 0, WARN: 1, UNKNOWN: 2, PASS: 3}
+#: B-755: 'flagged, or never assessed' — the population an inventory row calls out. Built
+#: from the shared set so a new FAIL-weight status joins it without an edit here.
+_FLAGGED_OR_UNSEEN = ACTIONABLE_STATUSES | {UNKNOWN}
+
 _ICON = {FAIL: "⛔", WARN: "⚠️", PASS: "✅", UNKNOWN: "❔", "SKILL_ARCHIVE_PATH_TRAVERSAL": "⛔"}
 _ICON_ASCII = {FAIL: "[X]", WARN: "[!]", PASS: "[OK]", UNKNOWN: "[?]", "SKILL_ARCHIVE_PATH_TRAVERSAL": "[X]"}
 
@@ -588,9 +594,11 @@ def _sev_token(severity: str, *, ascii_only: bool = False, color: bool = False) 
 # (brand.GRADE_ANSI vs. brand.GRADE_HEX) makes that class of bug structurally
 # impossible instead of relying on file-order discipline.
 # Status → colour for finding icons / coverage states.
+#: B-755: the FAIL-weight entry was present and GREY — the colour this table reserves for
+#: "could not be assessed". Present-but-wrong is the failure mode a presence check cannot
+#: see, so the FAIL-weight rows are now DERIVED from the shared set rather than typed.
 _STATUS_COLOR = {
-    FAIL: "red", WARN: "yellow", PASS: "green", UNKNOWN: "grey",
-    "SKILL_ARCHIVE_PATH_TRAVERSAL": "grey",
+    **fail_weight_rows("red"), WARN: "yellow", PASS: "green", UNKNOWN: "grey",
 }
 
 # ── Assurance honesty (R11) ───────────────────────────────────────────────────
@@ -640,7 +648,7 @@ def _urgent_headline(findings: list[Finding]) -> str:
         return (_SEV_ORDER.get(f.severity, 9), f.id)
 
     live = [f for f in findings if not getattr(f, "suppressed", False)]
-    candidates = [f for f in live if f.status == FAIL]
+    candidates = [f for f in live if f.status in FAIL_WEIGHT_STATUSES]
     if candidates:
         top = sorted(candidates, key=_rank)[0]
         return f"Most urgent: {top.severity} — {_sanitize(top.title)}  [{top.id}]"
@@ -1295,7 +1303,7 @@ def issue_population_line(issues: list[Finding]) -> str:
     prove it, and if it is real it is the worst kind". The fix is to state the
     population, never to narrow it.
     """
-    n_fail = sum(1 for f in issues if f.status == FAIL)
+    n_fail = sum(1 for f in issues if f.status in FAIL_WEIGHT_STATUSES)
     n_warn = sum(1 for f in issues if f.status == WARN)
     if not (n_fail or n_warn):
         return ""
@@ -1904,7 +1912,7 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     sk_subject = inv.get("skills_subject") or {}
     sk_subject_text = _subject_count_text(len(sk_subject.get("findings") or []),
                                           int(sk_subject.get("unassessed") or 0))
-    sk_flagged = [s for s in skills if s.get("status") in (FAIL, WARN, UNKNOWN)]
+    sk_flagged = [s for s in skills if s.get("status") in _FLAGGED_OR_UNSEEN]
     sk_status = _worst_of_statuses(
         [s.get("status") for s in sk_flagged] + [sk_subject.get("status", PASS)])
     # B-594: the roster's population is described by `_skills_roster_text`, never spelled
@@ -2035,7 +2043,7 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
                     ascii_only: bool = False, color: bool = False,
                     compact: bool = False, why_drop_severities: frozenset = frozenset()):
     conf = getattr(f, "confidence", "HIGH")
-    tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in (FAIL, WARN) else ""
+    tag = f"  (confidence: {conf.lower()})" if conf != "HIGH" and f.status in ACTIONABLE_STATUSES else ""
     pc = getattr(f, "pass_confidence", None)
     pass_tag = f"  ({pc.replace('_', ' ')})" if f.status == PASS and pc else ""
     # Issue lines lead with the severity dot (B-077 / Component-2 mock); PASS/UNKNOWN
@@ -2060,7 +2068,7 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
     # survive only when they ADD something the why line doesn't literally contain.
     # B-381: --compact drops evidence bullets entirely -- the same "headline only"
     # trim already applied to Plugins/MCP/RISK-chain detail under --compact.
-    if f.evidence and f.status in (FAIL, WARN) and not compact:
+    if f.evidence and f.status in ACTIONABLE_STATUSES and not compact:
         # Evidence is emitted verbatim (already bidi-stripped by _sanitize). B-629: the
         # cap is announced now — this site used to end the list silently, so a finding
         # with 40 entries could render three bullets and look complete.
@@ -2070,7 +2078,7 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
             )
         )
     # Blast-radius summary: only emitted when the caller supplies cfg (verbose mode).
-    if f.status == FAIL and cfg is not None:
+    if f.status in FAIL_WEIGHT_STATUSES and cfg is not None:
         br = compute_blast_radius(cfg, f.id)
         lines.append(
             f"  blast: channels={br['open_channels']} "
@@ -2431,7 +2439,7 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
 
     def _bucket(subject: str) -> dict:
         members = by_subject.get(subject, [])
-        issues = [f for f in members if f.status in (FAIL, WARN)]
+        issues = [f for f in members if f.status in ACTIONABLE_STATUSES]
         # B-472: `unassessed` is carried separately from `status` because neither of the
         # two existing fields can answer "was this subject actually looked at". `status`
         # rolls UNKNOWN up over PASS, so it cannot tell one unreachable check among ten
@@ -2750,8 +2758,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
     _blast_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if (verbose and ctx is not None) else None
     suppressed_count = sum(1 for f in findings if getattr(f, "suppressed", False))
     issues = [f for f in findings
-              if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
-    issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
+              if f.status in ACTIONABLE_STATUSES and not getattr(f, "suppressed", False)]
+    issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status not in FAIL_WEIGHT_STATUSES))
     # Assurance honesty (R11): single source-of-truth coverage tally, computed once and
     # reused by both the C-166 low-coverage line (below) and the C-165 staleness nudge
     # (advisory band, further down) — never a second independent tally.
@@ -3196,7 +3204,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # reads as "half-broken". State the non-standard detection explicitly and explain
     # the UNKNOWNs instead of letting them look like failures.
     if not openclaw_detected:
-        n_unknown = sum(1 for f in findings if f.status in (UNKNOWN, "SKILL_ARCHIVE_PATH_TRAVERSAL"))
+        # B-755: this counted a CONFIRMED archive escape as "not determined". The status was
+        # added here deliberately and put on the wrong side of the only distinction that
+        # matters — a conviction is the opposite of an undetermined check.
+        n_unknown = sum(1 for f in findings if f.status == UNKNOWN)
         warn_icon = "[!]" if ascii_only else "⚠️"
         lines.append("")
         lines.append(
@@ -3262,7 +3273,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
             members.sort(key=lambda f: (_STATUS_ORDER.get(f.status, 9), _SEV_ORDER.get(f.severity, 9)))
             label = SUBJECT_LABEL.get(subj_key, "Other")
             label_disp = paint(label, "bold", enabled=True) if color else label
-            n_bad = sum(1 for f in members if f.status in (FAIL, WARN))
+            n_bad = sum(1 for f in members if f.status in ACTIONABLE_STATUSES)
             # B-472: this header used a bare `else "clear"` and so contradicted the
             # "N not assessed (config can't tell)" line this same block prints a few lines
             # below, for the same members. Same rule as the inventory block above.
@@ -3281,7 +3292,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
             n_unknown = 0
             n_na = 0
             for f in members:
-                if f.status in (FAIL, WARN):
+                if f.status in ACTIONABLE_STATUSES:
                     _render_finding(lines, f, cfg=_blast_cfg,
                                     ascii_only=ascii_only, color=color)
                 elif f.status == PASS:
@@ -3446,7 +3457,7 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
     findings = deduplicate_findings(findings)
     qualifying = [
         f for f in findings
-        if f.status in (FAIL, WARN)
+        if f.status in ACTIONABLE_STATUSES
         and not getattr(f, "suppressed", False)
         and getattr(f, "confidence", "HIGH") not in (MEDIUM, ATTESTED)
     ]
@@ -3514,7 +3525,7 @@ def _plugins_inventory_lines(sweep, *, ascii_only: bool = False, compact: bool =
         return []
     icon = _ICON_ASCII if ascii_only else _ICON
     by_name = dict(sweep.findings)
-    fail_warn = [(name, status) for name, status, _ev in sweep.rows if status in (FAIL, WARN)]
+    fail_warn = [(name, status) for name, status, _ev in sweep.rows if status in ACTIONABLE_STATUSES]
     not_scanned = [name for name, status, _ev in sweep.rows if status in ("TRUNCATED", "SKIPPED")]
     clean = [name for name, status, _ev in sweep.rows if status == PASS]
     flagged_n = len(fail_warn) + len(not_scanned)
@@ -3649,7 +3660,7 @@ def _glance_qualifying_findings(findings: list[Finding]) -> list[Finding]:
     that could drift apart on the confidence/suppressed rule."""
     return [
         f for f in findings
-        if f.status in (FAIL, WARN)
+        if f.status in ACTIONABLE_STATUSES
         and not getattr(f, "suppressed", False)
         and getattr(f, "confidence", "HIGH") in (MEDIUM, ATTESTED)
     ]
@@ -3805,7 +3816,7 @@ def _card_top_urgent_lines(findings, *, limit: int = _CARD_TOP_URGENT,
     5 of 26 findings would read as a complete list)."""
     qualifying = [
         f for f in findings
-        if f.status in (FAIL, WARN)
+        if f.status in ACTIONABLE_STATUSES
         and not getattr(f, "suppressed", False)
         and getattr(f, "confidence", "HIGH") not in (MEDIUM, ATTESTED)
     ]
@@ -3949,7 +3960,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     findings = deduplicate_findings(findings)
     n_issues = sum(
         1 for f in findings
-        if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)
+        if f.status in ACTIONABLE_STATUSES and not getattr(f, "suppressed", False)
     )
     # Both separators used to be different characters (an em-dash for the "Audit —
     # Grade"/"— Findings —" spots, a middle-dot for the "Grade F · 49/100" spot) — a
@@ -4843,7 +4854,7 @@ def _advise_reasons(profile, limit: int = 5) -> "tuple[list[str], int]":
     a disagreement: it answers "what is most urgent", where severity legitimately leads.
     Two questions, two keys.)
     """
-    qualifying = [f for f in profile.findings if f.status in (FAIL, WARN)]
+    qualifying = [f for f in profile.findings if f.status in ACTIONABLE_STATUSES]
     restated = _restatements_of_other_findings(qualifying)
     worst_first = sorted(
         (f for f in qualifying if id(f) not in restated),
@@ -4853,7 +4864,10 @@ def _advise_reasons(profile, limit: int = 5) -> "tuple[list[str], int]":
             f.id,
         ),
     )
-    shown = [f"{f.id} ({f.status}): {_sanitize(f.detail)}" for f in worst_first[:limit]]
+    # B-755: `display_status` rather than the raw field — every other surface labels this
+    # finding FAIL, and the enum tells the reader nothing the detail beside it does not.
+    shown = [f"{f.id} ({display_status(f.status)}): {_sanitize(f.detail)}"
+             for f in worst_first[:limit]]
     return shown, max(0, len(worst_first) - len(shown))
 
 
@@ -5328,7 +5342,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
 
     def _finding_dict_json(f: Finding) -> dict:
         d = _finding_to_dict(f)
-        if f.status == FAIL and _json_cfg is not None:
+        if f.status in FAIL_WEIGHT_STATUSES and _json_cfg is not None:
             d["blast_radius"] = compute_blast_radius(_json_cfg, f.id)
         return d
 
@@ -5508,8 +5522,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     All finding text is HTML-escaped.
     """
     issues = [f for f in findings
-              if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
-    issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
+              if f.status in ACTIONABLE_STATUSES and not getattr(f, "suppressed", False)]
+    issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status not in FAIL_WEIGHT_STATUSES))
 
     # C-423: no letter when this run carries no grade — `grade_hex("")` already falls
     # back to the same neutral grey `grade_hex` uses for any unrecognized letter.
@@ -5548,7 +5562,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     def _finding_card(f: Finding) -> str:
         sev_style = SEVERITY.get(f.severity)
         color = sev_style.hex if sev_style else "#999"
-        icon_char = "✕" if f.status == FAIL else "⚠"
+        icon_char = "✕" if f.status in FAIL_WEIGHT_STATUSES else "⚠"
         f_title = esc(_sanitize(f.title))
         detail_plain = _sanitize(f.detail) if f.detail else ""
         f_detail = esc(detail_plain)
@@ -5573,7 +5587,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             for line in _evidence_bullets(
                 f.evidence, limit=12, indent="", bullet="", already_shown=detail_plain,
             )
-        ] if (f.evidence and f.status in (FAIL, WARN)) else []
+        ] if (f.evidence and f.status in ACTIONABLE_STATUSES) else []
         ev_html = ("" if not ev_rows else
                    '<ul class="finding-evidence">'
                    + "".join(f"<li>{esc(r)}</li>" for r in ev_rows)
@@ -5584,7 +5598,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         # page to tell them apart.
         conf = getattr(f, "confidence", "HIGH")
         conf_html = (f'<span class="conf-pill">confidence: {esc(str(conf).lower())}</span>'
-                     if conf != "HIGH" and f.status in (FAIL, WARN) else "")
+                     if conf != "HIGH" and f.status in ACTIONABLE_STATUSES else "")
 
         return f'''
                 <article class="finding" style="--sev:{color};">
@@ -5645,11 +5659,16 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
     if summary_rows:
         _st_color = {FAIL: "#d9534f", WARN: "#d9a406", PASS: "#1a7f37", UNKNOWN: "#8a8f98"}
+        # B-755: both halves of this cell read the RAW status. The colour lookup missed and
+        # fell back to the grey reserved for "not assessed", and the cell itself printed the
+        # enum — so a confirmed archive escape rendered as a grey `SKILL_ARCHIVE_PATH_TRAVERSAL`
+        # in the one surface most likely to be read by someone who did not run the scan.
         _inv_rows = "".join(
             f'<tr><td class="subj-name">{esc(label)}</td>'
             f'<td class="subj-count">{esc(count_text)}</td>'
-            f'<td class="subj-status"><span class="subj-dot" style="--dot:{_st_color.get(status, "#8a8f98")};"></span>'
-            f'{esc(status)}</td></tr>'
+            f'<td class="subj-status">'
+            f'<span class="subj-dot" style="--dot:{_st_color.get(display_status(status), "#8a8f98")};"></span>'
+            f'{esc(display_status(status))}</td></tr>'
             for label, status, count_text in summary_rows)
         # B-560: the roster this table summarises has a member the content ring never
         # scanned, and HTML was the one human-facing surface that did not say so — the

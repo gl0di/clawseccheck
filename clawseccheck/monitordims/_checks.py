@@ -10,7 +10,9 @@ applying is distinguished from one that stopped being able to answer.
 """
 
 from __future__ import annotations
-from ..catalog import BY_ID, FAIL, PASS, UNKNOWN, WARN  # noqa: F401
+from ..catalog import (  # noqa: F401
+    ACTIONABLE_STATUSES, BY_ID, FAIL, FAIL_WEIGHT_STATUSES, PASS, UNKNOWN, WARN,
+)
 from ._shared import NOTE_INSPECTION_CAPPED, NOTE_UNDETERMINED  # noqa: F401
 
 
@@ -41,7 +43,12 @@ def _diff_check_transitions(
     therefore neither.
     """
     for cid, status in cc.items():
-        if status == FAIL and pc.get(cid) != FAIL:
+        # B-755: both halves compared against the bare literal, so a check that acquired a
+        # CONFIRMED archive escape between two runs announced nothing at all — the single
+        # most consequential silence in the subsystem, since --monitor is what a cron job
+        # reads. Reversed, it was also a false alarm: FAIL-weight -> FAIL would have
+        # reported a brand-new failure where the verdict had not moved.
+        if status in FAIL_WEIGHT_STATUSES and pc.get(cid) not in FAIL_WEIGHT_STATUSES:
             # B-269: a check that read UNKNOWN only because the PREVIOUS run could not
             # parse the config was not passing then — re-reading it as FAIL now is the
             # config becoming legible again, not a new failure. Writing that into the
@@ -171,7 +178,7 @@ def _diff_check_transitions(
         # benign shape: the surface it inspects is confirmed gone (the user removed their
         # MCP config), not the check losing its footing.
         elif (_reasons_known and _same_scope_flags and not (prev_blind or curr_blind)
-              and status == UNKNOWN and pc.get(cid) in (WARN, FAIL)
+              and status == UNKNOWN and pc.get(cid) in ACTIONABLE_STATUSES
               and cid not in _na_curr):
             title, was = _check_title(cid), pc[cid]
             if cid in _deg_curr:
@@ -233,7 +240,7 @@ def _diff_vanished_checks(
     """
     if _vanished and _same_scope_flags and not _ignore_moved:
         _n_crashed = sum(1 for k in cc if str(k).startswith("ERR:"))
-        _lost_verdicts = sorted(c for c in _vanished if pc.get(c) in (FAIL, WARN))
+        _lost_verdicts = sorted(c for c in _vanished if pc.get(c) in ACTIONABLE_STATUSES)
         if _n_crashed and _lost_verdicts and not (prev_blind or curr_blind):
             # ONE run-level alert, not one per id. The crash marker is `ERR:<funcname>`,
             # which cannot be mapped back to the catalog id that produced it, so claiming

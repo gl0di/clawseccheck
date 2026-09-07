@@ -30,9 +30,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 
-from .catalog import BY_ID, FAIL, PASS, UNKNOWN, WARN, ast_for
+from .catalog import (
+    BY_ID, FAIL, FAIL_WEIGHT_STATUSES, PASS, UNKNOWN, WARN, ast_for,
+)
+
 from .scoring import grade_for
 from .skillast import capability_families
+
+#: B-755: 'a definite verdict of any kind'. Derived, so a status added to the FAIL cascade
+#: counts as an assessment without an edit here.
+_ASSESSED_STATUSES = frozenset({PASS, WARN}) | FAIL_WEIGHT_STATUSES
 
 # Fifth status, local to the dossier (catalog has no "not applicable" concept).
 NA = "N/A"
@@ -635,7 +642,10 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     # for a skill/plugin — content that was read. If the artifact is missing / unreadable /
     # empty (only UNKNOWN findings, e.g. "no MCP servers"), the empty axes must read
     # UNKNOWN, never a fabricated PASS/grade.
-    assessed = any(f.status in (PASS, WARN, FAIL) for f in pool) or (
+    # B-755: a pool carrying only a FAIL-weight status that is not the literal answered
+    # "nothing was assessed", which forces every empty axis to UNKNOWN — the fabricated
+    # -PASS guard firing on a definite conviction.
+    assessed = any(f.status in _ASSESSED_STATUSES for f in pool) or (
         target_type in ("skill", "plugin") and bool(getattr(ctx, "installed_skills", None))
     )
     # B-616: relpaths this run could only decode by ASSUMING a codepage (`_decode_ladder`'s

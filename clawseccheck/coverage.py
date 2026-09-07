@@ -9,7 +9,10 @@ Entry point:  ``coverage(findings) -> dict``
 """
 from __future__ import annotations
 
-from .catalog import BY_ID, FAMILY_OF, SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER, SURFACES, Finding
+from .catalog import (
+    BY_ID, FAIL_WEIGHT_STATUSES, FAMILY_OF, SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER,
+    SURFACES, Finding,
+)
 
 # ── Derived surface / family constants ───────────────────────────────────────
 
@@ -45,7 +48,9 @@ _ROADMAP: list[str] = []
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_CHECKED_STATUSES: frozenset[str] = frozenset({"PASS", "FAIL", "WARN"})
+#: B-755: derived, not spelled — a FAIL-weight status other than the literal "FAIL" left a
+#: surface reading "partial" (never assessed) when it had in fact been assessed and convicted.
+_CHECKED_STATUSES: frozenset[str] = frozenset({"PASS", "WARN"}) | FAIL_WEIGHT_STATUSES
 
 
 def _empty_counts() -> dict[str, int]:
@@ -56,7 +61,10 @@ def _tally(findings: list[Finding]) -> dict[str, int]:
     """Count findings by status into lowercase keys."""
     counts = _empty_counts()
     for f in findings:
-        key = f.status.lower()
+        # B-755: fold every FAIL-weight status onto the 'fail' bucket. Lower-casing the raw
+        # status produced a key no bucket has, so a confirmed escape counted as nothing at
+        # all and the surface reported `fail: 0` beside its own conviction.
+        key = "fail" if f.status in FAIL_WEIGHT_STATUSES else f.status.lower()
         if key in counts:
             counts[key] += 1
     return counts

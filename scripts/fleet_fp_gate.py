@@ -74,6 +74,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from clawseccheck import __version__, audit, vet_plugin, vet_skill  # noqa: E402
+from clawseccheck.catalog import FAIL_WEIGHT_STATUSES  # noqa: E402
 from clawseccheck.collector import skill_load_roots  # noqa: E402
 from clawseccheck.safeio import secure_dir, secure_write_text  # noqa: E402
 
@@ -200,7 +201,11 @@ def discover_targets(home):
 # --------------------------------------------------------------------------- FAIL set
 
 def _is_unsuppressed_fail(f):
-    return getattr(f, "status", None) == "FAIL" and not getattr(f, "suppressed", False)
+    # B-755: the bare literal made this gate blind to every FAIL-weight status that is not
+    # spelled "FAIL" — so a confirmed archive escape appearing on the real fleet was not a
+    # new FAIL as far as the gate that blocks releases on new FAILs was concerned.
+    return (getattr(f, "status", None) in FAIL_WEIGHT_STATUSES
+            and not getattr(f, "suppressed", False))
 
 
 def fail_rows(findings, *, scope, target=""):
@@ -323,7 +328,8 @@ def build_snapshot(home=DEFAULT_HOME):
     rows = fail_rows(findings, scope="audit")
     suppressed = sum(
         1 for f in findings
-        if getattr(f, "status", None) == "FAIL" and getattr(f, "suppressed", False)
+        if getattr(f, "status", None) in FAIL_WEIGHT_STATUSES
+        and getattr(f, "suppressed", False)
     )
     degraded = list(degraded_checks(findings))
 

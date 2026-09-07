@@ -54,7 +54,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .baseline import fingerprint
-from .catalog import ATTESTED, BY_ID, FAIL, MEDIUM, UNKNOWN, WARN, Finding
+from .catalog import ACTIONABLE_STATUSES, ATTESTED, BY_ID, FAIL, MEDIUM, UNKNOWN, WARN, Finding
 from .logsafe import redact
 from .sar import _VERDICT_VALUES, build_sars
 from .skillast import analyze_env_auth_kwarg_exfil, analyze_python
@@ -641,7 +641,7 @@ def _corroboration_groups(findings) -> dict:
     """
     groups: dict[str, set] = {}
     for f in findings or []:
-        if f.status not in (WARN, FAIL):
+        if f.status not in ACTIONABLE_STATUSES:
             continue
         if getattr(f, "suppressed", False):
             continue
