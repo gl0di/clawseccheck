@@ -197,7 +197,7 @@ def test_the_helpers_live_in_one_place_only():
 
 @pytest.mark.parametrize("bind", [
     "/etc:/etc:ro",
-    "/home/glodi/.openclaw:/oc:ro",
+    "/home/user/.openclaw:/oc:ro",
     "/var/run/docker.sock:/var/run/docker.sock:ro",
     "/srv:/srv:ro,z",
 ], ids=["etc", "openclaw-home", "docker-sock", "ro-with-label"])
@@ -246,7 +246,7 @@ def test_the_defaults_branch_and_the_per_agent_branch_agree_on_a_read_only_bind(
     `~/.openclaw:...:ro` bind FAILed at `agents.defaults` and went silent per-agent. Whatever
     the rule is, the two branches have to share it — a finding that depends on which half of
     the config you wrote it in is not a finding about the setup."""
-    bind = "/home/glodi/.openclaw:/oc:ro"
+    bind = "/home/user/.openclaw:/oc:ro"
     per_agent = _b4(_agent({"docker": {"binds": [bind]}}))
     defaults = _b4({"agents": {"defaults": {"sandbox": {"docker": {"binds": [bind]}}}}})
     assert per_agent.status == defaults.status == FAIL

@@ -383,3 +383,45 @@ def test_no_internal_markers_in_shipped_files() -> None:
         "Internal-only marker(s) leaked into publicly-shipped file(s):\n"
         + "\n".join(failures)
     )
+
+
+# --- the repository publishes more than the artifact ------------------------
+
+#: Markers that are never legitimate in a test file. Deliberately a SUBSET of `_MARKERS`:
+#: the Pulse task-ID pattern is excluded because tests reference their task by design — 92
+#: files do, and the filenames themselves are built from those ids. A hostname or an
+#: operator's home directory has no such purpose, and both reach GitHub.
+_TEST_FILE_MARKERS = [
+    (name, pat) for name, pat in _MARKERS
+    if name in ("internal Pulse hostname", "absolute local dev path")
+]
+
+
+def test_tests_carry_no_operator_identity() -> None:
+    """`tests/` is published by the git remote even though it is not in the ClawHub artifact.
+
+    The gate above scans what the RELEASE contains, parsed from the publish workflow's own
+    staging list — which is right for the artifact and silent about everything else in the
+    repository. `tests/test_b673_peragent_bind_scope.py` carried
+    `"/home/glodi/.openclaw:/oc:ro"` as a sample bind, found on a pre-push sweep rather than
+    by this file, and a push would have put an operator's home directory into public git
+    history, where it cannot be taken back out.
+
+    The path was never load-bearing — it stands for "the OpenClaw home", and the check parses
+    the source path without caring whose it is.
+    """
+    offenders = []
+    here = Path(__file__).resolve()
+    for path in sorted((here.parent).rglob("*.py")):
+        if path == here:
+            continue  # this file states the patterns it forbids
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for name, pattern in _TEST_FILE_MARKERS:
+            match = pattern.search(text)
+            if match:
+                line = text[: match.start()].count("\n") + 1
+                offenders.append(f"{path.name}:{line} — {name} ({match.group(0)!r})")
+    assert not offenders, (
+        "these test files would publish internal identity to the git remote:\n  "
+        + "\n  ".join(offenders)
+    )
