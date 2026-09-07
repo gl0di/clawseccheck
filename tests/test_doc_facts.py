@@ -281,15 +281,15 @@ def test_attack_chain_count_claims_match_the_risk_engine():
     assert not wrong, "stale attack-chain count claims:\n  " + "\n  ".join(wrong)
 
 
-# Each badge states its five figures three times: as visible <text class="num"> elements,
-# and again inside aria-label and <title>. `[\d,]+` and not `\d+` -- the test-count slot is
+# Each badge states its six figures three times: as visible <text class="num"> elements,
+# and again inside aria-label and <title>. `[\d.,]+` and not `\d+` -- the test-count slot is
 # comma-grouped ("15,400"), and a `\d+` pattern silently matches the "15" of it, which is
 # how that position stayed unguarded while reading as covered.
-_SVG_NUM_RE = re.compile(r'<text class="num" x="([\d.]+)"[^>]*>([\d,]+)</text>')
+_SVG_NUM_RE = re.compile(r'<text class="num" x="([\d.]+)"[^>]*>([\d.,]+)</text>')
 _SVG_LABEL_RE = re.compile(r'aria-label="([^"]*)"')
 _SVG_TITLE_RE = re.compile(r"<title>([^<]*)</title>")
 # "184 security checks - 26 attack-chain detectors - ..." -> the figure opening each segment.
-_SVG_STAT_RE = re.compile(r"([\d,]+)\s+[A-Za-z]")
+_SVG_STAT_RE = re.compile(r"([\d.,]+)\s+[A-Za-z]")
 
 
 def _svg_self_disagreements(svg: str, name: str) -> list:
@@ -1130,3 +1130,47 @@ def test_the_whole_suite_decision_reads_no_filesystem_state():
             f"_run_narrowing consults {forbidden!r} — the decision must depend only on "
             f"the invocation, or a mid-run tree change can silence the guard again"
         )
+
+
+# --- the badge now states an OpenClaw version, and a version rots ------------
+
+_VENDOR_TABLES = REPO / "tests" / "vendor_state_tables.txt"
+_BADGE_VERSION_RE = re.compile(r'<text class="num"[^>]*>(\d{4}\.\d+\.\d+)</text>')
+
+
+def _stamped_openclaw_version() -> str:
+    """The OpenClaw the shipped snapshots were actually taken against."""
+    header = _VENDOR_TABLES.read_text(encoding="utf-8")[:2000]
+    m = re.search(r"^#\s*openclaw-version:\s*(\S+)", header, re.M)
+    assert m, f"{_VENDOR_TABLES.name} has no `openclaw-version:` header to pin against"
+    return m.group(1)
+
+
+def test_the_badge_openclaw_version_matches_the_shipped_snapshot():
+    """A version in an image is the most rot-prone claim this project makes.
+
+    It is a picture, so no text grep reaches it, and it goes stale on somebody else's release
+    schedule rather than ours — OpenClaw moved 2026.7.1 -> 8.1 -> 8.2 -> 9.1 -> 9.2 inside one
+    recorded window. So it is pinned to the version the shipped snapshots were generated
+    against (`tests/vendor_state_tables.txt`'s own header), which the upgrade protocol
+    regenerates. Restamping the snapshots and forgetting the badge now fails the build.
+
+    Not pinned to the INSTALLED OpenClaw: CI has none, and a guard that skips wherever it
+    matters is not a guard.
+    """
+    want = _stamped_openclaw_version()
+    wrong = []
+    for name in ("stats-light.svg", "stats-dark.svg"):
+        svg = (REPO / "docs" / "assets" / name).read_text(encoding="utf-8")
+        found = _BADGE_VERSION_RE.findall(svg)
+        if not found:
+            wrong.append(f"{name}: states no OpenClaw version at all")
+        elif found != [want]:
+            wrong.append(f"{name}: badge says {found}, snapshots were taken against {want}")
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    if f"OpenClaw {want}" not in readme:
+        wrong.append(f"README.md does not say 'OpenClaw {want}'")
+    assert not wrong, (
+        "the OpenClaw version claimed in the badge has drifted from the one the shipped "
+        "schema/state snapshots were generated against:\n  " + "\n  ".join(wrong)
+    )

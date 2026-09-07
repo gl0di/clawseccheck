@@ -18,7 +18,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="188 security checks · 26 attack-chain detectors · 22,361 automated tests · 0 dependencies · 0 network calls" width="900">
+    <img src="docs/assets/stats-light.svg" alt="188 security checks · 26 attack-chain detectors · 22,361 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.9.2 verified" width="900">
   </picture>
 </p>
 
