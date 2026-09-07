@@ -243,7 +243,7 @@ result was not a crash — it was a clean verdict over ground the tool no longer
 
 ### Fixed
 
-- 218 fixes. The recurring family — at least 32 of them by commit subject — is a verdict
+- 231 fixes. The recurring family — at least 32 of them by commit subject — is a verdict
   that asserted more than the run observed: a truncated log read reported as the whole
   history, a settings digest stored for a file the run never opened, a capability reported
   as absent because only one of two policy layers was consulted, a crashed content check
@@ -343,6 +343,18 @@ closed.
 
 ### Breaking (JSON consumers)
 
+- **`--vet --json`'s `verdict` no longer uses the same words, and that one fails open.** The
+  value vocabulary changed with the verdict itself: `DANGEROUS` -> `DO-NOT-INSTALL`,
+  `SUSPICIOUS` -> `CAUTION`, `NO KNOWN ISSUE` -> `INSTALL`, and an `UNKNOWN` result now reads
+  as `CAUTION` rather than `UNKNOWN`. A removed key raises `KeyError` and you find out; a
+  renamed VALUE does not, so a gate written as `if payload["verdict"] == "DANGEROUS": block()`
+  silently stops matching and stops blocking. If you gate CI on this field, update the words
+  before upgrading — or key off `axes[].status`, which still uses `PASS`/`WARN`/`FAIL`/
+  `UNKNOWN`/`N/A` and did not move.
+- **`--vet --json` no longer carries top-level `grade` or `score`.** This is the machine-side
+  of "`--vet` answers a decision, not a letter" above; the payload's top-level keys are now
+  exactly `tool`, `version`, `mode`, `target`, `target_type`, `verdict`, `axes`, `findings`,
+  `unmapped`. `docs/OUTPUT_SCHEMA.md` section 11 states why the two will not come back.
 - **`inventory.system` is gone.** The `--json` subject grouping went from 5 keys to 8:
   `system` split into `openclaw` + `host`, and `plugins` + `logs` are new. Top-level
   field names are unchanged and `inventory` itself is still present — only its subject
