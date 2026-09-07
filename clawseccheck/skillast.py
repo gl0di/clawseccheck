@@ -2662,6 +2662,93 @@ def _is_decode_call(node: ast.AST) -> bool:
     return isinstance(f, ast.Attribute) and f.attr in _DECODE_ATTRS
 
 
+def _path_module_aliases(tree: ast.AST) -> tuple:
+    """`(direct, viaos)` — the names *tree*'s own imports bind to a path module.
+
+    B-753. `direct` holds names whose `.join(...)` is a path join (`from os import path`,
+    `import posixpath`, `import os.path as p`, each with or without `as`). `viaos` holds
+    names X where the join is reached as `X.path.join(...)` (`import os`, `import os as
+    o`, `import os.path` without an alias).
+
+    NOTHING IS SEEDED. The first version pre-loaded `{"posixpath", "ntpath"}` before
+    looking at a single import, which made a bare local variable with either name a path
+    module -- the cheapest of the false cleans an adversarial pass found here. A name only
+    earns membership by being bound, in this file, by an import statement.
+    """
+    direct: set = set()   # names whose `.join(...)` is a path join
+    viaos: set = set()    # names X where `X.path.join(...)` is a path join
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name in ("posixpath", "ntpath"):
+                    direct.add(a.asname or a.name)
+                elif a.name == "os.path":
+                    # `import os.path as p` binds p to the module; without asname it
+                    # binds `os`, and the join is then reached as `os.path.join`.
+                    (direct if a.asname else viaos).add(a.asname or "os")
+                elif a.name == "os":
+                    viaos.add(a.asname or "os")
+        elif isinstance(n, ast.ImportFrom) and n.module == "os":
+            for a in n.names:
+                if a.name == "path":
+                    direct.add(a.asname or "path")
+
+    # A name that is ALSO assigned somewhere in the module is not trusted: `from os
+    # import path` followed by `path = ""` leaves the join reaching a string, and the
+    # verdict has to follow the value rather than the import line. Dropping the name is
+    # the fail-safe direction -- it can only put a call back under suspicion.
+    rebound = {
+        t.id
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+        for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
+        if isinstance(t, ast.Name)
+    }
+    return direct - rebound, viaos - rebound
+
+
+def _is_path_join_call(node: ast.AST, path_aliases: "set | None" = None) -> bool:
+    """True when *node* is `os.path.join(...)` — a PATH join, not a string join.
+
+    B-753. `join` is in `_DECODE_ATTRS` because `"".join(parts)` is a real
+    content-hiding primitive: assembling a payload from fragments is one of the shapes
+    this analyzer hunts. But the membership is by ATTRIBUTE NAME, so an ordinary
+    `os.path.join(...)` matches it too, and that misclassification is not harmless --
+    it made the artifact-relative carve-out bail before it ever reached the genuine
+    `.decode()` in the same expression, convicting the canonical `setup.py` idiom
+    written as a one-liner.
+
+    The discrimination is on the RECEIVER, and every leg of it is an IMPORT BINDING, not
+    a name. That is the second version. The first accepted any attribute chain ending in
+    `.path` and seeded the alias set with `posixpath`/`ntpath` unconditionally, and an
+    adversarial pass killed it: `self.path.join(payload)`, `cfg.path.join(payload)`,
+    `Outer().b.path.join(payload)`, and a bare local variable literally named `posixpath`
+    all qualified. The refutation that matters is not any single shape but why they
+    worked -- see the pairing note in the caller. Seeding names was exactly the
+    name-guessing this docstring already claimed to avoid, one line below where it
+    claimed it.
+
+    So: a bare `X.join(...)` qualifies only when `X` is bound by an import to a path
+    module, and `X.path.join(...)` only when `X` is bound by an import to `os`. A name
+    that is reassigned anywhere in the module is dropped from both sets, because
+    `from os import path` followed by `path = ""` leaves the join reaching a string.
+    A string constant, an unbound variable, an instance attribute, a subscript, or
+    anything unresolvable keeps its old meaning and still counts as the obfuscation
+    primitive.
+    """
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        return False
+    if node.func.attr != "join":
+        return False
+    direct, viaos = path_aliases or (set(), set())
+    base = node.func.value
+    if isinstance(base, ast.Name):
+        return base.id in direct
+    if isinstance(base, ast.Attribute) and base.attr == "path":
+        return isinstance(base.value, ast.Name) and base.value.id in viaos
+    return False
+
+
 def _has_xor_decode(node: ast.AST) -> bool:
     """F-053: True when the subtree builds a byte/char sequence via XOR — bytes(...^...),
     bytearray(...^...), or a comprehension containing ^ — the common non-base64
@@ -4398,7 +4485,7 @@ def _decode_call_reads_artifact_relative_file(
 
 
 def _decode_signal_is_only_artifact_relative_reads(
-    node: ast.AST, scope: ast.AST, relpath: str = ""
+    node: ast.AST, scope: ast.AST, relpath: str = "", path_aliases: "set | None" = None
 ) -> bool:
     """True when EVERY decode-shaped call `_subtree_has_decode` would match inside
     *node* is a bare `.decode(...)` on a local sibling-file read anchored on
@@ -4413,6 +4500,26 @@ def _decode_signal_is_only_artifact_relative_reads(
     found_any = False
     for n in ast.walk(node):
         if not _is_decode_call(n):
+            continue
+        # B-753: `os.path.join(...)` matches `_is_decode_call` only because "join" is in
+        # `_DECODE_ATTRS` for `"".join(parts)`'s sake. It is not a content-hiding
+        # primitive, so it must neither count as one nor end this loop -- doing so bailed
+        # before the genuine `.decode()` in the same expression was ever examined, which
+        # made the exemption UNREACHABLE for the inline `setup.py` idiom while leaving the
+        # `with`-block spelling of the same read exempt. Skipped, not treated as evidence.
+        #
+        # WHY THE RECEIVER TEST HAS TO BE STRICT, stated here because this is the line
+        # that makes it matter. It is true that a skip alone absolves nothing -- the loop
+        # returns `found_any`, which only a genuine artifact-relative `.decode()` sets --
+        # and it is tempting to conclude that dressing a string join as a path join buys
+        # an attacker nothing. That does not follow, and an adversarial pass proved it:
+        # PAIR the disguised join with a real in-artifact read in the SAME expression and
+        # the genuine half satisfies `found_any` while the skip carries the payload
+        # through. `exec(open(join(dirname(__file__), "v.py")).read().decode() +
+        # fake.path.join(fragments))` was absolved. So the skip is only ever as safe as
+        # the receiver test is strict, and the receiver test is import-bound for that
+        # reason, not for tidiness.
+        if _is_path_join_call(n, path_aliases):
             continue
         found_any = True
         nf = n.func
@@ -4541,7 +4648,7 @@ def analyze_python(
             # bare-decode signal; a real content-hiding primitive elsewhere in the
             # same expression still convicts.
             if has_decode_signal and _decode_signal_is_only_artifact_relative_reads(
-                arg, owner_map.get(node, tree), filename
+                arg, owner_map.get(node, tree), filename, _path_module_aliases(tree)
             ):
                 has_decode_signal = False
             if (
