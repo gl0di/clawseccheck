@@ -22,10 +22,13 @@ less than its name suggests is the failure this project keeps removing:
   dependency SET moves, which a version bump alone need not do. Instant (133 KB).
 * `code_sha256` — the executable surface: everything under `dist/` plus the top-level entry
   scripts. This is the one that catches a swapped build with an untouched `package.json` —
-  the actual attack — and it is the only one with a real cost. Measured on the real install:
-  7,716 files, 77.8 MB, **0.27-0.32 s** over three consecutive runs, against a `--monitor`
-  run of roughly 7.8 s. That is affordable; a `node_modules` sweep would not be, which is
-  why the tree below stops at the package root's own code.
+  the actual attack — and it is the only one with a real cost. Measured on the real install,
+  newest first: **2026.9.2** — 8,858 files, 157.4 MB, **0.59-0.63 s** over three consecutive
+  runs; **2026.7.1-2** — 7,716 files, 77.8 MB, 0.27-0.32 s. Against a `--monitor` run of
+  roughly 7.8 s that is still affordable; a `node_modules` sweep would not be, which is why
+  the tree below stops at the package root's own code. Re-measure on every OpenClaw upgrade:
+  the surface doubled in bytes between those two releases, and it does NOT move in one
+  direction only — 9.1 was 162.7 MB, so 9.2 is a contraction.
 
 **Budget is a security property.** A monitor slow enough to be annoying gets switched off,
 so the walk is bounded by file count and by bytes, and a walk that hit a bound says so
@@ -47,10 +50,14 @@ from pathlib import Path
 
 from .deptree import find_package_root
 
-# Bounds on the code walk. Roughly 2.5x the real install (7,716 files / 77.8 MB), so an
-# ordinary OpenClaw never approaches them and a pathological tree cannot hang a scheduled
-# run. Deliberately generous rather than tight: a cap that fires in normal use produces a
-# permanent "could not inspect it all" note, which teaches the reader to ignore the line.
+# Bounds on the code walk. The "roughly 2.5x the real install" these were set to is no
+# longer what they are: measured against an installed 2026.9.2 (8,858 files / 157.4 MB) the
+# file cap is 2.26x and the byte cap 1.91x, i.e. the install sits at 44.3% and 52.5% of them.
+# Still generous rather than tight — a cap that fires in normal use produces a permanent
+# "could not inspect it all" note, which teaches the reader to ignore the line — but the
+# margin is half what the original figure claims, and the byte side is the tighter one. A
+# capped digest fails safe (it says `code_capped`) and blind: it cannot catch the swapped
+# build it exists for. Re-measure on every upgrade and raise the cap BEFORE it bites.
 MAX_CODE_FILES = 20_000
 MAX_CODE_BYTES = 300 * 1024 * 1024
 
@@ -135,10 +142,14 @@ def _code_files(root: Path) -> "list[str]":
     install, which is the same false-drift shape the F-173 baseline reference had to remove.
 
     `os.walk` over strings rather than `Path.rglob`, and relative paths built by slicing
-    rather than by `Path.relative_to`. Not premature: measured on the real install (7,717
-    files, 77.8 MB) the pathlib version took 0.89 s of a ~7.8 s monitor run, of which only
-    ~0.3 s was reading bytes — the rest was `Path` object churn and 7,717 `relative_to`
-    calls. The rewrite is ~0.35 s. Budget is a security property here: a monitor slow
+    rather than by `Path.relative_to`. Not premature: measured against the install of the
+    day (OpenClaw 2026.7.1-2, 7,717 files / 77.8 MB) the pathlib version took 0.89 s of a
+    ~7.8 s monitor run, of which only ~0.3 s was reading bytes — the rest was `Path` object
+    churn and 7,717 `relative_to` calls. The rewrite is ~0.35 s. Those figures are kept as
+    the historical comparison that decided the rewrite, NOT restated against a current
+    install: the pathlib version is gone, so its half cannot be re-measured, and replacing
+    only the numbers that can be would turn a real A/B into an invented one. For what the
+    walk costs today, see the dated series in the module docstring. Budget is a security property here: a monitor slow
     enough to be annoying gets switched off.
 
     `followlinks` is left at its default False, and each entry is checked with `islink`

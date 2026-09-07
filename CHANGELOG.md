@@ -24,7 +24,7 @@ settings out from under the checks that read them.
 - **`--vet` answers a decision, not a letter.** Vetting one package and grading a whole
   setup are different questions; one letter standing for both read as the same thing.
 
-### OpenClaw 2026.8.1 / 8.2 / 9.1 compatibility
+### OpenClaw 2026.8.1 / 8.2 / 9.1 / 9.2 compatibility
 
 Three OpenClaw releases moved things the audit reads. On an un-upgraded ClawSecCheck the
 result was not a crash — it was a clean verdict over ground the tool no longer looked at.
@@ -47,6 +47,17 @@ result was not a crash — it was a clean verdict over ground the tool no longer
   key before it, and both with their versions attached when the build cannot be determined. The
   marketplace-feed all-clear was corrected the same way, and no longer describes a key that
   build does not have as merely unset.
+- **2026.9.2 moved nothing this tool reads — measured, not assumed.** The config schema went
+  from 5,280 declared paths to 5,282: four added (`gateway.controlUi.communityInvite`,
+  `gateway.controlUi.experimental`, `gateway.controlUi.experimental.customPlugins`,
+  `transcripts.autoStart[].whenOccupied`) and two removed (`gateway.controlUi.toolTitles`,
+  `messages.suppressToolErrors`). No check reads any of the six. Drift in the paths this tool
+  actually depends on is **zero**: all 121 that a real installed build accepted at 9.1 are
+  still accepted at 9.2. The vendor's own state tables went from 121 to 122 for a new
+  `update_runs` ledger, which nothing here reads yet. All three shipped snapshots were
+  regenerated against an installed 2026.9.2 and each carries that version in its header, so the
+  claim is checkable rather than asserted. No capability was added for this release; the entry
+  exists because "nothing broke" is only worth reading when someone went and looked.
 
 ### Added
 
@@ -195,6 +206,20 @@ result was not a crash — it was a clean verdict over ground the tool no longer
   filesystem-write exposure warned where it now fails. Those scopes are kept, and the findings
   that name them state that the confinement is undecided rather than asserting the reach is
   real.
+- **A FAIL-weight status now survives every consumer, not the ones anyone thought to check.**
+  The earlier repair rewired the consumers it had enumerated by hand and missed about as many
+  again; in their place is a guard that drives every drivable callable in the package over two
+  finding lists differing only in a status the rank tables weigh as FAIL, and requires the
+  outputs to agree once the status string itself is folded away. On the tree before the fix it
+  named 21 consumers across six modules, 20 of them real. The report headline said "Nothing
+  failed outright" over a confirmed zip-slip; the JSON report gave a high-severity count of 0
+  and no blast radius; the PDF printed "0 FAIL, 7 WARN" with the finding's own entry missing
+  while the escape string appeared elsewhere, which is why a presence-only test stayed green;
+  SARIF carried a second counter beside the sound one; and `--monitor` said nothing when an
+  installed skill acquired a confirmed archive escape. Two classes the guard cannot reach are
+  closed by their own layers: a status-keyed table that painted a confirmed escape the grey
+  this palette reserves for "could not assess", and the raw status reaching text a person
+  reads.
 
 ### Fixed
 
