@@ -1,5 +1,5 @@
-<svg width="1488" height="128" viewBox="0 0 1488 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="188 security checks - 26 attack-chain detectors - 22,362 automated tests - 0 dependencies - 0 network calls - 2026.9.2 OpenClaw verified">
-  <title>188 security checks - 26 attack-chain detectors - 22,362 automated tests - 0 dependencies - 0 network calls - 2026.9.2 OpenClaw verified</title>
+<svg width="1488" height="128" viewBox="0 0 1488 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="188 security checks - 26 attack-chain detectors - 22,361 automated tests - 0 dependencies - 0 network calls - 2026.9.2 OpenClaw verified">
+  <title>188 security checks - 26 attack-chain detectors - 22,361 automated tests - 0 dependencies - 0 network calls - 2026.9.2 OpenClaw verified</title>
   <style>
     text { font-family: -apple-system, "Segoe UI", Roboto, "DejaVu Sans", Helvetica, Arial, sans-serif; }
     .card { opacity: 0; animation: rise .65s cubic-bezier(.2,.7,.3,1) forwards; }
@@ -40,7 +40,7 @@
   <line x1="496.0" y1="26" x2="496.0" y2="96" stroke="#d0d7de" stroke-width="1"/>
   <g class="card c2">
     <text class="icon" x="620.0" y="34" text-anchor="middle">🧪</text>
-    <text class="num" x="620.0" y="78" text-anchor="middle" fill="#1a7f37" style="color:#1a7f37">22,362</text>
+    <text class="num" x="620.0" y="78" text-anchor="middle" fill="#1a7f37" style="color:#1a7f37">22,361</text>
     <text class="label" x="620.0" y="103" text-anchor="middle">automated tests</text>
   </g>
   <line x1="744.0" y1="26" x2="744.0" y2="96" stroke="#d0d7de" stroke-width="1"/>
