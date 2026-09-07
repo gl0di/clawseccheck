@@ -64,7 +64,15 @@ def _expr_text(node: ast.AST | None) -> str:
             if isinstance(part, ast.Constant):
                 parts.append(str(part.value))
             elif isinstance(part, ast.FormattedValue):
-                parts.append(f"{{{ast.unparse(part.value).strip()}}}")
+                # Same rule as the fallback below, and it has to be repeated here because an
+                # f-string is rendered by its own branch: a CALL inside a placeholder elides,
+                # a bare name is kept as a slot label. Without this,
+                # "{', '.join(providers)}" and "{', '.join(transport)}" reached the page —
+                # two more leaks of the class the fallback fix alone did not close.
+                if any(isinstance(sub, ast.Call) for sub in ast.walk(part.value)):
+                    parts.append("...")
+                else:
+                    parts.append(f"{{{ast.unparse(part.value).strip()}}}")
         return "".join(parts)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _expr_text(node.left) + _expr_text(node.right)
@@ -89,7 +97,22 @@ def _expr_text(node: ast.AST | None) -> str:
     try:
         value = ast.literal_eval(node)
     except Exception:
-        return ast.unparse(node).strip()
+            # An expression this function cannot render as prose must not reach the page as
+            # Python SOURCE. `ast.unparse` here is how RISK-15 shipped `_key_advice(ctx, ...)`
+            # and how RISK-23 shipped `str(len(fired))`, `'; '.join(fired)` and
+            # `'; '.join(signal_bearing)` into user-facing advice. The first was caught only
+            # because markdownlint read the underscore as emphasis; the rest carry no
+            # underscore and were caught by nobody. Special-casing each callee is what let
+            # them through, so the FALLBACK changes instead.
+            #
+            # Only a CALL elides. A bare name reads as a slot label and carries real
+            # information in the schematic `Chain:` lines — "channel_label -> tool_label ->
+            # host / filesystem" tells a reader what fills each position, and replacing it
+            # with "... -> ..." would trade a cosmetic problem for a worse one. A call is
+            # different: it is machinery, and a document has no run to evaluate it against.
+            if any(isinstance(sub, ast.Call) for sub in ast.walk(node)):
+                return "..."
+            return ast.unparse(node).strip()
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False)

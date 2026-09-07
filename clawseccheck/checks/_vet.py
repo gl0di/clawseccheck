@@ -5091,11 +5091,29 @@ def check_installed_skills(ctx: Context) -> Finding:
     _path_traversal = getattr(ctx, "path_traversal_violations", None) or []
     _signal_buckets["path_traversal"] = _path_traversal
     if _path_traversal:
+        _fix = "Ensure archives inside skills do not attempt path traversal."
+        # B-747 (§2.5(d)): a member name shaped like a Windows drive reference is convicted
+        # conservatively, because whether it escapes depends on the extraction root's drive
+        # letter and that is not knowable from the name. The signal cannot separate a
+        # genuine "D:evil" from a POSIX file called "M:1-16569.fasta", so the limit is
+        # disclosed here rather than argued away. It goes in `fix` and never in `detail`:
+        # baseline.fingerprint() hashes `detail`, and moving it would orphan every
+        # .clawseccheckignore entry users have already written.
+        if any(_DRIVE_SHAPED_MEMBER_RE.search(v) for v in _path_traversal):
+            _fix += (
+                " One of these is flagged only because its name begins with a single letter"
+                " and a colon, which Windows reads as a drive reference — extraction would"
+                " land outside the target directory whenever that drive differs from the"
+                " one being extracted to, and the scan cannot know which drive that is. If"
+                " the file is an ordinary name that happens to start that way (a genomics"
+                " coordinate slice, say), it is safe on Linux and macOS and this is a"
+                " conservative conviction rather than evidence of an attack."
+            )
         return _b13_verdict(
             HIGH,
             "SKILL_ARCHIVE_PATH_TRAVERSAL",
             "Archive path traversal detected: " + "; ".join(_path_traversal[:6]),
-            "Ensure archives inside skills do not attempt path traversal.",
+            _fix,
             None,
             _signal_buckets,
             "path_traversal",
@@ -5562,6 +5580,11 @@ def check_installed_skills(ctx: Context) -> Finding:
 # back to rank 0 -- the SAME rank as PASS -- letting any ordinary content-ring WARN
 # (e.g. B88, once B-201 made it fire more often) outrank and hide a detected path-
 # traversal archive behind an unrelated hygiene WARN.
+#: B-747: an archive member whose name begins "<letter>:" — a Windows drive reference. The
+#: member is the part after "::" in "archive.zip::member/name"; anchored so "chrM:1-16569"
+#: and "data/M:1.fasta" do not match, which is what makes the disclosure specific.
+_DRIVE_SHAPED_MEMBER_RE = re.compile(r"(?:^|::)[A-Za-z]:")
+
 _VET_MERGE_RANK = {FAIL: 3, "SKILL_ARCHIVE_PATH_TRAVERSAL": 3, WARN: 2, UNKNOWN: 1, PASS: 0}
 
 

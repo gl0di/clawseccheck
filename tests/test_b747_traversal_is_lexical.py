@@ -109,6 +109,26 @@ _CASES = [
     ("\\evil", False),
     ("\\\\srv\\share\\evil", False),   # UNC
     ("\\\\?\\C:\\evil", False),        # extended-length prefix
+    # --- B-747 accepted residual: drive-RELATIVE names, no separator after the colon ---
+    # These are the shapes the retracted fix would have let through. Each was measured with
+    # ntpath (safeio.py carries the table): a drive-relative name escapes whenever its drive
+    # differs from the extraction root's, and the root's drive is unknowable from the name.
+    # "M:1-16569.fasta" is the plausible-benign case and is convicted deliberately, not by
+    # accident — pinned here so a future "cleanup" of the isalpha() rule has to argue with it.
+    ("D:evil", False),
+    ("C:evil", False),
+    ("M:1-16569.fasta", False),
+    ("X:1-100.bed", False),
+    ("C:", False),
+    ("C:/", False),
+    # ...and the near-misses that must stay SAFE, which is what makes the rule narrow rather
+    # than "any colon is dangerous".
+    ("chrM:1-16569.fasta", True),
+    ("data/M:1.fasta", True),
+    ("./M:1.fasta", True),
+    ("AB:1.txt", True),
+    (":x.txt", True),
+    ("2026-09-07T14:30:00.log", True),
 ]
 
 
@@ -215,8 +235,20 @@ def test_the_predicate_reads_no_filesystem_at_all():
     """
     import inspect
 
+    import io
+    import tokenize
+
+    # Strip the docstring AND every comment, then match. Both are prose about the function,
+    # and both legitimately name `.resolve()`: the docstring explains what was removed, and
+    # a comment records the ntpath measurement behind the B-747 accepted residual. The
+    # earlier version skipped only the docstring and fired on that comment — the guard is
+    # right about the property and was reading the wrong text. Tokenising is exact where a
+    # split on quotes is not.
     src = inspect.getsource(is_safe_tar_member)
-    body = src.split('"""')[-1]  # skip the docstring, which discusses .resolve() by name
+    body = "".join(
+        tok.string if tok.type not in (tokenize.COMMENT, tokenize.STRING) else " "
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline)
+    )
     for call in (".resolve(", ".exists(", ".stat(", ".is_dir(", ".is_symlink(", "os.path.realpath"):
         assert call not in body, (
             f"is_safe_tar_member calls {call} — the answer must be a property of the "
@@ -267,3 +299,54 @@ def test_the_accepted_residual_is_pinned_where_it_is_silent(tmp_path):
     b87 = next(f for f in run_all(collect(outer_home)) if f.id == "B87")
     assert b87.status == "WARN", (b87.status, b87.detail[:160])
     assert "escapes the tree" in (b87.detail or ""), b87.detail
+
+
+# --------------------------------------------------------------- the accepted residual
+
+
+def test_the_drive_letter_conviction_is_disclosed_to_the_reader():
+    """B-747 §2.5(d): the limit is stated in the advice, because it cannot be removed.
+
+    A member named `M:1-16569.fasta` is convicted, and that is correct under this module's
+    doctrine — it escapes on Windows whenever the extraction root is not on drive M, which
+    the scan cannot know. What the signal CANNOT do is tell that apart from a POSIX file
+    that merely starts with a letter and a colon, so the finding says so.
+
+    The disclosure lives in `fix` and never in `detail`: ``baseline.fingerprint()`` hashes
+    ``detail``, so putting it there would orphan every ``.clawseccheckignore`` entry users
+    have already written. Pinned in BOTH directions — present on a drive-shaped conviction,
+    absent on an ordinary one — because a disclosure that is always appended discloses
+    nothing.
+    """
+    import dataclasses
+
+    from clawseccheck.checks._vet import check_installed_skills
+    from clawseccheck.collector import collect
+
+    # A real home with one installed skill, not a bare Context: `check_installed_skills`
+    # returns UNKNOWN before it ever reaches the traversal branch when `installed_skills`
+    # is empty, so a synthetic Context would have tested the early return instead.
+    home = Path(__file__).resolve().parent.parent / "fixtures" / "warn_b746_tempfile_without_traversal"
+    base = collect(home)
+
+    def _verdict(violations):
+        return check_installed_skills(dataclasses.replace(
+            base, path_traversal_violations=list(violations)))
+
+    drive = _verdict(["refdata.zip::M:1-16569.fasta"])
+    ordinary = _verdict(["bundle.zip::../../../tmp/escape_via_zip.txt"])
+
+    assert drive.status == "SKILL_ARCHIVE_PATH_TRAVERSAL", drive.status
+    assert ordinary.status == "SKILL_ARCHIVE_PATH_TRAVERSAL", ordinary.status
+
+    assert "drive reference" in drive.fix, (
+        "a drive-shaped conviction carries no disclosure, so a reader cannot tell a "
+        f"conservative conviction from an attack: {drive.fix!r}")
+    assert "drive reference" not in ordinary.fix, (
+        "the disclosure is appended to an ordinary traversal too, which turns it into "
+        f"boilerplate: {ordinary.fix!r}")
+
+    for f in (drive, ordinary):
+        assert "drive reference" not in f.detail, (
+            "the disclosure reached `detail`, which baseline.fingerprint() hashes — every "
+            "existing .clawseccheckignore entry for this finding would stop matching")

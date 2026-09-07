@@ -2625,7 +2625,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
 
 - Severity: HIGH
 - Pattern: HIGH (RISK-14): wildcard-elevated sender + heartbeat = self-escalating loop.
-- Chain: any sender via wildcard elevated provider(s): {', '.join(providers)} -> injected instruction invokes elevated tools -> heartbeat re-runs the agent unattended -> self-escalating privilege loop
+- Chain: any sender via wildcard elevated provider(s): ... -> injected instruction invokes elevated tools -> heartbeat re-runs the agent unattended -> self-escalating privilege loop
 - Why:
   A provider in tools.elevated.allowFrom is set to '*', so any sender on that channel can
   invoke elevated tools, and a heartbeat (agents.defaults.heartbeat or a per-agent
@@ -2798,35 +2798,33 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Pattern: HIGH (RISK-23, E-065): 2+ independent persistence anchors of DIFFERENT
 - Chain: *fired -> removing any single anchor does not evict the foothold
 - Why:
-  This install has str(len(fired)) independent persistence mechanisms flagged at once,
-  from different mechanism classes: '; '.join(fired). Most of these checks are WARN-only
-  disclosure — a developer might legitimately have any one of them for a real reason. What
-  makes this combination worth escalating is that at least one of them (';
-  '.join(signal_bearing)) shows an actual suspicious signal beyond "the mechanism exists,
-  unreviewed", co-located with other independent re-establishment mechanisms — the shape
-  that makes removing any single anchor insufficient to evict a real foothold. This is not
-  proof of compromise; it warrants prioritized review of every flagged anchor, starting
-  with the one that shows the actual signal.
+  This install has ... independent persistence mechanisms flagged at once, from different
+  mechanism classes: .... Most of these checks are WARN-only disclosure — a developer
+  might legitimately have any one of them for a real reason. What makes this combination
+  worth escalating is that at least one of them (...) shows an actual suspicious signal
+  beyond "the mechanism exists, unreviewed", co-located with other independent re-
+  establishment mechanisms — the shape that makes removing any single anchor insufficient
+  to evict a real foothold. This is not proof of compromise; it warrants prioritized
+  review of every flagged anchor, starting with the one that shows the actual signal.
 - Fix:
-  Investigate every flagged anchor, starting with '; '.join(signal_bearing) — then review
-  the rest: the .pth/sitecustomize/PYTHONSTARTUP files, systemd units, per-turn skill
-  hooks, and any tunnel/mesh-VPN binaries this install surfaced. Removing a single anchor
-  without addressing the others leaves a working foothold in place.
+  Investigate every flagged anchor, starting with ... — then review the rest: the
+  .pth/sitecustomize/PYTHONSTARTUP files, systemd units, per-turn skill hooks, and any
+  tunnel/mesh-VPN binaries this install surfaced. Removing a single anchor without
+  addressing the others leaves a working foothold in place.
 
 ### RISK-24 - An enrolled tunnel transport defeats destination-based egress filtering
 
 - Severity: MEDIUM
 - Pattern: MEDIUM (RISK-24, E-065): a confirmed default-deny egress policy cannot see
-- Chain: untrusted input reaches the agent -> agent can execute / write on the host -> {', '.join(transport)} enrolled and active on the host (its own outbound transport) -> default-deny OUTPUT policy confirmed, but cannot see destinations carried inside the tunnel's own already-permitted connection -> destination-based egress filtering is defeated for traffic riding the tunnel
+- Chain: untrusted input reaches the agent -> agent can execute / write on the host -> ... enrolled and active on the host (its own outbound transport) -> default-deny OUTPUT policy confirmed, but cannot see destinations carried inside the tunnel's own already-permitted connection -> destination-based egress filtering is defeated for traffic riding the tunnel
 - Why:
-  ClawSecCheck confirmed a default-deny outbound firewall policy on this host, and {',
-  '.join(transport)} is enrolled and active — its own outbound control connection is
-  itself a locally-generated packet the OUTPUT chain does evaluate, but once that one
-  connection is up, destination-based egress filtering cannot see the individual
-  destinations carried inside it. This agent can act on the host (exec/write) and is
-  reachable by untrusted input, so a prompt-injection compromise could invoke that
-  transport directly — the audit's own 'egress is hardened' verdict does not extend to
-  traffic riding inside it.
+  ClawSecCheck confirmed a default-deny outbound firewall policy on this host, and ... is
+  enrolled and active — its own outbound control connection is itself a locally-generated
+  packet the OUTPUT chain does evaluate, but once that one connection is up, destination-
+  based egress filtering cannot see the individual destinations carried inside it. This
+  agent can act on the host (exec/write) and is reachable by untrusted input, so a prompt-
+  injection compromise could invoke that transport directly — the audit's own 'egress is
+  hardened' verdict does not extend to traffic riding inside it.
 - Fix:
   Do not rely on host firewall policy alone to contain this agent. Either remove the
   tunnel/mesh-VPN client if it is not required for this agent's purpose, or explicitly

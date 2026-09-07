@@ -257,8 +257,40 @@ def is_safe_tar_member(base_dir: Path, member_name: str) -> bool:
     # Fold the Windows separator before any judgement — see the docstring: a name that
     # escapes on a supported platform is unsafe on every one of them.
     name = name.replace("\\", "/")
-    # A drive-qualified name ("C:/evil", "C:evil") is rooted on Windows and is never a
-    # legitimate archive member; posixpath cannot see it as absolute.
+    # A drive-qualified name is rooted on Windows and is never a legitimate archive
+    # member; posixpath cannot see it as absolute.
+    #
+    # B-747 ACCEPTED RESIDUAL. This convicts a POSIX file literally named "M:1-16569.fasta"
+    # — a plausible genomics coordinate slice at archive root. A fix was proposed (require a
+    # separator after the colon, so only "C:/evil" and "C:\evil" are rejected) and RETRACTED
+    # on C-135 grounds, because it trades a plausible false positive for a PROVEN false
+    # negative. Measured with ntpath, which is what Path.resolve() degrades to on Windows:
+    #
+    #     ntpath.join(r"C:\extract\root", "M:1-16569.fasta") -> "M:1-16569.fasta"   ESCAPES
+    #     ntpath.join(r"C:\extract\root", "D:evil")          -> "D:evil"            ESCAPES
+    #     ntpath.join(r"C:\extract\root", "C:evil")          -> inside the root
+    #     ntpath.join(r"D:\extract\root", "C:evil")          -> "C:evil"            ESCAPES
+    #
+    # A drive-relative name escapes whenever its drive differs from the extraction root's,
+    # and the root's drive is NOT knowable from a member name — so the conservative answer
+    # is the only sound one, and rejecting is CORRECT under this module's own doctrine
+    # rather than a false positive. The proposed fix would have let "D:evil" through.
+    #
+    # Two measurements from the independent pass are worth keeping, because they cut both
+    # ways. Against: `zipfile._extract_member` does `os.path.splitdrive(arcname)[1]`
+    # unconditionally on every Python version, so a drive-qualified member can never escape
+    # through Python's own zip extractor — and the B-747 repro is a .zip. For: `tarfile`
+    # still defaults to `fully_trusted_filter` on 3.12 (the safe `data_filter` becomes the
+    # default only in 3.14), so the tar-side escape is live today, not a legacy corner.
+    # Non-Python extractors are unverified either way, which is why the rule stays uniform
+    # rather than being relaxed for zip on the strength of one extractor's behaviour.
+    #
+    # `name[0].isalpha()` is deliberately narrower than ntpath, whose `splitroot` accepts
+    # ANY character before the colon: "1:2.txt" reads safe here and escapes under ntpath.
+    # Left alone — Windows assigns drive letters from A-Z only, and a colon after a
+    # non-letter is an NTFS alternate-data-stream reference, which anchors inside the root
+    # rather than redirecting out of it. That is a different concern from traversal, and
+    # it is UNVERIFIED on a real Windows host rather than proven safe.
     if len(name) >= 2 and name[1] == ":" and name[0].isalpha():
         return False
     # Absolute ("/etc/passwd", "//etc/passwd", UNC "//srv/share/x") escapes by definition.
