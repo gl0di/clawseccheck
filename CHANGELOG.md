@@ -105,6 +105,14 @@ result was not a crash — it was a clean verdict over ground the tool no longer
   read everything still takes precedence, so an incomplete scan is never upgraded into a
   confident verdict, and a guard now holds the ordering so an escape-level finding cannot be
   demoted by position again.
+- **`--exit-code` no longer returns 0 over a confirmed archive escape.** Both exit-code gates
+  compared a finding's status against the bare literal `"FAIL"`, and a confirmed zip-slip's
+  status is not that literal even though the rank tables weigh it as FAIL. So on a home whose
+  only installed skill ships an escape — a home whose own report row reads "DANGEROUS (archive
+  escapes its directory)" — the gate a CI pipeline reads came back green over a finding the
+  report had already named. Measured with controls on both sides: two homes carrying ordinary
+  FAILs return 1 and a safe home returns 0, unchanged, while the traversal home moves 0 to 1
+  and its benign twin stays 0.
 - **A `__file__` in the path is no longer proof the code came from inside the skill.** Reading
   a file and handing it to `exec` was exempt from the hidden-payload finding whenever the path
   expression mentioned `__file__` — a token an attacker writes as easily as an author does. Two
@@ -114,6 +122,16 @@ result was not a crash — it was a clean verdict over ground the tool no longer
   clean; it is now flagged. Paths that cancel themselves out, and segments whose value the
   source does not state, keep the exemption — an expression the scan cannot resolve is never
   turned into an escape.
+- **Two spellings of the same file read no longer get opposite verdicts.** `os.path.join` was
+  being treated as a content-hiding primitive, because membership in that set is tested by
+  attribute name and `"".join(parts)` genuinely is one. Inside the artifact-relative exemption
+  that misreading stopped the scan before the real `.decode()` beside it was ever examined, so
+  the canonical one-line `setup.py` idiom was convicted while the identical read written with a
+  `with` block was exempt. A path join is now skipped there, and which receivers count is
+  decided by the module's own import bindings — a name rebound anywhere in the file drops out
+  of the set, so `from os import path` followed by `path = ""` leaves the join reaching a
+  string. A receiver the scan cannot resolve keeps its convicting reading, because this
+  predicate widens an exemption and an undecidable case must not be the one that opens it.
 - **Never a clean verdict over ground that was not read.** Six separate fixes, one bug.
 - **`--vet-skill <folder>/SKILL.md` no longer recommends installing a bundle it declined to
   read.** Pointing at a manifest scans the folder around it — unless that folder also holds
