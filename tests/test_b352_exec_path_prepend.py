@@ -60,7 +60,38 @@ def test_clean_fixtures_pass(name):
 def test_an_absolute_owner_only_entry_is_still_listed():
     """A PASS that names what is ahead of PATH is more useful than a bare "clean"."""
     f = _f("clean_b352_absolute_owner_only")
-    assert "/usr/local/bin" in f.detail
+    assert "/opt/clawseccheck-fixture-bin" in f.detail
+
+
+def test_no_fixture_names_a_real_system_directory():
+    """The fixtures must not ask a question about the machine running the tests.
+
+    This check reads the filesystem on purpose — "someone else can write it" is a property
+    of the host at audit time, and its own docstring says so. That is right for the CHECK
+    and wrong for a FIXTURE: `clean_b352_absolute_owner_only` used to name `/usr/local/bin`,
+    which is owner-only on a developer box and group- and world-writable on both the Ubuntu
+    and macOS GitHub runners. So the fixture asserted PASS about someone else's machine, and
+    CI went red on all three jobs — seven failures from this one line, including the
+    fingerprint manifest, because the detail text names whatever it found.
+
+    It stayed hidden for twelve days: the test landed 2026-08-26 and `dev` had last been
+    pushed on 2026-08-08, so no CI run saw it until a 421-commit push.
+
+    The paths below are deliberately under a directory no installation creates. An absent
+    path is the only absolute path whose permissions every machine agrees about.
+    """
+    import json
+
+    offenders = []
+    for cfg in sorted(FIXTURES.glob("*b352*/openclaw.json")):
+        name = cfg.parent.name
+        for entry in json.dumps(json.loads(cfg.read_text())).split('"'):
+            if entry.startswith(("/usr/", "/opt/homebrew", "/bin/", "/sbin/", "/etc/")):
+                offenders.append(f"{name}: {entry}")
+    assert not offenders, (
+        "these B352 fixtures name a real system directory, so their verdict depends on the "
+        "machine running the tests rather than on the fixture:\n  " + "\n  ".join(offenders)
+    )
 
 
 # ------------------------------------------------------------------ it fires
@@ -80,7 +111,7 @@ def test_an_agent_only_list_is_not_missed():
     """The per-agent lying-PASS: global is safe, one agent replaces it with /tmp.
 
     `pathPrepend` resolves with `??`, so the agent's list is what actually applies for
-    that agent — the global `/usr/local/bin` is not merged with it, it is discarded.
+    that agent — the global prepend is not merged with it, it is discarded.
     """
     f = _f("bad_b352_agent_only_prepend")
     assert f.status == WARN

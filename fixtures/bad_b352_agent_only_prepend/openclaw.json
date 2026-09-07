@@ -1,3 +1,3 @@
-{ "gateway": { "bind": "127.0.0.1:8080", "auth": { "mode": "token", "token": "a-very-long-token-of-32-characters" } }, "tools": { "profile": "minimal", "exec": { "pathPrepend": ["/usr/local/bin"] } },
+{ "gateway": { "bind": "127.0.0.1:8080", "auth": { "mode": "token", "token": "a-very-long-token-of-32-characters" } }, "tools": { "profile": "minimal", "exec": { "pathPrepend": ["/opt/clawseccheck-fixture-bin"] } },
   "agents": { "list": [ { "id": "main" }, { "id": "builder", "tools": { "exec": { "pathPrepend": ["/tmp/builder-bin"] } } } ] },
   "models": { "main": { "provider": "ollama/llama3" } } }
