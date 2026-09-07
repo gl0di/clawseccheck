@@ -343,6 +343,13 @@ closed.
 
 ### Breaking (JSON consumers)
 
+- **A `--vet-skill` exit code moved from `0` to `1` for one real population.** Filed under
+  Security below, where it belongs — it fails closed, not open — but named here because a CI
+  gate is what notices: pointing at a `SKILL.md` inside a folder that also holds ordinary
+  downloaded content now reports `CAUTION` and exits `1` instead of reporting `INSTALL` and
+  exiting `0`. Measured on 35,738 real ClawHub packages: 32 are held back this way, of which
+  11 are clean under a full directory scan. Naming the directory instead of the manifest
+  scans it fully and is unaffected.
 - **`--vet --json`'s `verdict` no longer uses the same words, and that one fails open.** The
   value vocabulary changed with the verdict itself: `DANGEROUS` -> `DO-NOT-INSTALL`,
   `SUSPICIOUS` -> `CAUTION`, `NO KNOWN ISSUE` -> `INSTALL`, and an `UNKNOWN` result now reads
