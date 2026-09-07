@@ -95,7 +95,15 @@ from .scanbudget import (
 )
 from . import pipeline as _pipeline
 from .baseline import append_entries, is_fingerprint
-from .catalog import CRITICAL, HIGH, LOW, MEDIUM, UNKNOWN, Finding
+from .catalog import (
+    CRITICAL,
+    FAIL_WEIGHT_STATUSES,
+    HIGH,
+    LOW,
+    MEDIUM,
+    UNKNOWN,
+    Finding,
+)
 from .dossier import build_profile, verdict_for
 from .ansi import should_color, strip_ansi
 from .monitor import (
@@ -443,7 +451,13 @@ _SWEEP_VERDICT: dict[str, str] = {
 # tallied as SAFE, and `has_fail` (which feeds `--exit-code` under `--full`) stayed False.
 # Named once here so a ninth site cannot reintroduce the literal, and pinned structurally
 # by tests/test_b750_sweep_renders_every_status.py against the rank tables themselves.
-_SWEEP_FAIL_STATUSES: frozenset = frozenset({"FAIL", "SKILL_ARCHIVE_PATH_TRAVERSAL"})
+# B-751 follow-up: this was a SECOND hand-written copy of the same frozenset that
+# `catalog.FAIL_WEIGHT_STATUSES` already held — identical contents, separate definition.
+# The comment above is right about wanting one source and was written for the sweep before
+# the catalog-wide vocabulary existed; two copies that agree today are exactly how a third
+# status lands in one and misses the other. Aliased rather than deleted so the sweep's own
+# name still reads locally at its five use sites.
+_SWEEP_FAIL_STATUSES: frozenset = FAIL_WEIGHT_STATUSES
 #: FAIL-weight or WARN — the rows already excluded from "safe", which must not be demoted
 #: to TRUNCATED nor lose their partial-coverage marker.
 _SWEEP_ACTIONABLE_STATUSES: frozenset = _SWEEP_FAIL_STATUSES | {"WARN"}
@@ -2716,7 +2730,11 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
     if args.fail_on is not None:
         _fail_on_rank = _SEVERITY_RANK[args.fail_on.upper()]
         if any(
-            f.status == "FAIL"
+            # B-751 follow-up: the shared vocabulary, not the bare literal. A confirmed
+            # zip-slip carries `SKILL_ARCHIVE_PATH_TRAVERSAL`, and this gate is what a CI
+            # pipeline reads -- comparing to "FAIL" made it blind to the one finding the
+            # whole B-746/B-750/B-751 family exists to surface.
+            f.status in FAIL_WEIGHT_STATUSES
             and _SEVERITY_RANK.get(f.severity, -1) >= _fail_on_rank
             and (
                 not getattr(f, "suppressed", False)
@@ -2744,7 +2762,11 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
 
     if args.exit_code:
         has_fail = any(
-            f.status == "FAIL"
+            # B-751 follow-up, same reason as --fail-on above: measured, `--exit-code`
+            # returned 0 on fixtures/bad_b746_traversal_masked_by_warn, whose only
+            # installed skill ships a confirmed archive escape and whose own report row
+            # says DANGEROUS. A green gate over a finding the report names.
+            f.status in FAIL_WEIGHT_STATUSES
             and (
                 not getattr(f, "suppressed", False)
                 or surfaced_despite_suppression(f)

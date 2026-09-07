@@ -372,3 +372,70 @@ def test_the_benign_control_is_untouched_everywhere():
     assert "RISK-09" not in [p.id for p in risk_paths(ctx, fs)]
     row = _skill_inventory(ctx)[0]
     assert row["status"] == "WARN" and row["verdict"] == "SUSPICIOUS", row
+
+
+# ---------------------------------------------------------------------------
+# The consumers this file's own method missed: the exit-code gates.
+# ---------------------------------------------------------------------------
+
+
+def test_the_exit_code_gate_sees_a_fail_weight_status():
+    """`--exit-code` returned 0 on a home whose report says DANGEROUS.
+
+    This file's docstring sets out the right method — drive every consumer and require the
+    conviction to survive — and notes that a new STATUS is picked up automatically because
+    the list is derived from `_VET_MERGE_RANK`. A new CONSUMER is not. The consumer list
+    was written by hand, and `cli.py`'s two exit-code gates were not on it: both compared
+    `f.status == "FAIL"`, and a confirmed zip-slip carries
+    `SKILL_ARCHIVE_PATH_TRAVERSAL`, so neither saw it.
+
+    Measured before the fix, with `fixtures/bad_b746_traversal_masked_by_warn`, whose only
+    installed skill ships a confirmed escape and whose own rendered row reads
+    `⛔ archive-demo  DANGEROUS (archive escapes its directory)`::
+
+        --exit-code   ->  0
+
+    That is a green gate over a finding the report names, and it is the surface a CI
+    pipeline reads rather than a human. Pinned here through the real `main()` so the
+    argument parsing, the suppression terms and the gate are all in scope — asserting on
+    the predicate alone would pass with the wiring broken.
+    """
+    import contextlib
+    import io
+
+    from clawseccheck.cli import main
+
+    def _rc(home: Path) -> int:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            return main(["--home", str(home), "--exit-code"])
+
+    assert _rc(TRAVERSAL_HOME) == 1, "a confirmed zip-slip must fail the exit-code gate"
+    assert _rc(BENIGN_HOME) == 0, "the benign twin must still pass it"
+
+    # Positive controls: homes whose findings are ordinary FAILs. Without these, a gate
+    # that returned 1 unconditionally would satisfy the assertion above.
+    for control in ("bad_b4_peragent_sandbox", "home_vuln"):
+        home = FIXTURES / control
+        if home.is_dir():
+            assert _rc(home) == 1, control
+    safe = FIXTURES / "home_safe"
+    if safe.is_dir():
+        assert _rc(safe) == 0, "home_safe"
+
+
+def test_there_is_one_fail_weight_vocabulary_not_two():
+    """`cli._SWEEP_FAIL_STATUSES` was a second hand-written copy of the catalog frozenset.
+
+    Identical contents, separate definition — and its own comment said it existed so that
+    "a ninth site cannot reintroduce the literal", which is the right instinct aimed one
+    scope too narrow: it was written for the sweep before the catalog-wide vocabulary
+    existed. Two copies that agree today are how a third status lands in one and misses the
+    other, which is the defect this whole task is about, one level up.
+
+    Identity rather than equality, deliberately: equal contents is what the two copies
+    already had.
+    """
+    from clawseccheck.cli import _SWEEP_FAIL_STATUSES
+
+    assert _SWEEP_FAIL_STATUSES is FAIL_WEIGHT_STATUSES
