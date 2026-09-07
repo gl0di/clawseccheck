@@ -40,7 +40,7 @@ from .scoring import ScoreResult
 if TYPE_CHECKING:
     from .collector import Context
 
-_SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+_SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json"
 _INFO_URI = "https://github.com/gl0di/clawseccheck"
 
 # severity -> SARIF defaultConfiguration.level

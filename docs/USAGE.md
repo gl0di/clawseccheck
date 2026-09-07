@@ -1528,7 +1528,7 @@ python3 audit.py --log audit.log            # also write log to a local file
     an MCP server itself (Golden Rule #2); you produce the dump with your own tool and hand it the
     resulting file:
     ```bash
-    # mcporter (https://github.com/instructa/mcporter) against a configured server:
+    # mcporter (https://github.com/openclaw/mcporter) against a configured server:
     mcporter tools <server-name> --json > server-tools.json
     clawseccheck --vet-mcp server-tools.json
 

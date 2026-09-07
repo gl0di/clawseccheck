@@ -518,7 +518,7 @@ the findings and does not need a grade to exist:
 
 ## 10. SARIF 2.1.0 Output (`--sarif`)
 
-Schema: `https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json`
+Schema: `https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json`
 
 Only `FAIL` and `WARN` findings appear as `results` entries; `PASS` and `UNKNOWN` are
 omitted, and their corresponding checks always appear in `rules`.
@@ -571,7 +571,7 @@ audit as a perfect one.
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
   "version": "2.1.0",
   "runs": [
     {
