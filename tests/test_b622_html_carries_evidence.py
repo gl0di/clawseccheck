@@ -25,7 +25,13 @@ import subprocess
 import sys
 
 _BAD_CONFIG = {
-    "channels": {"telegram": {"enabled": True, "dmPolicy": "open", "allowFrom": ["*"]}},
+    # `groups: {"*": {}}` is here to make ONE finding in this probe deliberately hedged
+    # (B140, confidence MEDIUM, surface "channels"). Without it the only non-HIGH-confidence
+    # finding came from C5 — "Native binary PATH safety", surface "host" — which stats the
+    # real machine's PATH. It fires on a developer box and not on a GitHub runner, so the
+    # hedged-pill test below passed locally and failed on all three CI jobs.
+    "channels": {"telegram": {"enabled": True, "dmPolicy": "open", "allowFrom": ["*"],
+                              "groups": {"*": {}}}},
     "tools": {"allow": ["read_file", "web_fetch", "exec_command"], "exec": {"mode": "full"}},
     "gateway": {"bind": "0.0.0.0"},
 }
@@ -81,7 +87,15 @@ def test_a_hedged_finding_is_distinguishable_from_a_certain_one(tmp_path):
     page, payload = _render(tmp_path, _BAD_CONFIG)
     hedged = [f for f in payload["findings"]
               if f["status"] in ("FAIL", "WARN") and f.get("confidence") not in (None, "HIGH")]
-    assert hedged, "probe produced no non-HIGH actionable finding"
+    # The hedged finding must come from the CONFIG, not from the machine. Excluding the host
+    # surface is what makes this test mean the same thing everywhere: the earlier version
+    # took whatever was hedged, which on a developer box was C5 (host PATH permissions) and
+    # on a GitHub runner was nothing at all — green locally, red on all three CI jobs.
+    hedged = [f for f in hedged if f.get("surface") != "host"]
+    assert hedged, (
+        "probe produced no non-HIGH actionable finding from the config itself — the "
+        "hedged-pill assertion below would be testing nothing"
+    )
     assert "conf-pill" in page
     assert f"confidence: {hedged[0]['confidence'].lower()}" in page
 
