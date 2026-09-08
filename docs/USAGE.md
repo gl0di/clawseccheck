@@ -1320,9 +1320,9 @@ python3 audit.py --log audit.log            # also write log to a local file
   later), and **connections** (whom it reaches out to) — with an overall **INSTALL / CAUTION /
   DO-NOT-INSTALL** verdict, the same install-recommendation word `--advise` speaks. This is
   never a letter grade: a per-package "should I install this" question is a different scale from
-  the full system audit's own A–F grade (`clawseccheck` with no flags), which additionally
-  certifies that every layer of the audit ran — a claim a single `--vet` never makes about one
-  package. Add `--json` for the machine-readable dossier (verdict + per-axis breakdown +
+  the full system audit's own A–F grade — which a bare run does not earn, and which
+  additionally certifies that every layer of the audit ran — a claim a single `--vet`
+  never makes about one package. Add `--json` for the machine-readable dossier (verdict + per-axis breakdown +
   findings), or `--sarif PATH` to drop a SARIF file for CI / code scanning; exit code is `1` on
   CAUTION/DO-NOT-INSTALL so `--vet … || fail` gates an install pipeline.
   Below the axes the dossier may print a **`Not assessed`** block. It lists things the scan

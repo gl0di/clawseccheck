@@ -21,6 +21,21 @@ settings out from under the checks that read them.
 - **`--fail-under <score>` is removed.** A default run no longer carries a score to
   threshold on. Use **`--fail-on <severity>`** for a CI gate that needs no grade, or
   `--exit-code` to trip on any FAIL.
+- **`--exit-code` and `--fail-on` now gate the artifact-rendering modes.** In 3.61.0
+  `--sarif`, `--badge` and `--html` printed a `note: --exit-code has no effect` line to
+  stderr and returned 0 whatever the run found — the gate was an allowlist nobody had
+  extended, not a decision. They honour it now, as do `--pdf` and `--dashboard`; `--monitor`
+  honours it only when the flag is passed, so a bare `--monitor` cron line is unchanged.
+  **A CI job built on this tool's own documented recipe — `--sarif results.sarif` with
+  `--fail-on`/`--exit-code` — has been passing unconditionally, and will start failing on
+  findings that were already there.** That is the gate working for the first time, not new
+  findings; look at what it reports before treating the red build as a regression.
+- **The installed OpenClaw package is read by default** (`--no-dist` opts out), which lets
+  the update check see the build that is installed *now* rather than only what the config
+  remembers. On an unchanged config this can surface one advisory the tool has never emitted
+  before — a version-rollback signature, WARN, unscored, moving neither grade nor exit code —
+  when the installed build is older than the config's own last-touched version.
+
 - **`--vet` answers a decision, not a letter.** Vetting one package and grading a whole
   setup are different questions; one letter standing for both read as the same thing.
 - **Fourteen checks reworded their finding text, so fingerprint suppressions written against
