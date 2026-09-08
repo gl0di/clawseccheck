@@ -177,13 +177,29 @@ def test_html_report_no_lens_emoji():
     assert "\U0001F50D" not in html  # 🔍
 
 
-def test_html_report_inlines_brand_logo_svg():
-    """render_html must inline brand.LOGO_SVG (an actual <svg>, not the mascot
-    emoji — a graphical mark is HTML/badge-only, brand.py Tier 3)."""
+def test_html_report_inlines_a_real_graphical_mark():
+    """The header must carry a GRAPHICAL mark, inlined, and not an emoji.
+
+    B-757 changed the format and not the property. This asserted `"<svg" in html`, because
+    the header used to embed `brand.LOGO_SVG` — which labels itself PROVISIONAL in
+    `brand.py`: a circle and two arcs standing in for art that did not exist yet. The header
+    now shows the real mascot, which ships as `brand.HEADER_LOGO_DATA_URI` (the same bytes
+    the favicon already inlines). So the test asks what it always meant to ask — is there a
+    real, inlined, non-emoji mark — instead of pinning the one format that happened to
+    satisfy it. `LOGO_SVG` is still vector and still right for the 14px badge and the PDF;
+    `test_brand.py::TestLogoSvg` keeps guarding it there.
+    """
     _, findings, score = audit(FIXTURES / "home_safe")
     html = render_html(findings, score)
-    assert "<svg" in html.lower()
-    assert 'aria-label="ClawSecCheck"' in html
+
+    assert brand.HEADER_LOGO_DATA_URI in html, "the header carries no inlined mark"
+    assert 'class="logo-mark"' in html
+    # Inlined, not fetched — the whole point of a data URI here.
+    assert "data:image/" in html
+    # A mark, not a glyph: the mascot emoji is a terminal/chat surface, never this one.
+    assert brand.MASCOT not in html, (
+        "the emoji stood in for the graphical mark — brand.py Tier 3 is HTML/badge-only"
+    )
 
 
 def test_html_report_wordmark_readable_without_the_graphic():

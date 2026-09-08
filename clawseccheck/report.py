@@ -31,7 +31,10 @@ from .catalog import (
     remediation_for,
 )
 from .ansi import paint
-from .brand import BRAND_RED, FAVICON_DATA_URI, LOGO_SVG, SEVERITY, WORDMARK, grade_ansi, grade_hex
+from .brand import (
+    BRAND_RED, FAVICON_DATA_URI, HEADER_LOGO_DATA_URI, LOGO_SVG, SEVERITY, WORDMARK,
+    grade_ansi, grade_hex,
+)
 from .dedup import deduplicate_findings
 from .dossier import AXIS_LABEL
 from .guide import suggest_actions
@@ -5540,8 +5543,14 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     # name, so a screen reader reads "ClawSecCheck Security Audit Report" once,
     # not twice.
     _claw, _rest = WORDMARK[:4], WORDMARK[4:]
+    # F-130 put LOGO_SVG here; B-757 swaps it for the REAL mark. LOGO_SVG labels itself
+    # PROVISIONAL in brand.py — a circle and two arcs — and at 1.6rem it read as a generic
+    # glyph rather than as this product. The mascot art already ships inlined as a data URI
+    # for the browser tab, so this costs no new asset and keeps the page self-contained.
+    # LOGO_SVG stays where a vector belongs: the 14px badge and the PDF.
     h1_html = (
-        f'<span class="logo-mark" aria-hidden="true">{LOGO_SVG}</span>'
+        f'<span class="logo-mark" aria-hidden="true">'
+        f'<img src="{HEADER_LOGO_DATA_URI}" alt="" width="40" height="40"></span>'
         f'<span class="wordmark"><span class="wordmark-claw">{html.escape(_claw)}</span>'
         f'{html.escape(_rest)}</span> Security Audit Report'
     )
@@ -5781,7 +5790,26 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             '<i></i></div></div>'
         )
     else:
-        grade_badge_html = '<div class="grade-badge" aria-label="No grade yet">?</div>'
+        # B-757: this was `<div class="grade-badge">?</div>` — the same 84x84 box a real
+        # letter gets, filled with a question mark and the neutral grey `grade_hex("")`
+        # returns. It was the largest element on the page and it read as a broken image,
+        # while withholding the grade is 4.0.0's headline behaviour and entirely deliberate.
+        # The meter says what actually happened instead: how many of the five layers ran.
+        # `class="grade-badge"` is deliberately NOT reused — tests/test_c423_ungraded_render
+        # allows this branch to omit it, and reusing the graded box is what made the absence
+        # look like a failure to produce one.
+        _ran = len(LAYER_ORDER) - len(getattr(score, "missing_layers", ()) or ())
+        _segs = "".join(
+            f'<span class="layer-seg{" on" if i < _ran else ""}"></span>'
+            for i in range(len(LAYER_ORDER))
+        )
+        grade_badge_html = (
+            f'<div class="layer-meter" role="img" aria-label="'
+            f'{esc(f"{_ran} of {len(LAYER_ORDER)} audit layers ran; no grade issued")}">'
+            f'<div class="layer-segs">{_segs}</div>'
+            f'<div class="layer-count"><strong>{_ran}</strong> of {len(LAYER_ORDER)}'
+            f' layers ran</div></div>'
+        )
         score_block_html = (
             '<div class="scorewrap">'
             f'<p class="meta">{esc(_urgent_headline(findings))}</p>'
@@ -5845,6 +5873,22 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             display: flex; align-items: center; justify-content: center; gap: 0.45rem; }}
         .logo-mark {{ display: inline-flex; flex: none; }}
         .logo-mark svg {{ width: 1.6rem; height: 1.6rem; }}
+        /* B-757: the mark reads at 2.5rem beside a 1.55rem wordmark. At 1.6rem it was
+           smaller than the question mark beside it, which inverted the hierarchy of a
+           page whose whole job is to be recognised and read. */
+        .logo-mark img {{ width: 2.5rem; height: 2.5rem; display: block; }}
+        /* The ungraded state, which replaces the grade badge rather than greying it out.
+           Five segments, one per audit layer; filled ones use the page ink, empty ones the
+           same neutral grey the withheld grade used to fill an 84x84 box with. Nothing here
+           borrows a grade colour: a partial run has no score to hint at. */
+        .layer-meter {{ margin: 1.25rem auto 0.75rem; display: flex; flex-direction: column;
+            align-items: center; gap: 0.5rem; }}
+        .layer-segs {{ display: flex; gap: 0.28rem; }}
+        .layer-seg {{ width: 2.1rem; height: 0.55rem; border-radius: 999px;
+            background: var(--grade); opacity: 0.35; }}
+        .layer-seg.on {{ background: var(--ink); opacity: 1; }}
+        .layer-count {{ font-size: 0.92rem; color: var(--muted); letter-spacing: 0.01em; }}
+        .layer-count strong {{ color: var(--ink); font-weight: 700; }}
         .wordmark-claw {{ color: {BRAND_RED}; }}
         .grade-badge {{
             display: inline-flex; align-items: center; justify-content: center;
