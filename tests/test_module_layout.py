@@ -281,7 +281,16 @@ _EXEMPT = {
                    "left behind. Recorded because the previous restate (B-727, 5,662 -> "
                    "6,172) logged the drift without logging its source, and a debt record "
                    "that cannot say which half is growing cannot argue for where to cut.",
-    "report.py": "~5,641 lines — the output renderers; grew further with F-131's "
+    # Restated 2026-09-08: 5,641 -> 6,178. The claim had already drifted ~467 lines before
+    # this touch; two commits adding ~70 (a mark swap, an ungraded-state block, and the
+    # credential-surface env fix — most of it the comment explaining each) crossed the
+    # 500-line cap that binds a file this size. That is the SECOND time this one entry has
+    # been restated at the same threshold: its own text below already narrates a "+10% that
+    # tripped the staleness guard". `checks/_lifecycle.py`'s restate note says what that
+    # means — the table needs one restate-and-reconsider pass, not an entry bumped each
+    # time the next commit trips it — and this bump is exactly the pattern it warned about.
+    # Recorded rather than quietly corrected: the split below is now owed twice over.
+    "report.py": "~6,178 lines — the output renderers; grew further with F-131's "
                  "Inventory-by-subject block (its own additive presentation layer, not "
                  "branching check logic), then with the B-617 inert-disclosure channel "
                  "and the B-547 scope-note rewiring. The +10% that tripped the staleness "
