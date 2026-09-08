@@ -3,6 +3,67 @@
 How the README's terminal screenshots are made. Recorded because the pipeline had to be
 reverse-engineered once already.
 
+## Report card (`report-compact.png`)
+
+The README's first screenshot is the **HTML report**, not the terminal one — the surface whose
+identity and layout the skill controls end to end. `report.png`, the longer excerpt inside the
+collapsed `<details>`, is still a terminal capture (next section).
+
+```bash
+python3 -m clawseccheck --home fixtures/home_vuln --no-history --html card.html
+```
+
+Then rasterize at 2x and crop:
+
+```bash
+google-chrome --headless --disable-gpu --no-sandbox --hide-scrollbars \
+  --force-device-scale-factor=2 --window-size=1000,1700 \
+  --screenshot=card.raw.png "file://$PWD/card.html"
+python3 -c "from PIL import Image; im=Image.open('card.raw.png').convert('RGB'); \
+  im.crop((0,0,im.width,1000)).save('report-compact.png', optimize=True)"
+```
+
+**`1000` is not a chosen number, and must not be re-chosen by eye.** It is the `.header`
+element's own bottom border (484 CSS px at a 1000 px viewport) plus 16 px of the container's
+padding, doubled for the 2x capture — so the image ends on a real divider rather than mid-air.
+Re-derive it after any change to the header, with the same renderer that takes the shot:
+
+```bash
+# append a probe to a COPY of card.html, then read it back out of the title
+<script>addEventListener('load',()=>{const b=document.querySelector('.header').getBoundingClientRect();
+ document.title='HDR='+Math.round(b.bottom+scrollY)+' WARN='+
+ Math.round(document.querySelector('.warning-box').getBoundingClientRect().top+scrollY);});</script>
+```
+
+```bash
+google-chrome --headless --disable-gpu --no-sandbox --virtual-time-budget=3000 \
+  --window-size=1000,1400 --dump-dom "file://$PWD/probe.html" | grep -o '<title>[^<]*'
+```
+
+**The crop must never reach the `⚠ Private Report` box**, which the probe reports as `WARN`.
+That banner says the report "must **NOT** be shared publicly" — inside an image whose whole
+purpose is to be shared publicly. It is HTML-only (`report.py:5595`); neither the text report
+nor either committed `.ansi` slice has it, so this contradiction is one the HTML capture would
+introduce on its own. At the time of writing the crop clears it by 12 CSS px; that margin is
+the reason the bound is anchored rather than eyeballed.
+
+**Pin the colour scheme explicitly — do not rely on the default.** `report.py` styles the dark
+variant through `@media (prefers-color-scheme: dark)` and offers no manual toggle, and headless
+Chrome answers that query from the *machine's* desktop theme. On the maintainer's box the command
+above produces the DARK card with no flag at all; on a light-themed machine the identical command
+produces the light one. The shipped image is the dark card, which also keeps it in the same visual
+language as `report.png` and the banner. To force the other one, neuter the query in a copy:
+
+```bash
+sed 's/@media (prefers-color-scheme: dark)/@media (max-width: 1px)/' card.html > card-light.html
+```
+
+Everything the image shows comes from that one command against the repo's own vulnerable fixture
+— nothing is composed, and unlike the `.ansi` slices below, a screenshot cannot elide. That is
+also why the crop stops where it does: the section under it contains a host-level finding that
+prints the maintainer's real home path, because some checks inspect the running host regardless
+of `--home`.
+
 ## Terminal screenshots (`report.png`, `report-compact.png`)
 
 Each PNG is a real capture, never hand-drawn. Three steps:

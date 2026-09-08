@@ -69,7 +69,7 @@ with the repo. A default run reaches 2 of the 5 layers, so it names the most urg
 in words and says which layers it skipped, rather than printing a grade it hasn't earned:*
 
 <p align="center">
-  <img src="docs/assets/report-compact.png" alt="A real ClawSecCheck report: the most urgent finding named first, and an explicit note that 3 of the 5 audit layers did not run — so no grade is issued" width="720">
+  <img src="docs/assets/report-compact.png" alt="A real ClawSecCheck report: a five-segment meter showing 2 of the 5 audit layers ran, the most urgent finding named first, and an explicit note that the other 3 layers did not — so no grade is issued" width="720">
 </p>
 
 <details>
