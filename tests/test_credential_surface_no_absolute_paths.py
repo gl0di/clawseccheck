@@ -132,3 +132,32 @@ def test_the_env_class_reports_a_key_that_really_is_the_subjects(tmp_path):
         "a secret-shaped key in the subject's own dotenv was not reported"
     )
     assert "SUBJECT_SERVICE_API_KEY" in " ".join(env[0]["evidence"])
+
+
+def test_env_readability_matches_the_collector_helper():
+    """The two expressions of one rule must not drift apart.
+
+    `_credential_surface_map` cannot call `collector.env_evidence_readable` directly: that
+    helper reads `ctx.unit_env_found` / `ctx.dotenv_found` as attributes, which is right for
+    a real Context and an AttributeError for the partial stubs this function is called with
+    — the blast-radius tests build a `_Ctx` carrying only `config`, and that is exactly how
+    the first version of this fix broke them. So the map reads the same two fields through
+    `getattr`, and this pins the two agreeing over every combination rather than trusting
+    that they were written to match.
+    """
+    from clawseccheck.collector import env_evidence_readable
+
+    class _Ctx:
+        pass
+
+    for unit, dotenv in ((False, False), (True, False), (False, True), (True, True)):
+        ctx = _Ctx()
+        ctx.unit_env_found = unit
+        ctx.dotenv_found = dotenv
+        guarded = bool(
+            getattr(ctx, "unit_env_found", False) or getattr(ctx, "dotenv_found", False)
+        )
+        assert guarded == env_evidence_readable(ctx), (
+            f"the map's guarded read disagrees with collector.env_evidence_readable for "
+            f"unit_env_found={unit}, dotenv_found={dotenv}"
+        )

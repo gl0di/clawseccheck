@@ -1584,7 +1584,7 @@ def _credential_surface_map(ctx) -> list[dict]:
     NOT a credential reader.
     """
     from .checks import SECRET_KEY_RE, _mcp_servers  # noqa: PLC0415
-    from .collector import WORKSPACE_DIRS, dig, env_evidence_readable  # noqa: PLC0415
+    from .collector import WORKSPACE_DIRS, dig  # noqa: PLC0415
 
     cfg = getattr(ctx, "config", {}) or {}
     home = getattr(ctx, "home", None)
@@ -1621,6 +1621,15 @@ def _credential_surface_map(ctx) -> list[dict]:
     # reason and says so at length; this now reads the same persistent artifacts it does —
     # the systemd unit's Environment=/EnvironmentFile= and the global dotenv files, both of
     # which belong to the service being audited.
+    # Every read of ctx in this function is a `getattr`, because it is called with partial
+    # and stub contexts — the blast-radius tests build a `_Ctx` carrying only `config`.
+    # `collector.env_evidence_readable` reads its two fields directly, which is right for a
+    # real Context and an AttributeError here, so the same two fields are read the way the
+    # rest of this function reads everything. That helper stays the authority for real
+    # contexts; `test_env_readability_matches_the_collector_helper` pins the two agreeing.
+    _env_artifact_readable = bool(
+        getattr(ctx, "unit_env_found", False) or getattr(ctx, "dotenv_found", False)
+    )
     _persistent_env: dict = {}
     _persistent_env.update(getattr(ctx, "dotenv_values", None) or {})
     _persistent_env.update(getattr(ctx, "unit_env_values", None) or {})
@@ -1628,7 +1637,7 @@ def _credential_surface_map(ctx) -> list[dict]:
     env_evidence: list[str] = []
     if env_keys:
         env_evidence.append(_summarize(env_keys, "env secret-like keys in a persistent artifact"))
-    elif not env_evidence_readable(ctx):
+    elif not _env_artifact_readable:
         # "Nothing set" and "could not look" are different answers, and only the first
         # justifies a quiet no. `reachable` stays keyed on the KEYS, never on this note —
         # letting an inability to look raise the flag would re-manufacture the same
