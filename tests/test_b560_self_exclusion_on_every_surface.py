@@ -46,6 +46,8 @@ import json
 import shutil
 from pathlib import Path
 
+from _pdftext import shown_strings
+
 from clawseccheck import audit, render_json, render_pdf, render_report, render_sarif
 from clawseccheck.report import SELF_EXCLUDED_NOTE, render_html, self_excluded_line
 
@@ -61,19 +63,18 @@ _DISCLOSURE_MARKERS = ("self-excluded", "not graded", "self_excluded", "selfExcl
 
 
 def _pdf_text(data: bytes) -> str:
-    """PDF shown-strings in order. Joining content streams with spaces instead splits
-    wrapped lines mid-phrase, which cost this task's own investigation an hour."""
-    import re
-    import zlib
-    chunks = []
-    for m in re.finditer(rb"stream\r?\n(.*?)endstream", data, re.S):
-        try:
-            chunks.append(zlib.decompress(m.group(1)))
-        except Exception:  # noqa: BLE001 — an uncompressed stream is used as-is
-            chunks.append(m.group(1))
-    blob = b"\n".join(chunks).decode("latin-1")
-    return "\n".join(re.sub(r"\\([()\\])", r"\1", m.group(1))
-                     for m in re.finditer(r"\((.*?)\)\s*Tj", blob, re.S))
+    """PDF shown-strings in order.
+
+    This was a private regex that scanned for ``endstream`` and joined EVERY stream into
+    one blob before matching ``(...) Tj`` — the exact shape ``_pdftext``'s own docstring
+    was written to eliminate, and it went wrong the moment the report's header mark became
+    an embedded raster. The mascot's compressed samples are arbitrary bytes: measured, they
+    carry 27 ESC and 57 BEL, while the page operators carry none. This test asserts that
+    single control characters never reach a surface, so it convicted the renderer of a leak
+    it did not have. ``shown_strings`` reads the operands of ``Tj`` from the drawing streams
+    only, which is what a reader actually sees.
+    """
+    return shown_strings(data)
 
 
 def _render_every_surface(home: Path) -> dict:
