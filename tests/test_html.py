@@ -4,7 +4,15 @@ from pathlib import Path
 
 from clawseccheck import audit, brand
 from clawseccheck.brand import GRADE_HEX, SEVERITY
-from clawseccheck.catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, Finding
+from clawseccheck.catalog import (
+    CRITICAL,
+    FAIL,
+    FAIL_WEIGHT_STATUSES,
+    HIGH,
+    LOW,
+    MEDIUM,
+    Finding,
+)
 from clawseccheck.report import render_html
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -180,7 +188,7 @@ def test_html_report_no_lens_emoji():
 def test_html_report_inlines_a_real_graphical_mark():
     """The header must carry a GRAPHICAL mark, inlined, and not an emoji.
 
-    B-757 changed the format and not the property. This asserted `"<svg" in html`, because
+    C-508 changed the format and not the property. This asserted `"<svg" in html`, because
     the header used to embed `brand.LOGO_SVG` — which labels itself PROVISIONAL in
     `brand.py`: a circle and two arcs standing in for art that did not exist yet. The header
     now shows the real mascot, which ships as `brand.HEADER_LOGO_DATA_URI` (the same bytes
@@ -246,8 +254,14 @@ def test_html_report_badge_color_matches_brand_grade_hex():
     assert f"--grade: {expected};" in html
 
 
+#: `class="finding[^"]*"` rather than a literal `class="finding"`: the card carries a
+#: status modifier (`finding is-fail`) since the tint was moved from severity to status,
+#: and pinning the exact attribute value would have made this regex match only the WARN
+#: cards while still reporting a count — the failure mode is silent under-scoping, not an
+#: error. What the test actually guards is unchanged and still exact: one match per issue,
+#: and each card's own `--sev` against its own pill.
 _FINDING_CARD_RE = re.compile(
-    r'<article class="finding" style="--sev:(#[0-9a-fA-F]+);">.*?'
+    r'<article class="finding[^"]*" style="--sev:(#[0-9a-fA-F]+);">.*?'
     r'<span class="sev-pill">([A-Z]+)</span>.*?</article>',
     re.DOTALL,
 )
@@ -308,3 +322,75 @@ def test_html_report_unknown_grade_falls_back_to_default_color():
     })()
     html = render_html(findings, score_obj)
     assert "--grade: #9f9f9f;" in html
+
+
+# --- status must be visible, not merely encoded (C-508) ----------------------------
+
+#: The card's opening tag plus the two things that identify it: its title (which maps the
+#: card back to the finding that produced it, so status comes from the DATA rather than
+#: from the rendering) and its severity pill.
+_CARD_IDENTITY_RE = re.compile(
+    r'(<article class="[^"]*" style="--sev:#[0-9a-fA-F]+;">).*?'
+    r'<span class="finding-title">(.*?)</span>.*?'
+    r'<span class="sev-pill">([A-Z]+)</span>.*?</article>',
+    re.DOTALL,
+)
+
+
+def test_status_changes_the_card_at_matched_severity():
+    """A FAIL and a WARN of the SAME severity must not render as the same card.
+
+    `--sev` is the *severity* colour, so every card used to be washed with it and status
+    was carried by nothing but a glyph — the smallest mark on the card. Measured on a
+    rendered page before the fix, a HIGH FAIL and a HIGH WARN differed by 4-6 of 255 in
+    each channel: a difference that exists in the CSS and not in anyone's eye.
+
+    The property pinned here is deliberately not "the class is spelled `is-fail`" — that
+    would pin the spelling and miss the point. It is: at matched severity, the card's
+    opening tag differs by status, and the stylesheet acts on whatever token carries the
+    difference. Both halves are required. A marker no rule reads is invisible, which is
+    the state this test exists to keep the page out of; and severity is already carried
+    twice, by the pill and the rule colour, so it cannot stand in for status.
+    """
+    _, findings, score = audit(FIXTURES / "home_vuln")
+    html = render_html(findings, score)
+    esc_title = {}
+    for f in findings:
+        esc_title.setdefault(
+            re.sub(r"\s+", " ", f.title).strip(), f.status
+        )
+
+    by_sev: dict = {}
+    for tag, title, sev in _CARD_IDENTITY_RE.findall(html):
+        status = esc_title.get(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", title)).strip())
+        if status is None:
+            continue
+        band = "fail" if status in FAIL_WEIGHT_STATUSES else "warn"
+        by_sev.setdefault(sev, {}).setdefault(band, tag)
+
+    matched = {s: g for s, g in by_sev.items() if len(g) == 2}
+    assert matched, (
+        "the fixture no longer produces a FAIL and a WARN at the same severity, so this "
+        "test cannot tell status apart from severity — point it at a fixture that does"
+    )
+
+    differing_tokens = set()
+    for sev, g in matched.items():
+        assert g["fail"] != g["warn"], (
+            f"at severity {sev} the FAIL card and the WARN card render an identical "
+            f"opening tag ({g['fail']}) — status is invisible and only severity shows"
+        )
+        fail_cls = set(re.search(r'class="([^"]*)"', g["fail"]).group(1).split())
+        warn_cls = set(re.search(r'class="([^"]*)"', g["warn"]).group(1).split())
+        differing_tokens |= fail_cls ^ warn_cls
+
+    assert differing_tokens, "the tags differ but not by a class the stylesheet can select"
+    for token in differing_tokens:
+        rule = re.search(r"\.finding\.%s\s*\{([^}]*)\}" % re.escape(token), html)
+        assert rule, f"nothing in the stylesheet selects .finding.{token}"
+        body = rule.group(1)
+        missing = [p for p in ("background", "border-left") if p not in body]
+        assert not missing, (
+            f".finding.{token} exists but sets no {' or '.join(missing)}, so the status "
+            f"marker is only partly drawn: {body.strip()!r}"
+        )

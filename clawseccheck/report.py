@@ -5578,7 +5578,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     # name, so a screen reader reads "ClawSecCheck Security Audit Report" once,
     # not twice.
     _claw, _rest = WORDMARK[:4], WORDMARK[4:]
-    # F-130 put LOGO_SVG here; B-757 swaps it for the REAL mark. LOGO_SVG labels itself
+    # F-130 put LOGO_SVG here; C-508 swaps it for the REAL mark. LOGO_SVG labels itself
     # PROVISIONAL in brand.py — a circle and two arcs — and at 1.6rem it read as a generic
     # glyph rather than as this product. The mascot art already ships inlined as a data URI
     # for the browser tab, so this costs no new asset and keeps the page self-contained.
@@ -5607,6 +5607,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         sev_style = SEVERITY.get(f.severity)
         color = sev_style.hex if sev_style else "#999"
         icon_char = "✕" if f.status in FAIL_WEIGHT_STATUSES else "⚠"
+        card_cls = "finding is-fail" if f.status in FAIL_WEIGHT_STATUSES else "finding"
         f_title = esc(_sanitize(f.title))
         detail_plain = _sanitize(f.detail) if f.detail else ""
         f_detail = esc(detail_plain)
@@ -5645,7 +5646,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
                      if conf != "HIGH" and f.status in ACTIONABLE_STATUSES else "")
 
         return f'''
-                <article class="finding" style="--sev:{color};">
+                <article class="{card_cls}" style="--sev:{color};">
                     <div class="finding-head">
                         <span class="finding-icon" aria-hidden="true">{esc(icon_char)}</span>
                         <span class="finding-title">{f_title}</span>
@@ -5825,7 +5826,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             '<i></i></div></div>'
         )
     else:
-        # B-757: this was `<div class="grade-badge">?</div>` — the same 84x84 box a real
+        # C-508: this was `<div class="grade-badge">?</div>` — the same 84x84 box a real
         # letter gets, filled with a question mark and the neutral grey `grade_hex("")`
         # returns. It was the largest element on the page and it read as a broken image,
         # while withholding the grade is 4.0.0's headline behaviour and entirely deliberate.
@@ -5908,9 +5909,10 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             display: flex; align-items: center; justify-content: center; gap: 0.45rem; }}
         .logo-mark {{ display: inline-flex; flex: none; }}
         .logo-mark svg {{ width: 1.6rem; height: 1.6rem; }}
-        /* B-757: the mark reads at 2.5rem beside a 1.55rem wordmark. At 1.6rem it was
-           smaller than the question mark beside it, which inverted the hierarchy of a
-           page whose whole job is to be recognised and read. */
+        /* The mark reads at 2.5rem beside a 1.55rem wordmark. At 1.6rem it was smaller
+           than the question mark beside it, which inverted the hierarchy of a page whose
+           whole job is to be recognised and read. (No tracker id here: this block is
+           emitted into the reader's report, and an internal task number is noise there.) */
         .logo-mark img {{ width: 2.5rem; height: 2.5rem; display: block; }}
         /* The ungraded state, which replaces the grade badge rather than greying it out.
            Five segments, one per audit layer; filled ones use the page ink, empty ones the
@@ -5932,7 +5934,21 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             border-radius: 20px; font-size: 2.6rem; font-weight: 800;
             box-shadow: 0 4px 14px color-mix(in srgb, var(--grade) 45%, transparent);
         }}
-        .scorewrap {{ max-width: 360px; margin: 0.5rem auto 0; }}
+        /* NOTE: comments in this block are emitted into the page. Never quote report
+           output in one — a stylesheet comment reproducing the ungraded wording put that
+           wording inside a GRADED report, which is exactly what B-586 exists to catch.
+           Describe the output; do not copy it.
+
+           The header centres the IDENTITY — mark, wordmark, grade or layer meter, chips.
+           Everything that is a SENTENCE is left-aligned inside one centred measure shared
+           with the score bar, so the header reads as a single column. The ungraded branch
+           prints two paragraphs three or four lines long, and centred body text gives the
+           eye a new left edge on every line; at the old 360px they broke into four ragged
+           lines inside an 880px container. */
+        .scorewrap {{ max-width: 34rem; margin: 0.75rem auto 0; }}
+        .header .meta, .header .capped {{
+            max-width: 34rem; margin-left: auto; margin-right: auto; text-align: left;
+        }}
         .scoreline {{ display: flex; justify-content: space-between; font-size: 0.95rem; color: var(--muted); margin-bottom: 0.35rem; }}
         .scoreline strong {{ color: var(--ink); }}
         .scorebar {{ height: 10px; border-radius: 999px; background: var(--line); overflow: hidden; }}
@@ -5975,25 +5991,63 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         .nav-chip:hover {{ border-color: var(--muted); }}
         .nav-count {{ color: var(--muted); font-weight: 700; }}
         .section-title {{ font-size: 1.15rem; font-weight: 700; margin: 0 0 0.25rem; }}
-        .family {{ margin-top: 1.75rem; scroll-margin-top: 1rem; }}
+        .family {{ margin-top: 2.5rem; scroll-margin-top: 1rem; }}
+        /* Pinning the jump list, and the anchor offset that has to clear it: one
+           decision, because an anchor landing under the pinned bar reads as a broken
+           link. The bar wraps, so its height depends on width and on how many subjects
+           the run produced. Measured at the taxonomy's worst case of nine chips: two
+           rows (93px, inside the 96px offset) down to a 680px container, three rows
+           (132px) below it, 172px at phone width — where pinning would also hold a fifth
+           of the viewport for good. Hence 720px of viewport, the narrowest that keeps
+           the worst case fitting; below it the bar scrolls away with the page. */
+        @media (min-width: 720px) {{
+            .famnav {{
+                position: sticky; top: 0; z-index: 5;
+                padding: 0.6rem 0; background: var(--card);
+                border-bottom: 1px solid var(--line);
+            }}
+            .family {{ scroll-margin-top: 6rem; }}
+        }}
+        /* A subject heading has to outrank the card titles under it, and at 1.02rem
+           against their bold 1rem it did not — the list read as one undivided run of
+           cards with an occasional slightly-bolder line in it. */
         .family-head {{
             display: flex; align-items: center; gap: 0.6rem;
-            font-size: 1.02rem; font-weight: 700; color: var(--ink);
-            padding-bottom: 0.5rem; border-bottom: 1px solid var(--line); margin-bottom: 1rem;
+            font-size: 1.22rem; font-weight: 700; color: var(--ink);
+            letter-spacing: -0.01em;
+            padding-bottom: 0.55rem; border-bottom: 2px solid var(--line); margin-bottom: 1.1rem;
         }}
         .family-count {{
             font-size: 0.75rem; font-weight: 700; color: var(--muted);
             background: var(--bg); border: 1px solid var(--line);
             border-radius: 999px; padding: 0.05rem 0.5rem;
         }}
+        /* Tint means FAILED, not "severe". Every card used to be washed with its own
+           severity colour, which sounds like hierarchy and measures as none: at matched
+           severity a FAIL and a WARN differed by 4-6 of 255 in each channel — invisible,
+           so the only thing separating them was a glyph. Severity is already carried
+           twice, by the pill and by the rule colour; status was carried nowhere. So the
+           tint now says status: failures are raised and tinted, warnings sit recessed on
+           the page ground with a washed-out rule. */
         .finding {{
-            border: 1px solid var(--line); border-left: 4px solid var(--sev);
+            border: 1px solid var(--line);
+            border-left: 4px solid color-mix(in srgb, var(--sev) 55%, var(--card));
             border-radius: 10px; padding: 0.9rem 1.05rem; margin-bottom: 0.85rem;
-            background: color-mix(in srgb, var(--sev) 4%, var(--card));
+            background: var(--bg);
         }}
-        .finding-head {{ display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }}
+        /* `flex: 1 1 auto` gives the title no basis, so as soon as it cannot fit beside
+           the glyph and the pill the whole title jumps to the next flex line and the
+           status glyph is left sitting alone on a row of its own — which is how it
+           rendered at narrow widths. A basis lets it share the row and wrap inside its
+           own column instead; `baseline` then puts glyph, first title line and pills on
+           one line rather than centring the glyph against a two-line title. */
+        .finding-head {{ display: flex; align-items: baseline; gap: 0.55rem; flex-wrap: wrap; }}
         .finding-icon {{ color: var(--sev); font-weight: 700; }}
-        .finding-title {{ font-weight: 700; color: var(--ink); flex: 1 1 auto; }}
+        .finding-title {{ font-weight: 700; color: var(--ink); flex: 1 1 12rem; }}
+        .finding.is-fail {{
+            border-left-width: 7px; border-left-color: var(--sev);
+            background: color-mix(in srgb, var(--sev) 12%, var(--card));
+        }}
         .sev-pill {{
             background: var(--sev); color: #fff; padding: 0.12rem 0.55rem;
             border-radius: 999px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em;
@@ -6027,6 +6081,39 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         .footer {{ margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
             text-align: center; color: var(--muted); font-size: 0.8rem; }}
         @media (max-width: 560px) {{ .container {{ padding: 1.4rem; }} .header h1 {{ font-size: 1.3rem; }} }}
+        /* Print. This report is shown to people, so paper is a real surface, and two
+           things break on it by default. First, `prefers-color-scheme` still reports the
+           reader's system setting when printing, so a dark-mode machine prints light ink
+           on the white paper the printer supplies — unreadable. The light values are
+           restored here rather than in `:root` because this block has to win against the
+           dark one above it, which it does by coming later at equal specificity.
+           Second, browsers drop backgrounds unless asked: without `print-color-adjust`
+           every severity pill prints white-on-white, i.e. the severity vanishes from the
+           artefact whose whole point is to carry it. */
+        @media print {{
+            :root {{
+                --bg: #f2f4f7; --card: #ffffff; --ink: #1f2733; --muted: #4d5563;
+                --line: #d9dee6; --key: #303a47;
+                --warn-bg: #fff8e1; --warn-line: #f0c040; --warn-ink: #7a5c00;
+                --shadow: none;
+            }}
+            /* `--bg` stays faintly grey so a warning card is still a card on paper —
+               flattening it to white would leave it a 1px outline on the white page and
+               undo the FAIL/WARN separation above. The sheet itself is forced white
+               here instead, since `body` is what the paper shows through. */
+            body {{ padding: 0; background: #ffffff; }}
+            .container {{ max-width: none; box-shadow: none; border-radius: 0; padding: 0; }}
+            .famnav {{ position: static; border-bottom: none; }}
+            .family {{ scroll-margin-top: 0; }}
+            .grade-badge, .sev-pill, .sev-chip, .layer-seg, .scorebar > i, .finding {{
+                -webkit-print-color-adjust: exact; print-color-adjust: exact;
+            }}
+            /* A finding split across a page break loses the pairing of its title with
+               its evidence, which is the only thing that makes a card readable. */
+            .finding, .warning-box, .all-clear {{ break-inside: avoid; page-break-inside: avoid; }}
+            .family-head {{ break-after: avoid; page-break-after: avoid; }}
+            .nav-chip {{ text-decoration: none; }}
+        }}
     </style>
 </head>
 <body>
