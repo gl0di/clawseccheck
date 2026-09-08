@@ -712,6 +712,13 @@ def test_preflight_shell_agrees_with_python_normaliser(tmp_path) -> None:
         ("[g](http://example.com/x)", None),
         ("[h](mailto:someone@example.com)", None),
         ("[i](#local-anchor)", None),
+        # EXTRACTION, not normalisation. These are why the comparison exists at all now:
+        # the two sides agreed on all four normalisation rules and still disagreed about
+        # what counts as a link, because only the Python side stripped code (B-606). The
+        # shell published nothing for weeks and then blocked a release on the sentence
+        # SKILL.md uses to warn against exactly this syntax.
+        ("`[j](nope/in-code-span.md)`", None),
+        ("```\n[k](nope/in-fence.md)\n```", None),
     ]
 
     staged_root = tmp_path / "dist" / "clawseccheck"
@@ -732,8 +739,10 @@ def test_preflight_shell_agrees_with_python_normaliser(tmp_path) -> None:
     shell_targets = re.findall(r"::error::SKILL\.md links to '([^']*)'", proc.stdout)
     python_targets = []
     for markdown, _ in cases:
-        raw = _MD_LINK_RE.search(markdown).group(1)
-        target = _normalise_link_target(raw)
+        match = _MD_LINK_RE.search(_prose_only(markdown))
+        if match is None:
+            continue          # code span or fence — not a link on either side
+        target = _normalise_link_target(match.group(1))
         if target is not None:
             python_targets.append(target)
 
