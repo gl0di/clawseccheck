@@ -240,10 +240,41 @@ result was not a crash — it was a clean verdict over ground the tool no longer
   traded a plausible false positive for a proven false negative on `D:evil`. The limit is
   disclosed in the advice rather than left for the reader to discover, and the two extractor
   behaviours that cut against each other are recorded beside the check.
+- **The credential surface map described the shell running the audit, not the setup being
+  audited.** It read the auditing process's own environment, so a clean home with no
+  credentials anywhere reported `env reachable=yes` on the strength of variables belonging to
+  whoever ran the check — and the secret-shaped variable NAMES of that shell travelled into
+  `--json` and into the report's credential-surface block, so pasting a report into an issue
+  published them. A tool that states a falsehood about its own subject is worse than one that
+  crashes. The source is now the subject's persistent artifacts — the systemd unit's
+  `Environment=`/`EnvironmentFile=` and the global dotenv files — the same ones
+  `collector.persistent_env_evidence` reads, which refuses `os.environ` for this exact reason
+  and says so at length. Where no such artifact could be read, the entry says that instead of
+  reporting an absence it never established.
 
 ### Fixed
 
-- 231 fixes. The recurring family — at least 32 of them by commit subject — is a verdict
+- **B41 called the gateway token a provider credential.** The count folded the gateway token
+  in with the provider profiles while the noun beside it stayed "provider credential", and the
+  parenthetical listing the providers was interpolated unconditionally — so a home with a
+  gateway token and no `auth.profiles` read `1 provider credential(s) (providers: ) + gateway
+  token`, an empty parenthetical over a count on the wrong noun, and "all of them" for a single
+  credential. Two profiles plus a token reported three providers. Both branches are corrected;
+  the PASS branch carried the identical miscount under the vaguer word "credential profile(s)".
+  **This changes B41's `detail` text, and a suppression fingerprint is a hash of it — an
+  existing `.clawseccheckignore` entry written against B41 will no longer match and the finding
+  returns.** Re-suppress it from the new output if it was deliberate.
+- **The "share your grade" step offered a command that cannot carry the grade.** A run that had
+  just earned a letter told the user to run `--badge grade.svg`; that command opens a fresh,
+  ungraded audit, so the badge it writes reads "no grade yet". An export never honours `--full`
+  on its own — doing so would mark sweep phases as having run when they did not — so it has to
+  ride the run that genuinely completed the five layers. The step now says so, and the command
+  it prints stays runnable as written.
+- **The report header showed a provisional mark, and an ungraded run showed a question mark.**
+  The header carried a logo marked provisional in the brand module, smaller than the `?` beside
+  it; the ungraded branch drew the same box around that question mark rather than naming what
+  the run actually reached.
+- 235 fixes. The recurring family — at least 32 of them by commit subject — is a verdict
   that asserted more than the run observed: a truncated log read reported as the whole
   history, a settings digest stored for a file the run never opened, a capability reported
   as absent because only one of two policy layers was consulted, a crashed content check
