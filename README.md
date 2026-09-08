@@ -60,13 +60,15 @@ directory. Neither is your config; see [Safe to run](#-safe-to-run) below.)
 
 > Audit my OpenClaw setup with clawseccheck.
 
-**3.** The most urgent problems appear right in the chat, with an A–F grade if
-that run covered all five audit layers — and a plain-language note on what it
-didn't get to if it didn't. Done.
+**3.** The findings come back in the conversation — most urgent first, with an
+A–F grade if that run covered all five audit layers, and a plain-language note on
+what it didn't get to if it didn't. Done.
 
-*What you'll see — a real default run against the deliberately vulnerable test setup bundled
-with the repo. A default run reaches 2 of the 5 layers, so it names the most urgent finding
-in words and says which layers it skipped, rather than printing a grade it hasn't earned:*
+*What you'll see — the report itself, from a real default run against the deliberately
+vulnerable test setup bundled with the repo. Your agent will summarise it in chat in its own
+words; the report is rendered by the skill, not by the agent, and you can ask for it any time
+("save the full report"). A default run reaches 2 of the 5 layers, so it names the most urgent
+finding and says which layers it skipped, rather than printing a grade it hasn't earned:*
 
 <p align="center">
   <img src="docs/assets/report-compact.png" alt="A real ClawSecCheck report: a five-segment meter showing 2 of the 5 audit layers ran, the most urgent finding named first, and an explicit note that the other 3 layers did not — so no grade is issued" width="720">
@@ -76,7 +78,7 @@ in words and says which layers it skipped, rather than printing a grade it hasn'
 <summary>See a longer excerpt of the same report</summary>
 
 <p align="center">
-  <img src="docs/assets/report.png" alt="A longer excerpt: the most-urgent header, the run's own ledger of what it did not reach, an inventory by subject, and findings grouped by subject, most urgent first" width="740">
+  <img src="docs/assets/report.png" alt="A longer excerpt of the same report: an inventory naming every audited subject and its verdict, then findings grouped by subject — failures tinted and ruled, warnings left plain" width="740">
 </p>
 
 </details>

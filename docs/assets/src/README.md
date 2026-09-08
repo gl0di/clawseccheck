@@ -1,13 +1,17 @@
 # Asset sources
 
-How the README's terminal screenshots are made. Recorded because the pipeline had to be
+How the README's screenshots are made. Recorded because the pipeline had to be
 reverse-engineered once already.
 
-## Report card (`report-compact.png`)
+## Report screenshots (`report-compact.png`, `report.png`)
 
-The README's first screenshot is the **HTML report**, not the terminal one — the surface whose
-identity and layout the skill controls end to end. `report.png`, the longer excerpt inside the
-collapsed `<details>`, is still a terminal capture (next section).
+Both are captures of the **HTML report** — the surface whose identity and layout the skill
+controls end to end, and the one a reader can honestly be shown, since the chat card is
+composed by the host agent rather than by this skill. They were terminal captures until
+2026-09-08; the ANSI pipeline that made them is kept below, but no shipped image uses it.
+
+`report-compact.png` is the header; `report.png`, inside the collapsed `<details>`, is a
+second, lower crop of the SAME render.
 
 ```bash
 python3 -m clawseccheck --home fixtures/home_vuln --no-history --html card.html
@@ -17,16 +21,24 @@ Then rasterize at 2x and crop:
 
 ```bash
 google-chrome --headless --disable-gpu --no-sandbox --hide-scrollbars \
-  --force-device-scale-factor=2 --window-size=1000,1700 \
+  --force-device-scale-factor=2 --window-size=1000,2100 \
   --screenshot=card.raw.png "file://$PWD/card.html"
 python3 -c "from PIL import Image; im=Image.open('card.raw.png').convert('RGB'); \
-  im.crop((0,0,im.width,1000)).save('report-compact.png', optimize=True)"
+  im.crop((0,0,im.width,1000)).save('report-compact.png', optimize=True); \
+  im.crop((0,1252,im.width,4006)).save('report.png', optimize=True)"
 ```
 
-**`1000` is not a chosen number, and must not be re-chosen by eye.** It is the `.header`
-element's own bottom border (484 CSS px at a 1000 px viewport) plus 16 px of the container's
-padding, doubled for the 2x capture — so the image ends on a real divider rather than mid-air.
-Re-derive it after any change to the header, with the same renderer that takes the shot:
+**None of those four numbers is chosen, and none may be re-chosen by eye.** Each is a measured
+element edge at a 1000 px viewport, doubled for the 2x capture, so every image ends on a real
+boundary rather than mid-air:
+
+| bound | CSS px | what it is |
+| --- | --- | --- |
+| compact, bottom | 484 + 16 | the `.header` element's own bottom border, plus the container's padding |
+| long, top | 626 | 8 px below the `⚠ Private Report` box, which ends at 618 |
+| long, bottom | 2003 | just past the sixth finding card, which ends at 1996 |
+
+Re-derive them after any change to the report, with the same renderer that takes the shot:
 
 ```bash
 # append a probe to a COPY of card.html, then read it back out of the title
@@ -40,7 +52,7 @@ google-chrome --headless --disable-gpu --no-sandbox --virtual-time-budget=3000 \
   --window-size=1000,1400 --dump-dom "file://$PWD/probe.html" | grep -o '<title>[^<]*'
 ```
 
-**The crop must never reach the `⚠ Private Report` box**, which the probe reports as `WARN`.
+**Neither crop may reach the `⚠ Private Report` box**, which the probe reports as `WARN`.
 That banner says the report "must **NOT** be shared publicly" — inside an image whose whole
 purpose is to be shared publicly. It is HTML-only (`report.py:5595`); neither the text report
 nor either committed `.ansi` slice has it, so this contradiction is one the HTML capture would
@@ -58,15 +70,21 @@ language as `report.png` and the banner. To force the other one, neuter the quer
 sed 's/@media (prefers-color-scheme: dark)/@media (max-width: 1px)/' card.html > card-light.html
 ```
 
-Everything the image shows comes from that one command against the repo's own vulnerable fixture
-— nothing is composed, and unlike the `.ansi` slices below, a screenshot cannot elide. That is
-also why the crop stops where it does: the section under it contains a host-level finding that
-prints the maintainer's real home path, because some checks inspect the running host regardless
-of `--home`.
+**The long crop must also stop before the `Host machine` section**, which begins at 3022 CSS px.
+One finding in it — `Native binary PATH safety` — prints the maintainer's real home path four
+times, because some checks inspect the *running host* regardless of `--home`. Everything both
+images show comes from that one command against the repo's own vulnerable fixture; nothing is
+composed, and unlike the `.ansi` slices below a screenshot cannot elide, so the bound is the
+only thing keeping that path out of a public asset.
 
-## Terminal screenshots (`report.png`, `report-compact.png`)
+## Terminal capture (dormant — no shipped image uses it)
 
-Each PNG is a real capture, never hand-drawn. Three steps:
+How `report.png` and `report-compact.png` were made until 2026-09-08. Kept because it still
+documents the CLI's text report, which is a real surface, and because `report_slice.ansi` and
+`report_compact_slice.ansi` are its committed sources. Nothing in the README renders from it
+today — keep it or retire it deliberately, but do not read it as live.
+
+Each PNG was a real capture, never hand-drawn. Three steps:
 
 1. **Capture** a colour run of the audit and cut a slice from it:
 
