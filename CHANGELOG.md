@@ -23,6 +23,15 @@ settings out from under the checks that read them.
   `--exit-code` to trip on any FAIL.
 - **`--vet` answers a decision, not a letter.** Vetting one package and grading a whole
   setup are different questions; one letter standing for both read as the same thing.
+- **Fourteen checks reworded their finding text, so fingerprint suppressions written against
+  them stop matching and those findings reappear.** A `.clawseccheckignore` entry of the
+  `<id>:<hash>` form is a hash of the finding's `detail` string, so any wording correction
+  orphans it. Measured across `fixtures/home_safe` and `fixtures/home_vuln`, the checks whose
+  fingerprint moved since 3.61.0 are: **A1, B1, B10, B11, B20, B22, B41, B48, B71, B175, B177,
+  B187, B189, C048**. Bare-id entries (`B41` with no hash) are unaffected. Re-suppress from the
+  new output anything that was deliberate — and note that nothing in a normal run tells you a
+  suppression has gone dead, so check `--show-suppressed` after upgrading rather than assuming
+  silence means it still applies.
 
 ### OpenClaw 2026.8.1 / 8.2 / 9.1 / 9.2 compatibility
 
