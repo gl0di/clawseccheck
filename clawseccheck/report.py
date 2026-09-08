@@ -9,7 +9,6 @@ unicode icons/box (e.g. a legacy Windows cp1252 console).
 from __future__ import annotations
 
 import hashlib
-import os
 import html
 import json
 import re
@@ -1585,7 +1584,7 @@ def _credential_surface_map(ctx) -> list[dict]:
     NOT a credential reader.
     """
     from .checks import SECRET_KEY_RE, _mcp_servers  # noqa: PLC0415
-    from .collector import WORKSPACE_DIRS, dig  # noqa: PLC0415
+    from .collector import WORKSPACE_DIRS, dig, env_evidence_readable  # noqa: PLC0415
 
     cfg = getattr(ctx, "config", {}) or {}
     home = getattr(ctx, "home", None)
@@ -1604,12 +1603,39 @@ def _credential_surface_map(ctx) -> list[dict]:
 
     entries: list[dict] = []
 
-    env_keys = sorted(k for k in os.environ if SECRET_KEY_RE.search(k))
+    # This read `os.environ` — the environment of the process RUNNING the audit, not
+    # anything belonging to the audited home. Two harms, and the first is the worse one.
+    #
+    # Correctness: a clean fixture home with no credentials anywhere reported
+    # `env reachable=yes`, because the auditor's own shell had secret-shaped variables in
+    # it. This function's own docstring promises an inventory "reachable from the agent
+    # home"; the auditing shell is neither a path nor that home. A tool that states a
+    # falsehood ABOUT ITS SUBJECT is worse than one that crashes.
+    #
+    # Privacy (§8): the names went into `--json`'s `secret_reachability` and into the text
+    # report's credential-surface block, so a user pasting a report into an issue published
+    # the secret-shaped variable NAMES of their own shell. Reproduced by exporting one
+    # variable before the run and finding it in the output.
+    #
+    # `collector.persistent_env_evidence` already refuses `os.environ` for exactly this
+    # reason and says so at length; this now reads the same persistent artifacts it does —
+    # the systemd unit's Environment=/EnvironmentFile= and the global dotenv files, both of
+    # which belong to the service being audited.
+    _persistent_env: dict = {}
+    _persistent_env.update(getattr(ctx, "dotenv_values", None) or {})
+    _persistent_env.update(getattr(ctx, "unit_env_values", None) or {})
+    env_keys = sorted(k for k in _persistent_env if SECRET_KEY_RE.search(k))
     env_evidence: list[str] = []
     if env_keys:
-        env_evidence.append(_summarize(env_keys, "process env secret-like keys"))
+        env_evidence.append(_summarize(env_keys, "env secret-like keys in a persistent artifact"))
+    elif not env_evidence_readable(ctx):
+        # "Nothing set" and "could not look" are different answers, and only the first
+        # justifies a quiet no. `reachable` stays keyed on the KEYS, never on this note —
+        # letting an inability to look raise the flag would re-manufacture the same
+        # fabrication in a new shape.
+        env_evidence.append("no env-bearing artifact could be read (systemd unit / dotenv)")
 
-    entries.append({"class": "env", "reachable": bool(env_evidence), "evidence": env_evidence})
+    entries.append({"class": "env", "reachable": bool(env_keys), "evidence": env_evidence})
 
     mcp_passthrough: list[str] = []
     for name, spec in sorted(_mcp_servers(cfg).items()):

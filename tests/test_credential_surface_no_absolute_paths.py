@@ -67,3 +67,68 @@ def test_credential_surface_evidence_never_contains_the_absolute_home_path(tmp_p
         assert str(tmp_path) not in text, f"absolute tmp_path leaked into evidence: {text!r}"
         assert str(home) not in text, f"absolute home path leaked into evidence: {text!r}"
     assert any(".ssh" in t or "id_rsa" in t for t in evidence)
+
+
+# --- the env class describes the SUBJECT, never the auditing shell ---------------------
+
+
+def test_the_env_class_ignores_the_auditing_process_environment(monkeypatch, tmp_path):
+    """`_credential_surface_map` read `os.environ` — the shell running the audit.
+
+    Two harms, and the first is the worse one. A clean home with no credentials anywhere
+    reported `env reachable=yes`, because the AUDITOR's shell had secret-shaped variables
+    in it — a tool that states a falsehood about its subject is worse than one that
+    crashes. And the names reached `--json`'s `secret_reachability` and the text report's
+    credential-surface block, so pasting a report into an issue published the secret-shaped
+    variable names of the reader's own shell (§8).
+
+    `collector.persistent_env_evidence` already refuses `os.environ` for exactly this
+    reason and documents it at length; this pins that the report layer agrees.
+    """
+    from clawseccheck.collector import collect
+    from clawseccheck.report import _credential_surface_map
+
+    monkeypatch.setenv("SYNTHETIC_AUDITOR_API_TOKEN", "not-the-subject-s-secret")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "openclaw.json").write_text("{}", encoding="utf-8")
+
+    entries = _credential_surface_map(collect(home))
+    env = [e for e in entries if e.get("class") == "env"]
+    assert env, "the env class disappeared from the map"
+
+    blob = " ".join(env[0].get("evidence") or [])
+    assert "SYNTHETIC_AUDITOR_API_TOKEN" not in blob, (
+        "the auditing shell's variable name reached the report — a user pasting this into "
+        "an issue would publish it"
+    )
+    assert env[0]["reachable"] is False, (
+        "a home with no env-bearing artifact was reported as having reachable env "
+        "credentials, on the strength of the auditor's own environment"
+    )
+
+
+def test_the_env_class_reports_a_key_that_really_is_the_subjects(tmp_path):
+    """The other direction: the check must still SEE a real persistent env credential.
+
+    Without this, the fix above would be satisfied by an env class that reports nothing
+    ever — which is the same defect with the sign flipped.
+    """
+    from clawseccheck.report import _credential_surface_map
+
+    class _Ctx:
+        home = None
+        config: dict = {}
+        dotenv_values = {"SUBJECT_SERVICE_API_KEY": "x"}
+        dotenv_sources = {"SUBJECT_SERVICE_API_KEY": ".env"}
+        unit_env_values: dict = {}
+        unit_env_sources: dict = {}
+        dotenv_found = True
+        unit_env_found = False
+
+    env = [e for e in _credential_surface_map(_Ctx()) if e.get("class") == "env"]
+    assert env and env[0]["reachable"] is True, (
+        "a secret-shaped key in the subject's own dotenv was not reported"
+    )
+    assert "SUBJECT_SERVICE_API_KEY" in " ".join(env[0]["evidence"])
