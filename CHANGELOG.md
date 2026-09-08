@@ -3,7 +3,7 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
-## [4.0.0] — 2026-09-04
+## [4.0.0] — 2026-09-08
 
 Every run used to print a letter. It should not have: a run that skipped the
 installed-skill sweep, never replayed a trajectory and was handed no attestation was

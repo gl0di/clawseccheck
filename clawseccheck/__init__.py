@@ -74,7 +74,7 @@ def _installed_dist_version(binary_name="openclaw"):
 
 __version__ = "4.0.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
-__released__ = "2026-09-04"
+__released__ = "2026-09-08"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
