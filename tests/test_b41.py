@@ -235,3 +235,87 @@ def test_b41_never_fails_even_with_worst_case():
     }
     f = check_credential_blast_radius(_ctx(cfg))
     assert f.status != "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# The prose must describe what the config actually holds
+#
+# `n` folded the gateway token in with the provider profiles, but the noun
+# attached to it stayed "provider credential" and the parenthetical listing the
+# providers was interpolated unconditionally.  A home with a gateway token and
+# no auth.profiles therefore rendered:
+#
+#     1 provider credential(s) (providers: ) + gateway token are reachable ...
+#
+# — an empty parenthetical, a count on the wrong noun, and "all of them" for a
+# single credential.  `test_b41_gateway_token_counted_and_noted` above already
+# exercised exactly that config and never saw it, because it only asserted that
+# the substring "gateway token" was present somewhere.
+# ---------------------------------------------------------------------------
+
+_GATEWAY_ONLY_REACHABLE = {
+    "gateway": {"auth": {"token": "a" * 32}},
+    "channels": {"telegram": {"dmPolicy": "open"}},
+    "tools": {"allow": ["email_send"]},
+}
+
+
+def test_b41_gateway_only_warn_has_no_empty_provider_parenthetical():
+    f = check_credential_blast_radius(_ctx(_GATEWAY_ONLY_REACHABLE))
+    assert f.status == WARN
+    assert "(providers: )" not in f.detail
+    assert "providers:" not in f.detail
+
+
+def test_b41_gateway_only_warn_does_not_call_the_token_a_provider_credential():
+    f = check_credential_blast_radius(_ctx(_GATEWAY_ONLY_REACHABLE))
+    assert "provider credential" not in f.detail
+    assert "1 provider" not in f.detail
+    assert f.detail.startswith("The gateway token is reachable")
+
+
+def test_b41_gateway_only_warn_does_not_claim_plurality():
+    """"all of them" describes nothing when the only credential is the token."""
+    f = check_credential_blast_radius(_ctx(_GATEWAY_ONLY_REACHABLE))
+    assert "all of them" not in f.detail
+
+
+def test_b41_providers_present_still_list_them():
+    """The opposite direction: the parenthetical must survive when it has content."""
+    cfg = {
+        "auth": {"profiles": {"google:owner@example.com": {}, "github:owner": {}}},
+        "gateway": {"auth": {"token": "a" * 32}},
+        "channels": {"telegram": {"dmPolicy": "open"}},
+        "tools": {"allow": ["email_send"]},
+    }
+    f = check_credential_blast_radius(_ctx(cfg))
+    assert f.status == WARN
+    assert "2 provider credential(s) (providers: github, google)" in f.detail
+    assert "+ gateway token" in f.detail
+    assert "all of them" in f.detail
+
+
+_GATEWAY_ONLY_NOT_REACHABLE = {
+    "gateway": {"auth": {"token": "a" * 32}},
+    "channels": {"telegram": {"dmPolicy": "owner-only"}},
+    "tools": {"profile": "minimal"},
+}
+
+
+def test_b41_gateway_only_pass_does_not_call_the_token_a_profile():
+    """The PASS branch carried the identical miscount and must not be left behind."""
+    f = check_credential_blast_radius(_ctx(_GATEWAY_ONLY_NOT_REACHABLE))
+    assert f.status == PASS
+    assert "credential profile(s)" not in f.detail
+    assert f.detail.startswith("The gateway token is present")
+
+
+def test_b41_pass_with_profiles_still_counts_them():
+    cfg = {
+        "auth": {"profiles": {"google:owner@example.com": {}}},
+        "channels": {"telegram": {"dmPolicy": "owner-only"}},
+        "tools": {"profile": "minimal"},
+    }
+    f = check_credential_blast_radius(_ctx(cfg))
+    assert f.status == PASS
+    assert "1 credential profile(s) present" in f.detail

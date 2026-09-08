@@ -1285,7 +1285,6 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     reachable = has_untrusted_ingress and has_outbound
 
     any_gateway_token = has_gateway_token or has_env_gateway_token
-    n = len(providers) + (1 if any_gateway_token else 0)
     provider_list = ", ".join(sorted(providers))
     gateway_note = " + gateway token" if any_gateway_token else ""
 
@@ -1301,12 +1300,29 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     elif has_env_gateway_token:
         evidence.append(f"gateway-token: present, supplied by {_env_gw_src}")
 
+    # The subject is built from what is actually present, never from `n` alone.
+    # `n` counts the gateway token alongside the provider profiles, so a home with a
+    # gateway token and no profiles used to render "1 provider credential(s)
+    # (providers: )" — an empty parenthetical, and a count attached to the wrong noun.
+    # The evidence list two blocks below has always been guarded this way; the prose
+    # was not.
+    if providers:
+        subject = (
+            f"{len(providers)} provider credential(s) "
+            f"(providers: {provider_list}){gateway_note}"
+        )
+        verb = "are"
+        blast = "one compromise's blast radius spans all of them"
+    else:
+        subject = "The gateway token"
+        verb = "is"
+        blast = "a compromise of it reaches everything it authorises"
+
     if reachable:
         detail = (
-            f"{n} provider credential(s) (providers: {provider_list}){gateway_note} "
-            "are reachable by an agent with untrusted ingress and outbound tools — "
-            "one compromise's blast radius spans all of them. Use least-privilege "
-            "scopes, isolate high-value profiles, and keep them rotatable."
+            f"{subject} {verb} reachable by an agent with untrusted ingress and "
+            f"outbound tools — {blast}. Use least-privilege scopes, isolate "
+            "high-value profiles, and keep them rotatable."
         )
         return _finding(
             "B41",
@@ -1333,8 +1349,14 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     if unreadable is not None:
         return unreadable
 
+    # Same rule as the WARN branch above: `n` folds the gateway token into a count
+    # whose noun is "credential profile", which a token is not.
+    if providers:
+        present = f"{len(providers)} credential profile(s){gateway_note} present"
+    else:
+        present = "The gateway token is present"
     detail = (
-        f"{n} credential profile(s) present; no untrusted-ingress + outbound path "
+        f"{present}; no untrusted-ingress + outbound path "
         "makes them broadly reachable."
     )
     return _finding(
