@@ -370,7 +370,18 @@ jobs:
               echo "::error::SKILL.md links to '${target}' but it is not in the staged tree"
               MISSING=1
             fi
-          done < <(grep -oE '\]\([^)]+\)' dist/clawseccheck/SKILL.md | sed -E 's/^\]\(//; s/\)$//')
+          # Strip fenced blocks and inline code spans BEFORE extracting links — the same
+          # two removals tests/test_publish_workflow.py's _prose_only() makes, and for the
+          # same reason it was added there (B-606): SKILL.md has to SHOW the forbidden
+          # `[report.pdf](path)` syntax in order to warn against it, and a naive extractor
+          # reads that illustration as a dangling link. The Python side learned this; this
+          # block did not, because the drift test compared only the four NORMALISATION
+          # rules and never what the two sides EXTRACT. It compares both now.
+          done < <(
+            awk 'BEGIN{fence=0} /^[[:space:]]*```/{fence=!fence; next} !fence' \
+                dist/clawseccheck/SKILL.md \
+              | sed -E 's/`[^`]*`//g' \
+              | grep -oE '\]\([^)]+\)' | sed -E 's/^\]\(//; s/\)$//')
           [ "$MISSING" -eq 0 ] || exit 1
           echo "Preflight OK — SKILL.md present and every relative link resolves."
 
