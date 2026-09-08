@@ -5936,10 +5936,14 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             border-radius: 20px; font-size: 2.6rem; font-weight: 800;
             box-shadow: 0 4px 14px color-mix(in srgb, var(--grade) 45%, transparent);
         }}
-        /* NOTE: comments in this block are emitted into the page. Never quote report
-           output in one — a stylesheet comment reproducing the ungraded wording put that
-           wording inside a GRADED report, which is exactly what B-586 exists to catch.
-           Describe the output; do not copy it.
+        /* NOTE: comments in this block are emitted into the page, so they are the
+           reader's bytes and not source commentary. Two rules follow, both learned the
+           hard way. Never quote report output in one: a comment reproducing the ungraded
+           wording put that wording inside a GRADED report, and the guard that every
+           artifact of one run agrees about the grade caught it. And never cite a tracker
+           id here — it is noise in the reader's report, and the shipped-file guard does
+           not reject the bare form, because in SOURCE the bare form is normal.
+           Describe the output; do not copy it, and leave the bookkeeping in git.
 
            The header centres the IDENTITY — mark, wordmark, grade or layer meter, chips.
            Everything that is a SENTENCE is left-aligned inside one centred measure shared
@@ -5959,8 +5963,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         .meta strong {{ color: var(--ink); }}
         .capped {{ margin-top: 0.35rem; color: #d9534f; font-size: 0.9rem; }}
         .summary {{ display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; margin-top: 1.1rem; }}
-        /* B-588: the chips are a severity ramp; this names the population they count,
-           so `CRITICAL 2` cannot be read as two critical FAILURES. Full width so it sits
+        /* The chips are a severity ramp; this names the population they count, so
+           `CRITICAL 2` cannot be read as two critical FAILURES. Full width so it sits
            under the chips rather than beside them at any viewport. */
         .summary-population {{
             flex-basis: 100%; text-align: center; font-size: 0.78rem; opacity: 0.75;
