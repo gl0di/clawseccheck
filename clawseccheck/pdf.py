@@ -404,12 +404,12 @@ class _PageFlow:
 
 
 # ---------------------------------------------------------------------------
-# Vector drawing — the brand mark as native PDF path ops, plus the branded header,
-# severity chips and per-subject summary table. base-14 forbids embedding a font, but
-# PDF draws vector paths itself, so the logo is the SAME geometry as brand.LOGO_SVG,
-# rendered crisp at any size (no raster, no external asset — Golden Rule #1).
+# Drawing — the branded header, the severity chips and the per-subject summary table.
+# The mark itself is a raster (`_PageFlow.draw_logo`): it used to be drawn here as path
+# ops replicating brand.LOGO_SVG's geometry, which meant the same mark existed in two
+# places and only one of them was ever updated. Still no external asset — the image is
+# inlined in brand.py, so Golden Rule #1 holds either way.
 # ---------------------------------------------------------------------------
-_KAPPA = 0.5522847498  # cubic-bezier control-point factor for a quarter-circle arc
 
 # status -> swatch colour for the subject-summary table (grade ramp; UNKNOWN neutral grey).
 # B-751: SKILL_ARCHIVE_PATH_TRAVERSAL (a confirmed zip-slip) is FAIL-weight but isn't the
@@ -484,31 +484,6 @@ def _png_rgba(data: bytes) -> tuple:
         rgb[i * 3:i * 3 + 3] = flat[i * 4:i * 4 + 3]
         alpha[i] = flat[i * 4 + 3]
     return w, h, bytes(rgb), bytes(alpha)
-
-
-def _circle_path(cx: float, cy: float, r: float) -> str:
-    """Four cubic-bezier arcs approximating a full circle (PDF has no arc primitive).
-    Path-construction ops only (no paint op) — the caller appends ``S`` (stroke) or
-    ``f`` (fill)."""
-    k = _KAPPA * r
-    return (f"{cx + r:.2f} {cy:.2f} m "
-            f"{cx + r:.2f} {cy + k:.2f} {cx + k:.2f} {cy + r:.2f} {cx:.2f} {cy + r:.2f} c "
-            f"{cx - k:.2f} {cy + r:.2f} {cx - r:.2f} {cy + k:.2f} {cx - r:.2f} {cy:.2f} c "
-            f"{cx - r:.2f} {cy - k:.2f} {cx - k:.2f} {cy - r:.2f} {cx:.2f} {cy - r:.2f} c "
-            f"{cx + k:.2f} {cy - r:.2f} {cx + r:.2f} {cy - k:.2f} {cx + r:.2f} {cy:.2f} c")
-
-
-def _quad_to_cubic_path(p0, ctrl, p1) -> str:
-    """One quadratic Bezier (LOGO_SVG's ``Q`` claw arcs) exactly converted to the cubic
-    ``c`` PDF operator: cp1 = p0 + 2/3(ctrl-p0), cp2 = p1 + 2/3(ctrl-p1). Returns
-    ``m ... c`` (no paint op)."""
-    x0, y0 = p0
-    cx, cy = ctrl
-    x1, y1 = p1
-    c1x, c1y = x0 + 2.0 / 3.0 * (cx - x0), y0 + 2.0 / 3.0 * (cy - y0)
-    c2x, c2y = x1 + 2.0 / 3.0 * (cx - x1), y1 + 2.0 / 3.0 * (cy - y1)
-    return (f"{x0:.2f} {y0:.2f} m "
-            f"{c1x:.2f} {c1y:.2f} {c2x:.2f} {c2y:.2f} {x1:.2f} {y1:.2f} c")
 
 
 def _draw_header(flow: "_PageFlow", version: str) -> None:

@@ -5582,7 +5582,9 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     # PROVISIONAL in brand.py — a circle and two arcs — and at 1.6rem it read as a generic
     # glyph rather than as this product. The mascot art already ships inlined as a data URI
     # for the browser tab, so this costs no new asset and keeps the page self-contained.
-    # LOGO_SVG stays where a vector belongs: the 14px badge and the PDF.
+    # LOGO_SVG stays where a vector belongs: the 14px badge. (It was also the PDF's
+    # mark when this was written — the PDF has since moved to the same raster, so
+    # the badge is now the ONLY surface still showing the provisional geometry.)
     h1_html = (
         f'<span class="logo-mark" aria-hidden="true">'
         f'<img src="{HEADER_LOGO_DATA_URI}" alt="" width="40" height="40"></span>'
