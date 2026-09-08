@@ -37,9 +37,18 @@ Usage::
 """
 from __future__ import annotations
 
+import base64
+import struct
 import zlib
 
-from .brand import BRAND_RED, GRADE_HEX, SEVERITY, WORDMARK, grade_hex
+from .brand import (
+    BRAND_RED,
+    FAVICON_DATA_URI,
+    GRADE_HEX,
+    SEVERITY,
+    WORDMARK,
+    grade_hex,
+)
 from .catalog import (
     CRITICAL,
     FAIL_WEIGHT_STATUSES,
@@ -123,6 +132,15 @@ def _pdf_literal(s: str) -> str:
     """Escape a string for a PDF ``(...)`` literal (backslash and parens only — the
     input is already ASCII-safe, so no other byte needs escaping)."""
     return s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _tint(hexcolor: str, frac: float) -> str:
+    """*hexcolor* mixed *frac* of the way over white — the paper equivalent of the HTML
+    report's ``color-mix(in srgb, var(--sev) N%, var(--card))``, so a failed finding is
+    tinted on both surfaces from the same severity colour and no new hex enters the
+    palette."""
+    r, g, b = (int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02x%02x%02x" % tuple(round(255 + (c - 255) * frac) for c in (r, g, b))
 
 
 def _hex_to_rgb01(hexcolor: str) -> tuple[float, float, float]:
@@ -241,6 +259,10 @@ class _PageFlow:
         self._font_helv = font_helv
         self._font_bold = font_bold
         self._page_ops: list[str] = []
+        # The brand mark, as a PDF image XObject. Created on first use and then shared by
+        # every page's /Resources — it is drawn only in the page-one header today, but a
+        # per-page number would mean re-embedding the same 7 KB for each page.
+        self._logo_xobj: int | None = None
         self.pages: list[int] = []  # finished Page object numbers, in order
         self.y = _TOP_Y
         self.page_epoch = 0  # bumped on every new page — lets a caller detect a block
@@ -269,7 +291,9 @@ class _PageFlow:
         page_num = self._doc.add_object(
             (
                 f"<< /Type /Page /Parent {self._doc.pages_parent} 0 R "
-                f"/Resources << /Font << /F1 {self._font_helv} 0 R /F2 {self._font_bold} 0 R >> >> "
+                f"/Resources << /Font << /F1 {self._font_helv} 0 R /F2 {self._font_bold} 0 R >>"
+                + (f" /XObject << /Im1 {self._logo_xobj} 0 R >>" if self._logo_xobj else "")
+                + " >> "
                 f"/MediaBox [0 0 {_PAGE_W:g} {_PAGE_H:g}] /Contents {content_num} 0 R >>"
             ).encode("ascii")
         )
@@ -285,6 +309,24 @@ class _PageFlow:
     def rect(self, x: float, y: float, w: float, h: float, hexcolor: str) -> None:
         r, g, b = _hex_to_rgb01(hexcolor)
         self._page_ops.append(f"{r:.3f} {g:.3f} {b:.3f} rg\n{x:.2f} {y:.2f} {w:.2f} {h:.2f} re f")
+
+    def mark(self) -> int:
+        """Index into the current page's op list, for `rect_behind`."""
+        return len(self._page_ops)
+
+    def rect_behind(self, at: int, x: float, y: float, w: float, h: float,
+                    hexcolor: str) -> None:
+        """Draw a rect UNDER content already emitted, by splicing it in at *at*.
+
+        PDF paints in stream order, so a block's background cannot simply be appended —
+        it would cover the text. It also cannot be drawn up front, because the block's
+        height is only known once its lines have been laid out and wrapped. Recording the
+        position with `mark()` and splicing here is the one way to get both. Callers must
+        check `page_epoch` first: a block that straddled a page break left its `at` in a
+        page that has already been serialized."""
+        r, g, b = _hex_to_rgb01(hexcolor)
+        self._page_ops.insert(
+            at, f"{r:.3f} {g:.3f} {b:.3f} rg\n{x:.2f} {y:.2f} {w:.2f} {h:.2f} re f")
 
     def line(self, text: str, *, size: float = 10, bold: bool = False,
               color: str | None = None, indent: float = 0.0, gap_before: float = 0.0,
@@ -324,6 +366,29 @@ class _PageFlow:
         nothing leaks into the text that follows."""
         self._page_ops.append(op)
 
+    def draw_logo(self, x: float, y: float, size: float) -> None:
+        """Draw the brand mark in a *size*-point square whose bottom-left is (x, y).
+
+        The mark is `brand.FAVICON_DATA_URI` — the SAME raster the HTML report and the
+        favicon use. It used to be a hand-redrawn copy of `brand.LOGO_SVG`, which brand.py
+        labels PROVISIONAL, so the PDF and the HTML export of one run showed two different
+        logos. Colour is the image's own; the alpha channel rides as an /SMask so the mark
+        keeps its shape over the BRAND_RED band instead of arriving in a box."""
+        if self._logo_xobj is None:
+            w, h, rgb, alpha = _png_rgba(base64.b64decode(FAVICON_DATA_URI.split(",", 1)[1]))
+            def _image(data: bytes, colorspace: str, extra: str = "") -> int:
+                comp = zlib.compress(data, 9)
+                head = (
+                    f"<< /Type /XObject /Subtype /Image /Width {w} /Height {h} "
+                    f"/ColorSpace /{colorspace} /BitsPerComponent 8 /Filter /FlateDecode"
+                    f"{extra} /Length {len(comp)} >>\nstream\n"
+                ).encode("ascii")
+                return self._doc.add_object(head + comp + b"\nendstream")
+            smask = _image(alpha, "DeviceGray")
+            self._logo_xobj = _image(rgb, "DeviceRGB", f" /SMask {smask} 0 R")
+        self._page_ops.append(
+            f"q {size:.2f} 0 0 {size:.2f} {x:.2f} {y:.2f} cm /Im1 Do Q")
+
     def text_abs(self, x: float, y: float, text: str, size: float, *,
                  bold: bool = False, rgb: tuple = (0.0, 0.0, 0.0)) -> None:
         """Draw one line of text at an ABSOLUTE (x, y) baseline — no wrapping, no y-advance,
@@ -355,6 +420,72 @@ _STATUS_HEX = {status: GRADE_HEX["F"] for status in FAIL_WEIGHT_STATUSES}
 _STATUS_HEX.update({WARN: GRADE_HEX["C"], PASS: GRADE_HEX["B"], UNKNOWN: "#9f9f9f"})
 
 
+def _png_rgba(data: bytes) -> tuple:
+    """Decode an 8-bit RGBA, non-interlaced PNG to ``(w, h, rgb_bytes, alpha_bytes)``.
+
+    Stdlib only (`zlib` plus the filter reconstruction below) because the project takes no
+    runtime dependency, and PDF cannot consume a PNG directly: it wants raw samples, and
+    the alpha channel has to travel separately as an /SMask. Deliberately narrow — it
+    accepts exactly the shape `brand.FAVICON_DATA_URI` is (checked, not assumed) and
+    raises on anything else rather than guessing, since a silently mis-decoded logo would
+    render as noise on every page-one header we ship.
+    """
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    pos, idat, ihdr = 8, [], None
+    while pos < len(data):
+        ln = struct.unpack(">I", data[pos:pos + 4])[0]
+        typ = data[pos + 4:pos + 8]
+        if typ == b"IHDR":
+            ihdr = struct.unpack(">IIBBBBB", data[pos + 8:pos + 8 + ln])
+        elif typ == b"IDAT":
+            idat.append(data[pos + 8:pos + 8 + ln])
+        elif typ == b"IEND":
+            break
+        pos += 12 + ln
+    if ihdr is None:
+        raise ValueError("PNG has no IHDR")
+    w, h, depth, ctype, _comp, _filt, interlace = ihdr
+    if (depth, ctype, interlace) != (8, 6, 0):
+        raise ValueError(f"unsupported PNG: depth={depth} colortype={ctype} interlace={interlace}")
+    bpp, stride = 4, w * 4
+    raw = zlib.decompress(b"".join(idat))
+    flat = bytearray(h * stride)
+    prev = bytearray(stride)
+    p = 0
+    for row in range(h):
+        ft = raw[p]
+        cur = bytearray(raw[p + 1:p + 1 + stride])
+        p += 1 + stride
+        if ft == 1:                                     # Sub
+            for i in range(bpp, stride):
+                cur[i] = (cur[i] + cur[i - bpp]) & 0xFF
+        elif ft == 2:                                   # Up
+            for i in range(stride):
+                cur[i] = (cur[i] + prev[i]) & 0xFF
+        elif ft == 3:                                   # Average
+            for i in range(stride):
+                left = cur[i - bpp] if i >= bpp else 0
+                cur[i] = (cur[i] + ((left + prev[i]) >> 1)) & 0xFF
+        elif ft == 4:                                   # Paeth
+            for i in range(stride):
+                a = cur[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                cur[i] = (cur[i] + pr) & 0xFF
+        elif ft != 0:
+            raise ValueError(f"bad PNG filter {ft}")
+        flat[row * stride:(row + 1) * stride] = cur
+        prev = cur
+    rgb, alpha = bytearray(w * h * 3), bytearray(w * h)
+    for i in range(w * h):
+        rgb[i * 3:i * 3 + 3] = flat[i * 4:i * 4 + 3]
+        alpha[i] = flat[i * 4 + 3]
+    return w, h, bytes(rgb), bytes(alpha)
+
+
 def _circle_path(cx: float, cy: float, r: float) -> str:
     """Four cubic-bezier arcs approximating a full circle (PDF has no arc primitive).
     Path-construction ops only (no paint op) — the caller appends ``S`` (stroke) or
@@ -380,27 +511,6 @@ def _quad_to_cubic_path(p0, ctrl, p1) -> str:
             f"{c1x:.2f} {c1y:.2f} {c2x:.2f} {c2y:.2f} {x1:.2f} {y1:.2f} c")
 
 
-def _logo_ops(x0: float, y0: float, size: float, rgb=(1.0, 1.0, 1.0)) -> str:
-    """`brand.LOGO_SVG` rendered as native PDF path ops, in *rgb*, inside a *size*-point
-    box whose bottom-left is (x0, y0): a ring, two claw arcs and a centre dot — the same
-    geometry as the SVG, drawn white for the BRAND_RED header band. SVG is y-down, PDF is
-    y-up, so every point is flipped through (64 - sy). Wrapped in q/Q so its colour and
-    line-width never leak into later content."""
-    s = size / 64.0
-
-    def _p(sx, sy):
-        return (x0 + sx * s, y0 + (64.0 - sy) * s)
-
-    r, g, b = rgb
-    out = [f"q {r:.3f} {g:.3f} {b:.3f} RG {r:.3f} {g:.3f} {b:.3f} rg 1 J 1 j"]
-    out.append(f"{2.6 * s:.2f} w " + _circle_path(*_p(32, 32), 29.0 * s) + " S")
-    out.append(f"{4.0 * s:.2f} w " + _quad_to_cubic_path(_p(20, 24), _p(13, 32), _p(20, 40)) + " S")
-    out.append(_quad_to_cubic_path(_p(44, 24), _p(51, 32), _p(44, 40)) + " S")
-    out.append(_circle_path(*_p(32, 32), 5.0 * s) + " f")
-    out.append("Q")
-    return "\n".join(out)
-
-
 def _draw_header(flow: "_PageFlow", version: str) -> None:
     """The BRAND_RED header band (page 1): full-bleed rectangle + white logo mark +
     wordmark + subtitle + version. Sets `flow.y` to just below the band so the body
@@ -409,7 +519,7 @@ def _draw_header(flow: "_PageFlow", version: str) -> None:
     band_h = 74.0
     flow.rect(0.0, _PAGE_H - band_h, _PAGE_W, band_h, BRAND_RED)
     logo_sz = 36.0
-    flow.raw(_logo_ops(_MARGIN, _PAGE_H - band_h / 2.0 - logo_sz / 2.0, logo_sz, (1.0, 1.0, 1.0)))
+    flow.draw_logo(_MARGIN, _PAGE_H - band_h / 2.0 - logo_sz / 2.0, logo_sz)
     tx = _MARGIN + logo_sz + 14.0
     flow.text_abs(tx, _PAGE_H - 34.0, WORDMARK, 19, bold=True, rgb=(1.0, 1.0, 1.0))
     flow.text_abs(tx, _PAGE_H - 50.0, "Security Audit Report", 10.5, rgb=(1.0, 0.86, 0.83))
@@ -435,7 +545,9 @@ def _draw_chips(flow: "_PageFlow", sev_counts: dict) -> None:
         flow.rect(x, y - 15.0, w, 15.0, style.hex if style else "#999999")
         flow.text_abs(x + 7.0, y - 11.0, text, 9, bold=True, rgb=(1.0, 1.0, 1.0))
         x += w + 6.0
-    flow.y = y - 15.0 - 8.0
+    # Same baseline arithmetic as the section header: 8.0 left 1.88pt between the chips
+    # and the population sentence under them.
+    flow.y = y - 15.0 - 14.0
 
 
 def _draw_subject_summary(flow: "_PageFlow", rows) -> None:
@@ -465,7 +577,12 @@ def _draw_section_header(flow: "_PageFlow", text: str) -> None:
     flow.rect(_MARGIN, y - 17.0, _CONTENT_W, 19.0, "#f4efe9")
     flow.rect(_MARGIN, y - 17.0, 3.0, 19.0, BRAND_RED)
     flow.text_abs(_MARGIN + 11.0, y - 13.0, text, 12, bold=True, rgb=(0.16, 0.16, 0.16))
-    flow.y = y - 17.0 - 8.0
+    # `flow.y` is a BASELINE, so the drop below the band has to clear the next line's
+    # ascender before any visible gap begins. At 8.0 it cleared exactly the ascender of
+    # the 11pt finding title that follows and nothing more: measured on a real report, the
+    # band's bottom edge sat 0.05pt above the glyph tops, i.e. the heading and the first
+    # finding touched — on every section, on every page. 16.0 leaves ~8pt of daylight.
+    flow.y = y - 17.0 - 16.0
 
 
 def _draw_subject_header(flow: "_PageFlow", label: str, n: int) -> None:
@@ -515,6 +632,7 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
     flow.ensure_space(3 * 12 * 1.35)
     bar_y_top = flow.y
     start_epoch = flow.page_epoch
+    bg_at = flow.mark()
     flow.line(f"[{status_word}] {f.id}: {_sanitize(f.title)}", size=11, bold=True, gap_after=1.0)
     flow.line(f"Severity: {f.severity}", size=9, color=sev_hex, gap_after=2.0)
     if f.detail:
@@ -526,7 +644,22 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
     # text content itself is never affected either way (see `_PageFlow.line`'s own
     # per-line `ensure_space`, which is what actually guarantees nothing is lost).
     if flow.page_epoch == start_epoch:
-        flow.rect(_MARGIN - 8, flow.y, 2.2, bar_y_top - flow.y, sev_hex)
+        # Status has to carry its own weight, not ride on a word. The accent bar takes its
+        # colour from SEVERITY, so a HIGH FAIL and a HIGH WARN were the same block with a
+        # different first word — the same defect measured and fixed in the HTML report,
+        # and leaving it here would put the two artifacts of one run back out of step.
+        # A failure is tinted and its rule is thicker; a warning keeps the plain page.
+        is_fail = f.status in FAIL_WEIGHT_STATUSES
+        if is_fail:
+            # `bar_y_top` and `flow.y` are BASELINES, so the tint has to reach above the
+            # first line's ascender and below the last line's descender to look like a
+            # panel rather than a band clipped through the text. The top padding is also
+            # what separates consecutive failures: at more than the 6pt inter-finding
+            # spacer, neighbouring tints overlap and a run of failures reads as one
+            # undivided smear instead of several findings.
+            flow.rect_behind(bg_at, _MARGIN - 10, flow.y + 7.5, _CONTENT_W + 12.0,
+                             bar_y_top - flow.y + 2.0, _tint(sev_hex, 0.12))
+        flow.rect(_MARGIN - 8, flow.y, 4.0 if is_fail else 2.2, bar_y_top - flow.y, sev_hex)
     flow.spacer(6.0)
 
 
