@@ -82,6 +82,24 @@ result was not a crash — it was a clean verdict over ground the tool no longer
 - **Coverage is reported**: how much of the catalog reached no verdict, and why.
 - **The AI-BOM lists installed plugins** and names each skill's supplier.
 
+### Changed
+
+- **`--html` report.** Failed findings are now visually distinct from warnings. The card tint
+  used to carry *severity*, which meant a HIGH FAIL and a HIGH WARN differed by 4-6 of 255 in
+  each colour channel — a difference that existed in the stylesheet and not in anyone's eye —
+  leaving a small glyph as the only thing telling them apart. The tint now carries *status*;
+  severity keeps the pill and the rule colour it already had. Header prose is set in one reading
+  measure instead of centred at a width that broke its own sentences into four ragged lines;
+  subject headings outrank the card titles beneath them; and the jump list stays pinned while you
+  read a long list. The page now also prints correctly — printing from a machine set to dark mode
+  produced light ink on white paper, and severity pills printed white-on-white.
+- **`--pdf` report.** The PDF now carries the same mark as the HTML report and the favicon; it had
+  been drawing a provisional placeholder as hand-converted path operations, so the two exports of
+  one run showed different logos. Section headings no longer print on top of the finding beneath
+  them — measured, the heading band sat 0.08pt above the glyph tops of the first finding's title,
+  in every section on every page. And a failed finding is now visually distinct from a warning of
+  the same severity, as in the HTML report.
+
 ### Security
 
 - **A confirmed zip-slip is no longer read as clean, anywhere.** One installed skill shipping
