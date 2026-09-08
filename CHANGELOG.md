@@ -3,6 +3,32 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.0.1] — 2026-09-09
+
+**4.0.0 is 4.0.1.** Nothing in the tool changed between them. 4.0.0 was tagged and never
+reached ClawHub: its publish stopped on a defect in the publish pipeline itself, and the
+tag protecting releases — correctly — will not let a tag be moved onto the fix. So the
+release ships under the next patch number. Everything in the 4.0.0 entry below applies,
+and it is the entry to read.
+
+### Fixed
+
+- **The publish preflight read `SKILL.md`'s own anti-link warning as a broken link.** It
+  extracted markdown links with a bare pattern over the raw file, and `SKILL.md` has to
+  SHOW the syntax it forbids — a fenced example of a link to a local path — in order to
+  warn the agent never to write one. The illustration was read as a dangling link and the
+  bundle was refused before anything was uploaded.
+
+  The same defect had already been found and fixed on the other side of this contract, in
+  the static test that checks the same links: it strips fenced blocks and inline code spans
+  before extracting. The publish-time twin never got that treatment, and the test built to
+  keep the two in step compared only how they *normalise* a link target — never what they
+  *extract*. They agreed on every rule they were compared on. Both halves are fixed, and
+  the comparison now covers extraction too.
+
+  User-visible effect: none. The staged bundle excludes `tests/` and `.github/`, so the
+  artifact published here is byte-for-byte the one 4.0.0 would have published.
+
 ## [4.0.0] — 2026-09-08
 
 Every run used to print a letter. It should not have: a run that skipped the
