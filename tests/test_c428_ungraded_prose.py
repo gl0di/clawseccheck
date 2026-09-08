@@ -157,3 +157,52 @@ def test_the_do_not_redraw_instruction_survives_both_branches():
         why = {a.id: a for a in suggest_actions(FINDINGS, score)}["share_grade"].why
         assert "do not redraw" in why
         assert "attach grade.svg itself" in why
+
+
+# ── the graded branch's COMMAND, which C-428 did not reach ───────────────────
+#
+# C-428 corrected the ungraded branch's prose and stopped there. The graded
+# branch kept promising "Share your grade" over a bare `--badge grade.svg`,
+# which per B-586 never honours `--full` on its own: it opens a fresh, ungraded
+# audit. Measured end to end on fixtures/home_safe — a run that printed
+# "Grade A · 96/100" told the user to run that command, and the SVG it wrote
+# carried aria-label="OpenClaw Security: no grade yet".
+#
+# The command stays runnable (a suggestion the agent is told to run must not be
+# a placeholder), so the promise around it is what has to be true.
+
+def _share(score):
+    return {a.id: a for a in suggest_actions(FINDINGS, score)}["share_grade"]
+
+
+def test_graded_share_step_admits_the_bare_command_carries_no_grade():
+    why = _share(_graded()).why
+    assert "would not carry this grade" in why
+    assert "add `--badge grade.svg` to the same command that produced it" in why
+
+
+def test_graded_share_step_does_not_quote_the_ungraded_badge_text():
+    """tests/test_b604_dashboard_next_actions.py discriminates graded from ungraded
+    by this phrase. Saying the bare command cannot carry the grade must not be done
+    by quoting the ungraded badge, which would make the two blocks read alike."""
+    assert "no grade" not in _share(_graded()).why.lower()
+
+
+def test_graded_share_step_keeps_the_privacy_promise():
+    """The load-bearing sentence C-428 protected must survive this correction."""
+    why = _share(_graded()).why
+    assert "never your findings" in why
+
+
+def test_graded_share_step_command_stays_runnable_as_written():
+    """No placeholder may reach a line the skill tells an agent to run."""
+    cmd = _share(_graded()).command
+    assert "--badge grade.svg" in cmd
+    for placeholder in ("<", ">", "YOUR", "..."):
+        assert placeholder not in cmd
+
+
+def test_ungraded_share_step_is_untouched_by_the_graded_correction():
+    why = _share(_ungraded()).why
+    assert "This run has no grade" in why
+    assert "add `--badge grade.svg` to the same command" not in why

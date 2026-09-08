@@ -184,7 +184,23 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
             # "this run has no grade". The privacy promise is load-bearing, so it is
             # reworded to what the badge actually contains (measured: its only text nodes
             # are "OpenClaw Security" and "no grade yet"), never dropped.
-            ("Only the grade + score is shared, never your findings. " if graded else
+            #
+            # C-428 fixed the ungraded branch's PROSE and left the graded branch's
+            # COMMAND promising what it cannot deliver. A grade needs all five layers,
+            # and per B-586 an export never honours `--full` on its own — it rides the
+            # run that genuinely completed those layers. So the bare command below opens
+            # a NEW, ungraded audit: on a run that had just earned "Grade A · 96/100" it
+            # wrote aria-label="OpenClaw Security: no grade yet" (measured). Telling a
+            # user to share the grade they just earned, with a command that cannot carry
+            # it, is worse than saying nothing.
+            # The wording deliberately does not quote the ungraded badge's own text
+            # here: tests/test_b604_dashboard_next_actions.py discriminates the two
+            # blocks by that phrase, and it is right to — a graded block that quotes
+            # it reads like an ungraded one to a user skimming.
+            ("Only the grade + score is shared, never your findings. As written this "
+             "command starts a fresh audit that will not complete all five layers, so "
+             "its badge would not carry this grade — add `--badge grade.svg` to the "
+             "same command that produced it. " if graded else
              "This run has no grade, so the badge reads \"no grade yet\" — that phrase "
              "is the whole of what it carries. Your findings are never in it. ")
             + "This writes a real SVG file — attach grade.svg itself, do not redraw "
