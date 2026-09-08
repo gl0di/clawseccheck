@@ -1,11 +1,32 @@
-"""B333 (F-143/W2.1) — MCP tool safety-hint annotations declared but not enforced.
+"""B333 (F-143/W2.1) — MCP tool safety-hint annotations, on the build that ignores them.
 
-Grounded against dist openclaw@2026.7.1-2 (2026-07-25): when OpenClaw registers an MCP
-tool it stores exactly {serverName, safeServerName, toolName, title, description,
-inputSchema, fallbackDescription} — `annotations` is NEVER stored. readOnlyHint /
-destructiveHint / openWorldHint / idempotentHint exist only in the
-@modelcontextprotocol/sdk vendor .d.ts types (compile-time only); OpenClaw's runtime
-never reads them.
+Scoped to the LEGACY leg since B-706: these cases run with no installed version resolved, so
+they take the 2026.7.x reading, where the annotations really were inert. The 2026.8.1 leg —
+where OpenClaw reads them and a server's own `readOnlyHint: true` waives its approval gate —
+lives in tests/test_b706_codex_annotations_enforced.py.
+
+
+BUILD RANGE THIS MODULE'S CLAIM HOLDS FOR: openclaw <= 2026.7.x. It is FALSE from
+2026.8.1 onward, and the machine this suite usually runs on is well past that (2026.9.1
+at the time of writing). Everything in the next paragraph is therefore stated in the past
+tense on purpose — read as a present-tense fact about OpenClaw it is simply wrong, and
+that is exactly the standing false claim C-483 was filed to remove.
+
+Grounded against dist openclaw@2026.7.1-2 (2026-07-25): when that build registered an MCP
+tool it stored exactly {serverName, safeServerName, toolName, title, description,
+inputSchema, fallbackDescription} — `annotations` was never stored. readOnlyHint /
+destructiveHint / openWorldHint / idempotentHint existed only in the
+@modelcontextprotocol/sdk vendor .d.ts types (compile-time only), so that build's runtime
+never read them and a server declaring destructiveHint:true got zero behavioral effect.
+From 2026.8.1 BOTH halves are false: the runtime stores the annotations and honours
+`readOnlyHint: true` as a waiver of its own approval gate. See `checks/_mcp.py`'s B333
+comment for the dist grounding of the newer leg.
+
+What keeps these cases on the legacy leg is the CONTEXT, not the installed dist: they
+build a Context with a home that does not exist, so no version resolves and the check
+takes its 2026.7.x reading. That is worth knowing before editing them -- give one of
+these contexts a resolvable version and it moves to the other leg, which would look
+like the assertions breaking rather than like the fixture changing meaning.
 
 WARN    — a config-embedded (source == "manifest") tool declares one of the four hint
           keys. This is a host limitation, not server wrongdoing — the wording must say
@@ -126,9 +147,13 @@ def test_b333_warn_manifest_source_destructive_hint():
     assert f.status == WARN
     assert "files-mcp" in "".join(f.evidence)
     assert "delete_file" in "".join(f.evidence)
-    # The exact wording constraint from the spec: state the host fact, never accuse the
-    # server of lying.
-    assert "OpenClaw does not read destructiveHint" in f.detail
+    # The wording constraint from the spec is about the CLAIM, not the sentence: state the
+    # host fact, never accuse the server of lying. B-706 qualified the subject ("this
+    # OpenClaw build" rather than "OpenClaw"), because 2026.8.1 DOES read these — pinning
+    # the old phrasing verbatim would have made a true correction look like a regression.
+    assert "does not read destructiveHint/readOnlyHint" in f.detail
+    assert "not enforced" in f.detail
+    assert "lie" not in f.detail.lower()
     assert "readOnlyHint" in f.detail
     assert "lie" not in f.detail.lower()
     assert "lied" not in f.detail.lower()
@@ -176,7 +201,7 @@ def test_b333_clean_fixture_passes():
 def test_b333_bad_fixture_warns():
     f = check_mcp_unenforced_annotations(collect(FIXTURES / "bad_b333_mcp_annotation_ignored"))
     assert f.status == WARN
-    assert "OpenClaw does not read destructiveHint" in f.detail
+    assert "does not read destructiveHint/readOnlyHint" in f.detail
 
 
 def test_b333_registered_in_audit():

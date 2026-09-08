@@ -134,22 +134,34 @@ def test_chain_legacy(tmp_path: Path) -> None:
 
 
 def test_chain_empty(tmp_path: Path) -> None:
-    """Empty file verifies as OK."""
+    """An empty file is the THIRD outcome, not OK (B-589).
+
+    This test previously read "Empty file verifies as OK" and pinned exactly the lying
+    PASS the verifier existed to prevent: truncating the journal to zero bytes passed the
+    tamper check. It is neither intact nor tampered — there is no chain here.
+    """
     journal = tmp_path / "events.jsonl"
     journal.write_text("", encoding="utf-8")
     journal.chmod(0o600)
 
     ok, msg = verify_chain(journal)
-    assert ok is True
-    assert msg == "OK"
+    assert ok is None
+    assert "OK" not in msg
+    assert msg == "no chain here \u2014 the file is empty"
 
 
 def test_chain_absent_file(tmp_path: Path) -> None:
-    """Missing file verifies as OK (no journal yet)."""
+    """A missing file is the THIRD outcome, not OK (B-589).
+
+    ``rm events.jsonl`` is the crudest tampering there is and it used to verify clean.
+    Not (False, ...) either: a genuine first run has no journal yet, and reporting that as
+    tampering sends the user hunting an intruder who is not there (F-173).
+    """
     journal = tmp_path / "no_such_file.jsonl"
     ok, msg = verify_chain(journal)
-    assert ok is True
-    assert msg == "OK"
+    assert ok is None
+    assert "OK" not in msg
+    assert msg == "no chain here \u2014 the file does not exist"
 
 
 def test_chain_legacy_then_new(tmp_path: Path) -> None:

@@ -76,63 +76,68 @@ from ..textnorm import (
 # via the aggregator (CLAUDE.md §3.1-a: no __all__ here).
 from . import _shared
 from ._shared import (
-    _is_posix,
-    _perms_loose,
-    LOOPBACK,
-    _LoopbackHostSet,
-    _loopback_ip,
-    EXPOSED_BINDS,
-    parse_bind_host,
     # B-288: root-`hooks` session-key/agent-routing policy family + the gateway
     # remote-exposure label RISK-20 composes it with.
+    _active_channels,
+    _agent_is_powerful,
+    _agent_legs,
+    _bind_mode_is_ro,
+    _canon_tool,
     _canonical_ipv4,
+    _channel_has_implicit_default_account,
+    _channels,
+    _channels_with_context_visibility_all,
+    _config_unreadable,
+    _CRED_RE,
+    _DESTRUCTIVE_HINTS,
+    _enabled_tools,
+    _EXFIL_RE,
+    EXPOSED_BINDS,
+    _external_input_channels,
+    _finding,
     _gateway_remote_exposure_reason,
+    _has_approval_gate,
+    _hint,
     _hooks_agent_ids_unrestricted,
     _hooks_allowed_session_key_prefixes,
     _hooks_session_key_exposures,
-    SECRET_KEY_RE,
-    SECRET_PATTERNS,
-    _CRED_RE,
-    _EXFIL_RE,
-    _KNOWN_EXFIL_HOST_RE,
-    _SECRET_PATH_RE,
-    INPUT_TOOL_HINTS,
-    SENSITIVE_TOOL_HINTS,
-    OUTBOUND_TOOL_HINTS,
-    _meta,
-    _finding,
-    _config_unreadable,
-    _surface_absent,
-    _skill_corpus_complete,
-    _channels,
-    _UNTRUSTED_INPUT_POLICIES,
-    _norm_group_policy,
     _IMPLICIT_DEFAULT_ACCOUNT_KEYS,
-    _channel_has_implicit_default_account,
-    _open_channels,
-    _external_input_channels,
-    _channels_with_context_visibility_all,
-    _MAX_WALK_DEPTH,
+    INPUT_TOOL_HINTS,
+    _is_own_source,
+    _is_posix,
+    _is_public_ip,
     _is_secret_reference,
-    _secret_paths,
-    _enabled_tools,
-    _hint,
+    _KNOWN_EXFIL_HOST_RE,
+    _LEG_KEYS,
+    LOOPBACK,
+    _loopback_ip,
+    _LoopbackHostSet,
+    _MAX_WALK_DEPTH,
+    _meta,
+    _norm_group_policy,
+    _open_channels,
+    OUTBOUND_TOOL_HINTS,
+    _OWN_ENGINE_MARKERS,
+    parse_bind_host,
+    _perms_loose,
     _POWERFUL_PROFILES,
     _profile_is_powerful,
     _real_exec_enabled,
-    _web_fetch_enabled,
-    _active_channels,
-    _untrusted_input_channels,
-    _agent_legs,
-    _LEG_KEYS,
-    _has_approval_gate,
-    _is_public_ip,
-    _OWN_ENGINE_MARKERS,
-    _is_own_source,
-    _DESTRUCTIVE_HINTS,
-    _agent_is_powerful,
-    _TIER_NAME,
+    _resolve_sandbox_scope,
     _safe_mtime,
+    _sandbox_has_writable_bind,
+    SECRET_KEY_RE,
+    _SECRET_PATH_RE,
+    _secret_paths,
+    SECRET_PATTERNS,
+    SENSITIVE_TOOL_HINTS,
+    _skill_corpus_complete,
+    _surface_absent,
+    _TIER_NAME,
+    _unclassified_leg_verbs,
+    _untrusted_input_channels,
+    _UNTRUSTED_INPUT_POLICIES,
+    _web_fetch_enabled,
 )
 
 from ._shared import (_plugins,)
@@ -159,7 +164,7 @@ from ._host import (
 )
 
 from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_tool_texts, _mcp_url_is_local, _read_jsonl_tail, correlation_indicators, _CORR_INDICATOR_CAP,)
-from ._shared import (_MCP_DATA_CAP_RE, _MCP_FS_PKG_RE, _MCP_BROAD_FS_ROOTS, _mcp_fs_root_is_broad, _mcp_sensitive_reason, _mcp_leg_contributions,)
+from ._shared import (_key_advice, _openclaw_generation, _retired_key_note, _MCP_DATA_CAP_RE, _MCP_FS_PKG_RE, _MCP_BROAD_FS_ROOTS, _mcp_fs_root_is_broad, _mcp_sensitive_reason, _mcp_leg_contributions, _node_commands,)
 from ._shared import (_MCP_INTAKE_CAP_RE, _mcp_intake_reason,)
 # B-297: the wildcard-group ingress predicate — risk.py's ingress leg reaches it only
 # through this aggregator (CLAUDE.md §3.1-a), never by importing a topic module.
@@ -200,7 +205,22 @@ from ._egress import (
     check_webfetch_redirects,
 )
 
-from ._shared import (_trifecta_legs,)
+from ._shared import (_trifecta_legs, _trifecta_leg_sources,)  # B-493
+from ._shared import (  # C-462
+    _FS_GOVERNED_TOOL_IDS,
+    _fs_reads_are_confined,
+)
+from ._shared import (  # B-667
+    SENSITIVE_TOOL_IDS,
+    _attested_tool_id_sources,
+    _tool_id_sources,
+)
+from ._shared import (  # B-666
+    _CRED_STORE_MAX_BYTES,
+    _CRED_STORE_MAX_FILES,
+    _CRED_STORE_MAX_NAMES,
+    _credential_store_state,
+)
 from ._shared import (_unpolicied_open_wildcard_group_channels,)  # B-371
 from ._agents import (
     _B21_OBEY_RE,
@@ -229,15 +249,25 @@ from ._agents import (
 )
 
 from ._capability import (
+    _b352_effective_prepends,
+    _b352_risky,
+    check_exec_path_prepend,
+    _b351_normalize_agent_id,
+    _b351_resolvable_agents,
+    _b351_enabled,
+    _b351_raw_code_mode,
+    check_code_mode_tool_surface,
     _AUTO_GATE_BLAST,
     _B31_BYPASS_CANDIDATES,
     _B31_WRITE_CLASS,
+    _B55_FS_WRITE_TOOLS,
     _B71_INEFFECTIVE_RE,
     _FS_WRITE_TOOL_HINTS,
     _ToolPolicyView,
     _agent_profile_widenings,
     _approval_bypass_actors,
     _b31_collect_deny_lists,
+    _b55_write_tools_granted,
     _b68_fs_tools_granted,
     _has_heartbeat_signal,
     _tool_policy_view,
@@ -262,6 +292,8 @@ from ._config import (
     _C015_TEXT_EXTS,
     _DANGER_AGENT_SANDBOX,
     _DANGER_FIXED,
+    _is_owner_wildcard_allow_from,
+    _DANGER_FIXED_2026_8_1,
     _MISSING_LEG_ACTIVATORS,
     _c015_candidate_files,
     _c015_has_secret,
@@ -271,6 +303,7 @@ from ._config import (
     _meaningful_tool_surface,
     _model_names,
     _multi_agent_note,
+    _persistence_note,
     _net_is_private,
     _pattern_hits_real_secret,
     _peragent_sandbox_evidence,
@@ -290,6 +323,7 @@ from ._config import (
     check_dangerous_overrides,
     check_effective_bind,
     check_gateway,
+    check_gateway_operator_terminal,
     check_gateway_rate_limit,
     check_hook_template_content,
     check_hooks_enable_toggles,
@@ -706,6 +740,7 @@ from ._vet import (
     _url_matches_own_host,
     check_installed_skills,
     detect_vet_type,
+    detect_vet_type_with_reason,
     resolve_skill_target,
     vet_skill,
     vet_source,
@@ -783,6 +818,17 @@ from ._mcp import (
     _b332_is_generic,
     _b332_unique_names,
     _b333_hinted_tool_names,
+    _b333_modern_surface_verdict,
+    _b333_waived_tool_names,
+    _mcp_codex_annotations,
+    _mcp_codex_approval_mode,
+    _mcp_codex_is_loopback_server,
+    _mcp_codex_normalize_mode,
+    _mcp_codex_requires_approval,
+    _mcp_is_per_requester,
+    _mcp_normalize_tool_filter,
+    _mcp_tool_allowed,
+    _mcp_tool_filter_matches,
     _b333_surface_verdict,
     _host_sanitize_simulated,
     _load_mcp_spec_file,
@@ -806,6 +852,7 @@ from ._mcp import (
     check_mcp_server_exfil_host_in_args,
     check_mcp_tool_inheritance,
     check_mcp_tool_name_shadowing,
+    check_mcp_codex_preapproved_tools,
     check_mcp_unenforced_annotations,
     check_plugin_app_server_command,
     check_plugin_clawhub_trust,
@@ -990,7 +1037,13 @@ _B30_PROVIDERS_WITH_NAME_MATCH = ("discord", "slack")
 # browser.ssrfPolicy.dangerouslyAllowPrivateNetwork (bool) — lets the agent browser
 # reach internal/metadata IPs (cloud-credential theft via 169.254.169.254).
 # browser.noSandbox (bool) — browser runs without OS sandbox.
-# browser.ssrfPolicy.hostnameAllowlist (array) — restrict outbound browser targets.
+# browser.ssrfPolicy.allowedHostnames (array) — restrict outbound browser targets.
+#   B-515: the installed dist honours TWO sibling keys under ssrfPolicy and merges
+#   them at runtime — allowedHostnames (current) and hostnameAllowlist (which the
+#   vendor itself labels legacy/alternate). B38 reads BOTH and combines them, so an
+#   allowlist counts as present when EITHER holds a non-empty list; keying on the
+#   legacy field alone warned at operators who had configured the current one.
+#   See check_browser_ssrf in checks/_egress.py.
 # browser.headless (bool) — informational; headless adds stealth but not a FAIL alone.
 
 
@@ -1213,6 +1266,8 @@ _B26_SAFE_VALUES = frozenset({"allowlist", "allowlist_quote"})
 
 # ---------------------------------------------------------------------------
 # SKILL_CONTENT_RING — single source of truth for content-security ring checks.
+# Defined in checks/_vet.py, imported above, spliced into CHECKS below. This block
+# explains it; the tuple itself is not here.
 #
 # Most of these read ctx.installed_skills (and optionally ctx.bootstrap,
 # ctx.installed_skill_py, ctx.effect_profiles) and are therefore meaningful
@@ -1256,7 +1311,8 @@ CHECKS = [
     check_mcp_hardening,
     check_mcp_external_endpoint,
     check_mcp_server_exfil_host_in_args,
-    check_mcp_unenforced_annotations,  # B333 — declared MCP annotations OpenClaw never reads (F-143/W2.1)
+    check_mcp_unenforced_annotations,  # B333 — MCP safety-hint annotations, per build (F-143/W2.1)
+    check_mcp_codex_preapproved_tools,  # B353 — MCP server pre-approves every tool (F-185)
     check_mcp_host_sanitizer_gap,  # B331 — MCP tool-description injection past the host sanitizer (F-144/W2.2)
     check_mcp_tool_name_shadowing,  # B332 — cross-server tool-name collision/homoglyph/near-miss (F-145/W2.3)
     check_proxy_header_forging,
@@ -1315,8 +1371,11 @@ CHECKS = [
     check_cron_run_log_orphans,  # B189 — cron run log without a surviving job definition (B-294)
     check_exec_approvals_grants,  # B172 — standing exec-approvals.json allow-always grant inventory (B-236)
     # Content-security ring — single source of truth (also consumed by vet_skill).
-    # SKILL_CONTENT_RING is defined just above; changing it updates both the full audit
-    # and the --vet path so they can never drift apart.
+    # SKILL_CONTENT_RING is DEFINED in checks/_vet.py and imported at the top of this
+    # file; the block above documents it, it does not declare it. Splicing it here is
+    # what keeps the full audit and the --vet path from drifting apart.
+    # (Said precisely because the earlier wording — "defined just above" — sent a reader
+    # looking for the tuple in this file, where it is not.)
     *SKILL_CONTENT_RING,
     # B105 — cross-skill Signal-A/Signal-B combined effect (B-096). Deliberately OUTSIDE
     # SKILL_CONTENT_RING: it correlates across ctx.installed_skills, which only ever has
@@ -1336,6 +1395,15 @@ CHECKS = [
     check_session_approval_policy,
     check_gateway_rate_limit,
     check_effective_bind,  # B340 — corroborate declared gateway.bind against the actual listening socket (F-156)
+    # B350 — the gateway operator terminal: a PTY-backed shell carrying the gateway
+    # process environment, served to Control UI and mobile clients. WARN-only.
+    check_gateway_operator_terminal,
+    # B351 — code mode: the model is handed exec+wait over a catalog bridge instead of
+    # the ordinary tool surface. Walks agents.list, which can enable it independently.
+    check_code_mode_tool_surface,
+    # B352 — tools.exec.pathPrepend: what OpenClaw exports ahead of $PATH for every
+    # exec run. Skips scopes where host=node, which the runtime ignores.
+    check_exec_path_prepend,
     check_subagent_spawn_limits,
     check_cachetrace_redaction,
     # B-281/B-282 (ENV-1/ENV-6): is the audited file the one the agent loads, and is a

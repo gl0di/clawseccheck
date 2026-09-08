@@ -793,7 +793,14 @@ def test_b68_fs_tools_granted_widening_intersects_a_real_global_allowlist():
         "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},
     }
     granted, enumerable = _b68_fs_tools_granted(cfg)
-    assert granted == ["read"]
+    # B-668/S3: was `== ["read"]`. The C-135 finding this test was built for STANDS —
+    # `write` is genuinely denied and is not in the list. What the assertion also claimed,
+    # and should not have, is that nothing else survives. Executing the installed 2026.9.1
+    # `resolveConfiguredToolPolicies` + `isToolAllowedByPolicies` for scope `coder` returns
+    # ["read", "apply_patch"]: `allow:["write"]` expands to imply `apply_patch`, and
+    # `deny:["write"]` does not propagate to it. The runtime hands this agent a
+    # write-capable filesystem tool the old resolver reported as absent.
+    assert granted == ["apply_patch", "read"], granted
     assert enumerable is True
 
 
@@ -889,9 +896,12 @@ def test_b409_c135_exact_repro_no_longer_fails(tmp_path):
             "agents": {"list": [{"id": "coder", "tools": {"profile": "coding"}}]},
         }
     )
-    assert granted == ["read"], granted
+    assert granted == ["apply_patch", "read"], granted
     f = _b55(home)
-    assert f.status == PASS, f.detail
+    # B-668/S3: was PASS. `apply_patch` survives the `write` deny (vendor execution recorded
+    # on the unit test above), so a write-capable tool IS reachable. Still not FAIL — the
+    # C-135 concern was a false FAIL and that outcome is preserved.
+    assert f.status == WARN, f.detail
     assert f.status != FAIL
 
 
@@ -904,7 +914,11 @@ def test_b409_c135_multi_token_deny_variant_no_longer_fails(tmp_path):
         ' "channels": {"telegram": {"dmPolicy": "open"}}}',
     )
     f = _b55(home)
-    assert f.status == PASS, f.detail
+    # B-668/S3: was PASS. Denying BOTH `write` and `edit` still leaves `apply_patch` granted
+    # — vendor-executed, scope `coder` -> ["read", "apply_patch"]. Not FAIL, so the C-135
+    # outcome this test guards is intact.
+    assert f.status == WARN, f.detail
+    assert f.status != FAIL
 
 
 def test_b409_widening_still_applies_when_global_allow_is_a_wildcard(tmp_path):
@@ -933,7 +947,13 @@ def test_b409_profile_substring_false_positive_stays_bounded_by_allowlist(tmp_pa
         ' "channels": {"telegram": {"dmPolicy": "open"}}}',
     )
     f = _b55(home)
-    assert f.status == PASS, f.detail
+    # B-668/S3: was PASS. The substring false positive this test guards is still bounded —
+    # `write` and `edit` are NOT granted despite "barcode-reader" matching the powerful-
+    # profile substring. `apply_patch` is, and that is not the substring artefact: the vendor
+    # grants it for the same allow-implies / deny-does-not-propagate reason it does under a
+    # real profile name.
+    assert f.status == WARN, f.detail
+    assert f.status != FAIL
 
 
 def test_b409_explicit_write_grant_ignores_a_denied_named_token(tmp_path):
@@ -1029,7 +1049,14 @@ def test_b68_fs_tools_granted_weak_per_agent_profile_does_not_trigger_the_new_br
     assert _agent_profile_widenings(cfg) == []
     granted, enumerable = _b68_fs_tools_granted(cfg)
     assert enumerable is True
-    assert granted == []
+    # B-668/S3: was `== []`, and the widening detector still reports none — that half of the
+    # control holds. The vendor nonetheless grants this agent the whole fs family, for a
+    # reason the widening detector was never looking for: "readonly" is not a profile
+    # OpenClaw knows, so `resolveToolProfilePolicy` yields nothing and the global `minimal`
+    # profile is REPLACED by nothing rather than intersected; the global `alsoAllow` with no
+    # `allow` then injects unionAllow's wildcard. Vendor-executed for scope `reader`.
+    # An unrecognised per-agent profile name silently drops the global restriction.
+    assert granted == ["apply_patch", "edit", "read", "write"], granted
 
 
 def test_b68_fs_tools_granted_real_allowlist_plus_alsoallow_still_intersects():
@@ -1050,7 +1077,10 @@ def test_b68_fs_tools_granted_real_allowlist_plus_alsoallow_still_intersects():
     }
     granted, enumerable = _b68_fs_tools_granted(cfg)
     assert enumerable is True
-    assert granted == ["read"], granted  # identical to the no-alsoAllow b409 test
+    # B-668/S3: was `== ["read"]`. The intersection behaviour this control exists for is
+    # unchanged — the alsoAllow decoration does not widen `write` past the deny. Only
+    # `apply_patch` is added, for the reason recorded on the exact-repro test above.
+    assert granted == ["apply_patch", "read"], granted  # identical to the no-alsoAllow b409 test
 
 
 def test_b55_profile_alsoallow_widening_warns_not_pass_not_fail(tmp_path):
@@ -1094,8 +1124,14 @@ def test_warn_fixture_b409_profile_alsoallow_widening():
 
 
 def test_clean_fixture_weak_agent_profile_no_widening_passes():
+    # B-668/S3: this fixture is misnamed and now WARNs. Executing the vendor against it for
+    # scope `reader` returns the whole fs family — read, write, edit, apply_patch — so the
+    # PASS it used to produce was a lying PASS, one of the two this migration exists to fix.
+    # Kept under its original name so the history stays findable; the assertion follows the
+    # runtime, not the filename.
     f = _b55(FIXTURES / "clean_b409_weak_agent_profile_no_widening")
-    assert f.status == PASS, f.detail
+    assert f.status == WARN, f.detail
+    assert "apply_patch" in (f.detail or "")
 
 
 def test_clean_fixture_real_allowlist_intersection_unaffected_passes():
@@ -1144,3 +1180,108 @@ def test_b44_b84_unaffected_by_the_profile_alsoallow_widening_fix(tmp_path):
     f44_2 = check_attestation_mismatch(ctx2)
     assert f44_2.status == PASS, f44_2.detail
     assert not any("write" in e or "edit" in e or "apply_patch" in e for e in f44_2.evidence)
+
+
+# --- B-668 / S3: the per-agent grant resolution, and the gate that used to swallow it -----
+#
+# `_b68_fs_tools_granted` models the GLOBAL tools.* layer with a hand-built accumulator and
+# unions in what each DECLARED per-agent scope grants, resolved by `clawseccheck.toolgrant`
+# (the vendor port). Every expected value below was produced by EXECUTING the installed
+# 2026.9.1 `resolveConfiguredToolPolicies` + `isToolAllowedByPolicies`, not by reading source.
+
+
+def test_b668_per_agent_grant_is_seen_when_the_global_layer_declares_nothing():
+    """The defect an independent C-135 pass found in the first draft of this change.
+
+    With no global `tools` block, `view.enumerable` is False and `_agent_profile_widenings`
+    is empty, so the early return fired BEFORE the per-agent resolution ran and the whole
+    migration was skipped on exactly the shape it exists for. The vendor grants `write` here
+    (and `apply_patch`, which `write` implies); we answered UNKNOWN.
+    """
+    cfg = {"agents": {"entries": {"main": {"tools": {"allow": ["write"]}}}}}
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert granted == ["apply_patch", "write"], granted
+    assert enumerable is True, (
+        "a config we CAN resolve must not be reported as unresolvable — a per-agent grant "
+        "makes the answer enumerable on its own"
+    )
+
+
+def test_b668_per_agent_alsoallow_with_no_global_layer():
+    """The same gate, reached through `alsoAllow` rather than `allow`. With no `allow` beside
+    it, unionAllow injects the wildcard, so the whole fs family is granted."""
+    cfg = {"agents": {"entries": {"main": {"tools": {"alsoAllow": ["write"]}}}}}
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert granted == ["apply_patch", "edit", "read", "write"], granted
+    assert enumerable is True
+
+
+def test_b668_a_global_deny_still_wins_over_a_per_agent_allow(tmp_path):
+    """The control that must stay QUIET, and the reason the new grants are not just unioned
+    in blind: the vendor AND-s the layers, so a global deny removes what an agent allows.
+    Vendor-executed: global scope -> ["read"], scope `main` -> []. If this ever WARNs, the
+    per-agent union has stopped respecting the deny layer.
+    """
+    home = _write_config(
+        tmp_path,
+        '{"tools": {"allow": ["read"], "deny": ["write"]},'
+        ' "agents": {"entries": {"main": {"tools": {"allow": ["write"]}}}},'
+        ' "channels": {"telegram": {"enabled": true, "dmPolicy": "open"}}}',
+    )
+    granted, _enumerable = _b68_fs_tools_granted(
+        {
+            "tools": {"allow": ["read"], "deny": ["write"]},
+            "agents": {"entries": {"main": {"tools": {"allow": ["write"]}}}},
+        }
+    )
+    assert granted == ["read"], granted
+    f = _b55(home)
+    assert f.status == PASS, f.detail
+
+
+def test_b668_agents_defaults_tools_applies_only_without_a_roster():
+    """`agents.defaults.tools` is a scope, but only when no roster property exists —
+    `agentTools = agentConfig?.tools ?? (!hasAgentRosterProperty(cfg) ? defaults.tools : void 0)`
+    in the dist. Both halves pinned, because getting only the first half right is what makes
+    the shipped fixture `toolscope_case9_agents_defaults_tools_ignored_with_roster` fail.
+    """
+    without = {"agents": {"defaults": {"tools": {"allow": ["write"]}}}}
+    assert _b68_fs_tools_granted(without)[0] == ["apply_patch", "write"]
+
+    with_roster = {
+        "agents": {
+            "defaults": {"tools": {"allow": ["write"]}},
+            "entries": {"main": {"default": True}},
+        }
+    }
+    # The roster property exists, so the vendor ignores the defaults entirely. Anything
+    # granted here would have to come from the (absent) global layer.
+    assert _b68_fs_tools_granted(with_roster)[0] == [], _b68_fs_tools_granted(with_roster)
+
+
+def test_b668_an_agent_that_declares_no_tools_is_not_consulted():
+    """The boundary that keeps this a migration rather than a 65-fixture expansion.
+
+    `toolgrant` is faithful, so asking it about a scope that declares nothing returns the
+    VENDOR DEFAULT — and that default is permissive. This config has no `tools` anywhere, so
+    the runtime really does grant the fs family; reporting it is a separate, deliberate
+    decision (B-737), and until it is taken this resolver must stay quiet here.
+    """
+    cfg = {"agents": {"entries": {"main": {"default": True}}}}
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    assert granted == [], granted
+    assert enumerable is False
+
+
+def test_b668_the_gate_fix_is_load_bearing():
+    """Positive control. Without it the four tests above could pass against a resolver that
+    happens to be enumerable for an unrelated reason. Reproduce the ORIGINAL ordering — gate
+    first, per-agent resolution second — and show it returns nothing on the case that matters.
+    """
+    cfg = {"agents": {"entries": {"main": {"tools": {"allow": ["write"]}}}}}
+    view = _tool_policy_view(cfg)
+    assert view.enumerable is False, "precondition: the global layer declares nothing"
+    assert _agent_profile_widenings(cfg) == [], "precondition: no profile widening either"
+    # Those two are exactly the early-return condition, so the pre-fix code path returned
+    # ([], False) here while the vendor granted write.
+    assert _b68_fs_tools_granted(cfg)[0] == ["apply_patch", "write"]

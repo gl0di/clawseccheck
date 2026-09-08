@@ -1,8 +1,9 @@
 """Capability menu — the guided Welcome screen as a runnable command.
 
 ``clawseccheck --menu`` prints the compact entry screen the skill shows in
-``SKILL.md`` Step 1: the four common things you can do, plus two status nudges —
-when you last ran a check, and an offline hint if this build looks stale.
+``SKILL.md`` Step 1: the three modes plus a way into everything else, the rule
+that decides whether a run gets a grade at all, and two status nudges — when you
+last ran a check, and an offline hint if this build looks stale.
 Read-only, no network, pure stdlib (Python 3.9+).
 
 ``render_menu()`` is pure and fully injectable (version, ages, staleness) so it is
@@ -16,21 +17,30 @@ from datetime import date
 from . import brand
 
 # (number, emoji, title, hint). The emoji is dropped in --ascii mode.
-# Each item maps to a real capability: 1 -> --full (audit + live self-test),
-# 2 -> --vet / --vet-mcp, 3 -> the report/save/trend/badge family, 4 -> the full
-# function list. The "⚡" in item 1's hint discloses the live-agent test up front,
-# so picking it is informed consent (read-only-by-default stays honest).
+#
+# The three product modes, on the one axis that separates them — how often you
+# reach for each — plus a way into everything else. Item 1 -> the audit (--full
+# and its instruments), 2 -> the periodic watch (--monitor / --trend / …),
+# 3 -> the pre-install vet (--vet family), 4 -> the full palette (--functions).
+# The hint column is deliberately the *question the mode answers*, not a list of
+# flags: a flag list is what Screen 12 is for, and it is what made this screen
+# unreadable before.
 _ITEMS = (
-    # B-469: this said "config + live agent test ⚡", which is wrong twice over. Item 1 is
-    # `--dashboard --full` — entirely read-only; it never touches the running agent. And
-    # SKILL.md is explicit that "the live injection test (⚡) stays a separate, opt-in step
-    # — not part of item 1", so the menu was also advertising an opt-in action as included.
-    # Wording matches SKILL.md's own rendering of this screen.
-    ("1", "🔍", "Check everything", "config + capability audit"),
-    ("2", "📦", "Check before install", "skill · plugin · MCP"),
-    ("3", "📄", "Report & history", "show · save · trend · badge"),
-    ("4", "📋", "Menu", "everything else: verify · version · HTML · SARIF…"),
+    # B-469: item 1 said "config + live agent test ⚡", wrong twice over — the audit is
+    # entirely read-only and never touches the running agent, and the live injection test
+    # is a separate, opt-in step. The live tests now live inside mode A on Screen 12,
+    # where their ⚡ tag and confirm-gate are stated next to them.
+    ("1", "🔍", "Full check", "how safe is this setup?"),
+    ("2", "👀", "Watch", "what changed since last time?"),
+    ("3", "📦", "Before you install", "is this thing safe to add?"),
+    ("4", "📋", "Everything else", "the full list of instruments"),
 )
+
+# The grade rule, stated up front rather than discovered at the end of a report.
+# A check earns a letter only when all five layers ran; anything short of that
+# shows findings and names what is missing. Keeping it on this screen means the
+# user is told before they choose, not after they read a number that isn't there.
+_GRADE_RULE = "A grade only when all five layers ran — otherwise findings, and what's missing."
 
 # Title column width, so hints line up. Padding is by plain-title length; emoji
 # prefixes shift the emoji rows by a constant, so the columns still read.
@@ -137,6 +147,8 @@ def render_menu(*, version, build_age_days=None, last_check_days=None,
         hint_text = _ascii(hint) if ascii_only else hint
         lines.append(f"{prefix}{title}{' ' * pad}{hint_text}")
 
+    lines.append("")
+    lines.append("  " + (_ascii(_GRADE_RULE) if ascii_only else _GRADE_RULE))
     lines.append("")
     lines.append("  " + _last_check_line(last_check_days, ascii_only))
     lines.append("  " + _update_line(build_age_days, stale, ascii_only))

@@ -2662,6 +2662,93 @@ def _is_decode_call(node: ast.AST) -> bool:
     return isinstance(f, ast.Attribute) and f.attr in _DECODE_ATTRS
 
 
+def _path_module_aliases(tree: ast.AST) -> tuple:
+    """`(direct, viaos)` — the names *tree*'s own imports bind to a path module.
+
+    B-753. `direct` holds names whose `.join(...)` is a path join (`from os import path`,
+    `import posixpath`, `import os.path as p`, each with or without `as`). `viaos` holds
+    names X where the join is reached as `X.path.join(...)` (`import os`, `import os as
+    o`, `import os.path` without an alias).
+
+    NOTHING IS SEEDED. The first version pre-loaded `{"posixpath", "ntpath"}` before
+    looking at a single import, which made a bare local variable with either name a path
+    module -- the cheapest of the false cleans an adversarial pass found here. A name only
+    earns membership by being bound, in this file, by an import statement.
+    """
+    direct: set = set()   # names whose `.join(...)` is a path join
+    viaos: set = set()    # names X where `X.path.join(...)` is a path join
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name in ("posixpath", "ntpath"):
+                    direct.add(a.asname or a.name)
+                elif a.name == "os.path":
+                    # `import os.path as p` binds p to the module; without asname it
+                    # binds `os`, and the join is then reached as `os.path.join`.
+                    (direct if a.asname else viaos).add(a.asname or "os")
+                elif a.name == "os":
+                    viaos.add(a.asname or "os")
+        elif isinstance(n, ast.ImportFrom) and n.module == "os":
+            for a in n.names:
+                if a.name == "path":
+                    direct.add(a.asname or "path")
+
+    # A name that is ALSO assigned somewhere in the module is not trusted: `from os
+    # import path` followed by `path = ""` leaves the join reaching a string, and the
+    # verdict has to follow the value rather than the import line. Dropping the name is
+    # the fail-safe direction -- it can only put a call back under suspicion.
+    rebound = {
+        t.id
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+        for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
+        if isinstance(t, ast.Name)
+    }
+    return direct - rebound, viaos - rebound
+
+
+def _is_path_join_call(node: ast.AST, path_aliases: "set | None" = None) -> bool:
+    """True when *node* is `os.path.join(...)` — a PATH join, not a string join.
+
+    B-753. `join` is in `_DECODE_ATTRS` because `"".join(parts)` is a real
+    content-hiding primitive: assembling a payload from fragments is one of the shapes
+    this analyzer hunts. But the membership is by ATTRIBUTE NAME, so an ordinary
+    `os.path.join(...)` matches it too, and that misclassification is not harmless --
+    it made the artifact-relative carve-out bail before it ever reached the genuine
+    `.decode()` in the same expression, convicting the canonical `setup.py` idiom
+    written as a one-liner.
+
+    The discrimination is on the RECEIVER, and every leg of it is an IMPORT BINDING, not
+    a name. That is the second version. The first accepted any attribute chain ending in
+    `.path` and seeded the alias set with `posixpath`/`ntpath` unconditionally, and an
+    adversarial pass killed it: `self.path.join(payload)`, `cfg.path.join(payload)`,
+    `Outer().b.path.join(payload)`, and a bare local variable literally named `posixpath`
+    all qualified. The refutation that matters is not any single shape but why they
+    worked -- see the pairing note in the caller. Seeding names was exactly the
+    name-guessing this docstring already claimed to avoid, one line below where it
+    claimed it.
+
+    So: a bare `X.join(...)` qualifies only when `X` is bound by an import to a path
+    module, and `X.path.join(...)` only when `X` is bound by an import to `os`. A name
+    that is reassigned anywhere in the module is dropped from both sets, because
+    `from os import path` followed by `path = ""` leaves the join reaching a string.
+    A string constant, an unbound variable, an instance attribute, a subscript, or
+    anything unresolvable keeps its old meaning and still counts as the obfuscation
+    primitive.
+    """
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        return False
+    if node.func.attr != "join":
+        return False
+    direct, viaos = path_aliases or (set(), set())
+    base = node.func.value
+    if isinstance(base, ast.Name):
+        return base.id in direct
+    if isinstance(base, ast.Attribute) and base.attr == "path":
+        return isinstance(base.value, ast.Name) and base.value.id in viaos
+    return False
+
+
 def _has_xor_decode(node: ast.AST) -> bool:
     """F-053: True when the subtree builds a byte/char sequence via XOR — bytes(...^...),
     bytearray(...^...), or a comprehension containing ^ — the common non-base64
@@ -4039,6 +4126,412 @@ def _is_writable_import_path(node: ast.AST) -> bool:
     return False
 
 
+# B-640: OBFUSCATED_EXEC (below) treats `_subtree_has_decode` alone as proof of a
+# hidden payload. That is right for a real content-hiding primitive (base64/hex/b85/
+# zlib/... in _DECODE_FUNCS) or an XOR-built sequence, but `_subtree_has_decode` ALSO
+# matches the bare `.decode(...)` method -- and `exec(fh.read().decode("utf-8"), ns)`
+# is exactly how `setup.py` reads a sibling `__version__.py` in requests/urllib3/
+# hundreds of real packages, and how a migrations runner reads its own migration
+# files. `.decode("utf-8")` over a LOCAL file read is not obfuscation; it is a
+# bytes->str conversion of the artifact's own bundled content.
+#
+# Reuses the SAME proxy `_is_writable_import_path` above already accepts for sys.path:
+# presence of `__file__` anywhere in the path expression is treated as proof the path
+# resolves relative to the scanned file's own location. One hop of local-variable
+# resolution is added (`_scope_own_assigns`) because the real-world shape splits the
+# anchor across two statements -- `here = os.path.dirname(__file__)` then
+# `open(os.path.join(here, "x.py"))` -- so a single-expression check misses it
+# entirely (confirmed against this exact shape before shipping). Deliberately capped
+# at one hop, mirroring `_remote_code_load_findings`'s own one-hop discipline
+# elsewhere in this module -- a general propagation is a bigger, riskier change than
+# this narrow proxy needs.
+#
+# This is a PROXY, not the real signal, and is scoped ONLY to the OBFUSCATED_EXEC call
+# site below -- `_subtree_has_decode` itself is left untouched for its other two
+# callers (decode-composing function detection, TT4's file-tainted rule). It has no
+# way to confirm the referenced path actually stays inside the artifact being scanned
+# (`os.path.join(os.path.dirname(__file__), "..", "..", "/etc/passwd")` still passes),
+# and no way to confirm the resolved path is really a file present in the artifact at
+# all -- the caller (checks/_vet.py's `installed_skill_py`) already enumerates every
+# path in the artifact but that set is never threaded into `analyze_python()`. The
+# stronger, precise version would add an optional artifact-relpath-set parameter to
+# `analyze_python()` and check the resolved path against it -- deferred: it widens
+# `analyze_python()`'s signature and both of its call sites (checks/_vet.py,
+# checks/_mcp.py), a bigger change than this narrow FP fix justifies on its own. A
+# literal or env/argv-derived path (the dropper shape: `open("/tmp/x.py", "rb")`)
+# never contains `__file__` and is therefore never exempted by this proxy.
+def _scope_own_assigns(scope: ast.AST) -> dict:
+    """name -> RHS expr for every single-Name-target `x = <expr>` in `scope`'s own
+    body (via `_scope_own_nodes`, so it does not descend into nested functions) --
+    the one-hop lookup table `_path_expr_is_dunder_file_relative` uses."""
+    out: dict = {}
+    for n in _scope_own_nodes(scope):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            out[n.targets[0].id] = n.value
+    return out
+
+
+def _path_expr_swallows_its_anchor(node: ast.AST, scope_assigns: dict) -> bool:
+    """True when a literal ABSOLUTE segment in *node* discards the `__file__` anchor.
+
+    B-752. `os.path.join` keeps only what follows its last absolute argument, so
+    ``os.path.join(os.path.dirname(__file__), "assets", "/tmp/.cache/stage2.py")``
+    resolves to ``/tmp/.cache/stage2.py`` -- measured, not reasoned -- while the AST
+    still carries a real `__file__`. A carve-out that reads the TOKEN rather than the
+    resolved path therefore absolves reading and executing an arbitrary absolute path,
+    with no traversal and no obfuscation: one extra argument.
+
+    Scoped to LITERAL segments on purpose. A computed segment could also be absolute at
+    runtime, and this says nothing about that case -- refusing on a non-literal would
+    turn every dynamically-built in-artifact path into a conviction, which is the false
+    FAIL the carve-out exists to prevent. What is claimed here is only what is provable
+    from the source text.
+
+    One hop of local assignment is resolved, matching the anchor lookup below, so a
+    segment parked in a variable first is not a bypass.
+
+    SCOPED TO ACTUAL PATH SEGMENTS, and that scoping is not cosmetic. The first version
+    of this predicate accepted any string constant anywhere in the expression, which
+    convicted two measured benign shapes outright: ``"/".join(["data", "v.py"])`` and
+    ``raw.replace("/", "_")`` -- the second being sanitising code, i.e. the change would
+    have punished the defensive habit it wants people to have. A separator is not a
+    segment. Only the arguments of a path join (``os.path.join`` / ``.joinpath``) and the
+    operands of pathlib's ``/`` are read as segments here.
+    """
+    def _absolute_literal(x: ast.AST) -> bool:
+        return isinstance(x, ast.Constant) and isinstance(x.value, str) and x.value.startswith("/")
+
+    def _segment_is_absolute(seg: ast.AST) -> bool:
+        if _absolute_literal(seg):
+            return True
+        # One hop, and only when the variable IS a literal. Asking whether its RHS
+        # merely CONTAINS an absolute-looking constant is what convicted
+        # ``name = "/".join(["data", "v.py"])`` -- a computed value whose absoluteness
+        # is not statically knowable, so nothing is claimed about it.
+        if isinstance(seg, ast.Name) and seg.id in scope_assigns:
+            return _absolute_literal(scope_assigns[seg.id])
+        return False
+
+    # The path is routinely bound first (`p = Path(__file__).parent / "/tmp/x"`) and only
+    # then opened, so the structural rules below must see the RHS too -- one hop, the same
+    # budget the anchor lookup uses. Expanding first and matching after is what keeps the
+    # two halves from disagreeing; keeping them separate is how the pathlib forms were
+    # missed on the first attempt.
+    nodes = list(ast.walk(node))
+    for n in list(nodes):
+        if isinstance(n, ast.Name) and n.id in scope_assigns:
+            nodes.extend(ast.walk(scope_assigns[n.id]))
+
+    for n in nodes:
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            base = n.func.value
+            is_path_join = n.func.attr == "join" and not (
+                isinstance(base, ast.Constant) and isinstance(base.value, str)
+            )
+            if (is_path_join or n.func.attr == "joinpath") and any(
+                _segment_is_absolute(a) for a in n.args
+            ):
+                return True
+        elif isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div):
+            if _segment_is_absolute(n.right):
+                return True
+    return False
+
+
+def _anchor_depth_below_root(expr: ast.AST, relpath: str, scope_assigns: dict | None = None) -> int:
+    """How many components separate the artifact root from this expression's anchor.
+
+    B-752. `..` segments only escape the artifact once they exceed the anchor's own
+    depth, so the count is meaningless without knowing where the anchor sits -- and that
+    depends on which anchor form the source used:
+
+        <root>/a/b/mod.py     `os.path.dirname(__file__)` / `Path(__file__).parent` -> 2
+                              bare `__file__`                                       -> 3
+                              `Path(__file__).parent.parent`                        -> 1
+
+    An unrecognised form falls back to the DEEPEST reading (bare `__file__`), which is
+    the permissive end: it under-convicts rather than inventing an escape. A wrong guess
+    in the other direction would be a false FAIL on a skill doing nothing wrong, and this
+    predicate exists to remove exactly that.
+    """
+    parts = [p for p in relpath.replace("\\", "/").split("/") if p not in ("", ".")]
+    file_depth = len(parts)  # <root>/a/b/mod.py -> 3
+    if file_depth == 0:
+        return 0
+
+    # The anchor is routinely parked in a local first -- `here = os.path.dirname(__file__)`
+    # then `open(os.path.join(here, ...))` -- which is the very shape the rest of this
+    # carve-out already resolves one hop for. Searching only the path expression finds no
+    # anchor form there and silently falls back to the permissive reading, which is how
+    # the first version of this function left the traversal family open. Measured, not
+    # reasoned: it was caught by testing the wired verdict, never by the helper's own
+    # unit cases, which passed the anchor in directly.
+    nodes = list(ast.walk(expr))
+    for n in list(nodes):
+        if isinstance(n, ast.Name) and scope_assigns and n.id in scope_assigns:
+            nodes.extend(ast.walk(scope_assigns[n.id]))
+
+    def _dirname_hops(call: ast.AST) -> int:
+        """How many nested `dirname(...)` wrappers sit between the call and `__file__`.
+
+        `os.path.dirname(os.path.dirname(__file__))` climbs TWO components, not one.
+        Counting it as one over-states the anchor's depth, which absolves a real escape --
+        found by the adversarial pass, in the under-convicting direction.
+        """
+        hops = 0
+        cur = call
+        while (
+            isinstance(cur, ast.Call)
+            and isinstance(cur.func, ast.Attribute)
+            and cur.func.attr == "dirname"
+            and cur.args
+        ):
+            hops += 1
+            cur = cur.args[0]
+        return hops if any(
+            isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(cur)
+        ) else 0
+
+    dirname_hops = [
+        h for h in (
+            _dirname_hops(n) for n in nodes
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "dirname"
+        ) if h
+    ]
+    if dirname_hops:
+        return max(file_depth - max(dirname_hops), 0)
+
+    # `Path(__file__).parent`, `.parent.parent`, ... -- count the chain.
+    best = None
+    for n in nodes:
+        if isinstance(n, ast.Attribute) and n.attr == "parent":
+            hops, cur = 0, n
+            while isinstance(cur, ast.Attribute) and cur.attr == "parent":
+                hops += 1
+                cur = cur.value
+            if any(isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(cur)):
+                depth = max(file_depth - hops, 0)
+                best = depth if best is None else min(best, depth)
+    if best is not None:
+        return best
+    return file_depth
+
+
+def _path_expr_escapes_artifact(node: ast.AST, scope_assigns: dict, relpath: str) -> bool:
+    """True when the literal `..` segments in *node* provably leave the artifact root.
+
+    SCOPED TO REAL PATH SEGMENTS, for the same reason its sibling above is, and this is
+    the third time that scoping had to be learned rather than the first. Counting every
+    string constant in the expression convicted a traversal SANITISER --
+    ``name = raw.replace("..", "_")`` and ``name = raw if ".." not in raw else "_"`` --
+    because the literal `".."` sits there as a replace argument or a comparator, not as a
+    component being joined. Both are the OWASP-recommended defence against exactly the
+    attack this predicate hunts, so counting them convicted the fix for the bug.
+
+    A segment counts when it is an argument of a path join (``os.path.join`` /
+    ``.joinpath``) or an operand of pathlib's ``/``. One hop through a local, and only
+    when the local IS a string literal -- a computed name says nothing statically.
+    """
+    def _components(x: ast.AST) -> "list[str] | None":
+        """The literal path components *x* contributes, in order, or None if unknowable."""
+        lit = None
+        if isinstance(x, ast.Constant) and isinstance(x.value, str):
+            lit = x.value
+        elif isinstance(x, ast.Name) and x.id in scope_assigns:
+            rhs = scope_assigns[x.id]
+            if isinstance(rhs, ast.Constant) and isinstance(rhs.value, str):
+                lit = rhs.value
+        if lit is None:
+            return None
+        return [p for p in lit.replace("\\", "/").split("/") if p not in ("", ".")]
+
+    def _is_anchor(x: ast.AST) -> bool:
+        """True when *x* IS the `__file__` anchor rather than a component joined onto it.
+
+        The anchor's own position is already carried by `_anchor_depth_below_root`, so
+        pushing it again as a segment double-counts it. That is not hypothetical: doing so
+        silently cancelled one `..` and re-absolved `join(here, "..", "x.py")` from a
+        root-level file -- an escape the previous draft convicted correctly.
+        """
+        if any(isinstance(y, ast.Name) and y.id == "__file__" for y in ast.walk(x)):
+            return True
+        if isinstance(x, ast.Name) and x.id in scope_assigns:
+            return any(
+                isinstance(y, ast.Name) and y.id == "__file__"
+                for y in ast.walk(scope_assigns[x.id])
+            )
+        return False
+
+    def _ordered_segments(x: ast.AST) -> "list[str] | None":
+        """Segments of a path expression, left to right, or None when not a join shape."""
+        if isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute):
+            base = x.func.value
+            is_path_join = x.func.attr == "join" and not (
+                isinstance(base, ast.Constant) and isinstance(base.value, str)
+            )
+            if is_path_join or x.func.attr == "joinpath":
+                out: "list[str]" = []
+                for a in x.args:
+                    if _is_anchor(a):
+                        continue
+                    comps = _components(a)
+                    out.extend(comps if comps is not None else ["?"])
+                return out
+        if isinstance(x, ast.BinOp) and isinstance(x.op, ast.Div):
+            left = [] if _is_anchor(x.left) else (_ordered_segments(x.left) or [])
+            comps = None if _is_anchor(x.right) else _components(x.right)
+            right = [] if _is_anchor(x.right) else (comps if comps is not None else ["?"])
+            return left + right
+        if isinstance(x, ast.Name) and x.id in scope_assigns:
+            return _ordered_segments(scope_assigns[x.id])
+        return None
+
+    segments = _ordered_segments(node)
+    if not segments:
+        return False
+
+    # WALK the segments, never count them. `join(dirname(__file__), "assets", "..",
+    # "data", "v.py")` contains a `..` and goes nowhere: it cancels `assets` and the read
+    # stays inside the artifact. Summing raw `..` tokens convicted that -- and every
+    # net-zero variant of it, including two cancels and a single combined literal
+    # "assets/../data/v.py" -- which the adversarial pass reproduced as a regression this
+    # change had introduced. Only a walk that goes NEGATIVE has actually left the root.
+    # An unknowable segment ("?") is treated as one ordinary component: it can only push
+    # the depth up, never down, so an unknown can never manufacture an escape.
+    depth = _anchor_depth_below_root(node, relpath, scope_assigns)
+    for seg in segments:
+        if seg == "..":
+            depth -= 1
+            if depth < 0:
+                return True
+        else:
+            depth += 1
+    return False
+
+
+def _path_expr_is_dunder_file_relative(
+    node: ast.AST, scope_assigns: dict, relpath: str = ""
+) -> bool:
+    """True when *node* (an open()-style path argument) is built from `__file__`,
+    directly or through one hop of local assignment resolved via *scope_assigns*.
+
+    B-752: an anchor that a literal absolute segment has already discarded is not an
+    anchor, and neither is one the `..` segments have already climbed past -- in both
+    cases the answer is False regardless of how visible `__file__` is in the expression.
+    `relpath` defaults to empty so a caller that cannot say where the file sits gets the
+    old, anchor-only behaviour rather than a guessed escape.
+    """
+    if _path_expr_swallows_its_anchor(node, scope_assigns):
+        return False
+    if relpath and _path_expr_escapes_artifact(node, scope_assigns, relpath):
+        return False
+    if any(isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(node)):
+        return True
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name) and n.id in scope_assigns:
+            rhs = scope_assigns[n.id]
+            if any(isinstance(x, ast.Name) and x.id == "__file__" for x in ast.walk(rhs)):
+                return True
+    return False
+
+
+def _decode_call_reads_artifact_relative_file(
+    node: ast.Call, scope: ast.AST, relpath: str = ""
+) -> bool:
+    """True when *node* is `<expr>.decode(...)` and <expr>'s receiver chain resolves
+    to a LOCAL file opened at a `__file__`-relative path -- either the direct chain
+    `open(<path>).read().decode(...)`, or through a handle bound in *scope*'s own body
+    (`with open(<path>) as h: ... h.read().decode(...)` / `h = open(<path>); ...`).
+
+    B-752: *relpath* is the scanned file's own path inside the artifact, which is what
+    makes "does this climb out of the artifact?" answerable at all. Every production
+    caller of `analyze_python()` already passes one; the default keeps the old behaviour
+    for a caller that cannot."""
+    receiver = node.func.value
+    scope_assigns = _scope_own_assigns(scope)
+    for n in ast.walk(receiver):
+        if (
+            _is_open_call(n)
+            and n.args
+            and _path_expr_is_dunder_file_relative(n.args[0], scope_assigns, relpath)
+        ):
+            return True
+    handle_names = {n.id for n in ast.walk(receiver) if isinstance(n, ast.Name)}
+    if not handle_names:
+        return False
+    for stmt in _scope_own_nodes(scope):
+        if isinstance(stmt, ast.With):
+            for item in stmt.items:
+                if (
+                    _is_open_call(item.context_expr)
+                    and isinstance(item.optional_vars, ast.Name)
+                    and item.optional_vars.id in handle_names
+                    and item.context_expr.args
+                    and _path_expr_is_dunder_file_relative(
+                        item.context_expr.args[0], scope_assigns, relpath
+                    )
+                ):
+                    return True
+        elif isinstance(stmt, ast.Assign) and _is_open_call(stmt.value):
+            if stmt.value.args and _path_expr_is_dunder_file_relative(
+                stmt.value.args[0], scope_assigns, relpath
+            ):
+                for t in stmt.targets:
+                    if isinstance(t, ast.Name) and t.id in handle_names:
+                        return True
+    return False
+
+
+def _decode_signal_is_only_artifact_relative_reads(
+    node: ast.AST, scope: ast.AST, relpath: str = "", path_aliases: "set | None" = None
+) -> bool:
+    """True when EVERY decode-shaped call `_subtree_has_decode` would match inside
+    *node* is a bare `.decode(...)` on a local sibling-file read anchored on
+    `__file__` (see `_decode_call_reads_artifact_relative_file`), and nothing
+    stronger -- a real content-hiding primitive (base64/hex/b85/zlib/... in
+    _DECODE_FUNCS), an XOR-built sequence, or a `.fromhex(...)`/`.join(...)` call --
+    is present anywhere in the subtree. False (never exempt) if no decode-shaped call
+    is found at all, so this must only be consulted when `_subtree_has_decode` is
+    already True."""
+    if _has_xor_decode(node):
+        return False
+    found_any = False
+    for n in ast.walk(node):
+        if not _is_decode_call(n):
+            continue
+        # B-753: `os.path.join(...)` matches `_is_decode_call` only because "join" is in
+        # `_DECODE_ATTRS` for `"".join(parts)`'s sake. It is not a content-hiding
+        # primitive, so it must neither count as one nor end this loop -- doing so bailed
+        # before the genuine `.decode()` in the same expression was ever examined, which
+        # made the exemption UNREACHABLE for the inline `setup.py` idiom while leaving the
+        # `with`-block spelling of the same read exempt. Skipped, not treated as evidence.
+        #
+        # WHY THE RECEIVER TEST HAS TO BE STRICT, stated here because this is the line
+        # that makes it matter. It is true that a skip alone absolves nothing -- the loop
+        # returns `found_any`, which only a genuine artifact-relative `.decode()` sets --
+        # and it is tempting to conclude that dressing a string join as a path join buys
+        # an attacker nothing. That does not follow, and an adversarial pass proved it:
+        # PAIR the disguised join with a real in-artifact read in the SAME expression and
+        # the genuine half satisfies `found_any` while the skip carries the payload
+        # through. `exec(open(join(dirname(__file__), "v.py")).read().decode() +
+        # fake.path.join(fragments))` was absolved. So the skip is only ever as safe as
+        # the receiver test is strict, and the receiver test is import-bound for that
+        # reason, not for tidiness.
+        if _is_path_join_call(n, path_aliases):
+            continue
+        found_any = True
+        nf = n.func
+        if isinstance(nf, ast.Name):
+            return False  # a real _DECODE_FUNCS primitive called bare, e.g. b64decode(x)
+        if not (isinstance(nf, ast.Attribute) and nf.attr == "de" + "code"):
+            return False  # fromhex/join, or a _DECODE_FUNCS primitive as a method
+        if not _decode_call_reads_artifact_relative_file(n, scope, relpath):
+            return False
+    return found_any
+
+
 def analyze_python(
     source: str, filename: str = "<skill>", own_host: str | None = None
 ) -> list[ASTFinding]:
@@ -4148,8 +4641,18 @@ def analyze_python(
             visible_tainted = _tainted_names_visible(
                 node, tainted, owner_map, parent_scope, shadow_cache
             )
+            has_decode_signal = _subtree_has_decode(arg)
+            # B-640: `.decode("utf-8")` reading a __file__-relative sibling file (the
+            # canonical setup.py idiom -- see the module comment above
+            # `_scope_own_assigns`) is not obfuscation on its own. Only un-arms the
+            # bare-decode signal; a real content-hiding primitive elsewhere in the
+            # same expression still convicts.
+            if has_decode_signal and _decode_signal_is_only_artifact_relative_reads(
+                arg, owner_map.get(node, tree), filename, _path_module_aliases(tree)
+            ):
+                has_decode_signal = False
             if (
-                _subtree_has_decode(arg)
+                has_decode_signal
                 or (_names_in(arg) & visible_tainted)
                 or _subtree_calls_decode_composing(arg, visible_composing)
             ):
@@ -4164,17 +4667,25 @@ def analyze_python(
             continue
 
         # getattr(obj, name)(...) — obfuscated call.
-        # crit only for a dangerous attribute literal, OR a dynamic attr on a dangerous
-        # module (os/subprocess/...). A dynamic attr on an ordinary object is normal
-        # dynamic dispatch (plugin frameworks) -> info, so it never FAILs on its own.
+        # B-639: crit REQUIRES the base object resolve to a known-dangerous module
+        # (os/subprocess/...) -- for BOTH a dangerous attribute literal and a dynamic
+        # attr. A dangerous-shaped attribute NAME alone ("run"/"call" -- also real
+        # subprocess.run/call names) on an ordinary object is normal dynamic dispatch
+        # (a plugin registry's `getattr(handler, "run")()`) -> never flagged, matching
+        # the sibling "dynamic attr on an ordinary object" case just below it. Before
+        # this fix the literal branch matched on the attribute name alone, with no
+        # base-object check at all -- unlike the dynamic branch, which already required
+        # `base_obj in _DANGEROUS_OBJ` -- so `getattr(handler, "run")(x)` in a plugin
+        # dispatcher FAILed identically to `getattr(os, "system")(x)`.
         if isinstance(f, ast.Call) and isinstance(f.func, ast.Name) and f.func.id == "getattr":
             first = f.args[0] if f.args else None
             second = f.args[1] if len(f.args) >= 2 else None
             literal_str = isinstance(second, ast.Constant) and isinstance(second.value, str)
             dynamic = second is not None and not literal_str
-            dangerous_literal = literal_str and second.value in _DANGEROUS_ATTRS
             base_obj = _attr_base(first) if first is not None else ""
-            if dangerous_literal or (dynamic and base_obj in _DANGEROUS_OBJ):
+            dangerous_obj = base_obj in _DANGEROUS_OBJ
+            dangerous_literal = literal_str and second.value in _DANGEROUS_ATTRS and dangerous_obj
+            if dangerous_literal or (dynamic and dangerous_obj):
                 add(
                     "GETATTR_INDIRECTION",
                     "crit",
@@ -4186,18 +4697,49 @@ def analyze_python(
             continue
 
         # __import__("os").system(...) / importlib.import_module("os").system(...)
+        # B-639: the SAME defect as the getattr rule above, on the module-name side --
+        # crit REQUIRES the imported module to be a literal that resolves to a
+        # known-dangerous module. Before this fix the code never inspected the
+        # __import__/import_module argument at all: ANY dynamically-imported module
+        # combined with a dangerous-shaped attribute name FAILed, so
+        # `importlib.import_module(plugin_name).run(x)` (a dynamic plugin loader) or
+        # `importlib.import_module("a.b").run(1)` (an ordinary, non-dangerous target)
+        # convicted identically to `importlib.import_module("os").system(x)`. A
+        # computed/unresolvable module name is the same ambiguity as getattr's dynamic
+        # branch -- downgraded to info (still visible, escalates only alongside a
+        # cred/exfil signal), not silenced.
         if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Call):
             inner = f.value.func
             is_dyn_import = (isinstance(inner, ast.Name) and inner.id == "__import__") or (
                 isinstance(inner, ast.Attribute) and inner.attr == "import_module"
             )
             if is_dyn_import and f.attr in _DANGEROUS_ATTRS:
-                add(
-                    "DYNAMIC_IMPORT_EXEC",
-                    "crit",
-                    ln,
-                    f"__import__(...).{f.attr}() — dynamic import to evade static scan",
+                mod_arg = f.value.args[0] if f.value.args else None
+                mod_literal = (
+                    mod_arg.value
+                    if isinstance(mod_arg, ast.Constant) and isinstance(mod_arg.value, str)
+                    else None
                 )
+                mod_base = mod_literal.split(".")[0].lower() if mod_literal else None
+                if mod_base in _DANGEROUS_OBJ:
+                    add(
+                        "DYNAMIC_IMPORT_EXEC",
+                        "crit",
+                        ln,
+                        f"__import__(...).{f.attr}() — dynamic import to evade static scan",
+                    )
+                else:
+                    reason_target = (
+                        f"a non-dangerous module ({mod_literal!r})"
+                        if mod_literal is not None
+                        else "a computed/unresolvable module name"
+                    )
+                    add(
+                        "DYNAMIC_IMPORT_EXEC",
+                        "info",
+                        ln,
+                        f"__import__(...).{f.attr}() — dynamic import to {reason_target}",
+                    )
                 continue
 
         # D1 (defensibility): sys.path.insert/append to a relative / writable / env-derived
@@ -5494,6 +6036,193 @@ def _package_tainted_exports(trees: dict) -> dict:
     return exports
 
 
+# ── Capability PRESENCE, as opposed to taint reachability (B-592) ─────────────
+#
+# The effect simulator answers "does UNTRUSTED data reach this sink" — a risk question.
+# Two consumers were asking it a different question and reading the answer as if it were
+# a capability inventory: the vet dossier's Connections axis (which then stated "no
+# outbound network surface" for a skill whose only code posts to an external host) and
+# `--emit-manifest`'s proposed permission fields (which proposed denying network to that
+# same skill). A permission manifest needs "does this code touch the capability at all";
+# a constant-URL fetch needs network permission exactly as much as a tainted one does.
+#
+# Deliberately the SAME call shapes the simulator registers effects for
+# (`EffectSimulator.simulate_call`'s four blocks), minus the taint gate — so the two
+# views can never disagree about what a network/exec/read/write sink IS, only about
+# whether untrusted data reached it. `cred` is the one family the simulator never
+# registers at all, so it is defined here from the credential-path and credential-env
+# vocabularies this module already carries.
+#
+# Error profile, stated because it decides how the callers may use this: a false
+# POSITIVE costs a broader-than-necessary permission proposal and a vaguer axis
+# sentence; a false NEGATIVE leaves the caller exactly where it was before this
+# function existed. Neither direction can create a finding — no check consumes this.
+
+#: Families this function can report. `eval` is folded into `exec` here, matching
+#: `report._MANIFEST_FAMILY_ALIASES`; `network`/`read`/`write` mirror the simulator's.
+CAPABILITY_FAMILIES = frozenset({"network", "exec", "read", "write", "cred"})
+
+_CAP_WRITE_MODE_CHARS = "wax+"
+_CAP_PATHLIB_WRITE_ATTRS = {"write_text", "write_bytes"}
+_CAP_PATHLIB_READ_ATTRS = {"read_text", "read_bytes"}
+_CAP_ENV_READ_ATTRS = {"getenv"}
+
+
+def _cap_open_modes(node: ast.Call) -> str:
+    """The mode string an `open(...)` call was given ("r" when it is implicit)."""
+    mode = "r"
+    if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+        if isinstance(node.args[1].value, str):
+            mode = node.args[1].value
+    for kw in node.keywords:
+        if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+            if isinstance(kw.value.value, str):
+                mode = kw.value.value
+    return mode
+
+
+def _cap_is_secretish_env_read(node: ast.AST) -> bool:
+    """True for `os.environ["API_TOKEN"]` / `os.getenv("API_TOKEN")` / `environ.get(...)`
+    whose key literal carries a credential-shaped NAME. The name gate is what keeps an
+    ordinary `os.environ["HOME"]` out of the credentials family."""
+    if isinstance(node, ast.Subscript):
+        if not _rhs_has_subscript_environ(node):
+            return False
+        key = node.slice
+        return (
+            isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and bool(_CRED_ENV_NAME_RE.fullmatch(key.value))
+        )
+    if isinstance(node, ast.Call):
+        f = node.func
+        is_env_read = (
+            isinstance(f, ast.Attribute)
+            and (
+                (f.attr in _CAP_ENV_READ_ATTRS and _attr_base(f.value) == "os")
+                or (f.attr == "get" and _attr_base(f.value) == "environ")
+            )
+        ) or (isinstance(f, ast.Name) and f.id in _CAP_ENV_READ_ATTRS)
+        if not is_env_read or not node.args:
+            return False
+        first = node.args[0]
+        return (
+            isinstance(first, ast.Constant)
+            and isinstance(first.value, str)
+            and bool(_CRED_ENV_NAME_RE.fullmatch(first.value))
+        )
+    return False
+
+
+def _imported_sink_names(tree: ast.AST) -> tuple:
+    """Local names bound by `from <mod> import <sink> [as alias]`, split (network, exec).
+
+    Found by the adversarial pass on B-592: `from urllib.request import urlopen as u`
+    then `u(url)` is an ORDINARY idiom, not evasion, and a bare-Name call carries no base
+    for `_is_net_sink` to gate on — so the whole family went unreported. Deliberately
+    NOT extended to `getattr(requests, "post")(...)` or
+    `importlib.import_module("os").system(...)`: those are evasion shapes the engine's own
+    rules do not resolve either, and a presence scan that out-detects the finding engine
+    would put capabilities in a permission proposal that no check can corroborate.
+    """
+    net_names: set = set()
+    exec_names: set = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        mod = (node.module or "").split(".")[0]
+        for alias in node.names:
+            local = alias.asname or alias.name
+            if mod in _NET_SINK_BASES or mod in _NET_OUT_SINK_BASES:
+                if alias.name in _NET_SINK_ATTRS_ANY or alias.name in _NET_SINK_ATTRS_BASED:
+                    net_names.add(local)
+                elif alias.name in _NET_OUT_SINK_FETCH_ATTRS:
+                    net_names.add(local)
+            if mod in _EXEC_SINK_BASES_OS and alias.name in _EXEC_SINK_OS_ATTRS:
+                exec_names.add(local)
+            if mod in _EXEC_SINK_BASES_SUBP and alias.name in _EXEC_SINK_SUBP_ATTRS:
+                exec_names.add(local)
+    return net_names, exec_names
+
+
+def _capability_families_in_tree(tree: ast.AST) -> set:
+    fams: set = set()
+    # Same alias resolution the engine's own rules use (B-422/C-348): without it
+    # `s = socket.socket(); s.connect(...)` and `sess = requests.Session(); sess.put(...)`
+    # read as non-network, which is exactly the covert-channel shape B-338 exists for.
+    net_sink_aliases = _net_sink_alias_names(tree)
+    imported_net, imported_exec = _imported_sink_names(tree)
+    for node in ast.walk(tree):
+        if _cap_is_secretish_env_read(node):
+            fams.add("cred")
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if _is_exec_sink_call(func)[0]:
+            fams.add("exec")
+        if (
+            _is_net_sink(func, net_sink_aliases)
+            or _is_ssrf_sink_call(func)[0]
+            or _is_net_out_data_sink(func)[0]
+        ):
+            fams.add("network")
+        name = ""
+        if isinstance(func, ast.Name):
+            name = func.id
+            if name in imported_net:
+                fams.add("network")
+            if name in imported_exec:
+                fams.add("exec")
+        elif isinstance(func, ast.Attribute):
+            name = func.attr
+        if name in _FILE_OPEN_NAMES:
+            mode = _cap_open_modes(node)
+            if any(c in mode for c in _CAP_WRITE_MODE_CHARS):
+                fams.add("write")
+            if "w" not in mode and "x" not in mode and "a" not in mode:
+                fams.add("read")
+        if name in _CAP_PATHLIB_WRITE_ATTRS:
+            fams.add("write")
+        if name in _CAP_PATHLIB_READ_ATTRS:
+            fams.add("read")
+        if _has_cred_path_const(node):
+            fams.add("cred")
+    return fams
+
+
+def capability_families(sources) -> set:
+    """Which capability families a skill's Python *touches at all* — presence, not taint.
+
+    `sources` is what `Context.installed_skill_py` holds: an iterable of
+    ``(relpath, source)`` pairs. A bare source string, an iterable of plain strings, and
+    a ``None`` entry are all tolerated, because that mapping is populated by several
+    collection paths and this function must never be the thing that raises.
+
+    Returns a subset of :data:`CAPABILITY_FAMILIES`. Unparseable source contributes
+    nothing (it is reported as `AST_UNANALYZABLE` by `analyze_python`, and the callers
+    have their own "could not analyze" state) — never a fabricated absence.
+    """
+    if sources is None:
+        return set()
+    if isinstance(sources, str):
+        sources = [("<source>", sources)]
+    fams: set = set()
+    for item in sources:
+        if item is None:
+            continue
+        src = item
+        if isinstance(item, (tuple, list)):
+            src = item[1] if len(item) > 1 else None
+        if not isinstance(src, str) or not src.strip():
+            continue
+        try:
+            tree = ast.parse(src)
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+            continue
+        fams |= _capability_families_in_tree(tree)
+    return fams
+
+
 def analyze_python_package(files) -> list[ASTFinding]:
     """Cross-file / import-graph taint (H1): a decode-derived module-level value defined in
     one skill file, imported and executed (exec/eval/os.system/subprocess) in another. The
@@ -5814,11 +6543,25 @@ _SH_EVAL_REMOTE_RE = re.compile(
 _SH_RAW_SOCKET_RE = re.compile(r"\b(?:ncat|netcat)\b|/dev/tcp/", re.I)
 # a credential-shaped env-var NAME (contains TOKEN/SECRET/API_KEY/…). Gating env->outbound
 # on the name (not any $VAR) is what keeps this zero-FP against authed-API scripts.
+# The credential-shaped NAME vocabulary, shared by the shell rule below and by
+# `capability_families`' Python-side env read (B-592) so the two cannot drift into
+# disagreeing about what "looks like a secret" — the divergent-table failure B-483
+# documented for the ascii folder. `tests/test_b592_capability_presence.py` pins the
+# shell pattern's rendered source, so rebuilding it from this fragment cannot silently
+# change the rule it has always implemented.
+_CRED_NAME_WORDS = (
+    r"API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|ACCESS_?KEY|AUTH"
+)
 _SH_CRED_ENV_RE = re.compile(
     r"\$\{?[A-Za-z0-9_]*"
-    r"(?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|ACCESS_?KEY|AUTH)"
+    r"(?:" + _CRED_NAME_WORDS + r")"
     r"[A-Za-z0-9_]*\}?",
     re.I,
+)
+#: The same vocabulary against a bare identifier — `os.environ["API_TOKEN"]`, which
+#: carries no `$`. Used only for capability PRESENCE, never for a finding.
+_CRED_ENV_NAME_RE = re.compile(
+    r"[A-Za-z0-9_]*(?:" + _CRED_NAME_WORDS + r")[A-Za-z0-9_]*", re.I
 )
 
 # B-430: metacharacters that can glue directly onto a word with no surrounding
@@ -6229,8 +6972,11 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
 # --------------------------------------------------------------------------- #
 # analyze_javascript (F-064): lexical JS/TS pass — the JS blind spot.          #
 # Hybrid severity: eval/Function of a decoded blob and remote fetch-then-exec  #
-# are crit (obfuscated RCE, zero-FP); child_process-with-template and dynamic  #
-# require() are warn (often legit). No JS parser; stdlib regex only.           #
+# are crit (obfuscated RCE, zero-FP); every other rule is warn (often legit).  #
+# B-743: the warn set is NOT enumerated here — it was, as two, and went stale   #
+# when a third arrived, which is how the consuming bucket's advice went false.  #
+# The list lives in the function docstring below and in checks/_vet.py's        #
+# _JS_WARN_REMEDIATION, which a test keeps complete. No JS parser; stdlib re.   #
 # --------------------------------------------------------------------------- #
 # eval / new Function of a base64-decoded blob — obfuscated code execution.
 _JS_EVAL_DECODED_RE = re.compile(

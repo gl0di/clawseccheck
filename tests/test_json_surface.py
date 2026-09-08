@@ -159,12 +159,30 @@ def test_json_has_projection_key(capsys):
 
 
 def test_json_projection_has_current(capsys):
+    """C-426: the KEY stays; its value is null on a run that has no score.
+
+    This is the shape C-423 settled on for the whole document — withhold the number,
+    never the key, so a consumer's `payload["projection"]["current"]["score"]` keeps
+    working and gets an explicit null rather than a KeyError.
+
+    The projection must agree with the top-level `score`: publishing a number here
+    while `payload["score"]` is null was a real leak (one key apart in the same
+    document), so the two are asserted together rather than separately.
+    """
     doc = _json_doc(VULN, capsys)
     proj = doc["projection"]
     assert "current" in proj
     current = proj["current"]
-    assert "score" in current and isinstance(current["score"], int)
-    assert "grade" in current and isinstance(current["grade"], str)
+    assert "score" in current
+    assert "grade" in current
+    if doc["graded"]:
+        assert isinstance(current["score"], int)
+        assert isinstance(current["grade"], str)
+        assert current["score"] == doc["score"]
+    else:
+        assert current["score"] is None
+        assert current["grade"] is None
+        assert doc["score"] is None
 
 
 def test_json_projection_current_score_matches_top_level(capsys):

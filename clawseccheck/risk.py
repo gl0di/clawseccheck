@@ -29,10 +29,12 @@ from typing import Callable
 from . import attest as _attest
 from . import mcpsurface as _mcpsurface
 from . import trajectory as _trajectory
-from .catalog import CRITICAL, FAIL, HIGH, MEDIUM, WARN, Finding
+from .catalog import CRITICAL, FAIL, FAIL_WEIGHT_STATUSES, HIGH, MEDIUM, WARN, Finding
 from .checks import (
+    _key_advice,
     _b62_actual_families,
     _b62_extract_declaration,
+    _credential_store_state,
     _enabled_tools,
     _EVENT_HOOK_PATH_RE,
     _external_input_channels,
@@ -41,15 +43,17 @@ from .checks import (
     _hint,
     _HOOK_MINIFIED_LINE,
     _hooks_session_key_exposures,
+    INPUT_TOOL_HINTS,
     _mcp_servers,
     _open_wildcard_group_channels,
-    _reassembly,
-    _resolved_channel_nodes,
-    SENSITIVE_TOOL_HINTS,
-    INPUT_TOOL_HINTS,
     OUTBOUND_TOOL_HINTS,
+    _reassembly,
+    _resolve_sandbox_scope,
+    _resolved_channel_nodes,
+    _sandbox_has_writable_bind,
+    SENSITIVE_TOOL_HINTS,
 )
-from .collector import Context, dig
+from .collector import Context, agent_roster, dig
 from .scanbudget import limits_for
 # B-483: `_asciify` was a SECOND, narrower copy of report.py's table (no ·, ×,
 # ≤, ≥, ≈, •) — the drift a duplicated table always produces. Both surfaces now
@@ -150,11 +154,126 @@ def _has_outbound(tools: list[str], cfg: dict) -> bool:
 
 
 def _has_sensitive_data(tools: list[str], ctx: Context) -> bool:
+    # B-730: this term read `(ctx.home / "credentials").is_dir()` -- the exact predicate
+    # B-666 disproved and replaced in A1's leg, left standing here because the fix
+    # landed in checks/_shared.py and never reached this module (git log: risk.py has
+    # commits on 08-25/27/31 and 09-01/02, none on 2026-08-28).
+    #
+    # The store exists on any home that ever paired a channel, so on the real fleet home
+    # -- where the directory is EMPTY, 0 files -- it raised this leg by itself and RISK-02
+    # asserted "All three legs of the Lethal Trifecta are active simultaneously" in the
+    # SAME --json document that reported `"trifecta": "2/3"` and A1 PASS. Measured
+    # disjunct-by-disjunct on that home: the hint term and the gateway term were both
+    # False, so this one term was the whole of a false-positive HIGH on the flagship
+    # chain. A directory name is not evidence; its contents are.
+    #
+    # `incomplete` is deliberately NOT folded in, and that is a real choice rather than
+    # an oversight. A1 has three states and routes an unreadable store to a WARN hedge
+    # ("nothing found in it means 'not found', not 'not there'"); a RISK chain has two,
+    # and its why-text ASSERTS the leg is active. Reading the hedge here would make the
+    # chain assert a leg nobody could confirm. The check hedges, the chain asserts, and
+    # the uncertainty still reaches the user -- through A1's WARN, not through a HIGH
+    # chain built on a store the audit could not read.
+    #
+    # KNOWN, UNSETTLED (B-730 follow-up): A1 excludes `gateway.auth.password` from this
+    # leg on the stated grounds that it is "the gateway's own auth secret, not
+    # agent-readable data" and that B1 flags it -- verified: check_secrets emits B1
+    # FAIL/CRITICAL on it. This module still counts it, so a home with only that key set
+    # reproduces the same A1-vs-RISK-02 disagreement through a different term. Left in
+    # place on purpose: removing it narrows detection, which is the false-negative
+    # direction, and it deserves its own measurement rather than a ride on this fix.
+    home = getattr(ctx, "home", None)
     return (
         _hint(tools, SENSITIVE_TOOL_HINTS)
-        or (ctx.home / "credentials").is_dir()
+        or bool(_credential_store_state(home)["secret_files"])
         or bool(dig(ctx.config, "gateway.auth.password"))
     )
+
+
+def _open_channel_entries(cfg: dict) -> list[tuple[str, str, bool, str]]:
+    """Same predicate/order as ``_open_channel_labels``, but keeps the RAW channel key,
+    whether it matched via the wildcard-group shape, and a WHY-fragment naming the
+    actual field+value the config declares -- alongside its rendered label.
+
+    B-567 round 2: a caller that needs to know WHICH predicate fired for a specific
+    channel must not recover the channel name by parsing it back out of the rendered
+    label (``label.split(" (", 1)[0]``) — ``channelId`` is a plain ``ZodString`` in the
+    installed dist with no charset/format constraint found
+    (dist/bundled-channel-config-schema-BYKT0d_t.d.ts:987), and plugin-registered
+    channels are a real, schema-supported shape (dist/channel-entry-contract-
+    TASNXkep.js), so a third-party channel id containing ``" ("`` cannot be ruled out
+    from the schema alone. A collision there would silently fall through to the wrong
+    branch and restore the exact bug this fixed. Carrying the name as a separate field
+    makes that class of bug structurally unreachable rather than merely unlikely.
+
+    B-567 round 3 (LOW residual): the policy branch's why-fragment used to be a single
+    hard-coded "dmPolicy or groupPolicy is 'open'" regardless of which field actually
+    matched -- reachable through Feishu's ``groupPolicy: "allowall"`` alias
+    (B-283/C-135, channel-PR3XHV0V.js:89-93), which is a real, schema-legal value that
+    is not literally ``'open'``. The why-fragment is now built from the SAME
+    field-by-field test that decides membership, so it names ``allowall`` when that is
+    what fired, rather than a value the config does not contain.
+    """
+    entries: list[tuple[str, str, bool, str]] = []
+    channels = cfg.get("channels")
+    if not isinstance(channels, dict):
+        return entries
+    open_wildcard = _open_wildcard_group_channels(cfg)
+    for name, c in channels.items():
+        if not isinstance(c, dict):
+            continue
+        if name in open_wildcard:
+            mention = any(
+                isinstance(node.get("groups"), dict)
+                and isinstance(node["groups"].get("*"), dict)
+                and node["groups"]["*"].get("requireMention") is True
+                for node in _resolved_channel_nodes(c)
+            )
+            suffix = ", any group, mention-gated" if mention else ", any group"
+            reason = (
+                "has a wildcard groups {'*': ...} entry with no allowFrom "
+                "restriction, so any member of that group can trigger it"
+            )
+            entries.append((name, f"{name} (open group{suffix})", True, reason))
+            continue
+        # B-378: a schema-drifted "accounts" (a list/string instead of a dict) must
+        # degrade to "no accounts", never raise — this is called directly from
+        # risk_paths() in cli.py's _main, OUTSIDE checks.run_all's per-check crash
+        # isolation, so an unguarded .values() here aborted the whole --full run.
+        accounts = c.get("accounts")
+        nodes = [c] + (list(accounts.values()) if isinstance(accounts, dict) else [])
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            parts = []
+            reason_bits = []
+            if node.get("dmPolicy") == "open":
+                parts.append("open DM")
+                reason_bits.append("dmPolicy is 'open'")
+            # B-283 (a), GROUNDING CORRECTION (C-135 review): Feishu's GroupPolicySchema
+            # maps the "allowall" alias onto "open" (channel-PR3XHV0V.js:89-93) — canonical
+            # helper is _norm_group_policy in checks/_shared.py; inlined here to keep
+            # risk.py free of a non-aggregator import (see CLAUDE.md §3.1-a). Feishu-scoped
+            # ONLY: every other channel schema checked in the dist (LINE
+            # reply-payload-transform-Ce9ZfUxA.js:19-23; the "core" schema shared by
+            # Telegram/Discord/Slack/Signal/Matrix/Nextcloud-Talk/Zalo,
+            # zod-schema.core-DviqqtPj.js:424-428) rejects "allowall" outright, so it
+            # cannot appear on those channels in a config that actually loaded — treating
+            # it as "open" there would label a schema-impossible value as an open group.
+            # The if/elif (not a shared `or`) keeps the two RAW values distinguishable
+            # for reason_bits below, while `parts`/the rendered label stay identical
+            # either way (B-567 round 3 must not change the label, only the why-text).
+            if node.get("groupPolicy") == "open":
+                parts.append("open group")
+                reason_bits.append("groupPolicy is 'open'")
+            elif name == "feishu" and node.get("groupPolicy") == "allowall":
+                parts.append("open group")
+                reason_bits.append("groupPolicy is 'allowall' (Feishu's alias for 'open')")
+            if parts:
+                reason = "accepts messages from anyone (" + " and ".join(reason_bits) + ")"
+                entries.append((name, f"{name} ({', '.join(parts)})", False, reason))
+                break
+    return entries
 
 
 def _open_channel_labels(cfg: dict) -> list[str]:
@@ -180,55 +299,11 @@ def _open_channel_labels(cfg: dict) -> list[str]:
     A wildcard group's ``requireMention: true`` is surfaced as mitigating context in the
     label, NOT treated as closing the path: it changes what triggers the bot, not who is
     allowed to trigger it.
+
+    Thin wrapper over ``_open_channel_entries`` (B-567 round 2) — kept for the existing
+    callers/tests that only need the rendered label, never the raw name.
     """
-    labels = []
-    channels = cfg.get("channels")
-    if not isinstance(channels, dict):
-        return labels
-    open_wildcard = _open_wildcard_group_channels(cfg)
-    for name, c in channels.items():
-        if not isinstance(c, dict):
-            continue
-        if name in open_wildcard:
-            mention = any(
-                isinstance(node.get("groups"), dict)
-                and isinstance(node["groups"].get("*"), dict)
-                and node["groups"]["*"].get("requireMention") is True
-                for node in _resolved_channel_nodes(c)
-            )
-            suffix = ", any group, mention-gated" if mention else ", any group"
-            labels.append(f"{name} (open group{suffix})")
-            continue
-        # B-378: a schema-drifted "accounts" (a list/string instead of a dict) must
-        # degrade to "no accounts", never raise — this is called directly from
-        # risk_paths() in cli.py's _main, OUTSIDE checks.run_all's per-check crash
-        # isolation, so an unguarded .values() here aborted the whole --full run.
-        accounts = c.get("accounts")
-        nodes = [c] + (list(accounts.values()) if isinstance(accounts, dict) else [])
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            parts = []
-            if node.get("dmPolicy") == "open":
-                parts.append("open DM")
-            # B-283 (a), GROUNDING CORRECTION (C-135 review): Feishu's GroupPolicySchema
-            # maps the "allowall" alias onto "open" (channel-PR3XHV0V.js:89-93) — canonical
-            # helper is _norm_group_policy in checks/_shared.py; inlined here to keep
-            # risk.py free of a non-aggregator import (see CLAUDE.md §3.1-a). Feishu-scoped
-            # ONLY: every other channel schema checked in the dist (LINE
-            # reply-payload-transform-Ce9ZfUxA.js:19-23; the "core" schema shared by
-            # Telegram/Discord/Slack/Signal/Matrix/Nextcloud-Talk/Zalo,
-            # zod-schema.core-DviqqtPj.js:424-428) rejects "allowall" outright, so it
-            # cannot appear on those channels in a config that actually loaded — treating
-            # it as "open" there would label a schema-impossible value as an open group.
-            if node.get("groupPolicy") == "open" or (
-                name == "feishu" and node.get("groupPolicy") == "allowall"
-            ):
-                parts.append("open group")
-            if parts:
-                labels.append(f"{name} ({', '.join(parts)})")
-                break
-    return labels
+    return [label for _, label, _, _ in _open_channel_entries(cfg)]
 
 
 def _channels_with_visibility_all(cfg: dict) -> list[str]:
@@ -295,10 +370,8 @@ def _has_heartbeat_cfg(cfg: dict) -> bool:
     """Autonomous heartbeat configured at agents.defaults or any per-agent entry."""
     if dig(cfg, "agents.defaults.heartbeat"):
         return True
-    agents = dig(cfg, "agents.list")
-    if isinstance(agents, list):
-        return any(isinstance(a, dict) and dig(a, "heartbeat") for a in agents)
-    return False
+    # B-699: agents.entries as well as agents.list
+    return any(dig(a.entry, "heartbeat") for a in agent_roster(cfg))
 
 
 def _host_reaching_bind(cfg: dict) -> str | None:
@@ -341,6 +414,239 @@ def _sandbox_off(cfg: dict) -> bool:
     return mode == "off" or mode is None
 
 
+def _fs_writes_contained(cfg: dict) -> bool:
+    """True only when the sandbox VERIFIABLY confines filesystem writes to a
+    read-only or absent mount -- B-497.
+
+    Grounded against the installed OpenClaw dist
+    (~/.npm-global/lib/node_modules/openclaw, 2026-08-24):
+    ``agents.defaults.sandbox.workspaceAccess`` is typed ``"none" | "ro" | "rw"``
+    (dist/types-34KlOMUq.d.ts:101,215,237); ``agents.defaults.sandbox.mode`` has
+    ``"all" | "non-main" | "off"`` as its sandboxed/unsandboxed split (mirrors
+    ``_sandbox_off`` above; dist/plugin-tool-allowlist-warnings-DrV_jgRM.js:89 tests
+    sandboxed-ness as exactly ``mode === "all" || mode === "non-main"``).
+    OpenClaw's own audit remediation and doctor hint state the containment condition
+    identically: dist/audit-UjVvFwCi.js:779 -- "use sandbox mode \"all\" and
+    workspaceAccess \"ro\" or \"none\""; dist/doctor-security-Dn5L6Ypi.js:120 --
+    "use sandbox mode \"all\" with workspaceAccess \"ro\" or \"none\"". Both legs are
+    required:
+
+    * ``mode`` must be exactly ``"all"`` -- ``"non-main"`` only sandboxes non-main
+      sessions; the agent's MAIN session still runs on the host
+      (dist/launch-BmPwk1y9.js:37: "'non-main' keeps the agent's main session on the
+      host"), so a write reaching that session is not contained regardless of
+      ``workspaceAccess``.
+    * ``workspaceAccess`` must be ``"ro"`` or ``"none"`` -- ``"rw"`` (or a missing key,
+      which OpenClaw itself defaults to ``"none"`` per dist/config-Dy4vED5-.js:156 but
+      this function does NOT rely on that upstream default; see below) leaves the real
+      writable workspace mounted.
+
+    Any other shape -- either key absent, non-string, or any value outside the two
+    verified-safe sets above -- returns False (NOT contained). This is deliberate: an
+    absent or unparseable containment key must not silently suppress a real RISK-12
+    chain (CLAUDE.md's C-135 house rule -- standing down on ambiguity is a false
+    negative). Only a config that DECLARES both keys with a verified-safe value earns
+    suppression.
+
+    ROUND 2 (C-135 caught a reintroduction of C-058): reading only
+    ``agents.defaults.sandbox`` misses a per-agent override that re-exposes the host
+    even when the default is safe -- exactly the gap ``checks/_config.py``'s
+    ``_peragent_sandbox_evidence`` already documents and fixes for B4/C-058. Grounded
+    on ``resolveSandboxConfigForAgent`` (dist/config-Dy4vED5-.js:140-156):
+
+    .. code-block:: js
+
+        mode: agentSandbox?.mode ?? agent?.mode ?? "off",
+        workspaceAccess: agentSandbox?.workspaceAccess ?? agent?.workspaceAccess ?? "none",
+
+    Resolution is PER-FIELD, not per-object: a per-agent ``sandbox`` key only
+    overrides the fields it explicitly declares; an omitted field falls through to
+    the default's value for that SAME field. So ``agents.list[N].sandbox =
+    {"workspaceAccess": "rw"}`` with no ``mode`` key still inherits ``mode: "all"``
+    from a safe default and is uncontained purely on the access leg -- this function
+    resolves each per-agent field independently to mirror that, never wholesale.
+    Since the top-level default check above already requires the default to be safe
+    before this loop runs, the ``?? "off"``/``?? "none"`` literal fallbacks in the JS
+    (only reached when BOTH per-agent and default are absent) can never trigger here.
+
+    ROUND 3 (C-135 caught a THIRD layer, one field deeper than round 2): mode +
+    workspaceAccess alone are not sufficient -- ``docker.binds`` and ``backend`` also
+    determine whether writes are actually confined, and both are read the same way
+    ``checks/_config.py``'s ``_peragent_sandbox_evidence`` (the C-058 fix this
+    function already claims as its model) reads them, rather than a third,
+    independently-drifting copy:
+
+    * ``docker.binds`` -- custom binds are appended to the container invocation
+      VERBATIM with no read-only flag (dist/docker-Hq4HIYYD.js:977:
+      ``if (params.includeBinds !== false ...) for (const bind of params.cfg.binds)
+      args.push("-v", bind);``); only the MANAGED workspace mount honours
+      ``workspaceAccess`` (dist/docker-Hq4HIYYD.js:612,617). Defaults-level and
+      per-agent binds are CONCATENATED onto the same running agent, not one
+      replacing the other (dist/config-Dy4vED5-.js:57: ``binds = [...globalDocker
+      ?.binds ?? [], ...agentDocker?.binds ?? []]``) -- so a bind declared at
+      EITHER level defeats containment, checked independently at each level (never
+      only the per-agent one, and never only the defaults one).
+    * ``backend`` -- ``SandboxBackendId`` is an unbounded string and
+      ``registerSandboxBackend`` is exported so plugins can add backends
+      (dist/sandbox-BMYGaWSS.d.ts:66; dist/types-34KlOMUq.d.ts:71); two ship today,
+      ``"docker"`` and ``"ssh"`` (dist/browser-bridges-DdlAaIG3.js:2176,2181).
+      Resolution mirrors mode/workspaceAccess but with JS ``||``, not ``??``
+      (dist/config-Dy4vED5-.js:154: ``agentSandbox?.backend?.trim() ||
+      agent?.backend?.trim() || "docker"``) -- an empty/whitespace string is ALSO
+      falsy and falls through, not just null/undefined. Only ``"docker"`` is a
+      backend this function can reason about (the ``ro``/``none`` semantics above
+      are grounded against the docker code path specifically); an ``"ssh"`` sandbox
+      runs exec on a REMOTE real host under ``mode: "all"``, and any
+      plugin-registered backend is unverifiable by construction, so anything other
+      than ``"docker"`` returns False -- fail-closed on an unmodelled backend, same
+      shape as the unmodelled-value branches above.
+
+    ROUND 4 (C-135 review, source-read only -- every claim below was reproduced
+    against a crafted config through the real engine before acting on it):
+
+    * **FN closed -- ``tools.exec.host`` is a CO-EQUAL fourth axis, not a sandbox
+      sub-field.** OpenClaw's own audit resolves it jointly with sandbox mode/
+      workspaceAccess (``isExecFilesystemConstrained``, dist/exec-filesystem-policy-
+      CTlB-k7U.js:13-17): ``if (sandboxMode !== "all") return false; if (execHost
+      === "gateway" || execHost === "node") return false; return
+      sandboxWorkspaceAccess !== "rw";``. ``host`` is typed ``"auto" | "sandbox" |
+      "gateway" | "node"`` (dist/types.tools-CBCgJD1K.d.ts:256, default ``"auto"``),
+      resolved ``agentExec?.host ?? globalExec?.host ?? "auto"`` from the TOP-LEVEL
+      ``tools.exec.host`` / per-agent ``agents.list[N].tools.exec.host`` -- an
+      explicit ``"gateway"`` or ``"node"`` routes exec OFF the sandboxed container
+      regardless of ``mode``/``workspaceAccess``, so only ``"auto"``/``"sandbox"``
+      are safe; reproduced (see test suite) before this leg was added.
+    * **FP1 fixed -- a verifiably ``:ro`` bind is genuinely contained.** Round 3's
+      blanket "any declared bind defeats containment" was too blunt: reproduced
+      that ``binds: ["/srv/data:/data:ro"]`` mounts read-only via Docker's own
+      native bind-mode enforcement. Narrowed via ``_bind_mode_is_ro`` -- see its
+      docstring for why this does NOT need to replicate OpenClaw's own
+      path-blocklist validation to stay sound.
+    * **FP2 fixed -- ``scope: "shared"`` discards a per-agent ``docker.binds``.**
+      Reproduced: under ``scope: "shared"`` (or legacy ``perSession: false``),
+      ``resolveSandboxDockerConfig`` never reads this agent's own ``sandbox.docker``
+      at all, so a per-agent bind that would otherwise defeat containment is inert.
+      See ``_resolve_sandbox_scope``. Only the per-agent BINDS leg is scope-gated --
+      ``mode``/``workspaceAccess``/``backend`` resolve per-field independently of
+      ``scope`` (dist/config-Dy4vED5-.js:153-156 does not reference it), and
+      defaults-level binds are never discarded by scope either.
+    * **``"ro"``/``"none"`` equivalence investigated, kept as-is.** The concern was
+      that write/edit/apply_patch tools are only STRIPPED for ``"ro"``
+      (``allowWorkspaceWrites = sandbox?.workspaceAccess !== "ro"``,
+      dist/agent-tools-BD8WL7ny.js:1040) and still constructed under ``"none"``.
+      But the underlying Docker MOUNT is what actually blocks a write attempt
+      regardless of which tool issues it, and at that layer the two are equal or
+      ``"none"`` is stricter: the primary workspace mount is read-only whenever
+      ``workspaceAccess !== "rw"`` -- true for BOTH ``"ro"`` and ``"none"``
+      (dist/docker-Hq4HIYYD.js:606-608) -- and the SECOND (agent-workspace) mount is
+      only added at all when ``workspaceAccess !== "none"``, i.e. ``"none"`` mounts
+      strictly fewer, never more, writable paths than ``"ro"`` (dist/docker-
+      Hq4HIYYD.js:614-618). Left untraced: whether a constructed-but-mount-blocked
+      write tool could still write to container-ephemeral ``tmpfs`` (``/tmp``,
+      default per ``resolveSandboxDockerConfig``) under ``"none"`` -- but that is
+      container-scoped and destroyed with the sandbox, not HOST persistence, which
+      is what RISK-12 (tamper/persistence) is about. Not reproduced as a wrong
+      classification; left as-is rather than narrowed on an unresolved claim.
+    * **Consistency fix -- a malformed ``docker`` shape now fails closed.** A
+      ``docker`` key present but not a dict (string/list/etc.) used to silently
+      read as "no binds" (permissive) while every other unmodelled shape in this
+      function fails closed; ``_sandbox_has_writable_bind`` now treats it as a
+      defeater. An ABSENT ``docker`` key is unaffected (still safe).
+    """
+    # NOT `dig(cfg, "agents.defaults.sandbox")`: that is a bare NON-LEAF object read,
+    # which test_schema_grounding.py's manifest guard cannot verify by construction
+    # (the dist-verified snapshot enumerates LEAF paths only) -- adding it to the
+    # manifest anyway made three OTHER grounding guards fail instead of the one this
+    # avoids. Every field actually needed off this node (mode/workspaceAccess are
+    # grounded LEAF paths; backend/scope are not grounded at all) is read via plain
+    # dict traversal below, exactly like the per-agent side already does
+    # (`a.get("sandbox")`), which never touches this guard.
+    agents_node = cfg.get("agents")
+    defaults_node = agents_node.get("defaults") if isinstance(agents_node, dict) else None
+    default_sandbox = defaults_node.get("sandbox") if isinstance(defaults_node, dict) else None
+    default_sandbox = default_sandbox if isinstance(default_sandbox, dict) else {}
+    default_mode = default_sandbox.get("mode")
+    default_access = default_sandbox.get("workspaceAccess")
+    if not (default_mode == "all" and default_access in ("ro", "none")):
+        return False
+    default_backend = _resolve_sandbox_backend(default_sandbox, "docker")
+    if default_backend != "docker":
+        return False
+    if _sandbox_has_writable_bind(default_sandbox):
+        return False
+    default_exec_host = dig(cfg, "tools.exec.host")
+    if default_exec_host is None:
+        default_exec_host = "auto"
+    if default_exec_host not in ("auto", "sandbox"):
+        return False
+    for _agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
+        a = _agent.entry
+        eff_exec_host = _resolve_exec_host(a.get("tools"), default_exec_host)
+        if eff_exec_host not in ("auto", "sandbox"):
+            return False
+        agent_sandbox = a.get("sandbox")
+        if not isinstance(agent_sandbox, dict):
+            continue  # no sandbox override declared -> fully inherits the safe default
+        eff_mode = agent_sandbox.get("mode")
+        if eff_mode is None:
+            eff_mode = default_mode
+        eff_access = agent_sandbox.get("workspaceAccess")
+        if eff_access is None:
+            eff_access = default_access
+        if not (eff_mode == "all" and eff_access in ("ro", "none")):
+            return False
+        if _resolve_sandbox_backend(agent_sandbox, default_backend) != "docker":
+            return False
+        # FP2: a shared-scope agent's OWN docker.binds never reaches the
+        # container (see _resolve_sandbox_scope), so only check it otherwise.
+        if _resolve_sandbox_scope(agent_sandbox, default_sandbox) != "shared":
+            if _sandbox_has_writable_bind(agent_sandbox):
+                return False
+    return True
+
+
+def _resolve_sandbox_backend(sandbox: dict, fallback: str) -> str:
+    """Mirrors resolveSandboxConfigForAgent's backend resolution
+    (dist/config-Dy4vED5-.js:154): ``agentSandbox?.backend?.trim() ||
+    agent?.backend?.trim() || "docker"`` -- JS ``||``, so an empty or
+    whitespace-only string is ALSO falsy and falls through, not just a missing key.
+    """
+    v = sandbox.get("backend") if isinstance(sandbox, dict) else None
+    if isinstance(v, str):
+        v = v.strip()
+    return v or fallback
+
+
+
+
+def _resolve_exec_host(agent_tools: dict, fallback: str) -> str:
+    """Mirrors resolveExecHost (dist/exec-filesystem-policy-CTlB-k7U.js:11):
+    ``params.agentExec?.host ?? params.globalExec?.host ?? "auto"``.
+
+    Field path is the top-level ``tools.exec.host`` globally / ``agents.list[N]
+    .tools.exec.host`` per agent -- NOT under ``.sandbox`` at all. See
+    ``_fs_writes_contained``'s ROUND 4 note for why this is a co-equal fourth axis,
+    not a sandbox sub-field.
+
+    KNOWN LIMIT (documented, not fixed here -- C-135 round 4 follow-up): the REAL
+    exec-target resolution chain has more links than this function models --
+    ``execOverrides?.host ?? sessionEntry?.execHost ?? agentExec?.host ??
+    globalExec?.host ?? "auto"`` (dist/exec-defaults-BLH0Yltk.js:27) -- and an
+    ``elevatedRequested`` exec is forced to ``"gateway"`` regardless of the
+    resolved default. So a config reading ``host: "auto"`` here can still route an
+    elevated exec off the sandbox at runtime; this function cannot see that from
+    static config alone and will under-narrow (stay silent) in that specific case.
+    Not chased further in this round -- flagged for whoever next touches exec.host
+    reasoning. Mitigating fact, verified: ``sandboxAvailable`` (the input to
+    ``auto``'s own "sandbox when available, otherwise gateway" fallback) comes from
+    CONFIG, not from Docker actually being reachable at runtime, so that specific
+    fallback path cannot silently fire under a config declaring ``mode: "all"``.
+    """
+    exec_cfg = agent_tools.get("exec") if isinstance(agent_tools, dict) else None
+    v = exec_cfg.get("host") if isinstance(exec_cfg, dict) else None
+    return v if v is not None else fallback
+
+
 def _has_mutable_identity(findings: list[Finding], cfg: dict) -> bool:
     """True when B30 FAILs OR any channel has dangerouslyAllowNameMatching."""
     b30 = _finding_status(findings, "B30")
@@ -374,6 +680,56 @@ def _bootstrap_writable(findings: list[Finding]) -> bool:
 def _self_mod_exec(findings: list[Finding]) -> bool:
     """True when B22 FAILs (self-modification path open without approval)."""
     return _finding_status(findings, "B22") == FAIL
+
+
+def _bootstrap_content_poisoned(findings: list[Finding]) -> bool:
+    """B-494: True when a content-ring scanner FOUND an injected directive actually
+    written into the agent's own bootstrap/identity files (B6 or B161 FAIL).
+
+    B20/B22 are mode-bit checks (group/world-writable permissions). The real
+    self-modification shape needs no permission weakness at all: a 0600 file the user
+    owns, poisoned through the agent's own granted `fs_write`. That sets neither bit,
+    so `_bootstrap_writable`/`_self_mod_exec` are structurally blind to it -- this is
+    the alternative kind of evidence: not "the file COULD be written by an outsider"
+    but "the file WAS written, and the payload is still there."
+
+    Scoped to exactly B6 and B161 -- both scan `ctx.bootstrap` ONLY (no
+    installed_skills, no MCP tool text mixed in), so a FAIL from either is
+    attributable to the bootstrap/identity file itself, matching this chain's own
+    "identity rewritten" / "persisted into files reloaded every turn" narrative.
+    `collector.py`'s bootstrap filename list already includes MEMORY.md, so this also
+    covers memory-file content, not just SOUL.md/AGENTS.md/TOOLS.md.
+
+    FAIL only, never WARN, for both:
+      - B161's own docstring hedges its WARN tier as "no corroborating fake code --
+        may be documentation"; FAIL there already required a corroborating fabricated
+        authorization code, i.e. the check's own high-confidence tier.
+      - B6 has no WARN tier at all (FAIL/PASS/UNKNOWN only), so this is consistent
+        rather than a special case.
+
+    Deliberately excluded, with reasons (do not fold these in without re-reading this
+    docstring):
+      - B64 (generic instruction-hierarchy override): its single FAIL/WARN verdict is
+        pooled across `ctx.bootstrap`, `ctx.installed_skills`, AND MCP tool
+        descriptions with no per-source status, so a B64 FAIL cannot be attributed to
+        the bootstrap file specifically -- it may be an installed skill or an MCP tool
+        with no bootstrap file touched at all. That is a different chain's shape
+        (malicious skill / malicious MCP tool), not "bootstrap file rewritten".
+      - B66 (persona/DAN jailbreak): never reaches FAIL -- WARN/PASS/UNKNOWN only.
+        Requiring FAIL from it would be permanently-dead code; lowering the bar to
+        WARN for a check whose own review never promoted it past WARN would undercut
+        the FAIL-strength bar this helper otherwise holds.
+      - B7 ("memory poisoning surface" in the catalog title): not actually a content
+        scanner -- it only checks whether `memory.vectorStore` declares explicit
+        access control (auth/readOnly); it never scans MEMORY.md text for an injected
+        directive, and has no FAIL status at all (WARN/UNKNOWN/PASS only). Its stated
+        surface is already covered above: MEMORY.md is one of the filenames B6/B161
+        scan via `ctx.bootstrap`.
+    """
+    return (
+        _finding_status(findings, "B6") == FAIL
+        or _finding_status(findings, "B161") == FAIL
+    )
 
 
 def _session_cross_user(findings: list[Finding], cfg: dict) -> bool:
@@ -433,12 +789,17 @@ def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPat
     An untrusted actor (anonymous DM or open group) can reach host execution
     or mutate state directly — no intermediary step required.
     """
-    open_ch = _open_channel_labels(cfg)
-    if not open_ch:
+    open_entries = _open_channel_entries(cfg)
+    if not open_entries:
         return None
     if not (_has_exec_or_write_tools(tools) or "elevated" in tools):
         return None
-    channel_label = open_ch[0]
+    # B-567: `open_reason` is built by _open_channel_entries from the SAME
+    # field-by-field test that decided this channel is open (round 2: no parsing of
+    # the rendered label; round 3: the reason names the actual field+value declared,
+    # e.g. Feishu's "allowall" alias rather than a hard-coded "'open'" the config may
+    # not literally contain) -- never a second, independently-drifting sentence here.
+    _channel_name, channel_label, _via_wildcard, open_reason = open_entries[0]
     # NOT _has_exec_or_write_tools(tools): that also returns True for a BARE "elevated"
     # grant with no exec/write tool at all, which would mislabel this branch -- the
     # guard at :418 already established at least one of {exec/write, elevated} is
@@ -453,8 +814,7 @@ def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPat
         title="Untrusted sender can reach host execution",
         chain=[channel_label, tool_label, "host / filesystem"],
         why=(
-            f"The channel '{channel_label}' accepts messages from anyone "
-            f"(dmPolicy or groupPolicy is 'open'). The agent also has "
+            f"The channel '{channel_label}' {open_reason}. The agent also has "
             f"{tool_label} enabled. Any anonymous actor can craft a message "
             "that causes the agent to execute code or mutate files on the host "
             "— no additional privilege escalation required."
@@ -463,7 +823,8 @@ def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPat
             "Lock every channel's dmPolicy and groupPolicy to 'allowlist' so only "
             "known, trusted senders can reach the agent. If open channels are required, "
             "remove or gate exec/write/elevated tools behind human approval "
-            "(tools.exec.mode='ask' or tools.exec.security='ask')."
+            "(tools.exec.mode='ask' puts a command to you when it is not on the allow "
+            "list; tools.exec.ask='always' puts every one to you)."
         ),
     )
 
@@ -524,10 +885,15 @@ def _rule_sandbox_off_untrusted_exec(ctx: Context, tools: list[str], cfg: dict) 
             "the host without any containment."
         ),
         fix=(
-            "Enable the sandbox: set agents.defaults.sandbox.mode to 'non-main' or "
-            "'all', and configure agents.defaults.sandbox.docker (network='bridge', "
-            "no broad host binds). If sandboxing is not possible, remove exec/write "
-            "tools or lock all ingress channels to a strict allowlist."
+            # B-738: this used to offer 'non-main' as an equal alternative. It clears
+            # this very chain while leaving it live — see _sandbox_off's docstring above,
+            # which already required exactly 'all' and cited the dist for why.
+            "Enable the sandbox: set agents.defaults.sandbox.mode to 'all', and configure "
+            "agents.defaults.sandbox.docker (network='bridge', no broad host binds). "
+            "'non-main' is not sufficient here: it keeps the agent's own main session on "
+            "the host, which is the session this chain runs through. If sandboxing is not "
+            "possible, remove exec/write tools or lock all ingress channels to a strict "
+            "allowlist."
         ),
     )
 
@@ -622,15 +988,27 @@ def _rule_control_plane_exposed(ctx: Context, findings: list[Finding],
 
 def _rule_self_modification(ctx: Context, findings: list[Finding],
                              tools: list[str], cfg: dict) -> RiskPath | None:
-    """HIGH: writable bootstrap + exec/fs_write without approval."""
-    # Check B20 (bootstrap write) or B22 (self-modification) failing
-    has_writable_bootstrap = (_finding_status(findings, "B20") == FAIL
-                               or _finding_status(findings, "B22") == FAIL)
-    if not has_writable_bootstrap:
+    """HIGH: writable bootstrap (or already-poisoned bootstrap) + exec/fs_write
+    without approval.
+
+    B-494: B20/B22 (mode-bit permission checks) alone are blind to the real
+    self-modification shape -- a 0600 bootstrap file the user owns, poisoned through
+    the agent's own granted fs_write. `_bootstrap_content_poisoned` (B6/B161 FAIL) is
+    an alternative kind of evidence for the same "identity file compromised" fact --
+    see its docstring for what's included/excluded and why.
+    """
+    has_bootstrap_evidence = (_finding_status(findings, "B20") == FAIL
+                               or _finding_status(findings, "B22") == FAIL
+                               or _bootstrap_content_poisoned(findings))
+    if not has_bootstrap_evidence:
         return None
     if not _has_exec_or_write_tools(tools):
         return None
-    # Only fire when there is no approval gate (real OpenClaw field: tools.exec.mode)
+    # Only fire when there is no approval gate (real OpenClaw field: tools.exec.mode).
+    # B-494: `_has_approval_gate` reads only `tools.exec.*` and does not know a bare
+    # fs_write grant (no exec tool) is left ungated by an exec-only "ask" mode -- a
+    # known gap in the approval-gate scope, deliberately NOT fixed or worked around
+    # here (wider than this rule; shared by the pre-existing B20/B22 path too).
     if _has_approval_gate(cfg):
         return None
     return RiskPath(
@@ -641,18 +1019,21 @@ def _rule_self_modification(ctx: Context, findings: list[Finding],
                "agent identity rewritten → persistent compromise"],
         why=(
             "Bootstrap or identity files (SOUL.md / AGENTS.md / TOOLS.md) are "
-            "group- or world-writable (B20 or B22 fails), AND the agent has "
-            "exec or fs_write tools enabled without a human approval gate. The "
-            "agent can therefore rewrite its own instructions, identity, or "
-            "installed skills — a single successful prompt-injection makes the "
-            "compromise persistent across restarts."
+            "group- or world-writable (B20 or B22 fails), OR a content-ring scanner "
+            "already found an override/jailbreak directive actually written into them "
+            "(B6 or B161 fails — the normal-permission file poisoned through the "
+            "agent's own fs_write). Either way, the agent also has exec or fs_write "
+            "tools enabled without a human approval gate, so it can rewrite its own "
+            "instructions, identity, or installed skills — a single successful "
+            "prompt-injection makes the compromise persistent across restarts."
         ),
         fix=(
             "Run 'chmod 700 workspace/ && chmod 600 workspace/SOUL.md "
             "workspace/AGENTS.md workspace/TOOLS.md' to remove group/world "
-            "write access. Also add an approval gate: set tools.exec.mode='ask'/'allowlist' "
-            "(or tools.exec.security='ask') so every write action needs explicit "
-            "human sign-off."
+            "write access, and restore any flagged file from a trusted backup. Also "
+            "add an approval gate: tools.exec.ask='always' requires your sign-off "
+            "before EVERY exec action; tools.exec.mode='ask' requires it only when the "
+            "command is not on the allow list."
         ),
     )
 
@@ -690,7 +1071,11 @@ def _rule_malicious_skill_exfil(ctx: Context, findings: list[Finding],
     reach out (messaging channels, external-service skills, outbound tools), the
     malicious skill has a live path to read secrets/data and send them out.
     """
-    if _finding_status(findings, "B13") != FAIL:
+    # B-751: was `!= FAIL`, so a CONFIRMED zip-slip (B13 status
+    # SKILL_ARCHIVE_PATH_TRAVERSAL) silently disabled this whole CRITICAL chain —
+    # measured: risk_paths() returned [] on a traversal home and ['RISK-09'] on the
+    # same findings with the status swapped to FAIL.
+    if _finding_status(findings, "B13") not in FAIL_WEIGHT_STATUSES:
         return None
     has_egress = (
         _has_outbound(tools, cfg)
@@ -812,10 +1197,18 @@ def _rule_fs_write_tamper(ctx: Context, findings: list[Finding],
     ungated (FAIL or WARN) AND there is an untrusted ingress vector. Keyed on the B55
     fs-write verdict rather than on raw tool names, so it is the capability-scoping framing
     of the write risk (distinct from RISK-01's open-sender-reaches-exec path).
+
+    B-497: suppressed when ``_fs_writes_contained`` verifies the sandbox genuinely
+    confines writes (``sandbox.mode: "all"`` AND ``workspaceAccess`` in
+    ``("ro", "none")`` -- see that helper's docstring for the dist grounding). Any
+    other shape -- including absent/unparseable containment keys -- is NOT treated as
+    contained and the chain keeps firing.
     """
     if _finding_status(findings, "B55") not in (FAIL, WARN):
         return None
     if not _has_untrusted_ingress(tools, cfg):
+        return None
+    if _fs_writes_contained(cfg):
         return None
     open_ch = _open_channel_labels(cfg)
     ingress_label = open_ch[0] if open_ch else "untrusted input (email/web/feed)"
@@ -843,16 +1236,20 @@ def _rule_fs_write_tamper(ctx: Context, findings: list[Finding],
 
 
 def _rule_markdown_image_persistence(ctx: Context, findings: list[Finding]) -> RiskPath | None:
-    """HIGH (RISK-13): markdown-image exfil + writable bootstrap/memory = persistence/exfil.
+    """HIGH (RISK-13): markdown-image exfil + writable/poisoned bootstrap = persistence/exfil.
 
     B59 already shows that remote markdown/HTML image URLs can leak data out of the
-    agent context. If bootstrap or memory files are writable (B20 or B22 fail), the
-    same attacker can write a payload or instruction back into files the agent reloads
-    later. That turns a one-shot exfil channel into a persistence-plus-exfil path.
+    agent context. If bootstrap or memory files are writable (B20 or B22 fail), OR a
+    content-ring scanner already found a directive planted in them (B6 or B161 FAIL —
+    B-494; see `_bootstrap_content_poisoned`'s docstring for scope), the same attacker
+    can write (or already has written) a payload or instruction back into files the
+    agent reloads later. That turns a one-shot exfil channel into a
+    persistence-plus-exfil path.
     """
     if _finding_status(findings, "B59") not in (FAIL, WARN):
         return None
-    if not (_bootstrap_writable(findings) or _self_mod_exec(findings)):
+    if not (_bootstrap_writable(findings) or _self_mod_exec(findings)
+            or _bootstrap_content_poisoned(findings)):
         return None
     return RiskPath(
         id="RISK-13",
@@ -865,10 +1262,12 @@ def _rule_markdown_image_persistence(ctx: Context, findings: list[Finding]) -> R
         ],
         why=(
             "B59 shows that a remote markdown/image URL can carry data out of the agent "
-            "context. If bootstrap or memory files are writable (B20 or B22 fails), the "
-            "same attacker can write a payload or instruction back into files the agent "
-            "reloads later. The result is a persistence-plus-exfil chain: steal data now, "
-            "leave behind code or instructions that survive restart."
+            "context. If bootstrap or memory files are writable (B20 or B22 fails), OR a "
+            "content-ring scanner already found a planted directive in them (B6 or B161 "
+            "fails), the same attacker can write — or already has written — a payload or "
+            "instruction back into files the agent reloads later. The result is a "
+            "persistence-plus-exfil chain: steal data now, leave behind code or "
+            "instructions that survive restart."
         ),
         fix=(
             "Remove remote markdown/image URLs from untrusted content, keep bootstrap and "
@@ -1040,8 +1439,21 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
         fix=(
             "Set channels.<provider>.contextVisibility (or channels.defaults) to 'allowlist' "
             "or 'allowlist_quote', and set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork "
-            "to false with an explicit browser.ssrfPolicy.hostnameAllowlist. Breaking either "
-            "leg breaks the chain."
+            "to false with an explicit "
+            # B-714: this named `hostnameAllowlist` unqualified. Measured by EXECUTING the
+            # installed 2026.9.1 root schema with a bogus-key control: that spelling returns
+            # `unrecognized_keys@browser.ssrfPolicy`, identical to the control, while
+            # `allowedHostnames` is ACCEPTED -- and `ssrfPolicy` is a `.strict()` object, so
+            # the WHOLE config is refused. A reader following this literally would have made
+            # OpenClaw unable to load their config while believing they had closed the SSRF
+            # leg. RISK-15 is reachable on a modern build (its own trigger key,
+            # dangerouslyAllowPrivateNetwork, is still current), which is what made this a
+            # live defect rather than a theoretical one -- RISK-25's equally stale
+            # `marketplaces.feeds` advice cannot reach a modern reader, because the key that
+            # fires it is itself rejected by the schema.
+            + _key_advice(ctx, "browser.ssrfPolicy.hostnameAllowlist",
+                          "browser.ssrfPolicy.allowedHostnames")
+            + ". Breaking either leg breaks the chain."
         ),
     )
 
@@ -2210,7 +2622,7 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
         ],
         why=(
             "This install has the full unattended Skill Workshop pipeline configured "
-            "and reachable: skills.workshop.autonomous.enabled authors new skill "
+            "and reachable: the Skill Workshop autonomy setting authors new skill "
             "proposals from conversation signals, and approvalPolicy='auto' installs "
             "them with no human confirmation. At the same time, at least one ingress "
             f"surface admits content from someone other than the owner: {detail}. A "
@@ -2218,9 +2630,10 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
             "install new executable code on disk with no review step in between."
         ),
         fix=(
-            "Set skills.workshop.approvalPolicy back to the default 'pending' so every "
+            "Set skills.workshop.approvalPolicy to 'pending' so every "
             "generated proposal needs an explicit `openclaw skills workshop apply` "
-            "decision, and/or disable skills.workshop.autonomous.enabled unless "
+            "decision, and/or turn off skills.workshop.autonomous.mode "
+            "(skills.workshop.autonomous.enabled before OpenClaw 2026.8.1) unless "
             "unattended authoring is genuinely intended. Independently, close the "
             "flagged ingress surface(s): set channels.<provider>.contextVisibility to "
             "'allowlist'/'allowlist_quote' (B26), scope commands.ownerAllowFrom/"

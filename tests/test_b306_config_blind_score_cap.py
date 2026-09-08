@@ -273,7 +273,18 @@ class TestReproC_TotalZeroBypass:
     minimal/fresh OpenClaw home (no skills, no MCP servers) with openclaw.json truncated
     AND a `.clawseccheckignore` that happens to suppress the only two checks (B9, B16)
     that still score off a blind ``ctx.config == {}`` (every other config-derived check
-    was already guarded to UNKNOWN by this task's first half). Pre-fix this reached
+    was already guarded to UNKNOWN by this task's first half). The assertion below is a
+    deliberate guard on that setup — when it fires, some check has started scoring off an
+    unreadable config and the repro shape has drifted.
+
+    B10 was briefly a third entry here. B-514 taught it to read `audit.enabled` and answer
+    the field's documented default when absent, which scores — and on a config that never
+    parsed, "absent" meant "nothing read", so it scored a PASS off a blind config and this
+    guard fired. Adding B10 to the ignore list silenced the guard without changing what
+    B10 said to the user; B-524 fixed the check instead (`_config_unreadable` at the top of
+    `check_audit_log`), so B10 is UNKNOWN here again and the seed is back to two entries.
+    Suppressing a check to quiet this assertion is the wrong repair: the assertion is
+    reporting a real lying PASS, not a stale fixture. Pre-fix this reached
     `scored == []`, `total == 0`, and fell through to `assessable=False`/grade="N/A" —
     a neutral grey badge, not the CRITICAL-ceiling F this project's own doctrine assigns
     everywhere else a config goes dark. Runs through the real `audit()` entry point

@@ -9,7 +9,10 @@ Entry point:  ``coverage(findings) -> dict``
 """
 from __future__ import annotations
 
-from .catalog import BY_ID, FAMILY_OF, SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER, SURFACES, Finding
+from .catalog import (
+    BY_ID, FAIL_WEIGHT_STATUSES, FAMILY_OF, SUBJECT_LABEL, SUBJECT_OF, SUBJECT_ORDER,
+    SURFACES, Finding,
+)
 
 # ── Derived surface / family constants ───────────────────────────────────────
 
@@ -45,7 +48,9 @@ _ROADMAP: list[str] = []
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_CHECKED_STATUSES: frozenset[str] = frozenset({"PASS", "FAIL", "WARN"})
+#: B-755: derived, not spelled — a FAIL-weight status other than the literal "FAIL" left a
+#: surface reading "partial" (never assessed) when it had in fact been assessed and convicted.
+_CHECKED_STATUSES: frozenset[str] = frozenset({"PASS", "WARN"}) | FAIL_WEIGHT_STATUSES
 
 
 def _empty_counts() -> dict[str, int]:
@@ -56,7 +61,10 @@ def _tally(findings: list[Finding]) -> dict[str, int]:
     """Count findings by status into lowercase keys."""
     counts = _empty_counts()
     for f in findings:
-        key = f.status.lower()
+        # B-755: fold every FAIL-weight status onto the 'fail' bucket. Lower-casing the raw
+        # status produced a key no bucket has, so a confirmed escape counted as nothing at
+        # all and the surface reported `fail: 0` beside its own conviction.
+        key = "fail" if f.status in FAIL_WEIGHT_STATUSES else f.status.lower()
         if key in counts:
             counts[key] += 1
     return counts
@@ -178,18 +186,35 @@ def coverage(findings: list[Finding]) -> dict:
 # find" (checked/partial/not_checkable by SECURITY FAMILY); this answers "was every
 # CHECK this subject owns actually reached", at the coarser 8-SUBJECT (owner-facing)
 # grouping `catalog.SUBJECT_OF` already defines for the Inventory-by-subject block.
+# Every subject that owns at least one CATALOG check, derived from `SUBJECT_OF` rather
+# than listed by hand. B-565: it *was* a hand-written tuple excluding skills/mcp/plugins,
+# on the reasoning that those three get a PER-INSTANCE count instead. The per-instance
+# count is real and still rendered — but "counted per instance" never implied "every check
+# about it resolved", and the hand-written tuple made the two mutually exclusive: 68 of 188
+# catalog checks (skills 55 + mcp 13) were in neither the numerator nor the denominator of
+# the page whose whole job is to say what did and did not get checked. Deriving the set
+# means a subject added to `SUBJECT_OF` tomorrow is counted the day it is added.
+_CHECK_OWNING_SUBJECTS: tuple[str, ...] = tuple(dict.fromkeys(SUBJECT_OF.values()))
+# The subjects whose TOP-LEVEL page row is check granularity. The rest (skills/mcp/plugins)
+# lead with their per-instance count and carry check granularity in a `checks` sub-entry —
+# see `build_coverage_page`. `plugins` owns no catalog check at all, so it has no sub-entry.
 _BUCKET_SUBJECTS: tuple[str, ...] = tuple(
-    dict.fromkeys(s for s in SUBJECT_OF.values() if s not in ("skills", "mcp", "plugins"))
+    s for s in _CHECK_OWNING_SUBJECTS if s not in ("skills", "mcp", "plugins")
 )
-# "skills"/"mcp"/"plugins" are deliberately excluded: those three subjects get a
-# PER-INSTANCE scanned-vs-total (one installed skill/configured server/swept plugin
-# at a time, from the skill/plugin sweep and the MCP inventory) rather than this
-# CHECK-granularity bucket count — see pipeline.build_coverage_page, the function
-# that combines both kinds into the full 8-subject page.
+_INSTANCE_SUBJECTS: tuple[str, ...] = ("skills", "mcp", "plugins")
+# (unit noun, verb) per subject for the text page. Only the instance-counted subjects
+# need an entry; everything else is check granularity and falls back to ("checks",
+# "scanned"). B-565: before this, every row read "N of M scanned" whatever M counted.
+_UNIT_OF: dict[str, tuple[str, str]] = {
+    "skills": ("skills", "swept"),
+    "plugins": ("plugins", "swept"),
+    "mcp": ("servers", "inventoried"),
+}
 
 
-def subject_coverage(findings: list[Finding]) -> dict:
-    """Per-bucket-subject scanned-vs-total, at CHECK granularity.
+def subject_coverage(findings: list[Finding], *,
+                     subjects: "tuple[str, ...] | None" = None) -> dict:
+    """Per-subject scanned-vs-total, at CHECK granularity.
 
     "scanned" = this subject has >=1 check that returned a conclusive PASS/FAIL/WARN
     (the same `_CHECKED_STATUSES` `coverage()` above uses); "total" = every CATALOG
@@ -198,12 +223,19 @@ def subject_coverage(findings: list[Finding]) -> dict:
 
     Args:
         findings: list of Finding objects from a scan run (e.g. checks.run_all).
+        subjects: which subjects to report. Defaults to EVERY subject that owns a
+            catalog check (`_CHECK_OWNING_SUBJECTS`) — including skills/mcp, whose
+            checks this function silently dropped before B-565. `build_coverage_page`
+            passes the default and then decides where each subject's numbers are
+            rendered; the parameter exists so a caller can narrow, never so this
+            function can forget a subject the catalog routes.
 
     Returns:
         {subject: {"total": int, "scanned": int, "not_scanned": [check_id, ...]}}
-        for each subject in `_BUCKET_SUBJECTS`.
+        for each requested subject.
     """
-    ids_by_subject: dict[str, list[str]] = {s: [] for s in _BUCKET_SUBJECTS}
+    wanted = _CHECK_OWNING_SUBJECTS if subjects is None else tuple(subjects)
+    ids_by_subject: dict[str, list[str]] = {s: [] for s in wanted}
     for cid, meta in BY_ID.items():
         subject = SUBJECT_OF.get(meta.surface)
         if subject in ids_by_subject:
@@ -212,7 +244,7 @@ def subject_coverage(findings: list[Finding]) -> dict:
     latest: dict[str, Finding] = {f.id: f for f in findings if f.id in BY_ID}
 
     result: dict[str, dict] = {}
-    for subject in _BUCKET_SUBJECTS:
+    for subject in wanted:
         cids = sorted(ids_by_subject[subject])
         not_scanned = [
             cid for cid in cids
@@ -257,7 +289,8 @@ def _sweep_coverage(sweep, *, skip_reason: str | None = None) -> dict:
 
 
 def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
-                        plugin_sweep=None, sweep_skip_reason: str | None = None) -> dict:
+                        plugin_sweep=None, extra_findings: list | None = None,
+                        sweep_skip_reason: str | None = None) -> dict:
     """The full 8-subject (F-163 taxonomy) "was everything looked at" page: answers a
     different question than the Inventory-by-subject block (`report.build_inventory`,
     "what did we FIND") — this states scanned-vs-total, with every skip named, never
@@ -268,6 +301,12 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
     sweep objects (either may be None when this run never swept that subject); `mcp`
     is always fully scanned (MCP vetting is not sweep-budgeted) — 0 of 0 reads as
     "none configured".
+
+    `extra_findings` (B-558) is how verdicts reached OUTSIDE `CHECKS` reach the bucket
+    counts — today P8's T1/T2/T3/B191, which are catalogued (so they are in `logs`'
+    denominator) but never registered as checks. Omit it and the page reports exactly
+    what the audit's own findings support, which is right for any run that did not run
+    those phases.
 
     V1 scope note (F-165): file/byte-level detail for `logs` ("N of M
     trajectory files, X of Y MB scanned") is intentionally NOT in this page yet — that
@@ -287,7 +326,28 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
     # docstring precedent); keeping both directions deferred avoids the two modules
     # ever needing a load-order guarantee neither currently promises.
 
-    page: dict[str, dict] = dict(subject_coverage(findings))
+    # B-558: `extra_findings` carries verdicts reached OUTSIDE `CHECKS` this run — today
+    # P8's T1/T2/T3/B191. They are in CATALOG, so `subject_coverage` already counts them
+    # in `logs`' denominator; without this merge they could never reach its numerator, and
+    # a `--full` run printed their verdicts and then listed them as "not scanned" twenty
+    # lines below. Merged HERE rather than into the audit's findings list: these must not
+    # reach the score, the inventory or `--exit-code` (F-154 routes them to the grade as a
+    # cap-only signal, computed elsewhere, and that stays their only path to the verdict).
+    #
+    # Merged FIRST so a real check always wins a collision. `subject_coverage` keeps the
+    # LAST finding per id (`{f.id: f for f in findings}`), so this order — not the one an
+    # earlier revision of this comment claimed — is what stops an off-check producer
+    # overriding a registered check's verdict. Nothing collides today, since no member of
+    # `BEHAVIORAL_CHECK_IDS` is in `CHECKS`; the ordering is here because this parameter is
+    # generic over any future phase, and a collision would otherwise be silent.
+    #
+    # Status semantics are `_CHECKED_STATUSES`, unchanged — an UNKNOWN detector stays in
+    # `not_scanned` exactly as an UNKNOWN check does. What is NOT delegated to that rule is
+    # whether these verdicts are admissible at all: a behavioural PASS can be vacuous in a
+    # way no check's can (see `behavioral.analysis_is_conclusive`), so the producer decides
+    # whether to publish them and this function decides only how to count what it is given.
+    check_cov = subject_coverage(list(extra_findings or ()) + list(findings))
+    page: dict[str, dict] = {s: check_cov[s] for s in _BUCKET_SUBJECTS}
 
     for subject, sweep in (("skills", skill_sweep), ("plugins", plugin_sweep)):
         page[subject] = _sweep_coverage(sweep, skip_reason=sweep_skip_reason)
@@ -295,6 +355,20 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
     n_mcp = len(_mcp_inventory(ctx))
     page["mcp"] = {"total": n_mcp, "scanned": n_mcp, "not_scanned": [],
                     "note": "none configured" if n_mcp == 0 else None}
+
+    # B-565: the three instance-counted subjects ALSO own catalog checks, and their
+    # per-instance row cannot speak for those. `mcp` was the sharp end: its row is
+    # `scanned = total` by construction — no finding is consulted, so it could never
+    # report a gap for any config. Measured on a config with three MCP servers, it
+    # printed "3 of 3 scanned" while 9 of 13 MCP checks were UNKNOWN, four of them HIGH
+    # (B331 tool-description injection, B185 poisoned tool description, B177, B332).
+    # "MCP vetting is not sweep-budgeted" — the old rationale — is true and does not
+    # imply every MCP check resolved; enumerating every server is not checking it.
+    # The instance count stays the headline (it answers "did we look at each one"),
+    # and `checks` carries the separate question underneath, never merged into it.
+    for subject in _INSTANCE_SUBJECTS:
+        if subject in check_cov:
+            page[subject]["checks"] = check_cov[subject]
     return page
 
 
@@ -313,15 +387,37 @@ def coverage_page_lines(page: dict, *, ascii_only: bool = False) -> list[str]:
         if entry is None:
             continue
         label = SUBJECT_LABEL[subject]
+        unit, verb = _UNIT_OF.get(subject, ("checks", "scanned"))
         if entry["total"] is None:
-            lines.append(f" {label}: {entry['note']}")
-            continue
-        if entry["total"] == 0:
-            lines.append(f" {label}: 0 of 0 ({entry['note']})")
-            continue
-        lines.append(f" {label}: {entry['scanned']} of {entry['total']} scanned")
-        if entry["not_scanned"]:
-            shown = ", ".join(entry["not_scanned"][:8])
-            more = f" (+{len(entry['not_scanned']) - 8} more)" if len(entry["not_scanned"]) > 8 else ""
-            lines.append(f"   not scanned: {shown}{more}")
+            head = f" {label}: {entry['note']}"
+        elif entry["total"] == 0:
+            head = f" {label}: 0 of 0 ({entry['note']})"
+        else:
+            head = f" {label}: {entry['scanned']} of {entry['total']} {unit} {verb}"
+        # B-565: the check tally rides on the SAME line as the instance tally, never as a
+        # second bare "N of M" row. Two unlabelled counts in one identically-formatted list
+        # is what hid the gap: a reader answering "what did not get checked?" read
+        # "Skills: 2 of 2 scanned" as full coverage of the 55 skill checks, 13 of which
+        # were UNKNOWN in that very run. It is appended even when the sweep did not run,
+        # because the checks still did — dropping it there would re-hide the gap on exactly
+        # the `--fast`/plain-audit runs that have no sweep to speak for them.
+        checks = entry.get("checks")
+        if checks:
+            head += f"; {checks['scanned']} of {checks['total']} checks scanned"
+        lines.append(head)
+        if entry["total"]:
+            lines.extend(_not_scanned_lines(entry["not_scanned"], f"{unit} not {verb}"))
+        if checks:
+            lines.extend(_not_scanned_lines(checks["not_scanned"], "checks not scanned"))
     return lines
+
+
+def _not_scanned_lines(not_scanned: list, label: str) -> list[str]:
+    """One ``   <label>: a, b, c (+N more)`` line, or nothing when the list is empty.
+    Shared so the instance tally and the check tally (B-565) name their skips the same
+    way and neither can quietly start merely counting them."""
+    if not not_scanned:
+        return []
+    shown = ", ".join(str(x) for x in not_scanned[:8])
+    more = f" (+{len(not_scanned) - 8} more)" if len(not_scanned) > 8 else ""
+    return [f"   {label}: {shown}{more}"]

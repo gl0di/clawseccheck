@@ -5,6 +5,8 @@ append each change to a local owner-only event journal. Offline, deterministic.
 """
 from __future__ import annotations
 
+import re
+
 from clawseccheck import audit, diff, load_events, record_events, snapshot
 from clawseccheck.report import render_events
 
@@ -133,6 +135,41 @@ def test_render_events_empty_and_nonempty():
     assert "No recorded change" in render_events([])
     out = render_events([{"ts": "2026-06-20T10:00:00", "level": "CRITICAL", "message": "boom"}])
     assert "boom" in out and "2026-06-20T10:00:00" in out
+
+
+# ---------------------------------------------------------------------------
+# B-583: "never written" vs "clean history" must not render identically
+# ---------------------------------------------------------------------------
+
+def test_render_events_never_run_names_that_and_carries_no_date():
+    """A journal that was never created (monitoring never ran) must say so — and must
+    not claim a "since" it has no honest date for."""
+    out = render_events([], journal_exists=False)
+    assert "has not run" in out
+    assert "since" not in out.lower()
+    # no ISO-ish date substring either — nothing to fabricate a "since" from
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", out)
+
+
+def test_render_events_clean_history_carries_the_last_run_date():
+    """An existing, empty journal with a known last-run timestamp gets the SKILL.md
+    -documented "nothing has changed since <date>" sentence, not a bare "no events"."""
+    out = render_events([], since="2026-07-22T09:00:00")
+    assert "nothing has changed since 2026-07-22t09:00:00" in out.lower()
+
+
+def test_render_events_never_run_and_clean_history_differ():
+    """The whole defect: two opposite facts must not render the same words."""
+    never_run = render_events([], journal_exists=False)
+    clean_history = render_events([], since="2026-07-22T09:00:00")
+    assert never_run != clean_history
+
+
+def test_render_events_default_unknown_state_unchanged():
+    """Neither signal supplied (old call sites, not yet updated) keeps today's
+    deliberately vaguer wording rather than guessing which case it is."""
+    assert render_events([]) == render_events([], journal_exists=None, since=None)
+    assert "No recorded change events yet." in render_events([])
 
 
 def test_journal_file_is_owner_only(tmp_path):

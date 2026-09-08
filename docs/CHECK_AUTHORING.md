@@ -1,8 +1,12 @@
 # Check Authoring — the root-cause `detail` convention
 
-> **Status: convention, not enforced.** This is guidance for *new and edited* checks. It
-> deliberately does **not** trigger a build failure and does **not** call for a one-pass
-> rewrite of the ~600 existing `_finding()` call-sites. Apply it as you touch a check.
+> **Status: mostly convention.** This is guidance for *new and edited* checks. The `detail`
+> and `fix` conventions deliberately do **not** trigger a build failure and do **not** call
+> for a one-pass rewrite of the ~600 existing `_finding()` call-sites — apply them as you
+> touch a check. Two later sections are different and say so in place: the evidence-prefix
+> separator rule is enforced by a test, and the surface-reach and negative-result rules are
+> conventions today with a guard planned. Where a rule is enforced, this document says so
+> at the rule; assume the rest is guidance.
 
 Inspired by cloudflare/security-audit-skill's `report-schema.json` `root_cause` field
 (a forced one-sentence causal template). ClawSecCheck adopts the *spirit* — a Finding
@@ -119,6 +123,120 @@ subject doesn't have that feature configured" UNKNOWN.
 short, paste-adjacent remediation hint. Don't fold the remediation into `detail` — the
 renderers show them in distinct slots, and `--json` exposes them as separate fields
 (see [`OUTPUT_SCHEMA.md`](OUTPUT_SCHEMA.md) §2).
+
+## A new signal has to land somewhere, and the surfaces are not interchangeable
+
+A finding is not the only thing a check produces. Confidence, a coverage note, a
+resolved-default disclosure, a destination host, a sub-signal, a layer status — each is an
+*information-bearing channel*, and each is wired by hand into whichever renderer its author
+happened to be working in. That is how the same defect got filed six separate times: a
+channel computed once and rendered by one surface out of ten, invisible until someone read
+the other nine side by side.
+
+So before a channel counts as shipped, decide where it lands:
+
+- **The machine-complete surfaces carry everything.** `--json` and `--sarif` exist so a
+  consumer never has to re-derive what the engine already knew. A field that reaches neither
+  is not available to any automation.
+- **The human surfaces carry anything that changes what a reader should DO.** The text
+  report, the vet dossier and `--advise`. If a reader would act differently knowing it, it
+  belongs there — the fact that it fits in `--json` is not a substitute, because nobody
+  reading a dossier is also parsing JSON.
+- **The rest are explicitly exempt, and say why.** `--brief` runs no audit at all; `--card`
+  is a few lines; `--vet-plan` never scans. Exempt is a decision, not an oversight, and it
+  belongs in a comment.
+
+**A surface that cannot carry a channel must say so. It must never assert the opposite.**
+This is the presentation half of the rule the UNKNOWN section states for verdicts: report
+what you do not know, do not manufacture a clean answer. Two live examples of breaking it —
+`--advise` printing *"Nothing dangerous found — this looks safe to install"* for a run whose
+dossier says a region was never scanned (B-621); and a report announcing *"33 checks could
+not reach a reliable verdict — review the affected finding(s) below"* while marking none of
+them (B-624). Both sentences are true about what was assessed and false about what a reader
+takes from them.
+
+**A channel nobody reads is finished business, not a loose end.** Render it, delete it, or
+write in-source that it is internal and why. Left computed and silently dropped, it reads to
+the next author as something that displays somewhere.
+
+One instance of this is already enforced rather than advisory: an evidence line that opens
+with a scanned subject's name must use a separator the bundled-skill attribution understands,
+or the build fails. The list of separators was extended by hand three times, each time after
+a defect; it now answers to the producers instead.
+
+## Before you write "not found"
+
+Every rule above is about not overstating what you found. This one is about the opposite and
+is the easier mistake, because a clean result looks like success.
+
+**Show that the check could have found something, and put that demonstration where the
+result is read.**
+
+That is the whole requirement, and it is deliberately not written as a list of known traps.
+Seven false negatives were produced here in a single day and they came in at least three
+different shapes — a probe that never reached the branch, a command whose "nothing" was an
+artifact of how it was asked, and a result that was about a different tree than the one being
+read. Anyone who memorises those three will be caught by the fourth, exactly as the hand-kept
+separator list was caught by each new convention. The demand is on the *negative result*, not
+on a catalogue of ways to get one wrong.
+
+In practice that means:
+
+- Every "no finding" assertion carries a non-vacuity assertion beside it, proving the run
+  reached its subject at all.
+- A guard is shown to fail: mutate a copy so it *should* fire, and confirm it does.
+- A corpus result states how many of its targets entered the non-trivial path. A clean sweep
+  over a corpus that cannot reach the code proves nothing, and reporting the zero bare
+  implies otherwise.
+- A run names the object it ran against. If a file could have changed underneath — an edit
+  mid-run, a module cached at import — "green" has no subject.
+
+## Citing the OpenClaw dist: name the symbol, not the file
+
+Grounding a check means being able to point at what the runtime actually does. A citation that
+nobody can resolve provides the appearance of that without the substance.
+
+**Cite the SYMBOL. Treat `file:line` as a convenience, and stamp the version you read it on.**
+
+The reason is mechanical, not stylistic: OpenClaw's bundle filenames are content-hashed, so a
+release renames essentially all of them whether or not anything moved. Measured across the
+2026.7.1-2 → 2026.8.2 transition, of 206 distinct bundle names cited in this repo **194 no longer
+existed** — 94% — in a window where most of the behaviour they described had not changed at all.
+Over the same window, of 55 cited vendor symbols **47 still resolved**.
+
+So a `file:line` citation is written once and decays on the next release regardless of whether it
+was ever correct, while a symbol name stays greppable on any version.
+
+The damage is not untidiness. A dead citation collapses two very different situations into one
+appearance:
+
+- the bundle was renamed and the claim still holds, and
+- the behaviour was removed and the claim is now false.
+
+A reader cannot tell those apart without redoing the grounding, which is the work the citation
+existed to save. The eight symbols that genuinely vanished in that transition are exactly the
+cases a stale filename would have hidden behind "the file must have moved".
+
+In practice:
+
+- Name the function, constant or type: ``resolveEffectiveToolFsWorkspaceOnly``, not
+  `tool-fs-policy-CyOPYI8M.js:14`. Add the filename after it if it helps a reader navigate.
+- Stamp the version: *"Grounded on openclaw@2026.8.2 (2026-09-02)"*. That single clause converts
+  the citation into a claim that stays true as history instead of one that quietly rots. A dated
+  citation is never wrong — it says what was read, and when.
+- For a config field, cite the **path** (`gateway.controlUi.embedSandbox`) and check it against
+  the schema path list rather than a bundle line. Paths survive releases; line numbers do not.
+- When you find a cited symbol gone, that is a finding, not a chore. Re-establish what the runtime
+  does now before touching the check — a check written against a vanished predicate is the
+  phantom-path class Golden Rule #4 exists to stop.
+- Matching a leaf name against a new path list yields a **candidate**, never a proven rename. A
+  same-named leaf under a different parent is a different setting.
+
+`scripts/dist_citation_gate.py` enforces the floor: it fails on a NEW unqualified citation of a
+bundle the installed dist does not have. It cannot see a citation whose file still exists but
+whose line moved, so it is a backstop for the convention, not a substitute for it.
+`tests/test_dist_citation_gate.py` runs it inside the suite (local-only — it skips cleanly when
+no OpenClaw dist is installed, e.g. in CI).
 
 ## Notes
 

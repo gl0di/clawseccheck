@@ -20,7 +20,11 @@ Offline, read-only, stdlib only.
 """
 from __future__ import annotations
 
+import ast
+import importlib.util
 import re
+import sys
+import sysconfig
 from pathlib import Path
 
 from clawseccheck import __released__, __version__
@@ -63,17 +67,72 @@ _RISK_RANGE_RE = re.compile(
 # real count reaches the next multiple of ten, the doc has to be restated.
 _OPEN_CLAIM_SLACK = 10
 
-# "6,236 automated tests" — with or without the thousands comma.
-_TEST_COUNT_RE = re.compile(r"(\d{1,3}(?:,\d{3})+|\d{4,6})\+?\s*(?:automated\s+)?tests\b", re.IGNORECASE)
+# "6,236 automated tests" — with or without the thousands comma, and "549 test files":
+# a bare three-to-six-digit count (not just four-to-six — a claim like "549 test files"
+# is a real, currently-shipped shape and a three-digit count never matched before
+# C-445), followed by either "tests" or "test files".
+# The `files` group is what keeps the two claim KINDS apart. Widening the regex to see
+# "561 test files" without it fed a file count into the guard that compares against the
+# test count, and the full suite went red with "docs/USAGE.md says 561 while the suite has
+# 15,594 — restate it (drifted by 15,033)". It passed review because the value guard skips
+# below `_FULL_SUITE_FLOOR`, so a partial run — the only kind anyone runs while editing this
+# file — never exercised it (the skip is now file-based; see below). Seeing a claim and
+# knowing what it claims are two jobs.
+_TEST_COUNT_RE = re.compile(
+    r"(\d{1,3}(?:,\d{3})+|\d{3,6})\+?\s*(?:automated\s+)?test(?:s|(?P<files>\s+files))\b",
+    re.IGNORECASE,
+)
 
-# Below this, the run is a subset rather than the suite, so the collected count says
-# nothing about the true total.
-_FULL_SUITE_FLOOR = 3000
+def _run_narrowing(config) -> str:
+    """Name what narrowed this pytest run, or "" if nothing did (a whole-suite run).
+
+    Read off the INVOCATION, never off the filesystem or the collected count. Two earlier
+    versions of this decision were wrong in the two available directions:
+
+    * An absolute `_FULL_SUITE_FLOOR = 3000` item count. Set when the suite held ~3,500
+      tests; the suite now holds over 16,000, so every subset above 3,000 looked whole and
+      the guard compared a doc claim against a partial count — a 152-file selection
+      reported "README.md claims 16,100 tests but only 4,541 exist" about a correct README.
+      An absolute threshold against a growing quantity is a claim with an expiry date.
+
+    * Comparing the test FILES collected against the files on disk. Exact in principle and
+      wrong in practice: pytest collects once at session start, this runs at the END, and
+      a 20-minute suite gives a concurrent session ample time to add a file. That is not
+      hypothetical — it is what happened on the run that produced this function (626
+      collected, 627 on disk, one file created three minutes in), and the guard skipped on
+      a genuinely whole suite. Silently disabling itself on CI is the one failure this
+      guard must not have.
+
+    The invocation is a single snapshot and cannot drift underneath the run. If a future
+    pytest grows a narrowing flag not listed here, the guard runs on a partial suite and
+    goes RED — noise, which is the safe direction for a guard to fail in.
+    """
+    o = config.option
+    for attr, label in (
+        ("file_or_dir", "explicit paths"),
+        ("keyword", "-k"),
+        ("markexpr", "-m"),
+        ("deselect", "--deselect"),
+        ("lf", "--lf"),
+        ("failedfirst", "--ff"),
+        ("last_failed", "--lf"),
+    ):
+        if getattr(o, attr, None):
+            return label
+    return ""
+
+
+# Whether this run is the whole suite is decided by the shape of the INVOCATION
 
 # How far the stated figure may fall behind before it stops informing the reader. Wide
 # enough that ordinary commits do not redden CI, narrow enough that a stale claim cannot
 # survive to a release.
 _TEST_CLAIM_SLACK = 400
+
+# The same two rules, at the magnitude a file count actually moves: never overstate,
+# and restate once the gap stops informing. 400 would let a claim of 161 stand against
+# 561 files, which is the open-ended rot this guard exists to prevent.
+_TEST_FILE_CLAIM_SLACK = 40
 
 
 def _shipped_files():
@@ -222,22 +281,84 @@ def test_attack_chain_count_claims_match_the_risk_engine():
     assert not wrong, "stale attack-chain count claims:\n  " + "\n  ".join(wrong)
 
 
-def test_the_svg_badge_number_matches_its_own_label():
-    """The SVG carries the figure twice -- a <text class="num"> and the label beside it --
-    plus again in the title and aria-label. Fixing one and missing another is the whole
-    failure mode here, so pin that they agree."""
+# Each badge states its six figures three times: as visible <text class="num"> elements,
+# and again inside aria-label and <title>. `[\d.,]+` and not `\d+` -- the test-count slot is
+# comma-grouped ("15,400"), and a `\d+` pattern silently matches the "15" of it, which is
+# how that position stayed unguarded while reading as covered.
+_SVG_NUM_RE = re.compile(r'<text class="num" x="([\d.]+)"[^>]*>([\d.,]+)</text>')
+_SVG_LABEL_RE = re.compile(r'aria-label="([^"]*)"')
+_SVG_TITLE_RE = re.compile(r"<title>([^<]*)</title>")
+# "184 security checks - 26 attack-chain detectors - ..." -> the figure opening each segment.
+_SVG_STAT_RE = re.compile(r"([\d.,]+)\s+[A-Za-z]")
+
+
+def _svg_self_disagreements(svg: str, name: str) -> list:
+    """Every way *svg* contradicts itself across its three statements of the same figures.
+
+    Deliberately derives the number of stats FROM THE FILE rather than asserting five, so a
+    sixth stat added later is covered the day it is added -- the previous guard hardcoded a
+    single x position and therefore could only ever watch the one figure it was written for.
+    """
+    out = []
+    nums = [v for _, v in sorted(_SVG_NUM_RE.findall(svg), key=lambda p: float(p[0]))]
+    if not nums:
+        return [f"{name}: no <text class=\"num\"> elements at all"]
+    for what, rx in (("aria-label", _SVG_LABEL_RE), ("title", _SVG_TITLE_RE)):
+        m = rx.search(svg)
+        if not m:
+            out.append(f"{name}: no {what}")
+            continue
+        stated = _SVG_STAT_RE.findall(m.group(1))
+        if len(stated) != len(nums):
+            out.append(
+                f"{name}: {len(nums)} number element(s) but {what} states {len(stated)} figure(s)"
+            )
+            continue
+        for i, (drawn, said) in enumerate(zip(nums, stated)):
+            if drawn != said:
+                out.append(f"{name}: position {i} shows {drawn}, its {what} says {said}")
+    return out
+
+
+def test_the_svg_badge_numbers_match_their_own_label():
+    """Every figure the badge draws must equal what its aria-label and title say it draws.
+
+    The failure this pins really happened: on 2026-08-13 the test-count slot read 14,400
+    while the label beside it said 15,000 -- a 600 disagreement inside one file that no
+    guard could see, because the guard watched only the attack-chain position."""
     wrong = []
     for name in ("stats-light.svg", "stats-dark.svg"):
-        path = REPO / "docs" / "assets" / name
-        svg = path.read_text(encoding="utf-8")
-        label = _CHAIN_COUNT_RE.search(svg)
-        assert label, f"{name}: no 'N attack-chain detectors' text at all"
-        # the <text class="num"> sharing the label's x position carries the same figure
-        num = re.search(r'<text class="num" x="372\.0"[^>]*>(\d+)</text>', svg)
-        assert num, f"{name}: no attack-chain number element at the expected position"
-        if num.group(1) != label.group(1):
-            wrong.append(f"{name}: badge shows {num.group(1)}, its own text says {label.group(1)}")
+        svg = (REPO / "docs" / "assets" / name).read_text(encoding="utf-8")
+        wrong.extend(_svg_self_disagreements(svg, name))
     assert not wrong, "SVG badge disagrees with itself:\n  " + "\n  ".join(wrong)
+
+
+def test_the_badge_guard_bites_on_a_previously_unguarded_position():
+    """Guard the guard, on a position the OLD one structurally could not reach.
+
+    Mutating the attack-chain slot would prove nothing -- that is the one slot the previous
+    regex already watched. So mutate the test-count slot (x=620.0) and the checks slot
+    (x=124.0) instead, and require a complaint naming each."""
+    svg = (REPO / "docs" / "assets" / "stats-light.svg").read_text(encoding="utf-8")
+    assert not _svg_self_disagreements(svg, "control"), "the real file must start clean"
+
+    positions = [x for x, _ in sorted(_SVG_NUM_RE.findall(svg), key=lambda p: float(p[0]))]
+    assert len(positions) >= 3, "badge should carry several figures"
+
+    for idx in (0, 2):  # security checks, automated tests -- neither is x=372.0
+        x, value = sorted(_SVG_NUM_RE.findall(svg), key=lambda p: float(p[0]))[idx]
+        broken = svg.replace(
+            f'<text class="num" x="{x}"', f'<text class="num" x="{x}" data-mutated="1"', 1
+        )
+        # rewrite only that element's value, leaving the label and title untouched
+        broken = re.sub(
+            r'(<text class="num" x="' + re.escape(x) + r'"[^>]*>)[\d,]+(</text>)',
+            r"\g<1>999999\g<2>",
+            broken,
+        )
+        complaints = _svg_self_disagreements(broken, "mutant")
+        assert complaints, f"guard is blind to position {idx} (x={x}, was {value})"
+        assert any("999999" in c for c in complaints), complaints
 
 
 def test_changelog_is_exempt_from_the_count_pins():
@@ -256,14 +377,18 @@ def test_test_count_claims_are_true_and_not_badly_stale(request):
     a lie. So the rule is the one that actually protects a reader: never claim more tests
     than exist, and restate once the gap gets wide enough to mislead.
 
-    Skips on a partial run, where the collected count is not the suite total. CI runs the
+    Skips on a partial run, where the collected count is not the suite total — detected by
+    comparing the test FILES this run collected from against the files on disk, which is
+    exact and scales with the suite instead of expiring like an absolute floor. CI runs the
     whole suite, so the guard is live exactly where a release is cut.
     """
     actual = len(request.session.items)
-    if actual < _FULL_SUITE_FLOOR:
+    file_total = len(list((REPO / "tests").glob("test_*.py")))
+    narrowing = _run_narrowing(request.config)
+    if narrowing:
         import pytest
 
-        pytest.skip(f"partial run ({actual} collected) — count claims need the full suite")
+        pytest.skip(f"partial run ({narrowing}) — count claims need the full suite")
 
     wrong = []
     for path in _shipped_files():
@@ -272,11 +397,780 @@ def test_test_count_claims_are_true_and_not_badly_stale(request):
             claimed = int(m.group(1).replace(",", ""))
             line = text[: m.start()].count("\n") + 1
             where = f"{path.relative_to(REPO)}:{line}"
-            if claimed > actual:
-                wrong.append(f"{where} claims {claimed:,} tests but only {actual:,} exist")
-            elif actual - claimed >= _TEST_CLAIM_SLACK:
+            # "561 test files" and "15,200 tests" are both test-count claims and they are
+            # measured against different truths. Comparing a file count to the suite total
+            # produces a demand to "restate it (drifted by 15,033)" about a figure that was
+            # exactly right.
+            is_files = m.group("files") is not None
+            truth = file_total if is_files else actual
+            noun = "test files" if is_files else "tests"
+            slack = _TEST_FILE_CLAIM_SLACK if is_files else _TEST_CLAIM_SLACK
+            if claimed > truth:
+                wrong.append(f"{where} claims {claimed:,} {noun} but only {truth:,} exist")
+            elif truth - claimed >= slack:
                 wrong.append(
-                    f"{where} says {claimed:,} while the suite has {actual:,} — "
-                    f"restate it (drifted by {actual - claimed:,})"
+                    f"{where} says {claimed:,} {noun} while there are {truth:,} — "
+                    f"restate it (drifted by {truth - claimed:,})"
                 )
     assert not wrong, "test-count claims need attention:\n  " + "\n  ".join(wrong)
+
+
+def test_test_count_guard_reads_three_digit_counts_and_the_test_files_phrasing():
+    """Guard the guard: C-445 found "549 test files" invisible to `_TEST_COUNT_RE` for
+    two independent reasons — the numeric alternation admitted only a comma-thousands
+    form or four-to-six bare digits (never a bare three-digit count like 549), and the
+    trailing literal was `tests\\b`, which "test files" never satisfies. Pins both
+    widenings in both directions, same idiom as the RISK-range guard-the-guard test.
+    """
+    for claim, count in (
+        ("549 test files", "549"),
+        ("561 test files", "561"),
+        ("6,236 automated tests", "6,236"),
+        ("15,200 tests", "15,200"),
+    ):
+        m = _TEST_COUNT_RE.search(claim)
+        assert m is not None, f"{claim!r} is a test-count claim the guard cannot see"
+        assert m.group(1) == count
+    for not_a_claim in (
+        "99 test files",  # stays two digits — out of this widening's scope
+        "a broader test harness",
+        "the testsuite ran clean",
+    ):
+        assert _TEST_COUNT_RE.search(not_a_claim) is None, (
+            f"{not_a_claim!r} is not a test-count claim, but the guard reads one"
+        )
+
+
+# --- The two badge figures that nothing derived -------------------------------------
+#
+# `_svg_self_disagreements` above pins that the badge agrees with ITSELF, and it caught a
+# real 600-unit drift. But self-consistency is not truth. Three of the badge's five figures
+# are checked against code elsewhere in this file -- the check count against CATALOG, the
+# attack-chain count against the RISK engine, the test count against the collected suite --
+# and two were checked against nothing at all:
+#
+#     "0 dependencies"    "0 network calls"
+#
+# Those two are the badge's load-bearing claims. They restate CLAUDE.md's stdlib-only
+# constraint and Golden Rule #1 (local-only, forever), which is the whole reason a reader
+# is asked to run a security tool against their own agent config. Until this section they
+# rested on someone having typed a zero and never revisited it: one `import requests`, or
+# one `urllib.request`, and every guard in this file would still have gone green while the
+# badge went on promising zero.
+#
+# Same direction as the rest of the module: truth is DERIVED FROM THE TREE, the badge is
+# asserted against it. Each guard has a negative control that feeds it synthetic sources,
+# so nothing here needs to mutate the repository to prove it bites.
+
+_PACKAGE = REPO / "clawseccheck"
+
+# Stdlib modules that only EXIST on another platform, so `find_spec` cannot resolve them
+# here. Naming them beats letting the running platform decide what counts as a dependency:
+# on a Linux CI leg `winreg` (imported twice, for the Windows host checks) is unresolvable
+# and would be reported as third-party; on Windows the same would happen to fcntl/grp/pwd.
+_PLATFORM_STDLIB = frozenset({
+    "winreg", "msvcrt", "fcntl", "grp", "pwd", "termios", "posix", "nt",
+})
+
+# Modules that perform network I/O. `urllib.parse` is deliberately ABSENT -- it parses
+# strings and opens nothing, and it is the only urllib this package imports (ten files).
+# `socket` is absent for a different reason: it is imported once, purely for inet_aton /
+# inet_ntoa address conversion, so it is policed by ATTRIBUTE below rather than by import.
+_NETWORK_MODULES = frozenset({
+    "aiohttp", "asyncio", "ftplib", "http", "httplib2", "httpx", "imaplib", "nntplib",
+    "poplib", "requests", "smtplib", "socketserver", "ssl", "telnetlib", "urllib3",
+    "urllib.error", "urllib.request", "webbrowser", "xmlrpc",
+})
+
+# The only `socket` names that convert an address. Anything else -- socket(), connect(),
+# create_connection(), getaddrinfo() -- reaches the network or a resolver and must not
+# appear in a tool whose badge says zero.
+_SOCKET_ADDRESS_ONLY = frozenset({
+    "inet_aton", "inet_ntoa", "inet_pton", "inet_ntop",
+    "htons", "htonl", "ntohs", "ntohl",
+    "AF_INET", "AF_INET6", "error",
+})
+
+_SPAWN_ATTRS = {
+    "subprocess": {"run", "Popen", "call", "check_call", "check_output", "getoutput",
+                   "getstatusoutput"},
+    "os": {"system", "popen", "execv", "execve", "execvp", "execvpe", "spawnv", "spawnve",
+           "spawnl", "spawnlp", "posix_spawn", "posix_spawnp", "fork", "forkpty"},
+}
+
+
+def _package_sources():
+    """`(repo-relative path, source)` for every shipped module.
+
+    Returned rather than walked in place so each guard below can be pointed at synthetic
+    sources by its own negative control, instead of mutating the tree to prove it bites.
+    """
+    return [
+        (str(p.relative_to(REPO)), p.read_text(encoding="utf-8"))
+        for p in sorted(_PACKAGE.rglob("*.py"))
+    ]
+
+
+def _imported_modules(sources):
+    """`[(dotted module, file)]` for every ABSOLUTE import in *sources*.
+
+    A relative import is this package importing itself and is skipped. `from urllib.parse
+    import urlparse` yields both `urllib.parse` and `urllib.parse.urlparse`, so a ban list
+    can name a submodule (`urllib.request`) without also banning its parent.
+    """
+    out = []
+    for name, text in sources:
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    out.append((alias.name, name))
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    continue
+                module = node.module or ""
+                if not module:
+                    continue
+                out.append((module, name))
+                for alias in node.names:
+                    out.append((f"{module}.{alias.name}", name))
+    return out
+
+
+def _is_stdlib(top: str) -> bool:
+    if top in _PLATFORM_STDLIB or top in sys.builtin_module_names or top == "__future__":
+        return True
+    try:
+        spec = importlib.util.find_spec(top)
+    except (ImportError, ValueError):
+        return False
+    if spec is None:
+        return False
+    origin = spec.origin or ""
+    if origin in ("built-in", "frozen"):
+        return True
+    if not origin:
+        return False
+    paths = sysconfig.get_paths()
+    where = Path(origin).resolve()
+    # site-packages lives UNDER the stdlib prefix, so it has to be excluded first or every
+    # third-party package would answer "yes, I am stdlib".
+    for key in ("purelib", "platlib"):
+        if key in paths and where.is_relative_to(Path(paths[key]).resolve()):
+            return False
+    return where.is_relative_to(Path(paths["stdlib"]).resolve())
+
+
+def _third_party_imports(sources=None):
+    """Top-level module names this package imports that are not in the standard library."""
+    sources = _package_sources() if sources is None else sources
+    tops = {m.split(".")[0] for m, _ in _imported_modules(sources) if m != "clawseccheck"}
+    return sorted(t for t in tops if t and not _is_stdlib(t))
+
+
+def _declared_runtime_dependencies():
+    """The `[project] dependencies` array from pyproject.toml.
+
+    Parsed by hand because `tomllib` is 3.11+ and the CI floor is 3.9 -- and adding a TOML
+    library to read the file that proves there are no libraries would be its own joke.
+    """
+    text = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    body = re.search(r"^\[project\]\s*$(.*?)^\[", text, re.S | re.M)
+    section = body.group(1) if body else text
+    array = re.search(r"^dependencies\s*=\s*\[(.*?)\]", section, re.S | re.M)
+    if not array:
+        return []
+    return [item for item in re.findall(r'"([^"]+)"', array.group(1)) if item.strip()]
+
+
+def _network_surfaces(sources=None):
+    """Every construct in *sources* through which this package could reach the network."""
+    sources = _package_sources() if sources is None else sources
+    out = []
+    for module, where in _imported_modules(sources):
+        for banned in _NETWORK_MODULES:
+            if module == banned or module.startswith(banned + "."):
+                out.append(f"{where} imports {module}")
+                break
+    for name, text in sources:
+        tree = ast.parse(text)
+        imported_socket = any(
+            isinstance(n, ast.Import) and any(a.name == "socket" for a in n.names)
+            for n in ast.walk(tree)
+        )
+        for node in ast.walk(tree):
+            if (
+                imported_socket
+                and isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "socket"
+                and node.attr not in _SOCKET_ADDRESS_ONLY
+            ):
+                out.append(f"{name}:{node.lineno} uses socket.{node.attr}")
+            elif isinstance(node, ast.ImportFrom) and node.module == "socket":
+                for alias in node.names:
+                    if alias.name not in _SOCKET_ADDRESS_ONLY:
+                        out.append(f"{name}:{node.lineno} imports socket.{alias.name}")
+    return sorted(set(out))
+
+
+def _spawn_sites(sources=None):
+    """`(file, line, [literal argv strings])` for every place this package starts a program."""
+    sources = _package_sources() if sources is None else sources
+    out = []
+    for name, text in sources:
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)):
+                continue
+            if func.attr not in _SPAWN_ATTRS.get(func.value.id, ()):
+                continue
+            argv = []
+            for arg in node.args:
+                if isinstance(arg, (ast.List, ast.Tuple)):
+                    argv += [e.value for e in arg.elts
+                             if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+                elif isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    argv.append(arg.value)
+            out.append((name, node.lineno, argv))
+    return sorted(out)
+
+
+def _badge_figures():
+    """`{stat phrase: figure}` read off a badge's aria-label."""
+    svg = (REPO / "docs" / "assets" / "stats-light.svg").read_text(encoding="utf-8")
+    label = _SVG_LABEL_RE.search(svg)
+    assert label, "badge has no aria-label"
+    out = {}
+    for segment in label.group(1).split(" - "):
+        m = re.match(r"([\d,]+)\s+(.+)", segment.strip())
+        if m:
+            out[m.group(2).strip().lower()] = int(m.group(1).replace(",", ""))
+    return out
+
+
+def test_the_zero_dependencies_figure_is_derived_from_the_tree():
+    """The badge's dependency count must equal what the tree actually pulls in.
+
+    Two independent sources, because either alone can lie: `pyproject.toml` can declare
+    nothing while a module imports a package the developer happens to have installed, and
+    an import audit alone would miss a dependency declared for the installer's benefit.
+    """
+    declared = _declared_runtime_dependencies()
+    third_party = _third_party_imports()
+    real = len(declared) + len(third_party)
+    figure = _badge_figures().get("dependencies")
+    assert figure is not None, "badge no longer states a dependency count"
+    assert real == figure, (
+        f"badge claims {figure} dependencies but the tree has {real}: "
+        f"declared={declared}, imported={third_party}"
+    )
+
+
+def test_the_dependency_guard_bites_on_a_third_party_import():
+    """Guard the guard. A zero that cannot go non-zero is decoration, not a check."""
+    assert _third_party_imports() == [], "the real package must start clean"
+    planted = _third_party_imports([
+        ("clawseccheck/_synthetic.py", "import requests\nfrom yaml import safe_load\n"),
+    ])
+    assert planted == ["requests", "yaml"], planted
+    # …and a stdlib-only file of the same shape must stay silent, or the guard is just
+    # reporting every import it sees.
+    assert _third_party_imports([
+        ("clawseccheck/_synthetic.py", "import json\nfrom urllib.parse import urlparse\n"),
+    ]) == []
+
+
+def test_the_zero_network_calls_figure_is_derived_from_the_tree():
+    """The badge's network-call count must equal the reachable network surfaces.
+
+    Scope, stated rather than implied: this is an audit of what the PACKAGE does. It cannot
+    speak for a program the package spawns, which is why the single spawn site is pinned
+    separately below.
+    """
+    surfaces = _network_surfaces()
+    figure = _badge_figures().get("network calls")
+    assert figure is not None, "badge no longer states a network-call count"
+    assert len(surfaces) == figure, (
+        f"badge claims {figure} network calls but the tree has {len(surfaces)}:\n  "
+        + "\n  ".join(surfaces)
+    )
+
+
+def test_the_network_guard_bites_on_an_import_and_on_a_socket_that_connects():
+    """Guard the guard, in both directions.
+
+    The socket half matters most: `socket` IS imported by this package, for inet_aton and
+    inet_ntoa, so a ban on the import would have to be lifted and the whole module would go
+    unwatched. Policing the attribute keeps the address conversion and still catches a
+    connect() added beside it.
+    """
+    assert _network_surfaces() == [], "the real package must start clean"
+
+    by_import = _network_surfaces([
+        ("clawseccheck/_synthetic.py",
+         "import urllib.request\nfrom http.client import HTTPSConnection\n"),
+    ])
+    assert len(by_import) == 3, by_import
+
+    by_attribute = _network_surfaces([
+        ("clawseccheck/_synthetic.py",
+         "import socket\n"
+         "def f(host):\n"
+         "    s = socket.socket(socket.AF_INET)\n"
+         "    s.connect((host, 443))\n"
+         "    return socket.inet_ntoa(socket.inet_aton(host))\n"),
+    ])
+    assert any("socket.socket" in s for s in by_attribute), by_attribute
+    assert not any("inet_aton" in s or "inet_ntoa" in s or "AF_INET" in s
+                   for s in by_attribute), by_attribute
+
+    assert _network_surfaces([
+        ("clawseccheck/_synthetic.py",
+         "import socket\nfrom urllib.parse import urlparse\n"
+         "def f(x):\n    return socket.inet_aton(x)\n"),
+    ]) == []
+
+
+def test_the_only_program_this_package_spawns_is_the_users_own_openclaw_cli():
+    """"0 network calls" is an import-level claim, and an import audit cannot see a network
+    call made by a program we START. So the one place this package starts anything is pinned
+    by argv shape: `openclaw security audit --json`, the user's own already-installed CLI
+    reading their own machine.
+
+    A second spawn site, or a changed argv, reddens the build -- which is the point. It
+    forces whoever adds it to re-examine the badge's promise rather than inherit it.
+    """
+    sites = _spawn_sites()
+    assert len(sites) == 1, "\n".join(f"{f}:{ln} argv={argv}" for f, ln, argv in sites)
+    where, _, argv = sites[0]
+    assert where == "clawseccheck/native.py", where
+    assert argv == ["security", "audit", "--json"], argv
+
+
+def test_the_spawn_guard_bites_on_a_second_call_site():
+    """Guard the guard: the assertion above is `== 1`, so it must be shown to reach 2."""
+    planted = _spawn_sites([
+        ("clawseccheck/_synthetic.py",
+         "import subprocess, os\n"
+         "def f():\n"
+         "    subprocess.run(['curl', 'https://example.invalid'])\n"
+         "    os.system('wget https://example.invalid')\n"),
+    ])
+    assert len(planted) == 2, planted
+    assert planted[0][2] == ["curl", "https://example.invalid"], planted
+
+
+# A static import audit is only as complete as the absence of a dynamic one. `_is_stdlib`
+# can classify every name it is handed and still miss a dependency loaded by string.
+_DYNAMIC_IMPORT_CALLS = {"import_module", "__import__", "find_spec", "module_from_spec"}
+
+# Programs whose whole job is to reach the network. This package spawns exactly one thing
+# today; the ban exists for the site nobody has added yet, so that adding it collides with
+# the badge instead of quietly outdating it.
+_NETWORK_CLIENT_BINARIES = frozenset({
+    "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp", "ftp",
+    "telnet", "rsync", "git", "pip", "npm", "npx", "openssl",
+})
+
+
+def _dynamic_import_sites(sources=None):
+    """Every construct that could load a module whose name is not in the source text.
+
+    Written against the AST rather than by grep on purpose: this package is a scanner, so
+    `"importlib"` and `exec(...)` appear all over it as DETECTION SIGNATURES -- string
+    literals naming what a malicious skill does. A grep reports those and is useless; an
+    AST walk sees that a string constant is not an import.
+    """
+    sources = _package_sources() if sources is None else sources
+    out = []
+    for name, text in sources:
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0] == "importlib":
+                        out.append(f"{name}:{node.lineno} imports {alias.name}")
+            elif isinstance(node, ast.ImportFrom) and not node.level:
+                if (node.module or "").split(".")[0] == "importlib":
+                    out.append(f"{name}:{node.lineno} imports from {node.module}")
+            elif isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id == "__import__":
+                    out.append(f"{name}:{node.lineno} calls __import__()")
+                elif isinstance(func, ast.Attribute) and func.attr in _DYNAMIC_IMPORT_CALLS:
+                    out.append(f"{name}:{node.lineno} calls .{func.attr}()")
+    return sorted(set(out))
+
+
+def test_the_import_audit_is_complete_because_nothing_imports_by_string():
+    """What makes the two guards above trustworthy, rather than merely green.
+
+    `_imported_modules` walks the whole AST, so a lazy import inside a function is already
+    covered -- and that is not academic here: `report.py` alone carries 27 of them. What a
+    static walk genuinely cannot see is a module named by a runtime string. So the claim is
+    closed from the other end: this package contains no dynamic-import construct at all,
+    which makes the static list exhaustive rather than merely long.
+    """
+    assert _dynamic_import_sites() == [], (
+        "a dynamic import makes the dependency audit incomplete:\n  "
+        + "\n  ".join(_dynamic_import_sites())
+    )
+
+
+def test_the_dynamic_import_guard_bites_and_ignores_detection_signatures():
+    """Guard the guard, in both directions -- the second half is the load-bearing one.
+
+    This module lists `"importlib"` as a dangerous name a scanned skill might use, and
+    `catalog.py` describes `exec()/eval()` payload loaders in plain prose. A guard that
+    reported those would be untrustworthy noise on day one and would be deleted by day two.
+    """
+    planted = _dynamic_import_sites([
+        ("clawseccheck/_synthetic.py",
+         "import importlib\n"
+         "def f(name):\n"
+         "    __import__(name)\n"
+         "    return importlib.import_module(name)\n"),
+    ])
+    assert len(planted) == 3, planted
+
+    assert _dynamic_import_sites([
+        ("clawseccheck/_synthetic.py",
+         '_DANGEROUS = ["importlib", "__import__", "marshal"]\n'
+         'NOTE = "payload executed via exec()/eval() after import_module()"\n'),
+    ]) == []
+
+
+def test_no_spawn_site_starts_a_network_client():
+    """The other half of the spawn claim: not just how many, but WHAT.
+
+    "subprocess is imported" is not "there is a network call" -- the same distinction that
+    makes `socket` in `_egress.py` harmless, since it only converts addresses. So the
+    binaries are named. Today the single site runs the user's own `openclaw`; a future site
+    running `curl` would be the badge's claim going false, not this guard being incomplete.
+    """
+    offenders = []
+    for where, line, argv in _spawn_sites():
+        for word in argv:
+            if Path(word).name in _NETWORK_CLIENT_BINARIES:
+                offenders.append(f"{where}:{line} runs {word}")
+    assert not offenders, "\n  ".join(offenders)
+
+    planted = [
+        f"{w}:{ln} runs {word}"
+        for w, ln, argv in _spawn_sites([
+            ("clawseccheck/_synthetic.py",
+             "import subprocess\n"
+             "def f():\n"
+             "    subprocess.run(['/usr/bin/curl', '-fsSL', 'https://example.invalid'])\n"),
+        ])
+        for word in argv
+        if Path(word).name in _NETWORK_CLIENT_BINARIES
+    ]
+    assert len(planted) == 1, planted
+
+
+# `_TEST_COUNT_RE` and friends above cover the countable claims that were rotting at the
+# time they were written -- check counts, test counts, the RISK range, the release stamp.
+# They are not a general rule, and a claim outside the shapes they know is exactly as
+# unguarded as those were. This one was: OUTPUT_SCHEMA.md said "the five not-ran statuses"
+# while `layers.INCOMPLETE_LAYER_STATUSES` held six.
+#
+# The drift is worth reading, because it is not the usual kind. The row's own TABLE CELL
+# enumerated all seven statuses correctly; only the prose beside it undercounted, so the
+# figure and the list it summarises disagreed inside one sentence. And it was not the last
+# commit's mistake either: `aa68205^` already said "the four not-ran statuses" while
+# `STATUS_NOT_REACHED` already existed, so B-603 added one for the status it introduced and
+# inherited an off-by-one that was older than it.
+_NUMBER_WORDS = {
+    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+_NOT_RAN_COUNT_RE = re.compile(r"\bthe\s+([a-z]+)\s+not-ran statuses\b", re.IGNORECASE)
+
+
+def test_not_ran_status_counts_match_the_layer_ledger():
+    """Any doc that counts the not-ran layer statuses must agree with `layers.py`.
+
+    Derived, not pinned: the truth is `len(INCOMPLETE_LAYER_STATUSES)`, so adding a seventh
+    status reddens the prose that undercounts it instead of leaving the doc to be corrected
+    by whoever next happens to read both.
+    """
+    from clawseccheck.layers import INCOMPLETE_LAYER_STATUSES
+
+    truth = len(INCOMPLETE_LAYER_STATUSES)
+    wrong = []
+    for path in _shipped_files():
+        text = path.read_text(encoding="utf-8")
+        for m in _NOT_RAN_COUNT_RE.finditer(text):
+            word = m.group(1).lower()
+            claimed = _NUMBER_WORDS.get(word)
+            line = text[: m.start()].count("\n") + 1
+            where = f"{path.relative_to(REPO)}:{line}"
+            if claimed is None:
+                wrong.append(f"{where} counts the not-ran statuses as {word!r}, not a number")
+            elif claimed != truth:
+                wrong.append(f"{where} says {word} ({claimed}) not-ran statuses, code has {truth}")
+    assert not wrong, "not-ran status counts drifted:\n  " + "\n  ".join(wrong)
+
+
+def test_every_layer_status_is_named_in_the_output_schema():
+    """A count alone is half a claim -- six is still wrong if it summarises the wrong six.
+
+    So the names are pinned too: a consumer reading OUTPUT_SCHEMA.md to build against
+    `missing_layers[].status` must find every value the code can actually emit.
+    """
+    from clawseccheck.layers import LAYER_STATUSES
+
+    schema = (REPO / "docs" / "OUTPUT_SCHEMA.md").read_text(encoding="utf-8")
+    missing = sorted(s for s in LAYER_STATUSES if f"`{s}`" not in schema)
+    assert not missing, f"layer statuses the output schema never names: {missing}"
+
+
+def test_the_not_ran_count_guard_bites():
+    """Guard the guard, on the exact sentence that was wrong."""
+    truth = 6
+    assert _NUMBER_WORDS["six"] == truth, "update this control if the ledger grows"
+    m = _NOT_RAN_COUNT_RE.search("…and the five not-ran statuses are deliberately distinct:")
+    assert m is not None and _NUMBER_WORDS[m.group(1)] != truth
+    m = _NOT_RAN_COUNT_RE.search("…and the six not-ran statuses are deliberately distinct:")
+    assert m is not None and _NUMBER_WORDS[m.group(1)] == truth
+    assert _NOT_RAN_COUNT_RE.search("statuses that did not run are listed above") is None
+
+
+# --- Countable claims that no guard had ever been pointed at -------------------------
+#
+# The guards above were each written the day a specific claim was caught rotting. That
+# leaves a standing hole with no name: a countable claim is unguarded until someone thinks
+# to guard it, and nothing tells you which ones those are. Enumerated 2026-08-24 by listing
+# every number-bearing phrase in the shipped docs and subtracting what the guards above
+# actually assert — 13 claims asserted, 65 numbers not. Most of the 65 are prose thresholds
+# ("3 chars", "30 days") and guarding them would be noise. Four were real claims derived
+# from a named constant, and two of those were already wrong:
+#
+#   THREAT_COVERAGE.md  "179 catalogued, of which 175 run in a default audit"  -> 188 / 184
+#   OUTPUT_SCHEMA.md    "one of the 13 bucket surfaces"                        -> 14
+#
+# Both had drifted invisibly. `179 catalogued` is the same figure as the guarded
+# `184 checks` badge in a different phrasing, so the docs contradicted each other by nine
+# with one side pinned and the other free — which is the exact shape the check-count guard
+# was written to prevent, reappearing one synonym away from it.
+#
+# Table-driven on purpose: adding a claim is one row, not another copy of the loop.
+def _countable_claim_rules():
+    """`(label, regex, truth)` per countable claim, truth DERIVED from the code."""
+    from clawseccheck.coverage import _BUCKET_SURFACES, _FAMILY_ORDER
+    from clawseccheck.layers import LAYER_ORDER
+
+    return [
+        # "…— 188 catalogued," — the whole catalog, including checks a default run skips.
+        ("catalogued checks",
+         re.compile(r"(\d{2,4})\s+catalogued\b"), len(CATALOG)),
+        # "of which 184 run in a default audit" — the runnable subset, same truth the
+        # bare-count guard uses, so the two phrasings can never drift apart again.
+        ("checks a default audit runs",
+         re.compile(r"(\d{2,4})\s+run in a default audit\b"), _runnable_check_count()),
+        # "one of the 14 bucket surfaces" — trifecta excluded, per coverage.py.
+        ("bucket surfaces",
+         re.compile(r"(\d{1,3})\s+bucket surfaces\b"), len(_BUCKET_SURFACES)),
+        # "the 7 security family slugs"
+        ("security family slugs",
+         re.compile(r"(\d{1,3})\s+security family slugs\b"), len(_FAMILY_ORDER)),
+        # The five-layer ledger's DENOMINATOR only: "2 of 5 layers did not run" and
+        # "the 5 audit layers". The numerator is an example in prose, never a claim about
+        # the product, so it is deliberately not matched.
+        ("layers in the ledger",
+         re.compile(r"\bof\s+(?:the\s+)?(\d{1,2})\s+(?:audit\s+)?layers\b"), len(LAYER_ORDER)),
+        ("layers in the ledger",
+         re.compile(r"\bthe\s+(\d{1,2})\s+audit\s+layers\b"), len(LAYER_ORDER)),
+    ]
+
+
+def test_countable_claims_derived_from_a_named_constant_are_true():
+    """Each claim is compared against the constant it is about, not against a pinned number.
+
+    Equality, not a band: unlike the test count these do not move on ordinary commits, so a
+    change here is a real change to the product's shape and the doc should move with it.
+    """
+    wrong = []
+    for label, rx, truth in _countable_claim_rules():
+        for path in _shipped_files():
+            text = path.read_text(encoding="utf-8")
+            for m in rx.finditer(text):
+                claimed = int(m.group(1))
+                if claimed != truth:
+                    line = text[: m.start()].count("\n") + 1
+                    wrong.append(
+                        f"{path.relative_to(REPO)}:{line} claims {claimed} {label}, code has {truth}"
+                    )
+    assert not wrong, "countable claims drifted from the code:\n  " + "\n  ".join(wrong)
+
+
+def test_every_countable_claim_rule_actually_matches_something():
+    """Guard the guard, and the one that matters most here.
+
+    A rule whose regex matches nothing is indistinguishable from a rule that passes. Six of
+    these were written against phrasings found in the docs on 2026-08-24; if a doc is
+    reworded, the rule must fail loudly rather than quietly stop guarding. Rules that share
+    a label are alternates for one claim and only need a hit between them.
+    """
+    hits = {}
+    for label, rx, _ in _countable_claim_rules():
+        hits.setdefault(label, 0)
+        for path in _shipped_files():
+            hits[label] += len(rx.findall(path.read_text(encoding="utf-8")))
+    dead = sorted(label for label, n in hits.items() if n == 0)
+    assert not dead, (
+        "these claim rules no longer match any shipped doc — the wording changed and the "
+        f"claim is now unguarded: {dead}"
+    )
+
+
+def test_the_countable_claim_guard_bites_on_each_rule():
+    """Every rule must be shown to reject a wrong number, not merely accept the right one."""
+    for label, rx, truth in _countable_claim_rules():
+        sample = rx.pattern.replace(r"(\d{2,4})", str(truth + 1)) \
+                           .replace(r"(\d{1,3})", str(truth + 1)) \
+                           .replace(r"(\d{1,2})", str(truth + 1))
+        # build a concrete phrase from the pattern's literal tail rather than trusting it
+        literal = re.sub(r"\\b|\\s\+|\(\?:[^)]*\)\?|[()\\]", " ", sample)
+        literal = re.sub(r"\s+", " ", literal).strip()
+        # The phrase is derived from the pattern so a reworded rule gets a matching
+        # control for free. That only holds while the derivation yields a real sentence,
+        # so say it out loud: any surviving metacharacter means this test is exercising
+        # garbage rather than a claim, and should fail here rather than pass quietly.
+        assert not set(literal) & set(r"\\[]{}|^$*+?"), (
+            f"rule {label!r} no longer reduces to a plain phrase: {literal!r}"
+        )
+        m = rx.search(literal)
+        assert m is not None, f"rule {label!r} cannot read its own phrasing: {literal!r}"
+        assert int(m.group(1)) != truth, f"rule {label!r} negative control did not differ"
+
+
+# ---------------------------------------------------------------------------
+# `_run_narrowing` — the whole-suite decision, tested directly
+# ---------------------------------------------------------------------------
+# The guard it gates can only be observed on a 20-minute whole-suite run, and every
+# scoped run skips it by design — so the decision itself is what gets tested here.
+# Without this, "the guard is live on CI" would be a claim with no control behind it,
+# which is exactly how the previous two versions of it shipped broken.
+
+class _FakeOption:
+    def __init__(self, **kw):
+        self.file_or_dir = kw.get("file_or_dir", [])
+        self.keyword = kw.get("keyword", "")
+        self.markexpr = kw.get("markexpr", "")
+        self.deselect = kw.get("deselect", None)
+        self.lf = kw.get("lf", False)
+        self.failedfirst = kw.get("failedfirst", False)
+
+
+class _FakeConfig:
+    def __init__(self, **kw):
+        self.option = _FakeOption(**kw)
+
+
+def test_run_narrowing_reports_nothing_for_a_whole_suite_run():
+    """The values are not invented: they were read off real invocations before this was
+    written (`pytest -q` leaves file_or_dir empty and keyword/markexpr as '')."""
+    assert _run_narrowing(_FakeConfig()) == ""
+
+
+def test_run_narrowing_detects_every_narrowing_form():
+    cases = [
+        ({"file_or_dir": ["tests/test_doc_facts.py"]}, "explicit paths"),
+        ({"keyword": "coverage"}, "-k"),
+        ({"markexpr": "slow"}, "-m"),
+        ({"deselect": ["tests/test_x.py::test_y"]}, "--deselect"),
+        ({"lf": True}, "--lf"),
+        ({"failedfirst": True}, "--ff"),
+    ]
+    for kwargs, expected in cases:
+        assert _run_narrowing(_FakeConfig(**kwargs)) == expected, kwargs
+
+
+def test_run_narrowing_ignores_the_filesystem():
+    """THE regression pin. The previous version compared the test files pytest collected
+    from against the files on disk. pytest collects once at session start; the guard runs
+    at the end. On a real 20-minute run a concurrent session created one test file three
+    minutes in, so the comparison read 626 against 627 and the guard SKIPPED on a whole
+    suite — disabling itself precisely where a release is cut.
+
+    A decision that reads the filesystem cannot be immune to that. This asserts the
+    decision is a pure function of the invocation: same config, same answer, no matter
+    what appears in tests/ afterwards.
+    """
+    cfg = _FakeConfig()
+    before = _run_narrowing(cfg)
+    marker = REPO / "tests" / "test_zz_transient_probe_file.py"
+    assert not marker.exists(), "control: the probe name must not already be taken"
+    marker.write_text("def test_placeholder():\n    pass\n")
+    try:
+        assert _run_narrowing(cfg) == before == ""
+    finally:
+        marker.unlink()
+
+
+def test_the_whole_suite_decision_reads_no_filesystem_state():
+    """Staleness control: keeps the decision from drifting back to a directory read.
+
+    `_run_narrowing`'s source must not touch the tests directory or the collected-item
+    count. Both earlier versions failed by consulting exactly those, and both looked
+    correct in review.
+    """
+    import inspect
+
+    body = inspect.getsource(_run_narrowing)
+    body = body.split('"""')[2] if body.count('"""') >= 2 else body
+    for forbidden in ("glob", "iterdir", "REPO", "session", "items", "listdir"):
+        assert forbidden not in body, (
+            f"_run_narrowing consults {forbidden!r} — the decision must depend only on "
+            f"the invocation, or a mid-run tree change can silence the guard again"
+        )
+
+
+# --- the badge now states an OpenClaw version, and a version rots ------------
+
+_VENDOR_TABLES = REPO / "tests" / "vendor_state_tables.txt"
+_BADGE_VERSION_RE = re.compile(r'<text class="num"[^>]*>(\d{4}\.\d+\.\d+)</text>')
+
+
+def _stamped_openclaw_version() -> str:
+    """The OpenClaw the shipped snapshots were actually taken against."""
+    header = _VENDOR_TABLES.read_text(encoding="utf-8")[:2000]
+    m = re.search(r"^#\s*openclaw-version:\s*(\S+)", header, re.M)
+    assert m, f"{_VENDOR_TABLES.name} has no `openclaw-version:` header to pin against"
+    return m.group(1)
+
+
+def test_the_badge_openclaw_version_matches_the_shipped_snapshot():
+    """A version in an image is the most rot-prone claim this project makes.
+
+    It is a picture, so no text grep reaches it, and it goes stale on somebody else's release
+    schedule rather than ours — OpenClaw moved 2026.7.1 -> 8.1 -> 8.2 -> 9.1 -> 9.2 inside one
+    recorded window. So it is pinned to the version the shipped snapshots were generated
+    against (`tests/vendor_state_tables.txt`'s own header), which the upgrade protocol
+    regenerates. Restamping the snapshots and forgetting the badge now fails the build.
+
+    Not pinned to the INSTALLED OpenClaw: CI has none, and a guard that skips wherever it
+    matters is not a guard.
+    """
+    want = _stamped_openclaw_version()
+    wrong = []
+    for name in ("stats-light.svg", "stats-dark.svg"):
+        svg = (REPO / "docs" / "assets" / name).read_text(encoding="utf-8")
+        found = _BADGE_VERSION_RE.findall(svg)
+        if not found:
+            wrong.append(f"{name}: states no OpenClaw version at all")
+        elif found != [want]:
+            wrong.append(f"{name}: badge says {found}, snapshots were taken against {want}")
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    if f"OpenClaw {want}" not in readme:
+        wrong.append(f"README.md does not say 'OpenClaw {want}'")
+    assert not wrong, (
+        "the OpenClaw version claimed in the badge has drifted from the one the shipped "
+        "schema/state snapshots were generated against:\n  " + "\n  ".join(wrong)
+    )

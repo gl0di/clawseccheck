@@ -159,6 +159,17 @@ def _clean_skill_dirs() -> list[Path]:
     return sorted({p.parent for p in _FIX.glob("clean_*/**/SKILL.md")})
 
 
+# B-526 (2026-08-23): this guard has NO exemption list, and that is the point.
+# Wiring the fence-disclosure demote briefly made clean_b100_fetch_no_imperative
+# WARN, and the first fix here was an exemption dict for it. It did not need one:
+# that fixture had invented `get.example.com` as its placeholder host, and a
+# subdomain of a reserved example domain is not covered by the I-032 downgrade
+# (`_RESERVED_EXAMPLE_DOMAINS`, exact match only — see the measurement recorded
+# beside that constant). Pointing the fixture at the canonical bare `example.com`
+# removed the WARN at its source. If a later change makes a clean fixture WARN,
+# fix the cause or the fixture — do not reintroduce an allowance here.
+
+
 @pytest.mark.parametrize("skill_dir", _clean_skill_dirs(), ids=lambda p: p.parent.parent.name)
 def test_clean_skill_stays_silent_via_vet(skill_dir):
     """No clean fixture may FAIL or WARN when vetted — including from a newly-wired ring

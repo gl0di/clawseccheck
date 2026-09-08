@@ -32,22 +32,38 @@ THRESHOLDS: dict[str, int] = {
 }
 
 
-def _ledger_path(home: str | None = None) -> Path:
+def _ledger_path(home: str | None = None, path: str | None = None) -> Path:
     """Resolve the coverage.json ledger path.
 
     Parameters
     ----------
+    path:
+        The ledger file itself. Wins over *home*. This is how the CLI keeps the
+        ledger inside whatever local store the rest of the run is using — see
+        B-599 below.
     home:
         When given, treated as the user's HOME directory; the ledger lives at
         ``<home>/.clawseccheck/coverage.json``.  When ``None``, the default
         ``~/.clawseccheck/coverage.json`` (expanduser) is used.
+
+    B-599: ``home`` was documented "for testing" and no production path passed
+    anything, so this always resolved to the REAL ``~/.clawseccheck`` — including
+    under ``--data-dir``, whose own help text promises a scratch run "cannot
+    half-redirect and write into your real history". Three of the store's four
+    files moved with that flag and this one did not, so scratch, CI and test runs
+    stamped the user's real freshness ledger with today's date. That is not
+    hygiene: ``freshness_notice`` reads this file to tell the user when they last
+    exercised a capability, so a stamp they never earned makes the tool report
+    coverage that did not happen.
     """
+    if path is not None:
+        return Path(path).expanduser()
     if home is not None:
         return Path(home) / ".clawseccheck" / "coverage.json"
     return Path(DEFAULT_COVERAGE).expanduser()
 
 
-def load_ledger(home: str | None = None) -> dict[str, str]:
+def load_ledger(home: str | None = None, *, path: str | None = None) -> dict[str, str]:
     """Load the coverage ledger from disk.
 
     Returns a ``{capability: last_run_iso_date}`` dict.
@@ -59,8 +75,12 @@ def load_ledger(home: str | None = None) -> dict[str, str]:
     home:
         Override the ledger's parent HOME dir (for testing).
         ``None`` → real ``~/.clawseccheck/`` via expanduser.
+    path:
+        The ledger file itself; wins over *home*. The CLI passes the store dir it
+        is already using for history/state/events, so every local-state file of a
+        run lands together (B-599).
     """
-    p = _ledger_path(home)
+    p = _ledger_path(home, path)
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -76,7 +96,7 @@ def load_ledger(home: str | None = None) -> dict[str, str]:
 
 
 def record_run(capability: str, *, home: str | None = None,
-               today: date | None = None) -> None:
+               today: date | None = None, path: str | None = None) -> None:
     """Record that *capability* was run today in the coverage ledger.
 
     Silently drops write errors (same "never crash the caller" contract as
@@ -95,13 +115,16 @@ def record_run(capability: str, *, home: str | None = None,
     today:
         Override the recorded date (for testing).
         ``None`` → ``date.today()``.
+    path:
+        The ledger file itself; wins over *home*. See :func:`_ledger_path` for why
+        production callers must pass this rather than relying on the default.
     """
     from .locking import journal_lock  # avoid top-level import cycle
     from .monitor import SCHEMA_VERSION  # avoid top-level import cycle
     from .safeio import secure_dir, secure_write_text  # avoid top-level import cycle
 
     today = today or date.today()
-    p = _ledger_path(home)
+    p = _ledger_path(home, path)
     try:
         secure_dir(p.parent)
         # C-174: the read-modify-write cycle below was unlocked, so two real
@@ -110,7 +133,10 @@ def record_run(capability: str, *, home: str | None = None,
         # other's key on write — a silent lost update. journal_lock (same
         # primitive history.py/monitor.py already use) serializes it.
         with journal_lock(p):
-            ledger = load_ledger(home)
+            # Read from the SAME file this is about to write. Passing `home` alone
+            # here would read the default ledger and write the redirected one,
+            # silently dropping every other capability's date on the first write.
+            ledger = load_ledger(home, path=path)
             ledger[capability] = today.isoformat()
             # C-162: reserved "_schema" bookkeeping key, written last so it always
             # reflects this build regardless of write order above. load_ledger()

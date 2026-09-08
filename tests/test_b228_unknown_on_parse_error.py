@@ -27,6 +27,7 @@ import pytest
 
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN
 from clawseccheck.checks import (
+    check_audit_log,                  # B10
     check_cachetrace_redaction,       # B82
     check_cron_scheduler,             # C048
     check_dangerous_overrides,        # B48
@@ -47,9 +48,10 @@ from clawseccheck.collector import collect
 
 # Every config-dependent check guarded by checks/_shared._config_unreadable (B-228).
 # Keep in sync with the checks wired in clawseccheck/checks/_config.py, _capability.py,
-# _agents.py, _egress.py, _mcp.py, _lifecycle.py.
+# _agents.py, _egress.py, _mcp.py, _lifecycle.py, _host.py.
 GUARDED_CHECKS = [
     check_secrets,                    # B1
+    check_audit_log,                  # B10 (B-524)
     check_tls,                        # B11
     check_dangerous_overrides,        # B48
     check_proxy_header_forging,       # C032
@@ -72,7 +74,7 @@ _AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
 
 def test_guarded_checks_are_config_dependent_sanity():
     # Guard against a future rename silently dropping a check from the manifest above.
-    assert len(GUARDED_CHECKS) == 15
+    assert len(GUARDED_CHECKS) == 16
 
 
 class TestTruncatedJson:
@@ -154,7 +156,15 @@ class TestRegressionGuardIsInert:
     # it below by asserting the UNKNOWN came from B68's OWN logic and not from
     # _config_unreadable() — a strictly stronger check than the old status-only assert.
     _GUARD_DETAIL = "openclaw.json present but unparseable/unreadable"
-    _OWN_UNKNOWN_ON_EMPTY_CONFIG = {"check_exec_applypatch_workspace"}
+    # B-702: `check_skill_workshop_autonomy` joined this set. An empty config leaves the
+    # Skill Workshop settings at the build's defaults, and those defaults are OPPOSITE on
+    # the two OpenClaw generations — `{mode: "auto", approvalPolicy: "auto"}` from 2026.8.1,
+    # `{enabled: false, approvalPolicy: "pending"}` before it. This test constructs its
+    # Context directly, so no installed version is resolved and the check cannot tell which
+    # default applies; its own UNKNOWN is the honest answer, not the B-228 guard firing.
+    # The guard's real assertion (its detail must not appear) stays live for it above.
+    _OWN_UNKNOWN_ON_EMPTY_CONFIG = {"check_exec_applypatch_workspace",
+                                    "check_skill_workshop_autonomy"}
 
     def test_readable_config_other_guarded_checks_still_pass(self, tmp_path):
         # A valid, fully-parsed "{}" config declares nothing dangerous, so every guarded

@@ -35,7 +35,15 @@ def _stub(fid: str):
 # (_AXIS_BY_ID[id] = None) in favor of build_profile()'s dynamic .axis_reasons dispatch —
 # same mechanism MCP-VET/PLUGIN-VET use, but those two are synthetic container ids, not
 # real ring members, so they never needed this exception set until B339.
-_DYNAMIC_AXIS_ROUTED = {"B339"}
+#
+# B-613: B335 is also here, but NOT via .axis_reasons — build_profile()'s routing loop
+# has an explicit `elif f.id == "B335":` branch that appends the same Finding object
+# straight into both the "build" and "persistence" buckets (B335's producer never
+# populates .axis_reasons, so _route_axis_reasons has nothing to dispatch). axis_for()
+# returning None for B335 is therefore intentional dual-routing, not a missing mapping —
+# do not "fix" it by giving B335 a single axis in _AXIS_BY_ID, that would silently drop
+# it back to one axis and reopen the Persistence-axis contradiction B-613 closed.
+_DYNAMIC_AXIS_ROUTED = {"B339", "B335"}
 
 
 def _ring_ids() -> list[str]:
@@ -81,6 +89,10 @@ def _clean_skill_dirs() -> list[Path]:
 
 @pytest.mark.parametrize("skill_dir", _clean_skill_dirs(), ids=lambda p: str(p.relative_to(_FIX)))
 def test_clean_skill_profile_has_no_failing_axis(skill_dir):
+    """B-526 (2026-08-23): no fixture is exempt here, deliberately — the mirror of the
+    note in tests/test_vet_content_ring.py. Wiring the fence-disclosure demote briefly
+    made clean_b100_fetch_no_imperative warn on an invented `get.example.com`; the
+    fixture was pointed at the canonical bare `example.com` instead of being exempted."""
     p = build_profile(vet_skill(str(skill_dir)), str(skill_dir), "skill")
     failing = [a.axis for a in p.axes if a.status in (FAIL, WARN)]
     assert not failing, f"{skill_dir.relative_to(_FIX)} → failing axes {failing} (grade {p.overall_grade})"

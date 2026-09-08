@@ -51,6 +51,39 @@ STAGING_DIR = "dist/clawseccheck"
 # A markdown inline link: ](target). Captures everything up to the closing paren.
 _MD_LINK_RE = re.compile(r"\]\(([^)]+)\)")
 
+#: B-606: a link inside a code span or a fenced block is not a link -- it is the literal
+#: text of an example. The anti-link clause the skill prints to the host had to SHOW the
+#: forbidden syntax (`[report.pdf](path)`) to be understood, and the naive regex read the
+#: illustration as a dangling link to `references/path`. Stripped before matching rather
+#: than filtered after, so nested cases need no special handling. Measured before changing
+#: it: across every guarded doc, the only targets the naive regex sees and this one does not
+#: are exactly those two illustrations -- the guard loses no real coverage.
+_MD_FENCE_RE = re.compile(r"```.*?```", re.S)
+_MD_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+
+
+def _prose_only(text: str) -> str:
+    """*text* with fenced blocks and inline code spans removed."""
+    return _MD_CODE_SPAN_RE.sub("", _MD_FENCE_RE.sub("", text))
+
+
+def test_a_link_inside_a_code_span_is_not_treated_as_a_link(tmp_path):
+    """Guard the guard (B-606). The skill's own anti-link clause has to SHOW the forbidden
+    syntax to be understood, and the naive regex read that illustration as a dangling link.
+    Both halves are asserted: an example inside a code span or a fence is ignored, and a
+    real link in prose is still found -- a fix that stopped seeing links entirely would
+    pass the first assertion alone."""
+    doc = tmp_path / "d.md"
+    doc.write_text(
+        "Never write a link. `[report.pdf](path)` is one.\n\n"
+        "```text\n[also.pdf](other)\n```\n\n"
+        "See [the usage guide](docs/USAGE.md) for more.\n",
+        encoding="utf-8")
+    found = _relative_links(doc)
+    assert "docs/USAGE.md" in found, found
+    assert "path" not in found, found
+    assert "other" not in found, found
+
 
 def _skill_display_name_en() -> str:
     """The en display name declared in SKILL.md frontmatter metadata (inline JSON)."""
@@ -377,7 +410,7 @@ def _relative_links(path: Path) -> list[str]:
         # A doc outside the repo — the pre-fix guard test feeds a tmp_path copy of a
         # root-level doc. Treat it as sitting at the repo root, which is what it stands in for.
         base = ""
-    for raw in _MD_LINK_RE.findall(path.read_text(encoding="utf-8")):
+    for raw in _MD_LINK_RE.findall(_prose_only(path.read_text(encoding="utf-8"))):
         target = _normalise_link_target(raw)
         if target is None:
             continue

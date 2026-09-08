@@ -1,0 +1,13042 @@
+[
+ {
+  "agents": [],
+  "label": "b334_nearmiss_documented_helper",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b103_ftp",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b103_http_download",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b103_ip_host",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b103_known_ioc_host",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b103_onion",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b104_offboarding",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b105_cross_skill_combined",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b130_coding_profile_no_exec_fields",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b130_coding_profile_strict_inline_eval",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b130_web_fetch_enabled",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_ast05_blockquote",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_ast05_bullet",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_ast05_list_item",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_ast05_sentence_split",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_ast05_table",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_ast05_url_own_line",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_config_write_target_no_backup_marker",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_fetch_to_exec",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_hijack_defensive_chrome",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_k8s_token_exfil_attacker_host",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_live_instruction",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_notify_host_tainted",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_pipe_reserved_example_domain_warns",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_real_agent_config_write",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_runtime_fetch",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b13_self_declare_deep_body_still_fails",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b150_mcp_pipe_to_run",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b151_codex_plugin_hooks",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b152_orphaned_plugin",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b156_overt_secret_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b156_script_comment_cred_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b160_credential_store_disguised_as_auth_param",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b160_lookalike_host_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b165_exposed_private_key",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b166_mcp_exfil_args",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b167_appserver_pipe_to_shell",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b168_cron_exfil_trigger",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b169_hook_template_directive",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b170_fake_defense_cloak",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b170_trust_inversion",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b171_bash_wildcard",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b172_exec_approvals_allow_always",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b173_critical_suppression",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b173_low_severity_suppression",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b173_trusted_proxy_notice_suppression",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b174_installpolicy_allow_insecure_path",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b174_installpolicy_disabled",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b175_workshop_auto_pipeline",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b175_workshop_sandboxed_warn",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b178_cleartext_baseurl",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b178_private_network_baseurl",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b179_hooks_internal_extradirs",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b190_env_auth_header_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b194_secrets_provider_exec_insecure_path",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b195_browser_extra_args",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b195_browser_single_dash_switches",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b196_browser_evaluate_default",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b196_browser_evaluate_enabled",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b196_browser_evaluate_unowned_session",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b224_softhyphen_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b229_mcp_fs_root_trifecta",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b230_mcp_docker_privileged",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b230_mcp_docker_sock",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b230_mcp_header_auth",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b230_mcp_secret_env",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b230_mcp_ssl_verify_remote",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b230_mcp_unpinned_disttag",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b230_mcp_yarn_dlx_latest",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b232_boundary_split",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b232_tagblock_override",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b233_trustedproxy_nonloopback_no_headers",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b246_backup_sync_verb_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b247_mcp_intake_trifecta",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b248_mcp_conn_string_env",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b248_mcp_header_credential_shaped",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b283_ctxvis_account_all",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b283_ctxvis_defaults_account_all",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b283_dm_pairing",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b283_fs_explicit_false",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b283_fs_per_agent_optout",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b283_fs_unconfined_absent",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b283_group_allowall",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b288_hooks_agent_ids_wildcard",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b288_hooks_session_key_open",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b2_insecure_auth",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b305_c135_forged_header_bypass",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b307_apostrophe_does_not_hide_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b307_earlier_benign_mention_does_not_mask_later_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b307_fourth_header_bypass",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b307_literal_string_payload_short_form_warns",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b307_literal_string_payload_warns_not_fails",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b307_quoted_transport_name_still_invoked",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b307_single_line_header_bypass",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b307_two_uncorroborated_mentions_warn",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b308_ast05_list_item_padded_filler",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b308_cred_acquisition_unrelated_url_stays_fail",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b308_governance_decoy_verb_stays_fail",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b308_governance_double_verb_prohibition_warns",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b308_governance_visit_after_url_stays_fail",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b308_governance_window_padded_prohibition",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b308_prohibition_flip_no_second_fetch_warns",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b308_prohibition_flip_safe_local_alt_warns",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b308_runtime_fetch_padded_filler",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b321_browser_executable_path",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b322_browser_existing_session",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b323_env_path_override",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b324_shell_env_fallback",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b325_marketplace_feed",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b326_elevated_default_full",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b327_embedded_agent_project_settings_policy",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b328_exec_safebin_trusted_dirs",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b330_cdp_allow_origins",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b330_cdp_port_offhost",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b331_mcp_disregard_injection",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b332_mcp_exact_collision",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b333_mcp_annotation_ignored",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b334_conceal_directive",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b334_consent_directive",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b334_keyword_directive",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b334_ordering_directive",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b340_effective_bind_wildcard",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b341_plugin_hook_grants",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b342_plugin_slots_deny",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b347_deaddrop_resolver",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b350_terminal_on_lan",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b350_terminal_on_loopback",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b350_terminal_on_unresolvable_bind",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "builder",
+   "main"
+  ],
+  "label": "bad_b351_codemode_agent_only",
+  "results": {
+   "apply_patch": {
+    "builder": false,
+    "global": false,
+    "main": false
+   },
+   "automations": {
+    "builder": false,
+    "global": false,
+    "main": false
+   },
+   "edit": {
+    "builder": false,
+    "global": false,
+    "main": false
+   },
+   "exec": {
+    "builder": false,
+    "global": false,
+    "main": false
+   },
+   "read": {
+    "builder": false,
+    "global": false,
+    "main": false
+   },
+   "write": {
+    "builder": false,
+    "global": false,
+    "main": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "safe"
+  ],
+  "label": "bad_b351_codemode_global_on_agent_narrowed",
+  "results": {
+   "apply_patch": {
+    "global": false,
+    "safe": false
+   },
+   "automations": {
+    "global": false,
+    "safe": false
+   },
+   "edit": {
+    "global": false,
+    "safe": false
+   },
+   "exec": {
+    "global": false,
+    "safe": false
+   },
+   "read": {
+    "global": false,
+    "safe": false
+   },
+   "write": {
+    "global": false,
+    "safe": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b351_codemode_true_shorthand",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "builder",
+   "main"
+  ],
+  "label": "bad_b352_agent_only_prepend",
+  "results": {
+   "apply_patch": {
+    "builder": false,
+    "global": false,
+    "main": false
+   },
+   "automations": {
+    "builder": false,
+    "global": false,
+    "main": false
+   },
+   "edit": {
+    "builder": false,
+    "global": false,
+    "main": false
+   },
+   "exec": {
+    "builder": false,
+    "global": false,
+    "main": false
+   },
+   "read": {
+    "builder": false,
+    "global": false,
+    "main": false
+   },
+   "write": {
+    "builder": false,
+    "global": false,
+    "main": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b352_relative_entry",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b352_tmp_entry",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b353_mcp_preapproved_tools",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b365_boot_md",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b41_cred_reachable",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b48_cron_webhook_ssrf",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b48_docker_trio",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b48_node_allowcommands_new_shape",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b48_web_fetch_ssrf",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b48_wildcard_authority",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b4_docker_sock",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b4_peragent_sandbox",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b503_capgraph_profile_no_allow",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b55_fs_write_broad",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b56_controlui_origins",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b57_plugin_approve_all",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b58_css_hex_hidden_directive",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b58_defensive_chrome_actionable_comment",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b58_double_encoded_base64",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b58_unicode_injection",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b59_md_image_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b60_self_replication",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b619_nested_dm_open",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b61_agent_snoop",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b61_curl_exfil_config",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b61_node_path_harvest",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b61_pathlib_foreign_read",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b61_pipe_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b61_subdomain_host_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b61_wrapped_curl_exfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b62_cap_mismatch",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b62_cred_read_nonnetwork",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b63_action_conceal",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b63_fenced_bypass",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b63_heading_bypass",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b63_run_secrets_credential",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b63_semantic_credexfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b63_semantic_credread_only",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b63_silent_action",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b63_silent_bare",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b63_unrelated_negator",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b64_fail",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b64_forged_defensive",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b64_injection_ru",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b64_injection_zh",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b64_warn",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b65_conditional_trigger",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b65_delayed_persistence_trigger",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b65_marker_activation",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b66_persona",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b66_persona_authority_override",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b66_script_docstring_override",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "main",
+   "w"
+  ],
+  "label": "bad_b670_fs_confined_per_agent_escape",
+  "results": {
+   "apply_patch": {
+    "global": true,
+    "main": true,
+    "w": true
+   },
+   "automations": {
+    "global": false,
+    "main": false,
+    "w": false
+   },
+   "edit": {
+    "global": false,
+    "main": false,
+    "w": false
+   },
+   "exec": {
+    "global": false,
+    "main": false,
+    "w": false
+   },
+   "read": {
+    "global": false,
+    "main": false,
+    "w": false
+   },
+   "write": {
+    "global": true,
+    "main": true,
+    "w": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b68_applypatch_workspace",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b69_strict_inline_eval",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b70_trustedproxy_loopback",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b71_denycommands_ineffective",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b71_denycommands_ineffective_new_shape",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b72_subagents_wildcard",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b73_mdns_full",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b74_false_provenance",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b74_forged_system",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b7_memory_rag",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b80_gateway_ratelimit",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b81_subagent_limits",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b82_cachetrace_dotenv_override",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b82_cachetrace_redaction",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b83_webfetch_redirects",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b93_decoded_softexfil",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_b93_decoded_softexfil_htmlcomment",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c014_egress_inventory",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c014_egress_tool_unrestricted",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c015_config_backup",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c032_proxy_headers",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c040_agentconfig",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c040_authkey",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c040_cron",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c040_cron_stdin",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c040_selfmod",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c044_agency",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c044_agency_distant_consent_decoy",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c044_unpinned",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c047_mcp_external",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c048_cron_scheduler",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c074_image_attr_injection",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c256_corroboration",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c517_config_backup_only",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_c6_hook_policy_oldver",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_env6_breakglass_toggle",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_f022_typosquat",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_f113_tt4_file_net",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_f117_http_git",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_f119_missing_extradir",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_i013_log_secret",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_i013_report_secret",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_i013_tempfile_secret",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_mon_channel_drifted",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_mon_guardrails_removed",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_ownname_clawseccheck_squat",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_ownname_clawshield",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_risk21_group_proven_exec",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_risk26_workshop_absent_gate_nonopen_channel",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_risk26_workshop_local_hooks_only",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_risk26_workshop_open_webhook",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_risk26_workshop_owner_scoped_commands",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_taint_cmdinject",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_taint_comprehension_iterable",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_taint_direct",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_taint_fstring",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_taint_indirect",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_taint_ssrf",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "bad_taint_wrapper_tainted_argv0",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "benign_b13_disclosed_cred_sink",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "benign_b13_notify_discord",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "benign_b13_notify_telegram",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "benign_b13_self_declare_conjugated_verb",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "benign_b13_self_declare_modify_verb",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "benign_b13_self_declare_top_section",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "benign_b160_rest_auth_query_param",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "benign_b93_decoded_token",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "reader"
+  ],
+  "label": "clean_agent_profile_narrower",
+  "results": {
+   "apply_patch": {
+    "global": true,
+    "reader": false
+   },
+   "automations": {
+    "global": true,
+    "reader": false
+   },
+   "edit": {
+    "global": true,
+    "reader": false
+   },
+   "exec": {
+    "global": true,
+    "reader": false
+   },
+   "read": {
+    "global": true,
+    "reader": false
+   },
+   "write": {
+    "global": true,
+    "reader": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b103_brew",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b103_download_https",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b103_go",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b103_multi",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b103_private_ip",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b104_wired",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b105_cross_skill",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b127_singleton_group_write",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b130_minimal_no_capability",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b13_backup_target_config_write",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b13_cross_file_window_boundary",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b13_datasource_fetch",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b13_doc_example",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b13_fetch_docref",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b13_first_party_api",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b13_fixed_argv_subprocess",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b13_k8s_incluster_auth",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b13_temp_dir_config_write",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b13_test_fixture_config_write",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b13_torch_load_safe",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b150_mcp_curl_no_pipe",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b151_codex_plugin_hooks",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b152_orphaned_plugin",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b156_metrics_dashboard",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b160_shell_export_env_var",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b165_wallet_docs",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b166_mcp_exfil_args",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b167_appserver_pinned",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b168_cron_b64blob_digest",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b168_cron_benign",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b168_cron_digest_withhold",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b168_cron_gitsha_digest",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b168_cron_url_digest",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b169_hook_template_benign",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b169_hook_template_digest_withhold",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b170_readme_followup",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b170_threat_model_doc",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b170_trust_declaration",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b170_workflow_followup",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b171_scoped_owner",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b172_exec_approvals_empty",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b173_no_suppressions",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b174_installpolicy_gated",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b175_workshop_disabled",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b175_workshop_pending_reviewed",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b178_https_custom_baseurl",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b178_local_model_baseurl",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b178_no_baseurl_override",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b179_hooks_absent",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b17_heartbeat_template_disabled",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b188_state_db",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b194_secrets_provider_exec",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b195_browser_extra_args",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b195_browser_remote_debug_loopback",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b195_browser_remote_debug_mapped_loopback",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b196_browser_evaluate_enabled",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b196_browser_evaluate_unowned_session",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b224_softhyphen_benign",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b229_mcp_benign_compound_names",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b229_mcp_remote_benign",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b229_mcp_shared_home_dir",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b230_mcp_pinned_npx",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b230_mcp_pinned_scoped",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b230_mcp_ssl_verify_private",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b232_multi_file_bootstrap",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b233_trustedproxy_ip_allowlist",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b233_trustedproxy_loopback_bind",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b233_trustedproxy_required_headers",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b246_backup_sync_verb_benign",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b247_mcp_disabled_intake_stays_two_of_three",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b247_mcp_intake_alone_thin_surface",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b247_mcp_no_intake_stays_two_of_three",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b248_mcp_benign_env_headers",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b283_ctxvis_account_allowlist",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b283_dm_pairing_disabled",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b283_fs_product_default_sandboxed",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b283_fs_workspace_confined",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b284_datasource_blocks",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b284_table_heading_boundary",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b284_two_unrelated_tables_blank_separated",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b288_hooks_loopback",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b288_hooks_scoped",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b305_c135_header_lookalike_no_bypass",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b305_code_mentions_nl_verbs",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b306_symlink_safe_dotfiles",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b307_bare_curl_mention_far_no_invocation",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b307_transport_named_in_code_string",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b307_transport_named_in_frontmatter",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b307_unrelated_curl_and_path",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b308_unrelated_paragraphs_padded_filler",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b318_script_prose",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b321_browser_executable_path",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b322_browser_existing_session",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b323_env_path_override",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b324_shell_env_fallback",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b325_marketplace_feed",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b326_elevated_default_absent",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b326_elevated_default_on",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b327_embedded_agent_project_settings_policy",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b328_exec_safebin_trusted_dirs",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b330_cdp_control_port",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b330_cdp_port_loopback",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b331_mcp_no_injection",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b332_mcp_generic_name_overlap",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b333_mcp_no_annotations",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b334_disclosed_review_helper",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b334_prose_only_documentation",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b334_third_party_warning",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b340_effective_bind_loopback",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b341_plugin_hook_grants",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b342_plugin_slots_deny",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b347_deaddrop_literal_exec",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b347_deaddrop_local_decode",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b347_deaddrop_poll_print",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b350_terminal_absent",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b350_terminal_disabled",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b351_codemode_absent",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b351_codemode_false_shorthand",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b351_codemode_object_disabled",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b352_absolute_owner_only",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b352_ignored_under_node_host",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b352_no_prepend",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b353_mcp_approval_prompt",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b365_boot_md",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "coder"
+  ],
+  "label": "clean_b409_real_allowlist_intersection_unaffected",
+  "results": {
+   "apply_patch": {
+    "coder": false,
+    "global": false
+   },
+   "automations": {
+    "coder": false,
+    "global": false
+   },
+   "edit": {
+    "coder": false,
+    "global": false
+   },
+   "exec": {
+    "coder": false,
+    "global": false
+   },
+   "read": {
+    "coder": true,
+    "global": false
+   },
+   "write": {
+    "coder": false,
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "reader"
+  ],
+  "label": "clean_b409_weak_agent_profile_no_widening",
+  "results": {
+   "apply_patch": {
+    "global": false,
+    "reader": true
+   },
+   "automations": {
+    "global": false,
+    "reader": true
+   },
+   "edit": {
+    "global": false,
+    "reader": true
+   },
+   "exec": {
+    "global": false,
+    "reader": true
+   },
+   "read": {
+    "global": false,
+    "reader": true
+   },
+   "write": {
+    "global": false,
+    "reader": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b41_cred_not_reachable",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b48_docker_trio",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b48_wildcard_authority",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b4_peragent_sandbox",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b4_peragent_sandbox_shared_scope",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b503_capgraph_profile_minimal",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b55_fs_write_scoped",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b56_controlui_origins",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b57_plugin_approve_all",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b58_ascii_html_comment",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b58_defensive_html_comment",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b58_ts_regex_shorthand",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b59_md_image_plain",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b60_templating",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b615_bundled_media",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b619_nested_dm_closed",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b61_curl_prose",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b61_defensive_heading",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b61_dependency_table",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b61_metadata_auditor",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b61_normal_skill",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b61_own_config",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b61_path_placeholder",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b61_transport_without_payload",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b62_cred_read_network",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b62_disclosed_broad_scope",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b62_matched_downloader",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b62_unknown_nodesc",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b62_vague_helper",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b63",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b63_defensive_heading",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b63_procfs_environ",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b63_run_secrets_tls_cert",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b63_secret_echo_suppress",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b63_soft_suppress_benign",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b63_ux_artifact_conceal",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b63_verbosity",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b64",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b64_defensive",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b64_ru",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b64_signatures",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b64_zh",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b65_api_doc_later_calls",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b65_conditional_trigger",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b65_defensive_heading",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b65_frontmatter_invocation",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b65_marker_activation",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b65_memory_write_rule",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b65_webhook_notification",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b66_defensive_tooling_persona",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b66_named_approver_break_glass",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b66_persona",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b66_persona_mode_toggle",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b66_script_docstring_classifier",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "main",
+   "w"
+  ],
+  "label": "warn_b670_fs_confined_per_agent_escape",
+  "results": {
+   "apply_patch": {
+    "global": true,
+    "main": true,
+    "w": true
+   },
+   "automations": {
+    "global": false,
+    "main": false,
+    "w": false
+   },
+   "edit": {
+    "global": false,
+    "main": false,
+    "w": false
+   },
+   "exec": {
+    "global": false,
+    "main": false,
+    "w": false
+   },
+   "read": {
+    "global": false,
+    "main": false,
+    "w": false
+   },
+   "write": {
+    "global": true,
+    "main": true,
+    "w": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b68_applypatch_workspace",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b69_strict_inline_eval",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b70_trustedproxy_loopback",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b71_denycommands_effective",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b71_denycommands_effective_new_shape",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b72_subagents_explicit",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b73_mdns_minimal",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b74",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b74_vcs_metadata",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b7_memory_rag",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b80_gateway_ratelimit",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b81_subagent_limits",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b82_cachetrace_dotenv_falsy",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b82_cachetrace_redaction",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b82_cachetrace_workspace_dotenv",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b83_webfetch_redirects",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b9_redact_not_pinned",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c014_egress_inventory",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c015_home_secrets",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c015_identity_devices",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c032_proxy_headers",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c034_autoapprovecidrs",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c034_loopback_no_hsts",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c034_operator_readpath",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c034_prompt_injection_only",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c034_sessionkey",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c040_authkey_audit",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c040_own_data",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c044_pinned_skill",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c047_mcp_localhost",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c048_cron_scheduler",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c074_image_attr_plain",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c256_corroboration",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c517_identity_backup",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_c6_hook_policy_fixedver",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_env6_no_toggles",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_f022_typosquat",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_f113_adjudication",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_f117_registry",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_f119_present_extradir",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_i013_benign_sink",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_i013_doc_example",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_i025_b164_baseline",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_i025_b164_dualuse_host_no_cap",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_i025_b164_host_mention_no_verb_no_cap",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_i025_b164_oast_no_cap",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_i025_b164_own_api_log_no_cap",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_i025_b164_own_api_trajectory_no_cap",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_i025_b164_residual_no_cap",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_i025_trajaudit_baseline",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_i025_trajaudit_cap",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_mon_channel_stable",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_mon_config_readable",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_mon_guardrails_present",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_mon_workspace_memory_subtree",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_ownname_genuine_clawseccheck",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_risk21_group_allowlisted",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_risk21_group_low_blast",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_risk21_owner_origin_exec",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_taint_argv_listform",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_taint_argv_var_listform",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_taint_cross_scope_collision",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_taint_logonly",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "home_safe",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "home_vuln",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "toolscope_case1_empty_default",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "toolscope_case2_allow_write_implies_apply_patch",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "toolscope_case3_allow_apply_patch_asymmetric",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "helper",
+   "main"
+  ],
+  "label": "toolscope_case4_per_agent_allow_narrows_only",
+  "results": {
+   "apply_patch": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "automations": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "edit": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "exec": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "read": {
+    "global": true,
+    "helper": false,
+    "main": true
+   },
+   "write": {
+    "global": false,
+    "helper": false,
+    "main": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "helper",
+   "main"
+  ],
+  "label": "toolscope_case5_per_agent_alsoallow_no_profile",
+  "results": {
+   "apply_patch": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "automations": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "edit": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "exec": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "read": {
+    "global": true,
+    "helper": true,
+    "main": true
+   },
+   "write": {
+    "global": false,
+    "helper": false,
+    "main": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "helper",
+   "main"
+  ],
+  "label": "toolscope_case6_per_agent_alsoallow_widens_with_profile",
+  "results": {
+   "apply_patch": {
+    "global": false,
+    "helper": true,
+    "main": false
+   },
+   "automations": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "edit": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "exec": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "read": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "write": {
+    "global": false,
+    "helper": true,
+    "main": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "helper",
+   "main"
+  ],
+  "label": "toolscope_case7_per_agent_alsoallow_replaces_global",
+  "results": {
+   "apply_patch": {
+    "global": true,
+    "helper": false,
+    "main": true
+   },
+   "automations": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "edit": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "exec": {
+    "global": false,
+    "helper": false,
+    "main": false
+   },
+   "read": {
+    "global": false,
+    "helper": true,
+    "main": false
+   },
+   "write": {
+    "global": true,
+    "helper": false,
+    "main": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "toolscope_case8_agents_defaults_tools_no_roster",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [
+   "main"
+  ],
+  "label": "toolscope_case9_agents_defaults_tools_ignored_with_roster",
+  "results": {
+   "apply_patch": {
+    "global": true,
+    "main": true
+   },
+   "automations": {
+    "global": true,
+    "main": true
+   },
+   "edit": {
+    "global": true,
+    "main": true
+   },
+   "exec": {
+    "global": true,
+    "main": true
+   },
+   "read": {
+    "global": true,
+    "main": true
+   },
+   "write": {
+    "global": true,
+    "main": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_b299_bootstrap_correlated",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_b299_bootstrap_uncorrelated",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_b299_cred_arg_no_skill",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_b299_mundane_no_cred",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_b300_administered",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_b300_dishonest",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_b300_mt_administered",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_b300_no_evidence",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_b300_render_echo",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_incident_acted",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_no_sidecar",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_present_not_acted",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_prose_only_no_incident",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "traj_real_cred_path_acted",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "unknown_b168_cron_absent",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "unknown_b172_exec_approvals_absent",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "unknown_b326_elevated_default_env_var",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "unknown_b347_deaddrop_unparseable",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "unknown_b82_cachetrace_nonboolean",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "warn_b326_elevated_default_full_dormant",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "warn_b326_elevated_default_full_exec_hardened",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "warn_b326_elevated_default_full_no_allowfrom",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "warn_b347_deaddrop_checksum_data_arg",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "warn_b347_deaddrop_logger_data_arg",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "coder"
+  ],
+  "label": "warn_b409_profile_alsoallow_widening",
+  "results": {
+   "apply_patch": {
+    "coder": true,
+    "global": false
+   },
+   "automations": {
+    "coder": true,
+    "global": false
+   },
+   "edit": {
+    "coder": true,
+    "global": false
+   },
+   "exec": {
+    "coder": true,
+    "global": false
+   },
+   "read": {
+    "coder": true,
+    "global": false
+   },
+   "write": {
+    "coder": true,
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [
+   "worker"
+  ],
+  "label": "warn_b55_agent_profile_widens",
+  "results": {
+   "apply_patch": {
+    "global": false,
+    "worker": true
+   },
+   "automations": {
+    "global": false,
+    "worker": true
+   },
+   "edit": {
+    "global": false,
+    "worker": true
+   },
+   "exec": {
+    "global": false,
+    "worker": true
+   },
+   "read": {
+    "global": false,
+    "worker": true
+   },
+   "write": {
+    "global": false,
+    "worker": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "warn_taint_comprehension_shadow",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "warn_taint_wrapper_argv",
+  "results": {
+   "apply_patch": {
+    "global": false
+   },
+   "automations": {
+    "global": false
+   },
+   "edit": {
+    "global": false
+   },
+   "exec": {
+    "global": false
+   },
+   "read": {
+    "global": false
+   },
+   "write": {
+    "global": false
+   }
+  }
+ }
+]

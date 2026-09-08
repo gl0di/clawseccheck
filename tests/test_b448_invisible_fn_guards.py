@@ -5,11 +5,17 @@ consecutive RUN >= 4, or a TOTAL >= 32 the attacker cannot lower), grade the hal
 and let an isolated invisible read as typography. The corpus supported it — 0 run hits
 across 112,421 published JS files, and every survivor of `run OR total` an honest Persian
 locale or media bundle. It was implemented, measured, adversarially reviewed, and withdrawn.
+NOTE (B-450, 2026-09-03): that 112,421-file figure was taken against the THEN-6-MEMBER
+zero-width class; the class has since grown to 61 code points (18 ranges). Re-measured over
+a 37,068-file proxy corpus (this machine's installed node_modules), the 61-member class adds
+exactly 2 new-only hits over the 6-member one, both U+00AD soft hyphen, neither an
+install-time target — see the restated basis in `checks/_lifecycle.py` next to `_b349_assess_target`
+and `test_fn4_soft_hyphen_reachable_member_still_fails` below.
 
-These two tests are why. Each was reproduced end-to-end against both trees before the
+These tests are why. Each was reproduced end-to-end against both trees before the
 narrowing was reverted, and each pins a FAIL that the narrowing turned into a PASS. They
 are not tests of the current implementation's internals — they are the acceptance bar any
-FUTURE narrowing of this leg has to clear. A change that makes either of these PASS has
+FUTURE narrowing of this leg has to clear. A change that makes any of these PASS has
 reintroduced a working bypass of a CRITICAL check, whatever it does for false positives.
 
 Offline, read-only, stdlib only. The invisible characters here are built from `chr()` at
@@ -112,6 +118,27 @@ def test_fn3_a_single_invisible_in_an_installer_is_still_evidence(tmp_path):
     source = f'const p = "linux";\nconst p{ZWNJ}ath = "/tmp/x";\nconsole.log(p, p{ZWNJ}ath);\n'
     f = check_dependency_tree_hooks(_Ctx(_installer(tmp_path, "fn3-pkg", source)))
     assert f.status == FAIL
+
+
+def test_fn4_soft_hyphen_reachable_member_still_fails(tmp_path):
+    """B-450: the class widened 6 -> 61 members; U+00AD SOFT HYPHEN is the one newly
+    reachable member a real re-measure (37,068 published .js/.cjs/.mjs files) found
+    honest use for outside this check's population (2 files, neither an install-time
+    target). Pin that an installer carrying it as its only anomaly still reaches FAIL —
+    unchanged behaviour, deliberately, per the restated basis in `_lifecycle.py`. A
+    future narrowing that exempts U+00AD has to make this test fail first, the same
+    acceptance-bar shape as the two FN tests above.
+    """
+    SOFT_HYPHEN = chr(0x00AD)
+    source = (
+        f"// build helper -- co{SOFT_HYPHEN}mment carries a soft hyphen\n"
+        "console.log('ok');\n"
+    )
+    f = check_dependency_tree_hooks(_Ctx(_installer(tmp_path, "fn4-pkg", source)))
+    assert f.status == FAIL, (
+        "a lone soft hyphen in an install-time target must still be FAIL-eligible "
+        f"evidence, not narrowed away; got {f.status}: {f.evidence}"
+    )
 
 
 def test_the_two_narrowings_do_not_compose_into_a_clean_verdict(tmp_path):

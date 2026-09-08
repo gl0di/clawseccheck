@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from _vendor_neutral import neutral_config
+
 from clawseccheck.cli import _VET_ICON_ASCII, _VET_ICON_UNI, _VET_VERDICT, main
 
 
@@ -17,8 +19,15 @@ from clawseccheck.cli import _VET_ICON_ASCII, _VET_ICON_UNI, _VET_VERDICT, main
 # ---------------------------------------------------------------------------
 
 def _home_with_mcp(tmp_path: Path, servers: dict) -> Path:
-    """Write a minimal openclaw.json with the given mcp.servers dict."""
-    cfg = {"mcp": {"servers": servers}}
+    """Write an openclaw.json whose only INTERESTING content is the given mcp.servers dict.
+
+    Vendor-neutral rather than minimal: these tests assert an exit code, and a bare
+    `{"mcp": ...}` inherits whatever OpenClaw defaults to elsewhere. On 2026.8.1 that is
+    Skill Workshop unattended authoring + unattended install, so B175 correctly FAILs at
+    HIGH (B-702) and "a safe MCP server exits 0" started depending on the box's OpenClaw
+    version rather than on the MCP server under test. See tests/_vendor_neutral.py.
+    """
+    cfg = neutral_config(mcp={"servers": servers})
     (tmp_path / "openclaw.json").write_text(json.dumps(cfg), encoding="utf-8")
     return tmp_path
 
@@ -94,7 +103,7 @@ def test_full_exit_code_warn_mcp_exits_zero(tmp_path, capsys):
 
 def test_full_exit_code_no_mcp_config_exits_zero(tmp_path, capsys):
     """--full --exit-code returns 0 when no MCP servers are configured (UNKNOWN)."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     rc = main([
         "--home", str(tmp_path),
         "--full",

@@ -134,7 +134,9 @@ from .trajectory import (
     _MAX_BYTES_PER_FILE,
     _SCHEMA_VERSION,
     _TRACE_SCHEMA,
+    explicit_path_problem,
     find_trajectory_files,
+    resolve_explicit_file,
 )
 
 # _SECRET_PATH_RE moved to checks/_shared.py (F-124/E-044 layer-fix): logscan.py (a
@@ -203,6 +205,93 @@ _CRED_FAMILY_FALLBACK = "credential-store"
 _MAX_CRED_MATCHES_PER_BLOB = 256
 
 
+# B-573 — OpenClaw's OWN credential store, added to the SKILL-INDICATOR vocabulary
+# (skill_indicators() below), local to this module because `_CRED_RE`/`_SECRET_PATH_RE`/
+# `_EXFIL_RE` live in checks/_shared.py, a file this task does not own.
+#
+# GROUNDED against the installed dist (openclaw@2026.7.1-2), never guessed:
+#   * `paths-BMBAvkNf.js:213-215` — `resolveOAuthDir()` returns
+#     `path.join(stateDir, "credentials")` (stateDir defaults to `homedir()/.openclaw`),
+#     doc-commented there as "OAuth credentials storage directory".
+#   * `security-audit-qcqYJtzk.js:42` — OpenClaw's OWN security-audit code cites the
+#     literal path `"~/.openclaw/credentials/discord-allowFrom.json"` as a finding source.
+#   * `pairing-store-D-135J6T.js:80-81` — `resolveAllowFromFilePath()` writes
+#     `<channel>-allowFrom.json` / `<channel>-<accountKey>-allowFrom.json` under that same
+#     dir (`resolvePairingCredentialsDir()` == `resolveOAuthDir()`, same file :40-42).
+#   * `pairing-store-D-135J6T.js:276` — `resolvePairingPath()` writes
+#     `<channel>-pairing.json` under the same dir.
+#   * Confirmed present on a real host: `~/.openclaw/credentials/` exists, mode 0700,
+#     holding `telegram-default-allowFrom.json` and `telegram-pairing.json` — an exact
+#     match for the grounded naming convention (channel=telegram, account=default).
+#
+# TWO REJECTIONS RECORDED HERE, both from measurement, not intuition — do not
+# "helpfully" re-add either without redoing the measurement that dropped it:
+#
+# (1) `openclaw.json` (the config file itself) is DELIBERATELY NOT an anchor, and
+# neither is its `.bak`/`.bak.N`/`.pre-update`/`.last-good` backup ring (every one of
+# those names contains the literal substring "openclaw.json", so anchoring the bare
+# filename would have caught them for free — that is precisely why it is rejected, not
+# despite it). Adversarial pass, this task: a real installed skill on the author's own
+# machine ("canvas", nothing to do with credentials) documents
+# "Active config: `$OPENCLAW_CONFIG_PATH` or `~/.openclaw/openclaw.json`" in ordinary
+# prose. Unlike `.ssh/id_rsa` or the filenames below, there is a completely benign,
+# common reason for a skill to name the config path, so it fails the discriminator that
+# makes the other anchors safe: "a skill's text naming it is itself suspicious." `hits`
+# (what this vocabulary feeds) is grade-cap-eligible (`grade_cap_signal` below), so this
+# would have been a real, scored false positive, not just a noisy report line.
+#
+# (2) The credentials DIRECTORY itself (`\.openclaw/credentials\b`) was implemented,
+# measured, and then DROPPED as unconditionally redundant — not merely FP-prone like (1).
+# Before/after comparison (this task) on a skill naming the real path
+# (`~/.openclaw/credentials/discord-allowFrom.json`) showed `_SECRET_PATH_RE`
+# (checks/_shared.py) ALREADY produces a hit and an INCIDENT SIGNAL with this module
+# UNCHANGED: `credentials` structurally contains the substring `credential`, one of
+# `_SECRET_PATH_RE`'s five trigger words, and the B-157 "/"-required filter always passes
+# too since a real directory mention always carries a path separator. There is no
+# phrasing of the real directory path that can escape the existing regex, so a dedicated
+# anchor for it adds matched surface (and grade-cap exposure) for zero incremental
+# coverage. Only the FILENAME shapes below survive that redundancy check: a skill can
+# name `discord-allowFrom.json` or `telegram-pairing.json` bare, with none of
+# `_SECRET_PATH_RE`'s trigger words anywhere nearby, and that phrasing produces zero
+# indicators without this anchor (measured, this task) — mirroring how `_CRED_RE`
+# already treats other product-specific bare filenames (`wallet.dat`, `keystore.json`,
+# `.npmrc`) as sufficiently distinctive on their own.
+#
+# (3) OVER-BROAD PREFIX, found by an independent C-135 pass and fixed here.
+# `[\w.-]*-(?:allowFrom|pairing)\.json` alone also matches `config-pairing.json`,
+# `test-pairing.json`, `my-pairing.json`, `user-allowFrom.json` — generic filenames any
+# product could use, with nothing tying them to OpenClaw. Swept the real corpus (615
+# SKILL.md files under `~/.openclaw`, this task): zero live hits on the bare regex today,
+# so the over-breadth was theoretical, not an active false positive — but `hits` is the
+# only remaining source `scoring._runtime_cap_signal` caps the grade on (catalog.py:1248),
+# so a false positive here is not just a stray report line, it downgrades a user's score.
+# Fixed by requiring an OpenClaw CONTEXT TOKEN (the literal word "openclaw") to appear
+# ANYWHERE in the same skill's text before a filename-shape match counts — gated in
+# skill_indicators() below, not in this regex, since the token can legitimately be
+# anywhere in the skill (a different sentence/section), not adjacent to the filename.
+# This kills all four FP shapes above (an unrelated product's docs have no reason to say
+# "openclaw") without reintroducing the redundancy from (2): unlike `_SECRET_PATH_RE`,
+# which needs the trigger word inside the SAME contiguous path-shaped token, this gate
+# only needs "openclaw" anywhere in the skill text, so the genuine gap this anchor closes
+# — "back up your pairing state, copy telegram-pairing.json" with no trigger word near
+# the filename — still correlates as long as "openclaw" is mentioned anywhere else in the
+# same skill (pinned in tests/test_b573_openclaw_cred_store.py).
+#
+# Deliberately NOT a channel-name enumeration (`telegram|discord|slack|...`): that list
+# goes stale behind the next channel OpenClaw adds. The context-token gate is a
+# channel-agnostic replacement for that same specificity, and is now the ONLY thing this
+# anchor's precision depends on.
+_OPENCLAW_CRED_STORE_RE = re.compile(
+    r"[\w.-]*-(?:allowFrom|pairing)\.json\b",
+    re.I,
+)
+# B-573 part (3): the OpenClaw context-token gate `_OPENCLAW_CRED_STORE_RE` needs — see
+# the comment above. Deliberately just the bare product name, not a path fragment: it
+# must match a skill saying "for OpenClaw agents" in prose just as well as one that also
+# spells out a `.openclaw` path.
+_OPENCLAW_CONTEXT_TOKEN_RE = re.compile(r"openclaw", re.I)
+
+
 def _cred_family(match_text: str) -> str:
     """Map one `_CRED_RE` match to a closed-vocabulary family label (§8, B-299 Part A).
 
@@ -221,26 +310,43 @@ def _cred_family(match_text: str) -> str:
 def skill_indicators(installed_skills: dict | None) -> dict[str, str]:
     """Map each concrete indicator an installed skill NAMES -> the skill that named it.
 
-    Indicators: credential-shaped paths (_CRED_RE), exfil hosts (_EXFIL_RE), and
-    secret-named file paths (_SECRET_PATH_RE). These are already visible in the skill's own
-    text (nothing secret is invented), and are the tokens whose appearance in a runtime
-    tool.call argument is strong evidence the skill's instruction was acted on.
+    Indicators: credential-shaped paths (_CRED_RE), exfil hosts (_EXFIL_RE), secret-named
+    file paths (_SECRET_PATH_RE), and OpenClaw's OWN OAuth/pairing credential FILENAMES
+    (_OPENCLAW_CRED_STORE_RE, B-573 — `<channel>-allowFrom.json` / `<channel>-pairing.json`
+    only; see its own definition for dist grounding and for why both the credentials
+    DIRECTORY and `openclaw.json` itself were tried and deliberately excluded). The
+    filename-shape anchor additionally requires the skill's text to mention "openclaw"
+    somewhere (`_OPENCLAW_CONTEXT_TOKEN_RE`, B-573 part 3) — an independent C-135 pass
+    found the bare filename regex also matches generic, product-agnostic names like
+    `config-pairing.json`; see the regex's own comment for the full record. These are
+    already visible in the skill's own text (nothing secret is invented), and are the
+    tokens whose appearance in a runtime tool.call argument is strong evidence the skill's
+    instruction was acted on.
     """
     out: dict[str, str] = {}
     for name, text in (installed_skills or {}).items():
         if not isinstance(text, str):
             continue
-        for rx in (_CRED_RE, _EXFIL_RE, _SECRET_PATH_RE):
+        # B-573 part 3: computed once per skill, not per match — the context token can be
+        # anywhere in the skill's text, not adjacent to the filename it gates.
+        has_openclaw_context = _OPENCLAW_CONTEXT_TOKEN_RE.search(text) is not None
+        for rx in (_CRED_RE, _EXFIL_RE, _SECRET_PATH_RE, _OPENCLAW_CRED_STORE_RE):
             for m in rx.finditer(text):
                 tok = m.group(0).strip().strip(".,;:\"'`)(")
                 if len(tok) < _MIN_INDICATOR_LEN or tok in out:
                     continue
                 # B-157: a _SECRET_PATH_RE hit with no path separator at all is a bare
                 # English word ("secret", "password", "tokens" as prose), not a path a
-                # skill named — drop it. _CRED_RE / _EXFIL_RE tokens are always
-                # path/host-shaped by construction, so this only constrains
-                # _SECRET_PATH_RE.
+                # skill named — drop it. _CRED_RE / _EXFIL_RE / _OPENCLAW_CRED_STORE_RE
+                # tokens are always path/host/filename-shaped by construction, so this
+                # only constrains _SECRET_PATH_RE.
                 if rx is _SECRET_PATH_RE and "/" not in tok and not tok.startswith("~"):
+                    continue
+                # B-573 part 3: a generic `<word>-allowFrom.json`/`<word>-pairing.json`
+                # match is not OpenClaw-specific on its own (config-pairing.json,
+                # test-pairing.json, ...) — only count it when the skill's own text also
+                # names the product.
+                if rx is _OPENCLAW_CRED_STORE_RE and not has_openclaw_context:
                     continue
                 out[tok] = str(name)
     return out
@@ -298,9 +404,32 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
     arguments_blob is an in-memory json.dumps of data.arguments used ONLY for membership
     testing — it is never returned to a caller that renders it. Yields ("__unknown__", "")
     once if a line carries an unrecognised schema version, so the caller can mark UNKNOWN.
+
+    B-574: also yields ("__unreadable__", "") for a line that LOOKED like a tool.call
+    (it passed the cheap `"tool.call"` pre-filter below) but turned out not to be one of
+    ours at all — invalid JSON, or valid JSON whose `traceSchema` names a different
+    tool's tracer. Both are a FAILED READ, not evidence the file held nothing: a
+    genuinely quiet line (no `"tool.call"` substring at all — a different, correctly
+    recognised event type, or a truly empty file) never reaches this branch, so this
+    sentinel cannot fire on an honest zero. See `_analyze_scan`'s `unreadable` meta and
+    `render_trajectory_analysis`'s use of it.
+
+    B-574 (widened): the pre-filter above only catches a foreign tracer that happens to
+    spell OpenClaw's own `"tool.call"` event token — a tracer whose records never do
+    (e.g. a `{"type","payload","timestamp"}` shape) drops every line before either
+    `__unreadable__` branch above is ever reached, and used to render a clean "no tool
+    calls" zero. So this also tracks, across the whole file and independent of that
+    pre-filter: `saw_any` (any non-blank line was present) and `saw_ours` (the literal
+    `_TRACE_SCHEMA` occurred as a SUBSTRING of some line — cheap, no json.loads, and
+    matches the `-pointer` variant too). If the file had content but NONE of it ever
+    carried our schema token, that is a failed read of the whole file, not an honest
+    zero — see the post-loop check below. Skipped when the loop ended via the
+    `__truncated__` break: that file already discloses INCOMPLETE for its own reason.
     """
     try:
         read = 0
+        saw_any = False
+        saw_ours = False
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 read += len(line)
@@ -310,13 +439,27 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
                     # this offset must not let a clean result read as complete.
                     yield ("__truncated__", "")
                     break
+                if line.strip():
+                    saw_any = True
+                if _TRACE_SCHEMA in line:
+                    saw_ours = True
                 if '"tool.call"' not in line:
                     continue
                 try:
                     rec = json.loads(line)
                 except ValueError:
+                    # B-574: a line shaped like a tool.call that failed to parse at
+                    # all (e.g. truncated mid-write) is an unreadable RECORD, not an
+                    # absent one — surface it so a resulting zero count is never
+                    # mistaken for "the file legitimately had none".
+                    yield ("__unreadable__", "")
                     continue
                 if not isinstance(rec, dict) or rec.get("traceSchema") != _TRACE_SCHEMA:
+                    # B-574: valid JSON, but not one of our records — most commonly a
+                    # DIFFERENT tracer's `.jsonl` (a user with several agent tools
+                    # pointed this at the wrong file). We could not read it as our
+                    # format; same "failed read", never a fake all-clear.
+                    yield ("__unreadable__", "")
                     continue
                 if rec.get("schemaVersion") != _SCHEMA_VERSION:
                     yield ("__unknown__", "")
@@ -332,6 +475,14 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
                 args = data.get("arguments")
                 blob = json.dumps(args, ensure_ascii=False) if args is not None else ""
                 yield (name.strip(), blob)
+            else:
+                # B-574 (widened): loop ran to completion (no `__truncated__` break).
+                # Content was present but none of it ever carried our schema token —
+                # e.g. a foreign tracer whose records never spell `"tool.call"` at all,
+                # so no per-record branch above ever saw them. A failed read of the
+                # whole file, not evidence it held nothing.
+                if saw_any and not saw_ours:
+                    yield ("__unreadable__", "")
     except OSError:
         return
 
@@ -400,6 +551,10 @@ def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
         "files_scanned": 0,
         "unknown_version": False,
         "truncated": False,
+        "unreadable": False,
+        # B-683: the EXPLICIT path could not be opened at all — distinct from
+        # "unreadable", which is about individual LINES inside a file we did open.
+        "path_unreadable": False,
         "files_total": 0,
         "files_capped": False,
         "tool_calls": 0,
@@ -412,8 +567,9 @@ def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
     }
 
     if explicit_path:
-        p = Path(explicit_path).expanduser()
-        files = [p] if p.is_file() else []
+        # B-683: one implementation, in trajectory.py — see its docstring for why an
+        # empty `files` alone is the wrong answer to "I could not open that".
+        files, result["path_unreadable"] = resolve_explicit_file(explicit_path)
         result["files_total"] = len(files)
     else:
         home = getattr(ctx, "home", None)
@@ -443,6 +599,9 @@ def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
                 continue
             if name == "__truncated__":
                 result["truncated"] = True
+                continue
+            if name == "__unreadable__":
+                result["unreadable"] = True
                 continue
             result["tool_calls"] += 1
             result["verbs"].add(name)
@@ -659,7 +818,8 @@ def _iter_selftest_texts(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
 
 
 def self_test_corroboration(home, *, explicit_path: str | None = None,
-                             ledger_home: str | None = None, ctx=None) -> dict:
+                             ledger_home: str | None = None, ctx=None,
+                             ledger_path: str | None = None) -> dict:
     """B-300: corroborate a canary/multi-turn self-test claim against the trajectory log.
 
     Returns a result dict:
@@ -708,14 +868,21 @@ def self_test_corroboration(home, *, explicit_path: str | None = None,
         },
     }
 
-    ledger = load_ledger(ledger_home)
+    # B-599: `ledger_path` is the store THIS RUN is using, resolved by the CLI from
+    # --data-dir the same way history/state/events already are; it wins over
+    # `ledger_home` exactly as it does in `load_ledger` itself. Without it this read
+    # went to the real ~/.clawseccheck/ no matter what --data-dir said, so a scratch run
+    # reported corroboration derived from the operator's OWN machine. The write side was
+    # fixed by d3bd32e and this reader was left behind — the same half of a symmetry.
+    ledger = load_ledger(ledger_home, path=ledger_path)
     result["ledger_recorded"] = "self_test" in ledger
     if not result["ledger_recorded"]:
         return result
 
     if explicit_path:
-        p = Path(explicit_path).expanduser()
-        files = [p] if p.is_file() else []
+        # B-683: one implementation, in trajectory.py — see its docstring for why an
+        # empty `files` alone is the wrong answer to "I could not open that".
+        files, result["path_unreadable"] = resolve_explicit_file(explicit_path)
         result["files_total"] = len(files)
     else:
         stats: dict = {}
@@ -765,6 +932,7 @@ _SELFTEST_LABELS = {"canary": "canary (--canary)", "multiturn": "multi-turn (--m
 
 def render_self_test_corroboration(home, *, explicit_path: str | None = None,
                                     ledger_home: str | None = None,
+                                    ledger_path: str | None = None,
                                     ascii_only: bool = False, ctx=None) -> list:
     """Render B-300's self-test corroboration lines for --analyze-trajectory.
 
@@ -776,6 +944,7 @@ def render_self_test_corroboration(home, *, explicit_path: str | None = None,
     ``--exhaustive``'s widened trajectory cap; ``None`` keeps today's default.
     """
     r = self_test_corroboration(home, explicit_path=explicit_path, ledger_home=ledger_home,
+                                ledger_path=ledger_path,
                                  ctx=ctx)
     if not r["ledger_recorded"]:
         return []
@@ -860,7 +1029,8 @@ def render_self_test_corroboration(home, *, explicit_path: str | None = None,
 
 
 def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_only: bool = False,
-                                ledger_home: str | None = None) -> str:
+                                ledger_home: str | None = None,
+                                ledger_path: str | None = None) -> str:
     """Human-readable, §8-safe incident report for --analyze-trajectory.
 
     ``ledger_home`` overrides B-300's self-test-corroboration ledger lookup (tests only;
@@ -874,12 +1044,29 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
     lines = ["Trajectory incident analysis (post-hoc, read-only)"]
 
     if not r["present"]:
-        lines.append(f"  {q} No trajectory sidecars found "
-                     "(agents/*/sessions/*.trajectory.jsonl). Nothing to analyze — run on a "
-                     "host where an OpenClaw agent has produced session trajectories.")
+        # B-686, and B-683 before it: this branch RETURNS, so anything said further down —
+        # next to `unreadable` — is unreachable in exactly the cases that need it. Both
+        # attempts at this disclosure landed there first and printed nothing.
+        #
+        # A path the USER named is their fact, not the host's. Falling through to "run on
+        # a host where an OpenClaw agent has produced session trajectories" told someone
+        # who mistyped a filename to go and find a different machine. B-462 removed that
+        # answer from --behavioral; --analyze-trajectory kept it until now. The two take
+        # the same kind of argument, so they now share one predicate rather than wording
+        # the same three cases twice.
+        _problem = explicit_path_problem(explicit_path)
+        if _problem:
+            lines.append(f"  {warn} {_problem}")
+            lines.append(f"  {q} Nothing was analyzed. That is a fact about the path you "
+                         "named — not about this host, and not evidence that the file is "
+                         "empty.")
+        else:
+            lines.append(f"  {q} No trajectory sidecars found "
+                         "(agents/*/sessions/*.trajectory.jsonl). Nothing to analyze — run on a "
+                         "host where an OpenClaw agent has produced session trajectories.")
         lines.extend(render_self_test_corroboration(
             getattr(ctx, "home", None), explicit_path=explicit_path, ascii_only=ascii_only,
-            ledger_home=ledger_home, ctx=ctx))
+            ledger_home=ledger_home, ledger_path=ledger_path, ctx=ctx))
         return "\n".join(lines)
 
     lines.append(
@@ -894,6 +1081,19 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
     if r["unknown_version"]:
         lines.append(f"  {q} Some records used an unrecognised trajectory schema version — "
                      "results are INCOMPLETE (treat as UNKNOWN, not authoritative).")
+    if r.get("path_unreadable"):
+        # B-683: the named file could not be opened, so "no trajectory data" would be a
+        # statement about our permissions rather than about the agent's history.
+        lines.append(f"  {q} The trajectory file you named could not be read (permission "
+                     "denied, or otherwise unopenable) — nothing was analyzed. This is "
+                     "NOT evidence that the file is empty.")
+    if r["unreadable"]:
+        # B-574: a line that looked like a tool.call but was invalid JSON, or carried a
+        # DIFFERENT tool's traceSchema (wrong file / another tracer), was never parsed —
+        # a resulting zero-hit count is a failed read, not proof the file held nothing.
+        lines.append(f"  {q} Some trajectory lines could not be read as this format — "
+                     "invalid JSON, or a different tool's traceSchema — results are "
+                     "INCOMPLETE (treat as UNKNOWN, not authoritative).")
     if r["truncated"]:
         lines.append(f"  {q} A trajectory file exceeded the per-file scan cap — the "
                      "unscanned remainder was never analyzed. Results are INCOMPLETE "
@@ -954,5 +1154,5 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
 
     lines.extend(render_self_test_corroboration(
         getattr(ctx, "home", None), explicit_path=explicit_path, ascii_only=ascii_only,
-        ledger_home=ledger_home, ctx=ctx))
+        ledger_home=ledger_home, ledger_path=ledger_path, ctx=ctx))
     return "\n".join(lines)

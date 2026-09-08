@@ -8,6 +8,26 @@ This checklist is for maintainers cutting a release. Users never need it.
 - `python3 -m pytest`
 - Run the most relevant test subset for the touched area if the full suite is
   too large for your CI window — but a release tag requires the full suite green.
+- **Run the suite on the supported Python floor too, not only your own interpreter.**
+  This is not a formality: a stdlib predicate whose semantics moved between versions
+  can change a *verdict* rather than crash. One such change once made two checks
+  accept a world-open proxy — the exact lying PASS they exist to prevent.
+
+### The gates that are not in the test suite
+
+A green suite answers "does the code do what its tests say". These answer questions the
+suite structurally cannot ask, and a release runs all of them:
+
+| gate | the question only it asks |
+| --- | --- |
+| `scripts/fleet_fp_gate.py compare` | does this build raise a FAIL on real configs that the last one did not? A new FAIL id/target is a hard blocker until diagnosed. |
+| `scripts/monitor_detection_gate.py` | does the watch actually *say so* when something dangerous changes? The FP gate only proves it stays quiet — which a broken detector also does. ~20 minutes. |
+| `scripts/dist_citation_gate.py` | do the citations in our source still resolve against the installed OpenClaw? |
+| `scripts/state_db_drift_gate.py` | do the queries we issue still match the state DB the runtime ships? Run it after starting the new build, since the DB migrates on first start. |
+
+Note what a green gate does **not** cover: the false-positive gate compares FAIL
+findings only, so a false result reached through the attack-chain layer is invisible to
+it. Read it as "no new false FAIL", never as "no new false verdict".
 
 ## 2) Documentation and protocol alignment
 

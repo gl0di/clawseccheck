@@ -37,12 +37,28 @@ def test_record_and_load_three_entries(tmp_path):
 
     rows = load(path)
     assert len(rows) == 3
-    assert rows[0] == {"date": "2026-06-15", "score": 72, "grade": "C",
-                        "ts": "2026-06-15T00:00:00", "home": None, "source": "audit"}
-    assert rows[1] == {"date": "2026-06-17", "score": 81, "grade": "B",
-                        "ts": "2026-06-17T00:00:00", "home": None, "source": "audit"}
-    assert rows[2] == {"date": "2026-06-19", "score": 90, "grade": "A",
-                        "ts": "2026-06-19T00:00:00", "home": None, "source": "audit"}
+    # B-509: 'graded' is an additive key, the same shape 'ts'/'home'/'source' arrived in
+    # under F-128 — load() materializes the graded/ungraded decision once, at the boundary
+    # where it reads the row, so no consumer re-derives it from `score is None`.
+    # B-691: three more keys, and still EXACT equality rather than containment — the same
+    # restatement `graded` made under B-509. `load()` projects into a fixed set and drops
+    # everything it does not name, so a key the writer records but this projection forgets
+    # would be invisible to `render_trend`; only an exact assertion can see that.
+    #
+    # All three read None here because this test records through a duck-typed score with
+    # no `raw_score` and passes no `findings`/`version` — which is itself the pinned
+    # behaviour: a caller that cannot supply them writes no figure at all rather than a
+    # fabricated zero, and the 13 test modules that record this way keep working.
+    _blank_raw = {"raw_score": None, "raw_scope": None, "raw_ver": None}
+    assert rows[0] == {"date": "2026-06-15", "score": 72, "grade": "C", "graded": True,
+                        "ts": "2026-06-15T00:00:00", "home": None, "source": "audit",
+                        **_blank_raw}
+    assert rows[1] == {"date": "2026-06-17", "score": 81, "grade": "B", "graded": True,
+                        "ts": "2026-06-17T00:00:00", "home": None, "source": "audit",
+                        **_blank_raw}
+    assert rows[2] == {"date": "2026-06-19", "score": 90, "grade": "A", "graded": True,
+                        "ts": "2026-06-19T00:00:00", "home": None, "source": "audit",
+                        **_blank_raw}
 
 
 def test_record_creates_parent_dir(tmp_path):
@@ -257,18 +273,23 @@ def test_verify_ok_on_untampered_chain(tmp_path):
     assert msg == "OK"
 
 
-def test_verify_ok_on_missing_file(tmp_path):
+def test_verify_third_state_on_missing_file(tmp_path):
+    """B-589: absent is neither intact nor tampered — it is "no chain here".
+
+    Named ``test_verify_ok_on_missing_file`` until B-589, asserting the lying PASS that
+    let deleting the store defeat the check that exists to catch deletion.
+    """
     ok, msg = verify(str(tmp_path / "nonexistent.jsonl"))
-    assert ok is True
-    assert msg == "OK"
+    assert ok is None
+    assert "OK" not in msg
 
 
-def test_verify_ok_on_empty_file(tmp_path):
+def test_verify_third_state_on_empty_file(tmp_path):
     path = tmp_path / "history.jsonl"
     path.write_text("", encoding="utf-8")
     ok, msg = verify(str(path))
-    assert ok is True
-    assert msg == "OK"
+    assert ok is None
+    assert "OK" not in msg
 
 
 def test_verify_ok_on_legacy_entries_without_chain_hash(tmp_path):
@@ -325,10 +346,20 @@ def test_cli_verify_history_exits_zero_on_untampered_chain(tmp_path, capsys):
     assert "OK" in capsys.readouterr().out
 
 
-def test_cli_verify_history_exits_zero_on_missing_file(tmp_path, capsys):
+def test_cli_verify_history_does_not_exit_zero_on_missing_file(tmp_path, capsys):
+    """B-589: exit 0 over a file that was never opened is a pass a script will believe.
+
+    The named path is explicitly given, so the reader is told this is not a first-run
+    state. rc is 1 — the same non-zero --verify-baseline uses for "I could not check" —
+    while the text keeps it clearly apart from a tamper finding.
+    """
     path = str(tmp_path / "nonexistent.jsonl")
     rc = main(["--verify-history", "--history", path])
-    assert rc == 0
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "NOT VERIFIED" in out
+    assert "chain OK" not in out
+    assert "BROKEN" not in out
 
 
 def test_cli_verify_history_exits_one_on_tampered_chain(tmp_path, capsys):

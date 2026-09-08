@@ -29,12 +29,17 @@ from ..collector import (
 from . import _shared
 from ._shared import (
     _agent_is_powerful,
+    _config_unreadable,
     _custom,
     _dir_replaceable_by_others,
     _file_readable_by_others,
     _finding,
+    _key_advice,
+    _openclaw_generation,
     _plugins,
+    _retired_key_note,
 )
+from ..invocation import command_prefix
 
 
 def _detail_path(value, home) -> str:
@@ -240,6 +245,15 @@ def _host_finding(cid: str, cls: str, ctx: Context) -> Finding:
             f"Install/enable {label} on the host, or reduce the agent's blast radius "
             "(sandbox it, lock channels to an allowlist, remove exec/write tools).",
         )
+    # B-529: this is the exculpatory branch, and it is the one that must not be
+    # reached on an unreadable config. `active is False` is real, config-independent
+    # host-scan evidence; "low-privilege" is not -- `_agent_is_powerful` reads
+    # ctx.config, which is {} when openclaw.json could not be read, so a host with a
+    # genuine monitoring gap was excused on the strength of a config nobody managed to
+    # open. The WARN branch above is untouched: it earned its verdict from the host
+    # scan and does not need the config to be right.
+    if (unreadable := _config_unreadable(cid, ctx)) is not None:
+        return unreadable
     return _finding(
         cid,
         PASS,
@@ -251,47 +265,240 @@ def _host_finding(cid: str, cls: str, ctx: Context) -> Finding:
 
 
 def check_audit_log(ctx: Context) -> Finding:
+    # B-514: this used to assert in-source that "audit.enabled does NOT exist in the
+    # OpenClaw config schema" and told the user so. It does exist, and it is a kill
+    # switch, not a preference. From the installed dist:
+    #
+    #   types.base-DD09OBJd.d.ts:252  type AuditConfig = { enabled?: boolean }
+    #     "Record metadata-only audit events (agent runs and tool actions) into the
+    #      shared state database. ... Default: true. Disabling stops new writes;
+    #      existing records stay readable until they expire."
+    #   types.openclaw-CXjMEWAQ.d.ts:1658  audit?: AuditConfig
+    #
+    # So `audit.enabled: false` silently stops the agent-activity ledger — an
+    # anti-forensics switch this check was declining to look at.
+    #
+    # B-700: "`logging.audit` IS a phantom" was the other half of that note, and it has
+    # since gone stale — OpenClaw 2026.8.1 MOVED the block there. `audit` is rejected at
+    # the root and `logging.audit.enabled` is the real key, so reading only the old path
+    # made this check answer PASS "Nothing here turns it off" on a config that had
+    # explicitly turned it off. Measured, on the whole check set:
+    #
+    #   {"audit": {"enabled": false}}               -> B10 WARN   (ledger is off)
+    #   {"logging": {"audit": {"enabled": false}}}  -> B10 PASS   "Nothing here turns it off."
+    #
+    # Golden Rule #4, and the same shape as B-698. Both spellings are read now, permanently:
+    # OpenClaw's migration runs inside `doctor --fix`, so an un-migrated config still
+    # carries the old key while the schema rejects it. Precedence mirrors the vendor's own
+    # migration verbatim (`legacy-pGW3ZP3t.js`):
+    #
+    #   const canonicalAudit = getRecord(logging.audit) ?? {};
+    #   mergeMissing(canonicalAudit, audit);        // canonical wins per key
+    #
+    # i.e. `logging.audit.enabled` wins where it is present and the legacy block only
+    # fills a key the canonical one does not have.
+    #
+    # ABSENT is the DOCUMENTED DEFAULT (true), i.e. the safe state — warning on it would
+    # be a false positive on every stock config. The default lives in the .d.ts, not in
+    # the zod schema, which is why a first pass at this fix grounded on zod alone and
+    # wrongly reported the default as unreadable.
+    #
+    # B-524: but "absent" has two causes, and answering the default for both is a lying
+    # PASS. Every verdict below is read out of ctx.config alone, and on a config the
+    # collector found and failed to parse that dict is {} — so the default branch would
+    # tell the user "Nothing here turns it off" about a file nothing read. This check is
+    # purely config-content-derived (no bootstrap/host/trajectory signal of its own), so
+    # the guard belongs at the top: there is no independent evidence below that deserves
+    # a chance to fire first.
+    if (unreadable := _config_unreadable("B10", ctx)) is not None:
+        return unreadable
     cfg = ctx.config
-    # logging.audit and audit.enabled do NOT exist in the OpenClaw config schema.
-    # Audit is a CLI command only: `openclaw security audit`
-    # There is no config toggle to enable/disable audit logging.
-    # We check what IS observable: log redaction (separate from audit).
+    # B-700: canonical first, legacy as the fallback — see the migration quoted above.
+    # The container is read with plain dict access, exactly as `_shared._node_commands`
+    # does, so no manifest entry is created for a path that only reaches a child.
+    logging_node = cfg.get("logging") if isinstance(cfg, dict) else None
+    audit_node = logging_node.get("audit") if isinstance(logging_node, dict) else None
+    if isinstance(audit_node, dict) and "enabled" in audit_node:
+        audit_enabled = audit_node["enabled"]
+        audit_key = "logging.audit.enabled"
+    else:
+        audit_enabled = dig(cfg, "audit.enabled")
+        audit_key = ("audit.enabled" if audit_enabled is not None
+                     else _key_advice(ctx, "audit.enabled", "logging.audit.enabled"))
     redact = dig(cfg, "logging.redactSensitive")
+    # C-471: B-700 fixed only this check's audit half (audit_key, above) — the
+    # redaction half kept naming logging.redactSensitive with no generation awareness,
+    # so a 2026.8.1 build got a byte-identical WARN/fix to a 2026.7.x one about a key
+    # that OpenClaw REMOVED outright. Grounded against the installed dist (2026.8.2):
+    # `legacy-B-ouzcdF.js` lists `["logging", "redactSensitive"]` in the retired-path
+    # table, and `redact-C9Jj-ryD.js` hard-codes `DEFAULT_REDACT_MODE = "tools"` as a
+    # constant no config path feeds — the same runtime fact B9 (checks/_egress.py)
+    # already reads. `_shared.py`'s own B-700 note measured B9's fix string
+    # (`logging.redactSensitive: "tools"`) as `REJECTED unrecognized_keys@logging` on a
+    # modern build, and this check's fix string was the same one.
+    stale = _retired_key_note(ctx, "logging.redactSensitive")
+    redact_note = (
+        ' logging.redactSensitive is also "off", so what is written may expose '
+        f"secrets/PII (Israel Amendment 13).{stale}" if redact == "off" else ""
+    )
+
+    if audit_enabled is False:
+        return _finding(
+            "B10",
+            WARN,
+            f"{audit_key} is false — the metadata audit ledger is switched OFF, so agent "
+            "runs and tool actions stop being recorded to the shared state database. "
+            "Existing records stay readable until they expire; nothing new is written, so "
+            f"an incident from here on leaves no ledger to reconstruct.{redact_note}",
+            f"Remove {audit_key} (its default is true) or set it back to true in "
+            "openclaw.json. If something else set it to false, treat that as the finding.",
+        )
     if redact == "off":
+        generation = _openclaw_generation(ctx)
+        if generation == "modern":
+            fix = (
+                "Delete logging.redactSensitive — OpenClaw 2026.8.1 and later ignores "
+                "it and redaction is unconditional there. Run `openclaw security "
+                "audit` periodically."
+            )
+        elif generation == "legacy":
+            fix = (
+                'Set logging.redactSensitive to "tools" and run `openclaw security '
+                "audit` periodically."
+            )
+        else:
+            fix = (
+                'On OpenClaw 2026.8.1 and later, delete logging.redactSensitive — it '
+                'no longer exists there and redaction is unconditional; on releases '
+                'before that, set it to "tools" instead. Either way, run `openclaw '
+                "security audit` periodically."
+            )
         return _finding(
             "B10",
             WARN,
             'logging.redactSensitive is "off" — logs may expose secrets/PII '
-            "(Israel Amendment 13). OpenClaw audit is a CLI command "
-            "(`openclaw security audit`), not a config toggle.",
-            'Set logging.redactSensitive to "tools" and run `openclaw security audit` periodically.',
+            f"(Israel Amendment 13). The audit toggle is a separate setting, "
+            f"{audit_key}.{stale}",
+            fix,
+        )
+    if audit_enabled is True:
+        return _finding(
+            "B10",
+            PASS,
+            f"{audit_key} is true — the metadata audit ledger is switched on. This is "
+            "the config toggle only; that records are actually being written, retained "
+            "and reachable by you is not observable from config.",
+            "Confirm the ledger is really being produced and is retained somewhere you "
+            "can reach after an incident.",
+        )
+    if audit_enabled is None:
+        return _finding(
+            "B10",
+            PASS,
+            f"{audit_key} is not set, and its documented default is true — the metadata "
+            "audit ledger records agent runs and tool actions unless something turns it "
+            "off. Nothing here turns it off.",
+            "Nothing to change. If you want the setting to be explicit rather than "
+            f"inherited, set {audit_key} to true.",
+            pass_confidence="no_signal",
         )
     return _finding(
         "B10",
         UNKNOWN,
-        "OpenClaw exposes no audit-log config field (audit is a CLI command: "
-        "`openclaw security audit`) — cannot assess from config alone. "
-        "Run `openclaw security audit` periodically to detect issues.",
-        "Schedule `openclaw security audit` and wire its output to an alert channel.",
+        f"{audit_key} is set to {audit_enabled!r}, which is not a boolean — OpenClaw's "
+        "schema expects true or false, so what the runtime does with this value cannot "
+        "be read from the config.",
+        f"Set {audit_key} to a real boolean (true), or remove it to inherit the "
+        "documented default of true.",
     )
+
+
+_NAME_TOKEN_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _monitoring_candidate(name) -> bool:
+    """Does this skill/plugin NAME look like a monitor? A candidate, never a verdict.
+
+    B-501: matching used to be a bare substring test anywhere in the name, so `"ids"`
+    matched *asteroids*, *hybrids*, *pyramids*. A single-word hint must now START a token:
+    that keeps every intended match (`clawsec` -> *clawseccheck*, `monitor` ->
+    *monitoring*) while dropping the accidental ones, which all had the hint buried in the
+    middle of a word. Hints carrying a separator (`-ids`, `security-monitor`) keep
+    substring matching, which is what they were written for.
+    """
+    low = str(name).lower()
+    tokens = {t for t in _NAME_TOKEN_RE.split(low) if t}
+    for h in _MONITORING_HINTS:
+        if "-" in h or "_" in h:
+            if h in low:
+                return True
+        elif any(t.startswith(h) for t in tokens):
+            return True
+    return False
+
+
+def _attested_monitors_any(ctx: Context) -> list:
+    """Every self-reported host monitor, regardless of class.
+
+    `_attested_host_monitors` filters by class for B50-B54. B16 asks the broader
+    question — is anything watching at all — so it takes the list unfiltered rather
+    than borrowing another check's hint list.
+    """
+    att = getattr(ctx, "attestation", None) or {}
+    declared = att.get("host_monitors")
+    if not isinstance(declared, list):
+        return []
+    return [d for d in declared if isinstance(d, str) and d.strip()]
 
 
 def check_monitoring(ctx: Context) -> Finding:
     """Does the user actually have threat monitoring / detection in place?"""
     cfg = ctx.config
-    signals = []
-    for name in list(ctx.installed_skills) + list(_plugins(cfg)):
-        if any(h in str(name).lower() for h in _MONITORING_HINTS):
-            signals.append(f"'{name}'")
+    # B-501: a NAME used to be the whole gate — anything matching a hint returned PASS
+    # "Threat monitoring present". The name is attacker-controlled, and the corpus already
+    # held the exploit: fixtures/bad_ownname_clawseccheck_squat is a hostile skill calling
+    # itself `clawseccheck` and shipping vendor/sitecustomize.py, and B16 credited it as
+    # the user's threat monitoring. Only two fixtures in the whole corpus reached PASS,
+    # and that squat was one of them — the check's entire positive evidence was a string
+    # an attacker picks.
+    #
+    # A name is now a candidate. The PASS that remains is the attested one — B16's own fix
+    # text has pointed users at `--attest host_monitors` since it was written, and nothing
+    # ever read it.
+    #
+    # Deliberately NOT added: corroborating a candidate against an OpenClaw cron entry.
+    # Measured before designing — ctx.cron_jobs is empty on the real fleet box
+    # (cron_store_empty) and no fixture populates it, so it would be machinery that
+    # credits nobody while costing false negatives for externally-scheduled monitors.
+    #
     # monitoring, security.monitoring, alerts, security.alerts do NOT exist in the
-    # OpenClaw config schema — removed to eliminate dead-code false-signal arms.
-    # Detection relies on skill/plugin name hints above (confirmed reliable).
-    if signals:
+    # OpenClaw config schema — removed earlier to eliminate dead-code false-signal arms.
+    candidates = [
+        f"'{name}'"
+        for name in list(ctx.installed_skills) + list(_plugins(cfg))
+        if _monitoring_candidate(name)
+    ]
+    attested = _attested_monitors_any(ctx)
+    if attested:
         return _finding(
             "B16",
             PASS,
-            f"Threat monitoring present: {', '.join(signals[:5])}.",
-            "Keep it enabled and make sure its alerts actually reach you.",
+            "Threat monitoring is not confirmable from this config, but the agent "
+            f"attests it runs: {', '.join(attested[:5])} (self-reported).",
+            "Self-reported — confirm it is actually running and that its alerts reach you.",
+            evidence=list(attested[:5]),
+            confidence=ATTESTED,
+        )
+    if candidates:
+        return _finding(
+            "B16",
+            WARN,
+            f"Possible monitoring skill/plugin by name only: {', '.join(candidates[:5])}. "
+            "A name is not evidence — nothing here shows it watches anything, and the "
+            "name is chosen by whoever installed it. Treat monitoring as unconfirmed.",
+            "Confirm it really is a monitor and that its alerts reach you. If it is, "
+            "self-report it via `--attest` (host_monitors) so this check can credit it; "
+            f"if you do not recognise it, vet it with `{command_prefix()} --vet <folder>`.",
         )
     return _finding(
         "B16",
@@ -302,7 +509,7 @@ def check_monitoring(ctx: Context) -> Finding:
         "'not detected here', not proof you're unwatched; confirm before relying on it.",
         "If you have no detection, add a monitoring skill (e.g. ClawSec or "
         "openclaw-security-monitor), wire audit logging to an alert channel, or schedule "
-        "ClawSecCheck's own `clawseccheck --monitor`. If monitoring lives elsewhere, you can "
+        f"ClawSecCheck's own `{command_prefix()} --monitor`. If monitoring lives elsewhere, you can "
         "self-report it via `--ask`/`--attest` (host_monitors) so the host-watch checks "
         "credit it.",
     )
@@ -387,6 +594,14 @@ def check_host_egress_posture(ctx: Context) -> Finding:
             "destinations the agent actually needs.",
             evidence=evidence,
         )
+    # B-529: same shape as B50-B54's terminal branch above — active is False is
+    # real, config-independent host-scan evidence, but "low-privilege" is read out
+    # of ctx.config via _agent_is_powerful, which is False on an unreadable
+    # openclaw.json (ctx.config == {}) purely because nothing could be read. Guard
+    # only this exculpatory clean verdict; the WARN branch above already earned
+    # its own merits from the host scan.
+    if (unreadable := _config_unreadable("B101", ctx)) is not None:
+        return unreadable
     return _finding(
         "B101",
         PASS,

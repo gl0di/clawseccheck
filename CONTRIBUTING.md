@@ -36,6 +36,49 @@ Tests are **offline and read-only**: no network, nothing written outside
 pytest's `tmp_path`. CI runs the suite on Python 3.9 and 3.12, plus
 markdownlint (`markdownlint-cli@0.44.0`) over the docs.
 
+### The two false-positive gates
+
+CI cannot see your machine, and both of this tool's noisiest failure modes are
+things only a real setup shows. Two local gates cover them. Neither runs in CI,
+so running them is on you:
+
+```bash
+python3 scripts/fleet_fp_gate.py compare   # after a detection change
+python3 scripts/monitor_fp_gate.py check   # after a --monitor change
+```
+
+- **`fleet_fp_gate.py`** compares the FAIL set your real config produces against
+  a recorded baseline. A FAIL that is new is a hard blocker until diagnosed,
+  whatever a benchmark number did. Run it for any change to a check, and
+  re-record on a version bump.
+
+  When a new FAIL turns out to be a **true** positive you cannot remove — your
+  machine really is in that state — record why, rather than absorbing it:
+
+  ```bash
+  python3 scripts/fleet_fp_gate.py acknowledge --id B181 --scope audit \
+      --note "why this is expected on this machine"
+  ```
+
+  That entry stops the FAIL blocking and makes every later `compare` print it
+  back with its reason. Use it instead of `record`, which absorbs the entire
+  current FAIL set at once and leaves no trace of which entries you actually
+  investigated. `acknowledge` refuses unless the FAIL is live in a fresh scan, a
+  blank `--note` is rejected, and the entry is scoped to one check on one target —
+  acknowledging `B181` for your own skill does not acknowledge it for someone
+  else's.
+- **`monitor_fp_gate.py`** takes two snapshots of an unchanged home and asserts
+  the diff raises no alert — anything it reports is a false positive by
+  construction, because nothing moved between them. Run it for any change to
+  `monitor.py` or to a snapshot dimension. It asserts on **alerts only**: notes
+  record comparisons a run declined to make, and a healthy machine has several.
+
+Both refuse to judge a run in which a check degraded, rather than judging it
+anyway — a lost signal read as a resolved one is the failure they exist to
+prevent. Their test twins (`tests/test_fleet_fp_gate.py`,
+`tests/test_c420_monitor_fp_gate.py`) do run in CI and keep the gates themselves
+honest on synthetic input.
+
 ## Adding or changing a check
 
 Read [docs/CHECK_AUTHORING.md](docs/CHECK_AUTHORING.md) first. In short, every
@@ -79,9 +122,11 @@ check needs:
 
 ## Contributor License Agreement
 
-Your first pull request will get a bot comment asking you to sign
-[CLA.md](CLA.md) by replying with a single sentence. It takes a moment and you
-only ever do it once.
+Your first pull request needs a one-time sign-off on [CLA.md](CLA.md): reply on
+the pull request with the single sentence quoted there. It takes a moment and you
+only ever do it once. The check is currently manual — the automated CLA gate is
+switched off while every pull request so far has been the maintainer's — so if
+you open one and hear nothing, say so on the PR and it will be picked up.
 
 Being upfront about why, because a contributor should know before signing rather
 than discover it later:

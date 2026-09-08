@@ -117,6 +117,8 @@ from pathlib import Path
 
 import pytest
 
+from _realhome import REAL_HOME
+
 # The skill repo root is the parent of tests/ — in BOTH layouts (locally it is
 # <workspace>/skill/, in CI the checkout root itself). Resolve the source dir and manifest
 # relative to it so the guard works in CI, where the repo root IS the skill tree. Only the
@@ -152,10 +154,27 @@ MANIFEST_FILE = Path(__file__).resolve().parent / "grounded_schema_paths.txt"
 
 # C-249 third authority: the INSTALLED OpenClaw package. Local-only, like the recon —
 # absent in CI and on a machine without OpenClaw, where the layer skips. Read-only.
-OPENCLAW_DIST = Path.home() / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
+# B-519: REAL_HOME, not Path.home(). This line happens to run at import, before the
+# suite's $HOME redirect takes effect, so Path.home() would still be correct today --
+# by accident of collection order. Stating the intent removes that dependency.
+OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
 # The zod object the whole openclaw.json is parsed against. Anchoring the walk here is what
 # makes a ROOT-namespace manifest entry a checkable claim ("this is a real top-level key").
 DIST_ROOT_SCHEMA = "OpenClawSchema"
+
+# B-516: the dist layer's verdict, VENDORED so it survives into CI.
+#
+# The three authorities rank: installed dist (OpenClaw itself) > recon (hand notes) >
+# manifest (our own claim). The wiring inverted that — the manifest was unconditional, the
+# recon was a hard veto, and the dist layer skipped whenever OpenClaw was not installed,
+# i.e. always in CI. What remained running there compared our source to our own manifest
+# and consulted OpenClaw nowhere, so a phantom present in BOTH merged green. That is
+# precisely how `logging.cacheTrace.filePath` survived a re-baseline (B-262).
+#
+# This file records which manifest paths a real dist accepted, so the strongest authority
+# still has a voice where it cannot be present. It is generated, never hand-edited:
+#     PYTHONPATH=tests:. python3 tests/test_schema_grounding.py --write-dist-snapshot
+DIST_SNAPSHOT_FILE = Path(__file__).resolve().parent / "dist_verified_paths.txt"
 
 # Allowlist for configuration paths that are allowed even if not parsed from markdown
 ALLOWLISTED_PATHS: set[str] = set()
@@ -822,24 +841,80 @@ def test_dig_paths_match_shipped_manifest():
     )
 
 
+def _dist_accepts(path: str, root_expr: str, consts: dict) -> bool:
+    """Does the installed dist vouch for this manifest path?
+
+    Two questions, deliberately different in strength. A ROOT path is anchored: it must be
+    a real chain of keys under OpenClawSchema. A `relative:` path is read off some nested
+    object the guard cannot identify — that is what the namespace means — so the strongest
+    honest question is whether the chain exists ANYWHERE in the schema. Read a relative
+    green as "this shape exists in OpenClaw", never as "this field is real at the object
+    we read it from".
+    """
+    if path.startswith(RELATIVE_PREFIX):
+        leaf = path[len(RELATIVE_PREFIX):]
+        return any(_resolves_in_dist(leaf, expr, consts) for expr in consts.values())
+    return _resolves_in_dist(path, root_expr, consts)
+
+
+def _parse_dist_snapshot() -> set:
+    """Manifest paths a real installed dist accepted. See DIST_SNAPSHOT_FILE."""
+    if not DIST_SNAPSHOT_FILE.exists():
+        return set()
+    out = set()
+    for raw in DIST_SNAPSHOT_FILE.read_text(encoding="utf-8").splitlines():
+        # Strip FIRST. Testing `raw.startswith("#")` while storing `raw.strip()` let an
+        # indented comment enter the verified set as a path — a leading space smuggled a
+        # line past a file that says comments are ignored.
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            out.add(line)
+    return out
+
+
 def test_manifest_is_grounded_in_recon():
-    """Local guard: every vendored manifest path is documented in the recon doc.
+    """Local guard: every vendored manifest path is documented in the recon doc, UNLESS
+    OpenClaw itself already vouched for it.
 
     Skips when the recon doc is absent (e.g. CI, or a fresh clone without the sibling
     research dir) — the manifest-vs-source equality above is what runs there. This keeps
-    the manifest from silently vendoring a fabricated path."""
+    the manifest from silently vendoring a fabricated path.
+
+    B-516: the recon used to hold an unconditional veto, which inverted the authorities.
+    The recon was itself built from the flat descriptions map `schema-DRyO1XBt.js`, and
+    that map omits seven real top-level namespaces — `accessGroups`, `bindings` and
+    `crestodian` have ZERO hits in it. So a legitimate `dig("accessGroups.…")` failed the
+    local build while the strongest authority, the installed dist, would have accepted it:
+    hand notes vetoing OpenClaw. Grounding is now a disjunction — recon OR dist — which
+    is a weakening only against a path no authority accepts, and that path still fails.
+    """
     if not RECON_FILE.exists():
         pytest.skip(f"Recon doc not present at {RECON_FILE} — manifest-vs-recon check is local-only")
 
     recon_paths = _parse_recon_paths()
+    dist_verified = _parse_dist_snapshot()
     manifest_paths = _parse_manifest_paths() - ALLOWLISTED_PATHS
 
-    missing = sorted(p for p in manifest_paths if not _is_grounded(p, recon_paths))
+    # C-472: the disjunction gained a third term. A path REGISTERED in
+    # `_NOT_IN_CURRENT_SCHEMA` carries a measured `safeParse` disproof and the real path it
+    # sits beside — that is a STRONGER grounding than a mention in hand-written recon
+    # notes, not a weaker one, so it cannot be the term that fails. Without it,
+    # `plugins.bundledDiscovery` failed here: 2026.8.1 moved it out of the config into the
+    # machine-owned state store, so it is in neither the recon nor the (correctly)
+    # regenerated snapshot, while being deliberately read and fully documented.
+    missing = sorted(
+        p for p in manifest_paths
+        if p not in dist_verified
+        and p not in _NOT_IN_CURRENT_SCHEMA
+        and not _is_grounded(p, recon_paths)
+    )
 
     assert not missing, (
-        f"Found {len(missing)} manifest path(s) NOT grounded in the recon doc:\n"
+        f"Found {len(missing)} manifest path(s) grounded in NEITHER the recon doc nor the\n"
+        "installed OpenClaw schema:\n"
         + "\n".join(f"  - {p}" for p in missing)
         + f"\n\nEvery entry in {MANIFEST_FILE.name} must be documented in:\n  {RECON_FILE}"
+        f"\nor verified against a real dist and recorded in {DIST_SNAPSHOT_FILE.name}."
     )
 
 
@@ -1225,37 +1300,175 @@ _DIST_MAX_DEPTH = 8
 # Verdicts below are from `OpenClawSchema.safeParse()` on the installed 2026.7.1-2 dist, not
 # from this file's reader — the reader was cross-checked against it, not trusted over it.
 _NOT_IN_CURRENT_SCHEMA = {
+    # C-472 re-grounded every SCHEMA DISPROOF here against 2026.8.1. It did not re-ground
+    # the CODE POINTERS beside them, and the original wording of this comment ("EVERY
+    # justification") did not distinguish the two -- so a claim that was true of one half
+    # was read as covering both. All fourteen pointers had rotted by the time anyone
+    # checked: they still resolved to real lines in real files, which is why nothing went
+    # red, but they landed on unrelated code and one of them (gateway.host) named a file
+    # that no longer contains the read at all -- the C-433 split moved it to
+    # monitordims/. Thirteen were line drift alone, up to 3,767 lines. None of the
+    # justifications was ever false: every subject still exists and every reason still
+    # holds. It was the ADDRESSES that rotted, not the claims.
+    #
+    # They are now written as `file::symbol`, and
+    # `test_every_code_pointer_in_the_register_resolves` fails the build when a named
+    # symbol stops existing. A line number cannot be checked -- any integer resolves --
+    # which is exactly why it rotted in silence for so long. Same lesson the state-schema
+    # guard learned from a bundle filename: anchor on what the code NAMES, never on where
+    # it happens to sit.
+    #
+    # The entry below is what re-grounding the disproofs caught: it said the agents object
+    # "holds exactly {defaults, list}", true when written and now
+    # {defaults, entries, ownership}. The disproof still holds; the parenthetical
+    # describing WHY did not.
     "agents.subagents": (
-        "safeParse: unrecognized_keys@agents (the object holds exactly {defaults, list}); "
-        "the real path is agents.defaults.subagents. checks/_agents.py:119 tries it as the "
-        "first of three branches in _has_subagents(), which also tests the real "
-        "agents.defaults.subagents and a multi-entry agents.list — a dead branch, and the "
-        "function's answer does not depend on it."
+        "safeParse: unrecognized_keys@agents keys=[\"subagents\"] (the object holds exactly "
+        "{defaults, entries, ownership} on 2026.8.1); the real path is "
+        "agents.defaults.subagents. checks/_agents.py tries it as the first of three "
+        "branches in _has_subagents(), which also tests the real agents.defaults.subagents "
+        "and a multi-agent roster — a dead branch, and the function's answer does not "
+        "depend on it."
+    ),
+
+    # ---- undeclared but HONOURED by the runtime (a category of its own) ---------------
+    # Not a legacy read and not a retirement: this key is absent from the CURRENT schema
+    # and the CURRENT runtime reads it anyway. It is registered here rather than dropped
+    # because the audit would otherwise be blind to a grant the product genuinely applies.
+    "agents.defaults.tools": (
+        "schema walk (docs/research/openclaw-schema-paths-2026.9.1.txt, generated by "
+        "openclaw-schema-walk.mjs against the installed 2026.9.1): 0 paths under "
+        "agents.defaults.tools. That absence is measured, not inferred from a failed "
+        "traversal -- the same walk yields 96 paths under agents.entries.<key>.tools "
+        "(so `tools` IS visible to it under agents) and 240 under agents.defaults.* (so "
+        "the defaults branch is walked). A safeParse disproof is deliberately NOT used "
+        "here: the parent accepts unknown keys, so neither acceptance nor rejection at "
+        "agents.defaults would be evidence either way. "
+        "READ ANYWAY, and the counter-evidence is behavioural rather than schematic: the "
+        "vendor's own resolver, EXECUTED, grants write and apply_patch for "
+        "fixtures/toolscope_case8_agents_defaults_tools_no_roster, whose only grant is "
+        "this key (tests/data/toolgrant_battery.json, generated by running "
+        "resolveConfiguredToolPolicies + isToolAllowedByPolicies). Dropping the read "
+        "would make the audit blind to a grant the runtime applies. "
+        "toolgrant.py::_agent_tools, guarded to the no-roster case exactly as the dist "
+        "does. When the vendor starts DECLARING it, this entry must go -- the register "
+        "shrinks."
+    ),
+
+    # ---- OpenClaw 2026.8.1 retirements (C-470 epic) -----------------------------------
+    # Fourteen paths this tool reads that 2026.8.1 removed or moved. Every one is a
+    # DELIBERATE legacy read, kept because OpenClaw's migration runs inside
+    # `doctor --fix`: until the user runs it the old key sits on disk, and a user on an
+    # older build is not migrating at all. Dropping the reads would trade a stale path for
+    # a blind spot on the whole 2026.7.x fleet.
+    #
+    # Each disproof below was measured against the installed 2026.8.1 schema on
+    # 2026-09-01, not carried over from the triage notes.
+    "agents.list": (
+        "safeParse: unrecognized_keys@agents keys=[\"list\"]; the real path is "
+        "agents.entries (a RECORD keyed by id, where an entry's own `id` field is itself "
+        "rejected). collector.agent_roster() reads BOTH shapes and every consumer calls "
+        "it — B-699."
+    ),
+    "audit.enabled": (
+        "safeParse: unrecognized_keys@<root> keys=[\"audit\"]; the real path is "
+        "logging.audit.enabled. B10 reads the canonical key first and this one as the "
+        "fallback, with the vendor's own precedence (canonical wins per key) — B-700."
+    ),
+    "commands.useAccessGroups": (
+        "safeParse: unrecognized_keys@commands keys=[\"useAccessGroups\"]; REMOVED with no "
+        "replacement, fail-safe — the runtime reads `command.useAccessGroups ?? true` and "
+        "nothing in the 2026.8.1 schema can set it. B171 counts it as a gap only on a "
+        "build where it is live — C-471."
+    ),
+    "cron.store": (
+        "safeParse: unrecognized_keys@cron keys=[\"store\"]; the value moved OUT of the "
+        "config into the machine-owned state store (`config_machine_state`). The shadow "
+        "check reads the state first and this key as the fallback — F-183."
+    ),
+    "diagnostics.cacheTrace.filePath": (
+        "safeParse: unrecognized_keys@diagnostics.cacheTrace keys=[\"filePath\"]; REMOVED, "
+        "the parent now holds only `enabled`, and ZERO `filePath` leaves remain anywhere "
+        "in the schema. logdiscovery keeps the read for 2026.7.x and finds the sink via "
+        "the conventional default on newer builds — C-471."
+    ),
+    "gateway.controlUi.allowInsecureAuth": (
+        "safeParse: unrecognized_keys@gateway.controlUi keys=[\"allowInsecureAuth\"]; "
+        "REMOVED, and fail-safe — `evaluateMissingDeviceIdentity` rejects the Control-UI "
+        "unconditionally with no config consulted. B2 keeps the leg for 2026.7.x, where "
+        "three runtime modules still read it — C-471."
+    ),
+    "gateway.nodes.allowCommands": (
+        "safeParse: unrecognized_keys@gateway.nodes keys=[\"allowCommands\"]; the real path "
+        "is gateway.nodes.commands.allow. `_shared._node_commands` reads both, with the "
+        "vendor's precedence (`commands.allow === void 0` guards the copy) — B-698."
+    ),
+    "gateway.nodes.denyCommands": (
+        "safeParse: unrecognized_keys@gateway.nodes keys=[\"denyCommands\"]; the real path "
+        "is gateway.nodes.commands.deny. Same accessor and same precedence as "
+        "allowCommands above — B-698."
+    ),
+    "hooks.internal.installs": (
+        "safeParse: unrecognized_keys@hooks.internal keys=[\"installs\"]; the value moved "
+        "into the machine-owned state store. B179 reads the state first and this key as "
+        "the fallback, reporting only the COUNT either way — F-183."
+    ),
+    "logging.redactSensitive": (
+        "safeParse: unrecognized_keys@logging keys=[\"redactSensitive\"]; REMOVED with no "
+        "replacement. Redaction is unconditional on 2026.8.1 — `DEFAULT_REDACT_MODE` is a "
+        "constant config never feeds, and custom `redactPatterns` are UNIONED with the "
+        "built-ins. B9 keeps the read for 2026.7.x — B-700."
+    ),
+    "marketplaces.feeds": (
+        "safeParse: unrecognized_keys@<root> keys=[\"marketplaces\"]; the whole block was "
+        "retired (entry #2 of the vendor's RETIRED_TUNING_PATHS). B325 reports a present "
+        "block as inert on 2026.8.1 and as a real supply-chain risk on 2026.7.x — C-471."
+    ),
+    "marketplaces.sources": (
+        "safeParse: unrecognized_keys@<root> keys=[\"marketplaces\"]; same retired block as "
+        "marketplaces.feeds above, read only as supplementary evidence beside it — C-471."
+    ),
+    "plugins.bundledDiscovery": (
+        "safeParse: unrecognized_keys@plugins keys=[\"bundledDiscovery\"]; the value moved "
+        "into the machine-owned state store, where an UPGRADE can synthesise \"compat\" "
+        "without the user writing it. The monitor watches both the config key and the "
+        "state key under separate signature keys — F-183."
+    ),
+    "skills.workshop.autonomous.enabled": (
+        "safeParse: unrecognized_keys@skills.workshop.autonomous keys=[\"enabled\"]; the "
+        "real path is skills.workshop.autonomous.mode, an enum (off|propose|auto) rather "
+        "than a boolean. B175 reads both, and the DEFAULT flipped with the rename — "
+        "B-700 and B-702."
     ),
     "gateway.host": (
         "safeParse: unrecognized_keys@gateway; binding is configured via gateway.bind / "
-        "gateway.customBindHost. monitor.py:418 reads it as the last term of a fallback "
+        "gateway.customBindHost. monitordims/_gateway.py::_gateway_bind reads it as the last term of a fallback "
         "chain that already ends in a literal default, so it cannot change the outcome."
     ),
     "gateway.token": (
         "safeParse: unrecognized_keys@gateway; the real path is gateway.auth.token. Every "
         "read is `dig(cfg, 'gateway.auth.token') or dig(cfg, 'gateway.token')` "
-        "(report.py:298 and :521, checks/_config.py:809 and :1697) — legacy second term."
+        "(report.py::_credential_surface_map; checks/_config.py::_gateway_config_token, ::check_credential_blast_radius and ::check_gateway) — legacy second term. "
+        "B-730 follow-up removed the one read that BROKE that rule: report.py::_capability_graph "
+        "read this legacy key ALONE, with no gateway.auth.token first, so the capability graph's "
+        "sensitive-data term was blind on every config the current schema accepts (measured: 0 of "
+        "600 real configs set gateway.token, 479 set gateway.auth.token). It now reads neither — "
+        "see the comment there for why re-spelling it would have been the wrong repair."
     ),
     "lastTouchedVersion": (
         "safeParse: unrecognized_keys@<root>; the real path is meta.lastTouchedVersion, and "
         "the root object is .strict(). Every read is "
         "`dig(cfg, 'meta.lastTouchedVersion') or dig(cfg, 'lastTouchedVersion')` "
-        "(checks/_lifecycle.py:1035, :1319, :3637) — legacy second term."
+        "(checks/_lifecycle.py::check_hook_policy_bypass, ::check_known_vulns, ::check_version) — legacy second term."
     ),
     "plugins.mcp": (
-        "safeParse: unrecognized_keys@plugins. checks/_shared.py:859 folds it into an MCP "
+        "safeParse: unrecognized_keys@plugins. checks/_shared.py::_mcp_servers folds it into an MCP "
         "server map that has already merged the real mcp.servers plus the mcpServers / "
         "mcp_servers legacy spellings, so it only ever adds servers, never hides any."
     ),
     "tools.mcp": (
         "safeParse: unrecognized_keys@tools. Same call site and same reasoning as "
-        "plugins.mcp (checks/_shared.py:859) — the two are the one `or` expression."
+        "plugins.mcp (checks/_shared.py::_mcp_servers) — the two are the one `or` expression."
     ),
     # --- relative namespace ------------------------------------------------------------
     # These are not absences at all: they are read off objects OpenClaw deliberately leaves
@@ -1263,38 +1476,38 @@ _NOT_IN_CURRENT_SCHEMA = {
     # to plugins, channels and skill authors, so no dist evidence can exist either way and
     # the unanchored walk necessarily comes back empty.
     RELATIVE_PREFIX + "config.allowPrivateNetwork": (
-        "Read off a plugin entry (checks/_config.py:981, over _plugins(cfg)). "
+        "Read off a plugin entry (checks/_config.py::check_dangerous_overrides, over _plugins(cfg)). "
         "PluginEntrySchema.config is `record(string(), unknown())` "
         "(zod-schema-O9ml_nmo.js:788-806) — an open, plugin-defined bag, so its keys are "
         "outside the schema by design."
     ),
     RELATIVE_PREFIX + "config.permissionMode": (
-        "Read off an MCP server entry (checks/_mcp.py:1660). MCP server entries carry "
+        "Read off an MCP server entry (checks/_mcp.py::check_plugin_permission_mode). MCP server entries carry "
         "server-defined config, not openclaw.json's own key space."
     ),
     RELATIVE_PREFIX + "config.appServer.command": (
-        "Read off an MCP server entry (checks/_mcp.py:1717) — same open server-defined "
+        "Read off an MCP server entry (checks/_mcp.py::check_plugin_app_server_command) — same open server-defined "
         "config object as config.permissionMode above."
     ),
     RELATIVE_PREFIX + "network.dangerouslyAllowPrivateNetwork": (
-        "Read off a channel's node entries (checks/_config.py:965). ChannelsSchema is "
+        "Read off a channel's node entries (checks/_config.py::check_dangerous_overrides). ChannelsSchema is "
         "`.passthrough()` (zod-schema.channels-config-ORTHga0n.js:68-78), so per-channel "
         "entries are open and their keys are not enumerable from the schema."
     ),
     RELATIVE_PREFIX + "openclaw.user-invocable": (
-        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py:4344), not "
+        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py::_skill_is_unreachable), not "
         "off openclaw.json. Skill frontmatter is a separate file format."
     ),
     RELATIVE_PREFIX + "openclaw.disable-model-invocation": (
-        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py:4349) — same "
+        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py::_skill_is_unreachable) — same "
         "file format as openclaw.user-invocable above."
     ),
     RELATIVE_PREFIX + "openclaw.install": (
-        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py:6460) for "
+        "Read off a SKILL.md frontmatter `metadata` object (checks/_content.py::check_install_directive_supply_chain) for "
         "B103's install-directive provenance check. Skill frontmatter, not openclaw.json."
     ),
     RELATIVE_PREFIX + "openclaw.install.npmSpec": (
-        "Read off a package/plugin manifest (checks/_mcp.py:236), not off openclaw.json."
+        "Read off a package/plugin manifest (checks/_mcp.py::vet_plugin), not off openclaw.json."
     ),
 }
 
@@ -1694,6 +1907,77 @@ def test_register_entries_are_still_absent_from_the_dist():
     )
 
 
+# A code pointer in the register is `file::symbol`. It used to be `file:line`, and every
+# one of the fourteen had rotted without a single test noticing -- because a line number
+# cannot be validated. Any integer inside a long file "resolves"; the reader lands on
+# unrelated code and believes it. A symbol either exists or it does not.
+_CODE_POINTER_RE = re.compile(r"(?:([\w/]+\.py))?::(\w+)")
+
+# Non-vacuity floor. If a rewrite drops the pointers or breaks the pattern, the sweep below
+# would pass over an empty set and report nothing -- the exact shape of failure this whole
+# module exists to prevent.
+_MIN_CODE_POINTERS = 14
+
+
+def _defined_symbols(path: Path) -> "set[str]":
+    """Every def/class name in a module, at any nesting depth."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        n.name
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+
+
+def test_every_code_pointer_in_the_register_resolves():
+    """Each `file::symbol` in _NOT_IN_CURRENT_SCHEMA must name code that exists.
+
+    The justifications say WHERE a dead key is read and WHY that read is harmless. The
+    reasoning is only checkable if the address is, and this is the layer that checks it --
+    C-472 found all fourteen addresses stale at once, including one naming a file the read
+    had left entirely (gateway.host, moved to monitordims/ by the C-433 split).
+
+    A bare `::symbol` continues the file named before it, so one entry can cite several
+    call sites without repeating the path."""
+    pointers = []          # (key, file, symbol)
+    for key, why in sorted(_NOT_IN_CURRENT_SCHEMA.items()):
+        current_file = None
+        for m in _CODE_POINTER_RE.finditer(why):
+            named, symbol = m.group(1), m.group(2)
+            if named:
+                current_file = named
+            if current_file is None:
+                continue       # `::sym` with no file ever named -- not a code pointer
+            pointers.append((key, current_file, symbol))
+
+    assert len(pointers) >= _MIN_CODE_POINTERS, (
+        f"found only {len(pointers)} code pointer(s) in _NOT_IN_CURRENT_SCHEMA, expected "
+        f"at least {_MIN_CODE_POINTERS} -- the pattern stopped matching, so this test is "
+        "passing over an empty set rather than proving anything."
+    )
+
+    broken = []
+    for key, rel, symbol in pointers:
+        candidates = [REPO_ROOT / rel, REPO_ROOT / "clawseccheck" / rel]
+        target = next((c for c in candidates if c.is_file()), None)
+        if target is None:
+            broken.append(f"{key}: {rel}::{symbol} -- no such file")
+            continue
+        if symbol not in _defined_symbols(target):
+            broken.append(
+                f"{key}: {rel}::{symbol} -- file exists, but it defines no `{symbol}`"
+            )
+
+    assert not broken, (
+        "Code pointer(s) in _NOT_IN_CURRENT_SCHEMA name code that does not exist:\n"
+        + "\n".join(f"  - {b}" for b in broken)
+        + "\n\nThe justification beside each one explains why a dead config key is read "
+        "HERE and is harmless. If the code moved, repoint it at the symbol that does the "
+        "read now. If nothing reads the key any more, the register entry itself is what "
+        "should go."
+    )
+
+
 def test_register_has_no_entries_the_manifest_no_longer_carries():
     """A register entry outlives its dig() path silently unless something says otherwise."""
     stale = sorted(set(_NOT_IN_CURRENT_SCHEMA) - _parse_manifest_paths())
@@ -1715,14 +1999,26 @@ def test_dist_layer_rejects_the_b262_phantom():
 
     `logging.cacheTrace.filePath` passed BOTH internal layers — the manifest listed it and
     the recon vouched for it — while OpenClaw's strict `logging` object rejects it outright.
-    A leaf-key sweep would rubber-stamp it too, since `filePath` is a real key of the real
-    `diagnostics.cacheTrace`. Only the full parent-chain walk separates them."""
+    A leaf-key sweep would rubber-stamp it too. Only the full parent-chain walk separates
+    them, and that is what this asserts.
+
+    C-471 RE-ANCHORED the second half. The original companion was the real
+    `diagnostics.cacheTrace.filePath`, whose leaf `filePath` the phantom shared — and
+    OpenClaw 2026.8.1 deleted that key, leaving ZERO `filePath` leaves in the whole schema
+    (measured: 0 of 5,254 paths). An anchor the vendor has removed cannot demonstrate
+    anything, so the pairing moved to `enabled`, which is a STRONGER demonstration of the
+    same point rather than a weaker substitute: `enabled` is the most common leaf in the
+    schema (277 real paths), so a leaf-only check would rubber-stamp `<anything>.enabled`.
+    `diagnostics.cacheTrace.enabled` is real and `logging.cacheTrace.enabled` is not, and
+    only the parent chain tells them apart."""
     consts = _require_dist()
     root = consts[DIST_ROOT_SCHEMA]
     assert not _resolves_in_dist("logging.cacheTrace.filePath", root, consts)
     assert not _resolves_in_dist("logging.cacheTrace", root, consts)
-    # The real path, and the shared leaf that makes a leaf-only check useless here.
-    assert _resolves_in_dist("diagnostics.cacheTrace.filePath", root, consts)
+    # The phantom and the real path now share the `enabled` leaf, and only the parent
+    # chain separates them — which is precisely what a leaf-only sweep cannot do.
+    assert not _resolves_in_dist("logging.cacheTrace.enabled", root, consts)
+    assert _resolves_in_dist("diagnostics.cacheTrace.enabled", root, consts)
     assert _resolves_in_dist("logging.file", root, consts)
 
 
@@ -1800,3 +2096,280 @@ def test_dist_layer_skips_cleanly_when_openclaw_is_not_installed(monkeypatch):
     with pytest.raises(pytest.skip.Exception) as excinfo:
         _require_dist()
     assert "local-only" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------------
+# B-516: the dist layer, vendored so it still speaks in CI.
+# ---------------------------------------------------------------------------------
+
+def test_every_manifest_path_is_dist_verified_or_a_registered_absence():
+    """ALWAYS ON — including CI, which is the point.
+
+    Before this, the only unconditional guard compared our source against our own
+    manifest. Both are ours, so a fabricated path added to both merged green; that is
+    exactly how `logging.cacheTrace.filePath` survived a re-baseline (B-262). This asserts
+    against a record of what OpenClaw ITSELF accepted, so adding a path now requires
+    either a real dist to verify it or an explicit, reasoned entry in
+    `_NOT_IN_CURRENT_SCHEMA`.
+    """
+    verified = _parse_dist_snapshot()
+    # EVERY manifest path, root and `relative:` alike. An earlier draft used
+    # `_manifest_root_paths()`, which filters the relative namespace out — so a test named
+    # "every manifest path" covered 117 of 136, and `relative:made.up.path` sailed through
+    # on two file edits. The only relative-namespace check needs an installed dist and
+    # therefore skips in CI, which is the exact hole this layer exists to close.
+    unvouched = sorted(
+        p for p in _parse_manifest_paths()
+        if p not in verified and p not in _NOT_IN_CURRENT_SCHEMA
+    )
+    assert not unvouched, (
+        f"{len(unvouched)} manifest path(s) have never been checked against a real "
+        "OpenClaw schema:\n"
+        + "\n".join(f"  - {p}" for p in unvouched)
+        + f"\n\nOn a machine with OpenClaw installed, regenerate {DIST_SNAPSHOT_FILE.name}:\n"
+        "  PYTHONPATH=tests:. python3 tests/test_schema_grounding.py --write-dist-snapshot\n"
+        "If the path genuinely is not in the current schema (a legacy or alternate shape), "
+        "register it in _NOT_IN_CURRENT_SCHEMA with its disproof instead. Do NOT hand-add "
+        "a line to the snapshot — that is the guard writing its own evidence."
+    )
+
+
+def test_the_dist_snapshot_is_not_vacuous():
+    """Anti-vacuity for the vendored layer itself.
+
+    The test above is a negative check, and a negative check passes just as happily
+    against an empty file. An emptied or truncated snapshot would silently restore the
+    hole it exists to close — this project has hit that shape repeatedly, so the positive
+    side is pinned explicitly.
+    """
+    verified = _parse_dist_snapshot()
+    manifest = _parse_manifest_paths()
+    assert len(verified) >= 100, (
+        f"{DIST_SNAPSHOT_FILE.name} holds only {len(verified)} path(s); it has been "
+        "truncated or generated against an empty schema."
+    )
+    # A size floor alone is decoration: 120 junk lines satisfy it. The snapshot records a
+    # verdict ABOUT the manifest, so anything in it that is not a manifest path is not a
+    # verdict — it is padding, and padding is how a fabricated snapshot would clear a
+    # floor.
+    stray = sorted(verified - manifest)
+    assert not stray, (
+        f"{len(stray)} snapshot entr(ies) are not manifest paths at all:\n"
+        + "\n".join(f"  - {x}" for x in stray[:10])
+        + f"\n\n{DIST_SNAPSHOT_FILE.name} records which MANIFEST paths a real dist "
+        "accepted; an entry outside the manifest is padding, not evidence."
+    )
+    # C-472: `logging.redactSensitive` used to be the third canary here and 2026.8.1
+    # retired it, so this guard failed on its own ANCHOR while the snapshot it checks was
+    # perfectly real — the same shape as the B-262 phantom test's deleted companion. The
+    # replacements are chosen for structural centrality rather than convenience: a build
+    # that stops accepting the gateway bind, the exec mode or the tool profile is not a
+    # build this tool can audit at all, so a canary that dies there is reporting something
+    # worth failing on.
+    for expected in ("gateway.bind", "tools.exec.mode", "tools.profile"):
+        assert expected in verified, f"{expected!r} missing — the snapshot is not a real one"
+
+    header = DIST_SNAPSHOT_FILE.read_text(encoding="utf-8")
+    assert "openclaw-version:" in header, "the snapshot must record which OpenClaw vouched"
+    assert "GENERATED" in header, "the snapshot must say it is generated, not hand-edited"
+
+
+def test_a_fabricated_path_is_rejected_with_no_dist_installed(monkeypatch, tmp_path):
+    """The B-262 shape, reproduced against the new guard.
+
+    A phantom is added to BOTH our source and our manifest — the state that used to merge
+    green — and no dist is available to catch it. The vendored snapshot must reject it,
+    because a machine without OpenClaw is exactly where the old guard went quiet.
+    """
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text("# GENERATED\n# openclaw-version: 0.0.0\ngateway.bind\n", encoding="utf-8")
+    manifest = tmp_path / "grounded_schema_paths.txt"
+    manifest.write_text("gateway.bind\nlogging.cacheTrace.filePath\n", encoding="utf-8")
+
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST_FILE", manifest)
+    monkeypatch.setattr(
+        sys.modules[__name__], "OPENCLAW_DIST", Path("/nonexistent/openclaw/dist")
+    )
+
+    verified = _parse_dist_snapshot()
+    unvouched = sorted(
+        p for p in _manifest_root_paths()
+        if p not in verified and p not in _NOT_IN_CURRENT_SCHEMA
+    )
+    assert "logging.cacheTrace.filePath" in unvouched, (
+        "the phantom passed the vendored layer — the vacuous-pass hole is still open"
+    )
+
+
+def test_the_snapshot_still_matches_the_installed_dist():
+    """Local-only: catches a snapshot left stale by an OpenClaw upgrade.
+
+    Skipping here is safe in a way skipping the OLD dist layer was not: the vendored
+    check above still runs everywhere. This one only asks whether the vendored verdict is
+    current.
+    """
+    consts = _require_dist()
+    root = consts[DIST_ROOT_SCHEMA]
+    # The header was inert: rewriting `openclaw-version:` to 1999.1.1 left every test
+    # green, so a regeneration run against an OLD dist could write a lying provenance line
+    # and nothing would say so.
+    import json as _json
+
+    installed = _json.loads(
+        (OPENCLAW_DIST.parent / "package.json").read_text(encoding="utf-8")
+    )["version"]
+    header = DIST_SNAPSHOT_FILE.read_text(encoding="utf-8")
+    stamped = re.search(r"^#\s*openclaw-version:\s*(\S+)", header, re.M)
+    assert stamped and stamped.group(1) == installed, (
+        f"{DIST_SNAPSHOT_FILE.name} claims openclaw-version "
+        f"{stamped.group(1) if stamped else '<missing>'} but the installed OpenClaw is "
+        f"{installed}. Regenerate it — the re-baseline step was half-done."
+    )
+
+    live = {p for p in _parse_manifest_paths() if _dist_accepts(p, root, consts)}
+    recorded = _parse_dist_snapshot()
+    assert live == recorded, (
+        "the vendored snapshot disagrees with the installed OpenClaw:\n"
+        f"  only in the dist:     {sorted(live - recorded)}\n"
+        f"  only in the snapshot: {sorted(recorded - live)}\n"
+        "Regenerate it: PYTHONPATH=tests:. python3 tests/test_schema_grounding.py "
+        "--write-dist-snapshot"
+    )
+
+
+def _write_dist_snapshot() -> int:
+    """Regenerate DIST_SNAPSHOT_FILE from the installed dist. Returns the path count."""
+    import json
+
+    consts = _dist_schema_consts()
+    root = consts[DIST_ROOT_SCHEMA]
+    verified = sorted(p for p in _parse_manifest_paths() if _dist_accepts(p, root, consts))
+    pkg = OPENCLAW_DIST.parent / "package.json"
+    version = json.loads(pkg.read_text(encoding="utf-8"))["version"]
+    DIST_SNAPSHOT_FILE.write_text(
+        "# GENERATED by tests/test_schema_grounding.py --write-dist-snapshot. "
+        "Do not hand-edit.\n"
+        "#\n"
+        "# Every path below was resolved, component by component, against the ACTUAL "
+        "OpenClaw\n"
+        "# config schema (OpenClawSchema in the installed dist's zod-schema*.js) on a "
+        "machine\n"
+        "# where OpenClaw was installed. It ships so the dist-grounding layer has "
+        "something to\n"
+        "# assert in CI, which never has a dist and therefore always skipped that layer.\n"
+        "#\n"
+        "# Why this file exists: the always-on guard compared our source against our own\n"
+        "# manifest and consulted OpenClaw nowhere, so a phantom path present in BOTH "
+        "merged\n"
+        "# green. That is how logging.cacheTrace.filePath survived a re-baseline (B-262).\n"
+        "#\n"
+        "# Regenerate ONLY on a machine with the matching OpenClaw installed, as part of "
+        "the\n"
+        "# upgrade protocol's re-baseline step. Hand-adding a line here defeats the "
+        "guard.\n"
+        f"#\n# openclaw-version: {version}\n#\n" + "\n".join(verified) + "\n",
+        encoding="utf-8",
+    )
+    return len(verified)
+
+
+def test_a_dist_verified_path_absent_from_the_recon_is_accepted(monkeypatch, tmp_path):
+    """The rejection half of B-516, pinned.
+
+    The recon was built from the flat descriptions map, which omits seven real top-level
+    namespaces — `accessGroups`, `bindings` and `crestodian` have zero hits in it. A
+    legitimate read in one of those failed the local build purely because hand notes had
+    not caught up with OpenClaw. Now the dist's verdict is enough on its own.
+    """
+    recon = tmp_path / "recon.md"
+    recon.write_text("Only gateway.bind is documented here.\n", encoding="utf-8")
+    manifest = tmp_path / "grounded_schema_paths.txt"
+    manifest.write_text("gateway.bind\naccessGroups.definitions\n", encoding="utf-8")
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text(
+        "# GENERATED\n# openclaw-version: 0.0.0\ngateway.bind\naccessGroups.definitions\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(sys.modules[__name__], "RECON_FILE", recon)
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST_FILE", manifest)
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+
+    test_manifest_is_grounded_in_recon()  # must not raise
+
+
+def test_a_path_in_neither_authority_is_still_rejected(monkeypatch, tmp_path):
+    """The disjunction must weaken the guard only where a real authority vouches.
+    A path no one accepts still fails — otherwise B-516 would have traded one hole
+    for another."""
+    recon = tmp_path / "recon.md"
+    recon.write_text("Only gateway.bind is documented here.\n", encoding="utf-8")
+    manifest = tmp_path / "grounded_schema_paths.txt"
+    manifest.write_text("gateway.bind\nmade.up.path\n", encoding="utf-8")
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text("# GENERATED\n# openclaw-version: 0.0.0\ngateway.bind\n", encoding="utf-8")
+
+    monkeypatch.setattr(sys.modules[__name__], "RECON_FILE", recon)
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST_FILE", manifest)
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+
+    with pytest.raises(AssertionError) as exc:
+        test_manifest_is_grounded_in_recon()
+    assert "made.up.path" in str(exc.value)
+
+
+def test_a_fabricated_relative_path_is_also_caught(monkeypatch, tmp_path):
+    """C-135 round 1 on this guard found the hole: an earlier draft used
+    `_manifest_root_paths()`, which filters the `relative:` namespace out, so a test named
+    "every manifest path" covered 117 of 136 and `relative:made.up.path` passed on two
+    file edits. The only relative-namespace check needs an installed dist and skips in CI
+    — precisely the configuration this layer exists for."""
+    manifest = tmp_path / "grounded_schema_paths.txt"
+    manifest.write_text("gateway.bind\nrelative:made.up.path\n", encoding="utf-8")
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text("# GENERATED\n# openclaw-version: 0.0.0\ngateway.bind\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST_FILE", manifest)
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+
+    with pytest.raises(AssertionError) as exc:
+        test_every_manifest_path_is_dist_verified_or_a_registered_absence()
+    assert "relative:made.up.path" in str(exc.value)
+
+
+def test_an_indented_comment_does_not_become_a_verified_path(monkeypatch, tmp_path):
+    """The parser tested `raw.startswith('#')` while storing `raw.strip()`, so one leading
+    space smuggled a comment into the verified set — in a file whose header says comments
+    are ignored."""
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text(
+        "# GENERATED\n  # openclaw-version: 1.0\n\tgateway.port\ngateway.bind\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+    parsed = _parse_dist_snapshot()
+    assert parsed == {"gateway.port", "gateway.bind"}, parsed
+
+
+def test_padding_does_not_satisfy_the_size_floor(monkeypatch, tmp_path):
+    """A bare `>= 100` floor is decoration: 120 junk lines clear it. The snapshot records
+    a verdict ABOUT the manifest, so an entry outside the manifest is padding."""
+    snapshot = tmp_path / "dist_verified_paths.txt"
+    snapshot.write_text(
+        "# GENERATED\n# openclaw-version: 0.0.0\ngateway.bind\ntools.exec.mode\n"
+        "logging.redactSensitive\n"
+        + "\n".join(f"junk.path.{i}" for i in range(120)) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "DIST_SNAPSHOT_FILE", snapshot)
+    with pytest.raises(AssertionError) as exc:
+        test_the_dist_snapshot_is_not_vacuous()
+    assert "not manifest paths" in str(exc.value)
+
+
+if __name__ == "__main__":
+    if "--write-dist-snapshot" in sys.argv:
+        n = _write_dist_snapshot()
+        print(f"wrote {DIST_SNAPSHOT_FILE} — {n} dist-verified paths")
+    else:
+        print("usage: python3 tests/test_schema_grounding.py --write-dist-snapshot")

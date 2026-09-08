@@ -84,13 +84,21 @@ class TestBareRunOnly:
     """B-075: onboarding fires only on a BARE human run. Any CI / artifact / work flag
     takes the normal audit path, so nothing is silently dropped and CI gates fail loud."""
 
-    def test_fail_under_still_fails_on_missing_home(self, tmp_path, capsys):
-        # The CI guard-rail: a missing home must not turn a --fail-under gate green.
-        rc = main(["--home", str(tmp_path / "nope"), "--fail-under", "90", "--no-history"])
+    def test_a_ci_gate_still_fails_on_missing_home(self, tmp_path, capsys):
+        # The CI guard-rail: a missing home must not turn a machine gate green by
+        # silently showing the friendly onboarding screen instead of auditing.
+        # C-426: this used --fail-under until that flag was removed; --fail-on is the
+        # replacement and belongs to the same bare-run guard, so it pins the same
+        # property.
+        rc = main(["--home", str(tmp_path / "nope"), "--fail-on", "critical", "--no-history"])
         out = capsys.readouterr().out
         assert rc != 0
         assert "welcome" not in out
-        assert "Score:" in out  # the real audit ran
+        # C-426: "Score:" was only ever a marker for "the real audit ran, not the
+        # onboarding screen", and a bare run no longer prints one. The audit header and
+        # the findings tally prove the same thing and survive an ungraded run.
+        assert "OpenClaw Security Audit" in out
+        assert "FAIL," in out  # the "(N FAIL, M WARN — ...)" tally line
 
     def test_exit_code_path_skips_onboarding(self, tmp_path, capsys):
         main(["--home", str(tmp_path / "nope"), "--exit-code", "--no-history"])

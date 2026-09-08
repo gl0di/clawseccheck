@@ -10,6 +10,8 @@ import shutil
 from pathlib import Path
 from typing import NamedTuple
 from .. import attest as _attest
+from .. import toolpolicy as _toolpolicy
+from .. import toolgrant as _toolgrant
 from .. import trajectory as _trajectory
 from ..catalog import (
     BY_ID,
@@ -22,24 +24,31 @@ from ..catalog import (
 from ..collector import (
     LIMIT_DOMAIN_CONFIG,
     Context,
+    agent_roster,
     dig,
 )
 
 from . import _shared
 from ._shared import (
+    _fs_reads_are_confined,
     _b323_contains_env_var_reference,
+    _B55_FS_WRITE_TOOLS,
     _canon_tool,
     _config_unreadable,
     _custom,
+    _dir_replaceable_by_others,
     _external_input_channels,
     _finding,
     _has_approval_gate,
     _hint,
+    _key_advice,
+    _node_commands,
     _open_channels,
     _profile_is_powerful,
     _surface_absent,
     _unpolicied_open_wildcard_group_channels,
 )
+from ..invocation import command_prefix
 
 
 _AUTO_GATE_BLAST = {
@@ -77,10 +86,7 @@ _B71_INEFFECTIVE_RE = re.compile(r"[ *|&;/]|--")
 # token, keep matching.
 _FS_WRITE_TOOL_HINTS = ("fs_write", "write_file", "writefile", "apply_patch")
 
-# B55/B-395: the real, canonical write-capable subset of _B68_FS_TOOLS. "read" is
-# deliberately excluded — B68's tuple includes it because B68 asks a DIFFERENT question
-# ("is any fs tool reachable"), but B55 asks specifically about WRITE exposure.
-_B55_FS_WRITE_TOOLS = frozenset({"write", "edit", "apply_patch"})
+# F-169: _B55_FS_WRITE_TOOLS now lives in ._shared (A1 asks the same question).
 
 
 def _approval_bypass_actors(
@@ -117,7 +123,7 @@ def _b31_collect_deny_lists(cfg: dict) -> list[tuple[str, set[str]]]:
     Scopes inspected:
       - tools.deny  (global)
       - toolsBySender.<key>.deny  (top-level, global per-sender)
-      - agents.list[N].tools.toolsBySender.<key>.deny  (per-agent per-sender)
+      - <agent>.tools.toolsBySender.<key>.deny  (per-agent per-sender, either roster shape)
     """
     results: list[tuple[str, set[str]]] = []
 
@@ -138,29 +144,31 @@ def _b31_collect_deny_lists(cfg: dict) -> list[tuple[str, set[str]]]:
                 deny_set = {str(t).strip().lower() for t in deny_val}
                 results.append((f"toolsBySender.{key}.deny", deny_set))
 
-    # 3. Per-agent: agents.list[N].tools.toolsBySender.<key>.deny
-    agents_cfg = cfg.get("agents")
-    if isinstance(agents_cfg, dict):
-        agents_list = agents_cfg.get("list")
-        if isinstance(agents_list, list):
-            for idx, agent in enumerate(agents_list):
-                if not isinstance(agent, dict):
-                    continue
-                agent_tools = agent.get("tools")
-                if not isinstance(agent_tools, dict):
-                    continue
-                agent_tbs = agent_tools.get("toolsBySender")
-                if not isinstance(agent_tbs, dict):
-                    continue
-                for key, sender_cfg in agent_tbs.items():
-                    if not isinstance(sender_cfg, dict):
-                        continue
-                    deny_val = sender_cfg.get("deny")
-                    if isinstance(deny_val, list) and deny_val:
-                        deny_set = {str(t).strip().lower() for t in deny_val}
-                        results.append(
-                            (f"agents.list[{idx}].tools.toolsBySender.{key}.deny", deny_set)
-                        )
+    # 3. Per-agent: <agent>.tools.toolsBySender.<key>.deny
+    #
+    # B-699: through `agent_roster`, so BOTH roster shapes are seen. This site was missed
+    # by the first pass — it walked `agents.get("list")` by hand rather than digging the
+    # path, so a grep for the retired key did not surface it. Measured: with a per-agent
+    # `toolsBySender.deny` expressed the 2026.8.1 way, this returned NO scopes at all and
+    # B31 went UNKNOWN ("No tool deny-policy configured") instead of evaluating the policy
+    # that is actually there. The scope label comes from the entry, so it names the key the
+    # user's own file contains rather than a position in an array they may not have.
+    for agent in agent_roster(cfg):
+        agent_tools = agent.entry.get("tools")
+        if not isinstance(agent_tools, dict):
+            continue
+        agent_tbs = agent_tools.get("toolsBySender")
+        if not isinstance(agent_tbs, dict):
+            continue
+        for key, sender_cfg in agent_tbs.items():
+            if not isinstance(sender_cfg, dict):
+                continue
+            deny_val = sender_cfg.get("deny")
+            if isinstance(deny_val, list) and deny_val:
+                deny_set = {str(t).strip().lower() for t in deny_val}
+                results.append(
+                    (f"{agent.path}.tools.toolsBySender.{key}.deny", deny_set)
+                )
 
     return results
 
@@ -171,11 +179,8 @@ def _has_heartbeat_signal(ctx: Context) -> bool:
     return (
         any(path.endswith("HEARTBEAT.md") for path in getattr(ctx, "bootstrap", []))
         or dig(cfg, "agents.defaults.heartbeat")
-        or any(
-            dig(agent, "heartbeat")
-            for agent in (dig(cfg, "agents.list") or [])
-            if isinstance(agent, dict)
-        )
+        # B-699: agents.entries as well as agents.list
+        or any(dig(agent.entry, "heartbeat") for agent in agent_roster(cfg))
     )
 
 
@@ -271,7 +276,7 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
             UNKNOWN,
             "No tool inventory attested — capability blast-radius cannot be "
             "classified from config (tool names are opaque strings there).",
-            "Run 'clawseccheck --ask' to emit a template, have the agent fill in its "
+            f"Run '{command_prefix()} --ask' to emit a template, have the agent fill in its "
             "real 'tools' list, then re-run with '--attest <file>'.",
         )
     held = _attest.classify_tools(tools)
@@ -530,15 +535,11 @@ def _b68_fs_workspace_only_scopes(cfg: dict) -> list[tuple[str, object]]:
     global_val = dig(cfg, "tools.fs.workspaceOnly")
     if global_val is not None:
         scopes.append(("tools.fs.workspaceOnly", global_val))
-    agents = dig(cfg, "agents.list")
-    if isinstance(agents, list):
-        for idx, agent in enumerate(agents):
-            if not isinstance(agent, dict):
-                continue
-            val = dig(agent, "tools.fs.workspaceOnly")
-            if val is not None:
-                label = agent.get("name") or agent.get("id") or idx
-                scopes.append((f"agents.list[{label}].tools.fs.workspaceOnly", val))
+    for agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
+        val = dig(agent.entry, "tools.fs.workspaceOnly")
+        if val is not None:
+            name = agent.entry.get("name") or agent.id or agent.index
+            scopes.append((f"{agent.labelled(name)}.tools.fs.workspaceOnly", val))
     return scopes
 
 
@@ -593,15 +594,10 @@ def _agent_profile_widenings(cfg: dict) -> list:
         return []
 
     out: list = []
-    agents = dig(cfg, "agents.list")
-    if not isinstance(agents, list):
-        return out
-    for idx, entry in enumerate(agents):
-        if not isinstance(entry, dict):
-            continue
-        profile = dig(entry, "tools.profile")
+    for agent in agent_roster(cfg):  # B-699: agents.entries as well as agents.list
+        profile = dig(agent.entry, "tools.profile")
         if isinstance(profile, str) and profile and _profile_is_powerful(profile):
-            out.append((f"agents.list[{idx}].tools.profile", profile))
+            out.append((f"{agent.path}.tools.profile", profile))
     return out
 
 
@@ -807,9 +803,104 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
             # here exactly as before.
             granted |= set(_B68_FS_TOOLS) & set(view.named)
 
-    if not view.enumerable and not widenings:
+    # B-668 (S3): resolve what the PER-AGENT scopes grant, resolved by the ported vendor
+    # predicate rather than by the accumulator above.
+    #
+    # Everything above this line models the GLOBAL layer. A grant that exists only inside an
+    # `agents.*` entry was therefore invisible, and the checks built on it returned a
+    # confident "no filesystem-write tool is granted" on configs the runtime grants write on
+    # — reproduced on `clean_b409_weak_agent_profile_no_widening` (scope `reader`) and
+    # `toolscope_case6_per_agent_alsoallow_widens_with_profile` (scope `helper`), both
+    # confirmed by EXECUTING the vendor's own resolveConfiguredToolPolicies +
+    # isToolAllowedByPolicies against the installed 2026.9.1 dist.
+    #
+    # ONLY agents that DECLARE their own `tools` are consulted, and that restriction is the
+    # whole design, not a shortcut. `toolgrant` is a faithful port, so asking it about an
+    # agent that declares nothing returns the VENDOR DEFAULT — and that default is
+    # permissive: measured, a config with no `tools` block at all grants read/write/edit/
+    # apply_patch. Consulting every scope unconditionally therefore imports a second,
+    # far larger change: 65 of 541 fixtures would newly count as granting write, none of
+    # them because of a per-agent grant. That is a real blindness (B55 does not see the
+    # permissive default) but it is a decision about what the tool asserts, not this
+    # migration — see B-736. Restricted to declaring agents the blast radius is exactly the
+    # two fixtures above, which is what a fix for B-668 should touch and nothing more.
+    scoped: set = set()
+    _roster = agent_roster(cfg)
+    for _entry in _roster:
+        if not _entry.id or not isinstance(_entry.entry, dict):
+            continue
+        if not _entry.entry.get("tools"):
+            continue
+        scoped |= {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t, _entry.id)}
+
+    # `agents.defaults.tools` is the second DECLARED per-agent surface, and it is a scope
+    # only when NO roster exists -- measured against the vendor: declared with no roster it
+    # grants, declared alongside `agents.entries` it is ignored entirely, which is what the
+    # shipped fixture `toolscope_case9_agents_defaults_tools_ignored_with_roster` is named
+    # for. Consulted at global scope because that is where the vendor surfaces it in that
+    # shape, and gated on the key being DECLARED for the same reason the loop above is gated
+    # on `entry["tools"]`: an ungated global query returns the permissive vendor default and
+    # reintroduces the 65-fixture expansion this migration is deliberately not making.
+    if not _roster and dig(cfg, "agents.defaults.tools"):
+        scoped |= {t for t in _B68_FS_TOOLS if _toolgrant.granted(cfg, t)}
+
+    # The enumerability gate has to see `scoped`, and that ordering is the whole point of
+    # computing it above rather than below. An independent C-135 pass on the first draft of
+    # this change found the gate short-circuiting ahead of the per-agent resolution: on a
+    # config with NO global `tools` block whose only grant is per-agent
+    # (`agents.entries.main.tools.allow = ["write"]`), `view.enumerable` is False and
+    # `widenings` is empty, so the early return fired and the migration never ran. The vendor
+    # grants write and apply_patch there; we answered UNKNOWN. A config we CAN resolve must
+    # not be reported as unresolvable, so a per-agent grant makes the answer enumerable on
+    # its own.
+    if not view.enumerable and not widenings and not scoped:
         return [], False
-    return sorted(granted - view.denied), True
+
+    # `view.denied` is the GLOBAL deny list and is applied only to the globally-derived set.
+    # `scoped` already came from the vendor predicate, which applies every deny layer itself
+    # (verified: global `deny:["write"]` with a per-agent `allow:["write"]` resolves to
+    # nothing at that agent's scope) -- subtracting it a second time could only remove a
+    # grant the runtime keeps.
+    return sorted((granted - view.denied) | scoped), True
+
+
+def _b55_write_tools_granted(
+    cfg: dict,
+) -> "tuple[list[str], bool, _ToolPolicyView, frozenset]":
+    """B55's exact write-tool grant model (write/edit/apply_patch), factored out of
+    `check_fs_write_exposure` (B-503) so a non-check consumer -- report.py's
+    capability graph -- can ask "does config grant a write-capable tool" without
+    re-deriving the model and silently drifting from it, the same bug class B-503
+    fixed for `_enabled_tools` vs. `_b68_fs_tools_granted`: two resolvers answering
+    the same question that disagree.
+
+    Delegates to `_b68_fs_tools_granted` (the canonical write/edit/apply_patch/
+    group:fs/profile/widening resolution B55/B68/B84 already share) and unions in
+    B55's OWN legacy-alias fallback -- `_FS_WRITE_TOOL_HINTS` ("fs_write",
+    "write_file", "writefile", "apply_patch") matched against the raw allow/
+    alsoAllow tokens, because these are not real OpenClaw tool ids and
+    `_b68_fs_tools_granted` only recognizes the canonical `_B68_FS_TOOLS` names (see
+    check_fs_write_exposure's B-395 docstring section for why that union exists --
+    real fixtures, e.g. bad_b55_fs_write_broad, still use the legacy alias).
+
+    Returns ``(write_tools, enumerable, view, legacy_write)``: `write_tools` is the
+    sorted write-capable subset (`_B55_FS_WRITE_TOOLS`) actually granted;
+    `enumerable` mirrors `_b68_fs_tools_granted`'s own; `view` and `legacy_write` are
+    returned too so `check_fs_write_exposure` can reuse them for its own
+    `explicit_write_grant` computation (the EXPLICIT/WIDENED/IMPLICIT-WILDCARD
+    distinction, which only matters for B55's internal FAIL/WARN split, not for a
+    coarse "is a write tool granted at all" consumer) without a second
+    `_tool_policy_view` call computing the identical thing.
+    """
+    granted, enumerable = _b68_fs_tools_granted(cfg)
+    view = _tool_policy_view(cfg)
+    legacy_write = {
+        canon
+        for canon, raw in zip(view.named, view.raw_named)
+        if _hint([raw], _FS_WRITE_TOOL_HINTS)
+    } - view.denied
+    write_tools = sorted((set(granted) & _B55_FS_WRITE_TOOLS) | legacy_write)
+    return write_tools, enumerable, view, legacy_write
 
 
 def check_exec_applypatch_workspace(ctx: Context) -> Finding:
@@ -1006,6 +1097,27 @@ def check_exec_strict_inline_eval(ctx: Context) -> Finding:
     )
 
 
+def _escaping_scope_label(cfg: dict, name: str) -> str:
+    """B-670: a POSITIONAL label for one name `unconfined_scopes_inheriting_global_tools`
+    returned — the roster entry's own config path (``agents.list[1]`` /
+    ``agents.entries.web``), or ``"global scope"`` for the synthesised default-agent scope
+    that has no roster row at all.
+
+    Deliberately not the raw agent id. B-570 gated printing an attacker-authorable id
+    string pending an owner ruling; this never constructs that string — it looks up the
+    matching entry through `collector.agent_roster` (the one reader of both roster shapes,
+    per B-699) and reports where the entry SITS, not what it is called. `AgentEntry.path`
+    is exactly this: for `agents.list` it is the original array INDEX, not the id; for
+    `agents.entries` it echoes the config's own record key, unmodified, the same way the
+    roster reader already surfaces it everywhere else. No new string is authored from
+    attacker input either way, so the B-570 question does not apply here.
+    """
+    for entry in agent_roster(cfg):
+        if _toolpolicy._normalize_agent_id(entry.id) == name:
+            return entry.path
+    return "global scope"
+
+
 def check_fs_write_exposure(ctx: Context) -> Finding:
     """B55 (C-013) — filesystem-write tool granted without scoping.
 
@@ -1162,7 +1274,12 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     open-group config.
     """
     cfg = ctx.config
-    granted, enumerable = _b68_fs_tools_granted(cfg)
+    # B-503: grant resolution delegated to `_b55_write_tools_granted`, the same
+    # write/edit/apply_patch model report.py's capability graph now also calls, so
+    # the two can no longer disagree the way `_enabled_tools` vs.
+    # `_b68_fs_tools_granted` did. `view`/`legacy_write` are still needed below for
+    # `explicit_write_grant`'s EXPLICIT/WIDENED/IMPLICIT-WILDCARD distinction.
+    write_tools, enumerable, view, legacy_write = _b55_write_tools_granted(cfg)
     widenings = _agent_profile_widenings(cfg)
 
     if not enumerable:
@@ -1176,20 +1293,6 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
             "auditable, and scope any write/edit/apply_patch grant with an approval "
             "gate (tools.exec.mode='ask').",
         )
-
-    # Legacy aliases matched independently against the raw allow/alsoAllow tokens
-    # (_tool_policy_view.raw_named), since _b68_fs_tools_granted only recognizes the
-    # canonical _B68_FS_TOOLS names — an additive union, deny-filtered against the same
-    # alias-folded denied set _tool_policy_view already resolved, so an explicitly
-    # denied legacy token doesn't count.
-    view = _tool_policy_view(cfg)
-    legacy_write = {
-        canon
-        for canon, raw in zip(view.named, view.raw_named)
-        if _hint([raw], _FS_WRITE_TOOL_HINTS)
-    } - view.denied
-
-    write_tools = sorted((set(granted) & _B55_FS_WRITE_TOOLS) | legacy_write)
 
     if not write_tools:
         return _finding(
@@ -1241,10 +1344,41 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # B-376 C-135 fix: B68 (same file) treats either field as sufficient fs confinement
     # for this identical tool family (its own composite predicate, quoted there).
     # Confined-but-reachable writes are a real but lesser risk than "arbitrary".
-    fs_confined = (
-        dig(cfg, "tools.fs.workspaceOnly") is True
-        or dig(cfg, "agents.defaults.sandbox.mode") == "all"
-    )
+    #
+    # B-670: both disjuncts USED to be read at global scope only, and both are per-agent
+    # overridable — `resolveSandboxConfigForAgent` resolves `sandbox.mode` per FIELD with
+    # `??`, and `resolveToolFsConfig` does the same for `tools.fs.workspaceOnly`. So a
+    # global `sandbox.mode: "all"` beside a per-agent `sandbox.mode: "off"` fabricated
+    # confinement for an agent that has none. That matters because `fs_confined` DOWNGRADES
+    # a hard FAIL to WARN twenty lines below: the fabrication suppressed a real finding.
+    #
+    # The honest reading is per SCOPE -- one unconfined scope leaves the capability exposed
+    # -- and unioning the other way (any scope confined => confined) would make the
+    # suppression worse rather than better. Two attempts were retracted getting here:
+    #
+    # 1. Gating on `confined_scopes` alone made a hard FAIL out of an unconfined agent that
+    #    cannot write at all: one whose own `tools.deny` removes the write family, or which
+    #    runs `tools.profile: "messaging"` -- an ordinary notifier-bot layout beside a
+    #    sandboxed coding agent. No path from untrusted input to an arbitrary write existed.
+    # 2. Answering "can this scope write" inside `toolpolicy` was UNSOUND, and the full suite
+    #    proved it while a scoped run stayed green: that module's profile table and alias
+    #    table are both read-specific, so `fixtures/bad_b55_fs_write_broad` -- whose
+    #    `tools.allow: ["fs_write"]` uses a legacy alias -- resolved to "cannot write" and a
+    #    designed-bad config was DOWNGRADED to WARN. Trading a constructed false FAIL for a
+    #    real suppression is the worse deal, and `confined_scopes` had already documented the
+    #    same trap one tool over (`fs_read`).
+    #
+    # What survives asks only what can be answered soundly here: this check's own vetted
+    # resolver already established that a write tool is granted GLOBALLY, so the open question
+    # is which scopes inherit that grant unchanged AND are unconfined. A scope with no `tools`
+    # key of its own inherits it by the runtime's nullish-coalesce; a scope that sets `tools`
+    # may narrow the write family, and we decline to guess. Conservative in the quiet
+    # direction, but strictly narrower than the global read it replaces -- which missed every
+    # per-agent escape -- and it adds no false positive. The residual gap is F-186's.
+    fs_confined = _fs_reads_are_confined(cfg)
+    # Which unconfined scopes demonstrably inherit this global grant. Consumed at the FAIL
+    # escalation below, NOT here: an empty list must never be read as confinement (see there).
+    inheriting = _toolpolicy.unconfined_scopes_inheriting_global_tools(cfg)
     # DELIBERATE: _open_channels (open-only), NOT _external_input_channels. This feeds the
     # FAIL gate below; a hard FAIL ("arbitrary writes reachable by untrusted senders")
     # requires proven-broad reach — a wildcard sender or a truly-open/public channel. An
@@ -1342,8 +1476,9 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
         # exec-only gate doesn't scope write tools). See test_b315_unscored_never_fails.
         if fs_confined:
             ev.append(
-                "filesystem writes are confined to the workspace (tools.fs.workspaceOnly "
-                "or agents.defaults.sandbox.mode='all') -- not arbitrary write reach"
+                "filesystem writes are confined to the workspace in EVERY declared scope "
+                "(tools.fs.workspaceOnly or a fully-sandboxed session, resolved per agent) "
+                "-- not arbitrary write reach"
             )
             return _finding(
                 "B55",
@@ -1401,6 +1536,74 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 "Set tools.allow explicitly (or a tools.profile) so the intended grant "
                 "is unambiguous, and lock the open channel(s) to 'allowlist'.",
                 evidence=ev,
+            )
+        # The unconfined scopes all narrow their OWN tools, so nothing here demonstrably
+        # carries the global write grant out of the workspace. Deliberately NOT expressed by
+        # making `fs_confined` true: a scope that sets `tools` is not a confined scope, and
+        # saying so would fabricate the confinement B-670 exists to stop fabricating -- an
+        # earlier attempt did exactly that, and claimed full confinement for a config where
+        # NOTHING was confined, because its only agent happened to set `tools`.
+        #
+        # This is the same argument the widening branch above already makes and this check
+        # already accepts: the per-agent allow/deny, channel/group, toolsBySender and
+        # byProvider layers can remove a granted tool for one agent, and none of them is
+        # readable here. Resolving it properly needs a vetted write-grant model (F-186);
+        # until then the honest answer is WARN with the reason on screen, not a FAIL whose
+        # premise this check cannot establish.
+        # The sentence below describes the NARROWING TEST, not `widenings`. An earlier version
+        # claimed "none of them widens toward the write family" while asserting it from
+        # `_agent_profile_widenings`, which is profile-only and cannot see an allow/alsoAllow
+        # widening -- so for `tools: {"allow": ["write"]}` the finding printed a claim the code
+        # had never checked, about an override that names the write tool outright.
+        #
+        # `not widenings` is load-bearing, and the over-correction it repairs was caught by
+        # test_b409_widening_still_applies_when_global_allow_is_a_wildcard: a scope whose own
+        # `tools` is `{"profile": "coding"}` has not NARROWED anything -- that profile is what
+        # GRANTS the write family. "Sets its own tools" is too coarse a proxy for "might have
+        # taken the grant away"; a detected widening is direct evidence of the opposite.
+        # B-712: when a scope is in `inheriting` ONLY because its confinement could not be
+        # resolved -- `sandbox.mode: "non-main"`, whose answer depends on which session runs
+        # -- the FAIL below asserts "no write-specific scoping" and "arbitrary file writes"
+        # about ground this check did not read. Keeping the scope is right (declining to
+        # prove confinement is not proving it), but the evidence has to say which it is, or
+        # the verdict fabricates certainty in the direction opposite to the confident `True`
+        # the sandbox predicate used to return. Evidence-only: the verdict is unchanged.
+        _undecided = _toolpolicy.undecided_inheriting_scopes(cfg) or []
+        if _undecided:
+            ev.append(
+                f"{len(_undecided)} of the unconfined scope(s) are UNDECIDED rather than "
+                "proven unconfined: they run under sandbox.mode 'non-main', where OpenClaw "
+                "decides per session (the agent's own main session is unsandboxed, its "
+                "others are not), so the config does not settle whether the write reach is "
+                "real -- it only fails to rule it out"
+            )
+        if inheriting is not None and not inheriting and not widenings:
+            ev.append(
+                "every unconfined scope narrows its own tool policy in a way that could "
+                "remove write/edit/apply_patch (a tools.profile, a tools.allow naming no "
+                "write tool, a tools.deny naming one, or a byProvider/toolsBySender layer "
+                "this static check cannot resolve), so none is shown to inherit this global "
+                "grant"
+            )
+            return _finding(
+                "B55",
+                WARN,
+                f"Filesystem-write capability ({label}) is reachable by untrusted senders "
+                f"and not confined to the workspace, but every unconfined scope narrows its "
+                f"own tool policy, so broad write reach is not established.",
+                "Confirm the per-agent tools.* narrowing really removes write/edit/"
+                "apply_patch for those agents, and lock the open channel(s) to 'allowlist'.",
+                evidence=ev,
+            )
+        if inheriting:
+            # B-670: name WHICH scopes escaped, positionally (never the raw agent id —
+            # see _escaping_scope_label). Evidence-only; the FAIL verdict above is
+            # unchanged whether or not this appends.
+            total_scopes = len(_toolpolicy.confined_scopes(cfg) or [])
+            labels = [_escaping_scope_label(cfg, name) for name in inheriting]
+            ev.append(
+                f"{len(inheriting)} of {total_scopes} declared scope(s) are unconfined "
+                f"and inherit the global write grant unchanged: {', '.join(labels)}"
             )
         return _finding(
             "B55",
@@ -1699,44 +1902,52 @@ def check_elevated_default_full(ctx: Context) -> Finding:
 
 
 def check_node_denycommands_ineffective(ctx: Context) -> Finding:
-    """B71 — gateway.nodes.denyCommands ineffective patterns.
+    """B71 — node command deny-list entries that are silently ineffective.
 
-    Grounded (docs.openclaw.ai/gateway/nodes): denyCommands matching is exact command-name
+    Grounded (docs.openclaw.ai/gateway/nodes): deny matching is exact command-name
     only (e.g. 'system.run'); entries containing spaces, shell metacharacters, globs, or
     path separators are silently ineffective.
 
-    UNKNOWN — denyCommands absent or empty; no deny list configured.
-    WARN    — denyCommands non-empty and at least one entry looks non-exact.
+    Reads BOTH spellings via ``_node_commands`` (B-698) — ``gateway.nodes.commands.deny``
+    on OpenClaw 2026.8.1+, ``gateway.nodes.denyCommands`` before it — and every
+    user-facing string names the one actually found, so a reader is never pointed at a
+    key their own config does not contain.
+
+    UNKNOWN — deny list absent or empty; no deny list configured.
+    WARN    — deny list non-empty and at least one entry looks non-exact.
     PASS    — all entries are bare exact command names.
     """
     cfg = ctx.config
-    deny = dig(cfg, "gateway.nodes.denyCommands")
+    # B-698: both spellings — OpenClaw 2026.8.1 moved this under `gateway.nodes.commands`
+    # and its migration is deferred, so an un-migrated config still carries the old key.
+    deny, deny_path = _node_commands(cfg, "deny")
     if not deny or not isinstance(deny, list):
         return _finding(
             "B71",
             UNKNOWN,
-            "gateway.nodes.denyCommands is absent or empty — no node command deny list "
-            "is configured.",
-            "If you want to block specific node commands, set gateway.nodes.denyCommands "
-            "to bare exact command names (e.g. 'system.run').",
+            "gateway.nodes.commands.deny (pre-2026.8.1: gateway.nodes.denyCommands) is "
+            "absent or empty — no node command deny list is configured.",
+            "If you want to block specific node commands, set the node command deny list "
+            "to bare exact command names (e.g. 'system.run') — gateway.nodes.commands.deny "
+            "on OpenClaw 2026.8.1 and later, gateway.nodes.denyCommands before it.",
         )
     offenders = [str(e) for e in deny if isinstance(e, str) and _B71_INEFFECTIVE_RE.search(e)]
     if offenders:
         return _finding(
             "B71",
             WARN,
-            "gateway.nodes.denyCommands contains entries with spaces, shell metacharacters, "
+            f"{deny_path} contains entries with spaces, shell metacharacters, "
             "globs, or path separators — these patterns are silently ineffective because "
             "matching is exact command-name only.",
-            "Replace ineffective denyCommands entries with bare exact command names only "
+            f"Replace ineffective {deny_path} entries with bare exact command names only "
             "(e.g. 'system.run', not 'system.run --flag' or 'system*').",
-            evidence=[f"ineffective denyCommands entry: {e!r}" for e in offenders],
+            evidence=[f"ineffective {deny_path} entry: {e!r}" for e in offenders],
         )
     return _finding(
         "B71",
         PASS,
-        "All gateway.nodes.denyCommands entries are bare exact command names.",
-        "Keep gateway.nodes.denyCommands entries as bare exact command names without "
+        f"All {deny_path} entries are bare exact command names.",
+        f"Keep {deny_path} entries as bare exact command names without "
         "spaces, globs, or path separators.",
     )
 
@@ -1927,4 +2138,396 @@ def check_path_safety(ctx: Context) -> Finding:
         f"openclaw at {where}; binary dir, install-tree ancestors, and earlier PATH "
         "dirs all have tight permissions.",
         "Keep install/PATH directories owner-only (chmod 755 at most, never group/world-writable).",
+    )
+
+
+# B351: mirrors OpenClaw's own `normalizeCodeModeRawConfig`
+# (code-mode-D5mNEiYV.js:36-41) rather than approximating it. The boolean shorthand is
+# REAL - `codeMode: true` is a legal config with no `.enabled` key at all - and anything
+# that is neither a boolean nor a record resolves to "absent", which the caller's `or {}`
+# then turns into disabled. Reimplementing this by hand is how a lying-PASS gets written:
+# reading `.enabled` off `True` returns nothing and reports the feature off.
+def _b351_raw_code_mode(value):
+    """The vendor's normalisation: bool -> {"enabled": bool}, record -> itself, else None."""
+    if value is True:
+        return {"enabled": True}
+    if value is False:
+        return {"enabled": False}
+    return value if isinstance(value, dict) else None
+
+
+def _b351_enabled(raw: dict) -> bool:
+    """`readBoolean(raw.enabled, false)` (code-mode-D5mNEiYV.js:50-52).
+
+    Only a real boolean counts. A truthy non-bool (`"true"`, `1`) falls back to the
+    default, so it does NOT enable code mode - matching the vendor exactly instead of
+    guessing, the same discipline B350 applies to gateway.terminal.enabled.
+    """
+    val = raw.get("enabled")
+    return val if isinstance(val, bool) else False
+
+
+# B351: OpenClaw's own agent-id canonicalisation, ported from `normalizeAgentId`
+# (session-key-VWT_xzM9.js:95-101) and verified by EXECUTING the installed dist against
+# these exact inputs rather than by reading the regex. The vendor resolves an agent by
+# normalised ID, not by list position, so a check that loops raw entries reports agents
+# the resolver can never reach.
+_B351_VALID_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$", re.IGNORECASE)
+_B351_INVALID_CHARS_RE = re.compile(r"[^a-z0-9_-]+")
+_B351_DEFAULT_AGENT_ID = "main"
+
+
+def _b351_normalize_agent_id(value) -> str:
+    """`normalizeAgentId` — measured, not inferred.
+
+    Executed against the real dist: ``None``/``""``/``"   "``/``"!!!"`` -> ``"main"``;
+    ``"Main"`` -> ``"main"``; ``"my agent"`` -> ``"my-agent"``; ``"-x-"`` -> ``"x"``; a
+    70-character id truncates to 64. A non-string id is treated as absent, matching the
+    vendor's ``value ?? ""`` for null and the fact that the schema types `id` as a string
+    so a number never loads.
+
+    The consequence that matters: an entry with NO id normalises to ``"main"`` and
+    therefore COLLIDES with an entry explicitly named ``main`` — it is not skipped.
+    """
+    trimmed = value.strip() if isinstance(value, str) else ""
+    if not trimmed:
+        return _B351_DEFAULT_AGENT_ID
+    lowered = trimmed.lower()
+    if _B351_VALID_ID_RE.match(trimmed):
+        return lowered
+    cleaned = _B351_INVALID_CHARS_RE.sub("-", lowered).strip("-")[:64]
+    return cleaned or _B351_DEFAULT_AGENT_ID
+
+
+def _b351_resolvable_agents(agents) -> list:
+    """The entries the vendor's resolver can actually reach, in its own order.
+
+    ``resolveAgentEntry`` is ``listAgentEntries(cfg).find(e => normalizeAgentId(e.id) ===
+    id)`` (agent-scope-config-BxAUeF6t.js:66-69) and ``listAgentIds`` de-dups on the
+    normalised id (:41-53), so for any id the FIRST matching entry wins and every later
+    one is unreachable. Reporting a shadowed entry is a claim about an agent that cannot
+    exist.
+
+    B-699: takes the roster from ``collector.agent_roster`` rather than a raw
+    ``agents.list``, so a 2026.8.1 ``agents.entries`` record resolves the same way. The
+    de-dup key is unchanged -- the normalised id, which is the record KEY on the new shape
+    and the entry's own ``id`` field on the legacy one.
+
+    Returns ``[(normalized_id, AgentEntry), ...]``.
+    """
+    out = []
+    seen = set()
+    for agent in agents:
+        aid = _b351_normalize_agent_id(agent.id)
+        if aid in seen:
+            continue
+        seen.add(aid)
+        out.append((aid, agent))
+    return out
+
+
+def check_code_mode_tool_surface(ctx: Context) -> Finding:
+    """B351 - code mode replaces the model's tool surface with `exec` + `wait`.
+
+    Grounded on the INSTALLED dist (openclaw@2026.7.1-2) and on its RESOLVER, not on the
+    descriptions map. `tools.codeMode` is
+    ``ZodOptional<ZodUnion<[ZodBoolean, ZodObject<{enabled?, runtime?, mode?, ...}>]>>``
+    (plugin-sdk/config-schema.d.ts:3654), with a per-agent twin at
+    ``agents.list[].tools.codeMode`` (:1583). OpenClaw's own description (:331) states
+    that when enabled, "agent runs expose only `exec` and `wait` to the model and hide
+    normal tools behind a QuickJS-WASI catalog bridge".
+
+    WHY THIS IS WORTH A FINDING AT ALL. Code mode is not a hole - the guest runs in
+    QuickJS-WASI and the feature fails closed when the runtime is unavailable (:332). It
+    is reported because it silently changes what every OTHER tool-policy verdict MEANS: a
+    `tools.allow` list, a profile, a deny entry all describe a surface the model no longer
+    sees directly, while `exec` is exposed. An owner reading "tools are restricted to X"
+    should know the model is actually being handed exec-and-wait over a catalog bridge.
+
+    THE LYING-PASS THIS CLOSES, and why the check must walk agents. The resolver merges
+    per-agent OVER global - ``agentRaw ? {...globalRaw, ...agentRaw} : globalRaw``
+    (code-mode-D5mNEiYV.js:42-49) - so the override works in BOTH directions:
+
+      global off + agent `codeMode: true`   -> ON for that agent   <- a global-only read
+                                                                      reports PASS here
+      global on  + agent `codeMode: false`  -> OFF for that agent  <- benign narrowing,
+                                                                      must not fire
+      global on  + agent `{timeoutMs: 100}` -> still ON (the agent object carries no
+                                               `enabled`, so global's survives the spread)
+
+    Reading only `tools.codeMode` would therefore report a clean surface while a named
+    agent runs in code mode. Measured against the schema: `agents.defaults` carries no
+    `tools.codeMode`, so there are exactly TWO layers and no third to miss.
+
+    PASS    - resolved off everywhere: globally, and for every configured agent.
+    WARN    - resolved on globally, or on for at least one named agent (which one is
+              named in the detail).
+    UNKNOWN - the config was not read, or is present and unparseable.
+
+    Never FAILs: this is a capability disclosure about a sandboxed, fail-closed vendor
+    feature, not a compromise. A FAIL tier would need its own independent C-135 pass.
+
+    WHY THE VERDICT SAYS "QuickJS code mode" AND NOT "code mode". An independent pass
+    found a SECOND, unrelated path to the same user-visible property:
+    ``plugins.entries.<name>.config.appServer.codeModeOnly`` (config-fy-53tqM.js:122,
+    read at :302) flows through to ``"features.code_mode_only": true`` for Codex
+    app-server runs (run-attempt-CXZNKJ6y.js:2863 ->
+    thread-lifecycle-DSMv62L1.js:2339,2346). That is a DIFFERENT engine - Codex native,
+    not the QuickJS exec/wait bridge - so it is outside ``resolveCodeModeConfig`` and
+    outside this check. Nothing in ``checks/`` reads it today. The honest response is to
+    narrow the CLAIM rather than widen the check on ungrounded ground: an unqualified
+    "code mode is off" is what a reader would believe, and it would be wrong for that
+    config. Widening is a separate change with its own C-135 pass.
+
+    AGENT IDENTITY IS THE VENDOR'S, NOT LIST POSITION. See
+    ``_b351_resolvable_agents``: OpenClaw resolves an agent by NORMALISED id and takes
+    the first entry that matches, so two entries whose ids normalise the same (``"Main"``
+    and ``"main"``; an entry with no id, which normalises to ``"main"`` and collides with
+    one) are ONE agent, and the later entry is unreachable. Looping raw list entries
+    reported an agent the resolver can never produce - a false WARN, found by an
+    independent adversarial pass and fixed here.
+    """
+    unreadable = _config_unreadable("B351", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B351",
+            UNKNOWN,
+            "No config was read, so whether code mode replaces the model's tool surface "
+            "could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
+    global_raw = _b351_raw_code_mode(dig(cfg, "tools.codeMode")) or {}
+    global_on = _b351_enabled(global_raw)
+
+    on_agents: list[str] = []
+    off_agents: list[str] = []
+    for aid, agent in _b351_resolvable_agents(agent_roster(cfg)):
+        agent_raw = _b351_raw_code_mode(dig(agent.entry, "tools.codeMode"))
+        merged = {**global_raw, **agent_raw} if agent_raw is not None else global_raw
+        label = agent.labelled(aid)
+        (on_agents if _b351_enabled(merged) else off_agents).append(label)
+
+    if not global_on and not on_agents:
+        return _finding(
+            "B351",
+            PASS,
+            "QuickJS code mode is off, so the model sees the ordinary tool surface "
+            "rather than exec/wait over a catalog bridge.",
+            "Keep it off unless you specifically want the exec/wait surface; it is off "
+            "by default.",
+        )
+
+    if global_on:
+        who = "for every agent" if not off_agents else (
+            f"globally, and narrowed off for {', '.join(sorted(off_agents)[:4])}"
+        )
+        where = f"tools.codeMode is on {who}"
+    else:
+        where = (
+            "tools.codeMode is off globally but ON for "
+            f"{', '.join(sorted(on_agents)[:4])}"
+        )
+    return _finding(
+        "B351",
+        WARN,
+        f"{where}. Those agent runs expose only `exec` and `wait` to the model and hide "
+        "the normal tools behind a QuickJS-WASI catalog bridge, so any tools.allow / "
+        "tools.profile / tools.deny policy describes a surface the model does not see "
+        "directly.",
+        "If code mode is intentional, read the tool-policy findings in this report as "
+        "describing the CATALOG rather than what the model is handed, and confirm the "
+        "exec surface is governed by tools.exec.*. If it is not intentional, set "
+        "tools.codeMode.enabled to false (and check each per-agent entry under "
+        f"{_key_advice(ctx, 'agents.list', 'agents.entries')}, which can "
+        "turn it back on independently of the global setting).",
+        evidence=sorted(on_agents)[:8] or None,
+    )
+
+
+# B352: PATH entries that OpenClaw puts ahead of everything the agent runs.
+_B352_TMPISH = ("/tmp/", "/var/tmp/", "/dev/shm/")
+# The vendor's own tilde predicate, verbatim: io-By0s-a_s.js PATH_VALUE_RE.
+_B352_TILDE_RE = re.compile(r"^~(?=$|[\\\\/])")
+
+
+def _b352_effective_prepends(cfg: dict) -> list:
+    """Every (scope, host, entries) the runtime could actually apply.
+
+    Grounded on `agent-tools-BD8WL7ny.js`, which resolves BOTH fields with `??` rather
+    than a merge:
+
+        host:         agentExec?.host        ?? globalExec?.host
+        pathPrepend:  agentExec?.pathPrepend ?? globalExec?.pathPrepend
+
+    So an agent carrying its own list REPLACES the global one wholesale, and an agent
+    without one inherits it. The set of lists that can reach a shell is therefore the
+    global list plus each agent's own - reading `tools.exec.pathPrepend` alone would miss
+    a list only one agent has, the same per-agent shape B351 closed for code mode.
+    """
+    g = dig(cfg, "tools.exec") if isinstance(cfg, dict) else None
+    g = g if isinstance(g, dict) else {}
+    out = [("tools.exec", g.get("host"), g.get("pathPrepend"))]
+    for aid, agent in _b351_resolvable_agents(agent_roster(cfg)):
+        a = dig(agent.entry, "tools.exec")
+        a = a if isinstance(a, dict) else {}
+        entries = a.get("pathPrepend") if a.get("pathPrepend") is not None else g.get("pathPrepend")
+        out.append((f"{agent.labelled(aid)}.tools.exec",
+                    a.get("host") or g.get("host"), entries))
+    return out
+
+
+def _b352_risky(entry: str, home) -> "str | None":
+    """Why this entry is a hijack surface, or None.
+
+    Tilde entries are NOT relative: `normalize-paths` lists `pathPrepend` in
+    `PATH_LIST_KEYS` and runs `resolveUserPath` over it (`io-By0s-a_s.js`), so `~/bin`
+    reaches the runtime already absolute.
+    """
+    if not isinstance(entry, str) or not entry.strip():
+        return None
+    text = entry.strip()
+    # Mirror the vendor's own predicate exactly: PATH_VALUE_RE is /^~(?=$|[\\/])/, so a
+    # BARE `~` resolves to home just as `~/x` does, while `~user/x` does not resolve at
+    # all (no slash directly after the tilde). Handling only the `~/` form reported a
+    # bare `~` as relative — measured, and the test caught it.
+    if _B352_TILDE_RE.match(text):
+        rest = text[2:] if len(text) > 1 else ""
+        text = str(Path(home).parent / rest) if rest else str(Path(home).parent)
+    if not text.startswith("/"):
+        return "relative, so which binary runs depends on the working directory"
+    if any(text.rstrip("/").startswith(t.rstrip("/")) for t in _B352_TMPISH):
+        return "under a world-writable temp directory"
+    writable = _dir_replaceable_by_others(Path(text))
+    if writable:
+        return writable
+    return None
+
+
+def check_exec_path_prepend(ctx: Context) -> Finding:
+    """B352 - directories OpenClaw puts AHEAD of the agent's PATH for every exec run.
+
+    Grounded on the installed dist (openclaw@2026.7.1-2), on the code that applies it
+    rather than on the descriptions map. `wrapPosixCommandWithPathPrepend`
+    (bash-tools.exec-runtime-u4DiNcL4.js) rewrites the command itself:
+
+        export PATH="${OPENCLAW_PREPEND_PATH}${PATH:+:$PATH}"; unset ...; <command>
+
+    with the vendor's own reason: "This ensures our paths take precedence even if user RC
+    files (e.g. ~/.zshenv) prepend their own entries to PATH during shell startup." So an
+    entry here outranks the operator's own shell configuration by design. A directory on
+    that list that someone else can write is a standing binary-hijack primitive: plant
+    `git`, `curl` or `python` there and the agent runs it in preference to the real one,
+    with no approval prompt, because nothing about the command changed.
+
+    PASS    - nothing prepended, or every entry is an absolute path that only the owner
+              can write. The entries are still listed in the detail, because "what is
+              ahead of the agent's PATH" is worth knowing even when it is safe.
+    WARN    - an entry is relative (its meaning depends on the working directory), lives
+              under a world-writable temp directory, or is group/world-writable.
+    UNKNOWN - the config was not read.
+
+    TWO MITIGATIONS THAT ARE REAL, AND ARE RESPECTED RATHER THAN IGNORED.
+
+    `host: "node"` - the runtime does not apply the list at all, and says so:
+    "Warning: tools.exec.pathPrepend is ignored for host=node. Configure PATH on the node
+    host/service instead." (bash-tools-DHyGpWCr.js). Reporting a hijack risk from a
+    setting the engine discards would be a finding about nothing, so that scope is
+    skipped and the skip is named in the detail.
+
+    Windows - `wrapPosixCommandWithPathPrepend` returns the command unchanged on win32.
+    This is a self-audit, so the auditing platform IS the target platform; the detail
+    says so rather than silently assuming POSIX.
+
+    TILDE ENTRIES ARE NOT RELATIVE. `normalize-paths` puts `pathPrepend` in
+    `PATH_LIST_KEYS` and resolves `~` through `resolveUserPath` (io-By0s-a_s.js), so
+    `~/bin` arrives absolute. Treating it as relative would be a false positive on the
+    commonest way an owner writes their own bin directory.
+
+    Never FAILs: a writable PATH entry is a real hijack surface, but "someone else can
+    write it" is a property of the filesystem at audit time, and a FAIL tier needs its
+    own independent C-135 pass against real configs first.
+    """
+    unreadable = _config_unreadable("B352", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B352",
+            UNKNOWN,
+            "No config was read, so what is prepended to the agent's exec PATH could not "
+            "be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
+    risky: list[str] = []
+    listed: list[str] = []
+    ignored_scopes: list[str] = []
+    for scope, host, entries in _b352_effective_prepends(cfg):
+        if not isinstance(entries, list) or not entries:
+            continue
+        if host == "node":
+            ignored_scopes.append(scope)
+            continue
+        for entry in entries:
+            if not isinstance(entry, str):
+                continue
+            listed.append(f"{scope}: {entry}")
+            why = _b352_risky(entry, ctx.home)
+            if why:
+                risky.append(f"{scope}: {entry} — {why}")
+
+    if not listed and not ignored_scopes:
+        return _finding(
+            "B352",
+            PASS,
+            "Nothing is prepended to the exec PATH, so the agent resolves binaries the "
+            "way the host normally would.",
+            "Keep it that way; an entry here outranks even your own shell startup files.",
+        )
+
+    tail = ""
+    if ignored_scopes:
+        tail = (
+            f" Not assessed for {', '.join(sorted(ignored_scopes)[:3])}: exec runs "
+            "through host=node there, and the runtime ignores pathPrepend for that host."
+        )
+
+    if not risky:
+        # `listed` can be empty while `ignored_scopes` is not: every configured list sits
+        # under host=node, which the runtime discards. Saying "prepends are absolute and
+        # owner-only" there would be a sentence about an empty list.
+        head = (
+            f"Exec PATH prepends are absolute and owner-only: {'; '.join(sorted(listed)[:4])}."
+            if listed else
+            "No exec PATH prepend is applied on any scope this run could assess."
+        )
+        return _finding(
+            "B352",
+            PASS,
+            head + tail,
+            "Nothing to do. Re-check if any of those directories later becomes writable "
+            "by another account.",
+            evidence=sorted(listed)[:8] or None,
+        )
+    return _finding(
+        "B352",
+        WARN,
+        f"{len(risky)} exec PATH prepend entr{'y is' if len(risky) == 1 else 'ies are'} a "
+        f"binary-hijack surface: {'; '.join(sorted(risky)[:3])}. OpenClaw exports these "
+        "ahead of $PATH for every exec run — deliberately outranking your own shell "
+        "startup files — so a binary planted there runs instead of the real one, with no "
+        "approval prompt because the command text is unchanged." + tail,
+        "Make each entry an absolute path to a directory only your account can write, or "
+        "remove tools.exec.pathPrepend and let the host resolve binaries normally. Check "
+        "every per-agent entry under "
+        f"{_key_advice(ctx, 'agents.list', 'agents.entries')} too: an agent's own entry "
+        "replaces the global one.",
+        evidence=sorted(risky)[:8] or None,
     )

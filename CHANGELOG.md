@@ -3,6 +3,355 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.0.0] — 2026-09-08
+
+Every run used to print a letter. It should not have: a run that skipped the
+installed-skill sweep, never replayed a trajectory and was handed no attestation was
+graded on the same scale as one that did all three. **4.0.0 stops issuing a grade the run
+did not earn** — and, separately, catches up to three OpenClaw releases that moved
+settings out from under the checks that read them.
+
+### Breaking
+
+- **A letter grade is issued only when all five check layers ran** — static, installed
+  sweep, logs & trajectories, self-report, live behaviour. Short of that the run names the
+  layers it missed instead of printing a number. There is no capped grade and no second
+  scale: a partial check reports what it covered, in words. Every renderer — report, chat
+  card, HTML, PDF, SARIF, JSON, history, the incident pack — carries the ungraded form.
+- **`--fail-under <score>` is removed.** A default run no longer carries a score to
+  threshold on. Use **`--fail-on <severity>`** for a CI gate that needs no grade, or
+  `--exit-code` to trip on any FAIL.
+- **`--exit-code` and `--fail-on` now gate the artifact-rendering modes.** In 3.61.0
+  `--sarif`, `--badge` and `--html` printed a `note: --exit-code has no effect` line to
+  stderr and returned 0 whatever the run found — the gate was an allowlist nobody had
+  extended, not a decision. They honour it now, as do `--pdf` and `--dashboard`; `--monitor`
+  honours it only when the flag is passed, so a bare `--monitor` cron line is unchanged.
+  **A CI job built on this tool's own documented recipe — `--sarif results.sarif` with
+  `--fail-on`/`--exit-code` — has been passing unconditionally, and will start failing on
+  findings that were already there.** That is the gate working for the first time, not new
+  findings; look at what it reports before treating the red build as a regression.
+- **The installed OpenClaw package is read by default** (`--no-dist` opts out), which lets
+  the update check see the build that is installed *now* rather than only what the config
+  remembers. On an unchanged config this can surface one advisory the tool has never emitted
+  before — a version-rollback signature, WARN, unscored, moving neither grade nor exit code —
+  when the installed build is older than the config's own last-touched version.
+
+- **`--vet` answers a decision, not a letter.** Vetting one package and grading a whole
+  setup are different questions; one letter standing for both read as the same thing.
+- **Fourteen checks reworded their finding text, so fingerprint suppressions written against
+  them stop matching and those findings reappear.** A `.clawseccheckignore` entry of the
+  `<id>:<hash>` form is a hash of the finding's `detail` string, so any wording correction
+  orphans it. Measured across `fixtures/home_safe` and `fixtures/home_vuln`, the checks whose
+  fingerprint moved since 3.61.0 are: **A1, B1, B10, B11, B20, B22, B41, B48, B71, B175, B177,
+  B187, B189, C048**. Bare-id entries (`B41` with no hash) are unaffected. Re-suppress from the
+  new output anything that was deliberate — and note that nothing in a normal run tells you a
+  suppression has gone dead, so check `--show-suppressed` after upgrading rather than assuming
+  silence means it still applies.
+- **The first watch run after upgrading may report a check's own change as configuration drift.**
+  `--monitor` compares this run against a snapshot written by the previous version, and a snapshot
+  records a check's verdict but not the reason for it — so a verdict that moved because the check
+  itself got better is indistinguishable, to the diff, from one that moved because your setup did.
+  On this release the visible case is B175, whose logic now catches OpenClaw defaults it used to
+  miss: an unchanged config can be reported as `was PASS, now WARN`, and that sentence is written
+  to the Agent Watch journal like any other event. **It is the upgrade, not your setup.** Run
+  `--monitor` once straight after upgrading to re-take the baseline, and read the first
+  post-upgrade alert with that in mind. Attributing such a transition correctly needs the tool's
+  own version recorded in the snapshot, which is a stored-format change rather than a wording fix.
+
+### OpenClaw 2026.8.1 / 8.2 / 9.1 / 9.2 compatibility
+
+Three OpenClaw releases moved things the audit reads. On an un-upgraded ClawSecCheck the
+result was not a crash — it was a clean verdict over ground the tool no longer looked at.
+
+- **The agent roster has two shapes.** 2026.8.1 writes `agents.entries` (a record) where
+  earlier builds wrote `agents.list` (an array). One reader now resolves both, ported from
+  the runtime and validated against it over 84 cases. Before this, a config using the new
+  shape produced no agents at all — and checks that walk the roster reported PASS.
+- **Three settings left `openclaw.json` entirely**, into OpenClaw's machine-owned config
+  store. Every `dig()` on those keys was reading where the runtime no longer writes. The
+  headline one is the bundled-plugin discovery mode, which can flip to a value that
+  bypasses the plugin allowlist on upgrade with nobody having written it.
+- **Retired keys are named rather than silently missed.** A check whose key no longer
+  exists says so, instead of resolving to nothing and rendering a verdict anyway.
+- **Remediation advice names the key your build actually has.** The browser-SSRF chain told
+  every reader to set `browser.ssrfPolicy.hostnameAllowlist` — a spelling newer builds reject,
+  and because that block is strict they refuse the whole config with it, so anyone who followed
+  the line would have left OpenClaw unable to load their settings while believing the leg was
+  closed. Advice now resolves per build: `allowedHostnames` on 2026.8.1 and later, the older
+  key before it, and both with their versions attached when the build cannot be determined. The
+  marketplace-feed all-clear was corrected the same way, and no longer describes a key that
+  build does not have as merely unset.
+- **2026.9.2 moved nothing this tool reads — measured, not assumed.** The config schema went
+  from 5,280 declared paths to 5,282: four added (`gateway.controlUi.communityInvite`,
+  `gateway.controlUi.experimental`, `gateway.controlUi.experimental.customPlugins`,
+  `transcripts.autoStart[].whenOccupied`) and two removed (`gateway.controlUi.toolTitles`,
+  `messages.suppressToolErrors`). No check reads any of the six. Drift in the paths this tool
+  actually depends on is **zero**: all 121 that a real installed build accepted at 9.1 are
+  still accepted at 9.2. The vendor's own state tables went from 121 to 122 for a new
+  `update_runs` ledger, which nothing here reads yet. All three shipped snapshots were
+  regenerated against an installed 2026.9.2 and each carries that version in its header, so the
+  claim is checkable rather than asserted. No capability was added for this release; the entry
+  exists because "nothing broke" is only worth reading when someone went and looked.
+
+### Added
+
+- **`--monitor` watches the machine, not only the agent's settings** — host persistence
+  (systemd user units and the symlinks that arm them, shell startup files, world-readable
+  cron, `.pth`/`sitecustomize`), the installed OpenClaw package itself, and where each
+  installed skill came from, as a time series.
+- **`--monitor --json`**, `--brief` (is the watch still running, and did it speak while you
+  were away), `--probe` (report drift without consuming it), and `--cron-recipe` (hand the
+  agent a watch job instead of writing one).
+- **`--monitor` scopes its all-clear to what it actually compared**, and names what a first
+  run after an upgrade could not compare against.
+- **A per-dimension watch**: each watched surface now owns its snapshot and its diff in one
+  module, so a field added to one and not the other is a difference inside a single file.
+- **New checks** for surfaces that were unread: an MCP server that pre-approves every tool
+  it exposes, a hijackable directory placed ahead of every command the agent runs, the
+  gateway operator terminal (a config-declared shell on the host), code mode swapping the
+  model's tool surface for exec/wait, and the approval gate on unattended shell execution.
+- **A ported tool-grant predicate**, measured against the runtime over 3,354 cases — so
+  "is this tool granted, in this scope" is answered the way OpenClaw answers it rather than
+  by reading half the layers.
+- **Coverage is reported**: how much of the catalog reached no verdict, and why.
+- **The AI-BOM lists installed plugins** and names each skill's supplier.
+
+### Changed
+
+- **`--html` report.** Failed findings are now visually distinct from warnings. The card tint
+  used to carry *severity*, which meant a HIGH FAIL and a HIGH WARN differed by 4-6 of 255 in
+  each colour channel — a difference that existed in the stylesheet and not in anyone's eye —
+  leaving a small glyph as the only thing telling them apart. The tint now carries *status*;
+  severity keeps the pill and the rule colour it already had. Header prose is set in one reading
+  measure instead of centred at a width that broke its own sentences into four ragged lines;
+  subject headings outrank the card titles beneath them; and the jump list stays pinned while you
+  read a long list. The page now also prints correctly — printing from a machine set to dark mode
+  produced light ink on white paper, and severity pills printed white-on-white.
+- **`--pdf` report.** The PDF now carries the same mark as the HTML report and the favicon; it had
+  been drawing a provisional placeholder as hand-converted path operations, so the two exports of
+  one run showed different logos. Section headings no longer print on top of the finding beneath
+  them — measured, the heading band sat 0.08pt above the glyph tops of the first finding's title,
+  in every section on every page. And a failed finding is now visually distinct from a warning of
+  the same severity, as in the HTML report.
+
+### Security
+
+- **A confirmed zip-slip is no longer read as clean, anywhere.** One installed skill shipping
+  an archive that escapes its own directory used to score **96/A**: the status the check emits
+  carries FAIL's weight, but ~30 sites across eight modules compared against the bare literal
+  `"FAIL"`, so it matched none of them and every one failed toward "fine". On such a home the
+  score is now **79/C**, the CRITICAL exfiltration chain fires, and SARIF, the PDF, the text
+  report and the next-actions list all name the escaping member. Previously the skills block
+  printed `1 installed — 1 issue(s)` and then `1 clean` on consecutive lines, `--vet-all` and
+  `--full` crashed with an internal error before printing anything at all, and the
+  next-actions guide advised on a hardcoded temp-file path while saying nothing about the
+  escape beside it. The vocabulary is now one shared set, and a guard drives every consumer
+  with it, so a status added to the check later cannot silently fall through again.
+- **An archive member is judged by the name it declares, not by what happens to sit on disk
+  beside it.** Traversal detection resolved each member against the extraction root, following
+  symlinks that already existed there — so a skill holding an ordinary editable checkout next
+  to its own built wheel (`mypkg -> ../src/mypkg` beside `mypkg-1.0-py3-none-any.whl`) read
+  `DO-NOT-INSTALL` with "Archive path traversal detected", because a Python package's source
+  directory and its wheel's top-level package carry the same name by construction. Nothing is
+  extracted during a scan, so the only question is whether the declared name escapes, and that
+  is now answered from the name alone — on every supported platform at once, so Windows-shaped
+  `..\..\evil` and drive-qualified `C:/evil` are rejected wherever the scan runs. The trade is
+  stated rather than absorbed: a skill that ships both halves of an escape itself — a real
+  symlink out of its own directory plus a member that lands through it — is no longer caught
+  here, and is disclosed only when that symlink also leaves the OpenClaw home.
+- **A lower-severity warning can no longer bury a confirmed zip-slip.** The installed-skill
+  sweep reports its first match, and the archive-escape test was ranked below every ordinary
+  warning. A skill shipping an archive that escapes its own directory *and* one line of routine
+  caching code came back `CAUTION` for insecure temp-file handling, with "traversal" absent
+  from the whole report; the same skill without that one line came back `DO-NOT-INSTALL` with
+  the escaping member named. It now reports `DO-NOT-INSTALL` either way. A sweep that could not
+  read everything still takes precedence, so an incomplete scan is never upgraded into a
+  confident verdict, and a guard now holds the ordering so an escape-level finding cannot be
+  demoted by position again.
+- **`--exit-code` no longer returns 0 over a confirmed archive escape.** Both exit-code gates
+  compared a finding's status against the bare literal `"FAIL"`, and a confirmed zip-slip's
+  status is not that literal even though the rank tables weigh it as FAIL. So on a home whose
+  only installed skill ships an escape — a home whose own report row reads "DANGEROUS (archive
+  escapes its directory)" — the gate a CI pipeline reads came back green over a finding the
+  report had already named. Measured with controls on both sides: two homes carrying ordinary
+  FAILs return 1 and a safe home returns 0, unchanged, while the traversal home moves 0 to 1
+  and its benign twin stays 0.
+- **A `__file__` in the path is no longer proof the code came from inside the skill.** Reading
+  a file and handing it to `exec` was exempt from the hidden-payload finding whenever the path
+  expression mentioned `__file__` — a token an attacker writes as easily as an author does. Two
+  ways of keeping the token while reading elsewhere are now refused: an absolute segment passed
+  to a path join, which discards the anchor entirely, and `..` segments that climb past the
+  skill's own root. A skill decoding and running code from outside its folder used to come back
+  clean; it is now flagged. Paths that cancel themselves out, and segments whose value the
+  source does not state, keep the exemption — an expression the scan cannot resolve is never
+  turned into an escape.
+- **Two spellings of the same file read no longer get opposite verdicts.** `os.path.join` was
+  being treated as a content-hiding primitive, because membership in that set is tested by
+  attribute name and `"".join(parts)` genuinely is one. Inside the artifact-relative exemption
+  that misreading stopped the scan before the real `.decode()` beside it was ever examined, so
+  the canonical one-line `setup.py` idiom was convicted while the identical read written with a
+  `with` block was exempt. A path join is now skipped there, and which receivers count is
+  decided by the module's own import bindings — a name rebound anywhere in the file drops out
+  of the set, so `from os import path` followed by `path = ""` leaves the join reaching a
+  string. A receiver the scan cannot resolve keeps its convicting reading, because this
+  predicate widens an exemption and an undecidable case must not be the one that opens it.
+- **Never a clean verdict over ground that was not read.** Six separate fixes, one bug.
+- **`--vet-skill <folder>/SKILL.md` no longer recommends installing a bundle it declined to
+  read.** Pointing at a manifest scans the folder around it — unless that folder also holds
+  ordinary downloaded content, in which case the scan is held to the manifest so unrelated
+  personal files are never opened. That refusal still reported `INSTALL` and exit `0`: a
+  bundle whose `run.sh` exfiltrated credentials came back clean through the manifest, and
+  `DO-NOT-INSTALL` through the directory, with one inert `sample.pdf` as the only
+  difference. The refusal stands — no structural signal separates a downloads folder from a
+  minimal skill — but it now reports `CAUTION`, states on the plain terminal surface that
+  the siblings were not read, and exits `1`, so the documented `--vet … || fail` gate holds.
+  Measured cost, on 35,738 real ClawHub packages: 32 (0.09%) are held back, of which 11 are
+  clean under a full directory scan and now see a `CAUTION` they would not get by naming the
+  directory. That is the price of declining to read, and the finding says only what is true —
+  which files went unread — rather than classifying them. Re-tuning the suffix list to
+  recover those 11 was rejected: it is corpus-fitted tuning of exactly the kind the
+  real-fleet gate exists to stop.
+- **An unclosed code fence can no longer silence another file**, and a fence that hid
+  content is disclosed as hidden rather than read past.
+- **The output boundary is enforced on artifacts that leave the machine** — the operator's
+  home path is folded out of every SARIF field, the judge packet's target is bounded rather
+  than carrying attacker prose verbatim, and redaction happens at the journal boundary, not
+  only on the way to the screen.
+- **Install records are compared with themselves**, instead of one being elected the winner.
+- **A `--vet` conviction that rests on a paste or file-transfer host now says what that signal
+  cannot tell.** An upload command written to tell a human where to send a build log is the
+  same static shape as one the skill runs by itself — one command, one local file, one host,
+  one upload flag — and no static scan separates them. The verdict does not soften: both still
+  FAIL and the uninstall instruction still leads. The advice now names that limit, and for a
+  skill you authored or already trust it points at the flagged line so you can confirm who it
+  addresses and which file it sends. A critical finding with no such host carries no such
+  sentence.
+- **A plugin whose own code raises a signal no longer vets as `INSTALL`.** `--vet-plugin`
+  already detected remote or obfuscated `eval`, command injection and an attacker-influenced
+  require path, and already raised the verdict to `WARN` — but those signals were attached to
+  no axis, so the vet read the container as having found nothing and rendered `INSTALL`, Danger
+  `PASS` / `no malware signature or known-bad indicator`, exit `0`. A plugin whose entire
+  content is `fetch(url).then(r => r.text()).then(eval)` came back clean. They now land on the
+  Danger axis: measured across 61 real installed plugins, one that reported `INSTALL` over
+  three command-injection surfaces reads `CAUTION`. The entries are `WARN`, never `FAIL`, so a
+  lexical hit on a minified bundle still cannot decide the verdict on its own. The
+  credential-exfiltration shape this was found on still reads `INSTALL` — a missing rule rather
+  than a dropped verdict, and the rule drafted for it was withdrawn after it missed 30 of 40
+  evasions.
+- **The sandbox setting the tool tells you to apply now actually contains the agent.** Every
+  place that recommended `agents.defaults.sandbox.mode` = `non-main` — the sandbox check's
+  advice, the fix for the untrusted-ingress-plus-host-exec chain, and the machine-applicable
+  remediation carried in the JSON report and SARIF that a fixer applies without reading prose —
+  now names `all`. OpenClaw keeps the agent's own main session on the host under `non-main`,
+  the session an operator actually drives, so a user who followed the old advice got a report
+  saying the problem was gone while exec still ran on the host. `non-main` is still named, as
+  insufficient rather than as an option, so a reader who already set it learns why. The verdict
+  half is unchanged and stated plainly: choosing `non-main` unprompted still clears the
+  finding. Separately, the generated check catalog had started printing a line of Python source
+  where one chain's config key belonged; it now names the real key for both OpenClaw
+  generations.
+- **A sandbox set to `non-main` is no longer read as containment.** OpenClaw settles that mode
+  against the running session's key — each agent has its own main session, and that one runs
+  unsandboxed — so no config file decides it. Agents on that mode used to be subtracted from
+  the file-read reach as though they were sandboxed: a setup that confined the main scope and
+  left an agent on `non-main` came back clean on the lethal trifecta's sensitive-data leg, and
+  filesystem-write exposure warned where it now fails. Those scopes are kept, and the findings
+  that name them state that the confinement is undecided rather than asserting the reach is
+  real.
+- **A FAIL-weight status now survives every consumer, not the ones anyone thought to check.**
+  The earlier repair rewired the consumers it had enumerated by hand and missed about as many
+  again; in their place is a guard that drives every drivable callable in the package over two
+  finding lists differing only in a status the rank tables weigh as FAIL, and requires the
+  outputs to agree once the status string itself is folded away. On the tree before the fix it
+  named 21 consumers across six modules, 20 of them real. The report headline said "Nothing
+  failed outright" over a confirmed zip-slip; the JSON report gave a high-severity count of 0
+  and no blast radius; the PDF printed "0 FAIL, 7 WARN" with the finding's own entry missing
+  while the escape string appeared elsewhere, which is why a presence-only test stayed green;
+  SARIF carried a second counter beside the sound one; and `--monitor` said nothing when an
+  installed skill acquired a confirmed archive escape. Two classes the guard cannot reach are
+  closed by their own layers: a status-keyed table that painted a confirmed escape the grey
+  this palette reserves for "could not assess", and the raw status reaching text a person
+  reads.
+- **The published check catalogue no longer prints Python source where advice belongs.** Each
+  check's Why and Fix text is generated from the expression in its source, and anything that
+  was not a plain string fell back to unparsing the code — so the shipped catalogue carried
+  `str(len(fired))`, two `'; '.join(...)` calls and two more inside f-string placeholders, in
+  exactly the two sections a reader consults for what to do. This is the second instance of the
+  class, and the first one is why: it had been patched by special-casing the single callee that
+  caused it, so a different call sailed through. The rule changed instead — an expression
+  containing a call now renders as an ellipsis, while a bare name is deliberately kept, because
+  in the schematic chain lines a name is what tells a reader which position it fills. A guard
+  renders the whole catalogue and rejects any user-facing line that reads like source, with
+  controls in both directions: the three lines that really shipped must be convicted, and
+  ordinary advice must not.
+- **An archive member named like a Windows drive is still refused, and the finding now says why
+  that cannot be softened.** A member such as `D:data.tar` at archive root is convicted, which
+  can catch a plausible ordinary filename. A narrowing was written for it and withdrawn on
+  measurement: a drive-relative name escapes whenever its drive differs from the extraction
+  root's, and the root's drive is not knowable from the member name — so the change would have
+  traded a plausible false positive for a proven false negative on `D:evil`. The limit is
+  disclosed in the advice rather than left for the reader to discover, and the two extractor
+  behaviours that cut against each other are recorded beside the check.
+- **The credential surface map described the shell running the audit, not the setup being
+  audited.** It read the auditing process's own environment, so a clean home with no
+  credentials anywhere reported `env reachable=yes` on the strength of variables belonging to
+  whoever ran the check — and the secret-shaped variable NAMES of that shell travelled into
+  `--json` and into the report's credential-surface block, so pasting a report into an issue
+  published them. A tool that states a falsehood about its own subject is worse than one that
+  crashes. The source is now the subject's persistent artifacts — the systemd unit's
+  `Environment=`/`EnvironmentFile=` and the global dotenv files — the same ones
+  `collector.persistent_env_evidence` reads, which refuses `os.environ` for this exact reason
+  and says so at length. Where no such artifact could be read, the entry says that instead of
+  reporting an absence it never established.
+
+### Fixed
+
+- **B41 called the gateway token a provider credential.** The count folded the gateway token
+  in with the provider profiles while the noun beside it stayed "provider credential", and the
+  parenthetical listing the providers was interpolated unconditionally — so a home with a
+  gateway token and no `auth.profiles` read `1 provider credential(s) (providers: ) + gateway
+  token`, an empty parenthetical over a count on the wrong noun, and "all of them" for a single
+  credential. Two profiles plus a token reported three providers. Both branches are corrected;
+  the PASS branch carried the identical miscount under the vaguer word "credential profile(s)".
+  **This changes B41's `detail` text, and a suppression fingerprint is a hash of it — an
+  existing `.clawseccheckignore` entry written against B41 will no longer match and the finding
+  returns.** Re-suppress it from the new output if it was deliberate.
+- **The "share your grade" step offered a command that cannot carry the grade.** A run that had
+  just earned a letter told the user to run `--badge grade.svg`; that command opens a fresh,
+  ungraded audit, so the badge it writes reads "no grade yet". An export never honours `--full`
+  on its own — doing so would mark sweep phases as having run when they did not — so it has to
+  ride the run that genuinely completed the five layers. The step now says so, and the command
+  it prints stays runnable as written.
+- **The report header showed a provisional mark, and an ungraded run showed a question mark.**
+  The header carried a logo marked provisional in the brand module, smaller than the `?` beside
+  it; the ungraded branch drew the same box around that question mark rather than naming what
+  the run actually reached.
+- 235 fixes. The recurring family — at least 32 of them by commit subject — is a verdict
+  that asserted more than the run observed: a truncated log read reported as the whole
+  history, a settings digest stored for a file the run never opened, a capability reported
+  as absent because only one of two policy layers was consulted, a crashed content check
+  reading as a clean axis.
+- Grounding guards that could switch themselves off on an OpenClaw upgrade and report a
+  missing install as the cause now fail, naming the symbol to re-locate.
+- **The bundled-JavaScript warning names the signal that actually fired.** A skill whose only
+  JavaScript loads a native addon used to be told to inspect a `child_process` call that is not
+  in the file — one fixed piece of advice stood for three different signals, and that same
+  wording was the question put in the judge packet. The finding's headline and its advice are
+  now built from the signals that fired, and the packet names the specific one only when a
+  single skill raised it.
+- **A tagged release attaches its signed digest even when the registry upload reports a
+  failure.** ClawHub's publish command has a measured false-failure mode — it can upload a
+  version successfully and still exit non-zero saying that version already exists — and release
+  creation sat downstream of that exit code, so v3.59.0 through v3.61.0 shipped without
+  `SHA256SUMS.txt.bundle` and could not be checked with the `cosign verify-blob` command the
+  README and User guide document. The signature describes the tagged tree, not the registry, so
+  it now lands whatever the registry replied.
+
+### Changed
+
+- `checks.py`'s successor, the monitor, and the scoring path continue to split into
+  per-topic and per-dimension modules; audit output is byte-identical across every move.
+
 ## [3.61.0] — 2026-08-06
 
 The report grew a shape and a PDF; five separate fixes turned out to be one bug — the tool
@@ -77,6 +426,25 @@ closed.
 
 ### Breaking (JSON consumers)
 
+- **A `--vet-skill` exit code moved from `0` to `1` for one real population.** Filed under
+  Security below, where it belongs — it fails closed, not open — but named here because a CI
+  gate is what notices: pointing at a `SKILL.md` inside a folder that also holds ordinary
+  downloaded content now reports `CAUTION` and exits `1` instead of reporting `INSTALL` and
+  exiting `0`. Measured on 35,738 real ClawHub packages: 32 are held back this way, of which
+  11 are clean under a full directory scan. Naming the directory instead of the manifest
+  scans it fully and is unaffected.
+- **`--vet --json`'s `verdict` no longer uses the same words, and that one fails open.** The
+  value vocabulary changed with the verdict itself: `DANGEROUS` -> `DO-NOT-INSTALL`,
+  `SUSPICIOUS` -> `CAUTION`, `NO KNOWN ISSUE` -> `INSTALL`, and an `UNKNOWN` result now reads
+  as `CAUTION` rather than `UNKNOWN`. A removed key raises `KeyError` and you find out; a
+  renamed VALUE does not, so a gate written as `if payload["verdict"] == "DANGEROUS": block()`
+  silently stops matching and stops blocking. If you gate CI on this field, update the words
+  before upgrading — or key off `axes[].status`, which still uses `PASS`/`WARN`/`FAIL`/
+  `UNKNOWN`/`N/A` and did not move.
+- **`--vet --json` no longer carries top-level `grade` or `score`.** This is the machine-side
+  of "`--vet` answers a decision, not a letter" above; the payload's top-level keys are now
+  exactly `tool`, `version`, `mode`, `target`, `target_type`, `verdict`, `axes`, `findings`,
+  `unmapped`. `docs/OUTPUT_SCHEMA.md` section 11 states why the two will not come back.
 - **`inventory.system` is gone.** The `--json` subject grouping went from 5 keys to 8:
   `system` split into `openclaw` + `host`, and `plugins` + `logs` are new. Top-level
   field names are unchanged and `inventory` itself is still present — only its subject

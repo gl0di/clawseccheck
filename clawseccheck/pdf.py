@@ -37,16 +37,38 @@ Usage::
 """
 from __future__ import annotations
 
+import base64
+import struct
 import zlib
 
-from .brand import BRAND_RED, GRADE_HEX, SEVERITY, WORDMARK, grade_hex
-from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, UNKNOWN, WARN, Finding
+from .brand import (
+    BRAND_RED,
+    FAVICON_DATA_URI,
+    GRADE_HEX,
+    SEVERITY,
+    WORDMARK,
+    grade_hex,
+)
+from .catalog import (
+    CRITICAL,
+    FAIL_WEIGHT_STATUSES,
+    HIGH,
+    LOW,
+    MEDIUM,
+    PASS,
+    UNKNOWN,
+    WARN,
+    Finding,
+)
+from .layers import LAYER_ORDER, describe_layer
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
-    _coverage_lines, _group_issues_by_subject, _mcp_inventory_lines,
+    _coverage_lines, _degraded_incomplete_clause, _group_issues_by_subject, _mcp_inventory_lines,
     _plugins_inventory_lines, _risk_chain_lines, _sanitize, _second_opinion_item_lines,
     _second_opinion_lines,
-    _SEV_ORDER, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
+    _SEV_ORDER, _UNGRADED_CAP_TAIL, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
+    display_status,
+    issue_population_line,
     _worth_a_glance_lines, build_inventory,
 )
 from .scoring import ScoreResult
@@ -110,6 +132,15 @@ def _pdf_literal(s: str) -> str:
     """Escape a string for a PDF ``(...)`` literal (backslash and parens only — the
     input is already ASCII-safe, so no other byte needs escaping)."""
     return s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _tint(hexcolor: str, frac: float) -> str:
+    """*hexcolor* mixed *frac* of the way over white — the paper equivalent of the HTML
+    report's ``color-mix(in srgb, var(--sev) N%, var(--card))``, so a failed finding is
+    tinted on both surfaces from the same severity colour and no new hex enters the
+    palette."""
+    r, g, b = (int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02x%02x%02x" % tuple(round(255 + (c - 255) * frac) for c in (r, g, b))
 
 
 def _hex_to_rgb01(hexcolor: str) -> tuple[float, float, float]:
@@ -228,6 +259,10 @@ class _PageFlow:
         self._font_helv = font_helv
         self._font_bold = font_bold
         self._page_ops: list[str] = []
+        # The brand mark, as a PDF image XObject. Created on first use and then shared by
+        # every page's /Resources — it is drawn only in the page-one header today, but a
+        # per-page number would mean re-embedding the same 7 KB for each page.
+        self._logo_xobj: int | None = None
         self.pages: list[int] = []  # finished Page object numbers, in order
         self.y = _TOP_Y
         self.page_epoch = 0  # bumped on every new page — lets a caller detect a block
@@ -256,7 +291,9 @@ class _PageFlow:
         page_num = self._doc.add_object(
             (
                 f"<< /Type /Page /Parent {self._doc.pages_parent} 0 R "
-                f"/Resources << /Font << /F1 {self._font_helv} 0 R /F2 {self._font_bold} 0 R >> >> "
+                f"/Resources << /Font << /F1 {self._font_helv} 0 R /F2 {self._font_bold} 0 R >>"
+                + (f" /XObject << /Im1 {self._logo_xobj} 0 R >>" if self._logo_xobj else "")
+                + " >> "
                 f"/MediaBox [0 0 {_PAGE_W:g} {_PAGE_H:g}] /Contents {content_num} 0 R >>"
             ).encode("ascii")
         )
@@ -272,6 +309,24 @@ class _PageFlow:
     def rect(self, x: float, y: float, w: float, h: float, hexcolor: str) -> None:
         r, g, b = _hex_to_rgb01(hexcolor)
         self._page_ops.append(f"{r:.3f} {g:.3f} {b:.3f} rg\n{x:.2f} {y:.2f} {w:.2f} {h:.2f} re f")
+
+    def mark(self) -> int:
+        """Index into the current page's op list, for `rect_behind`."""
+        return len(self._page_ops)
+
+    def rect_behind(self, at: int, x: float, y: float, w: float, h: float,
+                    hexcolor: str) -> None:
+        """Draw a rect UNDER content already emitted, by splicing it in at *at*.
+
+        PDF paints in stream order, so a block's background cannot simply be appended —
+        it would cover the text. It also cannot be drawn up front, because the block's
+        height is only known once its lines have been laid out and wrapped. Recording the
+        position with `mark()` and splicing here is the one way to get both. Callers must
+        check `page_epoch` first: a block that straddled a page break left its `at` in a
+        page that has already been serialized."""
+        r, g, b = _hex_to_rgb01(hexcolor)
+        self._page_ops.insert(
+            at, f"{r:.3f} {g:.3f} {b:.3f} rg\n{x:.2f} {y:.2f} {w:.2f} {h:.2f} re f")
 
     def line(self, text: str, *, size: float = 10, bold: bool = False,
               color: str | None = None, indent: float = 0.0, gap_before: float = 0.0,
@@ -311,6 +366,29 @@ class _PageFlow:
         nothing leaks into the text that follows."""
         self._page_ops.append(op)
 
+    def draw_logo(self, x: float, y: float, size: float) -> None:
+        """Draw the brand mark in a *size*-point square whose bottom-left is (x, y).
+
+        The mark is `brand.FAVICON_DATA_URI` — the SAME raster the HTML report and the
+        favicon use. It used to be a hand-redrawn copy of `brand.LOGO_SVG`, which brand.py
+        labels PROVISIONAL, so the PDF and the HTML export of one run showed two different
+        logos. Colour is the image's own; the alpha channel rides as an /SMask so the mark
+        keeps its shape over the BRAND_RED band instead of arriving in a box."""
+        if self._logo_xobj is None:
+            w, h, rgb, alpha = _png_rgba(base64.b64decode(FAVICON_DATA_URI.split(",", 1)[1]))
+            def _image(data: bytes, colorspace: str, extra: str = "") -> int:
+                comp = zlib.compress(data, 9)
+                head = (
+                    f"<< /Type /XObject /Subtype /Image /Width {w} /Height {h} "
+                    f"/ColorSpace /{colorspace} /BitsPerComponent 8 /Filter /FlateDecode"
+                    f"{extra} /Length {len(comp)} >>\nstream\n"
+                ).encode("ascii")
+                return self._doc.add_object(head + comp + b"\nendstream")
+            smask = _image(alpha, "DeviceGray")
+            self._logo_xobj = _image(rgb, "DeviceRGB", f" /SMask {smask} 0 R")
+        self._page_ops.append(
+            f"q {size:.2f} 0 0 {size:.2f} {x:.2f} {y:.2f} cm /Im1 Do Q")
+
     def text_abs(self, x: float, y: float, text: str, size: float, *,
                  bold: bool = False, rgb: tuple = (0.0, 0.0, 0.0)) -> None:
         """Draw one line of text at an ABSOLUTE (x, y) baseline — no wrapping, no y-advance,
@@ -326,61 +404,86 @@ class _PageFlow:
 
 
 # ---------------------------------------------------------------------------
-# Vector drawing — the brand mark as native PDF path ops, plus the branded header,
-# severity chips and per-subject summary table. base-14 forbids embedding a font, but
-# PDF draws vector paths itself, so the logo is the SAME geometry as brand.LOGO_SVG,
-# rendered crisp at any size (no raster, no external asset — Golden Rule #1).
+# Drawing — the branded header, the severity chips and the per-subject summary table.
+# The mark itself is a raster (`_PageFlow.draw_logo`): it used to be drawn here as path
+# ops replicating brand.LOGO_SVG's geometry, which meant the same mark existed in two
+# places and only one of them was ever updated. Still no external asset — the image is
+# inlined in brand.py, so Golden Rule #1 holds either way.
 # ---------------------------------------------------------------------------
-_KAPPA = 0.5522847498  # cubic-bezier control-point factor for a quarter-circle arc
 
-# status -> swatch colour for the subject-summary table (grade ramp; UNKNOWN neutral grey)
-_STATUS_HEX = {FAIL: GRADE_HEX["F"], WARN: GRADE_HEX["C"], PASS: GRADE_HEX["B"], UNKNOWN: "#9f9f9f"}
-
-
-def _circle_path(cx: float, cy: float, r: float) -> str:
-    """Four cubic-bezier arcs approximating a full circle (PDF has no arc primitive).
-    Path-construction ops only (no paint op) — the caller appends ``S`` (stroke) or
-    ``f`` (fill)."""
-    k = _KAPPA * r
-    return (f"{cx + r:.2f} {cy:.2f} m "
-            f"{cx + r:.2f} {cy + k:.2f} {cx + k:.2f} {cy + r:.2f} {cx:.2f} {cy + r:.2f} c "
-            f"{cx - k:.2f} {cy + r:.2f} {cx - r:.2f} {cy + k:.2f} {cx - r:.2f} {cy:.2f} c "
-            f"{cx - r:.2f} {cy - k:.2f} {cx - k:.2f} {cy - r:.2f} {cx:.2f} {cy - r:.2f} c "
-            f"{cx + k:.2f} {cy - r:.2f} {cx + r:.2f} {cy - k:.2f} {cx + r:.2f} {cy:.2f} c")
+# status -> swatch colour for the subject-summary table (grade ramp; UNKNOWN neutral grey).
+# B-751: SKILL_ARCHIVE_PATH_TRAVERSAL (a confirmed zip-slip) is FAIL-weight but isn't the
+# literal "FAIL", so a plain literal dict left it in the ``.get(status, "#9f9f9f")``
+# fallback below — the same grey as UNKNOWN. Built from the shared set so every
+# FAIL-weight status gets FAIL's own colour, never an invented one.
+_STATUS_HEX = {status: GRADE_HEX["F"] for status in FAIL_WEIGHT_STATUSES}
+_STATUS_HEX.update({WARN: GRADE_HEX["C"], PASS: GRADE_HEX["B"], UNKNOWN: "#9f9f9f"})
 
 
-def _quad_to_cubic_path(p0, ctrl, p1) -> str:
-    """One quadratic Bezier (LOGO_SVG's ``Q`` claw arcs) exactly converted to the cubic
-    ``c`` PDF operator: cp1 = p0 + 2/3(ctrl-p0), cp2 = p1 + 2/3(ctrl-p1). Returns
-    ``m ... c`` (no paint op)."""
-    x0, y0 = p0
-    cx, cy = ctrl
-    x1, y1 = p1
-    c1x, c1y = x0 + 2.0 / 3.0 * (cx - x0), y0 + 2.0 / 3.0 * (cy - y0)
-    c2x, c2y = x1 + 2.0 / 3.0 * (cx - x1), y1 + 2.0 / 3.0 * (cy - y1)
-    return (f"{x0:.2f} {y0:.2f} m "
-            f"{c1x:.2f} {c1y:.2f} {c2x:.2f} {c2y:.2f} {x1:.2f} {y1:.2f} c")
+def _png_rgba(data: bytes) -> tuple:
+    """Decode an 8-bit RGBA, non-interlaced PNG to ``(w, h, rgb_bytes, alpha_bytes)``.
 
-
-def _logo_ops(x0: float, y0: float, size: float, rgb=(1.0, 1.0, 1.0)) -> str:
-    """`brand.LOGO_SVG` rendered as native PDF path ops, in *rgb*, inside a *size*-point
-    box whose bottom-left is (x0, y0): a ring, two claw arcs and a centre dot — the same
-    geometry as the SVG, drawn white for the BRAND_RED header band. SVG is y-down, PDF is
-    y-up, so every point is flipped through (64 - sy). Wrapped in q/Q so its colour and
-    line-width never leak into later content."""
-    s = size / 64.0
-
-    def _p(sx, sy):
-        return (x0 + sx * s, y0 + (64.0 - sy) * s)
-
-    r, g, b = rgb
-    out = [f"q {r:.3f} {g:.3f} {b:.3f} RG {r:.3f} {g:.3f} {b:.3f} rg 1 J 1 j"]
-    out.append(f"{2.6 * s:.2f} w " + _circle_path(*_p(32, 32), 29.0 * s) + " S")
-    out.append(f"{4.0 * s:.2f} w " + _quad_to_cubic_path(_p(20, 24), _p(13, 32), _p(20, 40)) + " S")
-    out.append(_quad_to_cubic_path(_p(44, 24), _p(51, 32), _p(44, 40)) + " S")
-    out.append(_circle_path(*_p(32, 32), 5.0 * s) + " f")
-    out.append("Q")
-    return "\n".join(out)
+    Stdlib only (`zlib` plus the filter reconstruction below) because the project takes no
+    runtime dependency, and PDF cannot consume a PNG directly: it wants raw samples, and
+    the alpha channel has to travel separately as an /SMask. Deliberately narrow — it
+    accepts exactly the shape `brand.FAVICON_DATA_URI` is (checked, not assumed) and
+    raises on anything else rather than guessing, since a silently mis-decoded logo would
+    render as noise on every page-one header we ship.
+    """
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    pos, idat, ihdr = 8, [], None
+    while pos < len(data):
+        ln = struct.unpack(">I", data[pos:pos + 4])[0]
+        typ = data[pos + 4:pos + 8]
+        if typ == b"IHDR":
+            ihdr = struct.unpack(">IIBBBBB", data[pos + 8:pos + 8 + ln])
+        elif typ == b"IDAT":
+            idat.append(data[pos + 8:pos + 8 + ln])
+        elif typ == b"IEND":
+            break
+        pos += 12 + ln
+    if ihdr is None:
+        raise ValueError("PNG has no IHDR")
+    w, h, depth, ctype, _comp, _filt, interlace = ihdr
+    if (depth, ctype, interlace) != (8, 6, 0):
+        raise ValueError(f"unsupported PNG: depth={depth} colortype={ctype} interlace={interlace}")
+    bpp, stride = 4, w * 4
+    raw = zlib.decompress(b"".join(idat))
+    flat = bytearray(h * stride)
+    prev = bytearray(stride)
+    p = 0
+    for row in range(h):
+        ft = raw[p]
+        cur = bytearray(raw[p + 1:p + 1 + stride])
+        p += 1 + stride
+        if ft == 1:                                     # Sub
+            for i in range(bpp, stride):
+                cur[i] = (cur[i] + cur[i - bpp]) & 0xFF
+        elif ft == 2:                                   # Up
+            for i in range(stride):
+                cur[i] = (cur[i] + prev[i]) & 0xFF
+        elif ft == 3:                                   # Average
+            for i in range(stride):
+                left = cur[i - bpp] if i >= bpp else 0
+                cur[i] = (cur[i] + ((left + prev[i]) >> 1)) & 0xFF
+        elif ft == 4:                                   # Paeth
+            for i in range(stride):
+                a = cur[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                cur[i] = (cur[i] + pr) & 0xFF
+        elif ft != 0:
+            raise ValueError(f"bad PNG filter {ft}")
+        flat[row * stride:(row + 1) * stride] = cur
+        prev = cur
+    rgb, alpha = bytearray(w * h * 3), bytearray(w * h)
+    for i in range(w * h):
+        rgb[i * 3:i * 3 + 3] = flat[i * 4:i * 4 + 3]
+        alpha[i] = flat[i * 4 + 3]
+    return w, h, bytes(rgb), bytes(alpha)
 
 
 def _draw_header(flow: "_PageFlow", version: str) -> None:
@@ -391,7 +494,7 @@ def _draw_header(flow: "_PageFlow", version: str) -> None:
     band_h = 74.0
     flow.rect(0.0, _PAGE_H - band_h, _PAGE_W, band_h, BRAND_RED)
     logo_sz = 36.0
-    flow.raw(_logo_ops(_MARGIN, _PAGE_H - band_h / 2.0 - logo_sz / 2.0, logo_sz, (1.0, 1.0, 1.0)))
+    flow.draw_logo(_MARGIN, _PAGE_H - band_h / 2.0 - logo_sz / 2.0, logo_sz)
     tx = _MARGIN + logo_sz + 14.0
     flow.text_abs(tx, _PAGE_H - 34.0, WORDMARK, 19, bold=True, rgb=(1.0, 1.0, 1.0))
     flow.text_abs(tx, _PAGE_H - 50.0, "Security Audit Report", 10.5, rgb=(1.0, 0.86, 0.83))
@@ -417,7 +520,9 @@ def _draw_chips(flow: "_PageFlow", sev_counts: dict) -> None:
         flow.rect(x, y - 15.0, w, 15.0, style.hex if style else "#999999")
         flow.text_abs(x + 7.0, y - 11.0, text, 9, bold=True, rgb=(1.0, 1.0, 1.0))
         x += w + 6.0
-    flow.y = y - 15.0 - 8.0
+    # Same baseline arithmetic as the section header: 8.0 left 1.88pt between the chips
+    # and the population sentence under them.
+    flow.y = y - 15.0 - 14.0
 
 
 def _draw_subject_summary(flow: "_PageFlow", rows) -> None:
@@ -429,7 +534,10 @@ def _draw_subject_summary(flow: "_PageFlow", rows) -> None:
         y = flow.y
         flow.rect(_MARGIN, y - 10.0, 7.0, 7.0, _STATUS_HEX.get(status, "#9f9f9f"))
         flow.text_abs(_MARGIN + 13.0, y - 9.0, label, 10)
-        right = f"{count}    {status}"
+        # B-755: the swatch colour comes from a table built over FAIL_WEIGHT_STATUSES and
+        # was already right; the WORD beside it was the raw field, so the document read
+        # "2 issue(s)    SKILL_ARCHIVE_PATH_TRAVERSAL" to a human.
+        right = f"{count}    {display_status(status)}"
         flow.text_abs(_PAGE_W - _MARGIN - _text_width(right, 9), y - 9.0, right,
                       9, rgb=(0.42, 0.42, 0.42))
         flow.y = y - 16.0
@@ -444,7 +552,12 @@ def _draw_section_header(flow: "_PageFlow", text: str) -> None:
     flow.rect(_MARGIN, y - 17.0, _CONTENT_W, 19.0, "#f4efe9")
     flow.rect(_MARGIN, y - 17.0, 3.0, 19.0, BRAND_RED)
     flow.text_abs(_MARGIN + 11.0, y - 13.0, text, 12, bold=True, rgb=(0.16, 0.16, 0.16))
-    flow.y = y - 17.0 - 8.0
+    # `flow.y` is a BASELINE, so the drop below the band has to clear the next line's
+    # ascender before any visible gap begins. At 8.0 it cleared exactly the ascender of
+    # the 11pt finding title that follows and nothing more: measured on a real report, the
+    # band's bottom edge sat 0.05pt above the glyph tops, i.e. the heading and the first
+    # finding touched — on every section, on every page. 16.0 leaves ~8pt of daylight.
+    flow.y = y - 17.0 - 16.0
 
 
 def _draw_subject_header(flow: "_PageFlow", label: str, n: int) -> None:
@@ -485,13 +598,16 @@ def _pipeline_block(flow: "_PageFlow", title: str, lines) -> None:
 def _finding_block(flow: _PageFlow, f: Finding) -> None:
     sev_style = SEVERITY.get(f.severity)
     sev_hex = sev_style.hex if sev_style else "#999999"
-    status_word = "FAIL" if f.status == FAIL else "WARN"
+    # B-751: a confirmed zip-slip is FAIL-weight, not the literal "FAIL", so it was
+    # labelled WARN here once the filter below let it through.
+    status_word = "FAIL" if f.status in FAIL_WEIGHT_STATUSES else "WARN"
     # Keep a finding's title (and the start of its detail) from being orphaned alone at
     # the very bottom of a page — everything past that still breaks losslessly line by
     # line via `_PageFlow.line`'s own `ensure_space`.
     flow.ensure_space(3 * 12 * 1.35)
     bar_y_top = flow.y
     start_epoch = flow.page_epoch
+    bg_at = flow.mark()
     flow.line(f"[{status_word}] {f.id}: {_sanitize(f.title)}", size=11, bold=True, gap_after=1.0)
     flow.line(f"Severity: {f.severity}", size=9, color=sev_hex, gap_after=2.0)
     if f.detail:
@@ -503,7 +619,22 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
     # text content itself is never affected either way (see `_PageFlow.line`'s own
     # per-line `ensure_space`, which is what actually guarantees nothing is lost).
     if flow.page_epoch == start_epoch:
-        flow.rect(_MARGIN - 8, flow.y, 2.2, bar_y_top - flow.y, sev_hex)
+        # Status has to carry its own weight, not ride on a word. The accent bar takes its
+        # colour from SEVERITY, so a HIGH FAIL and a HIGH WARN were the same block with a
+        # different first word — the same defect measured and fixed in the HTML report,
+        # and leaving it here would put the two artifacts of one run back out of step.
+        # A failure is tinted and its rule is thicker; a warning keeps the plain page.
+        is_fail = f.status in FAIL_WEIGHT_STATUSES
+        if is_fail:
+            # `bar_y_top` and `flow.y` are BASELINES, so the tint has to reach above the
+            # first line's ascender and below the last line's descender to look like a
+            # panel rather than a band clipped through the text. The top padding is also
+            # what separates consecutive failures: at more than the 6pt inter-finding
+            # spacer, neighbouring tints overlap and a run of failures reads as one
+            # undivided smear instead of several findings.
+            flow.rect_behind(bg_at, _MARGIN - 10, flow.y + 7.5, _CONTENT_W + 12.0,
+                             bar_y_top - flow.y + 2.0, _tint(sev_hex, 0.12))
+        flow.rect(_MARGIN - 8, flow.y, 4.0 if is_fail else 2.2, bar_y_top - flow.y, sev_hex)
     flow.spacer(6.0)
 
 
@@ -530,8 +661,15 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
 
     flow = _PageFlow(doc, font_helv, font_bold)
 
-    issues = [f for f in findings if f.status in (FAIL, WARN) and not getattr(f, "suppressed", False)]
-    issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.status != FAIL))
+    # B-751: this bare tuple dropped SKILL_ARCHIVE_PATH_TRAVERSAL, so a confirmed escape
+    # was absent from the PDF entirely — the word "traversal" did not appear in the file.
+    issues = [f for f in findings
+              if (f.status in FAIL_WEIGHT_STATUSES or f.status == WARN)
+              and not getattr(f, "suppressed", False)]
+    # B-755: a FAIL-weight status that is not the literal sorted BELOW every real FAIL of
+    # the same severity, which pushed a confirmed escape off the end of the document.
+    issues.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9),
+                               f.status not in FAIL_WEIGHT_STATUSES))
 
     # Lazy import: __version__ is assigned in __init__.py AFTER `from .pdf import
     # render_pdf` runs, so a module-level import here would be a circular-import
@@ -540,46 +678,109 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
 
     # ── Branded header band (page 1) + grade badge ───────────────────────────────
     _draw_header(flow, _pkg_version)
-    grade_color = grade_hex(score.grade)
     badge_top = flow.y
-    badge_s = 54.0
-    flow.rect(_MARGIN, badge_top - badge_s, badge_s, badge_s, grade_color)
-    # Centre the grade LETTER inside the badge — the old layout drew it a size above the
-    # box (baseline maths put a white glyph on the white page: invisible). Cap height is
-    # ~0.70 of the point size for Helvetica, so this centres it vertically in the square.
-    g_size = 30.0
-    g_w = _text_width(score.grade, g_size, bold=True)
-    flow.text_abs(_MARGIN + (badge_s - g_w) / 2.0, badge_top - badge_s + (badge_s - g_size * 0.70) / 2.0,
-                  score.grade, g_size, bold=True, rgb=(1.0, 1.0, 1.0))
-    tx = _MARGIN + badge_s + 16.0
-    flow.text_abs(tx, badge_top - 15.0, f"Security score {score.score}/100", 13, bold=True)
-    bar_y = badge_top - 27.0
-    flow.rect(tx, bar_y - 7.0, 210.0, 7.0, "#e6e6e6")
-    pct = max(0, min(100, int(score.score)))
-    if pct:
-        flow.rect(tx, bar_y - 7.0, 210.0 * pct / 100.0, 7.0, grade_color)
-    flow.text_abs(tx, badge_top - 46.0, f"Lethal Trifecta {_trifecta_ratio(findings)}",
-                  9.5, rgb=(0.40, 0.40, 0.40))
-    flow.y = badge_top - badge_s - 12.0
+    if score.graded:
+        grade_color = grade_hex(score.grade)
+        badge_s = 54.0
+        flow.rect(_MARGIN, badge_top - badge_s, badge_s, badge_s, grade_color)
+        # Centre the grade LETTER inside the badge — the old layout drew it a size above the
+        # box (baseline maths put a white glyph on the white page: invisible). Cap height is
+        # ~0.70 of the point size for Helvetica, so this centres it vertically in the square.
+        g_size = 30.0
+        g_w = _text_width(score.grade, g_size, bold=True)
+        flow.text_abs(_MARGIN + (badge_s - g_w) / 2.0, badge_top - badge_s + (badge_s - g_size * 0.70) / 2.0,
+                      score.grade, g_size, bold=True, rgb=(1.0, 1.0, 1.0))
+        tx = _MARGIN + badge_s + 16.0
+        flow.text_abs(tx, badge_top - 15.0, f"Security score {score.score}/100", 13, bold=True)
+        bar_y = badge_top - 27.0
+        flow.rect(tx, bar_y - 7.0, 210.0, 7.0, "#e6e6e6")
+        pct = max(0, min(100, int(score.score)))
+        if pct:
+            flow.rect(tx, bar_y - 7.0, 210.0 * pct / 100.0, 7.0, grade_color)
+        flow.text_abs(tx, badge_top - 46.0, f"Lethal Trifecta {_trifecta_ratio(findings)}",
+                      9.5, rgb=(0.40, 0.40, 0.40))
+        flow.y = badge_top - badge_s - 12.0
+    else:
+        # C-423: `graded is False` means no consumer of this ScoreResult may ever print a
+        # letter or a number for this run (see ScoreResult.graded's own docstring, Rule
+        # 1) — so the badge is replaced with the missing-layers sentence instead of a
+        # grade square. Layer/status wording comes ONLY from layers.describe_layer, never
+        # a phrase written here (the one sentence that must not vary by surface).
+        n_missing = len(score.missing_layers)
+        flow.line(
+            f"No grade yet - {n_missing} of {len(LAYER_ORDER)} layers did not run",
+            size=13, bold=True,
+        )
+        missing_text = ", ".join(
+            describe_layer(layer, status) for layer, status in score.missing_layers
+        )
+        if missing_text:
+            flow.wrapped(missing_text, size=9.5, color="#666666")
+        flow.spacer(4.0)
+
+    # C-423: the honesty invariant applies even on a graded run — a layer that ran
+    # without exhausting its subject says so regardless of whether the run earned a
+    # letter. `not_checked` is already plain-English, ledger-ordered, de-duplicated
+    # prose (layers.LayerLedger.not_checked, via scoring.compute) — joined here, not
+    # reworded.
+    if score.not_checked:
+        flow.wrapped(
+            f"Not fully covered: {'; '.join(score.not_checked)}",
+            size=9.5, color="#b94a48",
+        )
 
     degraded_n = getattr(score, "degraded_count", 0)
     if degraded_n:
         plural = "check" if degraded_n == 1 else "checks"
+        # B-532: the count and its cause are printed on every run — a degraded check is
+        # a fact about coverage, not about grading, and suppressing it here would trade a
+        # wrong word for a lost fact. Only the trailing clause is grade-aware, and it
+        # comes from report._degraded_incomplete_clause so this renderer cannot word it
+        # for itself (same single-source discipline as _cap_cascade above; see C-423 /
+        # B-531 below for what per-renderer wording already cost us once).
         flow.wrapped(
             f"Incomplete: {degraded_n} {plural} could not reach a reliable verdict this run "
-            "(crashed, timed out, or hit unreadable/corrupted input) - this grade is incomplete.",
+            "(crashed, timed out, or hit unreadable/corrupted input) - "
+            + _degraded_incomplete_clause(score),
             size=9.5, color="#b94a48",
         )
+    # C-423 / B-531: a cap explanation for a number that is not printed is noise, and
+    # worse than noise here — `Capped from 50` IS a score, on a run whose whole point is
+    # that no score was earned. render_report (report.py) and the HTML renderer have
+    # carried this gate since C-423; the PDF was the one site that missed it, which is
+    # precisely the failure mode E-077's design note rejected when it refused to let each
+    # renderer decide for itself whether a number may be shown.
+    #
+    # B-600: skipping the NUMBER is right; skipping the FACT was the same over-correction
+    # the HTML renderer made. An ungraded run left this page with no trace that anything
+    # had capped the score at all — including a submitted VULNERABLE live-test verdict,
+    # which C-423 calls the most serious thing this tool can report. The PDF is the copy
+    # that travels furthest from whoever ran it, so it is the worst place to lose it.
+    # The sentence is `report._UNGRADED_CAP_TAIL`, shared with the card and the text
+    # report, so this renderer still cannot word it for itself.
     primary, extras = _cap_cascade(score)
     if primary is not None:
         reason = _cap_primary_reason_text(primary, score)
         also = _cap_also_clause(extras)
-        flow.wrapped(f"Capped from {score.raw_score} ({reason}{also})", size=9.5, color="#b94a48")
+        if getattr(score, "graded", True):
+            text = f"Capped from {score.raw_score} ({reason}{also})"
+        else:
+            text = f"{reason}{also} - {_UNGRADED_CAP_TAIL}"
+        flow.wrapped(text, size=9.5, color="#b94a48")
 
     # ── Severity chips ───────────────────────────────────────────────────────────
     flow.spacer(6.0)
     sev_counts = {sev: sum(1 for f in issues if f.severity == sev) for sev in (CRITICAL, HIGH, MEDIUM, LOW)}
     _draw_chips(flow, sev_counts)
+    # B-588: name the population the chips count. `CRITICAL 2` alone reads as two critical
+    # FAILURES, and on one real run the split was 1 FAIL + 1 WARN (and 2 FAIL + 6 WARN of
+    # the eight HIGHs). This is the PDF — the copy that travels furthest from whoever ran
+    # it, and its first page is the part that gets read. Same sentence as the text report,
+    # from the same producer (`report.issue_population_line`), never a second tally here:
+    # a second derivation is how two surfaces start disagreeing about one number.
+    _population = issue_population_line(issues)
+    if _population:
+        flow.wrapped(_population, size=8.5, color="#666666")
 
     # ── Inventory by subject (summary table) ─────────────────────────────────────
     summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
@@ -609,7 +810,13 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
     # phase (a plain audit, --fast, or the phase's own budget) passes None and only that
     # block is omitted. Nothing here re-scans or re-judges anything.
     inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep) if ctx is not None else None
-    if inv is not None and inv["skills"]:
+    # B-560: `self_excluded` too, not `skills` alone. A home whose ONLY skill is our own
+    # installed copy has an empty roster and something to say about it — gating on the
+    # roster dropped the block, and with it the note that a skill was skipped, on exactly
+    # the run where the reader has no other way to notice. `_skills_inventory_lines` has
+    # handled the empty-roster case since B-506; this caller was deciding it never got
+    # asked.
+    if inv is not None and (inv["skills"] or inv.get("self_excluded")):
         _pipeline_block(flow, "Skills", _skills_inventory_lines(inv, ctx, ascii_only=True))
     _pipeline_block(flow, "Plugins", _plugins_inventory_lines(plugin_sweep, ascii_only=True))
     if inv is not None and inv["mcp"]:

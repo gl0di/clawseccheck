@@ -47,6 +47,10 @@ def _checks_snap(checks, score=90, grade="A", raw=None, **extra):
     # a same-scope comparison unless a test overrides it via **extra to simulate an
     # upgrade (see test_raw_score_backstop_is_silent_across_a_denominator_change).
     snap["raw_score_scope"] = "fixed-scope"
+    # B-511: these tests compare two runs that each EARNED the number under test, so
+    # the default is graded. Overridable through **extra for a test that wants the
+    # ungraded side — the score comparison stands down there by design.
+    snap["graded"] = True
     snap.update(extra)
     return snap
 

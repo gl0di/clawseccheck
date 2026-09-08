@@ -45,9 +45,15 @@ def test_guided_first_run_writes_the_pdf_and_still_prints_the_card(tmp_path, cap
     assert code == 0
     assert dest.is_file(), "the report directory must be created, not fatal"
     assert dest.read_bytes().startswith(b"%PDF")
-    # The card itself must still reach the user.
+    # The card itself must still reach the user. This first-guided-run home has no
+    # --attest / --judged-bundle, so layers 4-5 never ran and the run is ungraded
+    # (C-422/C-423): no "Grade X" letter anywhere, but the card still leads with the
+    # most urgent finding and discloses exactly which layers did not run instead of
+    # going quiet — the same "audit was swallowed" failure mode this test pins.
     assert "ClawSecCheck" in out
-    assert "Grade" in out
+    assert "Grade" not in out
+    assert "No grade yet" in out
+    assert "layers did not run" in out
     assert len(out) > 300, f"the audit was swallowed again: {len(out)} bytes"
 
 

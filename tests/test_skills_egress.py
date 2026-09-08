@@ -124,16 +124,22 @@ def test_b16_warns_when_no_threat_monitoring(tmp_path):
     assert _ids(audit(tmp_path)[1])["B16"].status == WARN
 
 
-def test_b16_passes_with_monitoring_skill(tmp_path):
+def test_b16_monitoring_named_skill_is_a_candidate_not_a_pass(tmp_path):
+    # B-501: a monitor-shaped NAME is recognised but no longer grants PASS — it is
+    # chosen by whoever installed the skill, and nothing here shows it watches anything.
     _home_with_skill(tmp_path, "clawsec-suite", "monitoring suite")
-    assert _ids(audit(tmp_path)[1])["B16"].status == PASS
+    b16 = _ids(audit(tmp_path)[1])["B16"]
+    assert b16.status == WARN
+    assert "'clawsec-suite'" in b16.detail
 
 
-def test_b16_passes_with_monitoring_config():
+def test_b16_monitoring_named_skill_in_config_is_a_candidate_not_a_pass():
     ctx = Context(home=Path("/x"))
     ctx.config = {}
     ctx.installed_skills = {"openclaw-security-monitor": "security monitoring skill"}
-    assert _ids(run_all(ctx))["B16"].status == PASS
+    b16 = _ids(run_all(ctx))["B16"]
+    assert b16.status == WARN
+    assert "'openclaw-security-monitor'" in b16.detail
 
 
 def test_b15_unknown_without_mcp_and_warns_with():

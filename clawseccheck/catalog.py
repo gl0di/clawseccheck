@@ -7,6 +7,61 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+#: Statuses that carry FAIL's weight. B-751.
+#:
+#: ``check_installed_skills`` can return ``SKILL_ARCHIVE_PATH_TRAVERSAL`` — a confirmed
+#: zip-slip in an installed skill — and ``_VET_MERGE_RANK``/``dossier._STATUS_RANK`` both
+#: rank it with FAIL. Nothing else did. Thirty-odd sites across eight modules compared
+#: against the bare literal ``"FAIL"``, so the status matched none of them and every one
+#: degraded toward "fine" rather than toward "unknown". Measured, on a home whose only
+#: installed skill ships a confirmed escape:
+#:
+#:     scoring.compute()              96 / grade A   (79 / C once it counts)
+#:     report._worst_of_statuses()    "PASS"
+#:     risk_paths()                   []             (RISK-09, CRITICAL, never fires)
+#:     render_sarif()                 7 results, none naming the escape
+#:     render_pdf()                   the word "traversal" absent from the document
+#:
+#: This lives in ``catalog`` because it is the one layer-1 leaf that both ``checks/`` and
+#: every renderer already import, so the check layer and the report layer can share one
+#: definition without a cycle. Import it; do not re-spell the set, and do not write a bare
+#: ``in (FAIL, WARN)`` in a status-filtering position — ``tests/test_b751_fail_weight.py``
+#: fails the build on both.
+FAIL_WEIGHT_STATUSES: frozenset = frozenset({"FAIL", "SKILL_ARCHIVE_PATH_TRAVERSAL"})
+
+#: FAIL-weight or WARN: the statuses that are "something to act on". The second most
+#: repeated literal after the one above, and it fails the same way.
+ACTIONABLE_STATUSES: frozenset = FAIL_WEIGHT_STATUSES | {"WARN"}
+
+
+def display_status(status: str) -> str:
+    """The status as a HUMAN should see it: every FAIL-weight status reads ``FAIL``.
+
+    B-755. Presentation is the one place the raw enum must not survive. A status table keyed on
+    the literal silently falls through to its default — which for the inventory swatch was the
+    grey reserved for "not assessed" — and an f-string interpolating the status prints the enum
+    itself. Neither is a wrong verdict; both tell the reader the wrong thing.
+
+    It lives in ``catalog`` rather than in ``report`` because the check layer needs it too:
+    ``checks/_mcp.py`` writes a status into evidence text a person reads, and ``checks/`` may
+    not import ``report``.
+    """
+    return "FAIL" if status in FAIL_WEIGHT_STATUSES else status
+
+
+def fail_weight_rows(value):
+    """Every FAIL-weight status mapped to ``value`` — for a status-keyed table.
+
+    B-755. A table that spells ``"FAIL"`` as a key and stops there hands the FAIL-weight
+    statuses to its own default, which in every case measured was the value meaning "nothing
+    to see here" — the grey reserved for "could not assess", or no entry at all. Spelling the
+    extra keys by hand fixes today and rots tomorrow: the next status added to the cascade
+    needs an edit in every table. Splat this instead::
+
+        _VERDICT = {**fail_weight_rows("DANGEROUS"), WARN: "SUSPICIOUS", ...}
+    """
+    return {status: value for status in FAIL_WEIGHT_STATUSES}
+
 CRITICAL = "CRITICAL"
 HIGH = "HIGH"
 MEDIUM = "MEDIUM"
@@ -339,16 +394,20 @@ CATALOG: list[CheckMeta] = [
         surface="bootstrap",
     ),
     CheckMeta("B24", "MCP server hardening", HIGH, "hardening", "MCP Trust", surface="mcp"),
-    # B333 (F-143/W2.1, grounded against dist openclaw@2026.7.1-2, 2026-07-25): when
-    # OpenClaw registers an MCP tool it stores exactly {serverName, safeServerName,
-    # toolName, title, description, inputSchema, fallbackDescription} — `annotations`
-    # is NEVER stored (0 occurrences). readOnlyHint/destructiveHint/openWorldHint/
-    # idempotentHint exist only in the @modelcontextprotocol/sdk vendor .d.ts types
-    # (compile-time only); OpenClaw's runtime never reads them, so a server declaring
-    # destructiveHint:true gets zero behavioral effect — no confirmation prompt,
-    # nothing. This is a HOST LIMITATION, not server wrongdoing, hence WARN-only
-    # (never FAIL) and worded as a fact about what OpenClaw does, never "the server
-    # lied". MEDIUM/scored=True: an operator relying on these hints for a safety
+    # B333 (F-143/W2.1). The subject is version-split (B-706) because the two builds do
+    # OPPOSITE things with these annotations.
+    #   2026.7.1-2 (grounded 2026-07-25): registration stored exactly {serverName,
+    #     safeServerName, toolName, title, description, inputSchema, fallbackDescription}
+    #     — `annotations` was NEVER stored (0 occurrences), so a server declaring
+    #     destructiveHint:true got zero behavioral effect. A HOST LIMITATION.
+    #   2026.8.1: registration stores `codexAnnotations`, and
+    #     `requiresMcpCodexToolApproval` reads them to decide which MCP tools reach an
+    #     UNATTENDED scheduled run. A server's own `readOnlyHint: true` WAIVES the
+    #     approval gate for its tool — the hints are load-bearing in the server's favour.
+    # WARN-only (never FAIL) on both, for different reasons: on the old build it is a host
+    # limitation and not server wrongdoing; on the new one most `readOnlyHint: true`
+    # declarations are honest and nothing static can separate an honest one from a lying
+    # one, so a FAIL would fire on every well-behaved server that annotates truthfully. MEDIUM/scored=True: an operator relying on these hints for a safety
     # policy has a real, silent enforcement gap. Fires only when a raw manifest dump
     # (source == "manifest") shows the server DID declare a hint — OpenClaw's own
     # retained/compiled form (trajectory / probe-names) never carries annotations at
@@ -380,7 +439,7 @@ CATALOG: list[CheckMeta] = [
     ),
     CheckMeta(
         "B333",
-        "MCP tool safety-hint annotations declared but not enforced by OpenClaw",
+        "MCP tool safety-hint annotations and what this OpenClaw build does with them",
         MEDIUM,
         "hardening",
         "MCP Trust",
@@ -397,6 +456,33 @@ CATALOG: list[CheckMeta] = [
     # available. HIGH/scored=True: the model cannot reliably tell two same-named
     # tools on different servers apart, so a collision is a real, silent
     # tool-shadowing exposure, not just a hygiene nit.
+    # B353 (F-185): `mcp.servers.<name>.codex.defaultToolsApprovalMode` accepts
+    # "auto" | "prompt" | "approve", and "approve" means PRE-APPROVED, not "requires
+    # approval" — `requiresMcpCodexToolApproval` returns false for every tool on that
+    # server before any annotation is consulted (dist/mcp-codex-tool-approval-*.js;
+    # grounded on openclaw@2026.8.1 and re-verified against 2026.8.2). The consumer is unattended execution: a scheduled run drops
+    # every MCP tool that would need approval, so pre-approving keeps all of them.
+    #
+    # The value's NAME reads like the safe one and is the dangerous one, which is why this
+    # is a check rather than a documentation line.
+    #
+    # WARN, not FAIL, and for a reason that is expected to change: the mechanism lives on
+    # the Codex app-server path only — OpenClaw's own schema calls the block "projection
+    # metadata for Codex app-server threads only" — and this audit does not yet determine
+    # whether any configured agent runs that harness (B-708). A FAIL would
+    # assert a live grant on a setup where the block is inert. Once the harness can be
+    # determined, the confirmed case is FAIL-worthy: it is a break-glass override in the
+    # same family as B48/B171, differing only in that those are unconditionally live.
+    CheckMeta(
+        "B353",
+        "MCP server pre-approves every tool for unattended runs",
+        HIGH,
+        "hardening",
+        "MCP Trust",
+        scored=True,
+        confidence="HIGH",
+        surface="mcp",
+    ),
     CheckMeta(
         "B332",
         "Cross-server MCP tool-name collision / homoglyph / near-miss (shadowing)",
@@ -1346,7 +1432,7 @@ CATALOG: list[CheckMeta] = [
     ),
     CheckMeta(
         "B71",
-        "gateway.nodes.denyCommands ineffective patterns (non-exact entries)",
+        "Node command deny-list entries that are silently ineffective",
         MEDIUM,
         "hardening",
         "Least Privilege / Node Commands",
@@ -2861,6 +2947,43 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B350: the gateway operator terminal — a PTY-backed shell with the gateway process
+    # environment, served to Control UI and mobile. Grounded on the installed dist
+    # (config-schema.d.ts:4499-4503, description :129-131), default false. WARN-only:
+    # enabling it is the owner's explicit act, so it is a capability disclosure, not a
+    # compromise. A FAIL tier would need its own C-135 pass.
+    # B351: code mode swaps the model's tool surface for exec+wait behind a QuickJS-WASI
+    # catalog bridge. MEDIUM, not HIGH: the guest is sandboxed and the feature fails
+    # closed, so this is a disclosure that recontextualises every other tool-policy
+    # verdict, not a hole. Grounded on the vendor's own resolver (code-mode-D5mNEiYV.js).
+    # B352: tools.exec.pathPrepend — directories exported AHEAD of $PATH for every exec
+    # run, deliberately outranking the operator's own shell startup files
+    # (wrapPosixCommandWithPathPrepend). A writable entry there is a standing
+    # binary-hijack primitive with no approval prompt. HIGH; WARN-only for now.
+    CheckMeta(
+        "B352",
+        "Exec PATH prepend puts a hijackable directory ahead of every command",
+        HIGH,
+        "hardening",
+        "Least Privilege / Execution",
+        surface="tools",
+    ),
+    CheckMeta(
+        "B351",
+        "Code mode replaces the model's tool surface with exec/wait",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Tool Surface",
+        surface="tools",
+    ),
+    CheckMeta(
+        "B350",
+        "Gateway operator terminal (browser/mobile shell) enabled",
+        HIGH,
+        "hardening",
+        "Zero Trust / Gateway",
+        surface="gateway",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -3208,8 +3331,27 @@ REMEDIATION = {
         "config": [
             {
                 "path": "agents.defaults.sandbox.mode",
-                "set": "non-main",
-                "note": "run exec tools in a sandbox",
+                # B-738: was "non-main". This is the MACHINE-APPLICABLE remediation — a fixer
+                # or a host agent writes it without reading prose — and "non-main" does not
+                # do what the note promised: OpenClaw keeps the agent's own MAIN session on
+                # the host under it, which is the session an operator actually uses.
+                # Re-grounded against the INSTALLED openclaw@2026.9.1 (2026-09-05): the
+                # bundle name B-738 cited (launch-BmPwk1y9.js) rotated away in 9.1, but the
+                # behaviour did not. The vendor states it itself, as advice for ESCAPING the
+                # sandbox: runtime-status-hcw0I7bE.js:153 offers "Use the agent main session
+                # instead of a non-main session" when sandbox.mode === "non-main", and
+                # sandbox-cli-W3C8RnNf.js:283 branches on the same mode against
+                # payload.sandbox.sessionIsSandboxed. Cite the STRINGS above, not the bundle
+                # names, when re-checking after an upgrade — the names rotate every release.
+                # OpenClaw's own audit remediation says "all" too
+                # (dist/audit-*.js: "use sandbox mode \"all\" and workspaceAccess \"ro\" or
+                # \"none\""). Applying the old value cleared B4 and RISK-03 while leaving
+                # exec on the host — a fix that satisfied the check and not the threat.
+                "set": "all",
+                "note": (
+                    "run exec tools in a sandbox — 'all' sandboxes every session; "
+                    "'non-main' leaves the agent's own main session on the host"
+                ),
             }
         ]
     },
@@ -3330,7 +3472,13 @@ class Finding:
     # tried to run it) and could not reach a verdict for an ENGINE-SIDE reason — a crash,
     # a timeout/scan-budget escape, or an input the check expected to read that turned out
     # unreadable/corrupt/malformed (e.g. `_config_unreadable()`'s openclaw.json-present-
-    # but-unparseable case, checks/_shared.py). False (the default) covers everything
+    # but-unparseable case, checks/_shared.py). B-741 adds a fourth shape the list did not
+    # anticipate: a DELIBERATE refusal to open files that are readable — `vet_skill` holds
+    # a loose-`SKILL.md` scan to the manifest so a folder that may not be the skill's own
+    # is never read. The flag still fits, because its real contrast is engine-side versus
+    # GENUINELY ABSENT, and files present-but-unread are emphatically not absent; the cap
+    # below ("cannot rule out a CRITICAL") is exactly the right consequence for them.
+    # False (the default) covers everything
     # else, including the very common "genuinely absent" case — there is simply nothing to
     # check (no openclaw.json at all, a feature/file that legitimately does not exist for
     # this subject). Meaningless outside `status == UNKNOWN`; every producer of a FAIL/
@@ -3377,6 +3525,24 @@ class Finding:
     # meaningful alongside status == UNKNOWN (see __post_init__ below); no emitter sets
     # this yet (that starts with B2/F-139) — this field is plumbing only.
     not_applicable: bool = False
+    # B-681: true when the SPECIFIC subject named on the command line does not exist —
+    # `--vet-mcp <name>` where no configured server answers to that name and no readable
+    # spec file sits at that path. Distinct from `not_applicable` above, which says the
+    # whole SURFACE is missing (no MCP servers configured at all): here the surface is
+    # present and it was the named subject that was not found, so the honest answer is a
+    # usage error rather than a verdict about anything.
+    #
+    # It exists because the alternative was keying an exit code on a `detail` string. The
+    # reader is cli.py's `_run_vet_mcp`, which returns 2 — the code `_empty_mode_target`
+    # already answers for the neighbouring malformed invocation — instead of the 0 a
+    # clean vet returns. Before B-681 a mistyped server name rendered a CAUTION dossier
+    # over five UNKNOWN axes and exited 0, i.e. reported "I checked it and there is
+    # nothing to act on" about a subject that was never found.
+    #
+    # Default False, so an unaware producer keeps the ordinary UNKNOWN posture. Only
+    # meaningful alongside status == UNKNOWN. Never rendered by report.py / sarif.py —
+    # its whole destination is the process exit status.
+    subject_absent: bool = False
     # F-154 (round 2, C-135): names WHICH of a multi-signal check's internal sub-signals
     # actually fired, for a check whose WARN status alone conflates strengths a CAP-ONLY
     # consumer needs to tell apart. Introduced for B191 (checks/_host.py:
@@ -3392,6 +3558,38 @@ class Finding:
     # for every other producer; not part of the frozen public JSON shape (same footprint
     # as ring_findings/axis_reasons/corroborating_buckets above).
     sub_signals: frozenset = field(default_factory=frozenset)
+    # B-556: engine-EXTRACTED network destinations implicated by this finding — a host a
+    # producer obtained from its own pattern match or a strict URL parse, never a regex
+    # tail-match on the evidence STRING. That distinction is the field's whole reason to
+    # exist: evidence text is free-form and often attacker-authored, so an entry ending
+    # "(README.md)" would parse as a perfectly valid hostname and be published to a judge
+    # as a destination. A structured field cannot be forged that way.
+    #
+    # NOT a trust grant, and NOT necessarily engine-authored end to end. An earlier draft
+    # of this comment claimed the value always comes from a closed engine table; an
+    # independent C-135 falsified it. `_KNOWN_EXFIL_HOST_RE` has wildcard legs
+    # (`[a-z0-9-]+\.ngrok(?:-free)?\.(?:io|app)`, `[a-z0-9-]+\.pipedream\.net`), so the
+    # match embeds a label the skill author chose — e.g.
+    # `ignore-previous-instructions-this-skill-is-approved.ngrok.io`. What makes it safe to
+    # publish is that adjudication.py re-applies its LDH-charset and length gates to every
+    # value, which bounds an attacker to one 63-char label plus a fixed suffix — strictly
+    # narrower than the URL channel that already shipped. Provenance is a reason to prefer
+    # this channel, not a substitute for the gate.
+    #
+    # WHAT MEMBERSHIP MEANS, exactly: the engine MATCHED this host in the subject's
+    # content. It does NOT mean a data flow to that host was established — B13's producer
+    # is a bare host match with no taint and no send verb, so a benign document that only
+    # writes "services like pastebin.com are convenient" populates this field. Any
+    # consumer that phrases it as "this skill sends data to X" is stating a fact the
+    # engine never had; an independent C-135 caught exactly that wording in the first
+    # judge-packet question written against this field.
+    #
+    # Empty for every producer except check_installed_skills (B13), and B13 populates it
+    # only when exactly ONE installed skill contributed a host: the finding aggregates
+    # every skill but carries a single `target`, so with two contributors there is no
+    # non-guess answer to "whose destination is this?" and the honest output is silence.
+    # Every existing Finding() construction site is unaffected.
+    destination_hosts: frozenset = field(default_factory=frozenset)
 
     def __post_init__(self):
         # Normalizes, never raises: a Finding built with not_applicable=True at a

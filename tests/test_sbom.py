@@ -27,6 +27,19 @@ def _ctx_with_skill(name: str, skill_md: str) -> Context:
     return ctx
 
 
+def _ctx_plugins_scanned(**kw) -> Context:
+    """A Context whose plugin index was read cleanly (empty by default) — the
+    baseline most tests want so `complete` isn't dragged down by an unrelated,
+    untested axis (B-568: `complete` now also requires `plugins_scanned`)."""
+    ctx = Context(home=_HOME_FAKE)
+    ctx.installed_skills = {}
+    ctx.config = {}
+    ctx.plugin_index_found = True
+    for k, v in kw.items():
+        setattr(ctx, k, v)
+    return ctx
+
+
 # --------------------------------------------------------------------------- skills
 
 def test_skill_hash_matches_monitor_hashing_scheme():
@@ -90,6 +103,138 @@ def test_mcp_pinned_detection():
     assert by_name["unpinned-svc"]["pinned"] is False
 
 
+# --------------------------------------------------------------------------- plugins (B-568)
+
+def _plugin_rec(plugin_id, *, origin="config", enabled=True, root_dir=None,
+                 manifest_path=None, source=None, contracts=None):
+    return {
+        "plugin_id": plugin_id,
+        "origin": origin,
+        "enabled": enabled,
+        "root_dir": root_dir,
+        "manifest_path": manifest_path,
+        "source": source,
+        "contracts": contracts or {},
+    }
+
+
+def test_plugins_were_entirely_absent_now_populated():
+    """The defect itself: B-568 filed this because there was no `plugins` key at
+    all, on a real box with 70 installed-plugin-index records."""
+    ctx = _ctx_plugins_scanned(plugin_index_records=[
+        _plugin_rec("alpha"), _plugin_rec("beta"),
+    ])
+    bom = build_sbom(ctx)
+    assert [p["name"] for p in bom["plugins"]] == ["alpha", "beta"]  # sorted
+    entry = bom["plugins"][0]
+    assert entry["origin"] == "config"
+    assert entry["enabled"] is True
+
+
+def test_plugin_contracts_are_names_only():
+    ctx = _ctx_plugins_scanned(plugin_index_records=[
+        _plugin_rec("p1", contracts={"agentToolResultMiddleware": ["h1"], "tools": ["x", "y"]}),
+    ])
+    bom = build_sbom(ctx)
+    assert bom["plugins"][0]["contracts"] == ["agentToolResultMiddleware", "tools"]
+
+
+def test_plugin_paths_never_carry_the_raw_home_prefix():
+    """CLAUDE.md §8: an AI-BOM is exactly what gets pasted into a ticket."""
+    ctx = _ctx_plugins_scanned(plugin_index_records=[
+        _plugin_rec(
+            "browser",
+            root_dir="/home/someoperator/.npm-global/lib/node_modules/openclaw/dist/extensions/browser",
+            manifest_path="/home/someoperator/.npm-global/lib/node_modules/openclaw/dist/extensions/browser/openclaw.plugin.json",
+            source="/home/someoperator/.npm-global/lib/node_modules/openclaw/dist/extensions/browser/index.js",
+        ),
+    ])
+    out = render_sbom(ctx)
+    assert "/home/someoperator" not in out
+    payload = json.loads(out)
+    entry = payload["plugins"][0]
+    assert entry["root_dir"].startswith("~/")
+    assert entry["manifest_path"].startswith("~/")
+    assert entry["entry_point"].startswith("~/")
+
+
+def test_bundled_skill_names_its_supplying_plugin():
+    ctx = _ctx_plugins_scanned(plugin_index_records=[
+        _plugin_rec("browser", root_dir="/home/x/.npm-global/dist/extensions/browser"),
+    ])
+    ctx.installed_skills = {"browser-automation": "---\nname: b\ndescription: b\n---\n"}
+    ctx.installed_skill_bundled = {"browser-automation"}
+    ctx.installed_skill_dirs = {
+        "browser-automation": "/home/x/.npm-global/dist/extensions/browser/skills/browser-automation",
+    }
+    bom = build_sbom(ctx)
+    assert bom["skills"][0]["supplier"] == "browser"
+
+
+def test_bundled_skill_with_no_matching_plugin_is_unknown_not_empty_or_guessed():
+    """Bundled-ness is definitive (installed_skill_bundled); WHICH plugin is not
+    always resolvable. The honest spelling is the string "unknown", never ""."""
+    ctx = _ctx_plugins_scanned(plugin_index_records=[])  # index read, but empty
+    ctx.installed_skills = {"orphan-bundled": "---\nname: o\ndescription: o\n---\n"}
+    ctx.installed_skill_bundled = {"orphan-bundled"}
+    ctx.installed_skill_dirs = {"orphan-bundled": "/some/root/skills/orphan-bundled"}
+    bom = build_sbom(ctx)
+    assert bom["skills"][0]["supplier"] == "unknown"
+    assert bom["skills"][0]["supplier"] != ""
+
+
+def test_non_bundled_skill_supplier_is_none_not_unknown():
+    """A directly user-installed skill has no plugin-supplier concept — that is a
+    different fact from "we don't know", so it must not collapse to "unknown"."""
+    ctx = _ctx_plugins_scanned()
+    ctx.installed_skills = {"user-skill": "---\nname: u\ndescription: u\n---\n"}
+    ctx.installed_skill_bundled = set()
+    bom = build_sbom(ctx)
+    assert bom["skills"][0]["supplier"] is None
+
+
+def test_plugin_index_not_found_makes_the_bom_not_complete():
+    ctx = Context(home=_HOME_FAKE)
+    ctx.installed_skills = {}
+    ctx.config = {}
+    ctx.config_found = True
+    # ctx.plugin_index_found left at its Context default: False
+    bom = build_sbom(ctx)
+    assert bom["plugins_scanned"] is False
+    assert bom["complete"] is False
+
+
+def test_plugin_index_parse_error_makes_the_bom_not_complete():
+    ctx = _ctx_plugins_scanned(plugin_index_parse_error=True)
+    ctx.config_found = True
+    bom = build_sbom(ctx)
+    assert bom["plugins_scanned"] is False
+    assert bom["complete"] is False
+
+
+def test_plugin_index_cleanly_read_and_empty_is_still_complete():
+    """The fix must not make every BOM incomplete just because a machine has zero
+    installed plugins — that would be the same lie B-521 already fixed, inverted."""
+    ctx = _ctx_plugins_scanned()
+    ctx.config_found = True
+    bom = build_sbom(ctx)
+    assert bom["plugins_scanned"] is True
+    assert bom["complete"] is True
+
+
+def test_a_context_without_plugin_fields_does_not_crash():
+    """`build_sbom` takes a duck-typed ctx; an older/partial one must not blow up."""
+    ctx = Context(home=_HOME_FAKE)
+    ctx.installed_skills = {}
+    ctx.config = {}
+    del ctx.plugin_index_records
+    del ctx.installed_skill_bundled
+    del ctx.installed_skill_dirs
+    bom = build_sbom(ctx)
+    assert bom["plugins"] == []
+    assert bom["plugins_scanned"] is False  # honestly unknown, never a fabricated PASS
+
+
 # --------------------------------------------------------------------------- determinism
 
 def test_render_sbom_is_deterministic():
@@ -101,14 +246,13 @@ def test_render_sbom_is_deterministic():
 
 
 def test_empty_context_produces_valid_empty_bom():
-    ctx = Context(home=_HOME_FAKE)
-    ctx.installed_skills = {}
-    ctx.config = {}
+    ctx = _ctx_plugins_scanned()
     out = render_sbom(ctx)
     payload = json.loads(out)
     assert payload["skills"] == []
     assert payload["mcp_servers"] == []
-    assert payload["version"] == 1
+    assert payload["plugins"] == []
+    assert payload["version"] == 3  # B-568: bumped 2 -> 3, see sbom.py SBOM_VERSION
 
 
 # --------------------------------------------------------------------------- redaction guard
@@ -135,8 +279,12 @@ def test_cli_sbom_emits_valid_json(capsys):
     out = capsys.readouterr().out
     assert rc == 0
     payload = json.loads(out)
-    assert payload["version"] == 1
-    assert "skills" in payload and "mcp_servers" in payload
+    assert payload["version"] == 3  # B-568: bumped 2 -> 3, see sbom.py SBOM_VERSION
+    assert "skills" in payload and "mcp_servers" in payload and "plugins" in payload
+    # fixtures/home_safe carries no state DB, so the plugin index was genuinely never
+    # read — `complete` must say so honestly, not silently claim a full inventory.
+    assert payload["plugins_scanned"] is False
+    assert payload["complete"] is False
 
 
 def test_cli_sbom_is_deterministic_across_runs(capsys):

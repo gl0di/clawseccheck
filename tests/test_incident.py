@@ -45,7 +45,12 @@ def test_build_incident_has_expected_top_level_keys(tmp_path):
     }
     assert payload["tool"] == "clawseccheck"
     assert payload["generated_at"] == "2026-07-04T00:00:00"
-    assert payload["score"] == {"score": 80, "grade": "B"}
+    # CLAWSECCHECK-C-423: "score" grew "graded"/"not_checked"/"missing_layers" alongside
+    # the pre-existing "score"/"grade" -- an ungraded run must null the latter two
+    # rather than drop them (see tests/test_c423_ungraded_pdf_incident.py for that path).
+    assert payload["score"] == {
+        "score": 80, "grade": "B", "graded": True, "not_checked": [], "missing_layers": [],
+    }
 
 
 def test_build_incident_purpose_frames_it_as_preservation_not_remediation(tmp_path):
@@ -104,6 +109,89 @@ def test_credential_rotation_list_never_contains_account_or_email_fragments(tmp_
     payload = build_incident(ctx, [b41], _score(), when="2026-07-04T00:00:00")
     for line in payload["credential_rotation_list"]:
         assert "@" not in line
+
+
+# --------------------------------------------------------------------------- B-569
+# B41's evidence alone under-covers: it is scoped to "credentials reachable by
+# untrusted ingress", so a channel secret (e.g. a Telegram bot token, which never
+# SENDS anything itself) could be live in config and never reach the old list.
+# The fix reads the config secret-path inventory directly (independent of any
+# check's verdict) and the bootstrap pattern scan (marked uncertain), unioned
+# with B41's evidence.
+
+def _bot_token_fragment() -> str:
+    # Assembled at runtime so no contiguous secret-shaped literal exists in source.
+    return "".join(["123456789", ":", "AAH", "x" * 20])
+
+
+def _gw_token_fragment() -> str:
+    return "a-very-long-gateway-token-" + "9" * 20
+
+
+def test_credential_rotation_list_includes_channel_bot_token_by_path(tmp_path):
+    """The reproduced gap: a live plaintext Telegram bot token must reach the
+    list by config PATH, never by value, alongside B41's own marker."""
+    ctx = _ctx(tmp_path)
+    token = _bot_token_fragment()
+    gw = _gw_token_fragment()
+    ctx.config = {
+        "gateway": {"auth": {"token": gw}},
+        "channels": {"telegram": {"accounts": {"main": {"botToken": token}}}},
+    }
+    b41 = Finding(id="B41", title="t", severity="MEDIUM", status="PASS",
+                  detail="d", fix="f", framework="fr",
+                  evidence=["gateway-token: present"])
+    payload = build_incident(ctx, [b41], _score(), when="2026-07-04T00:00:00")
+    rot = payload["credential_rotation_list"]
+    assert "config: channels.telegram.accounts.main.botToken" in rot
+    assert "config: gateway.auth.token" in rot
+    assert "gateway-token: present" in rot  # B41's own marker still unioned in
+    packed = json.dumps(payload)
+    assert token not in packed
+    assert gw not in packed
+
+
+def test_credential_rotation_list_independent_of_b1_verdict(tmp_path):
+    """Root-cause pin: the same secret-bearing config with B1 PASS (tight perms)
+    vs FAIL (loose perms) must produce the identical rotation list -- rotation
+    must not depend on whether a hardening check happened to be happy."""
+    ctx = _ctx(tmp_path)
+    ctx.config = {"channels": {"telegram": {"accounts": {
+        "main": {"botToken": _bot_token_fragment()}}}}}
+    b1_pass = Finding(id="B1", title="t", severity="HIGH", status="PASS",
+                       detail="No exposed plaintext secrets. (1 token(s) in config, "
+                              "but file perms are tight)", fix="f", framework="fr")
+    b1_fail = Finding(id="B1", title="t", severity="HIGH", status="FAIL",
+                       detail="1 secret(s) in config and openclaw.json is "
+                              "group/world-readable (644)", fix="f", framework="fr")
+    rot_pass = build_incident(ctx, [b1_pass], _score(),
+                              when="2026-07-04T00:00:00")["credential_rotation_list"]
+    rot_fail = build_incident(ctx, [b1_fail], _score(),
+                              when="2026-07-04T00:00:00")["credential_rotation_list"]
+    assert rot_pass == rot_fail
+    assert "config: channels.telegram.accounts.main.botToken" in rot_pass
+
+
+def test_credential_rotation_list_marks_uncertain_bootstrap_hit(tmp_path):
+    """A free-text pattern hit in a bootstrap file names the FILE, not a
+    structured field -- listed with an explicit uncertainty caveat rather than
+    silently dropped (silence reads as absence)."""
+    ctx = _ctx(tmp_path)
+    fake_key = "sk-ant-" + "a" * 20  # matches SECRET_PATTERNS' concrete-literal shape
+    ctx.bootstrap = {"AGENTS.md": f"setup notes\nANTHROPIC_API_KEY={fake_key}\n"}
+    payload = build_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
+    rot = payload["credential_rotation_list"]
+    assert any("AGENTS.md" in line and "unconfirmed" in line for line in rot)
+    assert fake_key not in json.dumps(payload)
+
+
+def test_credential_rotation_list_excludes_secret_reference_placeholders(tmp_path):
+    """A SecretRef indirection ('${NAME}') is not a plaintext secret -- listing
+    it would send an operator chasing a credential that was never in the file."""
+    ctx = _ctx(tmp_path)
+    ctx.config = {"channels": {"telegram": {"botToken": "${TELEGRAM_BOT_TOKEN}"}}}
+    payload = build_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
+    assert payload["credential_rotation_list"] == []
 
 
 # --------------------------------------------------------------------------- trajectory hashes

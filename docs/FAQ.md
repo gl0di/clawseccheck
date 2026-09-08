@@ -43,7 +43,7 @@ calls this out explicitly: *"`UNKNOWN` ≠ `PASS`"*.
   your running agent, and then pass `--attest attest.json` to unlock these checks.
 
 **Effect on the score.** An `UNKNOWN` finding never adds or subtracts a scored point — the
-weighted pass-rate arithmetic simply excludes it. It is not always fully inert, though: a
+severity-weighted pass-rate arithmetic simply excludes it. It is not always fully inert, though: a
 check that reports `UNKNOWN` because *its own input* was unreadable/corrupt
 (`engine_degraded`) can trip `DEGRADED_CHECK_CAP` and hard-cap the grade at F regardless of
 what did pass — see ["Why is my grade F?"](#why-is-my-grade-f). If most checks are
@@ -65,9 +65,62 @@ instead of a bare `UNKNOWN`. From `clawseccheck --dashboard --home fixtures/home
 
 ---
 
+## Why is there no grade at all?
+
+Because the check was not complete, and a partial check does not get to print a number.
+
+A full check is built from five layers. The first three run on their own; the last two cannot,
+because one needs your agent to answer a question about itself and the other pokes your running
+agent:
+
+| # | Layer | Runs on its own? | How to close it |
+|---|---|---|---|
+| 1 | Static: config, files, permissions | yes — the default run | (default) |
+| 2 | Sweep of what's installed: skills + plugins | yes | `--full` |
+| 3 | Logs and trajectories: what already happened | yes, budget-bounded | `--full` |
+| 4 | Agent self-report | **no** | `--ask`, then `--attest <file>` |
+| 5 | Live behaviour test | **no** | `--canary` / `--dryrun` / `--redteam` / `--multiturn` |
+
+**A letter is issued only when all five ran.** Short of that there is no number at all — not a
+capped one, not a partial one. You get the findings, led by the most urgent one in words, plus a
+line naming exactly which layers did not run and why:
+
+```text
+Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)  [A1]
+No grade yet — 2 of 5 layers did not run: agent self-report (not submitted), live behaviour test (not submitted).
+```
+
+This is deliberately stronger than capping the grade. A cap still prints a number, and a number
+gets read as a score; the absence of one cannot be misread as "fine". So a bare run leaves 3 of 5
+untouched, `--full` closes one of those — the installed sweep — and leaves 2 of 5, and you close
+the last two by submitting the agent's own answers (`--attest`, `--judged-bundle`).
+
+The six "did not run" phrasings mean different things and are worth reading — collapsing them
+into one would be its own small lie about how much the report is worth:
+
+| Phrase | What it means |
+|---|---|
+| `skipped by this run's flags` | you narrowed the run — e.g. `--full --fast` |
+| `declined` | you were asked and said no |
+| `not available here` | the capability does not exist on this box (CI, for instance, has no live agent) |
+| `not submitted` | the layer's evidence was never handed in — no `--attest`, or no `liveTest` verdict in the bundle. Fixable by you, which is why it is not called "not available" (B-603) |
+| `failed` | the layer broke |
+| `not reached` | the run never got to it — e.g. the installed sweep on a bare run, which needs `--full` |
+
+**`Not fully covered: …` is a different line and can appear on a graded run too.** It means a
+layer ran without exhausting its subject — log scans are budget-bounded by construction, so
+"79 of 132 log sinks not read" is an honest disclosure, not a missing layer.
+
+**In CI this is normal and not an error.** A pipeline has no live agent, so it never earns a
+letter. Gate on findings instead: `--fail-on <severity>` exits 1 on an unsuppressed FAIL at or
+above that severity, `--exit-code` trips on any FAIL, and `--json`/`--sarif` carry
+`fail_counts_by_severity` for a finer gate. None of those need a score.
+
+---
+
 ## Why is my grade F?
 
-The grading uses a **weighted pass-rate with hard caps** that prevent a single serious
+The grading uses a **severity-weighted pass rate with hard caps** that prevent a single serious
 failure from being diluted by many passes:
 
 | Severity of any FAIL | Score capped at | Grade ceiling |

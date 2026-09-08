@@ -1,0 +1,452 @@
+[
+ {
+  "mode": "all",
+  "placement": "defaults",
+  "roster": "entries",
+  "agent": "helper",
+  "effective_mode": "all",
+  "vendor_sandboxed_own_main_session": true,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": true
+ },
+ {
+  "mode": "all",
+  "placement": "defaults",
+  "roster": "entries",
+  "agent": "main",
+  "effective_mode": "all",
+  "vendor_sandboxed_own_main_session": true,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": true
+ },
+ {
+  "mode": "all",
+  "placement": "defaults",
+  "roster": "list",
+  "agent": "helper",
+  "effective_mode": "all",
+  "vendor_sandboxed_own_main_session": true,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": true
+ },
+ {
+  "mode": "all",
+  "placement": "defaults",
+  "roster": "list",
+  "agent": "main",
+  "effective_mode": "all",
+  "vendor_sandboxed_own_main_session": true,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": true
+ },
+ {
+  "mode": "all",
+  "placement": "defaults",
+  "roster": "none",
+  "agent": "main",
+  "effective_mode": "all",
+  "vendor_sandboxed_own_main_session": true,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": true
+ },
+ {
+  "mode": "all",
+  "placement": "entry",
+  "roster": "entries",
+  "agent": "helper",
+  "effective_mode": "all",
+  "vendor_sandboxed_own_main_session": true,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": true
+ },
+ {
+  "mode": "all",
+  "placement": "entry",
+  "roster": "list",
+  "agent": "helper",
+  "effective_mode": "all",
+  "vendor_sandboxed_own_main_session": true,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": true
+ },
+ {
+  "mode": "bogus",
+  "placement": "defaults",
+  "roster": "entries",
+  "agent": "helper",
+  "effective_mode": "bogus",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "bogus",
+  "placement": "defaults",
+  "roster": "entries",
+  "agent": "main",
+  "effective_mode": "bogus",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "bogus",
+  "placement": "defaults",
+  "roster": "list",
+  "agent": "helper",
+  "effective_mode": "bogus",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "bogus",
+  "placement": "defaults",
+  "roster": "list",
+  "agent": "main",
+  "effective_mode": "bogus",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "bogus",
+  "placement": "defaults",
+  "roster": "none",
+  "agent": "main",
+  "effective_mode": "bogus",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "bogus",
+  "placement": "entry",
+  "roster": "entries",
+  "agent": "helper",
+  "effective_mode": "bogus",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "bogus",
+  "placement": "entry",
+  "roster": "list",
+  "agent": "helper",
+  "effective_mode": "bogus",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "non-main",
+  "placement": "defaults",
+  "roster": "entries",
+  "agent": "helper",
+  "effective_mode": "non-main",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "non-main",
+  "placement": "defaults",
+  "roster": "entries",
+  "agent": "main",
+  "effective_mode": "non-main",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "non-main",
+  "placement": "defaults",
+  "roster": "list",
+  "agent": "helper",
+  "effective_mode": "non-main",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "non-main",
+  "placement": "defaults",
+  "roster": "list",
+  "agent": "main",
+  "effective_mode": "non-main",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "non-main",
+  "placement": "defaults",
+  "roster": "none",
+  "agent": "main",
+  "effective_mode": "non-main",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "non-main",
+  "placement": "entry",
+  "roster": "entries",
+  "agent": "helper",
+  "effective_mode": "non-main",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "non-main",
+  "placement": "entry",
+  "roster": "list",
+  "agent": "helper",
+  "effective_mode": "non-main",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": true,
+  "static_answer": "unknown"
+ },
+ {
+  "mode": "off",
+  "placement": "defaults",
+  "roster": "entries",
+  "agent": "helper",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "defaults",
+  "roster": "entries",
+  "agent": "helper",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "defaults",
+  "roster": "entries",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "defaults",
+  "roster": "entries",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "defaults",
+  "roster": "list",
+  "agent": "helper",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "defaults",
+  "roster": "list",
+  "agent": "helper",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "defaults",
+  "roster": "list",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "defaults",
+  "roster": "list",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "defaults",
+  "roster": "none",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "defaults",
+  "roster": "none",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "entries",
+  "agent": "helper",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "entries",
+  "agent": "helper",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "entries",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "entries",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "entries",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "entries",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "entries",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "list",
+  "agent": "helper",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "list",
+  "agent": "helper",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "list",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "list",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "list",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "list",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ },
+ {
+  "mode": "off",
+  "placement": "entry",
+  "roster": "list",
+  "agent": "main",
+  "effective_mode": "off",
+  "vendor_sandboxed_own_main_session": false,
+  "vendor_sandboxed_other_session": false,
+  "static_answer": false
+ }
+]

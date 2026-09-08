@@ -10,7 +10,6 @@ import json
 import os
 import time
 import zlib
-from pathlib import Path
 
 import pytest
 
@@ -809,7 +808,11 @@ def test_real_fleet_trajectory_scan_stays_within_check_budget():
     from clawseccheck.logdiscovery import discover_log_sinks
     from clawseccheck.scanbudget import DEFAULT_CHECK_BUDGET_S
 
-    real_home = Path.home() / ".openclaw"
+    from _realhome import REAL_HOME
+
+    # B-519: REAL_HOME, not Path.home() -- the suite redirects $HOME, which would make
+    # this skip unconditionally instead of exercising the real corpus.
+    real_home = REAL_HOME / ".openclaw"
     if not real_home.is_dir():
         pytest.skip("real ~/.openclaw not present on this box")
 

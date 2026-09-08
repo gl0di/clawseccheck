@@ -15,7 +15,7 @@ def _levels(alerts):
 def test_snapshot_has_expected_shape():
     ctx, findings, score = audit(FIXTURES / "home_safe")
     snap = snapshot(ctx, findings, score)
-    assert snap["version"] == 3 and snap["grade"] in "ABCDF"
+    assert snap["version"] == 8 and snap["grade"] in "ABCDF"
     assert "checks" in snap and "skills" in snap and "bootstrap" in snap
     assert snap["bootstrap"]  # home_safe has a SOUL.md
 
@@ -111,8 +111,12 @@ def test_unchanged_caps_and_version_no_new_alert():
 
 
 def test_score_drop_and_new_failing_check():
-    prev = {"score": 85, "grade": "B", "skills": {}, "bootstrap": {}, "checks": {"B2": "PASS"}}
-    curr = {"score": 49, "grade": "F", "skills": {}, "bootstrap": {}, "checks": {"B2": "FAIL"}}
+    # B-511: both sides carry graded=True — a score drop is only reportable between two
+    # runs that each earned the number being compared.
+    prev = {"score": 85, "grade": "B", "graded": True, "skills": {}, "bootstrap": {},
+            "checks": {"B2": "PASS"}}
+    curr = {"score": 49, "grade": "F", "graded": True, "skills": {}, "bootstrap": {},
+            "checks": {"B2": "FAIL"}}
     msgs = " ".join(m for _, m in diff(prev, curr))
     assert "dropped" in msgs and "Now FAILING" in msgs
 

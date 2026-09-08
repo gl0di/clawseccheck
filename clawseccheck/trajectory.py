@@ -37,6 +37,82 @@ _MAX_FILES = 60
 _MAX_BYTES_PER_FILE = 8_000_000
 
 
+def explicit_path_problem(explicit_path: str | None) -> str | None:
+    """Why an explicitly-named --behavioral PATH cannot be read, or None if it is fine.
+
+    B-462: when the user names a file, a bad path is THEIR fact, not the host's. A typo
+    used to fall through to the generic "no trajectory sidecars found ... run on a host
+    where an OpenClaw agent has produced session trajectories" — blaming the machine,
+    never echoing the path, and exiting 0 under a green tick.
+
+    Shared by `analyze` and the CLI's exit-code decision so the two cannot disagree, and
+    so deciding the exit code costs a stat rather than a second full `analyze()` pass over
+    every trajectory file.
+
+    B-686: moved here from ``behavioral.py``. Both trajectory modes take the same
+    kind of argument and must answer a bad one the same way; leaving the predicate
+    in one of them and importing it from the other would be a sibling dependency
+    for a question that belongs to neither. It sits beside ``resolve_explicit_file``,
+    which answers the adjacent half ("could I open it?"). ``behavioral`` re-exports
+    the name, so every existing importer still resolves.
+
+    The path is echoed unredacted, matching every other line these renderers print.
+    ``report._redact_home_paths`` is for artifacts handed to someone else -- the
+    dashboard card, SARIF, the CLI's stderr notes -- while an on-screen report keeps
+    full paths on purpose: "a real path is exactly what an owner debugging their own
+    config needs to see" (see that function's own docstring).
+    """
+    if not explicit_path:
+        return None
+    p = Path(explicit_path).expanduser()
+    # B-683: `Path.exists()` swallows ENOENT/ENOTDIR/EBADF/ELOOP and NOT EACCES, so a
+    # path under a directory this process cannot stat made it RAISE — and the one
+    # function whose entire job is to name a path problem answered one of them with
+    # "unexpected internal error (PermissionError) ... open an issue", i.e. by asking to
+    # be bug-reported for the caller's own directory mode. Ask stat directly and name
+    # each errno, rather than reading a boolean that cannot represent the third case.
+    try:
+        p.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return f"{explicit_path}: no such file or directory"
+    except PermissionError:
+        return f"{explicit_path}: permission denied"
+    except OSError as exc:
+        return f"{explicit_path}: {exc.strerror or exc}"
+    # Reached only after a successful stat, so the parent is readable and this cannot
+    # raise for the same reason.
+    if p.is_dir():
+        return f"{explicit_path}: is a directory, not a trajectory file"
+    return None
+
+
+def resolve_explicit_file(explicit_path) -> "tuple[list, bool]":
+    """``(files, path_unreadable)`` for a user-named trajectory path.
+
+    B-683. This was four copies of ``files = [p] if p.is_file() else []`` across this
+    module and ``trajaudit.py``, and every one of them had the same two defects.
+
+    ``Path.is_file()`` swallows ENOENT/ENOTDIR/EBADF/ELOOP and **not EACCES**, so a path
+    under a directory the process cannot stat *raised* — out past every branch to the
+    top-level handler, which printed "unexpected internal error (PermissionError) ...
+    open an issue", soliciting a bug report for the caller's own directory mode.
+
+    And catching it is only half the fix: falling back to an empty ``files`` on its own
+    leaves ``present`` False, which every caller renders as "no trajectory data" — a
+    statement about the agent's history sourced from a file nobody was allowed to open.
+    The second return value is what keeps "there is nothing here" and "I could not look"
+    apart, so a caller can say which one it means.
+
+    One implementation rather than four, because the four had already drifted in what
+    they recorded and a fifth copy is the obvious next step otherwise.
+    """
+    p = Path(explicit_path).expanduser()
+    try:
+        return ([p], False) if p.is_file() else ([], False)
+    except OSError:
+        return [], True
+
+
 def find_trajectory_files(
     home: Path, *, max_files: int = _MAX_FILES, stats: dict | None = None
 ) -> list[Path]:
@@ -339,11 +415,11 @@ def read_compiled_tool_descriptions(
         "present": False, "files_scanned": 0, "events": 0,
         "unknown_version": False, "truncated": False,
         "files_total": 0, "files_capped": False,
+        "path_unreadable": False,  # B-683
     }
 
     if explicit_path:
-        p = Path(explicit_path).expanduser()
-        files = [p] if p.is_file() else []
+        files, meta["path_unreadable"] = resolve_explicit_file(explicit_path)
         meta["files_total"] = len(files)
     else:
         stats: dict = {}
@@ -560,11 +636,12 @@ def read_events(
     meta = {
         "present": False, "files_scanned": 0, "unknown_version": False, "truncated": False,
         "files_total": 0, "files_capped": False,
+        # B-683: the named path could not be opened at all.
+        "path_unreadable": False,
     }
 
     if explicit_path:
-        p = Path(explicit_path).expanduser()
-        files = [p] if p.is_file() else []
+        files, meta["path_unreadable"] = resolve_explicit_file(explicit_path)
         meta["files_total"] = len(files)
     else:
         stats: dict = {}

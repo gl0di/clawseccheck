@@ -29,6 +29,7 @@ from clawseccheck.catalog import FAIL, PASS, UNKNOWN
 from clawseccheck.checks import vet_skill
 from clawseccheck.checks._vet import _looks_like_a_skill_package, _reads_as_html
 from clawseccheck.cli import main
+from clawseccheck.report import _UNGRADED_CAP_TAIL
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 SAFE = str(FIXTURES / "home_safe")
@@ -127,8 +128,14 @@ def test_card_discloses_that_no_openclaw_config_was_found(tmp_path, capsys):
     out = capsys.readouterr().out
     # Routed through the shared cap cascade (the same one render_report uses) so the
     # card cannot grow a second, drifting explanation of the same fact.
-    assert "capped from" in out
+    #
+    # C-426: the run is ungraded now, so "capped from N" -- a sentence whose whole job
+    # was explaining a number -- is gone with the number. What must NOT go with it is
+    # the fact, and that is what this test is really for (B-465): the card still names
+    # the missing config, still says it is not a verdict on the reader's setup, and now
+    # says explicitly that the cap would have applied had there been a grade.
     assert "no OpenClaw config found" in out
+    assert _UNGRADED_CAP_TAIL in out
     assert "not a verdict on your setup" in out
 
 

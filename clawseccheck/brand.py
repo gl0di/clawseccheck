@@ -343,3 +343,15 @@ FAVICON_DATA_URI = (
 / badge-only** (Tier 3) — same reach constraint as :data:`LOGO_SVG`, but this one is
 the real mascot art, not the vector placeholder; see :func:`clawseccheck.report.
 render_html`."""
+
+
+#: The mark the HTML report shows in its header.
+#:
+#: Deliberately the SAME bytes as ``FAVICON_DATA_URI`` — the real mascot art — and NOT
+#: ``LOGO_SVG``. ``LOGO_SVG`` is labelled PROVISIONAL above: an abstract circle-and-arcs
+#: placeholder, which is the right trade for the badge (a 14px shields.io row, where a
+#: raster would blur and vector geometry is re-implemented in `pdf.py`) and the wrong one
+#: for a page a person reads, where it reads as a generic glyph rather than as this
+#: product. The real art already ships inlined for the browser tab; showing it in the
+#: header costs no new asset and no network request.
+HEADER_LOGO_DATA_URI = FAVICON_DATA_URI

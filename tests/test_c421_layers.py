@@ -1,0 +1,230 @@
+"""CLAWSECCHECK-C-421 — the five-layer ledger (clawseccheck/layers.py).
+
+Stdlib-only, offline. Covers LayerState/LayerLedger validation and derived views, the
+leaf-module import-graph guard, and that pipeline.py's re-export of the status
+constants actually points at the same objects layers.py defines.
+"""
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+from clawseccheck import layers, pipeline
+from clawseccheck.layers import (
+    COVERAGE_COMPLETE,
+    COVERAGE_PARTIAL,
+    COVERAGE_UNKNOWN,
+    INCOMPLETE_LAYER_STATUSES,
+    LAYER_COVERAGES,
+    LAYER_INSTALLED_SWEEP,
+    LAYER_LIVE_BEHAVIOUR,
+    LAYER_LOGS_TRAJECTORIES,
+    LAYER_ORDER,
+    LAYER_SELF_REPORT,
+    LAYER_STATIC,
+    LAYER_STATUSES,
+    STATUS_ERROR,
+    STATUS_NOT_REACHED,
+    STATUS_NOT_SUBMITTED,
+    STATUS_RAN,
+    STATUS_REFUSED,
+    STATUS_SKIPPED,
+    STATUS_UNAVAILABLE,
+    LayerLedger,
+    LayerState,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LAYERS_PY = REPO_ROOT / "clawseccheck" / "layers.py"
+
+
+def _all_ran_states() -> dict:
+    return {layer: LayerState(status=STATUS_RAN) for layer in LAYER_ORDER}
+
+
+def test_all_ran_is_complete_and_nothing_missing() -> None:
+    ledger = LayerLedger(states=_all_ran_states())
+    assert ledger.complete is True
+    assert ledger.missing == ()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [STATUS_SKIPPED, STATUS_REFUSED, STATUS_UNAVAILABLE, STATUS_ERROR, STATUS_NOT_REACHED],
+)
+def test_each_non_ran_status_breaks_complete(status: str) -> None:
+    states = _all_ran_states()
+    states[LAYER_SELF_REPORT] = LayerState(status=status)
+    ledger = LayerLedger(states=states)
+    assert ledger.complete is False
+    assert ledger.missing == (LAYER_SELF_REPORT,)
+
+
+def test_missing_is_ordered_by_layer_order_not_insertion_order() -> None:
+    # Deliberately scrambled insertion order, and not all five present-but-scrambled —
+    # dict preserves insertion order in Python, so this would fail if LayerLedger ever
+    # iterated self.states instead of LAYER_ORDER.
+    states = {
+        LAYER_LIVE_BEHAVIOUR: LayerState(status=STATUS_SKIPPED),
+        LAYER_STATIC: LayerState(status=STATUS_RAN),
+        LAYER_SELF_REPORT: LayerState(status=STATUS_ERROR),
+        LAYER_INSTALLED_SWEEP: LayerState(status=STATUS_RAN),
+        LAYER_LOGS_TRAJECTORIES: LayerState(status=STATUS_UNAVAILABLE),
+    }
+    ledger = LayerLedger(states=states)
+    assert ledger.missing == (
+        LAYER_LOGS_TRAJECTORIES, LAYER_SELF_REPORT, LAYER_LIVE_BEHAVIOUR,
+    )
+
+
+def test_not_checked_unions_orders_and_dedupes() -> None:
+    states = _all_ran_states()
+    states[LAYER_STATIC] = LayerState(
+        status=STATUS_RAN, not_reached=("dup", "static-only"),
+    )
+    states[LAYER_INSTALLED_SWEEP] = LayerState(
+        status=STATUS_SKIPPED, not_reached=("dup", "sweep-only"),
+    )
+    states[LAYER_LIVE_BEHAVIOUR] = LayerState(
+        status=STATUS_UNAVAILABLE, not_reached=("live-only",),
+    )
+    ledger = LayerLedger(states=states)
+    # LAYER_ORDER = static, installed_sweep, logs_trajectories, self_report, live_behaviour
+    assert ledger.not_checked == ("dup", "static-only", "sweep-only", "live-only")
+
+
+def test_status_accessor() -> None:
+    ledger = LayerLedger(states=_all_ran_states())
+    assert ledger.status(LAYER_STATIC) == STATUS_RAN
+
+
+def test_ledger_missing_a_layer_raises_value_error() -> None:
+    states = _all_ran_states()
+    del states[LAYER_LIVE_BEHAVIOUR]
+    with pytest.raises(ValueError):
+        LayerLedger(states=states)
+
+
+def test_ledger_with_unknown_layer_name_raises_value_error() -> None:
+    states = _all_ran_states()
+    states["not_a_real_layer"] = LayerState(status=STATUS_RAN)
+    with pytest.raises(ValueError):
+        LayerLedger(states=states)
+
+
+def test_layer_state_with_bogus_status_raises_value_error() -> None:
+    with pytest.raises(ValueError):
+        LayerState(status="totally-made-up")
+
+
+def test_layer_statuses_and_incomplete_set_are_consistent() -> None:
+    assert LAYER_STATUSES == {
+        STATUS_RAN, STATUS_SKIPPED, STATUS_REFUSED, STATUS_UNAVAILABLE,
+        STATUS_NOT_SUBMITTED, STATUS_ERROR, STATUS_NOT_REACHED,
+    }
+    assert INCOMPLETE_LAYER_STATUSES == LAYER_STATUSES - {STATUS_RAN}
+    assert STATUS_RAN not in INCOMPLETE_LAYER_STATUSES
+
+
+def test_layers_module_is_a_true_leaf() -> None:
+    """Import-graph guard: layers.py must import nothing from clawseccheck itself —
+    no relative import, no absolute `clawseccheck.*` import. Parsed with ast rather
+    than asserted in prose, so a future edit can't quietly grow a cycle."""
+    tree = ast.parse(LAYERS_PY.read_text(encoding="utf-8"))
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level and node.level > 0:
+                offenders.append(f"relative import (level={node.level}): {node.module}")
+            elif node.module and node.module.split(".")[0] == "clawseccheck":
+                offenders.append(f"absolute clawseccheck import: {node.module}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "clawseccheck":
+                    offenders.append(f"absolute clawseccheck import: {alias.name}")
+    assert not offenders, (
+        "clawseccheck/layers.py must stay a leaf (no import from clawseccheck itself): "
+        + ", ".join(offenders)
+    )
+
+
+def test_pipeline_reexports_the_same_status_objects() -> None:
+    """pipeline.py no longer defines its own STATUS_* strings; it re-exports layers.py's.
+    Since these are interned str literals identity (`is`) holds too, but equality is the
+    contract that actually matters."""
+    assert pipeline.STATUS_RAN is layers.STATUS_RAN
+    assert pipeline.STATUS_SKIPPED is layers.STATUS_SKIPPED
+    assert pipeline.STATUS_NOT_REACHED is layers.STATUS_NOT_REACHED
+    assert pipeline.STATUS_UNAVAILABLE is layers.STATUS_UNAVAILABLE
+    assert pipeline.STATUS_ERROR is layers.STATUS_ERROR
+
+
+# ── the one wording table (B-483 discipline: one table, in the leaf) ─────────
+
+
+def test_every_layer_and_status_has_wording() -> None:
+    """A layer or status with no entry would render as a KeyError or, worse, silently
+    as nothing — in the one sentence whose whole job is to say what was not checked."""
+    assert set(layers.LAYER_LABEL) == set(LAYER_ORDER)
+    assert set(layers.STATUS_PHRASE) == set(LAYER_STATUSES)
+
+
+def test_describe_layer_reads_as_a_sentence_fragment() -> None:
+    assert layers.describe_layer(
+        layers.LAYER_SELF_REPORT, layers.STATUS_UNAVAILABLE
+    ) == "agent self-report (not available here)"
+    assert layers.describe_layer(
+        layers.LAYER_LIVE_BEHAVIOUR, layers.STATUS_REFUSED
+    ) == "live behaviour test (declined)"
+
+
+def test_describe_layer_rejects_what_it_cannot_describe() -> None:
+    with pytest.raises(ValueError):
+        layers.describe_layer("no_such_layer", layers.STATUS_RAN)
+    with pytest.raises(ValueError):
+        layers.describe_layer(layers.LAYER_STATIC, "no_such_status")
+
+
+def test_the_four_not_ran_statuses_read_differently() -> None:
+    """An operator narrowing the run, a user declining, a capability that does not exist
+    here, and a layer that broke are four different facts about how much the report is
+    worth. Collapsing them to one phrase would be the lie this table exists to prevent."""
+    phrases = {
+        layers.STATUS_PHRASE[s]
+        for s in (layers.STATUS_SKIPPED, layers.STATUS_REFUSED,
+                  layers.STATUS_UNAVAILABLE, layers.STATUS_ERROR)
+    }
+    assert len(phrases) == 4
+
+
+# ── B-558: LayerState.coverage — a third, independent axis ──────────────────────
+
+
+def test_coverage_defaults_to_unknown_and_every_preexisting_construction_stays_identical():
+    """The default must be UNKNOWN so every pre-existing `LayerState(...)` call in the
+    tree — including every fixture in this file — is untouched by this field existing."""
+    state = LayerState(status=STATUS_RAN)
+    assert state.coverage == COVERAGE_UNKNOWN
+
+
+def test_coverage_accepts_all_three_named_values():
+    for value in (COVERAGE_UNKNOWN, COVERAGE_COMPLETE, COVERAGE_PARTIAL):
+        state = LayerState(status=STATUS_RAN, coverage=value)
+        assert state.coverage == value
+    assert LAYER_COVERAGES == {COVERAGE_UNKNOWN, COVERAGE_COMPLETE, COVERAGE_PARTIAL}
+
+
+def test_coverage_rejects_an_unknown_value():
+    with pytest.raises(ValueError):
+        LayerState(status=STATUS_RAN, coverage="mostly")
+
+
+def test_coverage_is_independent_of_status_and_not_reached():
+    """Three states, not a bool: `coverage` must be settable regardless of `status` or
+    `not_reached` — it is not derived from either at construction time."""
+    state = LayerState(status=STATUS_ERROR, not_reached=("x",), coverage=COVERAGE_COMPLETE)
+    assert state.status == STATUS_ERROR
+    assert state.not_reached == ("x",)
+    assert state.coverage == COVERAGE_COMPLETE

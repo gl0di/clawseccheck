@@ -30,9 +30,15 @@ from clawseccheck.collector import Context, collect
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
 
-def _ctx(cfg: dict, parse_error: bool = False) -> Context:
+def _ctx(cfg: dict, parse_error: bool = False, config_found: bool = True) -> Context:
+    """`config_found` defaults True because every case in this file supplies a config —
+    `_ctx({})` means "the user has an openclaw.json and configured nothing", which is not
+    the same question as "there is no openclaw.json". B175 distinguishes them: it cannot
+    reason from the build's defaults about a config it never read. Collector state is False
+    on a bare `Context`, so the helper has to say which one it means."""
     c = Context(home=Path("/nonexistent"))
     c.config = cfg
+    c.config_found = config_found
     c.config_parse_error = parse_error
     return c
 
@@ -197,12 +203,29 @@ def test_symlink_target_writes_alone_warns():
 # PASS: safe default (disabled / explicit "pending")
 # ---------------------------------------------------------------------------
 
-def test_no_skills_key_at_all_passes():
-    """An absent skills.workshop key resolves to the safe defaults per
-    resolveSkillWorkshopConfig — this must be PASS, never UNKNOWN (Golden Rule #4 cuts
-    both ways: an absent-but-defaulted field is a known-safe state, not an unknown one)."""
-    r = check_skill_workshop_autonomy(_ctx({}))
-    assert r.status == PASS
+def test_no_skills_key_at_all_depends_on_which_build_is_installed():
+    """An absent `skills.workshop` key resolves to the BUILD's defaults, and B-702 measured
+    that those defaults are opposite on the two generations::
+
+        2026.7.1-2   autonomous {enabled: false}   approvalPolicy "pending"
+        2026.8.1     autonomous {mode: "auto"}     approvalPolicy "auto"
+
+    So the original form of this test — "an absent key is a known-safe state, so PASS,
+    never UNKNOWN" — was true when written and became false the day 2026.8.1 shipped. Its
+    insight survives and is asserted here in full: where the default is knowable we state
+    it, in whichever direction it points, and only where it is NOT knowable do we say so.
+    """
+    legacy = _ctx({})
+    legacy.installed_dist_version = "2026.7.1-2"
+    assert check_skill_workshop_autonomy(legacy).status == PASS
+
+    modern = _ctx({})
+    modern.installed_dist_version = "2026.8.1"
+    assert check_skill_workshop_autonomy(modern).status == FAIL
+
+    blind = _ctx({})
+    blind.installed_dist_version = None
+    assert check_skill_workshop_autonomy(blind).status == UNKNOWN
 
 
 def test_autonomous_disabled_passes():

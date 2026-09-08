@@ -53,12 +53,29 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .attest import template as attest_template
+from .behavioral import analysis_incompleteness as behavioral_analysis_incompleteness
+from .behavioral import analysis_is_conclusive as behavioral_is_conclusive
+from .behavioral import analyze as behavioral_analyze
 from .behavioral import render_behavioral_analysis
 from .catalog import UNKNOWN
+from .layers import (            # noqa: F401 — re-exported for existing importers
+    STATUS_ERROR, STATUS_NOT_REACHED, STATUS_NOT_SUBMITTED, STATUS_RAN, STATUS_SKIPPED,
+    STATUS_UNAVAILABLE,
+)
+# C-425: the five-layer ledger names/types themselves — NOT re-exported above (that
+# comment is about the pre-existing STATUS_* vocabulary pipeline.py already used before
+# layers.py existed), only consumed by PipelineResult.to_ledger() below.
+from .layers import (
+    LAYER_INSTALLED_SWEEP, LAYER_LIVE_BEHAVIOUR, LAYER_LOGS_TRAJECTORIES,
+    LAYER_SELF_REPORT, LAYER_STATIC, LayerLedger, LayerState,
+)
+# B-558: the coverage vocabulary — same non-re-exported treatment as the ledger names
+# immediately above (only consumed inside to_ledger()).
+from .layers import COVERAGE_COMPLETE, COVERAGE_PARTIAL, COVERAGE_UNKNOWN
 from .report import _sanitize
 from .scanbudget import (
     DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, budget_deadline, budget_exceeded,
@@ -80,17 +97,12 @@ PHASE_ORDER = (
     PHASE_ADJUDICATION,
 )
 
-STATUS_RAN = "ran"
-STATUS_SKIPPED = "skipped"
-STATUS_NOT_REACHED = "not_reached"
-STATUS_UNAVAILABLE = "unavailable"
-STATUS_ERROR = "error"
-
 #: Statuses that mean "this phase cannot vouch for anything" — they make the run
 #: incomplete. ``ran`` is the only status that does not, and even then the phase's own
 #: ``complete`` flag can still be False (a sweep that hit its budget mid-fleet).
 _INCOMPLETE_STATUSES = frozenset({
-    STATUS_SKIPPED, STATUS_NOT_REACHED, STATUS_UNAVAILABLE, STATUS_ERROR,
+    STATUS_SKIPPED, STATUS_NOT_REACHED, STATUS_UNAVAILABLE, STATUS_NOT_SUBMITTED,
+    STATUS_ERROR,
 })
 
 # Section banners. Deliberately distinct strings from the two banners --full already
@@ -183,6 +195,15 @@ class PhaseResult:
     detail: str = ""
     #: Every target this phase cannot vouch for, named. No silent caps here.
     not_scanned: list[str] = field(default_factory=list)
+    #: B-558: `Finding` objects this phase evaluated that are NOT in `CHECKS` and so are
+    #: invisible to every roll-up computed from the audit's own findings list. Today that
+    #: is P8's `BEHAVIORAL_CHECK_IDS` (T1/T2/T3/B191), which are in `CATALOG` — hence
+    #: counted in the coverage page's denominator — while living outside `CHECKS` by
+    #: design. Read ONLY by the coverage page; deliberately absent from `to_json` and
+    #: never merged into the audit's findings, because these must not reach the score,
+    #: the inventory or `--exit-code` (F-154 routes them to the grade as a cap-only
+    #: signal, computed elsewhere, and that stays the single path by which they score).
+    evaluated_findings: list = field(default_factory=list)
     #: FAIL-only, mirroring the vet-mcp / skill-sweep contribution to ``--exit-code``.
     has_fail: bool = False
     #: Verbose section body (without the banner, which :func:`render_sections` adds).
@@ -348,6 +369,39 @@ def _sweep_data(sweep) -> dict:
     }
 
 
+def record_plugin_sweep(sweep, *, elapsed_s: float = 0.0,
+                        absent: PhaseResult | None = None) -> PhaseResult:
+    """Fold an ALREADY-EXECUTED installed-plugin sweep into the phase ledger.
+
+    The symmetric twin of :func:`record_skill_sweep`, and it exists for the same caller
+    shape: ``--dashboard --full`` runs the plugin sweep itself (``cli.py``, inline)
+    rather than through :func:`run_pipeline`, so it holds a finished sweep object and no
+    ``PhaseResult`` for it. Before B-723 that did not matter, because the layer ledger was
+    built from a promise; now that the ledger must be projected from real phases, the
+    dashboard needs the same fold the pipeline path gets.
+
+    ``absent`` is what to record when *sweep* is ``None`` — and it is a REQUIRED thought,
+    not a default, because "no sweep object" has several causes that are not
+    interchangeable: the build ships no plugin sweep (``unavailable``), the budget was
+    spent before it started (``not reached``), ``--fast`` was given (``skipped``), or it
+    raised (``error``). Collapsing them into one status would tell the reader the wrong
+    thing about why nothing was inspected — the caller knows which happened, so the caller
+    says. Passing ``None`` for *absent* falls back to ``skipped``, the weakest claim.
+
+    Duck-typed on *sweep* for the same layering reason ``record_skill_sweep`` is; see its
+    docstring.
+    """
+    if sweep is None:
+        return absent if absent is not None else _skipped(
+            PHASE_PLUGIN_SWEEP, "not run.", section=False)
+    phase = _sweep_phase_from(PHASE_PLUGIN_SWEEP, sweep, unit="plugin",
+                              elapsed_s=elapsed_s,
+                              full_detail_flag="--vet-plugin <path>")
+    # ``section=False``: this caller has already rendered the plugin material in its own
+    # established position, exactly as ``record_skill_sweep`` documents for P6.
+    return replace(phase, section=False)
+
+
 def _run_plugin_sweep_with_sweep(home_dir, *, deadline: float | None = None,
                                  ascii_only: bool = False):
     """P7's actual work, returning `(PhaseResult, sweep_or_None)`.
@@ -396,8 +450,14 @@ def run_plugin_sweep(home_dir, *, deadline: float | None = None,
 
 # ── P8: behavioural replay ───────────────────────────────────────────────────
 
-def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
+def run_behavioral(ctx, *, ascii_only: bool = False,
+                   ledger_path: str | None = None) -> PhaseResult:
     """P8 — the behavioural/trajectory detectors, over the audit's OWN ``ctx``.
+
+    ``ledger_path`` (B-599): forwarded to ``render_trajectory_analysis``'s B-300
+    self-test-corroboration ledger lookup, so a ``--data-dir`` run's coverage ledger
+    resolves under that store rather than the real ``~/.clawseccheck`` — ``None``
+    keeps today's default (see ``cli._coverage_path``).
 
     Reusing ``ctx`` is not a micro-optimisation: ``trajaudit``'s per-context memo lives
     on that object, so a fresh ``Context`` here would silently discard it and re-pay the
@@ -431,7 +491,14 @@ def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
     """
     started = time.monotonic()
     try:
-        rendered = render_behavioral_analysis(ctx, ascii_only=ascii_only)
+        # B-558: analysed here, rather than inside the renderer, so this phase keeps the
+        # detectors' own Finding objects. The coverage page counts T1/T2/T3/B191 in its
+        # denominator (they are in CATALOG) but could never see them in its numerator,
+        # because they are outside CHECKS — so a --full run printed their verdicts and
+        # then listed them as "not scanned" in the same output. One analyse, one render:
+        # `result=` is what keeps this from becoming a second full trajectory glob.
+        analysis = behavioral_analyze(ctx)
+        rendered = render_behavioral_analysis(ctx, ascii_only=ascii_only, result=analysis)
     except Exception as exc:  # noqa: BLE001 — see run_plugin_sweep
         return PhaseResult(
             name=PHASE_BEHAVIORAL, status=STATUS_ERROR, complete=False,
@@ -446,7 +513,8 @@ def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
 
     incident = False
     try:
-        traj_rendered = render_trajectory_analysis(ctx, ascii_only=ascii_only)
+        traj_rendered = render_trajectory_analysis(ctx, ascii_only=ascii_only,
+                                                   ledger_path=ledger_path)
         lines.append("")
         lines.extend(_sanitize(ln) for ln in traj_rendered.splitlines())
         # Structural substring check (not a security-relevant keyword match): the
@@ -482,6 +550,14 @@ def run_behavioral(ctx, *, ascii_only: bool = False) -> PhaseResult:
         detail=detail,
         lines=lines,
         quiet_line=quiet_line,
+        # Only when the replay had complete material to work on — see
+        # `behavioral.analysis_is_conclusive`. T1/T2 return PASS over an empty or
+        # truncated event set, which is fine as a rendered line (the section prints the
+        # counts beside it) and is not a basis for "this subject was scanned".
+        evaluated_findings=(
+            list(analysis.get("findings") or ())
+            if behavioral_is_conclusive(analysis) else []
+        ),
     )
 
 
@@ -614,7 +690,7 @@ def _vet_second_opinion(vet_targets, vet_judged: list) -> list[dict]:
 
 
 def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
-                     bundle: dict | None = None) -> PhaseResult:
+                     bundle: dict | None = None, score=None) -> PhaseResult:
     """P9 — assemble the judge packet, and fold in a submitted bundle if there is one.
 
     Emit-and-return: this phase never waits for an answer. With no bundle it reports
@@ -626,7 +702,7 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
     there would be nothing to opt out of.
     """
     from .adjudication import (  # noqa: PLC0415 — see the module note on layering
-        _parse_verdicts, _second_opinion, build_judge_packet,
+        _parse_verdicts, _second_opinion, build_judge_packet, run_state,
     )
     started = time.monotonic()
     try:
@@ -643,6 +719,10 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
 
     data: dict = {
         "judgePacket": packet,
+        # B-623: the same run-level frame the standalone --judge-packet carries. Without
+        # it a --full adjudication phase hands a judge a band of UNKNOWNs and no way to
+        # see that the run itself was blind, capped or ungraded.
+        "runState": run_state(score),
         "vetPackets": packets,
         "attestTemplate": attest_template(),
         "verdictsSubmitted": False,
@@ -744,6 +824,12 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
 
 # ── phase 2: the judged bundle ───────────────────────────────────────────────
 
+#: B-687: the type each bucket must carry, mirroring the isinstance gates in
+#: :func:`split_judged_bundle`. Kept beside them so a fifth bucket cannot be added to one
+#: without the other noticing.
+_BUCKET_TYPES = {"attestation": dict, "judged": dict, "vetJudged": list, "liveTest": dict}
+
+
 def split_judged_bundle(raw: str) -> dict:
     """Split a ``--judged-bundle`` payload into its four independent buckets.
 
@@ -767,13 +853,26 @@ def split_judged_bundle(raw: str) -> dict:
     empty: dict = {"attestation": None, "judged": None, "vetJudged": [], "liveTest": None}
     if not isinstance(raw, str):
         return empty
+    # B-687: three of the four early returns below drop a payload the caller DID send, and
+    # said nothing. B-597 put a disclosure at the end of this function; everything that
+    # reaches it is reported, and these paths return first. The consequence is the one
+    # `read_judged_bundle_with_problem` already records for the path it could not open --
+    # `liveTest` feeds `scoring.compute`'s cap, so a lost bundle is a silently HIGHER score.
+    #
+    # `_note_bundle_dropped` stays silent on an empty or whitespace-only payload, which is
+    # the "nothing was submitted" case `adjudication._payload_carries_content` protects --
+    # and which `read_judged_bundle_with_problem` also produces for an unreadable path, so
+    # noting it here would double-report what B-562 already says with the path named.
     if len(raw.encode("utf-8", "surrogatepass")) > MAX_BUNDLE_BYTES:
+        _note_bundle_dropped(raw, f"it is larger than the {MAX_BUNDLE_BYTES}-byte cap")
         return empty
     try:
         data = json.loads(raw)
     except ValueError:
+        _note_bundle_dropped(raw, "it is not valid JSON")
         return empty
     if not isinstance(data, dict):
+        _note_bundle_dropped(raw, "its top level is not a JSON object")
         return empty
     out = dict(empty)
     if isinstance(data.get("attestation"), dict):
@@ -785,11 +884,136 @@ def split_judged_bundle(raw: str) -> dict:
         out["vetJudged"] = [e for e in vet_judged if isinstance(e, dict)]
     if isinstance(data.get("liveTest"), dict):
         out["liveTest"] = data["liveTest"]
+    _note_misplaced_bundle_content(data, out)
     return out
 
 
-def read_judged_bundle(path: str) -> dict:
-    """:func:`split_judged_bundle` over a file (``-`` reads stdin). Never raises."""
+def _note_bundle_dropped(raw: str, reason: str) -> None:
+    """B-687: say that a bundle the caller sent was discarded whole, and why.
+
+    Silent when the payload is empty or whitespace-only. That is not a dropped bundle but
+    the "nothing was submitted" case, which ``adjudication._payload_carries_content``
+    deliberately keeps quiet -- and it is also what ``read_judged_bundle_with_problem``
+    hands us when the FILE could not be opened, a case B-562 already reports with the path
+    named. Noting it here would turn one failure into two lines.
+
+    *reason* is composed by this module from fixed text and this contract's own numbers;
+    nothing from the payload reaches it. See ``_note_misplaced_bundle_content`` for why
+    that rule exists -- a bundle key can carry a secret-shaped value straight into a
+    diagnostic.
+    """
+    from .adjudication import _note  # noqa: PLC0415 -- see the module note on layering
+
+    if not raw or not raw.strip():
+        return
+    _note(f"--judged-bundle was read but nothing was applied: {reason}. "
+          "The run continues as if no bundle had been submitted.")
+
+
+def _note_misplaced_bundle_content(data: dict, out: dict) -> None:
+    """B-597: never drop recognisable bundle content without saying so.
+
+    B-330 already made a *malformed* verdicts payload loud — "produced no usable entries".
+    The mirror case stayed silent: content that is perfectly well-formed but sits at the
+    wrong level. ``_parse_verdicts`` is only reached when the ``judged`` bucket exists
+    (see the call in :func:`run_full_pipeline`), so a file whose ``verdicts`` array is at
+    the TOP level instead of inside ``judged`` never reaches the diagnostic that would
+    have caught it — every entry is discarded and the report then states "no verdicts
+    submitted", which is a false statement about a file the tool just read.
+
+    That is not hypothetical, and it is not a shape a user would invent unprompted: it is
+    what ``_parse_verdicts``' own error message *taught* a host agent to write. Told its
+    bundle "has no top-level 'verdicts' array" — a sentence describing the inside of the
+    ``judged`` object — the agent moved the array to the file's top level and dropped
+    ``judged``. The second run applied the ``liveTest`` bucket from the same file, printed
+    a grade, and said nothing about the 25 verdicts it had thrown away. (That message is
+    reworded in ``adjudication`` as part of this fix, so it can no longer teach it.)
+
+    **The misplaced array is accepted, not rejected**, and the note says so. The intent is
+    unambiguous — ``verdicts`` is this contract's own key, carrying this contract's own
+    entry shape — and rejecting would cost the caller a second full pipeline run to
+    recover data that was already in its hands. What must never happen is silence, and an
+    explicit ``judged`` bucket always wins over the inferred one: guessing is a last
+    resort, not a peer.
+
+    Notes carry no caller-supplied strings (see ``adjudication._note``'s own contract) —
+    only counts and this contract's own fixed key names — so an unrecognised key is
+    counted, never echoed. A bundle key could otherwise carry a secret-shaped value
+    straight into a diagnostic.
+    """
+    from .adjudication import _note  # noqa: PLC0415 — see the module note on layering
+
+    misplaced = data.get("verdicts")
+    if isinstance(misplaced, list) and misplaced:
+        if out["judged"] is None:
+            out["judged"] = {"verdicts": misplaced}
+            _n = len(misplaced)
+            _entries = "entry" if _n == 1 else "entries"
+            _note(
+                f'--judged-bundle carried a top-level "verdicts" array of {_n} {_entries}'
+                ' with no "judged" bucket around it. Applied it as the judged bucket,'
+                ' since that is the only thing it can mean — but the documented shape is'
+                ' {"judged": {"verdicts": [...]}}, and a future version may stop guessing.'
+            )
+        else:
+            _note(
+                'ignored a top-level "verdicts" array in --judged-bundle: the file also'
+                ' has an explicit "judged" bucket, which wins. Only one of the two was'
+                " applied."
+            )
+        return
+    # B-687: a recognised key carrying the WRONG TYPE was dropped as silently as an absent
+    # one -- the four isinstance gates above have no else. That is not a hypothetical shape:
+    # this whole function exists because the tool's own error message taught a host agent to
+    # move `verdicts` to the top level, and a mistyped `judged` is the same class of mistake
+    # by the same kind of caller. Checked BEFORE the early return below, because a bucket
+    # that was thrown away is thrown away whether or not a sibling bucket survived.
+    #
+    # The key names are this contract's own fixed strings and the type words are a fixed
+    # vocabulary, so nothing from the payload is echoed.
+    _mistyped = [k for k, t in _BUCKET_TYPES.items()
+                 if k in data and not isinstance(data[k], t)]
+    if _mistyped:
+        _keys = ", ".join(f'"{k}"' for k in _mistyped)
+        _one = len(_mistyped) == 1
+        _note(
+            f"--judged-bundle: {'bucket' if _one else 'buckets'} {_keys} carried the wrong"
+            f" type and {'was' if _one else 'were'} dropped. Expected an object for"
+            ' "attestation", "judged" and "liveTest", and an array for "vetJudged".'
+        )
+    # A readable object none of whose keys we recognise is the other way to lose a whole
+    # file in silence — B-562 covers the path that could not be READ, not the one that
+    # parsed into nothing.
+    if any(out[k] for k in ("attestation", "judged", "vetJudged", "liveTest")):
+        return
+    unknown = [k for k in data if k not in ("attestation", "judged", "vetJudged", "liveTest")]
+    if unknown:
+        _note(
+            f"--judged-bundle parsed but none of its {len(unknown)} top-level key(s) is a"
+            ' recognised bucket, so nothing was applied. Expected one or more of:'
+            ' "attestation", "judged", "vetJudged", "liveTest".'
+        )
+
+
+def read_judged_bundle_with_problem(path: str) -> "tuple[dict, OSError | None]":
+    """:func:`read_judged_bundle`, plus the exception when the file could not be read.
+
+    B-562: the bundle read swallowed ``OSError`` into an empty payload, so a mistyped
+    ``--judged-bundle`` path emptied all four buckets at once and said nothing. Measured
+    on the real CLI, that produced ``rc 0``, 237 KB of stdout and a byte-empty stderr with
+    the path named zero times — and because ``liveTest`` feeds ``scoring.compute``'s cap,
+    a lost bundle is a silently HIGHER score, which none of B-561's three flags can do.
+
+    The exception is RETURNED, not raised and not worded here: this function's "never
+    raises, degrade to inert" contract is what lets an advisory bundle be untrusted input,
+    and phrasing belongs to the shell (``cli._describe_os_error``). Callers that only want
+    the bundle keep using :func:`read_judged_bundle` unchanged.
+
+    A path that exists but holds garbage is NOT a problem in this sense — that is
+    :func:`split_judged_bundle`'s "anything malformed yields an absent bucket", a
+    statement about the payload rather than about there being no payload.
+    """
+    problem: "OSError | None" = None
     if path == "-":
         import sys  # noqa: PLC0415 — only needed on this one branch
         try:
@@ -799,9 +1023,15 @@ def read_judged_bundle(path: str) -> dict:
     else:
         try:
             raw = Path(path).expanduser().read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as exc:
             raw = ""
-    return split_judged_bundle(raw)
+            problem = exc
+    return split_judged_bundle(raw), problem
+
+
+def read_judged_bundle(path: str) -> dict:
+    """:func:`split_judged_bundle` over a file (``-`` reads stdin). Never raises."""
+    return read_judged_bundle_with_problem(path)[0]
 
 
 # ── liveTest bucket (F-155) ───────────────────────────────────────────────────
@@ -963,7 +1193,89 @@ def live_test_cap_signal(bucket) -> LiveTestSignal:
     return LiveTestSignal(hit=True, reason=reason, reproducible=_live_test_reproducible(bucket))
 
 
+# ── C-425: projecting the pipeline onto the five-layer ledger (layers.py) ──────
+#
+# "Take the worse of the two statuses" — installed_sweep's own merge rule, and the
+# logs_trajectories/behavioral merge below it — needs a total order over the non-`ran`
+# statuses. `ran` is always best (rank 0); among the rest, `error` (broke while trying)
+# outranks a deliberate/structural non-run, which outranks an operator-narrowed
+# `skipped` — so one phase erroring can never hide behind its sibling merely having
+# been skipped.
+_STATUS_BADNESS = {
+    STATUS_RAN: 0,
+    STATUS_SKIPPED: 1,
+    STATUS_UNAVAILABLE: 2,
+    # B-603: ranked WITH unavailable, not above or below it. Both are a structural
+    # non-run rather than a failure, and asserting a severity difference between "the
+    # environment could not" and "the operator did not" would be inventing one. The tie
+    # is unreachable today -- `_worse_status` merges only installed_sweep and
+    # logs/behavioral, and neither can carry `not_submitted`, which is assigned solely
+    # to self_report and live_behaviour. Ranked anyway, because `.get(a, 99)` would
+    # otherwise rank an unlisted status worse than `error`.
+    STATUS_NOT_SUBMITTED: 2,
+    STATUS_NOT_REACHED: 3,
+    STATUS_ERROR: 4,
+}
+
+
+def _worse_status(a: str, b: str) -> str:
+    return a if _STATUS_BADNESS.get(a, 99) >= _STATUS_BADNESS.get(b, 99) else b
+
+
+# B164's own disclosure text (checks/_egress.py's check_log_threat_hunt) is the ONLY
+# place a per-sink "not scanned" count exists today — coverage.py's own V1 scope note
+# says as much ("that data exists today only as prose inside B164/trajaudit/
+# behavioral's own Finding text, not as structured counts"). Parsed here rather than
+# re-derived as a fresh count, so the ledger's not_reached line and B164's own sentence
+# can never disagree.
+_B164_NOT_SCANNED_RE = re.compile(r"(\d+) log/transcript sinks? not scanned")
+
+
+def _b164_not_reached(findings) -> tuple:
+    b164 = next((f for f in findings if getattr(f, "id", None) == "B164"), None)
+    if b164 is None or not getattr(b164, "detail", None):
+        return ()
+    m = _B164_NOT_SCANNED_RE.search(b164.detail)
+    return (f"{m.group(1)} log/transcript sink(s) not scanned",) if m else ()
+
+
 # ── the pipeline roll-up (P10) ───────────────────────────────────────────────
+
+# B-692: every key `run_adjudication` puts on its phase data, so the emitter cannot drop
+# one by omission. It used to be an inline five-tuple, and it silently dropped the two the
+# phase produces and nothing else reads back:
+#
+#   `runState` -- the run-level frame B-623 added precisely so a `--full` adjudication does
+#   not hand a judge a band of UNKNOWNs with no way to see the run was blind, capped or
+#   ungraded. The phase's own comment says that in as many words, and the emitter then threw
+#   it away; the standalone `--judge-packet` carried it while the composed route, which is
+#   the one `run_adjudication`'s operator text tells you to use, did not.
+#
+#   `verdictsSubmitted` -- set on every run and read by nobody, because it never left. It
+#   answers "did a verdict bucket of EITHER kind arrive", which no other key does: it is
+#   raised by the `judged` branch (which attaches `secondOpinion`) AND by the `vetJudged`
+#   branch (which attaches `vetSecondOpinion` instead), so it is not the same question as
+#   `"secondOpinion" in payload`. Measured: a bundle carrying only `liveTest` leaves it
+#   False, a `judged` bundle raises it, and a `vetJudged`-only bundle raises it with no
+#   `secondOpinion` present at all. Without it, "nothing was borderline" and "nobody
+#   judged" are indistinguishable.
+#
+# A named constant rather than a literal in the loop so the guard can be a CENSUS --
+# `tests/test_b692_the_phase_keys_all_reach_the_output.py` derives what the phase can produce
+# from its own source and requires this to cover it. An allowlist is a deliberate decision
+# about the public shape; the guard only makes leaving a key out a decision rather than an
+# oversight. Same shape as B-689's `_CAP_LADDER` and B-693's emitter census, for the same
+# reason: a hand-kept list beside a hand-kept producer is where these keep diverging.
+_ADJUDICATION_JSON_KEYS = (
+    "judgePacket",
+    "runState",
+    "vetPackets",
+    "attestTemplate",
+    "secondOpinion",
+    "vetSecondOpinion",
+    "verdictsSubmitted",
+)
+
 
 @dataclass
 class PipelineResult:
@@ -1032,8 +1344,7 @@ class PipelineResult:
         }
         adj = self.by_name(PHASE_ADJUDICATION)
         if adj is not None and isinstance(adj.data, dict):
-            for key in ("judgePacket", "vetPackets", "attestTemplate", "secondOpinion",
-                       "vetSecondOpinion"):
+            for key in _ADJUDICATION_JSON_KEYS:
                 if key in adj.data:
                     payload[key] = adj.data[key]
         plugins = self.by_name(PHASE_PLUGIN_SWEEP)
@@ -1041,6 +1352,187 @@ class PipelineResult:
             payload["pluginSweep"] = plugins.data
         from .report import _sanitize_tree  # noqa: PLC0415 — see the docstring
         return _sanitize_tree(payload)
+
+    def to_ledger(self, findings, *, degraded_count: int = 0,
+                 attestation: dict | None = None, live_test_bucket=None,
+                 behavioral_analysis: dict | None = None) -> LayerLedger:
+        """C-425: project this pipeline's phases onto the five-layer ledger (layers.py).
+
+        The mapping (decided; implemented as specified, not redesigned):
+
+        * ``static`` — always ``ran`` on an audit path (the checks engine itself
+          already ran to produce *findings*). ``not_reached`` names *degraded_count*
+          — the SAME figure ``scoring.compute``'s own DEGRADED_CHECK_CAP already
+          discloses (``score.degraded_count``) — passed in by the caller rather than
+          re-derived here, so the ledger's line and the score's own cap can never
+          disagree.
+        * ``installed_sweep`` — ``ran`` only when BOTH :data:`PHASE_SKILL_SWEEP` and
+          :data:`PHASE_PLUGIN_SWEEP` are present in ``self.phases`` and each is
+          itself ``ran``; otherwise the WORSE of the two (:func:`_worse_status`) — a
+          phase that errored can never hide behind a sibling that was merely
+          skipped. A phase absent from ``self.phases`` entirely reads as
+          ``not_reached`` (it never got a turn). ``not_reached`` is the union of
+          both phases' own ``not_scanned`` lists — never a fresh count.
+        * ``logs_trajectories`` — the log/trajectory content scan (B164) runs inside
+          the base audit unconditionally, so this STARTS ``ran``; :data:`PHASE_BEHAVIORAL`
+          (when present in ``self.phases``) can only make it WORSE, never better —
+          same :func:`_worse_status` merge. ``not_reached`` is B164's own "N
+          log/transcript sink(s) not scanned" figure (:func:`_b164_not_reached`),
+          parsed from that Finding's own disclosure rather than re-derived.
+        * ``self_report`` — ``ran`` iff *attestation* is a non-empty, truthy dict (a
+          genuinely-supplied, schema-valid attestation reached ``audit()`` — an
+          absent or malformed one parses to ``{}``, see
+          ``attest.parse_attestation``), else ``unavailable`` (nothing to ask, by
+          construction — matches ``layers.STATUS_UNAVAILABLE``'s own meaning).
+          There is NO freshness concept in the attestation schema (no timestamp
+          field), so ``ran`` can only ever mean "one was supplied", never "recently"
+          — disclosed via ``not_reached`` rather than silently implied.
+        * ``live_behaviour`` — **the trap this task exists to close.** ``ran`` iff
+          *live_test_bucket* (the raw ``--judged-bundle`` ``"liveTest"`` object)
+          carries at least one structurally-valid entry
+          (:func:`_valid_live_test_entries`) — REGARDLESS of that entry's verdict.
+          This is deliberately NOT ``live_test_cap_signal(bucket).hit``, which is
+          True ONLY for a VULNERABLE entry (the self-attestation guard — see that
+          function's own docstring, and ``scoring.LIVE_INJECTION_CAP``'s): reading
+          ``.hit`` here would make a user whose live test came back RESISTANT read
+          as ``not_reached`` and lose their grade for PASSING it. Presence +
+          well-formedness only, never the verdict's value — that asymmetry stays
+          exactly where it already lives, in the score's cap-only signal, not here.
+
+        B-558 adds a SECOND, independent axis on top of the mapping above:
+        ``LayerState.coverage`` — did a layer that *ran* also exhaust its subject?
+        This slice only answers it for ``logs_trajectories``, and only from
+        *behavioral_analysis* (the raw dict ``behavioral.analyze(ctx)`` returns, when
+        the caller actually ran it — never re-derived here):
+
+        * not ``behavioral_ran`` (no :data:`PHASE_BEHAVIORAL` phase, or one present but
+          not itself ``ran``) → :data:`~clawseccheck.layers.COVERAGE_UNKNOWN` — today's
+          behaviour, byte for byte. B164 scanning log sinks inside the base audit is
+          NOT proof the replay modes ran (the exact trap
+          ``test_the_replay_modes_survive_the_layer_being_marked_as_having_run`` pins),
+          so absent a real replay this layer's coverage stays unasked, same as every
+          other layer below.
+        * ``behavioral_ran`` and either ``behavioral.analysis_incompleteness(...)``
+          names a reason the replay could not reach a clean verdict, or B164's own
+          "not scanned" figure is non-empty → :data:`~clawseccheck.layers.
+          COVERAGE_PARTIAL`, and that reason is folded into ``not_reached`` alongside
+          B164's.
+        * otherwise → :data:`~clawseccheck.layers.COVERAGE_COMPLETE`.
+
+        The other four layers get an explicit :data:`~clawseccheck.layers.
+        COVERAGE_UNKNOWN` here — the field's own default — each for a DIFFERENT
+        reason, spelled out at each assignment below so a future reader does not
+        "fix" one of them into the wrong state:
+
+        * ``installed_sweep`` — cannot be reported at all yet. ``cli.py``'s
+          ``_build_layer_ledger`` fabricates this layer's phases from a
+          ``commit_full_phases`` PROMISE before the sweep actually runs (see that
+          function's own docstring), so a real completeness signal has nothing to
+          project from. Filed as B-723; out of scope here.
+        * ``live_behaviour`` — unobservable: this method never attaches
+          ``not_reached`` to it at all (below), and "were all scenario kinds
+          exercised" is not derivable from the raw bundle.
+        * ``self_report`` — its ``not_reached`` (above) is filled UNCONDITIONALLY
+          whenever ``ran``, because attestation freshness is unverifiable by
+          construction — completeness there is a constant, not a measurement, so it
+          stays UNKNOWN rather than a permanent, unearned PARTIAL.
+        * ``static`` — could be reported, but is excluded from the scope note by
+          ``test_static_layer_is_not_in_the_scope_note``; out of scope here.
+        """
+        skill = self.by_name(PHASE_SKILL_SWEEP)
+        plugin = self.by_name(PHASE_PLUGIN_SWEEP)
+        skill_status = skill.status if skill is not None else STATUS_NOT_REACHED
+        plugin_status = plugin.status if plugin is not None else STATUS_NOT_REACHED
+        if skill_status == STATUS_RAN and plugin_status == STATUS_RAN:
+            sweep_status = STATUS_RAN
+        else:
+            sweep_status = _worse_status(skill_status, plugin_status)
+        sweep_not_reached = tuple(skill.not_scanned if skill is not None else []) + tuple(
+            plugin.not_scanned if plugin is not None else [])
+
+        behavioral = self.by_name(PHASE_BEHAVIORAL)
+        logs_status = (
+            _worse_status(STATUS_RAN, behavioral.status) if behavioral is not None
+            else STATUS_RAN
+        )
+        # B-558: the SAME presence-and-status check `logs_status` above already makes
+        # — the existing flag the coverage rule is required to reuse, not a second one.
+        behavioral_ran = behavioral is not None and behavioral.status == STATUS_RAN
+
+        b164_not_reached = _b164_not_reached(findings)
+        if not behavioral_ran:
+            logs_coverage = COVERAGE_UNKNOWN
+            logs_not_reached = b164_not_reached
+        else:
+            # `behavioral_analysis` is None only if a caller marks the phase `ran`
+            # without handing in the analysis it ran against — not a shape any real
+            # call site produces (cli.py threads the two together), but guarded so a
+            # hand-built PhaseResult in a test cannot crash this method.
+            incompleteness_reason = (
+                behavioral_analysis_incompleteness(behavioral_analysis)
+                if behavioral_analysis is not None else None
+            )
+            if incompleteness_reason is not None or b164_not_reached:
+                logs_coverage = COVERAGE_PARTIAL
+                logs_not_reached = (
+                    ((incompleteness_reason,) if incompleteness_reason is not None else ())
+                    + b164_not_reached
+                )
+            else:
+                logs_coverage = COVERAGE_COMPLETE
+                logs_not_reached = b164_not_reached
+
+        static_not_reached: tuple = ()
+        if degraded_count > 0:
+            plural = "check" if degraded_count == 1 else "checks"
+            static_not_reached = (
+                f"{degraded_count} {plural} could not reach a verdict this run",
+            )
+
+        if attestation:
+            self_report_status = STATUS_RAN
+            self_report_not_reached = (
+                "attestation freshness not verified — the schema carries no "
+                "timestamp, so this can only mean one was supplied, never that it "
+                "is recent",
+            )
+        else:
+            # B-603: the attestation did not arrive; whether one COULD have is not
+            # something this run observed.
+            self_report_status = STATUS_NOT_SUBMITTED
+            self_report_not_reached = ()
+
+        live_status = (
+            STATUS_RAN if _valid_live_test_entries(live_test_bucket)
+            else STATUS_NOT_SUBMITTED
+        )
+
+        return LayerLedger(states={
+            # B-558: could be reported, but excluded from the scope note by
+            # test_static_layer_is_not_in_the_scope_note — out of scope for this slice.
+            LAYER_STATIC: LayerState(
+                status=STATUS_RAN, not_reached=static_not_reached,
+                coverage=COVERAGE_UNKNOWN),
+            # B-558/B-723: this layer's phases are fabricated from a
+            # commit_full_phases PROMISE before the sweep runs (cli._build_layer_ledger)
+            # — there is no real PipelineResult to project a completeness signal from.
+            LAYER_INSTALLED_SWEEP: LayerState(
+                status=sweep_status, not_reached=sweep_not_reached,
+                coverage=COVERAGE_UNKNOWN),
+            LAYER_LOGS_TRAJECTORIES: LayerState(
+                status=logs_status, not_reached=logs_not_reached, coverage=logs_coverage),
+            # B-558: not_reached is filled UNCONDITIONALLY whenever ran (below) because
+            # attestation freshness is unverifiable by construction — completeness here
+            # is a constant, not a measurement, so it stays UNKNOWN rather than a
+            # permanent, unearned PARTIAL.
+            LAYER_SELF_REPORT: LayerState(
+                status=self_report_status, not_reached=self_report_not_reached,
+                coverage=COVERAGE_UNKNOWN),
+            # B-558: unobservable — this method never attaches not_reached to this
+            # layer at all, and "were all scenario kinds exercised" is not derivable
+            # from the raw live-test bundle.
+            LAYER_LIVE_BEHAVIOUR: LayerState(status=live_status, coverage=COVERAGE_UNKNOWN),
+        })
 
 
 def _banner(title: str) -> list[str]:
@@ -1099,8 +1591,12 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
                  skill_sweep_elapsed_s: float = 0.0, vet_targets=(),
                  deadline: float | None = None, budget_s: float = DEFAULT_FULL_BUDGET_S,
                  fast: bool = False, ascii_only: bool = False, version: str = "",
-                 bundle: dict | None = None) -> PipelineResult:
+                 bundle: dict | None = None, score=None,
+                 ledger_path: str | None = None) -> PipelineResult:
     """Run P7-P9 and roll them up with the already-executed P6.
+
+    ``ledger_path`` (B-599): forwarded to P8's ``run_behavioral`` — see that
+    function's docstring. ``None`` keeps today's default.
 
     ``deadline`` is injectable so a test can pin the budget's behaviour without
     sleeping; when omitted, one is opened from ``budget_s``.
@@ -1130,8 +1626,23 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
     fast_note = "skipped — --fast was given; no target here was inspected."
 
     # P6 — recorded, not run (see the module docstring).
+    #
+    # B-719: the budget arm is NOT the one P7/P8 use, and the difference is deliberate.
+    # They decide whether to START their work, so a blown deadline is enough on its own.
+    # P6's sweep is executed by the CALLER and handed in, so by the time we look at the
+    # clock the work may already be done — gating on the deadline alone would discard a
+    # completed sweep's real result and invent a coverage hole out of a run that happened.
+    # Hence `skill_sweep is None and ...`: the budget only explains an ABSENT sweep.
+    #
+    # Without this arm an absent sweep fell through to record_skill_sweep(None), i.e.
+    # _skipped(..., "not run.") — and STATUS_SKIPPED means "the operator narrowed the run
+    # (e.g. --fast)", rendered as "skipped by this run's flags". So a user who asked for a
+    # full sweep and lost it to the clock was told they had asked for less, while P7 and
+    # P8, stopped by the very same deadline, correctly reported the budget.
     if fast:
         result.add(_skipped(PHASE_SKILL_SWEEP, fast_note))
+    elif skill_sweep is None and budget_exceeded(deadline):
+        result.add(_not_reached(PHASE_SKILL_SWEEP, budget_s))
     else:
         result.add(record_skill_sweep(skill_sweep, elapsed_s=skill_sweep_elapsed_s))
 
@@ -1154,7 +1665,7 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
     elif budget_exceeded(deadline):
         result.add(_not_reached(PHASE_BEHAVIORAL, budget_s))
     else:
-        result.add(run_behavioral(ctx, ascii_only=ascii_only))
+        result.add(run_behavioral(ctx, ascii_only=ascii_only, ledger_path=ledger_path))
 
     # P9 — adjudication. Deliberately NOT gated on --fast or on the budget: it re-runs
     # no check, so there is no expense to skip, and the borderline band is exactly what
@@ -1164,13 +1675,20 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
     combined_vet_targets = list(vet_targets) + (
         list(plugin_sweep_obj.vet_targets()) if plugin_sweep_obj is not None else [])
     result.add(run_adjudication(ctx, findings, vet_targets=combined_vet_targets,
-                                version=version, bundle=bundle))
+                                version=version, bundle=bundle, score=score))
     from .coverage import build_coverage_page  # noqa: PLC0415 — deferred: coverage.py
     # locally imports report.py (see build_coverage_page's own docstring), and this
     # module already imports report.py at top level, so a top-level import here would
     # risk a cycle at import time; deferred keeps it safe.
+    # B-558: whatever the phases evaluated OUTSIDE `CHECKS` this run. Collected from the
+    # phase results rather than named here, so a future phase that evaluates catalogued
+    # ids gets counted without this call site having to learn about it.
+    off_check_findings = [
+        f for phase in result.phases for f in phase.evaluated_findings
+    ]
     result.coverage_page = build_coverage_page(
         ctx, findings, skill_sweep=skill_sweep, plugin_sweep=plugin_sweep_obj,
+        extra_findings=off_check_findings,
         # B-473: `fast` is the only reason a --full run reaches here with no sweep, so
         # name it — "needs --full" was being printed to an operator who had passed --full.
         sweep_skip_reason=("not scanned this run (--fast drops the sweep phases)"

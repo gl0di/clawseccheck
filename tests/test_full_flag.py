@@ -142,7 +142,7 @@ def test_full_json_skips_extra_sections(capsys):
 
 
 # ---------------------------------------------------------------------------
-# vuln fixture: --full still exits 0 (no --exit-code / --fail-under)
+# vuln fixture: --full still exits 0 (no --exit-code / --fail-on)
 # ---------------------------------------------------------------------------
 
 def test_full_vuln_fixture_exits_zero(capsys):

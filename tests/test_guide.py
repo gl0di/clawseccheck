@@ -5,6 +5,7 @@ All tests are offline and deterministic. Uses real audit() on fixtures
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from clawseccheck import audit
@@ -53,12 +54,31 @@ class TestSuggestActionsVuln:
         ids = [a.id for a in suggest_actions(findings, score)]
         assert "track_trend" in ids
 
-    def test_commands_use_real_invocation_not_audit_py(self):
-        # A skill/CLI user has the `clawseccheck` command, not a bare `audit.py`.
+    def test_commands_use_the_invocation_form_the_user_actually_started(self, monkeypatch):
+        """B-679 REPLACES the pin that used to live here.
+
+        It asserted `a.command.startswith("clawseccheck ")` unconditionally, on the stated
+        premise that "a skill/CLI user has the `clawseccheck` command, not a bare
+        `audit.py`". That premise is false for the install shape this skill actually ships
+        in, and it was measured, not argued: on a ClawHub install `which clawseccheck` is
+        empty and the command exits 127, because ClawHub installs a DIRECTORY and
+        `SKILL.md` itself tells the agent `python3 {baseDir}/audit.py`. The console script
+        exists only under pip/pipx.
+
+        So the property is not "always the console name" but "whatever this process was
+        actually started as" — pinned here over both shapes rather than one.
+        """
         findings, score = _audit_vuln()
+
+        monkeypatch.setattr(sys, "argv", ["/usr/local/bin/clawseccheck"], raising=False)
         for a in suggest_actions(findings, score):
-            assert "audit.py" not in a.command, f"{a.id} hint uses audit.py: {a.command!r}"
             assert a.command.startswith("clawseccheck "), f"{a.id}: {a.command!r}"
+
+        shim = str(Path(__file__).resolve().parent.parent / "audit.py")
+        monkeypatch.setattr(sys, "argv", [shim], raising=False)
+        for a in suggest_actions(findings, score):
+            assert a.command.startswith("python3 "), f"{a.id}: {a.command!r}"
+            assert "audit.py" in a.command, f"{a.id}: {a.command!r}"
 
     def test_share_grade_always_present(self):
         findings, score = _audit_vuln()

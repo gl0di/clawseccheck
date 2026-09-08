@@ -4,7 +4,7 @@ of brand truth — so the README banner's accent colour can never drift from bra
 the way it previously could (the file matched brand.py's values only by hand-kept
 coincidence, not by construction).
 
-The logo MARK is a separate story (CLAWSECCHECK-B-441): it is embedded directly from
+The logo MARK is a separate story (B-441): it is embedded directly from
 docs/assets/logo.png — the real mascot art, base64-inlined — not from brand.LOGO_SVG.
 LOGO_SVG stays a small abstract vector because it is also re-nested inside the 14px
 shields.io badge icon (report.py's `_LOGO_INNER`), where the detailed shield/claws/
@@ -72,7 +72,7 @@ LOGO_PNG = ROOT / "docs" / "assets" / "logo.png"
 #
 # This is a deliberate design constant, not a stray magic number. The mark swapped
 # from the MASCOT emoji to LOGO_SVG's abstract vector to the real logo.png art
-# (CLAWSECCHECK-B-441) without ever changing size — 84x84 the whole time — so this
+# (B-441) without ever changing size — 84x84 the whole time — so this
 # slot geometry has outlived two mark swaps already and should outlive the next one.
 MARK_PX = 84
 SLOT_W_PX = 104.81
@@ -102,7 +102,7 @@ def build_banner_html() -> str:
     r, g, b = _hex_to_rgb(brand.BRAND_RED)
     rgb = f"{r},{g},{b}"
     red = brand.BRAND_RED
-    # CLAWSECCHECK-B-441: the banner is an HTML/badge-only surface (brand.py's Tier 3),
+    # B-441: the banner is an HTML/badge-only surface (brand.py's Tier 3),
     # so it carries the real graphical mark rather than the MASCOT emoji glyph — the
     # same img bytes every time, never hand-pasted/re-encoded here. Two details are
     # copied deliberately from the LOGO_SVG-based version this replaced (and from
@@ -151,13 +151,7 @@ def build_banner_html() -> str:
   .g {{ width: 62px; height: 72px; border-radius: 12px; display: flex; align-items: center;
        justify-content: center; font-size: 38px; font-weight: 800;
        background: rgba(255,255,255,.05); color: #6d5f59; border: 1px solid #332723; }}
-  .g.on {{ background: linear-gradient(160deg, #4ec96e, #2e9c50); color: #08140b;
-          border-color: transparent; box-shadow: 0 8px 26px rgba(78,201,110,.35); }}
   .g.f {{ color: #a0524a; }}
-  .meter {{ margin-top: 22px; height: 10px; border-radius: 6px; overflow: hidden;
-           background: #241a17; }}
-  .meter div {{ height: 100%; width: 78%;
-               background: linear-gradient(90deg, {red}, #e8a33d, #4ec96e); }}
   .cfoot {{ margin-top: 20px; font-size: 18.5px; line-height: 1.5; color: #b4a59f;
            font-family: "DejaVu Sans Mono", monospace; }}
   .cfoot .ok {{ color: #7ee787; }}
@@ -184,12 +178,11 @@ def build_banner_html() -> str:
     </div>
     <div class="clabel">$ clawseccheck</div>
     <div class="grades">
-      <div class="g on">A</div><div class="g">B</div><div class="g">C</div>
+      <div class="g">A</div><div class="g">B</div><div class="g">C</div>
       <div class="g">D</div><div class="g f">F</div>
     </div>
-    <div class="meter"><div></div></div>
-    <div class="cfoot">scores your setup <span class="ok">A–F</span><br>
-      finds the urgent holes<br>no API key · no network</div>
+    <div class="cfoot">grades <span class="ok">A–F</span> when all<br>
+      five layers ran<br>names what it skipped<br>no API key · no network</div>
   </div>
 </div>
 <div class="url">github.com/gl0di/clawseccheck</div>

@@ -32,6 +32,8 @@ from ._shared import (
     _config_unreadable,
     _custom,
     _enabled_tools,
+    _openclaw_generation,
+    _retired_key_note,
     _finding,
     _has_approval_gate,
     _hint,
@@ -171,6 +173,135 @@ def _weak_allowlist_entries(allowlist) -> list[str]:
     return weak
 
 
+# B-515 follow-up: an allowlist entry can grant a REAL exception from OpenClaw's
+# private-network gate, or merely be a config-hygiene red flag the runtime still
+# blocks today — these are two different mechanisms and a single "bypasses the guard"
+# claim is false for one of them. Verified against the real installed OpenClaw engine
+# offline (a stub resolver — no live DNS), not assumed from source alone:
+#
+#   allowedHostnames  169.254.169.254  -> BLOCKED (link-local / cloud-metadata)
+#   allowedHostnames  100.100.100.200  -> BLOCKED (Alibaba cloud-metadata carve-out)
+#   hostnameAllowlist 169.254.169.254  -> BLOCKED (legacy key grants no exemption)
+#   allowedHostnames  10.0.0.5         -> REACHABLE
+#   allowedHostnames  127.0.0.1        -> REACHABLE
+#   allowedHostnames  fd00::1          -> REACHABLE
+#   allowedHostnames  100.64.0.7       -> REACHABLE
+#
+# Mechanism (dist/ssrf-BayeDjCv.js): being on `allowedHostnames` sets
+# `skipPrivateNetworkChecks` (:264-270), which routes into a SECOND, narrower gate --
+# `assertAllowedTrustedHostnameResolvedAddressesOrThrow` (:207-209) -- that
+# unconditionally throws on link-local and cloud-metadata addresses regardless of the
+# allowlist. So the exemption genuinely reaches loopback / RFC1918 / CGNAT / IPv6-ULA
+# (BYPASS below: reachable today, dangerouslyAllowPrivateNetwork still false) but NEVER
+# reaches link-local or the well-known cloud-metadata addresses/hostname (LATENT below:
+# still blocked today by the second gate, but a genuine red flag on INTENT grounds --
+# it is a config mistake or a deliberate attempt to reach the metadata service, and it
+# goes live the instant dangerouslyAllowPrivateNetwork is separately set to true, which
+# is already this check's own FAIL condition). Both stay WARN, not FAIL: matches this
+# module's calibration for an ambiguous, possibly-deliberate shape (an internal
+# deployment MAY legitimately want the browser to reach a fixed internal host, and this
+# static check cannot tell that apart from a mistake) -- the same ambiguity
+# check_provider_baseurl/B178 already resolves to WARN.
+#
+# `hostnameAllowlist` (the legacy sibling key) never feeds `skipPrivateNetworkChecks`
+# at all (ssrf-BayeDjCv.js:105-107) -- an entry placed there grants NO exemption from
+# either gate, ever, so it is always treated as LATENT (red-flag, not-currently-live)
+# regardless of shape, never BYPASS.
+#
+# 100.100.100.200 (Alibaba ECS metadata) sits inside the ordinary 100.64.0.0/10 CGNAT
+# range yet is BLOCKED where an otherwise-ordinary CGNAT address in the same /10 is not
+# (100.64.0.7, verified REACHABLE) -- an explicit carve-out rather than range math alone.
+#
+# JUDGED as BYPASS: loopback (127.0.0.0/8, ::1, "localhost" and the other LOOPBACK
+# literals, including IPv4-mapped-IPv6 loopback forms -- see _loopback_ip); RFC1918/
+# CGNAT/IPv6-ULA (10/8, 172.16/12, 192.168/16, 100.64.0.0/10 minus the Alibaba
+# carve-out, fc00::/7); and "0.0.0.0"/"::" -- the 2024 "0.0.0.0 day" browser-routes-to-
+# localhost primitive, verified REACHABLE and neither link-local nor a metadata literal
+# (already modelled as local by _B178_LOCAL_MODEL_HOSTNAMES elsewhere in this file).
+# JUDGED as LATENT: link-local (169.254.0.0/16 -- the AWS/Azure/GCP metadata range --
+# and fe80::/10, extrapolated from the same "link-local" wording, not independently
+# reachability-probed for the IPv6 form), the Alibaba metadata IP, the grounded
+# metadata.google.internal hostname, and ANY otherwise-BYPASS-shaped entry that came
+# from the legacy hostnameAllowlist key only. Bracketed IPv6 ("[fd00::1]") is unwrapped
+# via the same `parse_bind_host` helper the gateway-bind checks use, and IPv4-mapped-
+# IPv6 forms ("::ffff:10.0.0.5") are folded to their IPv4 form before classification,
+# mirroring _loopback_ip's own fold.
+#
+# NOT judged, deliberately: any other bare/dotted hostname (e.g. "metadata.goog" --
+# GCP's short alias, not independently grounded here; an internal DNS name like
+# "db.corp.internal"; a Docker-Compose sibling service name) -- this is a local,
+# network-free check that cannot resolve DNS, and a plain hostname gives no static
+# signal that it is internal at all. Also not judged: decimal/octal-encoded IPv4
+# literals (e.g. "2130706433", "0177.0.0.1") -- NOT because OpenClaw's own matcher
+# might treat them as a different host (it does not: `looksLikeUnsupportedIpv4Literal`,
+# ssrf-BayeDjCv.js:145-150, recognizes and BLOCKS this exact shape independently of
+# this check), but because Python's `ipaddress` module rejects them as non-canonical,
+# and this scanner leaves that shape to the real engine's own, already-verified block
+# rather than hand-rolling a second parser for it.
+_CLOUD_METADATA_HOSTNAMES = frozenset({"metadata.google.internal"})
+_CLOUD_METADATA_IP_CARVEOUTS = frozenset({"100.100.100.200"})
+_ZERO_ROUTE_HOSTS = frozenset({"0.0.0.0", "::"})
+_LATENT_NETS = (
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("fe80::/10"),
+)
+_BYPASS_NETS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("fc00::/7"),
+)
+
+
+def _private_allowlist_entries(allowlist, *, allow_bypass: bool = True):
+    """Return (bypass, latent) subsets of an allowlist -- see the block comment above
+    for the mechanism split and exactly which shapes are judged.
+
+    ``allow_bypass=False`` (pass the legacy hostnameAllowlist key here) forces every
+    otherwise-BYPASS-shaped entry into ``latent`` instead: that key never feeds
+    `skipPrivateNetworkChecks`, so it never grants the real exemption.
+    """
+    bypass: list[str] = []
+    latent: list[str] = []
+    if not isinstance(allowlist, list):
+        return bypass, latent
+    for entry in allowlist:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        raw = entry.strip().lower()
+        if raw == "*" or raw.startswith("*."):
+            # Already reported by _weak_allowlist_entries as a wildcard; never a
+            # parseable IP literal or bare metadata hostname.
+            continue
+        host = parse_bind_host(raw).rstrip(".")
+        if host in _CLOUD_METADATA_HOSTNAMES:
+            latent.append(entry)
+            continue
+        if host in _ZERO_ROUTE_HOSTS:
+            (bypass if allow_bypass else latent).append(entry)
+            continue
+        if host in LOOPBACK:
+            (bypass if allow_bypass else latent).append(entry)
+            continue
+        try:
+            addr = ipaddress.ip_address(host)
+        except ValueError:
+            continue
+        mapped = getattr(addr, "ipv4_mapped", None)
+        if mapped is not None:
+            addr = mapped
+        if str(addr) in _CLOUD_METADATA_IP_CARVEOUTS:
+            latent.append(entry)
+            continue
+        if any(addr.version == net.version and addr in net for net in _LATENT_NETS):
+            latent.append(entry)
+            continue
+        if any(addr.version == net.version and addr in net for net in _BYPASS_NETS):
+            (bypass if allow_bypass else latent).append(entry)
+    return bypass, latent
+
+
 # B-362: shared not_applicable gate for the "no browser config" UNKNOWN branch that
 # B38/B195/B196/B321/B322/B330 all share verbatim (one locus, `ctx.config["browser"]`,
 # checked the same way by every one of them). Grounded against the installed dist
@@ -197,13 +328,28 @@ def check_browser_ssrf(ctx: Context) -> Finding:
               OR noSandbox == true). Either flag is a CRITICAL-class primitive:
               private-network access enables cloud-metadata credential theft;
               no-sandbox means the headless browser can escape OS isolation.
-    WARN    — browser is configured but ssrfPolicy.hostnameAllowlist is absent
-              (open egress surface — the browser can reach any external host);
-              OR the hostnameAllowlist is present but contains a wildcard entry or a
-              known user-content/anonymous-paste/webhook host — a weak mitigation an
-              attacker could stage payloads on despite the host being "trusted".
+    WARN    — browser is configured but ssrfPolicy.allowedHostnames /
+              ssrfPolicy.hostnameAllowlist (the runtime merges both into one combined
+              allowlist -- B-515) are both absent/empty (open egress surface — the
+              browser can reach any external host); OR the combined allowlist is
+              present but contains a wildcard entry, a known user-content/
+              anonymous-paste/webhook host, or a URL-rewriting proxy — a weak
+              mitigation an attacker could stage payloads on despite the host being
+              "trusted"; OR an allowedHostnames entry that is itself loopback/
+              RFC1918-private/CGNAT/IPv6-ULA/0.0.0.0/:: — OpenClaw's own allowlist
+              exemption genuinely lets the browser reach that host TODAY even with
+              dangerouslyAllowPrivateNetwork=false (verified against the installed
+              engine); OR an allowedHostnames/hostnameAllowlist entry that is
+              link-local (incl. 169.254.169.254) or the grounded
+              metadata.google.internal/100.100.100.200 cloud-metadata literals — these
+              stay blocked TODAY by a separate, unconditional gate regardless of the
+              allowlist, but naming them is a config-hygiene/intent red flag that goes
+              live the moment dangerouslyAllowPrivateNetwork is set to true (the
+              legacy hostnameAllowlist key never grants the real exemption at all, so
+              every otherwise-bypass-shaped entry placed there is judged this way too).
     PASS    — browser is configured AND sandboxed AND private network is blocked
-              AND a hostnameAllowlist is present with no weak entries.
+              AND the combined allowlist (allowedHostnames + hostnameAllowlist) is
+              non-empty with no weak or private-network entries.
     UNKNOWN — no browser config (not applicable).
     """
     cfg = ctx.config
@@ -220,7 +366,15 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     ssrf_policy = browser.get("ssrfPolicy") if isinstance(browser.get("ssrfPolicy"), dict) else {}
     allow_private = ssrf_policy.get("dangerouslyAllowPrivateNetwork")
     no_sandbox = browser.get("noSandbox")
-    allowlist = ssrf_policy.get("hostnameAllowlist")
+    # B-515: the installed dist honours TWO sibling allowlist keys and merges them at
+    # runtime -- allowedHostnames (current) and hostnameAllowlist (legacy/alternate).
+    # An operator who only sets the current field must not get an "empty allowlist"
+    # WARN, so both are read and combined before any presence/weak-entry check below.
+    allowed_hostnames = ssrf_policy.get("allowedHostnames")
+    legacy_allowlist = ssrf_policy.get("hostnameAllowlist")
+    allowlist = (allowed_hostnames if isinstance(allowed_hostnames, list) else []) + (
+        legacy_allowlist if isinstance(legacy_allowlist, list) else []
+    )
 
     fail_ev: list[str] = []
     if allow_private is True:
@@ -241,53 +395,106 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             "; ".join(fail_ev),
             "Set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false to block "
             "cloud-metadata IP access; set browser.noSandbox to false (or omit it) to "
-            "keep the OS sandbox active. Also add browser.ssrfPolicy.hostnameAllowlist "
-            "to restrict which hosts the browser may reach.",
+            "keep the OS sandbox active. Also add browser.ssrfPolicy.allowedHostnames "
+            "(or the legacy browser.ssrfPolicy.hostnameAllowlist) to restrict which "
+            "hosts the browser may reach.",
             evidence=fail_ev,
         )
 
-    # WARN: browser is configured but no hostnameAllowlist — open egress surface
-    has_allowlist = isinstance(allowlist, list) and len(allowlist) > 0
+    # WARN: browser is configured but no allowedHostnames/hostnameAllowlist entries in
+    # either sibling key — open egress surface
+    has_allowlist = len(allowlist) > 0
     if not has_allowlist:
         return _finding(
             "B38",
             WARN,
-            "Browser is configured with no ssrfPolicy.hostnameAllowlist — the agent "
-            "browser can fetch any external URL (open egress / SSRF surface).",
-            "Add browser.ssrfPolicy.hostnameAllowlist listing only the domains the "
+            "Browser is configured with no ssrfPolicy.allowedHostnames / "
+            "ssrfPolicy.hostnameAllowlist — the agent browser can fetch any external "
+            "URL (open egress / SSRF surface).",
+            "Add browser.ssrfPolicy.allowedHostnames (or the legacy "
+            "browser.ssrfPolicy.hostnameAllowlist) listing only the domains the "
             "browser legitimately needs to reach; set "
             "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false.",
         )
 
-    # QUALITY: allowlist present but contains a wildcard, known user-content host, or
-    # known URL-rewriting proxy — downgrade PASS to WARN. Still additive/advisory: does
-    # not touch FAIL behaviour.
+    # QUALITY: allowlist present but contains a wildcard, known user-content host,
+    # known URL-rewriting proxy, or a loopback/private/link-local/CGNAT/IPv6-ULA/
+    # cloud-metadata entry — downgrade PASS to WARN. Still additive/advisory: does not
+    # touch FAIL behaviour. All legs are computed and reported together (one Finding)
+    # so an allowlist mixing several reasons names all of them, instead of only the
+    # first one a sequential check would have found. BYPASS/LATENT are computed
+    # per-key (see _private_allowlist_entries) because the legacy hostnameAllowlist
+    # key never grants the real private-network exemption the current allowedHostnames
+    # key does — see the block comment above _private_allowlist_entries.
     weak_entries = _weak_allowlist_entries(allowlist)
-    if weak_entries:
+    bypass_current, latent_current = _private_allowlist_entries(
+        allowed_hostnames if isinstance(allowed_hostnames, list) else []
+    )
+    _, latent_legacy = _private_allowlist_entries(
+        legacy_allowlist if isinstance(legacy_allowlist, list) else [], allow_bypass=False
+    )
+    bypass_entries = bypass_current
+    latent_entries = list(dict.fromkeys(latent_current + latent_legacy))
+    if weak_entries or bypass_entries or latent_entries:
+        sentences = [
+            "Browser allowedHostnames/hostnameAllowlist is present, but:"
+        ]
+        evidence: list[str] = []
+        if weak_entries:
+            sentences.append(
+                "it contains weak entries (wildcard, known user-content/paste/"
+                "webhook host, and/or URL-rewriting image/CDN proxy) an attacker "
+                f"could stage a payload on or relay through despite the allowlist: "
+                f"{', '.join(weak_entries)}."
+            )
+            evidence.extend(weak_entries)
+        if bypass_entries:
+            sentences.append(
+                "it also allowlists loopback/RFC1918/CGNAT/IPv6-ULA/0.0.0.0/:: "
+                "host(s) that OpenClaw's own allowlist exemption genuinely lets the "
+                "browser reach TODAY even though dangerouslyAllowPrivateNetwork is "
+                f"false: {', '.join(bypass_entries)}."
+            )
+            evidence.extend(e for e in bypass_entries if e not in evidence)
+        if latent_entries:
+            sentences.append(
+                "it also names link-local/cloud-metadata host(s) — e.g. "
+                "169.254.169.254, the AWS/Azure/GCP instance-metadata IP that hands "
+                "out cloud credentials — that OpenClaw's own engine still blocks "
+                "today via a separate, unconditional gate; this is a config-hygiene "
+                "red flag on intent grounds and becomes live the moment "
+                f"dangerouslyAllowPrivateNetwork is set to true: {', '.join(latent_entries)}."
+            )
+            evidence.extend(e for e in latent_entries if e not in evidence)
         return _finding(
             "B38",
             WARN,
-            "Browser hostnameAllowlist is present but contains weak entries "
-            "(wildcard, known user-content/paste/webhook host, and/or URL-rewriting "
-            f"image/CDN proxy): {', '.join(weak_entries)} — an attacker could stage a "
-            "payload on a wildcard match, an anonymous content host, or relay "
-            "exfiltrated data through a proxy host despite the allowlist.",
+            " ".join(sentences),
             "Replace wildcard entries with explicit hostnames, and avoid allowlisting "
             "anonymous paste/gist/webhook hosts (e.g. pastebin.com, gist.github.com, "
             "raw.githubusercontent.com, webhook.site) or URL-rewriting image/CDN "
             "proxies (e.g. images.weserv.nl, i0-i3.wp.com, slack-imgs.com) — an "
             "attacker-controlled target can be reached through them even though the "
-            "proxy host itself is 'trusted'.",
-            evidence=weak_entries,
+            "proxy host itself is 'trusted'. Remove any loopback (127.0.0.1, "
+            "localhost, 0.0.0.0, ::), private (10/8, 172.16/12, 192.168/16), "
+            "link-local (169.254.0.0/16), CGNAT (100.64.0.0/10), IPv6-ULA (fc00::/7), "
+            "or cloud-metadata (metadata.google.internal, 100.100.100.200) entry from "
+            "allowedHostnames/hostnameAllowlist — the ones OpenClaw's engine still "
+            "blocks today are still a config mistake or a live risk the moment "
+            "dangerouslyAllowPrivateNetwork flips to true.",
+            evidence=evidence,
         )
 
     return _finding(
         "B38",
         PASS,
-        "Browser is configured: sandboxed, private-network access blocked, "
-        "and hostnameAllowlist is present.",
+        "Browser is configured: sandboxed, allowedHostnames/hostnameAllowlist is "
+        "present with no weak or private-network entries, so private-network access "
+        "is blocked for every host not explicitly allowlisted.",
         "Keep browser.noSandbox unset/false, "
-        "dangerouslyAllowPrivateNetwork=false, and maintain a tight hostnameAllowlist.",
+        "dangerouslyAllowPrivateNetwork=false, and maintain a tight "
+        "browser.ssrfPolicy.allowedHostnames allowlist with no loopback/private/"
+        "link-local/cloud-metadata entries.",
     )
 
 
@@ -1537,9 +1744,13 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
         if isinstance(trace_path, str) and trace_path.strip():
             where = f"diagnostics.cacheTrace.filePath={trace_path!r}"
         else:
+            # B-700: on 2026.8.1 `filePath` was removed and the parent holds only
+            # `enabled`, so "unset" is no longer something the user could change.
             where = (
-                "diagnostics.cacheTrace.filePath unset — written to "
-                "$OPENCLAW_CACHE_TRACE_FILE if set, else "
+                ("the trace file location is not configurable on this OpenClaw build"
+                 if _openclaw_generation(ctx) == "modern"
+                 else "diagnostics.cacheTrace.filePath unset")
+                + " — written to $OPENCLAW_CACHE_TRACE_FILE if set, else "
                 "$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl"
             )
         return _finding(
@@ -1561,6 +1772,14 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
     )
 
 
+# B-727: appended to B77's WARN when the journal exceeded the scan budget. The evidence
+# found is real either way — truncation never downgrades a WARN — but the count beside it
+# describes a window, not the file.
+_B77_WINDOW_NOTE = (
+    " Only the most recent 1 MB of the log was read, so earlier writes were not scanned."
+)
+
+
 def check_config_audit_log(ctx: Context) -> Finding:
     import json as _json
 
@@ -1574,7 +1793,7 @@ def check_config_audit_log(ctx: Context) -> Finding:
             "writes stay attributable and reviewable.",
         )
     try:
-        raw, _ = _read_jsonl_tail(log_path)
+        raw, truncated = _read_jsonl_tail(log_path)
     except OSError:
         return _finding(
             "B77",
@@ -1624,11 +1843,27 @@ def check_config_audit_log(ctx: Context) -> Finding:
             WARN,
             f"config-write audit log shows {n} entr{'y' if n == 1 else 'ies'} of concern "
             f"across {total} recorded write(s): suspicious markers and/or writes from an "
-            "unexpected process.",
+            "unexpected process." + (_B77_WINDOW_NOTE if truncated else ""),
             "Review each flagged config write. A write you did not initiate — or one "
             "carrying a suspicious marker — may indicate config tampering; restore from a "
             "known-good backup and rotate any exposed credentials.",
             evidence=evidence[:10],
+        )
+    if truncated:
+        # B-727: `_read_jsonl_tail` is bounded at `_JSONL_SCAN_CAP` because these journals
+        # reach GB (B-104). The bound is right; claiming completeness over it is not.
+        # "all N recorded config write(s) are clean" was false in both halves on an
+        # over-cap file — `total` counts the window, "all" covers only what was read — so
+        # a write from an unexpected process before the window was reported as absent.
+        # Golden Rule #4: the check cannot determine the file's state, so it says so.
+        return _finding(
+            "B77",
+            UNKNOWN,
+            f"the {total} most recent config write(s) are clean and openclaw-originated, "
+            "but the audit log is larger than this scan's budget and earlier writes were "
+            "not read — cannot verify the full config change history.",
+            "Review logs/config-audit.jsonl directly for writes older than the most "
+            "recent 1 MB, or rotate it so a full scan fits.",
         )
     return _finding(
         "B77",
@@ -2518,15 +2753,83 @@ def check_egress_inventory(ctx: Context) -> Finding:
 
 
 def check_leak(ctx: Context) -> Finding:
+    """B9 — is sensitive output redacted?
+
+    B-700: the SUBJECT of this check is gone on OpenClaw 2026.8.1. `logging.redactSensitive`
+    was removed and the `logging` block is now the strict set
+    `{level, file, maxFileBytes, consoleLevel, consoleStyle, redactPatterns, audit}`.
+
+    The PASS below rests on the RUNTIME, not on the field's description -- a check that
+    stops warning has to earn it. From `dist/redact-*.js`::
+
+        const DEFAULT_REDACT_MODE = "tools";
+        function resolveConfigRedaction() {
+            const cfg = readLoggingConfig();
+            return { mode: DEFAULT_REDACT_MODE, patterns: cfg?.redactPatterns };
+        }
+        function resolveToolPayloadRedaction(loggingConfig = readLoggingConfig()) {
+            const userPatterns = loggingConfig?.redactPatterns;
+            return { mode: "tools", patterns: userPatterns && userPatterns.length > 0
+                     ? [...userPatterns, ...DEFAULT_REDACT_PATTERNS] : void 0 };
+        }
+
+    `mode` is a CONSTANT -- config feeds only `patterns`, so no configuration reaches the
+    module's `mode === "off"` branch. And custom patterns are UNIONED with the built-ins,
+    so a user list adds to the redaction set and cannot replace it; an empty list falls
+    through to the defaults. No env var disables it either -- the only `OPENCLAW_REDACT*`
+    symbol in the dist is the `OPENCLAW_REDACTED__` output marker.
+
+    That made this check actively harmful on a current build: the field is always absent,
+    so it emitted WARN on EVERY 2026.8.1 config, telling the user to "pin
+    logging.redactSensitive" -- an instruction their schema rejects
+    (`REJECTED unrecognized_keys@logging`). A warning that cannot be cleared, to fix a
+    risk that no longer exists.
+
+    So only the ABSENT case changes: on a build we can see is 2026.8.1+, absent is PASS,
+    because there is no setting that turns redaction off. On an older build, and on one
+    whose generation cannot be determined, the original reasoning stands and only the
+    advice is qualified -- a hermetic run must not silently pick a story.
+
+    A value that is PRESENT keeps its original verdict on every build, and the retirement
+    is appended as a note. The first version of this fix collapsed "off" and "tools" into
+    one WARN on a modern build, on the reasoning that an unrecognized key is not in effect
+    anyway; `scripts/monitor_detection_gate.py` answered `redaction-off: expected an
+    alert, got silence`, because a watch cannot see a change between two states that
+    render the same. Someone still WROTE "off" there, and that is what the monitor exists
+    to catch.
+    """
     # Valid values: "off" | "tools" (default when set: "tools")
     # Boolean False never occurs in real configs — the field is always a string or absent.
     redact = dig(ctx.config, "logging.redactSensitive")
+    modern = _openclaw_generation(ctx) == "modern"
+    if modern and redact is None:
+        return _finding(
+            "B9",
+            PASS,
+            "Sensitive redaction is unconditional on this OpenClaw build — the logging "
+            "block has no setting that turns it off.",
+            "Nothing to set. Use logging.redactPatterns only to ADD patterns; it cannot "
+            "disable the built-in redaction.",
+        )
+    # A PRESENT value keeps its original verdict on every build. An earlier version of this
+    # fix collapsed "off" and "tools" into one WARN on a modern build, reasoning that an
+    # unrecognized key is not in effect anyway — `scripts/monitor_detection_gate.py` then
+    # reported `redaction-off: expected an alert, got silence`, because a watch cannot see
+    # a change between two states that render identically. Whatever the runtime does with
+    # the key, someone WROTE "off" there, and that transition is exactly what the monitor
+    # exists to catch. The retirement is reported as an ADDED note, never by flattening the
+    # verdict — see [[reference_never_suppress_a_finding_for_presentation]] in spirit: the
+    # fact stays, only the framing changes.
+    stale = (" On OpenClaw 2026.8.1 and later this key was removed, so the value is not "
+             "in effect — delete it (`openclaw doctor --fix` does)." if modern else "")
     if redact == "off":
         return _finding(
             "B9",
             FAIL,
-            'logging.redactSensitive is "off" — secrets/system prompt can surface in tool output/logs.',
-            'Set logging.redactSensitive to "tools" to redact secrets from tool output and logs.',
+            'logging.redactSensitive is "off" — secrets/system prompt can surface in '
+            "tool output/logs." + stale,
+            'Set logging.redactSensitive to "tools" to redact secrets from tool output '
+            "and logs." + stale,
         )
     if redact is None:
         # B-128: the OpenClaw default when the field is unset is already "tools"
@@ -2538,22 +2841,25 @@ def check_leak(ctx: Context) -> Finding:
             "B9",
             WARN,
             'logging.redactSensitive not pinned — default "tools" already redacts '
-            "secrets; pin it explicitly for stability against a future default change.",
-            'Explicitly set logging.redactSensitive to "tools".',
+            "secrets; pin it explicitly for stability against a future default change." +
+            _retired_key_note(ctx, "logging.redactSensitive"),
+            'Explicitly set logging.redactSensitive to "tools".' +
+            _retired_key_note(ctx, "logging.redactSensitive"),
         )
     if redact == "tools":
         return _finding(
             "B9",
             PASS,
-            'Sensitive redaction is enabled (logging.redactSensitive="tools").',
-            "Keep redaction on.",
+            'Sensitive redaction is enabled (logging.redactSensitive="tools").' + stale,
+            "Keep redaction on." + stale,
         )
     # Unexpected value — be conservative
     return _finding(
         "B9",
         WARN,
-        f'logging.redactSensitive has unexpected value {redact!r} — expected "tools" or "off".',
-        'Set logging.redactSensitive to "tools".',
+        f'logging.redactSensitive has unexpected value {redact!r} — expected "tools" '
+        'or "off".' + stale,
+        'Set logging.redactSensitive to "tools".' + stale,
     )
 
 
@@ -2806,6 +3112,31 @@ def _log_hunt_corroborated(nonzero_classes: set, world_readable: bool) -> bool:
     return strong_single or len(nonzero_classes) >= 2
 
 
+def _log_hunt_budget_remedy(lim) -> str:
+    """The tail clause for a "N sink(s) not scanned" disclosure — which remedy is true
+    depends on whether the run being disclosed was already `--exhaustive`.
+
+    B-486: before this, both call sites unconditionally pointed at `--exhaustive`, which
+    was fine while `EXHAUSTIVE_LIMITS.log_max_total_bytes` was unbounded (a truncated
+    default run really was helped by it, and a truncated *exhaustive* run could only
+    happen via the clock, so a re-run under different load genuinely could land
+    differently). Once `--exhaustive` itself got a finite, deterministically-planned
+    budget (the fix this function exists for), a run already under `--exhaustive` that
+    still has sinks left out will skip the SAME ones on a re-run — telling it to
+    "re-run with --exhaustive" would be advice to do the thing it already did and get
+    the identical result. So this branches on `lim.exhaustive` instead of assuming it.
+    """
+    if lim.exhaustive:
+        return (
+            " — even --exhaustive's own (much larger) scan budget could not cover "
+            "this fleet; a re-run with the same flag will skip the same sinks."
+        )
+    return (
+        " — re-run with --exhaustive for a much larger budget; it states "
+        "its own coverage either way."
+    )
+
+
 def check_log_threat_hunt(ctx: Context) -> Finding:
     """B164 — threats surfaced in the agent's own log corpus (content scan, advisory).
 
@@ -2979,7 +3310,7 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         # scan-budget decision, and discloses no truncation at all (Golden Rule #4).
         unread = (
             f" {skipped_for_time} of them were not offered to the scan (scan budget "
-            "reached) — re-run with --exhaustive to include them."
+            f"reached){_log_hunt_budget_remedy(lim)}"
             if skipped_for_time
             else ""
         )
@@ -3001,14 +3332,14 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         plural = "sink" if skipped_for_time == 1 else "sinks"
         # B-484: the old sentence ended "— re-run to include them", which was true only
         # while the cutoff was the wall clock and a second run could land differently.
-        # Now that the set is planned deterministically, a plain re-run skips exactly the
-        # same sinks, so that remedy would be a lie; --exhaustive is the real one. The
+        # Now that the set is planned deterministically (B-486 extended this to
+        # --exhaustive too — see EXHAUSTIVE_LIMITS.log_max_total_bytes in scanbudget.py),
+        # a plain re-run skips exactly the same sinks, so that remedy would be a lie. The
         # oldest-first phrasing tells the reader WHICH sinks they are missing — the point
         # of ordering them in the first place.
         note += (
             f" {skipped_for_time} log/transcript {plural} not scanned (scan budget "
-            "reached; the oldest are left out first) — re-run with --exhaustive to "
-            "include them."
+            f"reached; the oldest are left out first){_log_hunt_budget_remedy(lim)}"
         )
     elif lim.exhaustive:
         # F-164 SC-5: under --exhaustive, completeness must be stated affirmatively —

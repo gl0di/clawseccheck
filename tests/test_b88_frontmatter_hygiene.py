@@ -217,7 +217,11 @@ def test_fleet_wide_zero_fp():
     import glob
     import os
 
-    fleet = glob.glob(os.path.expanduser("~/.npm-global/lib/node_modules/openclaw/skills/*/SKILL.md"))
+    from _realhome import REAL_HOME
+
+    # B-519: REAL_HOME, not expanduser() -- the suite redirects $HOME, and resolving
+    # against it would find no fleet and return a silent pass.
+    fleet = glob.glob(str(REAL_HOME / ".npm-global/lib/node_modules/openclaw/skills/*/SKILL.md"))
     if not fleet:
         return  # no real fleet installed in this environment -- nothing to check
     warns = []

@@ -252,14 +252,54 @@ EXHAUSTIVE_LIMITS = ScanLimits(
     log_per_file_budget_s=30.0,                # 10x DEFAULT: one sink may legitimately
                                                 # run far longer scanning more of a corpus
     log_max_bytes_per_file=32 * 1024 * 1024,   # 16x DEFAULT (2 MiB -> 32 MiB)
-    log_max_total_bytes=_UNBOUNDED,            # B-484: --exhaustive offers the WHOLE
-                                                # corpus to the scan and stays bound only
-                                                # by log_check_budget_s. It still does not
-                                                # finish a large corpus (measured 126/132
-                                                # at the full 60.0s), and raising that
-                                                # cascades into check_budget_s /
-                                                # audit_budget_s below — a separate,
-                                                # separately-measured change.
+    # B-486: was `_UNBOUNDED` (B-484). That left `log_check_budget_s` as the ONLY
+    # binding constraint, so the SET actually scanned was decided by how fast this box
+    # happened to be that minute, not by the corpus — the same nondeterminism B-484
+    # removed from the default path, surviving on the path sold as the fix for it
+    # (measured on a real 132-135-sink fleet, four runs: 126, 132, 118, 132 of N; see
+    # tests/test_b484_log_hunt_planning.py's own docstring for the paired numbers).
+    # This constant is now what B-484's own comment already does for DEFAULT_LIMITS:
+    # a finite `log_max_total_bytes` so `_plan_log_hunt_sinks` — a pure function of
+    # (kind, mtime, size, path), no clock read — decides the covered set BEFORE
+    # anything is opened. `log_check_budget_s` stays a backstop for pathological
+    # content, not the everyday decider.
+    #
+    # 12 MiB, not a round-number guess: measured directly against
+    # `log_check_budget_s=60.0` on a real ~41 MiB / 120-sink corpus (this box,
+    # 2026-08-25) by running the real planning+scan loop `check_log_threat_hunt` uses
+    # (`_plan_log_hunt_sinks` then `scan_log_file` per admitted sink):
+    #
+    #      8 MiB -> 30/120 admitted, 24.6s   (0 clock-skipped, 59% headroom)
+    #     12 MiB -> 42/120 admitted, 32.2s   (0 clock-skipped, 46% headroom)  <- chosen
+    #     24 MiB -> 74/120 admitted, ran past 60.0s and STILL clock-tripped
+    #               (16 of the 74 admitted were skipped by the loop's own deadline)
+    #
+    # The jump between 12 and 24 MiB is not linear in bytes: per-byte cost on this
+    # fleet is dominated by a handful of sinks with pathologically long single JSONL
+    # lines (each requiring the oversized-line window path), not by nominal file size
+    # — a small file with one huge line can cost far more than a large file with many
+    # short ones. That is also why `DEFAULT_LIMITS.log_max_total_bytes=9 MiB`'s own
+    # 2026-08-06 calibration (`scanbudget.py`'s own comment above) measured 3.19s/4.5s
+    # and, re-measured on this same 2026-08-25 corpus, now lands at 4.51s/4.5s — right
+    # on ITS OWN ceiling. That drift is real and is content-scanning cost growing since
+    # the original calibration (more indicator classes / correlation work per line),
+    # not something this change causes or fixes; it is a DEFAULT_LIMITS recalibration,
+    # out of this task's file ownership, and is flagged rather than silently absorbed
+    # into a wider exhaustive margin.
+    #
+    # 12 MiB keeps real, deliberately generous headroom (46%, vs the 6% the unbounded
+    # setting left on this same corpus) so a machine running meaningfully slower than
+    # this one still lands under `log_check_budget_s` without touching the clock. It is
+    # a MUCH larger share than `DEFAULT_LIMITS`' 9 MiB in what it buys (32 MiB/file
+    # instead of 2 MiB, 30s/file instead of 3.0s, so large sinks aren't truncated the
+    # way they are by default) even though the two totals are numerically close — see
+    # `test_exhaustive_budget_is_finite_and_larger_than_default`.
+    #
+    # This does NOT make --exhaustive scan the whole corpus of a big fleet, and no
+    # wording anywhere claims it does (C-125: docs/USAGE.md and B164's own skip
+    # sentence were re-grounded in the same change). What it buys is a set that is the
+    # SAME on every run — the property this task exists to deliver — not completeness.
+    log_max_total_bytes=12 * 1024 * 1024,
     window_chars=3000,                         # unchanged here — a later F-164 sub-change's
                                                 # job, not this one; reserved field only
     window_overlap=512,                        # reserved: no reader consumes this yet

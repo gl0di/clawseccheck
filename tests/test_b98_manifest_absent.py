@@ -116,11 +116,14 @@ def test_emit_manifest_shows_risky_effects_true(capsys):
     out = capsys.readouterr().out
     assert rc in (0, 1)
     assert "unprofilable: false" in out
-    # NOTE: the effect simulator has no os.system/subprocess sink category (only bare
-    # eval/exec/compile calls with a tainted arg register "exec" — see
-    # render_permission_manifest's docstring caveat), so shell.exec stays false here even
-    # though the fixture runs shell=True. The tainted open(dest, 'w') write DOES register.
+    # B-592: the capability fields are PRESENCE now, not taint reachability, so the
+    # fixture's `subprocess.run(..., shell=True)` finally reads as shell.exec — the exact
+    # KNOWN GAP render_permission_manifest's docstring used to carry ("the effect
+    # simulator has no os.system/subprocess sink category ... so shell.exec stays false
+    # here even though the fixture runs shell=True"). Both are asserted, because a
+    # manifest that proposed neither for this fixture is what the gap looked like.
     assert "write: true" in out
+    assert "exec: true" in out
 
 
 def test_emit_manifest_unprofilable_skill_is_all_unknown(tmp_path, capsys):

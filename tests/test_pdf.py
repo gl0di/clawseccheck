@@ -10,13 +10,13 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-import zlib
 from pathlib import Path
 
 import pytest
 
 from clawseccheck import audit
 from clawseccheck.catalog import CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding
+from _pdftext import content_streams as decompressed_streams, content_text
 from clawseccheck.pdf import render_pdf
 from clawseccheck.safeio import secure_write_bytes
 from clawseccheck.scoring import compute
@@ -46,13 +46,10 @@ def _content_text(data: bytes) -> str:
     """All page content streams, decompressed and concatenated — lets a test assert on
     what was actually DRAWN without needing poppler installed. Note PDF string literals
     escape parens, so `(advisory)` appears as `\\(advisory\\)`."""
-    out = ""
-    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, re.S):
-        try:
-            out += zlib.decompress(m.group(1)).decode("latin-1", "replace")
-        except zlib.error:
-            continue
-    return out
+    # Parsed by /Length, never by scanning for `endstream`: the stream is binary, so a
+    # compressed body ending in \r loses a byte to a `\r?\n` separator pattern and then
+    # fails to decompress. See tests/_pdftext.py for the measured case.
+    return content_text(data)
 
 
 def _pdftotext(data: bytes) -> str:
@@ -173,10 +170,7 @@ def test_single_finding_straddling_a_page_break_draws_no_broken_bar():
     f = _finding("B1", FAIL, detail=long_detail)
     data = render_pdf([f], compute([f]))
 
-    content_streams = [
-        zlib.decompress(m.group(1))
-        for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, re.S)
-    ]
+    content_streams = decompressed_streams(data)
     # Filter to actual page content streams (they contain "BT" text ops); font/other
     # dict-only objects never match `stream` at all, so this is already page content.
     page_streams = [s for s in content_streams if b"BT" in s]

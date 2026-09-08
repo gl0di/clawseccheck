@@ -1,9 +1,9 @@
 ---
 name: clawseccheck
-version: 3.61.0
-description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Scores your setup (A–F) and reports the most urgent holes. It changes nothing in your OpenClaw setup except through one opt-in, confirmation-gated command (--apply-ignore-proposals, which appends only suppressions you approved to .clawseccheckignore). No API key; the scanner itself makes no network calls, and the single external command it can run is your own read-only openclaw security audit (skip it with --no-native). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score.
+version: 4.0.0
+description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Reports the most urgent holes, and grades your setup A–F when all five check layers ran — short of that it names the missing layers instead of printing a number. It is built to be run again, not once: --monitor records a local baseline and every later run alerts on what changed — a new MCP server, a new or edited skill, config drift, a finding that appeared or cleared. It changes nothing in your OpenClaw setup except through one opt-in, confirmation-gated command (--apply-ignore-proposals, which appends only suppressions you approved to .clawseccheckignore). No API key; the scanner itself makes no network calls, and the single external command it can run is your own read-only openclaw security audit (skip it with --no-native). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, see your A–F security score, watch your OpenClaw setup for changes, or ask what changed since the last check.
 license: MIT
-metadata: {"openclaw":{"emoji":"🦞","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Scores your setup (A–F) and reports the most urgent holes. It changes nothing in your OpenClaw setup except through one opt-in, confirmation-gated command (--apply-ignore-proposals, which appends only suppressions you approved to .clawseccheckignore). No API key; the scanner itself makes no network calls, and the single external command it can run is your own read-only openclaw security audit (skip it with --no-native). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, or see your A–F security score."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
+metadata: {"openclaw":{"emoji":"🦞","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Reports the most urgent holes, and grades your setup A–F when all five check layers ran — short of that it names the missing layers instead of printing a number. It is built to be run again, not once: --monitor records a local baseline and every later run alerts on what changed — a new MCP server, a new or edited skill, config drift, a finding that appeared or cleared. It changes nothing in your OpenClaw setup except through one opt-in, confirmation-gated command (--apply-ignore-proposals, which appends only suppressions you approved to .clawseccheckignore). No API key; the scanner itself makes no network calls, and the single external command it can run is your own read-only openclaw security audit (skip it with --no-native). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, see your A–F security score, watch your OpenClaw setup for changes, or ask what changed since the last check."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
 ---
 
 <!-- markdownlint-disable MD040 MD032 -->
@@ -73,10 +73,15 @@ OpenClaw setup — a private local audit history under `~/.clawseccheck/` (owner
 `--no-history`), any report files you explicitly request via a flag (`--save`, `--badge`, `--html`,
 `--sarif`, `--pdf`, `--monitor`, `--trend`, `--log`), and a small freshness ledger
 (`~/.clawseccheck/coverage.json`) recording when you last ran an opt-in active self-test
-(`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`). The one write that lands inside the
-audited OpenClaw home is `--apply-ignore-proposals` (opt-in, confirmation-gated): it appends
-entries a prior `--propose-ignore` run already proposed to `<home>/.clawseccheckignore`, never
-inventing one — see "Judge-panel fan-out" below. `--purge`
+(`--canary`/`--redteam`/`--dryrun`/`--self-test`/`--vet-mcp`). Two writes land inside the audited
+OpenClaw home, both user-requested and explicit — never on a bare/default run: `--apply-ignore-proposals`
+(opt-in, confirmation-gated) appends entries a prior `--propose-ignore` run already proposed to
+`<home>/.clawseccheckignore`, never inventing one — see "Judge-panel fan-out" below; and `--pdf`,
+when the OpenClaw home's own managed attachment directory (`<home>/media/outbound`) already exists
+and is writable, defaults its PDF there instead of `~/.clawseccheck/report.pdf`, so the file lands
+where OpenClaw's own read tool is always allowed to open it back up for a chat attachment — see
+"attachable report" below. Neither write ever touches `openclaw.json`, a skill, or a bootstrap file.
+`--purge`
 deletes its four known store files (history/events/state/coverage) plus their lock siblings in one
 step; a crash-artifact `.tmp` sibling, if one is ever left behind, is not touched by `--purge` and
 needs a manual `rm`. Scoping flags at a glance: `--no-history` (skip
@@ -337,7 +342,37 @@ alone.
 ### Step 1 — Pre-scan menu (show every time)
 
 Show this screen **every time** the user requests an audit. Do NOT auto-run the scan — present the
-menu and wait for a choice. Saying "check", "go", or "1" runs item 1 — Check everything (the default).
+menu and wait for a choice. Saying "check", "go", or "1" runs item 1 — Full check (the default).
+
+**The three modes.** ClawSecCheck is organised on one axis — how often you reach for it — and every
+other capability is an instrument *inside* a mode, not a peer of one:
+
+| Mode | Question it answers | Cadence | Produces |
+| --- | --- | --- | --- |
+| **A · Full check** | How safe is this setup? | once, deliberately | findings — and a grade **only when all five layers ran** |
+| **B · Watch** | What changed since last time? | repeatedly | events, **never a number** |
+| **C · Before you install** | Is this thing safe to add? | on the event | INSTALL / CAUTION / DO-NOT-INSTALL — **not a letter** |
+
+**A full check has five layers**, and a letter grade is issued only when all five ran:
+
+| # | Layer | Automatic? | How it runs |
+| --- | --- | --- | --- |
+| 1 | Static: config, files, permissions | yes | the default run |
+| 2 | Sweep of what is installed: skills + plugins | yes | `--full` |
+| 3 | Logs and trajectories: what already happened | yes, budget-bounded | `--full` (also `--behavioral`, `--analyze-trajectory`) |
+| 4 | Agent self-report | **no** — you must answer it | `--ask` → `--attest` (Step 2) |
+| 5 | Live behaviour test | **no** — pokes the running agent | `--canary` / `--dryrun` / `--redteam` / `--multiturn` |
+
+Short of all five there is **no number at all** — not a capped one. The report leads with the most
+urgent finding in words, then a mandatory line naming which layers did not run. Relay both; never
+substitute a grade of your own, and never describe an ungraded run as an error. It is a result:
+the tool has still told the user the most important thing it knows.
+
+**The honesty invariant — state it as a promise the user can hold us to.** Every mode ends by
+naming what it did not check, as part of the verdict rather than as fine print. No mode prints
+"clear" about a subject it did not look at. A *graded* run can still carry a `Not fully covered: …`
+line — that means a layer ran without exhausting its subject (log scans are budget-bounded by
+construction), which is a different fact from a layer never having run.
 
 Get the version and build age from:
 
@@ -354,28 +389,34 @@ monospace fence:
 
 > 🦞 ClawSecCheck · v{version}
 >
->   1  🔍 Check everything        config + capability audit
->   2  📦 Check before install    skill · plugin · MCP
->   3  📄 Report & history        show · save · trend · badge
->   4  📋 Menu                    everything else: verify · version · HTML · SARIF…
+>   1  🔍 Full check            how safe is this setup?
+>   2  👀 Watch                 what changed since last time?
+>   3  📦 Before you install    is this thing safe to add?
+>   4  📋 Everything else       the full list of instruments
+>
+>   A grade only when all five layers ran — otherwise findings, and what's missing.
 >
 >   🕒 Last check: {N} days ago        ← "not checked yet" when there's no history
 >   🆙 Say "update" to check for a newer version   ← always shown; when the build is stale it gets louder: "Build is {N} days old — say update"
 
-Keep it tiny: one comprehensive check, the pre-install vet, the report, and "Menu"
-for everything else. Don't dump a wall of flags — let "menu" (item 4) reveal the
-rest on demand. The number, the phrase, or a tap all select an item; free phrasing
-("scan me", "am I safe?") maps to the nearest item too.
+Keep it tiny: the three modes, and "Everything else" for the instruments inside
+them. Don't dump a wall of flags — let item 4 reveal the rest on demand. The
+grade-rule line is part of the screen, not decoration: it tells the user what
+earns a letter *before* they choose, instead of leaving them to discover a
+missing number at the end of a report. The number, the phrase, or a tap all
+select an item; free phrasing ("scan me", "am I safe?") maps to the nearest one.
 
 **Mode map — each choice maps to existing flags:**
 
 | Choice | Flag(s) | Notes |
 |--------|---------|-------|
-| 1 Check everything ("check" / "go") | `--dashboard --full` (+ auto capability self-report AND a mandatory judge panel, see Step 2) | Full pipeline in one go: audit **+** capability self-report (B43/B44 resolved inline instead of UNKNOWN — F-043) **+** MCP vet **+** per-skill/per-plugin sweeps (`Skills`/`Plugins`, one merged verdict per item, F-150) **+** the highest-risk chains (`RISK Chains`) **+** a behavioral/trajectory replay (`Behavioural`, F-151) **+** a MANDATORY judge-panel second opinion (`Second opinion (advisory)` — see Step 2's "Judge-panel fan-out" protocol above). Everything here is **visibility/advisory-only** — it never moves the score or grade — except two disclosed, cap-only exceptions: a fired behavioral detector (F-154) and a VULNERABLE live-test verdict (F-155, Section 6). All rendered as ONE fixed-order Dashboard card by the merged Step 2+3 command (F-153) — see Step 2/3 below for the exact protocol, and [`docs/USAGE.md`](docs/USAGE.md) for the full flag-by-flag composition. The live injection test (⚡, Section 6 item a) stays a separate, opt-in step — not part of item 1. |
-| 2 Check before install | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug\|url>` (before anything is even downloaded) | Supply-chain check on something you're about to trust. See the vet flow in Step 5 → [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md). |
-| 3 Report & history | default report · `--save <path>` · `--trend` · `--badge <path>` | Show or save the last result, the score trend, or a shareable badge. |
-| 4 Menu | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). Every capability appears as a speakable prompt grounded to its real flag (verify, what-changed, html, sarif, percentile, risk-paths, the vet family, the ⚡ live tests, …), so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) **It is ~6 KB — longer than a single Telegram/Slack message.** Send it as its own message, split on the blank line between categories if the channel still truncates, and say which categories you left out. Never let the host silently cut it. |
-| "private" modifier | Add `--no-history` to any mode | "1 private" = Check everything + `--no-history`. Nothing written to `~/.clawseccheck/` for the audit/vet/self-test modes — but `--monitor` and `--trend` always write their own state regardless of `--no-history`; it is not a suppressor for those two. |
+| 1 Full check (mode A, "check" / "go") | `--dashboard --full` (+ auto capability self-report AND a mandatory judge panel, see Step 2) | Full pipeline in one go: audit **+** capability self-report (B43/B44 resolved inline instead of UNKNOWN — F-043) **+** MCP vet **+** per-skill/per-plugin sweeps (`Skills`/`Plugins`, one merged verdict per item, F-150) **+** the highest-risk chains (`RISK Chains`) **+** a behavioral/trajectory replay (`Behavioural`, F-151) **+** a MANDATORY judge-panel second opinion (`Second opinion (advisory)` — see Step 2's "Judge-panel fan-out" protocol above). Everything here is **visibility/advisory-only** — it never moves the score or grade — except two disclosed, cap-only exceptions: a fired behavioral detector (F-154) and a VULNERABLE live-test verdict (F-155, Section 6). All rendered as ONE fixed-order Dashboard card by the merged Step 2+3 command (F-153) — see Step 2/3 below for the exact protocol, and [`docs/USAGE.md`](docs/USAGE.md) for the full flag-by-flag composition. The live injection test (⚡, Section 6 item a) stays a separate, opt-in step — not part of item 1. |
+| Session start (no prompt needed) | `--brief` | **Run this at the start of a session, without asking.** It reads three local files and **writes nothing** — no audit, no snapshot, no journal append — which is exactly why no consent prompt is required; the confirmation rule covers `--monitor`, which writes. It answers two questions nothing else does: *is the watch still running* (the cheapest attack on a scheduled monitor is to stop it, which touches none of the files it watches), and *did it record anything while nobody was looking* (an alert is written once; if the human missed that moment the signal never existed). Relay its lines verbatim — they are already one to five lines. Silence past three days is not "fine": it is above the longest gap ever measured on a real machine. |
+| 2 Watch (mode B) | `--monitor` · `--trend` · `--watch-log` · `--verify-history` · `--verify-events` | What changed since last time — a snapshot diff, the graded-scan trend, the Agent Watch timeline, and the two hash-chain integrity checks over the local stores. Those two have **three** outcomes, not two: an absent, empty or unreadable store reports `NOT VERIFIED` ("no chain here"), which is neither a pass nor a tamper finding and must never be relayed as "chain OK". `--trend`/`--watch-log` disclose that same journal's chain provenance inline, too — silence there means it verified in full; a line appears only if it's broken or carries a caveat (e.g. rows recorded before this tool began chaining, unconfirmed but not evidence of tampering). **Watch never produces a number**; zero events renders as "nothing has changed since \<date\>", which is not the same sentence as "all clear" and must not be relayed as one. |
+| 3 Before you install (mode C) | `--vet <path>` (autodetects skill · plugin · MCP spec; `--vet-skill` / `--vet-plugin` force an engine) · `--vet-mcp [name]` (configured MCP) · `--vet-source <slug\|url>` (before anything is even downloaded) · `--vet-all` · `--vet-plan` · `--advise` | Supply-chain check on something you're about to trust. Its verdict is **INSTALL / CAUTION / DO-NOT-INSTALL — never a letter grade**; a letter here would collide with mode A's on a different scale. See the vet flow in Step 5 → [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md). **Offer this BEFORE the user installs or updates anything** — whenever they mention adding a skill, plugin or MCP server, say you can check it first and name the target. That is the whole point of the mode, and it is worth nothing if it is only ever reached after the fact. **Never say or imply that you blocked, prevented or quarantined an install:** this skill cannot stop one. OpenClaw's real pre-install gate is the `before_install` plugin hook, and this is not a plugin. What it does is tell the user what it found, before or after, so they can decide. |
+| 4 Everything else | `--functions` (Screen 12 — the full palette) | Saying "menu" / "functions" / "more" expands the complete capability list — run `python3 {baseDir}/audit.py --functions` (or present its output). It is grouped by the three modes, and every capability is a speakable name grounded to its real flag, so there's no wall of raw flags. (`--menu` itself renders *this* Welcome screen; the palette is one level deeper.) **It is ~4.7 KB** — send it as its own message, and if the channel still truncates, split on the blank line between sections and say which sections you left out. Never let the host silently cut it. |
+| Reports & exports | `--save <path>` · `--badge <path>` · `--html` · `--sarif` · `--pdf` | **Not a mode** — these are instruments inside mode A, and they used to sit on the menu as if they were a peer of one. Offer them after a check, on the result the user just got — and pass them ON that command (`--dashboard --full … --badge b.svg`), which is what makes the artifact carry the check's own grade instead of a fresh bare run's (B-586). Asked for alone, they render a bare run, and the badge then reads "no grade yet"; do not describe that one as sharing a grade. |
+| "private" modifier | Add `--no-history` to any mode | "1 private" = Full check + `--no-history`. Nothing written to `~/.clawseccheck/` for the audit/vet/self-test modes — but `--monitor` and `--trend` always write their own state regardless of `--no-history`; it is not a suppressor for those two. |
 | "update" | Offline notice + agent check | ClawSecCheck never phones home. On "update" the **host agent** checks ClawHub for a newer version and, if there is one, offers `openclaw skills update clawseccheck` — the tool itself stays offline. |
 
 After the user chooses (or says "check" / "go"), proceed to Step 2.
@@ -429,7 +470,7 @@ Capture the output. The script is read-only and safe to run without any flags.
 short first-run **welcome** screen (Screen 13) instead of a Dashboard — "I looked for an OpenClaw
 setup at … but there's nothing there", with how to point it at the config (`--home <path>`). Relay
 that as-is and stop; there's nothing to score. Any CI/artifact/work flag (`--json`, `--save`,
-`--full`, `--fail-under`, `--badge`, …) skips the welcome and runs the real audit, so those flags
+`--full`, `--fail-on`, `--badge`, …) skips the welcome and runs the real audit, so those flags
 are always honored. (A home that *exists* but can't be read is a different case — a plain
 "Cannot read the OpenClaw home" error, exit code 1.)
 
@@ -457,7 +498,7 @@ in Step 2's internal pull — each invocation is its own fresh process, so `--at
 passed again) and folds in the mandatory judge panel's verdicts:
 
 ```
-python3 {baseDir}/audit.py --dashboard --full --attest <path-or- -> --judged-bundle <verdicts-path-or- -> --pdf ~/.clawseccheck/report.pdf
+python3 {baseDir}/audit.py --dashboard --full --attest <path-or- -> --judged-bundle <verdicts-path-or- -> --pdf
 ```
 
 **`--pdf` is what makes this fit a chat message (C-374).** With it, the run writes a
@@ -465,16 +506,57 @@ complete PDF — every finding with its why and evidence, *plus* the Skills/Plug
 RISK-chain, Behavioural, Second-opinion and Coverage blocks — and the card collapses to a
 chat-sized overview that points at that file. Without `--pdf` the same command pastes the
 whole pipeline inline (~11.5 KB), which a channel like Telegram will truncate or reject.
+Given with no PATH, as above, it picks the destination itself: if the OpenClaw home's own
+managed attachment directory (`<home>/media/outbound`) exists and is writable it writes
+there, else `~/.clawseccheck/report.pdf` as before — the check is existence and
+writability only, never a version.
 
-So: **paste the card, then attach `~/.clawseccheck/report.pdf` as a file.** Never paste
-its path at the user as if it were the deliverable, and never present it as a link —
-ClawSecCheck is local-only, so no URL exists. If your channel cannot attach files, say so
-plainly and offer `--dashboard --full` (everything inline, split across messages) instead
-— the card names the most urgent findings either way, so the user is never left with only
-a grade.
+**Send it, don't describe it (B-606).** The stderr note this command prints hands you a
+literal directive line — `MEDIA:<the real path>`. Reproduce that exact line, alone, on
+its own line, outside any code fence, in your reply: OpenClaw parses `MEDIA:<path>` out of
+assistant replies and turns it into a real file attachment on its own, in both the Control
+UI and Telegram — this is a documented mechanism, not something to paraphrase. It can only
+reach a path its read tool is allowed to open, which is why the auto-resolved location
+above matters: `<home>/media/outbound` is always allowed, so writing there gives the
+directive its best chance of actually attaching; anywhere else may be silently dropped by
+the host with no error shown here. That is why the path is still worth saying in words
+too — free to include, and the only thing left if the attachment never arrives. Never
+present it as a link — ClawSecCheck is local-only, so no URL exists — and any link you
+write will simply be broken. **Markdown link syntax counts**: `[report.pdf](path)` is a
+link, and a chat client strips the href off a local path and leaves a dead one the user
+can click forever (measured: 3 of 7 live runs did exactly this — B-606). Write the path as
+plain text or inline code. If your channel cannot attach files, say so plainly, **name the
+path so the user can open it themselves**, and offer `--dashboard --full` (everything
+inline, split across messages) instead — the card names the most urgent findings either
+way, so the user is
+never left with only a grade.
 
-`<verdicts-path-or- ->` is the file (or `-` for stdin) holding `{"judged": {...}}` — the
-verdicts map Step 2's mandatory judge panel just built. Omit `--judged-bundle` entirely only
+`<verdicts-path-or- ->` is the file (or `-` for stdin) carrying the verdicts map Step 2's
+mandatory judge panel just built. **The array lives two levels down, inside `judged`** —
+`--judge-packet` ships this same skeleton as its `bundleTemplate` key, so copy it from there
+rather than from here:
+
+```json
+{
+  "judged": {
+    "verdicts": [
+      {"finding_id": "B101", "target": "B101", "verdict": "SAFE", "reason": "why"}
+    ]
+  },
+  "liveTest": {
+    "seed": "the --seed you gave the harness",
+    "verdicts": [{"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]
+  }
+}
+```
+
+`finding_id`, `target` and `verdict` are required per entry; `verdict` is one of
+`SAFE` / `SUSPICIOUS` / `DANGEROUS`. Omit the `liveTest` bucket entirely unless you ran
+`--canary`/`--dryrun`/`--redteam`/`--multiturn`, or `--self-test`, which runs all four
+(B-602: a live agent ran the umbrella flag, found none of the four named, dropped the
+bucket and paid a second full run for its grade) — and pass those a `--seed`, because an
+unseeded VULNERABLE verdict still caps the run you are looking at but is never written to
+history, trend or the drift baseline (F-155). Omit `--judged-bundle` entirely only
 when Step 2 found `judgePacket` empty (genuinely nothing to judge this run). Frame the whole
 result as an **OpenClaw Security Audit** — not "your setup" or "my agent."
 
@@ -484,6 +566,16 @@ sentence. Examples:
 - "B2 FAIL" → "Anyone on your network can send commands to your agent right now."
 - "A1 FAIL (trifecta 3/3)" → "Your agent has three risky things active at once: it accepts outside
   input, holds sensitive data, and can take actions online. That combination is the most dangerous setup."
+- **"trifecta ?/3"** → "I could not tell how many of the three are active" — never "zero of three".
+  `?/3` means at least one leg could not be determined from the config (runtime tools granted at
+  session start are not written there), so A1's own advice is to treat it as *possibly* 3/3. Offer
+  `--ask` → `--attest` to resolve it; on a run that found no config, point `--home` at one instead.
+- **"A1 WARN naming a resolved default"** → "One of your channels never says who is allowed to
+  message the agent, and leaving that blank does not mean nobody — OpenClaw falls back to letting
+  anyone it has approved once keep messaging." Do NOT report this as a third active leg; the tool
+  deliberately does not count it as one, and the finding says so. If the user asks how to close it,
+  read the `fix` text back rather than inventing a value — the only setting that closes DM ingress
+  is `dmPolicy: "disabled"`, and Feishu and Lark have no closed setting at all.
 - "B1 FAIL" → "Your agent's config file is readable by anyone on this computer."
 - "B13 FAIL" → "One of your installed skills has code patterns used by malware."
 
@@ -494,7 +586,10 @@ prints it (see below) because its frame relies on monospace alignment.
 
 **Channel-aware delivery:** the combined card can exceed a chat channel's message limit (e.g.
 Telegram's ~4096-character cap — Sections 1-2 alone can already run to ≈6,482 characters,
-before the pipeline blocks below add more). If the destination channel truncates long
+before the pipeline blocks below add more). You do not have to estimate this: when the rendered
+card is too large to relay whole, the CLI says so on stderr with the measured character count
+and names both remedies (B-605). Relaying part of an oversized card as if it were the whole is
+the one response that is never right. If the destination channel truncates long
 messages, drop `--pdf` and add `--compact` instead — `--compact` has no effect while
 `--pdf` is present (with an attachment the card is already collapsed to an overview;
 the CLI says so on stderr). So the truncation remedy is `--dashboard --full --compact`.
@@ -505,17 +600,35 @@ actually scales with a bad config's FAIL/WARN count), and appends a `--save`/`--
 pointer for the full detail — or fall back to `--card` (grade + score + trifecta only)
 and offer to save the full report via `--save <path>` / `--html <path>`.
 
-**Do not compose the card — paste it.**
+**Do not compose the card — paste it, inside a fenced code block.**
 
 Live testing showed that when the model composes the grade card / findings sections
-itself, the 🦞 header and the per-subject frames silently vanish. So the WHOLE card above is one
-deterministic render — paste its **entire stdout here, verbatim**. It emits, in this fixed
-order (F-153):
+itself, the 🦞 header and the per-subject frames silently vanish. Measured across five live
+sessions (2026-08-20): four of five hosts rebuilt the card as their own bullet list, and three
+of those four dropped even the tool's name from the reply. The one host that relayed it intact
+wrapped it in a fenced block — which is what preserves the header, the score-bar and the
+per-subject frames, since the frame relies on monospace alignment. So the WHOLE card above is
+one deterministic render — paste its **entire stdout here, verbatim, inside a fenced code
+block** (language tag `text`). The CLI repeats this on stderr right next to the card (B-605),
+because a rule that lives only here is one you have already summarised away by the time you
+need it.
 
-- **Section 1 — Grade card:** `🦞 ClawSecCheck · OpenClaw Security Audit · Grade {grade} ·
-  {score}/100`, a 16-cell score-bar carrying the count of non-suppressed FAIL/WARN findings,
-  and — whenever the score was capped — a disclosure line naming the reason
-  (`⚠️ capped from 70/100 — open CRITICAL finding`).
+This is the one place a fence belongs: the menu (Step 1) and Sections 5-6 stay ordinary text.
+
+It emits, in this fixed order (F-153):
+
+- **Section 1 — Headline card**, in one of two shapes depending on whether all five layers ran:
+  - **graded** — `🦞 ClawSecCheck · OpenClaw Security Audit · Grade {grade} · {score}/100`, a
+    16-cell score-bar carrying the count of non-suppressed FAIL/WARN findings, and — whenever the
+    score was capped — a disclosure line naming the reason
+    (`⚠️ capped from 70/100 — open CRITICAL finding`).
+  - **ungraded** — the most urgent finding in words in that same position, then the mandatory
+    missing-layers line: `No grade yet — 2 of 5 layers did not run: agent self-report (not
+    submitted), live behaviour test (not submitted).` There is no letter, no `/100` and
+    no score-bar anywhere in this shape. Paste both lines; do not compose a grade, do not treat
+    the absence of one as a failure of the tool, and do not offer a number of your own.
+  Either shape may be followed by `Not fully covered: …`, which is a layer that ran without
+  exhausting its subject — a different fact from a layer that never ran. Relay it too.
   **No standalone Lethal Trifecta chip (F-044)** — trifecta state is one **Agents** finding
   among others in Section 2.
 - **Section 2 — Findings, grouped by subject** (details below).
@@ -535,6 +648,13 @@ order (F-153):
   per-item annotations, explicitly advisory, never changing the Grade card above.
 - **Section 3 — Coverage of OpenClaw surfaces** (details below).
 - **Section 4 — "Worth a glance"** (details below).
+- **Section 5 — "What you can do next"** — a short, finding-derived list of the capabilities
+  worth running next (monitoring, the live injection test, trend, badge), each with its exact
+  command. It is **rendered by the tool, not composed by you** (B-604): every item is gated on
+  a finding, so a config where the advice is already done does not get offered it, and the
+  wording adapts to whether this run earned a grade. Paste it with the rest of the card.
+  Under `--compact` it condenses to a one-line pointer (`run --next for the ranked list`) —
+  the compact card exists to fit a message-capped channel and has no room for the full block.
 
 Skills/Plugins/MCP/RISK Chains are each independently **omitted** only when there is
 genuinely nothing to show (no skills/plugins/MCP servers installed, no RISK chain
@@ -712,7 +832,10 @@ before running an active test).
 | d Menu | ✅ | Back to Step 1 (`--menu` / the pre-scan screen) |
 
 Adapt the menu to the audit result:
-- **Offer item a** if grade is C or worse, or if the user asks about injection resistance.
+- **Offer item a** if the run carries **no grade** (the live behaviour test is layer 5 — it is
+  one of the two things standing between this result and a verdict, so offer it first and say
+  that plainly), if the grade is C or worse, or if the user asks about injection resistance.
+  Offering it is not the same as running it: it touches the live agent, so still ask first.
 - **Offer item b** unless the user has recently run `--monitor`.
 - **Always offer c and d** — save/report and back-to-menu are standing closing choices, not
   conditional on the audit result.
@@ -738,7 +861,11 @@ routing index only, not the flow.
 - **live test** — `--canary`, then `--dryrun`, optionally `--redteam`
 - **trend** — `--trend`
 - **percentile** — `--percentile`
-- **share grade** — `--badge grade.svg` or `--card`
+- **share grade** — `--badge grade.svg` or `--card`. The badge carries a real grade only
+  when it rides a complete check: `--dashboard --full … --badge grade.svg` writes the
+  badge from that run (B-586). Asked for on its own, `--badge grade.svg` renders whatever
+  the bare run had — "no grade yet" — so offer that one as sharing the *result*, not a
+  grade.
 - **attachable report for a phone / mobile chat** — `--pdf report.pdf` — a filesystem path is
   useless to a user reading from a phone, but a PDF opens inline in a mobile chat client's own
   viewer where an HTML attachment would just be a download. **Attach the PDF file itself into
@@ -768,16 +895,17 @@ dispatcher; the full protocol behind each row is the matching `## Choice:` secti
 | "monitor", "watch", "alert me", "ongoing", "keep checking" | `--monitor` (ask first) |
 | "canary", "injection test", "am I vulnerable", "try an attack" | `--canary` then `--dryrun` — the standalone equivalent of Section 6's menu item a. A submitted VULNERABLE verdict fed back via `--dashboard --full --judged-bundle <file>`'s `liveTest` bucket hard-caps the grade (F-155); RESISTANT or nothing submitted changes nothing (self-attestation guard) — see Step 3, Section 6. |
 | "red team", "adversarial", "attack suite" | `--redteam` |
-| "trend", "history", "am I improving", "getting better" | `--trend` |
-| "percentile", "compare", "above average", "how do I rank" | `--percentile` |
-| "badge", "share my grade", "shareable", "certificate" | `--badge` or `--card` |
+| "trend", "history", "am I improving", "getting better" | `--trend` — plots the **graded** scans only. Ungraded runs are still recorded (so "last check was N days ago" stays honest) but carry no point to plot, and the trend never draws a line across the rule change. Say so rather than letting a short line read as a short history. |
+| "percentile", "compare", "above average", "how do I rank" | `--percentile` — needs a score, so an ungraded run answers "no rank yet" instead of a number. Relay that; do not estimate one. |
+| "badge", "share my grade", "shareable", "certificate" | `--badge` or `--card` — on an ungraded run the badge reads "no grade yet"; offer it as sharing the *result*, not the grade. Attach the SVG file itself; never redraw or regenerate the image. |
+| "why no grade", "where's my score", "why didn't it give me a letter" | Not an error — read the missing-layers line back. Layers 4 and 5 need the user: run `--ask` → `--attest` for the self-report, and one of `--canary` / `--dryrun` / `--redteam` / `--multiturn` for the live behaviour test. Offer them; never fabricate a grade or present a capped number in its place. |
 | "HTML report", "full report" | `--html report.html` |
 | "PDF", "send me a PDF", "phone", "mobile", "attach the report" | `--pdf report.pdf` — attach the file itself, never paste the path |
 | "JSON", "machine readable", "raw data" | `--json` |
 | "what did my agent actually do", "behavioral", "runtime audit", "did it really do that", "prove it happened" | `--behavioral` — post-hoc, proof-by-log tool-call sequences from the trajectory sidecar; metadata-only, WARN-only, never scored. **Always relay the output — never drop it.** (Item 1's `--dashboard --full` also runs this as its "Behavioural" block — F-151 — but that block is a one-paragraph summary; a fired T1/T2/T3/B191 detector there also caps the grade, F-154. A user asking for this by name should still get the standalone command for the full per-line detail.) |
 | "did a suspicious skill's instructions actually run", "was this indicator acted on" | `--analyze-trajectory` — post-hoc, correlates installed-skill indicators against real tool-call arguments. **Any `⚠ INCIDENT SIGNAL` line is a real incident finding — never drop it.** (Folded into item 1's `--dashboard --full` "Behavioural" block too, F-151 — same one-paragraph-summary caveat as the row above; ask for the standalone command for full detail.) |
 | "second opinion", "judge packet", "review the borderline findings" | Outside item 1's flow: `--judge-packet` — JSON list of borderline findings for host-agent review; summarize item count + per-item verdicts, offer to save large output to a file, **never paste raw JSON, never drop it** — then feed panel verdicts back with `--judged <file>` (see `docs/FLOW_CHOICES.md`). Inside item 1's flow this already ran, MANDATORY, in Step 2 — its verdicts are already in the pasted "Second opinion (advisory)" block, nothing further to do (C-297). |
-| "scan everything", "maximum coverage", "don't skip anything", "check the full logs" | add `--exhaustive` to whatever command is already running (composes with `--full`; has effect on its own too, since B164/B180 run on every audit) — raises the trajectory-file / log-sink / per-line scan caps instead of the interactive-fast defaults. Slower; offer it after a normal run's own disclosure names something skipped (a file-count cap, a time-budget skip, an oversized-line gap) and the user wants that specific gap closed, not as a default suggestion on every run. |
+| "scan everything", "maximum coverage", "don't skip anything", "check the full logs" | add `--exhaustive` to whatever command is already running (composes with `--full`; has effect on its own too, since B164/B180 run on every audit) — raises the trajectory-file / log-sink / per-line scan caps instead of the interactive-fast defaults. Slower; offer it after a normal run's own disclosure names something skipped (a file-count cap, a time-budget skip, an oversized-line gap) and the user wants that specific gap narrowed, not as a default suggestion on every run. It raises the budget substantially rather than removing it, and states its own coverage either way — so relay what the `--exhaustive` run itself reports and don't promise it scanned everything. |
 
 ---
 

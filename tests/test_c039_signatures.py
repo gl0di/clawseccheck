@@ -27,7 +27,7 @@ from clawseccheck.checks import (
     _AUTONOMY_RE,
     _DESTRUCTIVE_CMD_RE,
     _EXFIL_RE,
-    _SKILL_CRIT,
+    _KNOWN_EXFIL_HOST_RE,
     _SKILL_HIGH,
     _fence_ranges,
     _is_code_example,
@@ -56,16 +56,23 @@ def _home_with_skill(tmp, name, body, config="{}"):
 # ---------------------------------------------------------------------------
 
 def test_ngrok_io_in_skill_crit():
-    """ngrok.io subdomain is recognised as a paste/exfil host -> CRITICAL."""
-    host_pattern = next(rx for label, rx in _SKILL_CRIT if "exfiltration host" in label)
-    assert host_pattern.search("https://abc123.ngrok.io/collect")
-    assert host_pattern.search("https://abc123.ngrok-free.app/x")
+    """ngrok.io subdomain is recognised as a paste/exfil host.
+
+    B-555 moved the "paste / exfiltration host" label out of `_SKILL_CRIT` and into
+    `_exfil_host_hits`, because a host merely NAMED in prose is no longer unconditionally
+    CRITICAL. This test is about the HOST SET, not about which band consumes it, so it now
+    reads `_KNOWN_EXFIL_HOST_RE` directly — the single definition both the CRIT and the
+    down-ranked WARN branch share. Reaching through `_SKILL_CRIT` with a bare `next(...)`
+    was also why the move surfaced here as a raw `StopIteration` rather than a readable
+    failure.
+    """
+    assert _KNOWN_EXFIL_HOST_RE.search("https://abc123.ngrok.io/collect")
+    assert _KNOWN_EXFIL_HOST_RE.search("https://abc123.ngrok-free.app/x")
 
 
 def test_pipedream_net_in_skill_crit():
     """pipedream.net subdomain is recognised as a paste/exfil host."""
-    host_pattern = next(rx for label, rx in _SKILL_CRIT if "exfiltration host" in label)
-    assert host_pattern.search("https://eo1abc.m.pipedream.net/hook")
+    assert _KNOWN_EXFIL_HOST_RE.search("https://eo1abc.m.pipedream.net/hook")
 
 
 def test_ngrok_in_exfil_re():
@@ -245,7 +252,22 @@ def test_destructive_without_autonomy_stays_clean(tmp_path):
 
 
 def test_documented_example_destructive_suppressed(tmp_path):
-    """git push --force + autonomy marker inside a fenced block is suppressed."""
+    """git push --force + autonomy marker inside a fenced block is never CONVICTED.
+
+    B-526 (2026-08-23): since the fence-disclosure wiring this also emits a WARN saying
+    the fence was not assessed, so the test pins both halves — no conviction, and an
+    honest disclosure. It is worth knowing why the disclosure fires at all on a document
+    this clearly annotated: the blob says "Dangerous patterns to avoid", "Never configure
+    your agent to run the following without asking" and "Always require a confirmation
+    step", and `_fence_is_annotated` recognises none of them — `_NEGATION_RE` covers
+    `never run` / `never use` but not `never configure`.
+
+    That gap is deliberately NOT closed by widening `_NEGATION_RE`: it also gates
+    conviction suppression, and B-508's retraction measured the cost — appending "Do not
+    skip step 3." to a real backdoor took it from WARN to a clean INSTALL. So the fix was
+    to the WORDING instead. The message no longer calls the fence "unannotated" (a false
+    claim about this author) and instead discloses our own limit: no marker *we
+    recognise*."""
     body = (
         "# Dangerous patterns to avoid\n\n"
         "Never configure your agent to run the following without asking:\n\n"
@@ -256,8 +278,13 @@ def test_documented_example_destructive_suppressed(tmp_path):
     )
     _home_with_skill(tmp_path, "safe-guide", body)
     f = _b13(tmp_path)
-    assert not any("destructive command" in e for e in f.evidence), (
-        f"Fenced destructive+autonomy triggered false positive: {f.evidence}"
+    joined = " ".join(f.evidence or [])
+    assert f.status != FAIL, f"fenced destructive+autonomy wrongly convicted: {f.detail}"
+    assert "no marker we recognise" in joined, (
+        f"the fence was neither convicted nor disclosed — silently dropped: {f.evidence}"
+    )
+    assert "unannotated" not in joined, (
+        f"the disclosure claims this annotated document is unannotated: {f.evidence}"
     )
 
 

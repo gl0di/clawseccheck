@@ -16,7 +16,7 @@ import re
 from clawseccheck import audit, brand
 from clawseccheck.catalog import ATTESTED, CRITICAL, FAIL, HIGH, LOW, MEDIUM, PASS, WARN, Finding
 from clawseccheck.checks._mcp import PluginSweep
-from clawseccheck.cli import main
+from clawseccheck.cli import _COMPACT_NEXT_POINTER, _with_next_actions, main
 from clawseccheck.collector import Context
 from clawseccheck.report import (
     _glance_qualifying_findings, _plugins_inventory_lines, _sev_token, _worth_a_glance_lines,
@@ -527,6 +527,48 @@ class TestCompactCharBudget:
         big_score = compute(big_findings)
         out = render_dashboard(big_findings, big_score, ctx=ctx, full=True, compact=True)
         assert len(out) <= 4096, len(out)
+
+    def test_compact_budget_survives_what_the_caller_appends_after_it(self):
+        """The budget was enforced inside render_dashboard and then exceeded outside it.
+
+        `_with_next_actions` appends a fixed 55-char pointer AFTER render_dashboard has
+        already reduced the card to fit, and nothing re-enforced the cap. Measured on a
+        real config: a 4,066-char card plus that pointer emitted 4,121 against a
+        documented 4,096. The two committed fixtures never caught it because neither
+        lands near enough to the cap for 55 characters to matter — a guard measuring the
+        right thing on a population the defect is absent from.
+
+        A SWEEP, not one case, and that is deliberate. A single synthetic size is
+        brittle here: at 40 extra findings the card reaches the hard-truncate fallback,
+        which cuts at a newline boundary and happens to leave exactly enough room, so
+        that size cannot see the bug at all. The overrun only appears when the ladder
+        fits the card with LESS headroom than the pointer needs — measured at 14 and 20.
+        """
+        ctx, findings, _score = audit(home=FIXTURES / "home_vuln")
+        counts = range(0, 26, 2)
+        busts_without_reserve = []
+
+        for n in counts:
+            big = findings + self._synthetic_findings(n)
+            big_score = compute(big)
+
+            unreserved = render_dashboard(big, big_score, ctx=ctx, full=True,
+                                          compact=True, compact_reserve=0)
+            if len(unreserved) + len(_COMPACT_NEXT_POINTER) > 4096:
+                busts_without_reserve.append(n)
+
+            reserved = render_dashboard(big, big_score, ctx=ctx, full=True, compact=True,
+                                        compact_reserve=len(_COMPACT_NEXT_POINTER))
+            emitted = _with_next_actions(reserved, big, big_score, False, compact=True)
+            assert len(emitted) <= 4096, (n, len(emitted))
+            assert "What you can do next" in emitted, (
+                "the pointer was dropped to make room — the reservation exists so the "
+                "card's severity-ordered ladder absorbs it, not so the guidance "
+                "disappears", n)
+
+        assert busts_without_reserve, (
+            "positive control failed: no size in the sweep busts the budget without the "
+            "reservation, so this test cannot detect the defect it exists for")
 
     def test_compact_drops_low_severity_why_before_critical(self):
         """B-405: the reduction ladder is severity-ordered, not all-or-nothing --

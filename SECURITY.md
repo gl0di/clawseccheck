@@ -47,8 +47,9 @@ and a read-only `/proc/*/fd` walk), and an npm dependency-tree walk (`--no-deptr
 `node_modules` under the installed OpenClaw package, outside the OpenClaw home —
 manifests and install-time targets only, nothing executed). `SKILL.md` and
 [`SECURITY_MODEL.md`](SECURITY_MODEL.md) list the full surface. It writes only its own
-state under `~/.clawseccheck/` — by default a one-line score-history entry (opt out with
-`--no-history`), and other files only when you ask (`--save`, `--badge`, `--html`,
+state under `~/.clawseccheck/` — by default a one-line run-history entry (opt out with
+`--no-history`), which records the score only when the run earned a grade and otherwise
+just notes that it did not, and other files only when you ask (`--save`, `--badge`, `--html`,
 `--sarif`, `--pdf`, `--monitor`, `--log`). The one named exception, opt-in and
 confirmation-gated: `--apply-ignore-proposals` appends previously-proposed entries to
 `<home>/.clawseccheckignore` inside the audited OpenClaw home. Otherwise it never writes

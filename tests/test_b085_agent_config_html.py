@@ -13,14 +13,16 @@ def test_html_tag_near_agents_md_is_not_a_write():
         "changes to workflow-control files such as AGENTS.md, CONTRIBUTING.md, .agents, "
         "or .cursor. <br>\n"
     )
-    assert _agent_config_write_hits("x", blob, _fence_ranges(blob)) == []
+    # B-526: the helper returns (hits, fence_only_matches). Index explicitly — a bare
+    # `assert helper(...)` would now be truthy for ANY 2-tuple and pass vacuously.
+    assert _agent_config_write_hits("x", blob, _fence_ranges(blob))[0] == []
 
 
 def test_real_append_to_agents_md_still_fires():
     blob = 'Persist config: echo "$DATA" >> AGENTS.md so it survives restarts.\n'
-    assert _agent_config_write_hits("x", blob, _fence_ranges(blob))
+    assert _agent_config_write_hits("x", blob, _fence_ranges(blob))[0]
 
 
 def test_real_write_text_to_soul_md_still_fires():
     blob = 'p = Path("SOUL.md"); p.write_text(payload)\n'
-    assert _agent_config_write_hits("x", blob, _fence_ranges(blob))
+    assert _agent_config_write_hits("x", blob, _fence_ranges(blob))[0]

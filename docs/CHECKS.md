@@ -77,7 +77,7 @@ Advisory checks are recorded for coverage but are not scored.
 - OWASP: LLM06 Excessive Agency
 - What it checks: Execution sandbox
 - Remediation:
-  - config: `agents.defaults.sandbox.mode` = `"non-main"` - run exec tools in a sandbox
+  - config: `agents.defaults.sandbox.mode` = `"all"` - run exec tools in a sandbox — 'all' sandboxes every session; 'non-main' leaves the agent's own main session on the host
 
 ### B5 - Plugin / skill supply-chain integrity
 
@@ -333,7 +333,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B333 - MCP tool safety-hint annotations declared but not enforced by OpenClaw
+### B333 - MCP tool safety-hint annotations and what this OpenClaw build does with them
 
 - Severity: MEDIUM
 - Block: hardening
@@ -341,7 +341,19 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: yes
 - Confidence: HIGH
 - OWASP: none
-- What it checks: MCP tool safety-hint annotations declared but not enforced by OpenClaw
+- What it checks: MCP tool safety-hint annotations and what this OpenClaw build does with them
+- Remediation:
+  - none
+
+### B353 - MCP server pre-approves every tool for unattended runs
+
+- Severity: HIGH
+- Block: hardening
+- Framework: MCP Trust
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: MCP server pre-approves every tool for unattended runs
 - Remediation:
   - none
 
@@ -1241,7 +1253,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B71 - gateway.nodes.denyCommands ineffective patterns (non-exact entries)
+### B71 - Node command deny-list entries that are silently ineffective
 
 - Severity: MEDIUM
 - Block: hardening
@@ -1249,7 +1261,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: HIGH
 - OWASP: LLM06 Excessive Agency
-- What it checks: gateway.nodes.denyCommands ineffective patterns (non-exact entries)
+- What it checks: Node command deny-list entries that are silently ineffective
 - Remediation:
   - none
 
@@ -2357,6 +2369,42 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B352 - Exec PATH prepend puts a hijackable directory ahead of every command
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Least Privilege / Execution
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Exec PATH prepend puts a hijackable directory ahead of every command
+- Remediation:
+  - none
+
+### B351 - Code mode replaces the model's tool surface with exec/wait
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Tool Surface
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Code mode replaces the model's tool surface with exec/wait
+- Remediation:
+  - none
+
+### B350 - Gateway operator terminal (browser/mobile shell) enabled
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Zero Trust / Gateway
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Gateway operator terminal (browser/mobile shell) enabled
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.
@@ -2367,15 +2415,14 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Pattern: CRITICAL: public/group sender + exec/write/elevated tool.
 - Chain: channel_label -> tool_label -> host / filesystem
 - Why:
-  The channel '{channel_label}' accepts messages from anyone (dmPolicy or groupPolicy is
-  'open'). The agent also has {tool_label} enabled. Any anonymous actor can craft a
-  message that causes the agent to execute code or mutate files on the host — no
-  additional privilege escalation required.
+  The channel '{channel_label}' {open_reason}. The agent also has {tool_label} enabled.
+  Any anonymous actor can craft a message that causes the agent to execute code or mutate
+  files on the host — no additional privilege escalation required.
 - Fix:
   Lock every channel's dmPolicy and groupPolicy to 'allowlist' so only known, trusted
   senders can reach the agent. If open channels are required, remove or gate
-  exec/write/elevated tools behind human approval (tools.exec.mode='ask' or
-  tools.exec.security='ask').
+  exec/write/elevated tools behind human approval (tools.exec.mode='ask' puts a command to
+  you when it is not on the allow list; tools.exec.ask='always' puts every one to you).
 
 ### RISK-02 - Lethal Trifecta: untrusted input → sensitive data → outbound
 
@@ -2404,10 +2451,11 @@ These paths are computed from multiple checks. They fire only when every leg is 
   ingress channel, a prompt-injection payload delivered via that channel can execute code
   or write files on the host without any containment.
 - Fix:
-  Enable the sandbox: set agents.defaults.sandbox.mode to 'non-main' or 'all', and
-  configure agents.defaults.sandbox.docker (network='bridge', no broad host binds). If
-  sandboxing is not possible, remove exec/write tools or lock all ingress channels to a
-  strict allowlist.
+  Enable the sandbox: set agents.defaults.sandbox.mode to 'all', and configure
+  agents.defaults.sandbox.docker (network='bridge', no broad host binds). 'non-main' is
+  not sufficient here: it keeps the agent's own main session on the host, which is the
+  session this chain runs through. If sandboxing is not possible, remove exec/write tools
+  or lock all ingress channels to a strict allowlist.
 
 ### RISK-04 - Mutable agent identity + elevated/privileged tools
 
@@ -2458,19 +2506,22 @@ These paths are computed from multiple checks. They fire only when every leg is 
 ### RISK-07 - Self-modification: writable identity/bootstrap + exec without approval
 
 - Severity: HIGH
-- Pattern: HIGH: writable bootstrap + exec/fs_write without approval.
+- Pattern: HIGH: writable bootstrap (or already-poisoned bootstrap) + exec/fs_write
 - Chain: exec / fs_write tool (no approval gate) -> writable bootstrap/identity files -> agent identity rewritten → persistent compromise
 - Why:
   Bootstrap or identity files (SOUL.md / AGENTS.md / TOOLS.md) are group- or world-
-  writable (B20 or B22 fails), AND the agent has exec or fs_write tools enabled without a
-  human approval gate. The agent can therefore rewrite its own instructions, identity, or
-  installed skills — a single successful prompt-injection makes the compromise persistent
-  across restarts.
+  writable (B20 or B22 fails), OR a content-ring scanner already found an
+  override/jailbreak directive actually written into them (B6 or B161 fails — the normal-
+  permission file poisoned through the agent's own fs_write). Either way, the agent also
+  has exec or fs_write tools enabled without a human approval gate, so it can rewrite its
+  own instructions, identity, or installed skills — a single successful prompt-injection
+  makes the compromise persistent across restarts.
 - Fix:
   Run 'chmod 700 workspace/ && chmod 600 workspace/SOUL.md workspace/AGENTS.md
-  workspace/TOOLS.md' to remove group/world write access. Also add an approval gate: set
-  tools.exec.mode='ask'/'allowlist' (or tools.exec.security='ask') so every write action
-  needs explicit human sign-off.
+  workspace/TOOLS.md' to remove group/world write access, and restore any flagged file
+  from a trusted backup. Also add an approval gate: tools.exec.ask='always' requires your
+  sign-off before EVERY exec action; tools.exec.mode='ask' requires it only when the
+  command is not on the allow list.
 
 ### RISK-08 - Session context shared across users in a multi-user channel
 
@@ -2556,14 +2607,15 @@ These paths are computed from multiple checks. They fire only when every leg is 
 ### RISK-13 - Markdown-image exfil + writable memory/bootstrap = persistence / exfil
 
 - Severity: HIGH
-- Pattern: HIGH (RISK-13): markdown-image exfil + writable bootstrap/memory = persistence/exfil.
+- Pattern: HIGH (RISK-13): markdown-image exfil + writable/poisoned bootstrap = persistence/exfil.
 - Chain: remote markdown image URL with data-bearing query params -> writable bootstrap / memory files -> persisted payload + exfiltration channel
 - Why:
   B59 shows that a remote markdown/image URL can carry data out of the agent context. If
-  bootstrap or memory files are writable (B20 or B22 fails), the same attacker can write a
-  payload or instruction back into files the agent reloads later. The result is a
-  persistence-plus-exfil chain: steal data now, leave behind code or instructions that
-  survive restart.
+  bootstrap or memory files are writable (B20 or B22 fails), OR a content-ring scanner
+  already found a planted directive in them (B6 or B161 fails), the same attacker can
+  write — or already has written — a payload or instruction back into files the agent
+  reloads later. The result is a persistence-plus-exfil chain: steal data now, leave
+  behind code or instructions that survive restart.
 - Fix:
   Remove remote markdown/image URLs from untrusted content, keep bootstrap and memory
   files read-only, and require approval for any filesystem write that could persist
@@ -2573,7 +2625,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
 
 - Severity: HIGH
 - Pattern: HIGH (RISK-14): wildcard-elevated sender + heartbeat = self-escalating loop.
-- Chain: any sender via wildcard elevated provider(s): {', '.join(providers)} -> injected instruction invokes elevated tools -> heartbeat re-runs the agent unattended -> self-escalating privilege loop
+- Chain: any sender via wildcard elevated provider(s): ... -> injected instruction invokes elevated tools -> heartbeat re-runs the agent unattended -> self-escalating privilege loop
 - Why:
   A provider in tools.elevated.allowFrom is set to '*', so any sender on that channel can
   invoke elevated tools, and a heartbeat (agents.defaults.heartbeat or a per-agent
@@ -2602,8 +2654,8 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Fix:
   Set channels.<provider>.contextVisibility (or channels.defaults) to 'allowlist' or
   'allowlist_quote', and set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false
-  with an explicit browser.ssrfPolicy.hostnameAllowlist. Breaking either leg breaks the
-  chain.
+  with an explicit browser.ssrfPolicy.allowedHostnames (OpenClaw 2026.8.1 and later;
+  browser.ssrfPolicy.hostnameAllowlist before it). Breaking either leg breaks the chain.
 
 ### RISK-16 - Sandbox host-reach + plaintext gateway credential = control-plane takeover
 
@@ -2746,35 +2798,33 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Pattern: HIGH (RISK-23, E-065): 2+ independent persistence anchors of DIFFERENT
 - Chain: *fired -> removing any single anchor does not evict the foothold
 - Why:
-  This install has str(len(fired)) independent persistence mechanisms flagged at once,
-  from different mechanism classes: '; '.join(fired). Most of these checks are WARN-only
-  disclosure — a developer might legitimately have any one of them for a real reason. What
-  makes this combination worth escalating is that at least one of them (';
-  '.join(signal_bearing)) shows an actual suspicious signal beyond "the mechanism exists,
-  unreviewed", co-located with other independent re-establishment mechanisms — the shape
-  that makes removing any single anchor insufficient to evict a real foothold. This is not
-  proof of compromise; it warrants prioritized review of every flagged anchor, starting
-  with the one that shows the actual signal.
+  This install has ... independent persistence mechanisms flagged at once, from different
+  mechanism classes: .... Most of these checks are WARN-only disclosure — a developer
+  might legitimately have any one of them for a real reason. What makes this combination
+  worth escalating is that at least one of them (...) shows an actual suspicious signal
+  beyond "the mechanism exists, unreviewed", co-located with other independent re-
+  establishment mechanisms — the shape that makes removing any single anchor insufficient
+  to evict a real foothold. This is not proof of compromise; it warrants prioritized
+  review of every flagged anchor, starting with the one that shows the actual signal.
 - Fix:
-  Investigate every flagged anchor, starting with '; '.join(signal_bearing) — then review
-  the rest: the .pth/sitecustomize/PYTHONSTARTUP files, systemd units, per-turn skill
-  hooks, and any tunnel/mesh-VPN binaries this install surfaced. Removing a single anchor
-  without addressing the others leaves a working foothold in place.
+  Investigate every flagged anchor, starting with ... — then review the rest: the
+  .pth/sitecustomize/PYTHONSTARTUP files, systemd units, per-turn skill hooks, and any
+  tunnel/mesh-VPN binaries this install surfaced. Removing a single anchor without
+  addressing the others leaves a working foothold in place.
 
 ### RISK-24 - An enrolled tunnel transport defeats destination-based egress filtering
 
 - Severity: MEDIUM
 - Pattern: MEDIUM (RISK-24, E-065): a confirmed default-deny egress policy cannot see
-- Chain: untrusted input reaches the agent -> agent can execute / write on the host -> {', '.join(transport)} enrolled and active on the host (its own outbound transport) -> default-deny OUTPUT policy confirmed, but cannot see destinations carried inside the tunnel's own already-permitted connection -> destination-based egress filtering is defeated for traffic riding the tunnel
+- Chain: untrusted input reaches the agent -> agent can execute / write on the host -> ... enrolled and active on the host (its own outbound transport) -> default-deny OUTPUT policy confirmed, but cannot see destinations carried inside the tunnel's own already-permitted connection -> destination-based egress filtering is defeated for traffic riding the tunnel
 - Why:
-  ClawSecCheck confirmed a default-deny outbound firewall policy on this host, and {',
-  '.join(transport)} is enrolled and active — its own outbound control connection is
-  itself a locally-generated packet the OUTPUT chain does evaluate, but once that one
-  connection is up, destination-based egress filtering cannot see the individual
-  destinations carried inside it. This agent can act on the host (exec/write) and is
-  reachable by untrusted input, so a prompt-injection compromise could invoke that
-  transport directly — the audit's own 'egress is hardened' verdict does not extend to
-  traffic riding inside it.
+  ClawSecCheck confirmed a default-deny outbound firewall policy on this host, and ... is
+  enrolled and active — its own outbound control connection is itself a locally-generated
+  packet the OUTPUT chain does evaluate, but once that one connection is up, destination-
+  based egress filtering cannot see the individual destinations carried inside it. This
+  agent can act on the host (exec/write) and is reachable by untrusted input, so a prompt-
+  injection compromise could invoke that transport directly — the audit's own 'egress is
+  hardened' verdict does not extend to traffic riding inside it.
 - Fix:
   Do not rely on host firewall policy alone to contain this agent. Either remove the
   tunnel/mesh-VPN client if it is not required for this agent's purpose, or explicitly
@@ -2810,16 +2860,16 @@ These paths are computed from multiple checks. They fire only when every leg is 
 - Chain: detail -> Skill Workshop authors + installs new skill code with no human review step -> persistent executable code on disk
 - Why:
   This install has the full unattended Skill Workshop pipeline configured and reachable:
-  skills.workshop.autonomous.enabled authors new skill proposals from conversation
+  the Skill Workshop autonomy setting authors new skill proposals from conversation
   signals, and approvalPolicy='auto' installs them with no human confirmation. At the same
   time, at least one ingress surface admits content from someone other than the owner:
   {detail}. A single inbound message can therefore cause the agent to author and install
   new executable code on disk with no review step in between.
 - Fix:
-  Set skills.workshop.approvalPolicy back to the default 'pending' so every generated
-  proposal needs an explicit `openclaw skills workshop apply` decision, and/or disable
-  skills.workshop.autonomous.enabled unless unattended authoring is genuinely intended.
-  Independently, close the flagged ingress surface(s): set
-  channels.<provider>.contextVisibility to 'allowlist'/'allowlist_quote' (B26), scope
-  commands.ownerAllowFrom/allowFrom to your own channel-native ID(s) (B171), or disable
-  hooks.enabled if it is not required (B179).
+  Set skills.workshop.approvalPolicy to 'pending' so every generated proposal needs an
+  explicit `openclaw skills workshop apply` decision, and/or turn off
+  skills.workshop.autonomous.mode (skills.workshop.autonomous.enabled before OpenClaw
+  2026.8.1) unless unattended authoring is genuinely intended. Independently, close the
+  flagged ingress surface(s): set channels.<provider>.contextVisibility to
+  'allowlist'/'allowlist_quote' (B26), scope commands.ownerAllowFrom/allowFrom to your own
+  channel-native ID(s) (B171), or disable hooks.enabled if it is not required (B179).

@@ -11,11 +11,27 @@ name: CLA
 # executes the pull request's code. This workflow never checks out the PR. There is no
 # actions/checkout step at all and nothing from the fork is executed. Do not add one.
 
+# DISABLED 2026-09-05 — there are no external contributors yet.
+#
+# The automatic triggers are commented out rather than deleted, so re-enabling is
+# one uncomment. Both were reachable by any GitHub user — `issue_comment` fires on
+# a comment from anyone on any issue or PR, `pull_request_target` on any fork PR
+# (13 forks exist) — and every run handed a third-party action a token carrying
+# `contents: write`, `statuses: write` and `actions: write` on this repository.
+# That is a standing capability bought for nothing so far: this workflow was added
+# 2026-08-06 and the most recent pull request (#21) is 2026-07-25, so it has never
+# executed once.
+#
+# BEFORE RE-ENABLING, fix the blocker that would make it fail anyway: the action
+# commits signatures to `branch: 'main'` below, and main requires a pull request,
+# so a direct push from GITHUB_TOKEN is rejected. Point it at a dedicated
+# signatures branch first, then restore the two triggers.
 on:
-  issue_comment:
-    types: [created]
-  pull_request_target:
-    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+  # issue_comment:
+  #   types: [created]
+  # pull_request_target:
+  #   types: [opened, synchronize, reopened]
 
 permissions:
   actions: write

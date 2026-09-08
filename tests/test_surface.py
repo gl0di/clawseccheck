@@ -43,8 +43,14 @@ def test_surfaces_contains_all_required_slugs():
 
 # ── FAMILY_OF consistency ─────────────────────────────────────────────────────
 
-def test_family_of_keys_equal_the_13_bucket_surfaces():
-    """FAMILY_OF must have exactly the 13 bucket surfaces as keys (no trifecta)."""
+def test_family_of_keys_equal_the_bucket_surfaces():
+    """FAMILY_OF must have exactly the bucket surfaces as keys (no trifecta).
+
+    The count is deliberately not in the name or the docstring. It used to say 13
+    while `_BUCKET_SURFACES` held 14 — harmless, because the assertion compares the
+    constants and never the number, but it is the same rot that put "13 bucket
+    surfaces" into OUTPUT_SCHEMA.md and left it there. A number written beside an
+    assertion that does not check it has no owner."""
     assert frozenset(FAMILY_OF.keys()) == _BUCKET_SURFACES
 
 

@@ -67,15 +67,31 @@ def test_vet_bad_with_fixture_populates_effect_profile():
     assert "write" in all_effects
 
 
-def test_emit_manifest_with_idiom_shows_read_write_true(capsys):
+def test_emit_manifest_with_idiom_shows_write_and_network_true(capsys):
+    """B-155's regression guard, restated for B-592's field semantics.
+
+    The bug this file exists for is that the `with ... as VAR:` idiom made a skill's
+    capabilities INVISIBLE. That is still guarded, and now structurally so: the manifest's
+    fields come from `skillast.capability_families`, which walks the tree rather than
+    simulating it, so statement nesting cannot hide a sink from it at all.
+
+    `filesystem.read` legitimately reads `false` here and did not before. The fixture's
+    only `.read()` is `resp.read()` on a **network response**, and its single `open()` is
+    `open("/tmp/out.txt", "wb")` — write-only. The taint view counted that response read
+    as a filesystem "read" effect (its `read_attrs` matches a bare `.read` on any object);
+    a permission field named `filesystem.read` must not, since nothing here reads a file.
+    The taint view is not lost — it is asserted below, in the block that now carries it.
+    """
     skill_dir = FIXTURES / "bad_effectsim_with_taint_dropped" / "skills" / "with-fetcher"
     rc = main(["--vet-skill", str(skill_dir), "--emit-manifest"])
     out = capsys.readouterr().out
     assert rc in (0, 1)
     assert "unprofilable: false" in out
-    assert "read: true" in out
-    assert "write: true" in out
-    assert "reachable: true" in out  # network.reachable
+    assert "write: true" in out          # `with open(..., "wb") as f:` — seen through `with`
+    assert "reachable: true" in out      # `with urlopen(...) as resp:` — likewise
+    # The two views differ here, and the document shows both rather than publishing one
+    # under the other's name: taint still reports the response read.
+    assert "unshielded_effects: [network, read, write]" in out
 
 
 def test_emit_manifest_benign_with_idiom_shows_all_false(capsys):

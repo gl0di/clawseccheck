@@ -264,8 +264,9 @@ def test_cross_fixture_stale_verdicts_file_no_longer_escalates_the_wrong_target(
         judged = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert judged["verdict"] != "DANGEROUS"
-    assert judged["grade"] != "F"
+    # C427: "grade" is internal-only now; DO-NOT-INSTALL is the tier a danger-floored
+    # FAIL (the old "grade F") would have produced, so this is the same property.
+    assert judged["verdict"] != "DO-NOT-INSTALL"
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +429,7 @@ def test_cli_vet_judge_packet_coherence_note_without_vet_target(capsys):
     assert "--vet-judge-packet/--vet-judged require" in err
 
 
-def test_cli_vet_judged_safe_verdict_leaves_grade_unchanged(tmp_path, capsys):
+def test_cli_vet_judged_safe_verdict_leaves_verdict_unchanged(tmp_path, capsys):
     from clawseccheck.cli import main
     target = _fixture("bad_b100_clickfix_setup/skills/quick-tool")
 
@@ -444,8 +445,10 @@ def test_cli_vet_judged_safe_verdict_leaves_grade_unchanged(tmp_path, capsys):
     judged = json.loads(capsys.readouterr().out)
 
     assert judged["verdict"] == base["verdict"]
-    assert judged["grade"] == base["grade"]
-    assert judged["score"] == base["score"]
+    # C427: "grade"/"score" are internal-only now (dossier.verdict_for) -- pin their
+    # absence explicitly rather than silently dropping the old equality check.
+    assert "grade" not in judged and "grade" not in base
+    assert "score" not in judged and "score" not in base
 
 
 def test_cli_vet_judged_dangerous_verdict_escalates(tmp_path, capsys):
@@ -459,8 +462,8 @@ def test_cli_vet_judged_dangerous_verdict_escalates(tmp_path, capsys):
     rc = main(["--vet", str(target), "--vet-judged", str(verdicts_path), "--json"])
     assert rc == 1
     judged = json.loads(capsys.readouterr().out)
-    assert judged["verdict"] == "DANGEROUS"
-    assert judged["grade"] == "F"
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not DANGEROUS -- no letter grade.
+    assert judged["verdict"] == "DO-NOT-INSTALL"
 
 
 def test_cli_vet_judged_reads_from_stdin(tmp_path, capsys, monkeypatch):
@@ -474,10 +477,10 @@ def test_cli_vet_judged_reads_from_stdin(tmp_path, capsys, monkeypatch):
     rc = main(["--vet", str(target), "--vet-judged", "-", "--json"])
     assert rc == 1
     judged = json.loads(capsys.readouterr().out)
-    assert judged["verdict"] == "DANGEROUS"
+    assert judged["verdict"] == "DO-NOT-INSTALL"
 
 
-def test_cli_vet_judged_missing_file_leaves_grade_unchanged(tmp_path, capsys):
+def test_cli_vet_judged_missing_file_leaves_verdict_unchanged(tmp_path, capsys):
     """A --judged-style missing/unreadable verdicts file degrades to "no
     verdicts matched," same defensive contract as --judged itself -- never a
     crash, never an implicit escalation."""
@@ -490,7 +493,6 @@ def test_cli_vet_judged_missing_file_leaves_grade_unchanged(tmp_path, capsys):
     main(["--vet", str(target), "--vet-judged", str(tmp_path / "nope.json"), "--json"])
     judged = json.loads(capsys.readouterr().out)
     assert judged["verdict"] == base["verdict"]
-    assert judged["grade"] == base["grade"]
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +570,8 @@ def test_escalating_one_bundled_skill_does_not_escalate_the_other(tmp_path, caps
     rc = main(["--vet-plugin", str(root), "--vet-judged", str(verdicts_path), "--json"])
     assert rc == 1
     judged = json.loads(capsys.readouterr().out)
-    assert judged["verdict"] == "DANGEROUS"
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not DANGEROUS -- no letter grade.
+    assert judged["verdict"] == "DO-NOT-INSTALL"
 
     b100 = [f for f in judged["findings"] if f["id"] == "B100"]
     assert len(b100) == 2

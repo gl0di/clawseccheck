@@ -13,14 +13,27 @@ kept here so the always-loaded playbook stays lean.
   filesystem path is useless to a user reading from a phone, but a PDF opens inline in a chat
   client's own viewer (unlike `--html`, which most mobile clients hand over as a download). If
   the user is talking from a phone/chat client, attach the PDF file itself into the reply — never
-  paste its path or re-render its contents into the chat text (same doctrine as the `--badge`
-  SVG: attach the artifact, don't redraw it).
-- `--json` with `--vet`/`--vet-mcp` — emits the risk-dossier JSON object (`mode`, `target`,
-  `target_type`, `verdict`, `grade`, `score`, `axes[]`, `findings[]`): the five risk axes
-  (danger / build / behavior / persistence / connections) plus an A–F grade. Exit code is 1 on
-  SUSPICIOUS/DANGEROUS. See `docs/OUTPUT_SCHEMA.md` §11.
-- `--fail-under N` — exit with code 1 if score is below N (useful for CI pipelines).
-- `--exit-code` — exit 1 on a FAIL verdict from any of six sources: (1) an unsuppressed
+  re-render its contents into the chat text (same doctrine as the `--badge` SVG: attach the
+  artifact, don't redraw it), and never write a link: the tool is local-only, so no URL exists and
+  any link you write will be broken. Markdown link syntax counts as a link — `[report.pdf](path)`
+  is one, and a chat client strips the href off a local path and leaves a dead one the user can
+  click forever (B-606); write the path as plain text or inline code. Only when the channel cannot
+  attach files at all, say so and
+  name the path — useless on a phone, but the one thing a desktop reader can act on, and better
+  than the broken link a host invents when told it may say neither.
+- `--json` with `--vet`/`--vet-mcp` — emits the risk-dossier JSON object (`tool`, `version`,
+  `mode`, `target`, `target_type`, `verdict`, `axes[]`, `findings[]`, `unmapped`): the five risk
+  axes (danger / build / behavior / persistence / connections) plus a **verdict**. There is no
+  `grade` or `score` key — a "before you install" answer is INSTALL / CAUTION / DO-NOT-INSTALL,
+  never a letter, because a letter here would collide with the audit's own A–F on a different
+  scale. Exit code is 1 on SUSPICIOUS/DANGEROUS. See `docs/OUTPUT_SCHEMA.md` §11.
+- `--fail-on SEVERITY` (`critical`/`high`/`medium`/`low`) — exit with code 1 if an unsuppressed
+  FAIL at or above SEVERITY exists (useful for CI pipelines; needs no score, so it works on a
+  bare/default run too).
+- `--exit-code` — exit 1 on a FAIL verdict from any of six sources. Honored on the default
+  report path and on the artifact modes that render the same audit (`--sarif`/`--html`/
+  `--badge`/`--pdf`/`--dashboard`, B-584) — the artifact is still written on the run that
+  exits 1. Sources: (1) an unsuppressed
   `FAIL` audit finding; (2) under `--full`, a `FAIL` MCP server; (3) under `--full`, a
   `DANGEROUS` installed skill from the skill sweep; (4) under `--full` (and not `--fast`), a
   `DANGEROUS` installed plugin from the plugin sweep; (5) on any run, a present-but-unparseable
@@ -32,7 +45,11 @@ kept here so the always-loaded playbook stays lean.
   partially-scanned target: an incomplete sweep is disclosed in its printed section, never
   by reddening the gate. The adjudication phase (judge packet / second opinion) never trips
   this — advisory-only by design.
-  `--vet`'s exit code is a separate contract (1 on SUSPICIOUS *or* DANGEROUS).
+  `--vet`'s exit code is a separate contract (1 on SUSPICIOUS *or* DANGEROUS; 2 when the
+  target cannot be assessed at all — a path that is absent, a link to nothing, or
+  unreadable, or a `--vet-mcp` name that is neither a configured server nor a readable
+  spec file — which is a usage error, not a verdict, and prints no dossier). `--advise`
+  shares that contract.
 - `--fast` — only with `--full`: skip the plugin sweep, behavioral replay, and skill sweep,
   keeping the audit + self-test + vet-mcp + the (free) adjudication packet. For CI runs where
   the deep phases are too slow; this is the pre-F-150 `--full` shape.
@@ -51,6 +68,13 @@ kept here so the always-loaded playbook stays lean.
   score/grade), swept-target verdicts are escalate-only. Its `liveTest` bucket also has
   a separate, narrower effect WITHOUT `--full`: `--trend`/`--monitor`/`--percentile`/
   `--next` each honor it on its own to cap the reported score/percentile.
+  The shape is `{"judged": {"verdicts": [{"finding_id": …, "target": …, "verdict": …}]}}` —
+  two levels, and `--judge-packet` ships it as a ready-to-fill `bundleTemplate` key so it never
+  has to be reconstructed from prose (B-596).
+  Nothing recognisable in the file is ever dropped in silence: a `verdicts` array left at
+  the file's top level instead of inside `judged` is applied as the judged bucket with a
+  `note:` saying so (an explicit `judged` always wins over it), and a file none of whose
+  top-level keys is a bucket is reported rather than treated as an empty submission.
 - `--verbose` / `--debug` / `--log PATH` — local logging with secret redaction.
 - `--no-native` — skip the built-in `openclaw security audit` (for offline / hermetic testing).
 - `--no-deptree` — skip the OpenClaw dependency-tree walk behind B349 ("Obfuscated install-time
@@ -90,6 +114,6 @@ kept here so the always-loaded playbook stays lean.
 **Mode precedence.** Most flags above select a single mode; only one runs per invocation
 (resolved in a fixed order, `--json` winning over `--card` on the default report path). If you
 pass a second mode, or a modifier the chosen mode can't use (e.g. `--save` with `--vet`, or
-`--exit-code` with `--sarif`), ClawSecCheck prints a `note: …` to **stderr** naming what was
+`--exit-code` with `--sbom`), ClawSecCheck prints a `note: …` to **stderr** naming what was
 ignored and continues — machine-readable stdout (`--json`/`--sarif`) stays clean. `--no-history`
 is honored everywhere except `--trend`/`--monitor`, which record a score point as part of their job.

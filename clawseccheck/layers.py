@@ -1,0 +1,264 @@
+"""The five-layer ledger: what a full audit can actually vouch for.
+
+A grade is a claim about the *subject* (an agent setup), and the subject is only as
+well understood as the layers that actually ran against it. This module is the single
+place that names those layers, the statuses a layer can be in, and the ledger type that
+refuses to let one go unaccounted for. Pure stdlib, no deps — a leaf: it imports nothing
+from ``clawseccheck`` itself, so every other module can depend on it without risking a
+cycle (CLAUDE.md §3 dependency flow).
+
+======================  ============================================================
+layer                   what it covers
+======================  ============================================================
+static                  the config/manifest audit (the checks engine itself)
+installed_sweep         installed skills/plugins scanned on disk (``--vet-all`` etc.)
+logs_trajectories       trajectory/audit-trail/behavioral log analysis
+self_report             the audited agent's own attestation
+live_behaviour          active self-test / red-team / canary probes against a live agent
+======================  ============================================================
+
+## This ledger and the monitor's ``fully_compared`` are DIFFERENT questions (C-466)
+
+Two things in this tree answer something that sounds the same, and they are not the same.
+Written down here rather than left to be rediscovered, because the divergence is the kind
+that stays correct until someone assumes one implies the other.
+
+* **This ledger** answers *"is the subject understood well enough to put a LETTER on it?"*
+  Its subject is the agent setup, its unit is a source of evidence, and it gates the grade.
+* **``fully_compared``** (``cli.py``, built from ``diff_with_notes``' notes) answers
+  *"did this monitor run make every comparison this build knows how to make?"* Its subject
+  is the RUN, its unit is a comparison against the previous snapshot, and it gates nothing.
+
+The monitor deliberately does not import this module. It reads the ledger's *output* — the
+``score``/``grade``/``graded`` keys, through its ``_score`` dimension — and computes its own
+completeness separately, because "which sources of evidence ran" is not "which comparisons
+were possible against a stored baseline".
+
+The trap that makes this worth stating: **``fully_compared`` is false on every ``--monitor``
+run of a healthy machine.** Measured over five consecutive runs on two populations — a bare
+monitor run earns no grade, so the score comparison always emits a note, and several other
+standing limitations are permanent (the crontab spool needs elevated rights, most
+host-monitor classes cannot be confirmed, the trajectory window rotates). A reader who takes
+it for this ledger's completeness will read a healthy machine as a broken one. B-676 exists
+because of that, and the actionable monitor signal is the ``not_compared`` DELTA — a
+comparison that was possible last run and is not now — never the flag's absolute value.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from types import MappingProxyType
+
+# ── layer identity ───────────────────────────────────────────────────────────
+
+LAYER_STATIC = "static"
+LAYER_INSTALLED_SWEEP = "installed_sweep"
+LAYER_LOGS_TRAJECTORIES = "logs_trajectories"
+LAYER_SELF_REPORT = "self_report"
+LAYER_LIVE_BEHAVIOUR = "live_behaviour"
+
+#: Canonical order every ledger view (missing/not_checked/report) preserves.
+LAYER_ORDER = (
+    LAYER_STATIC,
+    LAYER_INSTALLED_SWEEP,
+    LAYER_LOGS_TRAJECTORIES,
+    LAYER_SELF_REPORT,
+    LAYER_LIVE_BEHAVIOUR,
+)
+
+# ── layer status ─────────────────────────────────────────────────────────────
+
+STATUS_RAN = "ran"
+STATUS_SKIPPED = "skipped"  # the operator narrowed the run (e.g. --fast)
+STATUS_REFUSED = "refused"  # the user declined this layer
+STATUS_UNAVAILABLE = "unavailable"  # no live agent / nothing to ask, by construction
+# B-603: the operator did not hand this layer's evidence in. Distinct from UNAVAILABLE,
+# which claims the environment could not supply it -- a stronger statement, and one the
+# tool cannot make about an absent `--attest` or an absent `liveTest` bucket. A live run
+# reported "live behaviour test (not available here)" to an agent that had just executed
+# the canary; the fact was "nothing arrived", the cause was invented. Keeping them apart
+# also keeps the line actionable: "not available" reads as a dead end, "not submitted"
+# names the input that produces a grade.
+STATUS_NOT_SUBMITTED = "not_submitted"
+STATUS_ERROR = "error"  # the layer tried and blew up
+# Kept only so pipeline.py keeps its existing vocabulary (it already used this exact
+# string for a phase that never got its turn before the deadline) — it is a valid
+# layer status too, not a leftover to delete.
+STATUS_NOT_REACHED = "not_reached"
+
+LAYER_STATUSES = frozenset({
+    STATUS_RAN, STATUS_SKIPPED, STATUS_REFUSED, STATUS_UNAVAILABLE,
+    STATUS_NOT_SUBMITTED, STATUS_ERROR, STATUS_NOT_REACHED,
+})
+
+#: Every status except STATUS_RAN — a layer in one of these cannot vouch for its subject.
+INCOMPLETE_LAYER_STATUSES = frozenset(LAYER_STATUSES - {STATUS_RAN})
+
+# ── how a layer is named to a reader ──────────────────────────────────────────
+#
+# ONE table, here in the leaf, for the same reason `textnorm.ASCII_MAP` is one table:
+# the moment a second renderer writes its own wording, the terminal report, the JSON,
+# the HTML and the PDF start disagreeing about what the tool did or did not do -- and
+# "what was not checked" is precisely the sentence that must never vary by surface.
+# Every renderer formats missing layers through `describe_layer` below; a test asserts
+# no renderer carries a competing table.
+
+#: Layer -> the noun a reader sees. Plain English, no jargon, no flag names.
+LAYER_LABEL = {
+    LAYER_STATIC: "static config audit",
+    LAYER_INSTALLED_SWEEP: "installed skills and plugins",
+    LAYER_LOGS_TRAJECTORIES: "logs and trajectories",
+    LAYER_SELF_REPORT: "agent self-report",
+    LAYER_LIVE_BEHAVIOUR: "live behaviour test",
+}
+
+#: Status -> the parenthetical that says WHY, in the reader's terms rather than the
+#: implementation's. The four not-ran statuses read differently on purpose: an operator
+#: narrowing the run, a user declining, a capability that does not exist here, and a
+#: layer that broke are four different facts about how much the report is worth.
+STATUS_PHRASE = {
+    STATUS_RAN: "ran",
+    STATUS_SKIPPED: "skipped by this run's flags",
+    STATUS_REFUSED: "declined",
+    STATUS_UNAVAILABLE: "not available here",
+    STATUS_NOT_SUBMITTED: "not submitted",
+    STATUS_ERROR: "failed",
+    STATUS_NOT_REACHED: "not reached",
+}
+
+
+# ── layer coverage — did the layer exhaust its subject? ────────────────────────
+#
+# A THIRD axis, independent of `status`. `status` answers "did this layer run at
+# all"; `coverage` answers "when it ran, did it look at everything it could have".
+# Three states, not a bool -- a bool would glue "we did not ask" to "we asked and
+# found a hole", the same distinction `skillprovenance.corroborated: bool | None`
+# exists to preserve (B-558). The default is UNKNOWN, so every pre-existing
+# `LayerState(...)` construction stays byte-identical: nothing in the tree asked
+# this question before this field existed, so nothing may retroactively claim
+# COMPLETE on its behalf.
+
+COVERAGE_UNKNOWN = "unknown"    # default — we did not ask
+COVERAGE_COMPLETE = "complete"  # the layer exhausted its subject, and that was observed
+COVERAGE_PARTIAL = "partial"    # the layer left something unread, and it is named
+
+LAYER_COVERAGES = frozenset({COVERAGE_UNKNOWN, COVERAGE_COMPLETE, COVERAGE_PARTIAL})
+
+
+def describe_layer(layer: str, status: str) -> str:
+    """One layer as a reader sees it, e.g. ``agent self-report (not available here)``.
+
+    The single formatting site for layer wording. Renderers join these; they never
+    build the phrase themselves.
+    """
+    if layer not in LAYER_LABEL:
+        raise ValueError(f"unknown layer {layer!r}; expected one of {LAYER_ORDER}")
+    if status not in STATUS_PHRASE:
+        raise ValueError(
+            f"unknown layer status {status!r}; must be one of {sorted(LAYER_STATUSES)}"
+        )
+    return f"{LAYER_LABEL[layer]} ({STATUS_PHRASE[status]})"
+
+
+@dataclass(frozen=True)
+class LayerState:
+    status: str
+    #: What this layer did NOT cover, in plain English, e.g.
+    #: "79 of 132 log sinks not read". Empty when the layer covered its subject.
+    not_reached: tuple[str, ...] = ()
+    #: B-558: did this layer, having run, exhaust its subject? See LAYER_COVERAGES
+    #: above. Kept LAST so every pre-existing positional/keyword `LayerState(...)`
+    #: construction in the tree stays byte-identical.
+    coverage: str = COVERAGE_UNKNOWN
+
+    def __post_init__(self) -> None:
+        if self.status not in LAYER_STATUSES:
+            raise ValueError(
+                f"unknown layer status {self.status!r}; must be one of "
+                f"{sorted(LAYER_STATUSES)}"
+            )
+        if self.coverage not in LAYER_COVERAGES:
+            raise ValueError(
+                f"unknown layer coverage {self.coverage!r}; must be one of "
+                f"{sorted(LAYER_COVERAGES)}"
+            )
+        # Normalise to a tuple so a caller who passes a list does not silently produce an
+        # unhashable "frozen" state that also compares unequal to a tuple-built twin.
+        if not isinstance(self.not_reached, tuple):
+            object.__setattr__(self, "not_reached", tuple(self.not_reached))
+
+
+@dataclass(frozen=True)
+class LayerLedger:
+    """One :class:`LayerState` per layer in :data:`LAYER_ORDER` — no more, no fewer.
+
+    A ledger that silently omits a layer would let ``complete`` lie about a subject
+    it never actually looked at, which is exactly the failure mode this module exists
+    to close off. Construction is where that gets enforced, once, so every reader of
+    an already-built ``LayerLedger`` can trust it unconditionally.
+    """
+
+    states: MappingProxyType[str, LayerState]
+
+    def __post_init__(self) -> None:
+        given = dict(self.states)
+        unknown = sorted(set(given) - set(LAYER_ORDER))
+        if unknown:
+            raise ValueError(f"unknown layer name(s): {unknown}; expected one of {LAYER_ORDER}")
+        missing = [layer for layer in LAYER_ORDER if layer not in given]
+        if missing:
+            raise ValueError(
+                f"LayerLedger is missing layer(s): {missing} — all five of {LAYER_ORDER} "
+                "must be present"
+            )
+        # Frozen + hashable-friendly: normalise into a MappingProxyType so the dataclass
+        # never exposes a mutable dict, without needing __hash__/__eq__ machinery of our
+        # own. object.__setattr__ is required because the dataclass is frozen.
+        object.__setattr__(self, "states", MappingProxyType(dict(given)))
+
+    def status(self, layer: str) -> str:
+        return self.states[layer].status
+
+    def coverage(self, layer: str) -> str:
+        """B-558: one layer's coverage — see :data:`LAYER_COVERAGES`.
+
+        The sibling of :meth:`status`, and a DIFFERENT question: ``status`` says
+        whether the layer ran, ``coverage`` says whether a layer that ran exhausted
+        its subject. A reader that collapses the two loses the state this field was
+        built to preserve — "we did not ask" is not "we asked and found nothing left".
+        """
+        return self.states[layer].coverage
+
+    @property
+    def coverages(self) -> tuple[tuple[str, str], ...]:
+        """Every layer paired with its coverage, in :data:`LAYER_ORDER`.
+
+        Ordering lives here rather than in the consumer for the same reason
+        :attr:`not_checked`'s de-duplication does: a renderer that re-derives the
+        order is a second place for it to drift.
+        """
+        return tuple((layer, self.states[layer].coverage) for layer in LAYER_ORDER)
+
+    @property
+    def complete(self) -> bool:
+        """True only when every one of the five layers actually ran."""
+        return all(self.states[layer].status == STATUS_RAN for layer in LAYER_ORDER)
+
+    @property
+    def missing(self) -> tuple[str, ...]:
+        """Layer names whose status is not ``ran``, in :data:`LAYER_ORDER`."""
+        return tuple(
+            layer for layer in LAYER_ORDER if self.states[layer].status != STATUS_RAN
+        )
+
+    @property
+    def not_checked(self) -> tuple[str, ...]:
+        """Union of every layer's ``not_reached``, in :data:`LAYER_ORDER`, de-duplicated,
+        order-stable."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for layer in LAYER_ORDER:
+            for item in self.states[layer].not_reached:
+                if item not in seen:
+                    seen.add(item)
+                    out.append(item)
+        return tuple(out)

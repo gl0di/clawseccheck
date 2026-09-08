@@ -43,6 +43,16 @@ def _literal_text(node: ast.AST | None) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _callee_name(node: ast.Call) -> str:
+    """The bare function name of a call, however it was imported."""
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
 def _expr_text(node: ast.AST | None) -> str:
     if node is None:
         return ""
@@ -54,16 +64,55 @@ def _expr_text(node: ast.AST | None) -> str:
             if isinstance(part, ast.Constant):
                 parts.append(str(part.value))
             elif isinstance(part, ast.FormattedValue):
-                parts.append(f"{{{ast.unparse(part.value).strip()}}}")
+                # Same rule as the fallback below, and it has to be repeated here because an
+                # f-string is rendered by its own branch: a CALL inside a placeholder elides,
+                # a bare name is kept as a slot label. Without this,
+                # "{', '.join(providers)}" and "{', '.join(transport)}" reached the page —
+                # two more leaks of the class the fallback fix alone did not close.
+                if any(isinstance(sub, ast.Call) for sub in ast.walk(part.value)):
+                    parts.append("...")
+                else:
+                    parts.append(f"{{{ast.unparse(part.value).strip()}}}")
         return "".join(parts)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _expr_text(node.left) + _expr_text(node.right)
+    if isinstance(node, ast.Call) and _callee_name(node) == "_key_advice":
+        # B-738: a fix string may resolve its config key against the READER's OpenClaw
+        # generation via `checks/_shared.py::_key_advice(ctx, legacy, modern)`. The fallback
+        # below would `ast.unparse` that call and put Python source into a user-facing
+        # remediation — which it did: RISK-15 shipped
+        # "...with an explicit _key_advice(ctx, 'browser.ssrfPolicy.hostnameAllowlist', ...)"
+        # into docs/CHECKS.md, caught only because markdownlint read the underscore as
+        # emphasis. A document has no reader's build, so it gets the same text the helper
+        # itself produces when the generation is undeterminable: both keys, each qualified.
+        # Rendered by CALLING the helper, not by restating its format, so the doc cannot
+        # drift from the advice the tool actually prints.
+        args = [_expr_text(a) for a in node.args[1:]]
+        if len(args) == 2:
+            from clawseccheck.checks import _key_advice  # local: keeps import cost off startup
+
+            return _key_advice(None, args[0], args[1])
     if isinstance(node, (ast.List, ast.Tuple)):
         return ", ".join(_expr_text(elt) for elt in node.elts)
     try:
         value = ast.literal_eval(node)
     except Exception:
-        return ast.unparse(node).strip()
+            # An expression this function cannot render as prose must not reach the page as
+            # Python SOURCE. `ast.unparse` here is how RISK-15 shipped `_key_advice(ctx, ...)`
+            # and how RISK-23 shipped `str(len(fired))`, `'; '.join(fired)` and
+            # `'; '.join(signal_bearing)` into user-facing advice. The first was caught only
+            # because markdownlint read the underscore as emphasis; the rest carry no
+            # underscore and were caught by nobody. Special-casing each callee is what let
+            # them through, so the FALLBACK changes instead.
+            #
+            # Only a CALL elides. A bare name reads as a slot label and carries real
+            # information in the schematic `Chain:` lines — "channel_label -> tool_label ->
+            # host / filesystem" tells a reader what fills each position, and replacing it
+            # with "... -> ..." would trade a cosmetic problem for a worse one. A call is
+            # different: it is machinery, and a document has no run to evaluate it against.
+            if any(isinstance(sub, ast.Call) for sub in ast.walk(node)):
+                return "..."
+            return ast.unparse(node).strip()
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False)

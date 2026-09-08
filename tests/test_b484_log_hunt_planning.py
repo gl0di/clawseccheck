@@ -25,12 +25,15 @@ comment, so re-measure rather than edit around it:
 
     default:      41/132, nondeterministic, 4.51s  ->  53/132, deterministic, 3.16s
 
-`--exhaustive` is NOT fixed by this change and is not claimed to be. It is bound by
-`EXHAUSTIVE_LIMITS.log_check_budget_s = 60.0`, not by bytes, and lands anywhere from
-118/132 to 132/132 depending only on how fast the box is that minute (observed: 126/132 at
-60.02s before, then 132/132 at 56.42s and 118/132 at 60.03s after). Raising that ceiling
-cascades into `check_budget_s`/`audit_budget_s` and is a separate, separately-measured
-task — so the exhaustive path keeps the very nondeterminism the default path just lost.
+`--exhaustive` was NOT fixed by this change and was not claimed to be — it stayed bound
+by `EXHAUSTIVE_LIMITS.log_check_budget_s = 60.0`, not by bytes, landing anywhere from
+118/132 to 132/132 depending only on how fast the box was that minute (observed: 126/132
+at 60.02s before, then 132/132 at 56.42s and 118/132 at 60.03s after). B-486 (a later,
+separately-measured task) closed that gap by giving `EXHAUSTIVE_LIMITS.log_max_total_bytes`
+a finite, calibrated value too — see `tests/test_b486_exhaustive_claims.py` and the
+measurement table beside the constant in `scanbudget.py`. `test_exhaustive_admits_everything`
+below is now `test_exhaustive_plan_genuinely_bounds_a_corpus_over_budget` for that reason:
+the old test's premise (unbounded) no longer holds.
 
 Coverage is only *partially* fixed and this file does not pretend otherwise: the byte
 budget is absolute, so the covered FRACTION still falls as a fleet grows. What is fixed
@@ -172,11 +175,21 @@ def test_unknown_size_is_admitted_and_left_to_the_clock():
     assert planned_out == 0
 
 
-def test_exhaustive_admits_everything():
-    sinks = [_sink(f"s{i}", size=64 * _MIB, mtime=float(i)) for i in range(20)]
+def test_exhaustive_plan_genuinely_bounds_a_corpus_over_budget():
+    """B-486: EXHAUSTIVE_LIMITS.log_max_total_bytes is finite now, not `_UNBOUNDED` —
+    superseding this test's old name/premise (`test_exhaustive_admits_everything`).
+    A corpus larger than the shipped budget must be genuinely truncated, deterministically,
+    by the plan — see tests/test_b486_exhaustive_claims.py for the full round-2 coverage
+    (finiteness, stability across repeated calls, and the end-to-end scan-loop guarantee).
+    """
+    # 1 MiB each (not 64 MiB): a per-sink cost above the shipped 12 MiB budget would be
+    # unadmittable at ANY count, which tests "budget too small for even one sink", not
+    # "a corpus bigger than the budget gets truncated" — the property this test is for.
+    sinks = [_sink(f"s{i}", size=_MIB, mtime=float(i)) for i in range(20)]
     admitted, planned_out = _plan_log_hunt_sinks(sinks, EXHAUSTIVE_LIMITS)
-    assert len(admitted) == 20
-    assert planned_out == 0
+    assert 0 < len(admitted) < 20
+    assert planned_out == 20 - len(admitted)
+    assert planned_out > 0
 
 
 def test_absent_or_zero_budget_admits_everything_in_order():

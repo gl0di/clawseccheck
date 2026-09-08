@@ -26,6 +26,7 @@ security property it cannot deliver on a platform it advertises.
 from __future__ import annotations
 
 import os
+import posixpath
 import tempfile
 from pathlib import Path
 
@@ -172,13 +173,134 @@ def secure_append_text(path: Path, data: str) -> None:
 
 
 def is_safe_tar_member(base_dir: Path, member_name: str) -> bool:
+    """True when an archive member's DECLARED NAME stays inside the extraction root.
+
+    B-747: this is answered LEXICALLY, and never against the filesystem. The previous
+    version did ``Path(base_dir / member_name).resolve()``, which follows symlinks that
+    happen to exist on disk — so it answered "where would this land given the current
+    state of this machine", not "does this name escape". Those are different questions,
+    and the second is the one an archive scan is asking: nothing is being extracted.
+
+    What that cost, measured end to end through ``--vet-skill``: a skill holding an
+    ordinary editable checkout beside its own built wheel —
+
+        mypkg -> ../src/mypkg          (a symlink, benign)
+        mypkg-1.0-py3-none-any.whl     (members: mypkg/__init__.py, ...dist-info/...)
+
+    read ``DO-NOT-INSTALL`` with "Archive path traversal detected:
+    mypkg-1.0-py3-none-any.whl::mypkg/__init__.py". ``mypkg/__init__.py`` is the most
+    ordinary path in Python packaging, and the collision is not bad luck: for a Python
+    package the source directory and the wheel's top-level package have the SAME NAME by
+    construction. Removing the symlink alone restored ``CAUTION``, which is how the cause
+    was isolated. A false-positive FAIL on a benign skill is the Golden Rule #5 class.
+
+    Deliberately NOT fixed by checking whether ``base_dir`` contains symlinks: that treats
+    the symptom. Resolving at all is the defect here.
+
+    ``base_dir`` is retained in the signature and read by nothing — that is the point of
+    the change, not an oversight: the answer must not depend on what is on disk, so there
+    is nothing for it to contribute. Kept so the two collector call sites and any future
+    one keep expressing "member, relative to this root", and so a reader who expects the
+    root to matter meets this sentence.
+
+    A name is unsafe if it escapes on ANY platform this tool runs on, which is why the
+    backslash is folded to a separator before the check. SKILL.md declares
+    ``os: [darwin, linux, win32]``, and on Windows the predicate this replaced joined and
+    normalised through ``ntpath``, so ``..\\..\\evil`` landed outside the root and WAS
+    flagged. A first draft of this function used ``posixpath`` unconditionally and called
+    that a "pre-existing false negative preserved" — which was true on POSIX and FALSE on
+    Windows, where it silently dropped detection on twelve shapes (``..\\..\\evil``,
+    ``sub\\..\\..\\evil``, ``\\evil``, ``C:/evil``, ``C:\\evil``, UNC ``\\\\srv\\share\\evil``,
+    ``\\\\?\\C:\\evil`` …). ``C:/evil`` contains no backslash at all, so the disclosure did not
+    even gesture at it. Caught by this change's own C-135 pass; modelled with
+    ``ntpath.normpath(ntpath.join(...))``, which is what ``Path.resolve()`` degrades to
+    there.
+
+    The cost of folding is a false POSITIVE on a POSIX file literally named
+    ``..\\..\\evil`` — a legal but bizarre filename that escapes on Windows anyway. For a
+    security predicate that is the right direction, and it does not touch the ordinary
+    case: ``dir\\file.txt`` folds to ``dir/file.txt`` and stays safe, as the battery pins.
+
+    One pre-existing FALSE NEGATIVE genuinely is preserved rather than silently changed,
+    and is filed on its own: the tar branch checks only ``member.name``, never
+    ``member.linkname``, so a link member with a traversing target and a safe name is
+    invisible to both this predicate and the one it replaces.
+
+    KNOWN AND ACCEPTED, with its mitigation stated exactly: a skill can ship both halves of
+    an escape itself — a real symlink ``data -> ../outside`` beside an archive member
+    ``data/payload.txt``. The old predicate caught that as a traversal; this one cannot,
+    because it is statically indistinguishable from the benign case above (the wheel's own
+    ``mypkg -> ../src/mypkg`` escapes the skill directory too, so even "does the symlink
+    point outside?" does not separate them). What covers it, MEASURED rather than assumed —
+    an earlier draft of this paragraph claimed a WARN always fires and that was wrong:
+
+      * symlink escaping the HOME  -> B87 WARNs, "Skill/workspace symlink escapes the
+        tree: workspace/skills/demo/data -> /…". The dangerous half is disclosed; only the
+        archive-member FAIL is gone.
+      * symlink escaping only the SKILL DIRECTORY but staying inside the home -> B87 PASSes
+        and B13 PASSes. That case is genuinely silent, and it is the residual this trade
+        buys. It is the milder half — extraction lands elsewhere inside the user's own
+        OpenClaw home rather than at an arbitrary host path — but it is not nothing, and it
+        is filed rather than papered over.
+
+    Verified against the predicate it replaces over a 32-shape battery on a clean base
+    directory — where the old one was correct — with zero disagreements, plus the shapes
+    that only differ once a symlink exists.
+    """
     try:
-        # Resolve absolute path without writing to disk
-        target_path = Path(base_dir / member_name).resolve()
-        # Ensure target path resides within the base directory
-        return base_dir.resolve() in target_path.parents or base_dir.resolve() == target_path
-    except (OSError, ValueError):
+        name = str(member_name)
+    except Exception:  # pragma: no cover - a member name that will not stringify
         return False
+    # A NUL cannot appear in a legitimate path and breaks downstream C-level calls.
+    if "\x00" in name:
+        return False
+    # Fold the Windows separator before any judgement — see the docstring: a name that
+    # escapes on a supported platform is unsafe on every one of them.
+    name = name.replace("\\", "/")
+    # A drive-qualified name is rooted on Windows and is never a legitimate archive
+    # member; posixpath cannot see it as absolute.
+    #
+    # B-747 ACCEPTED RESIDUAL. This convicts a POSIX file literally named "M:1-16569.fasta"
+    # — a plausible genomics coordinate slice at archive root. A fix was proposed (require a
+    # separator after the colon, so only "C:/evil" and "C:\evil" are rejected) and RETRACTED
+    # on C-135 grounds, because it trades a plausible false positive for a PROVEN false
+    # negative. Measured with ntpath, which is what Path.resolve() degrades to on Windows:
+    #
+    #     ntpath.join(r"C:\extract\root", "M:1-16569.fasta") -> "M:1-16569.fasta"   ESCAPES
+    #     ntpath.join(r"C:\extract\root", "D:evil")          -> "D:evil"            ESCAPES
+    #     ntpath.join(r"C:\extract\root", "C:evil")          -> inside the root
+    #     ntpath.join(r"D:\extract\root", "C:evil")          -> "C:evil"            ESCAPES
+    #
+    # A drive-relative name escapes whenever its drive differs from the extraction root's,
+    # and the root's drive is NOT knowable from a member name — so the conservative answer
+    # is the only sound one, and rejecting is CORRECT under this module's own doctrine
+    # rather than a false positive. The proposed fix would have let "D:evil" through.
+    #
+    # Two measurements from the independent pass are worth keeping, because they cut both
+    # ways. Against: `zipfile._extract_member` does `os.path.splitdrive(arcname)[1]`
+    # unconditionally on every Python version, so a drive-qualified member can never escape
+    # through Python's own zip extractor — and the B-747 repro is a .zip. For: `tarfile`
+    # still defaults to `fully_trusted_filter` on 3.12 (the safe `data_filter` becomes the
+    # default only in 3.14), so the tar-side escape is live today, not a legacy corner.
+    # Non-Python extractors are unverified either way, which is why the rule stays uniform
+    # rather than being relaxed for zip on the strength of one extractor's behaviour.
+    #
+    # `name[0].isalpha()` is deliberately narrower than ntpath, whose `splitroot` accepts
+    # ANY character before the colon: "1:2.txt" reads safe here and escapes under ntpath.
+    # Left alone — Windows assigns drive letters from A-Z only, and a colon after a
+    # non-letter is an NTFS alternate-data-stream reference, which anchors inside the root
+    # rather than redirecting out of it. That is a different concern from traversal, and
+    # it is UNVERIFIED on a real Windows host rather than proven safe.
+    if len(name) >= 2 and name[1] == ":" and name[0].isalpha():
+        return False
+    # Absolute ("/etc/passwd", "//etc/passwd", UNC "//srv/share/x") escapes by definition.
+    if posixpath.isabs(name):
+        return False
+    # Purely textual `..` collapse. "a/b/../../../c" -> "../c"; "foo/.." -> "."; "./" -> ".".
+    normalised = posixpath.normpath(name)
+    return normalised == "." or not (
+        normalised == ".." or normalised.startswith("../")
+    )
 
 
 _VCS_DIR_NAMES = (".git", ".hg", ".svn")
@@ -193,6 +315,7 @@ def walk_dir_safely(
     prune_dir=None,
     keep_file=None,
     capped: list | None = None,
+    unreadable_dirs: list | None = None,
 ) -> list[Path]:
     """Recursively walk base_dir, skipping symlinks and any file that escapes base_dir.
 
@@ -223,6 +346,26 @@ def walk_dir_safely(
     appended to it — so a caller can tell "genuinely truncated, more of the tree was
     never reached" apart from "walked everything and it just happened to total
     <= max_files files" (GR#4: no silent completeness claim over a capped scan).
+
+    If `unreadable_dirs` (a list) is provided, a subdirectory that could not be listed is
+    appended to it as a ``(path, reason, errno)`` triple instead of vanishing. `os.walk`'s default
+    ``onerror=None`` **discards** that error, so an unreadable directory produced no files,
+    no `skips` entry and no `capped` sentinel — the subtree simply did not exist as far as
+    every caller was concerned (B-549). That is the same fail-open B-458 closed for an
+    unreadable *file*, one level up and strictly worse: a file hides one file, a directory
+    hides an unbounded subtree. Measured through `--vet-skill` before this parameter
+    existed: a skill with `chmod 000` on a subdirectory containing a `curl | sh` payload
+    reported `INSTALL` / `Danger PASS "no malware signature or known-bad indicator"` /
+    exit 0, with nothing in `--json` either.
+
+    The `errno` is carried because the caller has to tell two very different facts apart and
+    only it can: ``EACCES``/``EPERM`` means the subtree is there and deliberately unlistable
+    (the defect above), while ``ENOENT`` means it ceased to exist between `os.walk` listing it
+    and descending into it — ordinary churn on a live machine, not something hidden. This
+    layer records both and rules on neither; that split is `collect_skill_files`'s to make.
+
+    Default `None` keeps the previous behaviour for every existing caller, so opting in is
+    per-call-site — the same additive discipline as `skips` and `capped`.
     """
     try:
         root = base_dir.resolve()
@@ -230,7 +373,54 @@ def walk_dir_safely(
         return []
 
     out = []
-    for dirpath, dirnames, filenames in os.walk(base_dir, topdown=True, followlinks=False):
+
+    def _on_walk_error(exc: OSError) -> None:
+        if unreadable_dirs is not None:
+            unreadable_dirs.append((str(getattr(exc, "filename", "") or base_dir),
+                                    exc.strerror or str(exc), exc.errno))
+
+    # dirpath -> [first entry, its OSError, how many entries in that directory failed]
+    _unlistable: dict = {}
+
+    def _note_unlistable(dirpath: str, entry: str, exc: OSError) -> None:
+        """An entry inside a listed directory that could not even be classified.
+
+        Re-raises when the caller did not opt in. Opt-in has to mean opt-in: before B-551
+        this OSError propagated, and swallowing it here would have converted a loud crash
+        into a silent drop at the **16** other call sites that never asked for the channel —
+        a fail-open introduced by the fix for a fail-open, and the exact opposite of the
+        "byte-identical for every existing caller" claim this parameter is documented with.
+        Caught by the independent adversarial pass, not by review or by any gate.
+        """
+        if unreadable_dirs is None:
+            raise exc
+        seen = _unlistable.get(dirpath)
+        if seen is None:
+            _unlistable[dirpath] = [entry, exc, 1]
+        else:
+            seen[2] += 1
+
+    def _flush_unlistable() -> None:
+        """One record per directory, but the record says how many entries it stands for.
+
+        The first version emitted one record and stopped counting, so a directory holding
+        three unreadable entries reported ``(1 path(s))`` and named only the first — and
+        because the walk yields `sorted(filenames)`, an attacker picks which one that is by
+        naming it. The disclosure still fired, but it understated the gap and pointed at a
+        file of the attacker's choosing. Counting costs nothing and the sentence stops
+        being a decoy.
+        """
+        if unreadable_dirs is None:
+            return
+        for entry, exc, count in _unlistable.values():
+            reason = exc.strerror or str(exc)
+            if count > 1:
+                reason = f"{reason} ({count} entries in this directory)"
+            unreadable_dirs.append((entry, reason, exc.errno))
+
+    for dirpath, dirnames, filenames in os.walk(
+        base_dir, topdown=True, followlinks=False, onerror=_on_walk_error
+    ):
         # Deterministic traversal
         if exclude_pycache or exclude_vcs or prune_dir is not None:
             rel_dirpath = os.path.relpath(dirpath, base_dir)
@@ -259,7 +449,28 @@ def walk_dir_safely(
                 continue
             if exclude_vcs and any(vcs in p.parts for vcs in _VCS_DIR_NAMES):
                 continue
-            if p.is_symlink():
+            try:
+                is_link = p.is_symlink()
+            except OSError as exc:
+                # B-551: `os.walk` succeeded here — `opendir` needs only `r`, which a `0444`
+                # directory grants — so `onerror` never fired and the `unreadable_dirs`
+                # channel above stayed empty. But without `x` on the parent, `stat` fails for
+                # EVERY entry, so `Path.is_symlink()` (which re-raises anything outside
+                # ENOENT/ENOTDIR/EBADF/ELOOP) threw straight out of this function before any
+                # bookkeeping ran. Measured: `--vet-skill` died with "unexpected internal
+                # error (PermissionError)" and no dossier at all, while the audit path caught
+                # it per-skill and printed `B13 PASS | Scanned 1 installed skill(s); no
+                # shell-exec / exfiltration / obfuscation patterns found` on a home holding
+                # two, with the unscanned one absent from the inventory entirely.
+                #
+                # Recorded once per directory, not once per entry: with no `x` every sibling
+                # fails identically, so a per-entry record would emit one line per file while
+                # saying the same thing. The dedup is keyed on the directory rather than
+                # skipping the rest of it, so a genuine single-entry failure (a race, a name
+                # the filesystem rejects) still drops only that entry.
+                _note_unlistable(dirpath, str(p), exc)
+                continue
+            if is_link:
                 if skips is not None:
                     try:
                         tgt = os.readlink(p)
@@ -274,7 +485,10 @@ def walk_dir_safely(
                     if skips is not None:
                         skips.append((str(p), f"path-escape -> {real}"))
                     continue
-            except OSError:
+            except OSError as exc:
+                # The same silent drop one line later, and reachable independently: a file
+                # that resolves through a directory the walk may not search.
+                _note_unlistable(dirpath, str(p), exc)
                 continue
 
             if keep_file is not None and not keep_file(p):
@@ -290,6 +504,8 @@ def walk_dir_safely(
             if max_files is not None and len(out) >= max_files:
                 if capped is not None:
                     capped.append(True)
+                _flush_unlistable()
                 return out
             out.append(p)
+    _flush_unlistable()
     return out

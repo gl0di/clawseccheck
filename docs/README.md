@@ -40,7 +40,7 @@ read one when you want to know *why* something is the way it is.
 
 1. [OUTPUT_SCHEMA.md](OUTPUT_SCHEMA.md) — the frozen `--json` / SARIF contract
 2. [USAGE.md — CI / automation](USAGE.md#ci--automation) — exit codes,
-   `--fail-under`, SARIF upload
+   `--fail-on`, SARIF upload
 
 ## I am the agent running this skill
 

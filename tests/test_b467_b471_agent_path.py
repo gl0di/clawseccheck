@@ -27,7 +27,11 @@ from pathlib import Path
 from clawseccheck import audit, menu
 from clawseccheck.cli import main
 from clawseccheck.palette import render_palette
-from clawseccheck.report import _second_opinion_item_lines, render_dashboard
+from clawseccheck.report import (
+    _UNGRADED_CAP_TAIL,
+    _second_opinion_item_lines,
+    render_dashboard,
+)
 from clawseccheck.scoring import compute
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -53,8 +57,13 @@ def _live_bundle(tmp_path: Path) -> str:
 def test_live_test_cap_is_disclosed_in_the_card(tmp_path, capsys):
     _, out, _ = _run(capsys, "--dashboard", "--full", "--judged-bundle",
                      _live_bundle(tmp_path), "--home", SAFE, "--no-color")
-    assert "capped from" in out
+    # C-423: a --full run with no attestation cannot reach layer 4, so it carries no
+    # grade and there is no number to have been "capped from". The disclosure is what
+    # this test protects, not the phrasing: without the ungraded branch the card said
+    # NOTHING about a submitted VULNERABLE verdict -- the most serious thing this tool
+    # can report -- purely because the sentence around it needed a number.
     assert "VULNERABLE" in out
+    assert _UNGRADED_CAP_TAIL in out
 
 
 def test_uncapped_card_carries_no_cap_line(capsys):
@@ -106,18 +115,21 @@ def test_no_pdf_means_no_stray_note(capsys):
 # ---- B-469: the menu must not advertise a live test in a read-only mode ----
 
 def test_menu_item_one_does_not_claim_to_touch_the_live_agent():
+    # C-428 renamed item 1 to the mode ("Full check") and made the hint the question
+    # the mode answers. The B-469 contract is unchanged and is what is asserted here:
+    # the read-only audit must not advertise a live-agent test in its label.
     labels = [row for row in menu._ITEMS if row[0] == "1"]
     assert labels, "expected a menu item 1"
     assert "live" not in labels[0][3].lower()
-    assert labels[0][3] == "config + capability audit"
+    assert "Full check" == labels[0][2]
 
 
 def test_rendered_menu_carries_no_live_claim_on_item_one(capsys):
     _, out, _ = _run(capsys, "--menu", "--home", SAFE, "--no-color")
-    line = [ln for ln in out.splitlines() if "Check everything" in ln]
+    line = [ln for ln in out.splitlines() if "Full check" in ln]
     assert line, "menu item 1 not rendered"
     assert "live agent test" not in line[0]
-    assert "capability audit" in line[0]
+    assert "live" not in line[0].lower()
 
 
 # ---- B-470: the judge panel's per-item verdicts must be rendered somewhere ----

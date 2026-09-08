@@ -387,7 +387,8 @@ def test_cli_vet_mcp_dangerous_exits_one(tmp_path, capsys):
     rc = main(["--home", str(home), "--vet-mcp", "--no-native"])
     assert rc == 1
     out = capsys.readouterr().out
-    assert "DANGEROUS" in out
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not DANGEROUS -- no letter grade.
+    assert "DO-NOT-INSTALL" in out
 
 
 def test_cli_vet_mcp_no_servers_exits_zero(tmp_path, capsys):
@@ -405,18 +406,20 @@ def test_cli_vet_mcp_safe_server_exits_zero(tmp_path, capsys):
     rc = main(["--home", str(home), "--vet-mcp", "--no-native"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "NO KNOWN ISSUE" in out
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not NO KNOWN ISSUE -- no grade.
+    assert "INSTALL" in out
 
 
 def test_cli_vet_mcp_suspicious_exits_one(tmp_path, capsys):
-    """SUSPICIOUS (WARN) should also exit 1 — it is not fully safe."""
+    """CAUTION (WARN) should also exit 1 — it is not fully safe."""
     home = _home_with_mcp(tmp_path, {
         "drift": {"command": "npx", "args": ["-y", "some-pkg@latest"]}
     })
     rc = main(["--home", str(home), "--vet-mcp", "--no-native"])
     assert rc == 1
     out = capsys.readouterr().out
-    assert "SUSPICIOUS" in out
+    # C427: Mode C speaks INSTALL/CAUTION/DO-NOT-INSTALL, not SUSPICIOUS -- no letter grade.
+    assert "CAUTION" in out
 
 
 def test_cli_vet_mcp_file_arg(tmp_path, capsys):

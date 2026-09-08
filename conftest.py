@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -5,8 +6,17 @@ import pytest
 
 # make the skill package importable when running pytest from anywhere
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# ...and the test-support modules (tests/_realhome.py). Explicit rather than relying on
+# pytest's own basedir insertion, so `conftest` itself can import it below.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "tests"))
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+# B-519: the maintainer's ACTUAL home, captured before ``_isolate_local_store`` below
+# redirects $HOME. Defined in tests/_realhome.py -- NOT here -- because this tree has two
+# conftest files and the bare name ``conftest`` resolves to fixtures/conftest.py on a
+# full-suite run. Re-exported for readability at the fixture's use site.
+from _realhome import REAL_HOME  # noqa: E402  (must follow the sys.path insert above)
 
 
 # ==========================================================================================
@@ -86,13 +96,26 @@ _PINNED_FIXTURE_MODES = {
     #   test_the_shipped_bad_fixture_demonstrates_the_finding_in_place`` holds this pin.
     "bad_b182_clawhub_token_store/.config/clawhub/config.json": 0o644,
 
-    # B-127 -- pinned to the value ``tests/test_b20.py::
-    # test_b20_clean_fixture_singleton_group_write_end_to_end`` restores. That test is the
-    # only one that chmods a SHIPPED fixture at runtime: it sets 0664 to drive B20's
-    # singleton group-write branch through the real collect() path, then restores exactly
-    # 0644 in a ``finally``. If the session-start pin disagreed with that restore value,
-    # this file's mode -- and therefore the whole corpus fingerprint -- would depend on
-    # whether test_b20 had already run, i.e. on test selection and ordering.
+    # B-127 -- an ORDINARY pin now, and the history is worth keeping because the coupling
+    # it used to describe was a real hazard.
+    #
+    # ``tests/test_b20.py::test_b20_clean_fixture_singleton_group_write_end_to_end`` used
+    # to be the only test that chmod'd a SHIPPED fixture at runtime -- 0664 to drive B20's
+    # singleton group-write branch through the real collect() path, restored to 0644 in a
+    # ``finally``. So this pin had to AGREE with that restore value, or the file's mode --
+    # and therefore the whole corpus fingerprint -- depended on whether test_b20 had
+    # already run, i.e. on test selection and ordering.
+    #
+    # Isolated 2026-09-03: that test now copies the fixture into ``tmp_path`` and chmods
+    # the COPY, so nothing mutates the corpus in place and this value stands on its own.
+    # The ordering dependency is gone, and with it a race that a parallel runner would
+    # have made non-deterministic rather than merely order-dependent: a ``finally``
+    # restores within one process, but cannot hold a shared file steady while another
+    # worker walks the corpus for the fingerprint manifest.
+    #
+    # Verified by measurement, not by reading: the corpus mode-fingerprint is byte-equal
+    # before and after running test_b20, test_b182 and the fingerprint manifest together
+    # (729 tests), and no test anywhere still chmods a path rooted at ``fixtures/``.
     "clean_b127_singleton_group_write/workspace/MEMORY.md": 0o644,
 }
 
@@ -123,8 +146,16 @@ def expected_mode(path: Path) -> int:
 
 def iter_fixture_paths():
     """Every real fixture path, deepest-last. Symlinks are skipped: ``Path.chmod()``
-    follows them, so chmod'ing one would reach outside the corpus (there are none today,
-    and this keeps it that way)."""
+    follows them, so chmod'ing one would change the mode of its target rather than of the
+    link, and a link that ever points outside ``fixtures/`` would reach out of the corpus.
+
+    There ARE symlinks now -- B-747 added two (the editable-checkout-beside-a-wheel pair),
+    where the symlink is not incidental but the whole subject of the fixture. Both point
+    inside their own home, and ``tests/test_b746_b747_corpus_fixtures.py`` asserts that
+    property so a future one cannot quietly point elsewhere. Skipping them stays correct
+    either way, and costs nothing: ``rglob`` does not descend into a symlinked directory,
+    so each target is still visited by its own real path and still gets its mode pinned.
+    """
     for p in sorted(_FIXTURES.rglob("*")):
         if p.is_symlink():
             continue
@@ -177,3 +208,51 @@ def _stub_host_detect(monkeypatch):
         clawseccheck, "_host_detect",
         lambda root="/", **_: {"system": "test", "supported": False, "classes": {}},
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_local_store(tmp_path_factory):
+    """B-519: point $HOME at a throwaway directory so the suite cannot write into the
+    maintainer's real ``~/.clawseccheck/`` store.
+
+    It had been writing there since the store existed. Measured before this fixture:
+    4,414 of the 4,547 rows in the real ``history.jsonl`` -- 97%, and 937 KB -- came from
+    test runs, leaving 132 genuine audits buried in suite noise. ``--trend`` reads that
+    file, so the user's own security history was mostly our exhaust.
+
+    F-128's ``source="test"`` tag (history.py ``_run_source``) is what made this survive
+    so long: it marks the rows filterable, which reads like containment but is not. The
+    row is still appended, still hashed into the chain, still there for anything that
+    does not filter.
+
+    WHY $HOME AND NOT THE SIX ``DEFAULT_*`` CONSTANTS. Six modules name a store path
+    (history/ledger/monitor x2/prescan/update), but ``record(score, path=DEFAULT_HISTORY)``
+    binds its default AT DEF TIME, so ``monkeypatch.setattr(history, "DEFAULT_HISTORY", ...)``
+    never reaches the already-bound value. The bound value is the *string*
+    ``"~/.clawseccheck/history.jsonl"``, expanded by ``expanduser()`` at write time -- so
+    redirecting $HOME does catch it, and catches every store path at once, including any
+    added later. Same reasoning as the corpus-wide permission pin above: this class of
+    defect regrows when patched one path at a time.
+
+    WHY THIS IS NOT A BLANKET SANDBOX. Eight tests deliberately read this machine
+    (real-fleet SKILL.md globs, the recorded fleet-FP baseline, the installed OpenClaw
+    dist, the real ``~/.openclaw``, and two "no machine-specific path may leak" assertions).
+    A naive redirect makes four of them skip and two of them assert against a /tmp path --
+    i.e. it would fix the writes by silently disabling the guards, which is the exact
+    failure this project keeps finding elsewhere. Those tests use ``REAL_HOME`` above.
+    """
+    fake_home = tmp_path_factory.mktemp("isolated-home")
+    # REAL_HOME is captured at import, before this runs; if they ever coincide the
+    # redirect is not redirecting and every write below lands in the user's store.
+    assert fake_home != REAL_HOME, f"isolation is a no-op: {fake_home}"
+    saved = {name: os.environ.get(name) for name in ("HOME", "USERPROFILE")}
+    for name in saved:
+        os.environ[name] = str(fake_home)
+    try:
+        yield fake_home
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value

@@ -26,8 +26,11 @@ import json
 import os
 from pathlib import Path
 
+from _vendor_neutral import neutral_config
+
 import clawseccheck.cli as cli
 import clawseccheck.collector as collector
+from clawseccheck.checks._vet import _VET_MERGE_RANK
 from clawseccheck.cli import (
     _SWEEP_ICON_ASCII, _SWEEP_ICON_UNI, _SWEEP_VERDICT,
     _VET_ICON_ASCII, _VET_ICON_UNI, _VET_VERDICT,
@@ -93,7 +96,7 @@ def _skill_sweep_section(out: str) -> str:
 
 def _home_with_skill(tmp_path: Path, name: str) -> Path:
     """A minimal auditable home carrying one clean installed skill."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     d = tmp_path / "skills" / name
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
@@ -253,7 +256,7 @@ def test_no_skills_directory_says_so_plainly(capsys):
 
 
 def test_empty_skills_directory_says_so_plainly(tmp_path, capsys):
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     (tmp_path / "skills").mkdir()
     rc, out = _run(capsys, str(tmp_path), ["--full"])
     section = _skill_sweep_section(out)
@@ -325,7 +328,7 @@ def _stub_sweep(monkeypatch, rows: list[tuple[str, str, int]], truncated: bool =
 
 
 def test_dangerous_skill_trips_exit_code(tmp_path, monkeypatch, capsys):
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     _stub_sweep(monkeypatch, [("evil", "FAIL", 1)])
     rc, _ = _run(capsys, str(tmp_path), ["--full", "--exit-code"])
     assert rc == 1
@@ -333,7 +336,7 @@ def test_dangerous_skill_trips_exit_code(tmp_path, monkeypatch, capsys):
 
 def test_suspicious_skill_does_not_trip_exit_code(tmp_path, monkeypatch, capsys):
     """FAIL-only, exactly as a WARN MCP server is treated."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     _stub_sweep(monkeypatch, [("iffy", "WARN", 1)])
     rc, _ = _run(capsys, str(tmp_path), ["--full", "--exit-code"])
     assert rc == 0
@@ -342,7 +345,7 @@ def test_suspicious_skill_does_not_trip_exit_code(tmp_path, monkeypatch, capsys)
 def test_truncated_sweep_does_not_trip_exit_code(tmp_path, monkeypatch, capsys):
     """An incomplete sweep is reported by the printed section, never by reddening a
     CI gate that would otherwise be green."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     _stub_sweep(monkeypatch, [("a", "SKIPPED", 0), ("b", "TRUNCATED", 0)],
                 truncated=True)
     rc, _ = _run(capsys, str(tmp_path), ["--full", "--exit-code"])
@@ -350,7 +353,7 @@ def test_truncated_sweep_does_not_trip_exit_code(tmp_path, monkeypatch, capsys):
 
 
 def test_exit_code_parity_quiet_vs_verbose_with_dangerous_skill(tmp_path, monkeypatch, capsys):
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     _stub_sweep(monkeypatch, [("evil", "FAIL", 1)])
     rc_verbose, _ = _run(capsys, str(tmp_path), ["--full", "--exit-code"])
     rc_quiet, _ = _run(capsys, str(tmp_path), ["--full", "--quiet", "--exit-code"])
@@ -383,7 +386,23 @@ def test_suspicious_fixture_exits_zero_end_to_end(capsys):
 # ---------------------------------------------------------------------------
 
 def test_sweep_does_not_change_score_or_grade(capsys):
-    """--full must produce the same audit verdict as a plain run on the same home."""
+    """--full must not let the skill/plugin sweep move the underlying verdict.
+
+    C-426: BOTH runs are now ungraded, and for different reasons — the plain run
+    reaches only three layers, `--full` on this fixture reaches four (no --attest,
+    no --judged-bundle). Under C-425 only the `--full` side was, and the asymmetry was
+    asserted here; now the agreement is, which is the stronger statement of the same
+    property: the sweep changes nothing about the verdict, including whether there is
+    one.
+
+    The property this test exists to pin — that scanning installed skills/plugins does
+    not itself perturb the severity-weighted verdict — is checked on the fields the
+    sweep could actually have touched and that stay visible on an ungraded run:
+    `earned`/`total` (the raw numerator/denominator `raw_score` is computed from),
+    `cap_severity`, and the per-severity FAIL counts. Those are asserted equal above;
+    the gradedness assertions below are deliberately kept rather than dropped, because
+    "neither run has a grade" is itself a fact the sweep must not change.
+    """
     rc_plain = main(["--home", DANGEROUS, "--no-native", "--no-host", "--no-history",
                      "--json"])
     plain = json.loads(capsys.readouterr().out)
@@ -391,7 +410,19 @@ def test_sweep_does_not_change_score_or_grade(capsys):
                     "--full", "--json"])
     full = json.loads(capsys.readouterr().out)
     assert rc_plain == rc_full
-    assert (plain["score"], plain["grade"]) == (full["score"], full["grade"])
+    assert (plain["earned"], plain["total"]) == (full["earned"], full["total"])
+    assert plain["cap_severity"] == full["cap_severity"]
+    assert plain["fail_counts_by_severity"] == full["fail_counts_by_severity"]
+    # Neither run carries a letter, and the sweep is not what decides that: the plain
+    # run never reaches the installed-sweep/self-report/live-behaviour layers, and this
+    # --full run still lacks the two this fixture supplies no input for.
+    assert plain["graded"] is False
+    assert full["graded"] is False
+    assert plain["score"] is None and plain["grade"] is None
+    assert full["score"] is None and full["grade"] is None
+    # ...and they disagree about WHY, which is the honest part: --full genuinely
+    # reached one layer more than the plain run did.
+    assert len(full["missing_layers"]) < len(plain["missing_layers"])
 
 
 # ---------------------------------------------------------------------------
@@ -456,10 +487,31 @@ def test_full_still_suppresses_the_coverage_gap_notice(tmp_path, monkeypatch, ca
 # ---------------------------------------------------------------------------
 
 def test_sweep_vocabulary_has_the_two_incomplete_states():
-    expected = {"FAIL", "WARN", "PASS", "UNKNOWN", "SKIPPED", "TRUNCATED"}
+    """The sweep's own two states exist, and the three tables agree on their key set.
+
+    B-750 changed the upper half of this from a frozen literal to a derived one, and the
+    reason is that the literal is what let a real crash through. This asserted the set was
+    exactly {FAIL, WARN, PASS, UNKNOWN, SKIPPED, TRUNCATED} while
+    ``check_installed_skills`` could already return a seventh status
+    (``SKILL_ARCHIVE_PATH_TRAVERSAL``), which the sweep indexes these tables with — so
+    ``--full`` and ``--vet-all`` died with ``KeyError`` on any home holding a zip-slip
+    skill, and this test stayed green the whole time.
+
+    The intent this test was written for is kept verbatim: the sweep needs SKIPPED and
+    TRUNCATED, which vet-mcp has no concept of (its sibling
+    ``test_vet_mcp_vocabulary_was_not_widened`` guards that boundary from the other side).
+    What is dropped is the accidental promise that the set never grows. Coverage of the
+    cascade's statuses is now derived from ``_VET_MERGE_RANK`` in
+    ``tests/test_b750_sweep_renders_every_status.py``; keeping it here as a literal would
+    just reinstate the freeze one key later.
+    """
+    expected = set(_VET_MERGE_RANK) | {"SKIPPED", "TRUNCATED"}
     assert set(_SWEEP_ICON_ASCII) == expected
     assert set(_SWEEP_ICON_UNI) == expected
     assert set(_SWEEP_VERDICT) == expected
+
+    # the two states this test is named for, asserted directly rather than implied
+    assert {"SKIPPED", "TRUNCATED"} <= set(_SWEEP_VERDICT)
     assert _SWEEP_VERDICT["SKIPPED"] == "not scanned (budget exceeded)"
 
 
@@ -526,7 +578,7 @@ def test_narrated_and_silent_sweeps_agree(tmp_path, capsys):
 
 
 def test_summary_lines_empty_when_no_targets(tmp_path, capsys):
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     sweep = sweep_installed_skills(tmp_path, narrate=False)
     assert sweep.no_roots is True
     assert sweep.no_targets is True
@@ -604,7 +656,7 @@ def test_aggregate_table_marks_truncation_on_a_fail_row_too():
 def _home_with_flat_and_grouped_skill(tmp_path: Path) -> Path:
     """A flat skill AND a skill nested one level deeper under a vendor-pack
     directory -- the exact grouped shape the old flat sweep silently missed."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     flat = tmp_path / "skills" / "flat-skill"
     flat.mkdir(parents=True)
     (flat / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
@@ -668,7 +720,7 @@ def test_permission_denied_subdirectory_forces_incomplete(tmp_path):
     flip complete=False, even though a SIBLING skill was found and scanned
     cleanly -- an enumeration failure is not localized to only the target it
     blinded."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     flat = tmp_path / "skills" / "flat-skill"
     flat.mkdir(parents=True)
     (flat / "SKILL.md").write_text(_CLEAN_MD, encoding="utf-8")
@@ -693,7 +745,7 @@ def test_permission_denied_skill_root_forces_incomplete_with_zero_targets(tmp_pa
     """The harder direction: discovery fails so completely that ZERO skills are
     found at all. An empty result from a walk that could not finish must not
     read the same as a genuinely-empty, complete walk (Golden Rule #4)."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     skills_root = tmp_path / "skills"
     hidden = skills_root / "hidden-skill"
     hidden.mkdir(parents=True)
@@ -744,13 +796,18 @@ def test_hand_built_ctx_with_no_discovery_gap_stays_complete():
 
 
 def test_quiet_line_mentions_discovery_gap_when_present():
+    # B-553: LIMIT_DOMAIN_SKILL is not discovery-only (it also carries ~40
+    # content-scan reasons), so the suffix must not assert "discovery" as the
+    # cause -- it must name the true superset instead. Wording checked here,
+    # not "Skill discovery was incomplete" (the old, narrower and sometimes-false
+    # claim) -- see test_b553_advise_scan_wording.py for the dedicated coverage.
     sweep = SkillSweep(
         home_dir=Path("/nonexistent"), checked_dirs=[Path("/x")],
         rows=[("a", "PASS", 0)],
         discovery_incomplete_reasons=["skill discovery under '/x' stopped early"],
     )
     line = _sweep_quiet_line(sweep)
-    assert "Skill discovery was incomplete" in line
+    assert "could not cover everything (discovery or content)" in line
     assert "stopped early" in line
 
 
@@ -758,7 +815,7 @@ def test_quiet_line_silent_about_discovery_gap_when_absent():
     sweep = SkillSweep(home_dir=Path("/nonexistent"), checked_dirs=[Path("/x")],
                        rows=[("a", "PASS", 0)])
     line = _sweep_quiet_line(sweep)
-    assert "discovery was incomplete" not in line.lower()
+    assert "could not cover everything" not in line
 
 
 def test_vet_all_returns_nonzero_when_discovery_incomplete_with_no_targets(tmp_path, monkeypatch):
@@ -794,7 +851,7 @@ def test_cyclic_symlink_under_plugin_skills_does_not_crash(tmp_path):
     one root that follows symlinks) must not hang or crash the sweep, and must
     not spuriously report incompleteness either -- the cycle is fully resolved
     (skilldiscovery dedups by resolved target), nothing was actually hidden."""
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     ps = tmp_path / "plugin-skills"
     ps.mkdir()
     real = ps / "real-skill"
@@ -814,7 +871,7 @@ def test_max_skills_cap_forces_incomplete_without_crashing(tmp_path, monkeypatch
     never a crash, never a silently clean result. Exercised cheaply via a
     monkeypatched cap rather than 300 real skill directories."""
     monkeypatch.setattr(collector, "_MAX_SKILLS", 2)
-    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "openclaw.json").write_text(json.dumps(neutral_config()), encoding="utf-8")
     for i in range(4):
         d = tmp_path / "skills" / f"s{i}"
         d.mkdir(parents=True)

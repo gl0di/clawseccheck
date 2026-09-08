@@ -53,9 +53,28 @@ def _deptree_scan(root=None):
     return _deptree.scan_dep_tree(_deptree.find_dep_tree(resolved))
 
 
-__version__ = "3.61.0"
+def _installed_dist_version(binary_name="openclaw"):
+    """The installed OpenClaw package's own `package.json` version, or None (B-502).
+
+    A single module-level seam on purpose, mirroring `_host_detect`/`_deptree_scan`
+    above: a test that needs the real lookup out of the way patches THIS name, and every
+    hermetic caller simply leaves `include_dist` off so it is never called. None when
+    the package could not be located on PATH; `check_version` (C4) treats that exactly
+    like the hermetic default (see `Context.installed_dist_version`'s own comment) rather
+    than as a separate UNKNOWN — it already has a presence-only fallback verdict.
+    """
+    from . import deptree as _deptree
+    from . import openclawdist as _openclawdist
+
+    root = _deptree.find_package_root(binary_name)
+    if root is None:
+        return None
+    return _openclawdist._read_version(root) or None
+
+
+__version__ = "4.0.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
-__released__ = "2026-08-06"
+__released__ = "2026-09-08"
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
@@ -64,6 +83,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
           attestation: dict | None = None,
           include_sockets: bool = False, proc_root: str = "/proc",
           include_deptree: bool = False, openclaw_pkg_root=None,
+          include_dist: bool = False,
           exhaustive: bool = False):
     """Run the full audit. Returns (ctx, findings, ScoreResult).
 
@@ -93,6 +113,15 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     it reads `ctx.dep_tree` only, so a Context built without this stays hermetic and
     the walk costs one traversal per audit instead of one per check call.
 
+    `include_dist` (default False, same hermetic-by-default reasoning, B-502) resolves
+    the INSTALLED OpenClaw package's own version (`openclawdist`, via
+    `deptree.find_package_root`) once, so C4 (`check_version`) can compare it against
+    the SELF-REPORTED `meta.lastTouchedVersion` in the SAME run and surface a version
+    rollback -- a downgrade re-opens whatever a newer build had fixed, and needs no
+    cross-run history to see. The CLI passes True by default (`--no-dist` to opt out).
+    Read-only, stdlib-only, no subprocess. When off (or when PATH does not resolve
+    `openclaw`), C4 falls back to its original presence-only verdict, unchanged.
+
     `attestation` (the agent's self-report; see attest.py) enriches the audit: when
     omitted, the attestation checks (B43/B44) report UNKNOWN and the score is
     unchanged. Passed straight through to ctx so the engine stays deterministic.
@@ -119,6 +148,9 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     ctx.openclaw_pkg_root = openclaw_pkg_root
     if include_deptree:
         ctx.dep_tree = _deptree_scan(openclaw_pkg_root)
+    ctx.include_dist = include_dist
+    if include_dist:
+        ctx.installed_dist_version = _installed_dist_version()
     if attestation:
         ctx.attestation = attestation
     ctx.exhaustive = exhaustive

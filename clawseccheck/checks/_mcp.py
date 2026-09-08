@@ -14,6 +14,8 @@ from .. import attest as _attest
 from .. import mcpsurface as _mcpsurface
 from .. import trajectory as _trajectory
 from ..catalog import (
+    FAIL_WEIGHT_STATUSES,
+    display_status,
     CRITICAL,
     FAIL,
     HIGH,
@@ -46,21 +48,23 @@ from ..textnorm import (
     _has_suspicious_zero_width,
     _is_zwj_between_emoji,  # B-449: the emoji carve-out, reused for the COUNT half
     _nfkc_ascii_fold_changed,
+    _ZERO_WIDTH_CLASS_SRC,  # B-450: single source for the run/counted classes below
     confusable_in_ascii_context,
     normalize_for_scan,
     obfuscation_signals,
 )
 
 from ._shared import (
-    SECRET_KEY_RE,
     _config_unreadable,
+    _finding,
     _is_secret_reference,
     _KNOWN_EXFIL_HOST_RE,
-    _finding,
     _mcp_has_remote,
     _mcp_servers,
     _mcp_url_is_local,
+    _openclaw_generation,
     _plugins,
+    SECRET_KEY_RE,
     _surface_absent,
 )
 from ._content import (
@@ -78,6 +82,7 @@ from ._vet import (
     _PLUGIN_MANIFEST,
     _run_content_ring,
     _VET_MERGE_RANK,
+    ast_finding_is_fail_capable,
     _decoded_payloads,
     _locate_plugin_root,
     coverage_gap_finding,
@@ -113,7 +118,17 @@ _PLUGIN_SNIFF_BYTES = 512
 # can't blow memory; a JS signal raises the plugin verdict to WARN (never FAIL — a
 # minified-bundle false-positive must not force a FAIL), fixing the old false-clean PASS.
 _PLUGIN_JS_EXT = (".js", ".mjs", ".cjs", ".ts")
+# B-628: executable source the plugin sweep has NO reader for. Python is analysed only
+# through bundled-skill dispatch, so any .py outside a dispatched skill dir is code that
+# nothing opens. Kept separate from _PLUGIN_JS_EXT because those ARE lexically scanned;
+# this list is "we can see the file and cannot say anything about it".
+_PLUGIN_UNREAD_SOURCE_EXT = (".py", ".pyw")
 _PLUGIN_JS_MAX_BYTES = 2_000_000
+# B-636: the same input bound the lexical JS pass uses, for the same reason — the AST pass
+# is bounded by input SIZE, not content hostility (F-148). A file over the cap is NOT
+# analysed and stays in `unanalysed_code`, so it keeps producing B-628's honest "no reader
+# for this" rather than a silent gap.
+_PLUGIN_PY_MAX_BYTES = 2_000_000
 
 
 _VET_RANK_STATUS = {3: FAIL, 2: WARN, 1: UNKNOWN, 0: PASS}
@@ -131,6 +146,145 @@ def _plugin_finding(severity, status, detail, fix, ev=None) -> Finding:
         False,
         ev or [],
     )
+
+
+# The separators an evidence line puts between the producing skill's name and the rest.
+# Measured across checks/*.py by walking every f-string whose first substitution is a
+# name-like variable: 176 sites use `": "`, 6 use `" ("`, 3 use `" ["`. None can both
+# match one entry, since they differ at the first character after the name.
+#
+#   ": "  the general convention, every check's evidence list
+#   " ("  checks/_content.py's B66/B156 prose scanners, as
+#         f"{skill_name} ({relpath} docstring/comment): ..."
+#   " ["  checks/_content.py's B64 multilingual scanner, as
+#         f'{source_name} [{lang}]: "{snippet}"'
+#
+# THIS LIST IS HAND-MAINTAINED AND HAS LOST THREE TIMES — the second and third entries
+# were each found by an adversarial pass, not by the tests, and the third was found by the
+# pass reviewing the fix for the second. A fourth producer will fail the same way and
+# nothing here will notice. The durable fix is a structural guard over the producers (see
+# the note in _attribute_to_bundled_skill); until it exists, treat this list as known-
+# incomplete rather than as the answer.
+_BUNDLED_EVIDENCE_SEPARATORS = (": ", " (", " [")
+
+
+def _reprefix_bundled_evidence(entry: str, name: str, rel_label: str) -> str:
+    """Swap a leading bare skill-name token for its plugin-relative path, or pass through."""
+    for sep in _BUNDLED_EVIDENCE_SEPARATORS:
+        head = f"{name}{sep}"
+        if entry.startswith(head):
+            return f"{rel_label}{sep}{entry[len(head):]}"
+    return entry
+
+
+_PY_BUDGET_GAP = "the scan budget was reached while it was being read"
+
+
+def _scan_loose_plugin_python(source, rel, analyze_python, subs, py_signals) -> str:
+    """Analyse one plugin Python file that no bundled-skill dispatch will reach (B-636).
+
+    Returns "" when the file was analysed, or a short phrase naming why it was not — the
+    caller turns that into a `coverage:` note AND keeps the file in `unanalysed_code`, so
+    "this scan has no reader for it" stays true of exactly the files it is true of.
+
+    Fail-capable findings become B13 sub-findings on the plugin's own `subs` list rather
+    than a parallel channel: `vet_plugin`'s FAIL branch selects `worst` out of `subs`, and
+    `dossier._AXIS_BY_ID["B13"]` is already "danger", so a payload found here lands on the
+    same axis, with the same id, as the identical payload found one directory lower. That
+    identity is the whole point of the fix — the bug was that location, not content,
+    decided the verdict.
+
+    `analyze_python` is passed in because `vet_plugin` imports skillast lazily (this module
+    keeps that import deferred); taking it as an argument avoids adding a module-level
+    import that the rest of the file deliberately does without.
+    """
+    try:
+        ast_findings = analyze_python(source, rel)
+    except ScanBudgetExceeded:
+        return _PY_BUDGET_GAP
+    unparseable = ""
+    for af in ast_findings:
+        if af.rule == "AST_UNANALYZABLE":
+            # F-057's contract: a parse failure is reported as a finding rather than an
+            # empty list precisely so a caller can tell "clean" from "could not look".
+            unparseable = "the AST layer could not parse it"
+            continue
+        loc = f"{rel}:{af.lineno}"
+        if ast_finding_is_fail_capable(af):
+            subs.append(_finding(
+                "B13",
+                FAIL,
+                f"[plugin file '{rel}'] Dangerous code shipped in the plugin tree, "
+                f"outside any bundled skill: {af.reason} ({loc})",
+                "Do NOT install this plugin until this file has been reviewed. Code a "
+                "plugin ships outside its declared skills still runs with the plugin's "
+                "own authority — being outside a skill directory restricts nothing.",
+                evidence=[f"{rel}: {af.reason} ({loc})"],
+                severity=CRITICAL,
+            ))
+        else:
+            py_signals.append(f"{rel}: {af.reason} ({loc})")
+    return unparseable
+
+
+def _attribute_to_bundled_skill(f: Finding, name: str, rel_label: str) -> Finding:
+    """Stamp one finding dispatched from a bundled skill with the skill it came from.
+
+    C-135 (2026-07-22): disambiguate a bundled skill's OWN evidence entries by its
+    plugin-relative path, not just its bare directory name — two bundled skills sharing
+    a basename (e.g. skills/a/tool, skills/b/tool) would otherwise produce IDENTICAL
+    evidence-line prefixes ("tool: ..."). adjudication.py's judge-packet/--vet-judged
+    matching keys on exactly that prefix (_target_from_evidence), so without this a
+    verdict meant for one bundled skill could silently escalate a DIFFERENT one sharing
+    the same bare name.
+
+    B-614 turned this from inline code into a named helper. The attribution used to be
+    applied to the dispatched primary alone; the primary and every finding riding on its
+    `.ring_findings` now go through the SAME function, so a later edit cannot hand one of
+    them the disambiguation and the other only the append — which is the exact mistake
+    the C-135 note above was written about.
+
+    B-614's own C-135 then found that the rewrite was reading ONE evidence convention and
+    the tree has two. `checks/_content.py`'s B66/B156 prose scanners emit
+    `f"{skill_name} ({relpath} docstring/comment): ..."`, which `startswith(f"{name}: ")`
+    rejects, so those lines passed through unattributed and
+    `_target_from_evidence`'s `partition(": ")` returned the shared
+    `"helper (scripts/x.py docstring/comment)"` for BOTH colliding skills. Reproduced end
+    to end through the real CLI: one DANGEROUS judge verdict escalated two different
+    bundled skills, WARN->FAIL, each tagged `[escalated by host-agent judge: DANGEROUS]`.
+    B66 and B156 are both in `adjudication._FN_PRONE_WARN_IDS`, so they are exactly the
+    band that reaches a judge. The gap pre-dates B-614 (it reproduces with either finding
+    as the primary), but B-614 is what makes those two reachable on the plugin path at
+    all, so it is fixed here rather than deferred.
+
+    A SECOND adversarial round, on this very fix, then found a third convention: B64's
+    multilingual scanner emits `f'{source_name} [{lang}]: "{snippet}"'`, and B64 is on
+    SKILL_CONTENT_RING, so B-614 makes it reachable on the plugin path the same way. Its
+    path to harm is narrower than B66/B156's and this is deliberately not overstated: B64
+    is NOT in `adjudication._FN_PRONE_WARN_IDS`, so a B64 **WARN** never reaches a judge
+    packet; only a B64 UNKNOWN would. The target collision is real either way.
+
+    What that second round actually proves is about the SHAPE of this fix, not about the
+    entry it added. The list is hand-maintained and has now lost three times, and the
+    tests cannot save it: an audit of all 292 fixture skill directories produced 734
+    evidence lines, 209 name-prefixed — 207 `": "`, 2 `" ("`, and **zero** `" ["`. The
+    corpus cannot exercise a convention nobody wrote a fixture for, so the property test
+    below only covers forms someone already thought to construct. Do not read it as
+    "a new format is caught by what it does".
+
+    The durable fix is a structural guard over the PRODUCERS — statically require the
+    literal following a name-like substitution to start with a known separator — which
+    would have reddened all three on the day they were written, with no fixture at all.
+    That needs its own design (a naive predicate reds on 20 unrelated sites: `name + "/"`
+    path joins, `name + " is on ("` config prose), so it is tracked separately rather than
+    bolted on here.
+    """
+    if rel_label != name:
+        f.evidence = [
+            _reprefix_bundled_evidence(e, name, rel_label) for e in (f.evidence or [])
+        ]
+    f.detail = f"[bundled skill {name!r}] {f.detail}"
+    return f
 
 
 def vet_plugin(
@@ -209,7 +363,7 @@ def vet_plugin(
     """
     import json as _json
 
-    from ..skillast import analyze_javascript  # noqa: PLC0415
+    from ..skillast import analyze_javascript, analyze_python  # noqa: PLC0415
 
     p = Path(str(path)).expanduser()
     if not p.exists():
@@ -253,6 +407,11 @@ def vet_plugin(
     notes: list[str] = []  # coverage / informational evidence — never verdict-moving
     subs: list[Finding] = []  # dispatched engine findings (vet_skill / vet_mcp)
     js_signals: list[str] = []  # B-165: lexical JS/TS findings — raise the verdict to WARN
+    # B-636: non-fail-capable AST findings from plugin Python outside a dispatched skill.
+    # The fail-capable ones do not come through here — they are appended to `subs` as B13
+    # sub-findings, so the existing merge rank, `worst` selection, `ring_findings` and the
+    # dossier's own `_AXIS_BY_ID["B13"] == "danger"` routing all apply with no new wiring.
+    py_signals: list[str] = []
 
     # -- manifest sanity (required fields per recon §11.2; host blocks activation on error)
     pid = manifest.get("id")
@@ -337,6 +496,7 @@ def vet_plugin(
 
     # -- bundled skills -> vet_skill (the plugin-skills auto-load surface, recon §11.1)
     skill_dirs: list[Path] = []
+    bundled_contexts: list = []  # B-628: each dispatched skill's engine Context
     try:
         root_res = root.resolve()
     except OSError:
@@ -393,33 +553,72 @@ def vet_plugin(
         except Exception:  # noqa: BLE001 — a dispatched engine must never break the vet
             warns.append(f"bundled skill {sd.name!r} could not be vetted")
             continue
-        # C-135 (2026-07-22): disambiguate this bundled skill's OWN evidence entries
-        # by its plugin-relative path, not just its bare directory name — two bundled
-        # skills sharing a basename (e.g. skills/a/tool, skills/b/tool) would otherwise
-        # produce IDENTICAL evidence-line prefixes ("tool: ..."). adjudication.py's
-        # judge-packet/--vet-judged matching keys on exactly that prefix
-        # (_target_from_evidence), so without this a verdict meant for one bundled
-        # skill could silently escalate a DIFFERENT one sharing the same bare name.
-        # vet_skill's own evidence convention prefixes each line with sd.name (its
-        # `name = p.name`), so replacing just that leading segment is safe and exact.
         try:
             rel_label = str(sd.resolve().relative_to(root_res))
         except (OSError, ValueError):
             rel_label = sd.name
-        if rel_label != sd.name:
-            bare_prefix = f"{sd.name}: "
-            sf.evidence = [
-                f"{rel_label}: {e[len(bare_prefix):]}" if e.startswith(bare_prefix) else e
-                for e in (sf.evidence or [])
-            ]
-        sf.detail = f"[bundled skill {sd.name!r}] {sf.detail}"
-        subs.append(sf)
+        # B-614: carry the LOSERS, not just the dispatched primary.
+        #
+        # vet_skill collapses its content ring into ONE primary
+        # (`primary = max(pool, key=_VET_MERGE_RANK...)`, checks/_vet.py) and hangs every
+        # other finding worth keeping on `.ring_findings`. This loop used to append the
+        # primary alone, so those were dropped right here — and every consumer downstream
+        # flattens exactly ONE level (`[f, *f.ring_findings]`: dossier._normalize_pool,
+        # cli.py's vet paths, adjudication._vet_pool), so a ring left nested under `sf`
+        # is invisible to all of them. They have to become members of `subs` themselves.
+        #
+        # The loss was never a quiet omission, which is why this is a security bug and
+        # not a reporting nicety: dossier.build_profile buckets findings by axis and
+        # prints a bucket's DEFAULT CLEAN text when nothing lands in it, so a dropped
+        # finding left an affirmative claim rather than a gap. Measured on byte-identical
+        # content, `--vet-skill` reported `Behavior FAIL` (B61 cross-agent config
+        # snooping) and `Build quality WARN` (B98 undeclared capabilities) where
+        # `--vet-plugin` reported `PASS` for both, and `--vet-plugin --json` carried
+        # neither id at all.
+        #
+        # What this deliberately does NOT change: the plugin's overall status. `subs`
+        # already contained the worst-ranked finding of each dispatched skill (that IS
+        # what `max` picks), so `sub_rank` below is unmoved by definition — this widens
+        # what is reported, never how bad the verdict is.
+        #
+        # `sf.ring_findings` is emptied so each finding has exactly one home. That is a
+        # no-op today (nothing recurses); it means a consumer that starts recursing
+        # tomorrow cannot count these twice.
+        ring = list(sf.ring_findings or [])
+        sf.ring_findings = []
+        # B-628: keep the dispatched skill's Context reachable from the CONTAINER, not
+        # only from whichever finding happens to survive into the pool. `vet_skill` sets
+        # `.ctx` on its primary alone, and the `actionable` filter below drops every
+        # PASS sub-finding — so for a plugin whose bundled skills are all clean, no pool
+        # member carries a ctx at all and the dossier concluded the plugin had no code.
+        # Recording it here is what makes the CLEAN case answerable; without it the fix
+        # only ever reached plugins that were already convicted of something.
+        sctx = getattr(sf, "ctx", None)
+        if sctx is not None:
+            bundled_contexts.append(sctx)
+        subs.append(_attribute_to_bundled_skill(sf, sd.name, rel_label))
+        subs.extend(_attribute_to_bundled_skill(rf, sd.name, rel_label) for rf in ring)
 
     # -- capped tree sweep (skips node_modules; symlinks never followed) for embedded
     #    MCP specs and native-executable stowaways outside the dispatched skill dirs
     truncated = False
     js_capped: list[str] = []  # B-344: runtime JS/TS files skipped for exceeding the cap
     swept: list[Path] = []
+    # B-628 (C-135 round 3): Python reached by NOTHING. The sweep below analyses .json
+    # (embedded MCP specs), sniffs for native stowaways, and lexically scans
+    # _PLUGIN_JS_EXT -- `.py` is analysed only when it sits inside a dispatched skill
+    # dir. A plugin shipping fetch-to-exec as a root-level install.py, or beside a skill
+    # dir rather than inside one, is therefore never opened by any reader. Recorded so
+    # the dossier cannot mistake "one bundled skill had Python" for "this plugin's code
+    # was measured" -- exactly the affirmative claim the reviewer reproduced.
+    unanalysed_code: list[str] = []
+    # B-636: plugin Python the Danger pass DID read. Distinct from `unanalysed_code` and
+    # from "no code at all": the AST/taint pass covers dangerous patterns, while the
+    # Persistence and Connections axes are computed from bundled-skill Contexts that never
+    # see this file. Without this the dossier had only three states and had to pick a false
+    # one — after the reader landed, a plugin shipping install.py printed "no executable
+    # code to analyze", which is a claim about the ARTIFACT and was simply untrue.
+    analysed_loose_code: list[str] = []
     if cpu_exceeded(deadline):
         budget_hit = True
     else:
@@ -457,7 +656,81 @@ def vet_plugin(
     def _under_skills(fp: Path) -> bool:
         return any(sd in fp.parents for sd in skill_dirs)
 
+    dispatched_dirs = [d.resolve() for d in skill_dirs]
     for fp in swept:
+        if fp.suffix.lower() in _PLUGIN_UNREAD_SOURCE_EXT:
+            try:
+                fp_res = fp.resolve()
+                inside = any(
+                    fp_res == d or d in fp_res.parents for d in dispatched_dirs
+                )
+            except OSError:
+                inside = False
+            if not inside:
+                # B-636: READ it, instead of only recording that nothing read it.
+                #
+                # B-628 established that this Python is reached by no reader and made the
+                # Persistence/Connections axes say so. It did not make the DANGER axis stop
+                # affirming, and Danger is the axis a pre-install gate is consulted for.
+                # Measured before this change, with the payload held constant and only its
+                # location varied: the shipped `bad_b13_fetch_to_exec` loader
+                # (urlopen -> exec(compile(...))) placed at the plugin root, or beside the
+                # dispatched skill dir, produced `Danger PASS — no malware signature or
+                # known-bad indicator`, while the SAME BYTES one directory lower produced
+                # `DO-NOT-INSTALL`. A control run with no Python at all produced the same
+                # verdict as the loader did, so the verdict carried no information about it.
+                #
+                # `analyze_python` is the AST/taint pass that convicts those bytes in the
+                # bundled-skill case — the difference was reach, not capability. The JS
+                # branch below caps its own findings at WARN because that pass is LEXICAL
+                # and a minified bundle can false-positive; that reasoning does not transfer
+                # to an AST pass, so a fail-capable rule here FAILs, exactly as it does one
+                # directory lower. Which rules those are is `_vet.ast_finding_is_fail_capable`
+                # — asked, never re-derived, because several rules carry a "crit" label and
+                # are deliberately never FAIL-capable (B336, B338). That predicate is the
+                # one `check_installed_skills` (B13) applies, which is the function
+                # `vet_skill` calls and therefore the exact classifier that convicts these
+                # bytes when they sit one directory lower.
+                #
+                # Anything this branch cannot read — over the cap, unparseable, unreadable,
+                # or cut off by the budget — still lands in `unanalysed_code`, so B-628's
+                # honest "no reader for this" keeps firing for exactly the files it is true
+                # of. Doing both in ONE pass is what makes it impossible for the dossier to
+                # claim a file was unread on one line and quote its contents on the next.
+                rel = str(fp.relative_to(root))
+                gap = ""
+                if cpu_exceeded(deadline):
+                    budget_hit = True
+                    gap = "the scan budget was reached before it was read"
+                else:
+                    try:
+                        py_size = fp.stat().st_size
+                    except OSError:
+                        py_size = _PLUGIN_PY_MAX_BYTES + 1
+                    if py_size > _PLUGIN_PY_MAX_BYTES:
+                        gap = (
+                            f"it exceeds the {_PLUGIN_PY_MAX_BYTES // 1_000_000}MB scan cap"
+                        )
+                    else:
+                        try:
+                            py_src = fp.read_text(encoding="utf-8", errors="replace")
+                        except OSError:
+                            py_src = None
+                        if py_src is None:
+                            gap = "it could not be read"
+                        else:
+                            gap = _scan_loose_plugin_python(
+                                py_src, rel, analyze_python, subs, py_signals
+                            )
+                            if gap == _PY_BUDGET_GAP:
+                                budget_hit = True
+                if gap:
+                    unanalysed_code.append(rel)
+                    notes.append(
+                        f"coverage: plugin Python '{rel}' was not analysed — {gap}"
+                    )
+                else:
+                    analysed_loose_code.append(rel)
         if cpu_exceeded(deadline):
             budget_hit = True
             break
@@ -604,13 +877,31 @@ def vet_plugin(
     # on a minified bundle must not force a FAIL.
     # F-148: budget_hit joins `truncated` at the same UNKNOWN floor — either way the
     # sweep is incomplete, so a clean run (rank 0) can never be reported.
-    rank = max(sub_rank, 2 if (warns or js_signals) else 0, 1 if (truncated or budget_hit) else 0)
+    # B-636: py_signals join js_signals at the WARN floor. The fail-capable Python
+    # findings are NOT here — they are in `subs`, so `sub_rank` already carries them to
+    # FAIL; this floor is for the WARN-only rules (B336/B338 and the exfil-flow family).
+    rank = max(
+        sub_rank,
+        2 if (warns or js_signals or py_signals) else 0,
+        1 if (truncated or budget_hit) else 0,
+    )
     status = _VET_RANK_STATUS[rank]
 
     n_mcp = sum(1 for f in subs if f.id == "MCP-VET")
     summary = f"plugin '{pid}' ({len(skill_dirs)} bundled skill(s), {n_mcp} embedded MCP spec(s))"
-    actionable = [f for f in subs if f.status in (FAIL, WARN, UNKNOWN)]
-    evidence = warns + js_signals + [f"{f.status}: {f.detail}" for f in actionable] + notes
+    # B-751: sub_rank above already promotes the plugin to FAIL via _VET_MERGE_RANK, but the
+    # traversal sub-finding was dropped here — plugin convicted, reason unstated.
+    actionable = [f for f in subs
+                  if f.status in FAIL_WEIGHT_STATUSES or f.status in (WARN, UNKNOWN)]
+    evidence = (
+        warns + js_signals + py_signals
+        # B-755: this wrote the RAW status into evidence a person reads, so a confirmed
+        # archive escape appeared as "SKILL_ARCHIVE_PATH_TRAVERSAL: ..." beside siblings
+        # labelled "FAIL". It is also the live case for the oracle's one known
+        # unsoundness — a status folded AFTER a length-sensitive step cannot be folded
+        # back — so folding it at the source removes both problems at once.
+        + [f"{display_status(f.status)}: {f.detail}" for f in actionable] + notes
+    )
 
     if status == FAIL:
         worst = max(subs, key=lambda f: _VET_MERGE_RANK.get(f.status, 0))
@@ -627,6 +918,8 @@ def vet_plugin(
             head_sig, label = warns[0], "supply-chain / packaging signals"
         elif js_signals:
             head_sig, label = js_signals[0], "runtime JS/TS signals"
+        elif py_signals:
+            head_sig, label = py_signals[0], "plugin Python signals"
         else:
             head_sig, label = actionable[0].detail, "bundled-content signals"
         finding = _plugin_finding(
@@ -654,6 +947,13 @@ def vet_plugin(
             evidence,
         )
     finding.ring_findings = actionable
+    # B-628: the container is the only member guaranteed to be in the pool, so it is
+    # where the bundled contexts belong. Read by dossier._pool_capabilities; carries no
+    # verdict of its own and no consumer treats it as a finding.
+    finding.bundled_contexts = bundled_contexts
+    finding.unanalysed_code = unanalysed_code
+    finding.analysed_loose_code = analysed_loose_code
+    axis_reasons: dict[str, list] = {}
     if warns:
         # Container-native signals (manifest sanity, npm lifecycle scripts, floating
         # dependency versions, skills-entry path escape, native-executable stowaways)
@@ -663,7 +963,33 @@ def vet_plugin(
         # way vet_mcp() tags MCP-VET via axis_reasons; each item is always WARN-severity
         # (rank 2) regardless of whether a dispatched sub-finding pushed the overall
         # status further to FAIL.
-        finding.axis_reasons = {"build": [[WARN, w] for w in warns]}
+        axis_reasons["build"] = [[WARN, w] for w in warns]
+    if js_signals or py_signals:
+        # B-742: B-149 is the comment directly above, and it names the exact hazard —
+        # a container-native signal that rides on no sub-finding is dropped from the
+        # dossier unless it is tagged here. B-165 then added `js_signals` and B-636
+        # added `py_signals` to the WARN floor of `rank` and did NOT tag either, so both
+        # reopened the defect B-149 closed, for two new families.
+        #
+        # What that produced, measured: a plugin whose `index.js` is
+        # `fetch(url).then(r=>r.text()).then(eval)` — JS_EVAL_REMOTE, severity `crit` —
+        # returned PLUGIN-VET status=WARN from this function and rendered
+        # `INSTALL / Danger PASS "no malware signature or known-bad indicator" / exit 0`.
+        # The engine saw it, said WARN, and the dossier threw the verdict away, because
+        # `dossier.py`'s PLUGIN-VET arm routes ONLY `.axis_reasons` and passes
+        # `fallback_axis=None` — an empty mapping there means "the container found
+        # nothing", which was false whenever these two lists were non-empty.
+        #
+        # Danger, not build: every rule in both families is about what the code DOES —
+        # obfuscated/remote RCE, command injection, an attacker-influenced require path,
+        # a dlopen escape past the analysis, and (Python side) the WARN-only exec/exfil
+        # rules. B-636's own comment says it: Danger is the axis a pre-install gate is
+        # consulted for. WARN-severity entries, never FAIL, keeping B-165's rule that a
+        # lexical false positive on a minified bundle must not force a FAIL — the
+        # fail-capable Python findings already ride in `subs` and bucket on their own.
+        axis_reasons["danger"] = [[WARN, s] for s in (*js_signals, *py_signals)]
+    if axis_reasons:
+        finding.axis_reasons = axis_reasons
     return finding
 
 
@@ -1380,27 +1706,38 @@ def _c038_has_rtl_script(text: str) -> bool:
 # needs at least two symbols, so a ZWJ-carrying payload still contributes non-ZWJ code
 # points at roughly half its length.
 #
-# The character classes MIRROR `textnorm.obfuscation_signals()`'s zero-width class, which
-# is a function-local and cannot be imported. They are pinned against it by
-# test_c038_invisible_run_class_mirrors_textnorm_signal so a drift is caught. This leg
-# only ever NARROWS that signal -- the signal is required first, so its emoji-ZWJ
+# The character classes are BUILT FROM `textnorm._ZERO_WIDTH_CLASS_SRC` -- the exact
+# source `obfuscation_signals()` itself compiles into `_ZERO_WIDTH_RE` -- rather than
+# restating its members here. This leg only ever NARROWS that signal (adds a run-length
+# or total-count gate on top of it); the signal is required first, so its emoji-ZWJ
 # exemption keeps holding untouched.
 #
-# B-450 (Tier 1, 2026-08-06): widened alongside the upstream class -- see
-# textnorm.obfuscation_signals' own comment above its `_ZERO_WIDTH_RE` for the full
-# rationale. Both classes below now carry the SAME twenty code points upstream does:
-# the original six (U+200B-200D, U+FEFF, U+00AD, U+2060) plus Tier 1
-# (U+2061-2064, U+FFF9-FFFB, U+206A-206F, U+180E). Tier 2 (variation selectors,
-# Braille blank, Hangul filler) stays out on both sides, same as upstream.
+# B-450 (Cf-property sweep): this used to be two hardcoded literal classes, kept in sync
+# by hand and pinned against upstream by test_c038_invisible_run_class_mirrors_textnorm_
+# signal / test_c038_invisible_counted_class_is_the_run_class_minus_zwj. That pin caught
+# every DRIFT (a copy that stopped matching a member both sides once had) but, by
+# construction, could not catch an ADDITION upstream never mirrored here -- it only ever
+# walked the members it already knew about. That is exactly what happened: this file
+# still carried the pre-sweep twenty (the original six plus Tier 1) after textnorm's
+# `_ZERO_WIDTH_CLASS_SRC` grew to sixty-one, so the FAIL-capable keyword-split leg (which
+# runs on `normalize_for_scan()` output, upstream of this file entirely) kept working for
+# every new member, but the WARN-only run/count gate below silently did not. Importing
+# the live source instead of restating it means this file cannot go stale again the next
+# time the upstream class moves -- there is nothing left here to forget to update.
+#
+# Tier 2 (variation selectors, Braille blank, Hangul filler) is not part of
+# `_ZERO_WIDTH_CLASS_SRC` at all (different Unicode category -- see the comment above
+# `_ZERO_WIDTH_RE` in textnorm.obfuscation_signals), so it stays out here automatically,
+# same as upstream, with no separate exclusion needed.
 _C038_INVISIBLE_RUN_MIN = 4
 _C038_INVISIBLE_RUN_RE = re.compile(
-    "[\u00ad\u180e\u200b-\u200d\u2060-\u2064\u206a-\u206f\ufeff\ufff9-\ufffb]{"
-    + str(_C038_INVISIBLE_RUN_MIN) + ",}"
+    "[" + _ZERO_WIDTH_CLASS_SRC + "]{" + str(_C038_INVISIBLE_RUN_MIN) + ",}"
 )
 _C038_INVISIBLE_TOTAL_MIN = 32
-_C038_INVISIBLE_COUNTED_RE = re.compile(
-    "[\u00ad\u180e\u200b\u200c\u2060-\u2064\u206a-\u206f\ufeff\ufff9-\ufffb]"
-)
+# U+200D ZWJ is excluded from the COUNTED class (see _c038_invisible_total below for why)
+# via a negative lookahead rather than a second, ZWJ-subtracted copy of the source string
+# -- so there is still only ONE place that spells out the member ranges.
+_C038_INVISIBLE_COUNTED_RE = re.compile("(?!\u200d)[" + _ZERO_WIDTH_CLASS_SRC + "]")
 _C038_ZWJ = "\u200d"
 
 
@@ -1428,16 +1765,21 @@ def _c038_invisible_total(text: str) -> int:
     counts, because that is what it is doing.
 
     WHAT THIS COUNTS, STATED EXACTLY, because an earlier draft of this docstring claimed
-    it counted "every invisible character" and that was false: it counts the nineteen
-    members of `_C038_INVISIBLE_COUNTED_RE` plus non-emoji ZWJ -- TWENTY code points as of
-    B-450 (Tier 1; was six before it). It is bounded by `obfuscation_signals`' own class,
+    it counted "every invisible character" and that was false: it counts every member of
+    `_C038_INVISIBLE_COUNTED_RE` plus non-emoji ZWJ -- i.e. every member of
+    `textnorm._ZERO_WIDTH_CLASS_SRC` (imported directly, not restated -- see the comment
+    above `_C038_INVISIBLE_RUN_RE`). Deliberately not stated as a number here: the exact
+    count moved from 6 to 20 (B-450 Tier 1) to 61 (B-450 Cf-property sweep) without this
+    docstring ever being told, which is what let the OLD, hardcoded pair of classes go
+    stale behind the count silently. It is bounded by `obfuscation_signals`' own class,
     which is upstream and shared, and the residuals below are all consequences of that
     boundary rather than of the arithmetic here.
 
     `_C038_INVISIBLE_COUNTED_RE` mirrors `obfuscation_signals`' class exactly, minus ZWJ --
-    widening the regex to add a new upstream member is fine (B-450 did exactly that); what
-    it must never do is fold the emoji exemption INTO the character class, because that
-    exemption is per-character-context (see `_is_zwj_between_emoji`) and cannot be
+    widening the regex to add a new upstream member is automatic now (both are built from
+    the same imported `_ZERO_WIDTH_CLASS_SRC`); what it must never do is fold the emoji
+    exemption INTO the character class, because that exemption is per-character-context
+    (see `_is_zwj_between_emoji`) and cannot be
     expressed as a static set of code points.
 
     MEASURED FALSE-POSITIVE COST: one file. Across 270,954 real text files plus 3,033 npm
@@ -1473,6 +1815,12 @@ def _c038_invisible_total(text: str) -> int:
         `_ZERO_WIDTH_RE` for why (pervasive legitimate per-character use, e.g. emoji
         presentation via U+FE0F, needs a per-character discriminator this class doesn't
         have) -- so a Tier-2-only channel is still a live gap, tracked there, not here.
+        A SECOND upstream widening (B-450, Cf-property sweep: 20 -> 61 members) landed
+        after the paragraph above was written, closing a set of narrow-script format
+        characters (Arabic/Syriac/Kaithi/Egyptian-Hieroglyph/Duployan/Musical-Symbol) the
+        same way. `_C038_INVISIBLE_RUN_RE` / `_C038_INVISIBLE_COUNTED_RE` now import
+        `_ZERO_WIDTH_CLASS_SRC` directly instead of restating its members, specifically so
+        this bullet does not need a third rewrite the next time the upstream class moves.
     """
     total = len(_C038_INVISIBLE_COUNTED_RE.findall(text))
     if _C038_ZWJ not in text:
@@ -2044,7 +2392,32 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
 
     if target is not None:
         p = Path(str(target)).expanduser()
-        if p.is_file():
+        # B-683: `Path.is_file()` does NOT swallow EACCES, so a target under a directory
+        # this process cannot stat used to raise straight past every branch below and out
+        # to the top-level handler, which printed "unexpected internal error
+        # (PermissionError) ... open an issue" — a bug report solicited for the caller's
+        # own directory mode. Ask the question this branch actually needs ("is there a
+        # readable spec file here?") in a form that can answer "I could not look".
+        try:
+            _is_spec_file = p.is_file()
+        except OSError:
+            # NOT subject_absent (B-681): whether this names a server or a spec file is
+            # exactly what we failed to establish, and the caller turns subject_absent
+            # into "you mistyped that". UNKNOWN, with the reason, is the honest answer.
+            return [
+                Finding(
+                    id="MCP-VET",
+                    title="MCP supply-chain / trust vet",
+                    severity=HIGH,
+                    status=UNKNOWN,
+                    detail=f"Could not read '{p}', so it could not be assessed.",
+                    fix="Check the path and its parent directories are readable, or "
+                    "name a configured MCP server instead.",
+                    framework="MCP Trust",
+                    scored=False,
+                )
+            ]
+        if _is_spec_file:
             loaded = _load_mcp_spec_file(p)
             if loaded is None:
                 # F-142: none of the four {name: spec} config shapes matched — last
@@ -2075,13 +2448,41 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
             cfg_file = home_path / "openclaw.json"
             import json as _json
 
+            # B-681: whether the config could be READ decides what we are entitled to
+            # say next. Both failures used to collapse into `cfg = {}`, which makes an
+            # empty server map indistinguishable from an unreadable one -- and the
+            # finding below then announced "not found in config" about a file nobody had
+            # managed to open. Harmless while it was only a sentence; not harmless once
+            # it drives an exit code, which is what this task added.
+            cfg_read = True
             try:
                 cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
             except (OSError, ValueError):
-                cfg = {}
+                cfg, cfg_read = {}, False
             all_servers = _mcp_servers(cfg)
             if name in all_servers:
                 servers = {name: all_servers[name]}
+            elif not cfg_read:
+                # The server may well be configured -- a truncated or unreadable
+                # openclaw.json cannot tell us either way. UNKNOWN, and NOT
+                # subject_absent: this keeps its dossier rather than being reported as
+                # the user's typo.
+                return [
+                    Finding(
+                        id="MCP-VET",
+                        title="MCP supply-chain / trust vet",
+                        severity=HIGH,
+                        status=UNKNOWN,
+                        detail=(
+                            f"Could not read the config at {cfg_file}, so whether "
+                            f"'{name}' is a configured server is undetermined."
+                        ),
+                        fix="Check that the config exists and is valid JSON, or point "
+                        "--vet-mcp at a JSON spec file.",
+                        framework="MCP Trust",
+                        scored=False,
+                    )
+                ]
             else:
                 return [
                     Finding(
@@ -2093,6 +2494,14 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                         fix="Check the server name or point --vet-mcp at a JSON file.",
                         framework="MCP Trust",
                         scored=False,
+                        # B-681: the named subject does not exist — nothing was assessed.
+                        # Every possibility was genuinely checked before we get here:
+                        # `p.is_file()` was False (no readable spec at that path), the
+                        # config WAS read, and the name is absent from its server map.
+                        # The caller turns this into a usage error; the "Could not parse"
+                        # finding above deliberately does NOT set it, because there the
+                        # subject IS there and it is the assessment that failed.
+                        subject_absent=True,
                     )
                 ]
     else:
@@ -2484,16 +2893,292 @@ def check_mcp(ctx: Context) -> Finding:
     )
 
 
-# B333 (F-143/W2.1): the four MCP tool safety-hint annotation keys. Grounded against dist
-# openclaw@2026.7.1-2 (2026-07-25): OpenClaw stores exactly {serverName, safeServerName,
-# toolName, title, description, inputSchema, fallbackDescription} when it registers a
-# tool -- `annotations` is never stored (0 occurrences). These four keys exist only in the
-# @modelcontextprotocol/sdk vendor .d.ts types (compile-time only); OpenClaw's runtime
-# never reads them, so a server declaring destructiveHint:true gets zero behavioral
-# effect -- no confirmation prompt, nothing.
+# B333 (F-143/W2.1): the four MCP tool safety-hint annotation keys.
+#
+# WHAT EACH BUILD DOES WITH THEM -- and they do OPPOSITE things, which is why everything
+# below is version-split (B-706).
+#
+# 2026.7.1-2 (grounded 2026-07-25): OpenClaw stored exactly {serverName, safeServerName,
+# toolName, title, description, inputSchema, fallbackDescription} when it registered a
+# tool -- `annotations` was never stored (0 occurrences). The four keys existed only in
+# the @modelcontextprotocol/sdk vendor .d.ts types (compile-time only), so a server
+# declaring destructiveHint:true got zero behavioral effect. Host limitation, not server
+# wrongdoing.
+#
+# 2026.8.1: BOTH halves of that are false. The registration entry in
+# `dist/agents/agent-bundle-mcp-runtime.js` now ends with
+# `codexAnnotations: normalizeMcpCodexToolAnnotations(tool.annotations)`, and
+# `requiresMcpCodexToolApproval` reads them to decide which MCP tools are exposed to an
+# UNATTENDED scheduled run (`isScheduledCodexApprovalAllowed` /
+# `filterScheduledCodexApproval` in `dist/agent-bundle-mcp-harness-*.js`; a tool that
+# requires approval is OMITTED from the run, which is the fail-safe direction).
+#
+# So on 2026.8.1 the hints are load-bearing IN THE SERVER'S FAVOUR: a server's own
+# `readOnlyHint: true` waives the approval gate for its tool. The advice this check used to
+# give -- treat the hints as inert and do not build a policy on them -- therefore pointed
+# the reader away from a live grant rather than merely going stale.
+#
+# The exact sentence is deliberately NOT reproduced here, in a comment or anywhere else in
+# the shipped tree: tests/test_b706_codex_annotations_enforced.py bans the phrasing outright
+# rather than trying to tell an assertion from a quotation of one. Third time this session a
+# guard read its own explanation as the violation (F-183's `SELECT *`, B-703's
+# "subprocess"); where the prose IS the subject, stripping comments is not available, so the
+# rule is "describe it, do not restate it".
+#
+# CORROBORATION IN OPENCLAW'S OWN WORDS, which is why the finding is framed the way it is.
+# `openclaw mcp probe --json` computes a per-server `approvalHint` and its literal text
+# (`MCP_CODEX_APPROVAL_ANNOTATION_HINT`, `dist/mcp-cli-*.js`) is:
+#
+#     "tools have no safety annotations; calls will require interactive approval"
+#
+# emitted exactly when `codexApprovalMode === "auto"` and every tool's `codexAnnotations` is
+# empty. The vendor is telling the operator that the ABSENCE of annotations is what keeps the
+# approval step -- i.e. their presence is what can remove it. That is this check's subject,
+# stated by OpenClaw itself.
+#
+# The same probe projection settles the SOURCE split, and settles it in favour of leaving it
+# alone: the probe emits `tools: projectedTools.map((tool) => tool.name).toSorted()` -- names
+# only, no annotations, on 2026.8.1 as before. So a probe- or trajectory-derived surface
+# still structurally cannot carry annotations, absence there still proves nothing, and those
+# sources stay UNKNOWN rather than becoming a clean PASS.
 _B333_HINT_KEYS = frozenset(
     {"readOnlyHint", "destructiveHint", "openWorldHint", "idempotentHint"}
 )
+
+# ---------------------------------------------------------------------------------------
+# Faithful port of OpenClaw 2026.8.1's `dist/mcp-codex-tool-approval-*.js`, the whole
+# module. Ported rather than approximated because the verdict rests on it, and VALIDATED
+# DIFFERENTIALLY against the installed dist rather than by reading -- see
+# tests/test_b706_codex_annotations_enforced.py, which replays every case below through
+# `node` and requires exact agreement. Reading it would have got at least three of these
+# wrong: an invalid camelCase mode falls THROUGH to the snake_case spelling rather than
+# ending the lookup; `destructiveHint: false` + `openWorldHint: false` waives the gate with
+# no `readOnlyHint` in sight; and a non-boolean hint value is dropped entirely, so
+# `readOnlyHint: "true"` grants nothing.
+# ---------------------------------------------------------------------------------------
+
+_MCP_CODEX_APPROVAL_MODES = frozenset({"auto", "prompt", "approve"})
+
+# `\A`/`\Z`, not `^`/`$`, and `[0-9]`, not `\d`. JavaScript's `$` without the `m` flag means
+# end-of-string and its `\d` is ASCII-only; Python's `$` also matches BEFORE a trailing
+# newline and its `\d` accepts every Unicode decimal digit. Both differences point the same
+# dangerous way -- they made the port answer "approve" where the runtime answers "auto", i.e.
+# they would have handed the vendor's implicit trust to a server named `openclaw` whose url
+# merely ends in a newline or uses Arabic-Indic/fullwidth/Devanagari digits for its port.
+# Found by an independent C-135 harness that ran 92 url cases against the real dist; 6
+# divergences, all in that direction. A second round found two more of the same shape:
+# JavaScript's `.` excludes \r and U+2028/U+2029 as well as \n, Python's excludes only \n,
+# so the optional query/fragment group over-matched on those three. Hence the explicit class.
+# tests/test_b706_codex_annotations_enforced.py replays every one.
+_MCP_CODEX_LOOPBACK_URL_RE = re.compile(
+    r"\Ahttps?://(?:127\.0\.0\.1|localhost):[0-9]+/mcp(?:[?#][^\n\r  ]*)?\Z"
+)
+
+
+# ---------------------------------------------------------------------------------------
+# Port of `dist/mcp-tool-filter-*.js` -- the per-server tool selection. B333's modern leg
+# needs it because a tool the operator filtered out is never materialized, so it cannot be
+# in a scheduled run and cannot have its approval gate waived. Reporting one is a false
+# WARN, and a pointed one: B333's own legacy advice tells the operator to enforce this
+# "via OpenClaw's own tool allowlist", so following the check's advice earned the check's
+# new finding. Found by the C-135 pass, verified through the real vendor pipeline.
+# ---------------------------------------------------------------------------------------
+
+# JavaScript `trim()` and Python `str.strip()` do not remove the same characters, and a
+# 220-case differential against the dist found 48 disagreements from exactly that: Python
+# strips the C1/field separators (\x1c-\x1f, \x85) which JS keeps, and JS strips U+FEFF
+# which Python keeps. Every disagreement changed whether a filter matched, i.e. whether this
+# check speaks. Spelled out rather than approximated.
+_JS_TRIM_CHARS = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009"
+    "\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _js_trim(value: str) -> str:
+    """`String.prototype.trim()`: WhiteSpace + LineTerminator, and nothing else."""
+    return value.strip(_JS_TRIM_CHARS)
+
+
+def _mcp_tool_filter_matches(pattern: str, value: str) -> bool:
+    """`matchesMcpToolFilterPattern`: exact text plus `*`, and NOT a regex or fnmatch.
+
+    Ported rather than approximated with `fnmatch` because the vendor's own algorithm has a
+    cursor and an end-bound that `fnmatch` does not reproduce for patterns with several
+    stars.
+    """
+    trimmed = _js_trim(pattern)
+    if not trimmed:
+        return False
+    if "*" not in trimmed:
+        return trimmed == value
+    parts = trimmed.split("*")
+    first, last = parts[0], parts[-1]
+    if first and not value.startswith(first):
+        return False
+    cursor = len(first)
+    end_bound = len(value) - len(last) if last else len(value)
+    if last and (not value.endswith(last) or end_bound < cursor):
+        return False
+    for part in parts[1:-1]:
+        if not part:
+            continue
+        index = value.find(part, cursor)
+        if index == -1 or index + len(part) > end_bound:
+            return False
+        cursor = index + len(part)
+    return True
+
+
+def _mcp_normalize_tool_filter(raw: object) -> "dict | None":
+    """`normalizeMcpToolFilter`: string entries only, and an all-empty filter is no filter."""
+    if not isinstance(raw, dict):
+        return None
+    include = [e for e in raw.get("include", []) if isinstance(e, str)] \
+        if isinstance(raw.get("include"), list) else []
+    exclude = [e for e in raw.get("exclude", []) if isinstance(e, str)] \
+        if isinstance(raw.get("exclude"), list) else []
+    if not include and not exclude:
+        return None
+    out: dict = {}
+    if include:
+        out["include"] = include
+    if exclude:
+        out["exclude"] = exclude
+    return out
+
+
+def _mcp_tool_allowed(tool_filter: "dict | None", tool_name: str) -> bool:
+    """`isMcpToolAllowed`: include-then-exclude, exclude wins."""
+    if not isinstance(tool_name, str):
+        return False
+    inc = (tool_filter or {}).get("include") or []
+    exc = (tool_filter or {}).get("exclude") or []
+    if inc and not any(_mcp_tool_filter_matches(p, tool_name) for p in inc):
+        return False
+    return not any(_mcp_tool_filter_matches(p, tool_name) for p in exc)
+
+
+def _mcp_codex_normalize_mode(value: object) -> "str | None":
+    """`normalizeApprovalMode`: only the three exact literals survive; anything else is
+    None, which lets the caller's `??` chain continue to the next source."""
+    return value if isinstance(value, str) and value in _MCP_CODEX_APPROVAL_MODES else None
+
+
+def _mcp_codex_is_loopback_server(name: str, spec: dict) -> bool:
+    """`isOpenClawLoopbackServer`: OpenClaw's OWN loopback MCP server, which the vendor
+    implicitly pre-approves. The match is exact and case-sensitive on both halves --
+    measured: `OpenClaw` does not match, and neither does a trailing path segment after
+    `/mcp`, a missing port, a non-loopback host, or a `ws://` scheme."""
+    url = spec.get("url") if isinstance(spec, dict) else None
+    return name == "openclaw" and isinstance(url, str) and bool(
+        _MCP_CODEX_LOOPBACK_URL_RE.match(url)
+    )
+
+
+def _mcp_codex_approval_mode(name: str, spec: dict) -> str:
+    """The effective codex approval mode for one server.
+
+    Mirrors `resolveProjectedMcpCodexToolApprovalMode` plus the caller-applied `?? "auto"`
+    default. It used to mirror `resolveMcpCodexToolApprovalMode`, which openclaw 2026.9.1
+    DELETED -- its whole body was `resolveProjectedMcpCodexToolApprovalMode(...) ?? "auto"`,
+    and that default did not disappear, it moved to the callers, which now apply it
+    independently in two places. So this function's behaviour is unchanged; only the vendor
+    symbol it corresponds to is. Verified by differential over 55 cases against both the
+    2026.8.2 and 2026.9.1 dists, 0 disagreements on each.
+
+    2026.9.1 also gave the projected resolver two extra precedence layers, and they are
+    deliberately NOT modelled: both read `projectedServer`, a runtime-supplied object, not
+    `openclaw.json`. Nothing in the config -- which is this tool's entire input -- can
+    reach them.
+
+    Both spellings are read. 2026.8.1 REMOVED `default_tools_approval_mode` from the
+    schema but the runtime still honours it, so a config carrying the retired spelling is
+    live -- the same dual-shape rule as `_mcp_servers`/`_node_commands`.
+    """
+    codex = spec.get("codex") if isinstance(spec, dict) else None
+    if not isinstance(codex, dict):
+        codex = {}
+    mode = _mcp_codex_normalize_mode(codex.get("defaultToolsApprovalMode"))
+    if mode is None:
+        mode = _mcp_codex_normalize_mode(codex.get("default_tools_approval_mode"))
+    if mode is None and _mcp_codex_is_loopback_server(name, spec):
+        mode = "approve"
+    return mode or "auto"
+
+
+def _mcp_codex_annotations(value: object) -> dict:
+    """`normalizeMcpCodexToolAnnotations`: keep the four keys, BOOLEAN VALUES ONLY.
+
+    The type filter is the whole point: `readOnlyHint: "true"` and `readOnlyHint: 1` are
+    dropped, so neither waives anything. A check that treated a truthy string as a grant
+    would report a finding the runtime does not produce.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items()
+            if k in _B333_HINT_KEYS and isinstance(v, bool)}
+
+
+def _mcp_codex_requires_approval(mode: str, annotations: dict) -> bool:
+    """`requiresMcpCodexToolApproval`: True when the tool still needs a human.
+
+    False means the tool is exposed to an unattended scheduled run with no gate. Note the
+    ORDER: `destructiveHint: true` wins over `readOnlyHint: true`, so a server cannot buy
+    the exemption by declaring both.
+    """
+    if mode == "approve":
+        return False
+    if mode == "prompt":
+        return True
+    if annotations.get("destructiveHint") is True:
+        return True
+    if annotations.get("readOnlyHint") is True:
+        return False
+    return (annotations.get("destructiveHint") is not False
+            or annotations.get("openWorldHint") is not False)
+
+
+def _b333_waived_tool_names(
+    surface: "_mcpsurface.ToolSurface", mode: str, spec: dict
+) -> list[str]:
+    """Tools whose approval gate the SERVER'S OWN annotations waive, on 2026.8.1.
+
+    Scoped to the annotation-driven case on purpose. Under `mode="approve"` every tool is
+    exempt for an operator-set reason that has nothing to do with what any server declared;
+    that is a different subject with a different verdict shape and it belongs to its own
+    check (the `codex.defaultToolsApprovalMode` surface). Attributing it here would tell
+    the reader an annotation caused something the operator caused.
+
+    REACHABILITY, and it is not optional. A waiver only matters for a tool that can actually
+    be in a scheduled run, and two ordinary config keys take a tool out of one entirely.
+    Both were false WARNs in the first version of this check, found by an independent C-135
+    pass that traced the vendor pipeline rather than reading it:
+
+    * ``enabled: false`` -- `bundle-mcp-config-*.js` builds `enabledConfiguredMcp` by
+      filtering on `server.enabled !== false`, so a disabled server never reaches the bundle
+      MCP runtime at all and none of its tools are ever materialized.
+    * ``toolFilter`` -- `agent-bundle-mcp-runtime.js` marks a filter-rejected tool
+      `excludedFromOpenClawCatalog` and keeps it out of `toolEntries` and out of
+      `catalog.tools`; `agent-bundle-mcp-materialize-*.js` builds the agent's tools from
+      `catalog.tools`, so `filterScheduledCodexApproval` never sees it.
+
+    The second is the sharper of the two, because B333's own legacy remediation tells the
+    operator to enforce read-only behaviour "via OpenClaw's own tool allowlist" -- an
+    operator who followed this check's advice would have earned this check's new finding.
+    """
+    if mode != "auto":
+        return []
+    if isinstance(spec, dict) and spec.get("enabled") is False:
+        return []
+    tool_filter = _mcp_normalize_tool_filter(
+        spec.get("toolFilter") if isinstance(spec, dict) else None
+    )
+    return [
+        t.name for t in surface.tools
+        if _mcp_tool_allowed(tool_filter, t.name)
+        and not _mcp_codex_requires_approval(mode, _mcp_codex_annotations(t.annotations))
+    ]
 
 
 def _b333_hinted_tool_names(surface: "_mcpsurface.ToolSurface") -> list[str]:
@@ -2528,40 +3213,241 @@ def _b333_surface_verdict(surface: "_mcpsurface.ToolSurface") -> "tuple[str, lis
     return None
 
 
+def _b333_modern_surface_verdict(
+    surface: "_mcpsurface.ToolSurface", name: str, spec: dict
+) -> "tuple[str, list[str]] | None":
+    """One ToolSurface's contribution to B333 on OpenClaw 2026.8.1 and later.
+
+    The question is no longer "did the server declare a hint" -- it is "does the server's
+    declaration WAIVE the approval gate", which is a different set of tools. A
+    `destructiveHint: true` declares the tool dangerous and OpenClaw responds by DROPPING
+    it from an unattended run, so reporting it would accuse a server of the opposite of
+    what it did.
+
+    The server's `codex.defaultToolsApprovalMode` is read first because `"prompt"`
+    short-circuits before any annotation is consulted: an operator who has already
+    hardened this server must not be told their annotations waive anything.
+
+    The source split is unchanged and for an unchanged reason: OpenClaw's own retained or
+    compiled forms (trajectory records, an `openclaw mcp probe --json` dump) never carry
+    annotations at all, so what they show proves nothing about what the server declared.
+    """
+    if surface.source != "manifest":
+        return (UNKNOWN, hinted) if (hinted := _b333_hinted_tool_names(surface)) else None
+    waived = _b333_waived_tool_names(surface, _mcp_codex_approval_mode(name, spec), spec)
+    return (WARN, waived) if waived else None
+
+
+def _mcp_is_per_requester(spec: dict) -> bool:
+    """True when a server is per-requester OAuth, which takes it out of the Codex config.
+
+    `partitionMcpServersByConnectionScope` (`dist/mcp-connection-resolver-*.js`) splits
+    configured servers into `staticServers` and `requesterScopedServerNames`, and
+    `codex-mcp-config-*.js` builds the Codex MCP config from the STATIC half only. A
+    per-requester server is therefore never in it, so its `codex` block -- approval mode
+    included -- never reaches the approval predicate.
+
+    BOTH conditions are required, measured rather than read: `identity: "per-requester"`
+    without `auth: "oauth"` leaves the server STATIC. Executed against openclaw@2026.8.2::
+
+        auth=oauth  identity=per-requester -> static=false, requesterScoped=["s"]
+        auth=oauth  identity=shared        -> static=true
+        NO auth     identity=per-requester -> static=true      <- the half a reading misses
+        auth=none   identity=per-requester -> static=true
+
+    Found by the C-135 pass on this check; keying on `identity` alone would have created
+    the mirror-image false negative.
+    """
+    if spec.get("auth") != "oauth":
+        return False
+    oauth = spec.get("oauth")
+    return isinstance(oauth, dict) and oauth.get("identity") == "per-requester"
+
+
+def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
+    """B353 (F-185): an MCP server set to pre-approve every one of its tools.
+
+    ``mcp.servers.<name>.codex.defaultToolsApprovalMode`` takes "auto" | "prompt" |
+    "approve", and **"approve" means pre-approved, not "requires approval"**:
+    ``requiresMcpCodexToolApproval`` returns false immediately for every tool on that
+    server, before any annotation is looked at. The consumer is unattended execution --
+    a scheduled run drops every MCP tool that would need approval, so this keeps all of
+    them, including destructive ones. The value's name reads like the safe one; that
+    inversion is why this is a check and not a docs line.
+
+    GROUNDED against **openclaw@2026.8.2**, the build installed when this was written, with
+    both controls the upgrade protocol requires -- a bogus sibling key, because an ACCEPTED
+    result on a passthrough object proves nothing, and a known-real sibling, because a probe
+    pointed at the wrong schema rejects everything:
+
+        mcp.servers.s.codex.defaultToolsApprovalMode  ACCEPTED   <- the subject
+        mcp.servers.s.codex.zzzBogusKey123            REJECTED   <- not a passthrough
+        mcp.servers.s.tools                           ACCEPTED   <- the probe is live
+        ...defaultToolsApprovalMode: "zzz"            REJECTED   <- a real enum
+        ...defaultToolsApprovalMode: "prompt"         ACCEPTED   <- the recommended value
+
+    The approval SEMANTICS this rests on come from the ports in this module, which are
+    replayed against whatever OpenClaw is installed by
+    tests/test_b706_codex_annotations_enforced.py -- they were validated on 2026.8.1 and
+    still agree on 2026.8.2 (86 cases, 0 disagreements), so the version above dates the
+    probe rather than bounding the claim.
+
+    Three things the task's own description asked for and the schema DISPROVED, so they
+    are deliberately NOT read here:
+
+    * ``nodeHost.mcp.servers.<name>.codex`` parses, but the bundle-MCP path that reaches
+      the approval predicate reads ``normalizeConfiguredMcpServers(params.cfg?.mcp?.servers)``
+      and nothing else (`dist/bundle-mcp-config-*.js`). A nodeHost server's codex block
+      never reaches it, so reporting one would be a finding about an inert key.
+    * the retired snake_case ``default_tools_approval_mode`` is REJECTED by the schema, so
+      a config carrying it does not load at all. The runtime still reads it as a
+      fallback, but no config can reach the runtime carrying it. A config that will not
+      load is a different problem with a different check.
+    * the legacy top-level ``mcpServers`` shape is likewise REJECTED, which is why this
+      reads ``mcp.servers`` directly rather than the merged ``_mcp_servers()``: that helper
+      unions shapes whose codex block this build never consults.
+
+    Two exclusions, both the reachability lesson from B-706's C-135 rounds:
+
+    * OpenClaw's OWN loopback server -- name exactly ``openclaw`` on a matching
+      ``127.0.0.1``/``localhost`` ``/mcp`` url -- is implicitly pre-approved by the vendor.
+      That is a default, not an operator mistake. A server merely NAMED ``openclaw`` on any
+      other url gets no exemption, which is the half that makes the exclusion safe.
+    * a server with ``enabled: false`` never reaches the runtime at all.
+
+    WARN, never FAIL, for a reason expected to change: the whole mechanism is on the Codex
+    app-server path, and this audit does not yet determine whether any configured agent
+    runs that harness (B-708). Asserting a live grant on a setup where the
+    block is inert is exactly the defect that round of C-135 found in B333.
+
+    WARN    -- a non-loopback, enabled server explicitly sets the mode to "approve".
+    PASS    -- servers were inspected and none does.
+    UNKNOWN -- no MCP servers configured under `mcp.servers`.
+    """
+    # A plain `.get()` walk, not `dig()`, and for the reason B-701 used one in this module:
+    # a new `dig()` path takes on a grounding obligation in tests/grounded_schema_paths.txt
+    # plus the dist snapshot, and this location needs none — `_mcp_servers()` two hundred
+    # lines up reads exactly `cfg["mcp"]["servers"]` the same way, and the key was verified
+    # against the installed schema with a bogus-key control (see this function's docstring).
+    _mcp = ctx.config.get("mcp") if isinstance(ctx.config, dict) else None
+    servers = _mcp.get("servers") if isinstance(_mcp, dict) else None
+    if not isinstance(servers, dict) or not servers:
+        return _finding(
+            "B353", UNKNOWN,
+            "No MCP servers are configured under mcp.servers, so there is no per-server "
+            "approval mode to inspect.",
+            "—",
+        )
+
+    hits: list[str] = []
+    for name, spec in sorted(servers.items()):
+        if not isinstance(spec, dict) or spec.get("enabled") is False:
+            continue
+        if _mcp_is_per_requester(spec):
+            continue
+        codex = spec.get("codex")
+        if not isinstance(codex, dict):
+            continue
+        # The EXPLICIT value, not the resolved mode: `_mcp_codex_approval_mode` also
+        # returns "approve" for the vendor's own loopback server, and conflating the two
+        # would report OpenClaw's default as the operator's mistake.
+        if _mcp_codex_normalize_mode(codex.get("defaultToolsApprovalMode")) != "approve":
+            continue
+        if _mcp_codex_is_loopback_server(name, spec):
+            continue
+        hits.append(str(name))
+
+    if hits:
+        ev = [f"mcp.servers.{n}.codex.defaultToolsApprovalMode=\"approve\"" for n in hits[:5]]
+        return _finding(
+            "B353", WARN,
+            "MCP server(s) are set to pre-approve every tool they expose (" +
+            ", ".join(hits[:5]) + "). Despite the name, \"approve\" does not mean "
+            "\"requires approval\" -- OpenClaw treats every tool on that server as already "
+            "approved, before any per-tool safety annotation is consulted, so a scheduled "
+            "run keeps all of them including destructive ones. WHETHER THAT IS LIVE HERE "
+            "depends on whether any of your agents runs the Codex app-server harness, "
+            "which this audit does not determine.",
+            "If you did not mean to waive approval for every tool on these servers, set "
+            "mcp.servers.<name>.codex.defaultToolsApprovalMode to \"prompt\" (always ask) or "
+            "remove the key (the default, \"auto\", decides per tool from the annotations "
+            "the server declares). If no agent runs a Codex app-server thread, this block "
+            "is inert on your setup and the setting changes nothing either way.",
+            evidence=ev,
+        )
+    return _finding(
+        "B353", PASS,
+        f"None of the {len(servers)} configured MCP server(s) pre-approves the tools it "
+        "exposes to an unattended run. A server can reach this either by not setting the "
+        "approval mode to \"approve\" or by being out of reach of that mechanism anyway -- "
+        "the reasons are not enumerated here because the list would be a completeness "
+        "promise this check cannot keep.",
+        "No action needed.",
+    )
+
+
 def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
-    """B333: MCP tool safety-hint annotations declared but not enforced by OpenClaw.
+    """B333: MCP tool safety-hint annotations, and what the installed build does with them.
 
-    Grounded against dist openclaw@2026.7.1-2 (2026-07-25, verified 2026-07-25): when
-    OpenClaw registers an MCP tool it stores exactly {serverName, safeServerName,
-    toolName, title, description, inputSchema, fallbackDescription} -- `annotations` is
-    NEVER stored (0 occurrences in the dist). readOnlyHint/destructiveHint/openWorldHint/
-    idempotentHint exist only in the @modelcontextprotocol/sdk vendor .d.ts types
-    (compile-time only); OpenClaw's runtime code never reads them. So a server that
-    declares destructiveHint:true gets ZERO behavioral effect from OpenClaw -- no
-    confirmation prompt, nothing -- and any host policy that claims to key off these
-    hints is not enforced.
+    The subject is VERSION-SPLIT (B-706) because the two builds do opposite things with
+    the same four keys. The module-level comment on ``_B333_HINT_KEYS`` carries the
+    grounding for both; the short form:
 
-    This is a HOST LIMITATION, not server wrongdoing -- the server's declaration is
-    truthful, OpenClaw simply never reads it. WARN only, never FAIL, and worded as a
-    fact about OpenClaw's behaviour, never as an accusation against the server.
+    * **2026.7.x** -- registration stored exactly {serverName, safeServerName, toolName,
+      title, description, inputSchema, fallbackDescription} and the four hints lived only
+      in the @modelcontextprotocol/sdk vendor .d.ts types. A server declaring
+      destructiveHint:true got zero behavioural effect, so a host policy keyed on them was
+      not enforced. A HOST LIMITATION, not server wrongdoing -- the declaration was
+      truthful and this build simply did not consult it.
+    * **2026.8.1+** -- registration stores ``codexAnnotations`` and
+      ``requiresMcpCodexToolApproval`` consults them to decide which MCP tools are exposed
+      to an UNATTENDED scheduled run. The hints are load-bearing IN THE SERVER'S FAVOUR:
+      ``readOnlyHint: true`` (or ``destructiveHint: false`` together with
+      ``openWorldHint: false``) waives the approval gate, while ``destructiveHint: true``
+      keeps it and gets the tool dropped from the run. ``idempotentHint`` is extracted and
+      never consulted, so that one hint really is still inert.
+
+    WARN on both, for different reasons, and never FAIL on either. On the old build it is a
+    host limitation and the server did nothing wrong. On the new one most
+    ``readOnlyHint: true`` declarations are honest and nothing static can separate an honest
+    one from a lying one, so a FAIL would fire on every well-behaved server that annotates
+    truthfully -- Golden Rule #5.
 
     Only a raw manifest-shaped tool surface (config-embedded ``mcp.servers.<name>.tools``,
     the same ``tools/list``-shaped dicts a server itself returns) can show what a server
-    actually declared -- OpenClaw's own retained/compiled form (trajectory records, an
-    ``openclaw mcp probe --json`` dump) never carries annotations at all, so a surface
-    built from one of those sources proves nothing either way about what was originally
-    declared and is reported UNKNOWN, never guessed as clean.
+    actually declared. OpenClaw's own retained/compiled forms carry no annotations on
+    either build -- re-measured on 2026.8.1, where ``openclaw mcp probe --json`` projects
+    ``tools: projectedTools.map((tool) => tool.name).toSorted()``, names only -- so a
+    surface built from one of those proves nothing either way and is reported UNKNOWN,
+    never guessed as clean.
 
-    WARN    -- a config-embedded tool declares readOnlyHint/destructiveHint/
-               openWorldHint/idempotentHint.
-    UNKNOWN -- no MCP servers configured, no embedded tool definitions to inspect, or
-               the only annotation evidence available came from a source (trajectory /
-               probe-names) that structurally cannot carry it.
-    PASS    -- embedded tool definitions were inspected and none declare any hint.
+    LEGACY / UNKNOWN generation
+      WARN    -- a config-embedded tool declares any of the four hints.
+      PASS    -- embedded tool definitions were inspected and none declare any hint.
+
+    MODERN generation
+      WARN    -- a config-embedded tool's own annotations waive its approval gate, on a
+                 server whose tools can actually reach a scheduled run.
+      PASS    -- no tool waives its gate. That covers declaring nothing, declaring
+                 destructiveHint, and being out of reach because the server is disabled,
+                 filtered, or set to ``prompt``/``approve`` -- so the PASS text says
+                 "nothing waives", never "nothing was declared", which would be false.
+
+    BOTH
+      UNKNOWN -- no MCP servers configured, no embedded tool definitions to inspect, or
+                 the only annotation evidence available came from a source (trajectory /
+                 probe-names) that structurally cannot carry it.
     """
     servers = _mcp_servers(ctx.config)
     if not servers:
         return _finding("B333", UNKNOWN, "No MCP servers configured.", "—")
+
+    # B-706: the two builds do OPPOSITE things with these annotations, so the generation
+    # decides which question is even being asked. `unknown` keeps the legacy reading, the
+    # rule every version-split check in this epic follows: silence would be a claim about
+    # a build we cannot see, and being told your policy is unenforced is the safer thing
+    # to be wrong about.
+    modern = _openclaw_generation(ctx) == "modern"
 
     warn_hits: list[str] = []
     unknown_hits: list[str] = []
@@ -2572,7 +3458,8 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
         if surface is None:
             continue
         surfaces_seen += 1
-        verdict = _b333_surface_verdict(surface)
+        verdict = (_b333_modern_surface_verdict(surface, sname, spec) if modern
+                   else _b333_surface_verdict(surface))
         if verdict is None:
             continue
         status, hinted = verdict
@@ -2581,17 +3468,38 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
 
     if warn_hits:
         ev = warn_hits[:5]
+        if modern:
+            return _finding(
+                "B333",
+                WARN,
+                "MCP tool(s) declare annotations that ask OpenClaw to waive their own "
+                "approval gate (" + "; ".join(ev) + "). On OpenClaw 2026.8.1 these are "
+                "read, not ignored: on a Codex app-server thread a scheduled run drops "
+                "every tool that would need approval, and a tool whose own declaration "
+                "waives it is kept. WHETHER THAT IS LIVE HERE depends on whether any of "
+                "your agents runs the Codex app-server harness, which this audit does not "
+                "determine -- so treat this as a property of the servers you have "
+                "configured, not as a confirmed grant.",
+                "Check whether any agent runs a Codex app-server thread (an OpenAI/Codex "
+                "runtime). If one does and you did not mean to let a server waive its own "
+                "gate, set mcp.servers.<name>.codex.defaultToolsApprovalMode to \"prompt\", "
+                "which is read before any annotation. If none does, this block is inert on "
+                "your setup -- OpenClaw's own schema calls it \"projection metadata for "
+                "Codex app-server threads only\" -- and the setting would change nothing.",
+                evidence=ev,
+            )
         return _finding(
             "B333",
             WARN,
             "MCP server(s) declare readOnlyHint/destructiveHint/openWorldHint/"
-            "idempotentHint tool annotations (" + "; ".join(ev) + "), but OpenClaw does "
-            "not read destructiveHint/readOnlyHint, so any policy relying on them is not "
-            "enforced.",
-            "Do not rely on these annotations for a safety policy -- OpenClaw drops them "
-            "entirely when it registers the tool. Enforce destructive/read-only behaviour "
-            "through the server's own access controls, or via OpenClaw's own tool "
-            "allowlist, instead.",
+            "idempotentHint tool annotations (" + "; ".join(ev) + "), but this OpenClaw "
+            "build does not read destructiveHint/readOnlyHint, so any policy relying on "
+            "them is not enforced.",
+            "Do not rely on these annotations for a safety policy on this build -- it "
+            "drops them entirely when it registers the tool. Enforce destructive/read-only "
+            "behaviour through the server's own access controls, or via OpenClaw's own "
+            "tool allowlist, instead. (OpenClaw 2026.8.1 and later DO read them, in the "
+            "server's favour -- upgrading changes this from inert to load-bearing.)",
             evidence=ev,
         )
     if unknown_hits:
@@ -2616,6 +3524,28 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
             "annotation data is available to assess.",
             "Provide a raw tools/list dump for these servers (e.g. via an MCP inspector "
             "export) to check for unenforced safety-hint annotations.",
+        )
+    if modern:
+        # The modern leg asks a DIFFERENT QUESTION than the legacy one -- "does any
+        # declaration waive the approval gate", not "did anyone declare a hint" -- so the
+        # legacy PASS sentence became a false statement here. It read "declare no
+        # readOnlyHint/destructiveHint/openWorldHint/idempotentHint annotations" for a
+        # server that plainly declares `destructiveHint: true`, an `idempotentHint`, or a
+        # `readOnlyHint` under a `prompt` mode. Golden Rule #4: a PASS may say the danger is
+        # absent; it may not say the DATA is absent when we read it and it was there.
+        #
+        # Found by the C-135 pass, and my own tests could not see it: they asserted
+        # `f.status` and never `f.detail`, so the suite stayed green with the false sentence
+        # shipping on the repo's own `bad_b333_mcp_annotation_ignored` fixture.
+        return _finding(
+            "B333",
+            PASS,
+            f"No MCP tool on {surfaces_seen} server(s) with embedded tool definitions "
+            "asks OpenClaw to waive its approval gate. Some may still declare safety-hint "
+            "annotations -- destructiveHint, idempotentHint and openWorldHint on their own "
+            "all keep the gate -- and a server may be out of reach anyway because it is "
+            "disabled, filtered, or set to prompt.",
+            "No action needed.",
         )
     return _finding(
         "B333",
@@ -5695,28 +6625,71 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     field-by-field source citation). This is the highest-precision plugin-trust signal
     available locally without a network call, and was never previously read.
 
-    FAIL    — at least one installed plugin's ``clawhubTrustDisposition`` is "blocked" —
-              OpenClaw's own moderation explicitly blocked the install, yet it is
-              persisted (and, per the plugin index, may still be enabled).
+    FAIL    — at least one "blocked"-verdict plugin id IS in OpenClaw's current
+              installed-plugin index (``ctx.plugin_index_records``) — OpenClaw's own
+              moderation explicitly blocked the install, yet it is persisted (and, per
+              the plugin index, may still be enabled) — OR the index population cannot
+              be corroborated at all, in which case a "blocked" verdict is trusted as
+              installed by default (missing information never buys silence).
     WARN    — at least one installed plugin carries a non-clean, non-blocked disposition
               ("review-required", "review-recommended", or any other future value), or a
               ``clawhubTrustPending``/``clawhubTrustStale`` verdict (unverified/outdated) —
-              with no "blocked" verdict present.
+              with no FAIL-qualifying "blocked" verdict present; OR a "blocked" verdict
+              exists but its plugin id is ABSENT from a readable installed-plugin index
+              (OC-82) — OpenClaw itself keeps an install record whose owner no longer
+              appears in ``plugins`` until ``openclaw uninstall`` or ``doctor --fix``
+              runs, so an orphaned record reads as a stale verdict, not a live threat.
     UNKNOWN — the shared state database, the installed_plugin_index row, or the
               install-records column is absent, locked, or unreadable/unparseable.
     PASS    — the index was read and no installed plugin carries an adverse ClawHub
               trust verdict (either every present disposition is "clean", or no
               installed plugin carries ClawHub trust data at all — that reflects
               absence of a bad verdict, not a positive clean scan for those installs).
+
+    WHY "blocked" JUSTIFIES A FAIL (C-479). The concern this answers: if only a
+    hand-edited config could produce ``clawhubTrustDisposition: "blocked"``, a FAIL would
+    be disproportionate — we would be reacting to a string the user typed. Grounded
+    against the installed dist, it is written by OpenClaw's own install path, from
+    ``params.assessment.disposition``:
+
+        function assessClawHubTrust(trust) {
+            if (riskReasons.length === 0 && notices.length === 0) return {disposition: "clean"};
+            if (isBlockingClawHubTrust(trust))                    return {disposition: "blocked"};
+            if (riskReasons.length > 0)                           return {disposition: "review-required"};
+            return {disposition: "review-recommended"};
+        }
+        function isBlockingClawHubTrust(trust) {
+            if (trust.blockedFromDownload) return true;
+            if (normalizeClawHubTrustToken(trust.scanStatus) === "malicious") return true;
+            if (CLAWHUB_BLOCKING_MODERATION_STATES.has(              // {blocked, quarantined, revoked}
+                    normalizeClawHubTrustToken(trust.moderationState))) return true;
+            return trust.reasons.some((r) => {
+                const n = normalizeClawHubTrustToken(r);
+                return n === "scan:malicious" || n === "static:malicious";
+            });
+        }
+
+    Every one of those four triggers is sourced from the REGISTRY's verdict — a download
+    block, a malicious scan status, a moderation state of blocked/quarantined/revoked, or
+    a ``scan:malicious``/``static:malicious`` reason token. So a FAIL here reports the
+    registry's own malicious verdict on an installed plugin, not a user-authored string.
+
+    The ladder is also why the WARN branch is written as "any non-clean, non-blocked
+    value" rather than an enumeration: the disposition set is exactly four today, and a
+    fifth would land in WARN, which is the safe direction.
+
+    Symbols, not filenames: ``assessClawHubTrust`` / ``isBlockingClawHubTrust`` /
+    ``CLAWHUB_BLOCKING_MODERATION_STATES`` are the anchors to re-locate this by. The
+    bundle hash rotates every release, and 2026.9.1 showed a whole family of bundles can
+    vanish outright (B-720) — a filename here would be evidence, never a locator.
     """
     if not ctx.plugin_trust_found:
         return _finding(
             "B177",
             UNKNOWN,
-            "No persisted installed_plugin_index found in "
-            "~/.openclaw/state/openclaw.sqlite (the state database, the plugin index "
-            "row, or the install-records column is absent) — cannot determine OpenClaw's "
-            "own ClawHub trust verdict for installed plugins.",
+            "No persisted plugin index found in OpenClaw's state database "
+            "(~/.openclaw/state/openclaw.sqlite) — cannot determine OpenClaw's own "
+            "ClawHub trust verdict for installed plugins.",
             "If plugins are installed, ensure ~/.openclaw/state/openclaw.sqlite is "
             "present and owner-readable so a future audit can surface OpenClaw's own "
             "ClawHub trust verdicts.",
@@ -5725,9 +6698,10 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
         return _finding(
             "B177",
             UNKNOWN,
-            "installed_plugin_index was found in ~/.openclaw/state/openclaw.sqlite but "
-            "could not be read or parsed (locked or corrupt) — cannot determine OpenClaw's "
-            "own ClawHub trust verdict for installed plugins.",
+            "OpenClaw's persisted plugin index was found in "
+            "~/.openclaw/state/openclaw.sqlite but could not be read or parsed (locked "
+            "or corrupt) — cannot determine OpenClaw's own ClawHub trust verdict for "
+            "installed plugins.",
             "Ensure ~/.openclaw/state/openclaw.sqlite is not held open exclusively by "
             "another process and is a valid SQLite database, then re-run the audit.",
         )
@@ -5740,6 +6714,45 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             return ""
         return " (" + _redact(", ".join(reasons[:2])) + ")"
 
+    # OC-82 (C-135 adversarial pass): a "blocked" verdict must be qualified against the
+    # population OpenClaw's own index says is actually INSTALLED
+    # (ctx.plugin_index_records) before it is trusted as a live threat.
+    # `extractPluginInstallRecordsFromInstalledPluginIndex` /
+    # `removePluginInstallRecordFromRecords`, all three symbols re-verified present in
+    # openclaw@2026.9.1. Line numbers below were read on 2026.8.2; the filenames are
+    # globbed because they rehash every release (docs/CHECK_AUTHORING.md).
+    # installed-plugin-index-store-*.js:131-136 deliberately KEEPS an install
+    # record whose owner is absent from "plugins" until `openclaw uninstall`
+    # (plugins-uninstall-command-*.js:177) or `doctor --fix`
+    # (doctor-plugin-registry-*.js:500) prunes it -- a hand-deleted plugin
+    # directory leaves the trust record behind, so installRecords not-a-subset-of
+    # plugins is a modelled, tolerated state, not corruption.
+    #
+    # Build the population id set the same way the collector coerces plugin_id
+    # (collector._plugin_index_record_from): only a non-empty string counts.
+    index_ids: set[str] = set()
+    index_has_unidentifiable_record = False
+    for irec in ctx.plugin_index_records:
+        ipid = irec.get("plugin_id") if isinstance(irec, dict) else None
+        if isinstance(ipid, str) and ipid:
+            index_ids.add(ipid)
+        else:
+            # An index entry we cannot identify must not license a downgrade for ANY
+            # blocked id below -- it might BE the plugin we are about to call "absent".
+            index_has_unidentifiable_record = True
+
+    # The population is usable as a witness of ABSENCE only when the SAME authority
+    # that supplied the trust verdict also tells us the plugin is gone -- i.e. the
+    # index itself was actually read, cleanly, with every entry identifiable. THIS IS
+    # THE WHOLE REASON THE FIX IS NOT A SILENCER: missing information must never buy
+    # silence, so every "absent" branch below is gated on this predicate, and when it
+    # is False a "blocked" verdict is trusted as installed by default (conservative).
+    population_readable = (
+        ctx.plugin_index_found
+        and not ctx.plugin_index_parse_error
+        and not index_has_unidentifiable_record
+    )
+
     blocked_ev: list[str] = []
     warn_ev: list[str] = []
     clean_ids: list[str] = []
@@ -5750,15 +6763,30 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
         disposition = rec.get("disposition")
         pending = rec.get("pending")
         stale = rec.get("stale")
+        installed = (not population_readable) or (pid in index_ids)
+        orphan_note = (
+            "" if installed
+            else " (not in the current installed-plugin index -- stale record)"
+        )
 
         if disposition == "blocked":
-            blocked_ev.append(
-                f"{pid}: clawhubTrustDisposition=blocked{_reason_snippet(rec)}"
-            )
+            if installed:
+                blocked_ev.append(
+                    f"{pid}: clawhubTrustDisposition=blocked{_reason_snippet(rec)}"
+                )
+            else:
+                warn_ev.append(
+                    f"{pid}: ClawHub trust verdict on record is 'blocked', but {pid} "
+                    "is not in OpenClaw's current installed-plugin index — typically "
+                    "a plugin removed without `openclaw uninstall`, whose stale "
+                    "install record lingers until `openclaw uninstall` or "
+                    f"`doctor --fix`{_reason_snippet(rec)}."
+                )
             continue
         if disposition and disposition != "clean":
             warn_ev.append(
-                f"{pid}: clawhubTrustDisposition={disposition}{_reason_snippet(rec)}"
+                f"{pid}: clawhubTrustDisposition={disposition}"
+                f"{_reason_snippet(rec)}{orphan_note}"
             )
             continue
         if disposition == "clean":
@@ -5766,9 +6794,13 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
         else:
             untracked_ids.append(pid)
         if pending:
-            warn_ev.append(f"{pid}: ClawHub trust scan pending (not yet verified)")
+            warn_ev.append(
+                f"{pid}: ClawHub trust scan pending (not yet verified){orphan_note}"
+            )
         if stale:
-            warn_ev.append(f"{pid}: ClawHub trust verdict stale (needs recheck)")
+            warn_ev.append(
+                f"{pid}: ClawHub trust verdict stale (needs recheck){orphan_note}"
+            )
 
     if blocked_ev:
         ev = blocked_ev[:6] + warn_ev[: max(0, 6 - len(blocked_ev[:6]))]
@@ -5806,14 +6838,55 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
         "No installed plugin in the persisted plugin index carries an adverse "
         "ClawHub trust verdict."
     )
-    if clean_ids and not untracked_ids:
+    # The trust verdict (blocked/warn/clean/untracked, above) is only ever computed
+    # over ctx.plugin_trust_records -- the plugins that carry an install record. On a
+    # dual-shape read (OC-82) the fuller plugin population, ctx.plugin_index_records,
+    # can be much larger (2 vs 61 on the grounding machine): using trust_total as BOTH
+    # numerator and denominator (as this used to) renders "2 of 2" — a sentence that
+    # reads as a statement about the whole install when it is really a statement about
+    # 2 of 61 plugins. Use the index population as the denominator when it is known and
+    # larger; fall back to the trust-only count (the old behaviour) otherwise -- e.g. a
+    # legacy machine, or an index read that failed while the trust map still succeeded.
+    trust_total = len(clean_ids) + len(untracked_ids)
+    index_known = (
+        ctx.plugin_index_found
+        and not ctx.plugin_index_parse_error
+        and len(ctx.plugin_index_records) > trust_total
+    )
+    if index_known:
+        population = len(ctx.plugin_index_records)
+        no_data = len(untracked_ids) + (population - trust_total)
+    else:
+        population = trust_total
+        no_data = len(untracked_ids)
+
+    # DERIVE the with-a-verdict count from `no_data` rather than computing it
+    # independently. `trust_total` counts plugins carrying an install RECORD, which is
+    # not the same as carrying a ClawHub VERDICT: on the grounding machine 2 of 61 have
+    # a record and 0 of those 2 carry any clawhub* field. Using trust_total here
+    # rendered "defined for only 2 of 61 — 61 of 61 carry no ClawHub trust data",
+    # two halves of one sentence that cannot both be true. Subtracting keeps them
+    # arithmetically incapable of disagreeing.
+    with_data = population - no_data
+
+    if clean_ids and no_data == 0:
         detail += f" {len(clean_ids)} plugin(s) show an explicit 'clean' verdict."
-    elif untracked_ids:
+    elif no_data and with_data == 0:
         detail += (
-            f" Note: {len(untracked_ids)} of {len(clean_ids) + len(untracked_ids)} "
-            "installed plugin(s) carry no ClawHub trust data at all (not installed via "
-            "a ClawHub-scanned path, or the scan has not run yet) — this reflects "
-            "absence of a bad verdict for those, not a positive clean scan."
+            f" Note: NONE of the {population} installed plugin(s) carries any ClawHub "
+            "trust data (not installed via a ClawHub-scanned path, the scan has not "
+            "run yet, or no install record is on file) — so this PASS reflects the "
+            "absence of a bad verdict, not a positive clean scan, and says nothing "
+            "about their trust status."
+        )
+    elif no_data:
+        detail += (
+            f" Note: OpenClaw's ClawHub trust verdict is defined for only "
+            f"{with_data} of {population} installed plugin(s) — the other {no_data} "
+            "carry no ClawHub trust data at all (not installed via a ClawHub-scanned "
+            "path, the scan has not run yet, or no install record is on file for "
+            "them) — this reflects absence of a bad verdict for those, not a positive "
+            "clean scan, and says nothing about their trust status."
         )
     return _finding(
         "B177",
@@ -5870,9 +6943,8 @@ def check_plugin_tool_result_middleware(ctx: Context) -> Finding:
         return _finding(
             "B187",
             UNKNOWN,
-            "No persisted installed_plugin_index.plugins_json found in "
-            "~/.openclaw/state/openclaw.sqlite (the state database, the plugin index "
-            "row, or the plugins_json column is absent) — cannot determine whether any "
+            "No persisted plugin index found in OpenClaw's state database "
+            "(~/.openclaw/state/openclaw.sqlite) — cannot determine whether any "
             "installed plugin declares the agentToolResultMiddleware contract.",
             "If plugins are installed, ensure ~/.openclaw/state/openclaw.sqlite is "
             "present and owner-readable so a future audit can surface which plugins "
@@ -5882,7 +6954,7 @@ def check_plugin_tool_result_middleware(ctx: Context) -> Finding:
         return _finding(
             "B187",
             UNKNOWN,
-            "installed_plugin_index.plugins_json was found in "
+            "OpenClaw's persisted plugin index was found in "
             "~/.openclaw/state/openclaw.sqlite but could not be read or parsed (locked "
             "or corrupt) — cannot determine whether any installed plugin declares the "
             "agentToolResultMiddleware contract.",

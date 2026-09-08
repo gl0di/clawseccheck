@@ -14,15 +14,33 @@ import json
 from typing import TYPE_CHECKING
 
 from . import brand
-from .catalog import CATALOG, CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding, remediation_for
-from .dossier import VERDICT_WORD, axis_for
-from .report import _sanitize, _sanitize_tree, surfaced_despite_suppression
+from .catalog import (
+    CATALOG,
+    CRITICAL,
+    FAIL_WEIGHT_STATUSES,
+    HIGH,
+    PASS,
+    UNKNOWN,
+    WARN,
+    Finding,
+    remediation_for,
+)
+from .dossier import axis_for
+from .layers import LAYER_ORDER
+from .report import (
+    _redact_home_paths,
+    _sanitize,
+    _sanitize_tree,
+    finding_counts_by_severity,
+    self_excluded_line,
+    surfaced_despite_suppression,
+)
 from .scoring import ScoreResult
 
 if TYPE_CHECKING:
     from .collector import Context
 
-_SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+_SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json"
 _INFO_URI = "https://github.com/gl0di/clawseccheck"
 
 # severity -> SARIF defaultConfiguration.level
@@ -34,10 +52,39 @@ _SEV_LEVEL = {
 }
 
 
+def _sarif_text(s: str) -> str:
+    """Sanitize *and* fold an operator home-directory prefix, for every string that
+    reaches SARIF `results[]` -- the artifact CLAUDE.md's own framing calls out as
+    handed to CI dashboards / pasted into public issues (B-620).
+
+    `_sanitize` alone (ANSI/OSC/control-char strip + `logsafe.redact`) does not fold a
+    path. B-620's own fix already reuses `_redact_home_paths` for the
+    `analysis_completeness.limit_hits` copy; this is the same helper applied to the
+    PRIMARY payload -- `message.text` / `properties.evidence` -- which is where the
+    leak was actually confirmed this round: `checks/_capability.py`'s C5 (native binary
+    PATH safety) builds its WARN `detail`/`evidence` from resolved, absolute
+    `Path` ancestors (e.g. ``/home/<user>/.npm-global/...``), and nothing between that
+    check and this renderer folds it. Fixed at the renderer, not at C5 (or any other
+    producer) deliberately: SARIF is the one channel every producer funnels through, so
+    this covers producers that were never individually audited for the same shape.
+
+    Also applied to `fixes[].description.text` (checked: sourced only from `catalog.
+    REMEDIATION`'s static string literals today, so no live path was found there --
+    wrapped anyway so a future REMEDIATION entry that interpolates a path doesn't leak
+    silently) and to `vetProfile.axes[].reason` (traced to `dossier._reason_and_fix`,
+    which returns `worst.detail` verbatim -- the SAME `Finding.detail` this function
+    already redacts for `results[].message.text`, so leaving it unwrapped here would
+    have reopened the identical leak one field over).
+    """
+    return _redact_home_paths(_sanitize(s))
+
+
 def _build_analysis_completeness(
     findings: list[Finding],
     checks_run: int,
     checks_total: int,
+    self_excluded: "list[str] | tuple[str, ...]" = (),
+    score=None,
 ) -> dict:
     """Return the ``analysisCompleteness`` metablock for SARIF run.properties.
 
@@ -49,8 +96,46 @@ def _build_analysis_completeness(
         Number of checks actually executed in this run.
     checks_total:
         Total checks registered in the CHECKS catalogue; ``-1`` when unknown.
+    self_excluded:
+        Skills dropped from the installed-skill content scan by the collector's identity
+        oracle -- in practice ClawSecCheck's own installed copy. B-560: SARIF was the
+        CI-facing surface that never said so, and a pipeline reading it could not tell
+        "scanned and clean" from "not scanned". It belongs here rather than as a
+        ``result``: it is a statement about the run's reach, which is what this block is.
+    score:
+        The run's :class:`~clawseccheck.scoring.ScoreResult`, when there is one. Adds the
+        five-layer state (B-585) -- see below. ``None`` on the ``--vet`` paths, and its
+        keys are then ABSENT rather than false: mode C produces no grade by construction,
+        so ``graded: false`` there would imply a letter was withheld when none ever
+        existed. `docs/OUTPUT_SCHEMA.md` documents that absence as a state.
+
+    B-585, the defect this parameter closes. On a home with no OpenClaw config at all
+    this block read::
+
+        {"checksRun": 184, "checksTotal": 184, "failCount": 0,
+         "limitations": ["host-posture checks require --host",
+                         "attestation checks require --attest"]}
+
+    A field named *analysisCompleteness* reporting 184 of 184 checks run, zero failures,
+    and no limitation worth naming -- for an audit that could not read a single byte of
+    configuration. 155 of those 184 were UNKNOWN, which was in the payload, but the
+    headline pair is what a dashboard renders. Meanwhile ``--json`` on the same run
+    carried ``graded: false``, ``missing_layers``, ``config_blind_capped: true`` and
+    ``config_blind_reason: "absent"``, and the dashboard card said it out loud.
+
+    The counts were never wrong -- 184 checks really did run. They answer a question
+    about CHECKS, and the block's name promises one about the ANALYSIS, which since
+    E-077 is the five-layer ledger. So the layer figures are published beside them
+    rather than the counts being changed: "184 of 184" can no longer be read as a
+    complete analysis while ``layersRan`` says 2 of 5.
+
+    Deliberately NOT published here: ``score``/``grade``. They are ``None`` on an
+    ungraded run, and a consumer reading a ``0`` where ``null`` was meant would rank a
+    blind audit as a perfect one -- the leak C-423 closed in ``render_json``'s projection
+    block and C-426 closed in ``_percentile_line``. This publishes the STATE, never a
+    number the report withheld.
     """
-    return {
+    block: dict = {
         "checksRun": checks_run,
         "checksTotal": checks_total,
         "unknownCount": sum(1 for f in findings if f.status == UNKNOWN),
@@ -62,13 +147,95 @@ def _build_analysis_completeness(
         "notApplicableCount": sum(1 for f in findings if getattr(f, "not_applicable", False)),
         "passCount": sum(1 for f in findings if f.status == PASS),
         "warnCount": sum(1 for f in findings if f.status == WARN),
-        "failCount": sum(1 for f in findings if f.status == FAIL),
+        # B-751: bare `== FAIL` left SKILL_ARCHIVE_PATH_TRAVERSAL (FAIL-weight, not the
+        # literal "FAIL") in none of the four buckets above, so they stopped summing to
+        # len(findings). Folded into failCount, where its weight already says it belongs.
+        "failCount": sum(1 for f in findings if f.status in FAIL_WEIGHT_STATUSES),
         "suppressedCount": sum(1 for f in findings if f.suppressed),
+        # I3: per-severity counts of UNSUPPRESSED FAIL findings — the same numbers
+        # `--fail-on SEVERITY` (cli.py) gates on and report.py's --json carries as
+        # `fail_counts_by_severity`. Deliberately distinct from `failCount` two lines
+        # above: that one is an unconditional total (suppressed FAILs included, no
+        # severity split); this one is the CI-assertable, suppression-aware figure —
+        # see finding_counts_by_severity()'s docstring (report.py) for the exact
+        # predicate. camelCase key to match this block's existing convention
+        # (checksRun/failCount/…); lowercase severity sub-keys to match report.py's.
+        "failCountsBySeverity": finding_counts_by_severity(findings),
+        # B-560: camelCase to match this block's convention. Always present, empty list
+        # when nothing was excluded — an absent key would make "no exclusions" and "this
+        # producer is too old to say" the same thing to a consumer.
+        "selfExcludedSkills": sorted(self_excluded),
         "limitations": [
             "host-posture checks require --host",
             "attestation checks require --attest",
-        ],
+        ] + ([self_excluded_line(sorted(self_excluded))] if self_excluded else []),
     }
+    if score is None:
+        return block
+
+    missing = [
+        {"layer": layer, "status": status}
+        for layer, status in (getattr(score, "missing_layers", ()) or ())
+    ]
+    graded = bool(getattr(score, "graded", True))
+    blind_reason = getattr(score, "config_blind_reason", None)
+    block["graded"] = graded
+    # `missing_layers` is every layer whose status is not "ran" (LayerLedger.missing), so
+    # the arithmetic is exact rather than a second count that could drift from it.
+    block["layersTotal"] = len(LAYER_ORDER)
+    block["layersRan"] = len(LAYER_ORDER) - len(missing)
+    block["missingLayers"] = missing
+    # A layer that RAN but could not exhaust its subject — a different question from a
+    # layer that never ran, and the reason both are published (ScoreResult's own
+    # docstring makes the same distinction).
+    block["notChecked"] = list(getattr(score, "not_checked", ()) or ())
+    # B-166 already surfaced a present-but-unparseable config in the sibling
+    # `analysis_completeness` block; a wholly ABSENT one (B-363) was surfaced nowhere in
+    # SARIF. `config_blind_reason` answers both in one field, exactly as it does for
+    # `--json`, so a consumer never has to re-derive the state from two booleans.
+    block["configBlind"] = {
+        "capped": bool(getattr(score, "config_blind_capped", False)),
+        "reason": blind_reason,
+    }
+    # B-690: `configBlind` is ONE of the six signals that can cap the score, and it was the
+    # only one this block published. A run capped by an open CRITICAL, a fired behavioural
+    # detector, a corroborated runtime indicator or a submitted VULNERABLE live-test verdict
+    # emitted SARIF saying nothing about any of it — with `configBlind.capped: false` present
+    # and looking like an answer. That matters more here than in a report a human reads: this
+    # artifact goes to CI and code-scanning consumers that act on it unaccompanied.
+    #
+    # ALWAYS present, empty list when nothing capped — the rule this block already states for
+    # `selfExcludedSkills` (B-560): an absent key would make "nothing capped this run" and
+    # "this producer is too old to say" the same thing to a consumer.
+    #
+    # The same `capsFired` name and shape the judge packet uses, from the same producer, not
+    # a second ladder beside it — B-689/B-692/B-693/B-694 were each one rule kept by hand in
+    # two places. Lazy import for the same reason `history._sanitize_home` gives for reaching
+    # into `report`: both modules are Layer 3 and the coupling is load-bearing only here.
+    #
+    # `configBlind` is kept unchanged rather than folded in. It is documented, it is the one
+    # signal a consumer may already read, and breaking it to tidy a duplication would trade a
+    # silence for a regression. `tests/test_b690_every_cap_reaches_sarif.py` pins that the two
+    # cannot disagree.
+    from .adjudication import caps_fired  # noqa: PLC0415 — see the comment above
+    block["capsFired"] = caps_fired(score)
+    if block["capsFired"]:
+        block["limitations"].append(
+            "the score was capped: " + ", ".join(c["what"] for c in block["capsFired"])
+            + " — it reports a ceiling, not a measurement of everything below it"
+        )
+    if blind_reason:
+        block["limitations"].append(
+            f"openclaw.json was {blind_reason} this run — findings describe what could "
+            "NOT be checked, not a clean configuration"
+        )
+    if not graded:
+        block["limitations"].append(
+            "no grade: " + ", ".join(
+                f"{m['layer']} ({m['status']})" for m in missing
+            ) + " — this run did not complete the five-layer check"
+        )
+    return block
 
 
 def render_sarif(
@@ -126,16 +293,19 @@ def render_sarif(
         surfaced_suppressed = surfaced_despite_suppression(f)
         if f.suppressed and not surfaced_suppressed:
             continue
-        if f.status not in (FAIL, WARN):
+        # B-751: SKILL_ARCHIVE_PATH_TRAVERSAL (a confirmed zip-slip) is FAIL-weight but
+        # isn't the literal "FAIL", so this bare tuple check dropped it silently — a CI
+        # gate consuming SARIF never saw a confirmed escape.
+        if f.status not in FAIL_WEIGHT_STATUSES and f.status != WARN:
             continue
-        level = "error" if f.status == FAIL else "warning"
-        message_text = _sanitize(f.detail if f.detail else f.title)
+        level = "error" if f.status in FAIL_WEIGHT_STATUSES else "warning"
+        message_text = _sarif_text(f.detail if f.detail else f.title)
         result = {
             "ruleId": f.id,
             "level": level,
             "message": {"text": message_text},
             "properties": {"confidence": getattr(f, "confidence", "HIGH"),
-                           "evidence": [_sanitize(e) for e in (f.evidence or [])]},
+                           "evidence": [_sarif_text(e) for e in (f.evidence or [])]},
         }
         # Risk-dossier axis (additive) so a SARIF viewer can group findings by axis.
         _ax = axis_for(f)
@@ -151,7 +321,7 @@ def render_sarif(
             else:
                 fix_texts.append(f"set {c['path']} = {json.dumps(c['set'])} ({c.get('note', '')})")
         if fix_texts:
-            result["fixes"] = [{"description": {"text": _sanitize(tx)}} for tx in fix_texts]
+            result["fixes"] = [{"description": {"text": _sarif_text(tx)}} for tx in fix_texts]
         if surfaced_suppressed:
             # SARIF-native suppression: the result stays in `results` (visible in the UI)
             # but is marked suppressed, so a gate that respects suppressions won't fail on
@@ -204,16 +374,32 @@ def render_sarif(
     if "properties" not in _run:
         _run["properties"] = {}
     _run["properties"]["analysisCompleteness"] = _build_analysis_completeness(
-        findings, _checks_run, _checks_total
+        findings, _checks_run, _checks_total,
+        self_excluded=list(getattr(ctx, "self_excluded_skills", None) or []),
+        score=score,
     )
 
     if ctx is not None:
         total_files_inspected = getattr(ctx, "total_files_inspected", 0)
         excluded_binary_files_count = getattr(ctx, "excluded_binary_files_count", 0)
         archives_unpacked = getattr(ctx, "archives_unpacked", 0)
-        limit_hits = list(getattr(ctx, "limit_hits", []))
+        # B-620: at least one `limit_hits` producer (collector._config_workspace_dirs,
+        # for a `workspace` value resolved via `~` expansion) interpolates a resolved
+        # ABSOLUTE path, and this block used to copy the list verbatim -- so a SARIF file
+        # could carry the operator's real `/home/<user>/...`. Reuse
+        # `report._redact_home_paths` (B-381's precedent for this exact shape, already
+        # applied to the --dashboard card) rather than reimplementing path folding a
+        # second time -- this repo has been burned by divergent redaction tables before.
+        # A NEW list of plain strings is built here; `ctx.limit_hits` (its `LimitHit`
+        # objects, read verbatim by B13/dossier.py leg 2/cli.sweep_installed_skills) is
+        # never touched.
+        limit_hits = [_redact_home_paths(str(h)) for h in (getattr(ctx, "limit_hits", None) or [])]
         path_traversal_violations = list(getattr(ctx, "path_traversal_violations", []))
         file_manifest = dict(getattr(ctx, "file_manifest", {}))
+        disclosures = [
+            {"kind": d.kind, "subject": d.subject, "detail": d.detail}
+            for d in (getattr(ctx, "disclosures", None) or [])
+        ]
 
         simulated_effects = []
         installed_skill_py = getattr(ctx, "installed_skill_py", None)
@@ -243,6 +429,7 @@ def render_sarif(
             "limit_hits": limit_hits,
             "path_traversal_violations": path_traversal_violations,
             "file_manifest": file_manifest,
+            "disclosures": disclosures,
             "simulated_effects": simulated_effects,
             # B-166: surface a present-but-unparseable openclaw.json so a SARIF consumer
             # doesn't read an UNKNOWN-only run over a broken config as a clean scan.
@@ -266,20 +453,24 @@ def render_sarif(
 
     # Risk-dossier summary (additive, non-breaking — an extension property outside the
     # frozen SARIF contract). Per-finding results stay finding-oriented; this carries the
-    # axis roll-up + overall grade so a viewer can show the dossier alongside the results.
+    # axis roll-up + Mode C's install-recommendation verdict so a viewer can show the
+    # dossier alongside the results.
+    #
+    # C427: no letter grade / numeric score here — "verdict" is `profile.verdict`
+    # (dossier.verdict_for(profile.overall_status), computed once in build_profile), the
+    # exact same value the text dossier / --json / --advise render, so SARIF cannot
+    # disagree with them.
     if profile is not None:
         run = sarif_log["runs"][0]
         run.setdefault("properties", {})
         run["properties"]["vetProfile"] = {
             "targetType": profile.target_type,
-            "grade": profile.overall_grade,
-            "verdict": VERDICT_WORD.get(profile.overall_status, "UNKNOWN"),
-            "score": profile.score,
+            "verdict": profile.verdict,
             "axes": [
                 {
                     "axis": a.axis,
                     "status": a.status,
-                    "reason": _sanitize(a.reason),
+                    "reason": _sarif_text(a.reason),
                     "findingIds": [x.id for x in a.findings],
                 }
                 for a in profile.axes

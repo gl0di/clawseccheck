@@ -1,0 +1,31 @@
+{
+  "agents": {
+    "list": [
+      {
+        "id": "main",
+        "default": true,
+        "sandbox": {
+          "mode": "all"
+        }
+      },
+      {
+        "id": "helper",
+        "sandbox": {
+          "mode": "all"
+        }
+      }
+    ]
+  },
+  "tools": {
+    "allow": [
+      "read",
+      "write",
+      "web_fetch"
+    ]
+  },
+  "channels": {
+    "telegram": {
+      "dmPolicy": "open"
+    }
+  }
+}

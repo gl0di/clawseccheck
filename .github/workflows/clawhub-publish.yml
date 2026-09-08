@@ -104,19 +104,41 @@ jobs:
         # so the file a user diffs against is byte-for-byte the same computation,
         # just produced out-of-band (from this checked-out tag, in CI) instead of
         # from inside their own possibly-tampered install.
+        #
+        # B-590: the `notes` channel is opted into and its rows are annotated exactly as
+        # `--verify-self` annotates them. A symlink's row is a digest of the LINK (its
+        # name and target), not of any file's bytes, and this listing is cosign-signed —
+        # an unannotated row would be a false statement inside a signed artifact, and the
+        # two listings would silently stop matching, which is what the paragraph above
+        # promises they do. The repo has no symlinked entries today (`git ls-files -s`
+        # shows no 120000 mode), so this changes nothing about what is published; it is
+        # here so that if one ever appears, the signed file says what it is instead of
+        # quietly lying. An unreadable path raises out of package_digest() and fails the
+        # job, which is correct: never sign a digest over a tree we could not fully read.
         run: |
           python3 - <<'PYEOF'
           from clawseccheck import __version__
-          from clawseccheck.integrity import package_digest
+          from clawseccheck.integrity import (
+              NOTE_PATH_ESCAPE, NOTE_SYMLINK, package_digest,
+          )
 
-          combined, per_file = package_digest()
+          notes = []
+          combined, per_file = package_digest(notes=notes)
+          uncovered = {rel: (kind, detail) for kind, rel, detail in notes
+                       if kind in (NOTE_SYMLINK, NOTE_PATH_ESCAPE)}
           lines = [
               f"ClawSecCheck {__version__} — engine source digest (SHA-256)",
               f"combined : {combined}",
               "",
           ]
           for name, digest in sorted(per_file.items()):
-              lines.append(f"  {digest}  {name}")
+              note = uncovered.get(name)
+              if note is None:
+                  lines.append(f"  {digest}  {name}")
+              else:
+                  kind, target = note
+                  lines.append(f"  {digest}  {name}  [{kind} -> {target}; "
+                               f"name and target hashed, target contents NOT read]")
           lines.append("")
           lines.append(
               "Compare the 'combined' value against the output of `clawseccheck --verify-self`."
@@ -418,7 +440,16 @@ jobs:
       # above, via the same `gh` CLI (`release upload`) rather than a second
       # release-management action, so there is one mechanism for release assets.
       - name: Create GitHub Release
-        if: github.ref_type == 'tag'
+        # Deliberately NOT gated on the publish step having succeeded. ClawHub has a
+        # measured false-failure mode: on 2026-08-06 `clawhub publish` uploaded v3.61.0
+        # successfully (that version answers 200 on the registry today) and then exited 1
+        # with "Version 3.61.0 already exists". Because this step sat downstream of that
+        # exit code, it was skipped for v3.59.0, v3.60.0 and v3.61.0 — all three lost
+        # their cosign bundle, and the releases were completed by hand with
+        # SHA256SUMS.txt alone, while README/FAQ tell users to verify the install with
+        # `cosign verify-blob --bundle`. The signed digest is a property of the TAGGED
+        # TREE, not of the registry, so it must land whatever the registry replied.
+        if: ${{ !cancelled() && github.ref_type == 'tag' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

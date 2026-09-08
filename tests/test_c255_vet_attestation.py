@@ -281,13 +281,15 @@ def test_cli_vet_judged_dangerous_attestation_caps_at_warn_not_fail(tmp_path, ca
     main(["--vet", str(target), "--vet-judged", str(verdicts_path), "--json"])
     judged = json.loads(capsys.readouterr().out)
 
-    assert judged["verdict"] != "DANGEROUS"
-    assert judged["grade"] != "F"
+    # C427: "grade" no longer exists on this payload (internal-only now); the verdict tier
+    # is the only headline signal left, and DO-NOT-INSTALL is exactly the tier a danger-
+    # floored FAIL (the old "grade F") would have produced, so this is the same property.
+    assert judged["verdict"] != "DO-NOT-INSTALL"
     assert any(f["id"] == "ATTEST-PROSE-SOCIAL-ENG" and f["status"] == "WARN"
                for f in judged["findings"])
 
 
-def test_cli_vet_judged_safe_attestation_leaves_grade_unchanged(tmp_path, capsys):
+def test_cli_vet_judged_safe_attestation_leaves_verdict_unchanged(tmp_path, capsys):
     from clawseccheck.cli import main
     target = _fixture("bad_b100_clickfix_setup/skills/quick-tool")
 
@@ -303,8 +305,10 @@ def test_cli_vet_judged_safe_attestation_leaves_grade_unchanged(tmp_path, capsys
     judged = json.loads(capsys.readouterr().out)
 
     assert judged["verdict"] == base["verdict"]
-    assert judged["grade"] == base["grade"]
-    assert judged["score"] == base["score"]
+    # C427: "grade"/"score" are internal-only now (dossier.verdict_for) -- pin their
+    # absence explicitly rather than silently dropping the old equality check.
+    assert "grade" not in judged and "grade" not in base
+    assert "score" not in judged and "score" not in base
 
 
 def test_cross_run_replayed_attestation_verdicts_are_rejected(capsys):
@@ -333,7 +337,8 @@ def test_cross_run_replayed_attestation_verdicts_are_rejected(capsys):
         judged = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert judged["verdict"] == "NO KNOWN ISSUE" or judged["grade"] == "A"
+    # C427: one vocabulary now (no separate grade scale to fall back to with "or").
+    assert judged["verdict"] == "INSTALL"
     assert not any(f["id"] == "ATTEST-PROSE-SOCIAL-ENG" for f in judged["findings"])
 
 

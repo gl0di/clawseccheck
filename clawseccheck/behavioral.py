@@ -49,7 +49,12 @@ from .checks import (
 )
 from .collector import dig
 from .scanbudget import limits_for
-from .trajectory import EXTERNAL_ORIGIN_KINDS, read_events, read_proven_tools
+from .trajectory import (
+    EXTERNAL_ORIGIN_KINDS,
+    explicit_path_problem,
+    read_events,
+    read_proven_tools,
+)
 
 # C-170 adversarial pass found the naive "reuse A1's three hint tuples verbatim"
 # design (still used for `INPUT_TOOL_HINTS` below) has two real bugs when applied
@@ -380,6 +385,47 @@ def _classify_event_role(
     return None
 
 
+# B-575: a PASS on `_classify_verb_role`'s output only means something if that function
+# could actually SEE a trifecta leg in the verbs the log used. On a real 1,824-event
+# corpus whose entire verb population was {bash, message, apply_patch, memory_search,
+# web_search, sessions_spawn, sessions_yield}, only `web_search` (ingress) and — via
+# `attest.classify_verb`'s EXEC/EGRESS fold, the third tier of `_classify_verb_role`,
+# easy to miss when reasoning about this by hand (an earlier repro script for this exact
+# bug did) — `bash` (egress) actually classify; the rest are None. T1/T2 still rendered a
+# plain green PASS: a true statement about the verbs they COULD read, worded as a
+# statement about the log. This mirrors B-559 (an unread FILE is not evidence of a clean
+# log) one level down: an unclassified VERB is not evidence either — it just never
+# reached either detector's vocabulary. `analysis_incompleteness` below only turns this
+# into UNKNOWN at TOTAL blindness (every verb-bearing event unclassified); see that
+# function's own comment for why a partial gap is deliberately left alone.
+def _verb_classification_coverage(events: list[dict]) -> "tuple[int, int, list[str]]":
+    """Return ``(verb_event_count, unclassified_event_count, unclassified_verb_names)``
+    over *events* — every event that carries a tool-verb `name` (so a nameless
+    `prompt.submitted` channel-origin event, which `_classify_event_role` handles via a
+    separate path, is not counted here at all: it was never eligible to be a "verb" in
+    the first place, so it can't count as a verb this detector failed to classify).
+
+    A verb is "classified" when `_classify_verb_role` returns any of ingress / sensitive
+    / egress — the union of everything either T1 or T2 can act on. This is deliberately
+    NOT scoped to just T1's ingress/egress or just T2's sensitive: both detectors share
+    one vocabulary and one blind spot, and `analysis_incompleteness` is a single signal
+    both already read (see B-559), so a second, narrower version of this per detector
+    would be the parallel-path mistake that function's own docstring warns against.
+    """
+    total = 0
+    unclassified_events = 0
+    unclassified_names: set = set()
+    for ev in events:
+        name = ev.get("name")
+        if not name:
+            continue
+        total += 1
+        if _classify_verb_role(name) is None:
+            unclassified_events += 1
+            unclassified_names.add(str(name))
+    return total, unclassified_events, sorted(unclassified_names)
+
+
 def _sort_key(event: dict):
     """Deterministic (seq, ts) ordering key — events with a missing/non-int seq sort
     after those with one (so partial data never silently reorders known-good events)."""
@@ -474,19 +520,35 @@ def _t1_thread_trifecta(
 
 
 def check_behavioral_trifecta(
-    groups: dict[str, list[dict]], untrusted_origin_channels: "frozenset[str]" = frozenset()
+    groups: dict[str, list[dict]], untrusted_origin_channels: "frozenset[str]" = frozenset(),
+    *, incomplete: "str | None" = None,
 ) -> object:
     """T1 — behavioral trifecta, proven by the trajectory log (not declared capability).
 
-    WARN — at least one thread shows an ingress leg (an ingress VERB, or an
-           externally-delivered group/channel message whose channel's own config
-           admits a non-owner sender — B-298, narrowed F-154 round 2), then a
-           sensitive-verb, then an egress-verb, in that order.
-    PASS — threads present, no thread shows the ordered sequence.
+    WARN    — at least one thread shows an ingress leg (an ingress VERB, or an
+              externally-delivered group/channel message whose channel's own config
+              admits a non-owner sender — B-298, narrowed F-154 round 2), then a
+              sensitive-verb, then an egress-verb, in that order.
+    PASS    — threads present, no thread shows the ordered sequence, and the read raised
+              no incompleteness signal (:func:`analysis_incompleteness`).
+    UNKNOWN — nothing found, but the read raised one (*incomplete*).
+
+    Note what PASS does and does not promise. It says every signal the reader RAISES was
+    clear, not that every record reached the detector: `trajectory.read_events` can drop
+    individual records inside a file it counts as scanned — a corrupt JSON line, or a
+    per-record schema it does not recognise — and reports no flag for it. So a PASS here
+    is "nothing found in a read that reported no problems", which is weaker than "the log
+    is clean" and stronger than the pre-B-559 PASS, which promised nothing at all.
 
     *untrusted_origin_channels* — see `_group_untrusted_origin_channels`; defaults to
     an empty set (no channel arms on origin alone) when the caller supplies nothing,
     matching `_classify_event_role`'s own default.
+
+    *incomplete* (B-559) — the reason the read could not cover the log, from
+    :func:`analysis_incompleteness`, or None. It gates ONLY the clean branch: a firing
+    thread stays WARN whatever went unread, because demoting an observation because the
+    REST of the history was capped is the false negative a fix in this direction
+    introduces. Default None keeps every existing caller on the pre-B-559 contract.
     """
     firing_keys: list[str] = []
     armed_by: dict[str, str] = {}
@@ -517,6 +579,17 @@ def check_behavioral_trifecta(
             "causally-unrelated actions in an ordinary workflow can satisfy this shape, "
             "so treat it as a lead to review manually, not confirmed exfiltration.",
             firing[:6],
+        )
+    if incomplete:
+        return _finding(
+            "T1",
+            UNKNOWN,
+            "No thread in what was read shows an ingress -> sensitive -> egress "
+            f"sequence — but {incomplete}, so this is not a clean result for the log as "
+            "a whole.",
+            "Nothing to act on yet: the sequence was not observed in the sessions that "
+            "were read, and the ones that were not read cannot be spoken for. Re-run "
+            "once the unread sessions are within reach to turn this into a verdict.",
         )
     return _finding(
         "T1",
@@ -559,16 +632,23 @@ def _t2_thread_anomaly(thread_events: list[dict]) -> bool:
     return False
 
 
-def check_outcome_anomaly(groups: dict[str, list[dict]]) -> object:
+def check_outcome_anomaly(groups: dict[str, list[dict]], *,
+                          incomplete: "str | None" = None) -> object:
     """T2 — outcome anomaly: repeated failure then success on a sensitive verb.
 
-    WARN — a sensitive verb failed at least twice in a row, then succeeded, within one
-           thread. Ambiguous by design (§8 — no error-class/message is read, only
-           status/isError/success): this can mean persistence past an initial denial
-           (e.g. permission/path probing), OR ordinary retry/backoff on a transient
-           failure (rate limit, timeout) — the finding text says so explicitly rather
-           than asserting the more alarming reading (C-170 adversarial finding).
-    PASS — threads present, no such series found.
+    WARN    — a sensitive verb failed at least twice in a row, then succeeded, within
+              one thread. Ambiguous by design (§8 — no error-class/message is read, only
+              status/isError/success): this can mean persistence past an initial denial
+              (e.g. permission/path probing), OR ordinary retry/backoff on a transient
+              failure (rate limit, timeout) — the finding text says so explicitly rather
+              than asserting the more alarming reading (C-170 adversarial finding).
+    PASS    — threads present, no such series found, and the read raised no
+              incompleteness signal (see `check_behavioral_trifecta` on what that
+              promises and what it does not).
+    UNKNOWN — none found, but the read raised one (*incomplete*).
+
+    *incomplete* (B-559) — see `check_behavioral_trifecta`; gates the clean branch only,
+    never a firing one.
     """
     firing_keys: list[str] = []
     for group_key, thread_events in groups.items():
@@ -589,6 +669,16 @@ def check_outcome_anomaly(groups: dict[str, list[dict]]) -> object:
             "or an ordinary retry/backoff on a transient failure (rate limit, timeout); "
             "the log's status/isError/success alone can't distinguish the two.",
             firing[:6],
+        )
+    if incomplete:
+        return _finding(
+            "T2",
+            UNKNOWN,
+            "No fail->fail->success series on a sensitive verb in what was read — but "
+            f"{incomplete}, so this is not a clean result for the log as a whole.",
+            "Nothing to act on yet: the series was not observed in the sessions that "
+            "were read, and the ones that were not read cannot be spoken for. Re-run "
+            "once the unread sessions are within reach to turn this into a verdict.",
         )
     return _finding(
         "T2",
@@ -926,28 +1016,6 @@ def audit_trail_divergence(ctx, events: list[dict]) -> "frozenset[str]":
     return frozenset(audit_sessions - traj_sessions)
 
 
-def explicit_path_problem(explicit_path: str | None) -> str | None:
-    """Why an explicitly-named --behavioral PATH cannot be read, or None if it is fine.
-
-    B-462: when the user names a file, a bad path is THEIR fact, not the host's. A typo
-    used to fall through to the generic "no trajectory sidecars found ... run on a host
-    where an OpenClaw agent has produced session trajectories" — blaming the machine,
-    never echoing the path, and exiting 0 under a green tick.
-
-    Shared by `analyze` and the CLI's exit-code decision so the two cannot disagree, and
-    so deciding the exit code costs a stat rather than a second full `analyze()` pass over
-    every trajectory file.
-    """
-    if not explicit_path:
-        return None
-    p = Path(explicit_path).expanduser()
-    if not p.exists():
-        return f"{explicit_path}: no such file or directory"
-    if p.is_dir():
-        return f"{explicit_path}: is a directory, not a trajectory file"
-    return None
-
-
 def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     """Run the v1 behavioral detectors (T1, T2, T3) plus the B191 audit-trail signal, and
     return a result dict.
@@ -971,6 +1039,10 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     events, meta = read_events(home, explicit_path=explicit_path,
                                 max_files=lim.traj_max_files,
                                 max_bytes_per_file=lim.traj_max_bytes_per_file)
+    # B-575: computed here, once, from the SAME `events` list every detector below reads
+    # — see `_verb_classification_coverage`'s own docstring for why this is one shared
+    # signal rather than a per-detector re-derivation.
+    verb_total, verb_unclassified, unclassified_names = _verb_classification_coverage(events)
     result = {
         "present": meta["present"],
         "files_scanned": meta["files_scanned"],
@@ -982,6 +1054,9 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "thread_count": 0,
         "findings": [],
         "explicit_path_error": explicit_path_error,
+        "verb_event_count": verb_total,
+        "unclassified_verb_event_count": verb_unclassified,
+        "unclassified_verb_names": unclassified_names,
     }
     b191 = check_audit_trail_signals(
         ctx,
@@ -999,9 +1074,13 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     # from `ctx.config` (never re-read per-event).
     cfg = getattr(ctx, "config", None) or {}
     untrusted_origin_channels = _group_untrusted_origin_channels(cfg)
+    # B-559: T1/T2 answer UNKNOWN rather than PASS when the log was not read in full.
+    # Computed once, here, because this is where every incompleteness flag is known;
+    # the detectors take the reason as a string so they never re-derive it.
+    incomplete = analysis_incompleteness(result)
     result["findings"] = [
-        check_behavioral_trifecta(groups, untrusted_origin_channels),
-        check_outcome_anomaly(groups),
+        check_behavioral_trifecta(groups, untrusted_origin_channels, incomplete=incomplete),
+        check_outcome_anomaly(groups, incomplete=incomplete),
         check_capability_drift(ctx),
         b191,
     ]
@@ -1026,6 +1105,93 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
 # rendered WARN finding itself is untouched: it still reports and evidences all three
 # signals to a human reader, and Golden Rule #5's scored=False is unaffected either way.
 _B191_STRONG_SUB_SIGNALS = frozenset({"blocked", "evasive"})
+
+
+def analysis_incompleteness(result: dict) -> "str | None":
+    """Why this :func:`analyze` result cannot support a clean verdict, or None if it can.
+
+    Lives here, beside the flags it reads, because it is a statement about what this
+    module's own result means — a caller re-deriving it would be a second source of
+    truth that a new incompleteness flag would silently not reach.
+
+    Ordered most-fundamental first, so the reason a reader is given is the one that
+    actually bounds the run: "nothing was parsed" is worth saying before "and some of
+    it was capped" — and (B-575) either of those is worth saying before "and what WAS
+    read used no verb this detector can classify", since a capped/partial read is the
+    more actionable fact (re-run once the rest is reachable) and may itself explain why
+    nothing classified.
+    """
+    if not result.get("present"):
+        return "no trajectory sidecar was read"
+    if not result.get("event_count"):
+        return "no events could be parsed from the trajectory sidecar(s)"
+    if result.get("unknown_version"):
+        return "some records used an unrecognised trajectory schema version"
+    if result.get("files_capped"):
+        return (f"only the {result.get('files_scanned')} most recent of "
+                f"{result.get('files_total')} trajectory file(s) were read")
+    if result.get("truncated"):
+        return "a trajectory file exceeded the per-file scan cap and was read in part"
+    scanned, total = result.get("files_scanned"), result.get("files_total")
+    if total and scanned is not None and scanned != total:
+        # Found by the C-135 pass on B-559: a sidecar the reader could not OPEN (mode
+        # 000, a broken link, a race) is skipped by `trajectory.read_events`' own
+        # `except OSError: continue` without incrementing `files_scanned` and without
+        # setting any of the flags above. The reviewer put a real trifecta in such a
+        # file and got PASS. `files_capped` covers the cap; nothing covered this.
+        # Safe to add: measured across all 19 fixture homes carrying a sidecar, the two
+        # counts are equal everywhere, so this fires only when a file really went unread.
+        return f"{total - scanned} of {total} trajectory file(s) could not be read"
+    # B-575: the read itself was complete, but every verb-bearing event it found used a
+    # verb outside `_classify_verb_role`'s vocabulary — see `_verb_classification_
+    # coverage`'s own docstring. Deliberately gated at TOTAL blindness only
+    # (unclassified == total, both > 0), not any gap: on real logs a partial gap is the
+    # norm (message/apply_patch/read/write verbs are routinely and correctly outside
+    # this vocabulary — B-285 narrowed it on purpose to hold the false-positive line),
+    # so flagging every such log would make this caveat universal noise instead of the
+    # rare, meaningful signal that the detector had literally nothing it could evaluate.
+    verb_total = result.get("verb_event_count") or 0
+    verb_unclassified = result.get("unclassified_verb_event_count") or 0
+    if verb_total and verb_unclassified == verb_total:
+        names = result.get("unclassified_verb_names") or []
+        shown = ", ".join(names[:6]) + (f" (+{len(names) - 6} more)" if len(names) > 6 else "")
+        return (
+            f"all {verb_total} observed tool-call event(s) used a verb outside the "
+            f"ingress/sensitive/egress vocabulary this detector can classify "
+            f"({len(names)} distinct verb name(s): {shown})"
+        )
+    # NARROWER, ATTEMPTED-AND-RETRACTED (B-575 review): a per-ROLE version of the branch
+    # above — UNKNOWN when a REQUIRED role (T1: ingress+sensitive+egress all three; T2:
+    # sensitive alone) was never observed at all, even though SOME verbs did classify —
+    # was proposed and measured, not built. Reason: measured across all 27 fixture homes
+    # that carry a trajectory sidecar, at least one required role was entirely absent in
+    # 25 of them (missing "sensitive" alone in ~20), including homes where every verb WAS
+    # classified (uncl=0) — e.g. a home whose only verb is an egress call has ingress=0,
+    # sensitive=0 by design, not by gap. This is not a fixture-corpus artifact: the B-575
+    # bug report's own real 1,824-event corpus shows the identical shape (ingress + egress
+    # present, sensitive = zero), and T1's own CheckMeta entry (catalog.py) already
+    # documents this as an ACCEPTED, understood limitation — "on a core-tools-only agent
+    # T1 cannot fire at all and its PASS is vacuous" — that predates this task and was a
+    # deliberate call, not an oversight. Firing UNKNOWN on every run of any host that
+    # simply hasn't touched a DB/secrets-store/MCP verb would make the caveat universal
+    # noise on the majority of real installs — trading a documented, accepted limitation
+    # for per-run alarm fatigue, the opposite of Golden Rule #5. Left unbuilt; the
+    # total-blindness branch above is the whole of this fix.
+    return None
+
+
+def analysis_is_conclusive(result: dict) -> bool:
+    """B-558: True only when this :func:`analyze` result may be counted as COVERAGE.
+
+    B-559 made T1/T2 answer UNKNOWN rather than a vacuous PASS, so the statuses now
+    carry that themselves. This predicate stays because it is also what withholds B191,
+    whose own verdict is sound but whose subject the run cannot vouch for as a whole —
+    B191 reads ``audit_events``, which the trajectory cap cannot truncate, so this
+    knowingly under-claims there. Naming which detector reads which source would put a
+    second map of that in the tree; withholding a provable verdict costs a coverage
+    point, while granting an unprovable one is the defect this exists to close.
+    """
+    return analysis_incompleteness(result) is None
 
 
 def grade_cap_signal(result: dict) -> "frozenset[str]":
@@ -1075,9 +1241,19 @@ def grade_cap_signal(result: dict) -> "frozenset[str]":
     return frozenset(fired)
 
 
-def render_behavioral_analysis(ctx, *, explicit_path: str | None = None, ascii_only: bool = False) -> str:
-    """Human-readable, §8-safe behavioral report for --behavioral."""
-    r = analyze(ctx, explicit_path=explicit_path)
+def render_behavioral_analysis(ctx, *, explicit_path: str | None = None,
+                               ascii_only: bool = False, result: dict | None = None) -> str:
+    """Human-readable, §8-safe behavioral report for --behavioral.
+
+    *result* lets a caller that has ALREADY run :func:`analyze` render from that same
+    run instead of paying for a second one (B-558). Additive and default-preserving:
+    omitted, this analyses as it always has. It exists because `pipeline.run_behavioral`
+    needs the detectors' own `Finding` objects — not just their rendered text — to tell
+    the run's coverage page which of `BEHAVIORAL_CHECK_IDS` actually reached a verdict,
+    and re-deriving that from a second `analyze()` would re-glob every trajectory file
+    to recompute an answer this call already has.
+    """
+    r = analyze(ctx, explicit_path=explicit_path) if result is None else result
     warn = "[!]" if ascii_only else "⚠"
     ok = "[ok]" if ascii_only else "✓"
     q = "[?]" if ascii_only else "?"
