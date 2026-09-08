@@ -32,6 +32,16 @@ settings out from under the checks that read them.
   new output anything that was deliberate — and note that nothing in a normal run tells you a
   suppression has gone dead, so check `--show-suppressed` after upgrading rather than assuming
   silence means it still applies.
+- **The first watch run after upgrading may report a check's own change as configuration drift.**
+  `--monitor` compares this run against a snapshot written by the previous version, and a snapshot
+  records a check's verdict but not the reason for it — so a verdict that moved because the check
+  itself got better is indistinguishable, to the diff, from one that moved because your setup did.
+  On this release the visible case is B175, whose logic now catches OpenClaw defaults it used to
+  miss: an unchanged config can be reported as `was PASS, now WARN`, and that sentence is written
+  to the Agent Watch journal like any other event. **It is the upgrade, not your setup.** Run
+  `--monitor` once straight after upgrading to re-take the baseline, and read the first
+  post-upgrade alert with that in mind. Attributing such a transition correctly needs the tool's
+  own version recorded in the snapshot, which is a stored-format change rather than a wording fix.
 
 ### OpenClaw 2026.8.1 / 8.2 / 9.1 / 9.2 compatibility
 
