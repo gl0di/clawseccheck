@@ -4137,7 +4137,8 @@ def _cron_store_key_candidates(jobs_json: Path) -> list:
     """Return the ``cron_jobs.store_key`` spellings that denote the audited store file.
 
     The runtime's partition key is ``cronStoreKey(storePath) { return path.resolve(storePath); }``
-    (key-BBZ40bDq.js:5-7) — an identity resolve, so the key is just the absolute store path.
+    (key-BBZ40bDq.mjs:5-7, grounded against openclaw@2026.9.3) — an identity resolve, so the
+    key is just the absolute store path.
 
     Two spellings are returned because Node's ``path.resolve`` is **purely lexical**
     (normalize + absolutize, no filesystem access) while Python's ``Path.resolve`` also
@@ -4211,7 +4212,7 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
     store path only to derive a key (``cronStoreKey(path.resolve(storePath))``,
     store-ScQ9SjOe.js:710) and then reads ``loadCronRows`` from the database; writes go
     through ``replaceCronRows`` (store-ScQ9SjOe.js:647). Grepped the dist's cron modules
-    (store-ScQ9SjOe.js, run-log-DIhrTrSU.js, key-BBZ40bDq.js) for unlink/rm/writeFile: there
+    (store-ScQ9SjOe.js, run-log-DIhrTrSU.js, key-BBZ40bDq.mjs) for unlink/rm/writeFile: there
     are none, so nothing ever removes a stale jobs.json. An install that predates the SQLite
     migration therefore keeps a file that the runtime no longer reads, and differencing run
     logs against it makes live jobs look erased.

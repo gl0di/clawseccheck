@@ -100,8 +100,8 @@ docstring explains):
   simply absent from the AND, never approximated.
 * glob patterns other than a bare ``*`` interior wildcard are handled (``_matches`` below is
   the same compiled-regex approach ``toolpolicy.py::_matches`` already carries, grounded
-  against ``glob-pattern-DFVWJ-hh.js``) — this is modelled, not skipped; listed here only to
-  say explicitly that it is NOT one of the omissions.
+  against ``glob-pattern-DFVWJ-hh.mjs`` — openclaw@2026.9.3) — this is modelled, not
+  skipped; listed here only to say explicitly that it is NOT one of the omissions.
 
 An unreadable/empty config is not evidence of a grant: ``granted()`` returns ``False`` for
 ``cfg`` that is not a non-empty ``dict``, a DELIBERATE divergence from the vendor (which
@@ -200,7 +200,9 @@ _CORE_TOOL_PROFILES = {
 }
 
 _DEFAULT_AGENT_ID = "main"
-# normalizeAgentId (dist agent-id-CeT3w4ap.js). Two-branch, unlike toolpolicy.py's own
+# normalizeAgentId (dist agent-id-GA8mwdTG.mjs, openclaw@2026.9.3 — the bundle graph
+# reshuffled around it, but the function body is byte-identical to the old
+# agent-id-CeT3w4ap.js). Two-branch, unlike toolpolicy.py's own
 # single-branch approximation: an id that ALREADY matches VALID_ID_RE is returned merely
 # lowercased (a trailing/leading dash survives, e.g. "a-" -> "a-"); only an id that fails
 # the pattern goes through the invalid-char-fold + dash-strip + 64-char-truncate slow path.
