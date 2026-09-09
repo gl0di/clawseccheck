@@ -95,7 +95,8 @@ def test_phase_result_to_json_sanitizes_and_rounds_elapsed():
 
 class _FakeSweep:
     def __init__(self, *, no_roots=False, no_targets=False, complete=True,
-                has_fail=False, counts=None, not_scanned=None):
+                has_fail=False, counts=None, not_scanned=None,
+                discovery_incomplete_reasons=None):
         self.no_roots = no_roots
         self.no_targets = no_targets
         self.complete = complete
@@ -103,6 +104,7 @@ class _FakeSweep:
         self._counts = counts or {"total": 0, "fails": 0, "warns": 0, "safe": 0,
                                   "truncated": 0, "skipped": 0}
         self._not_scanned = not_scanned or []
+        self.discovery_incomplete_reasons = discovery_incomplete_reasons or []
 
     def counts(self):
         return self._counts
@@ -133,6 +135,56 @@ def test_record_skill_sweep_carries_has_fail_and_not_scanned():
     assert p.elapsed_s == 2.5
     assert "1 dangerous" in p.detail
     assert p.section is False  # the caller already printed this section
+
+
+def test_record_skill_sweep_discloses_discovery_gap_with_no_row_level_issues():
+    """B-787: `complete` can be False purely from `discovery_incomplete_reasons` --
+    the WALK that finds targets didn't finish -- with every discovered row scanning
+    cleanly (truncated=0, skipped=0, notScanned=[]). Before the fix, `detail` named
+    no reason at all here, so a --full --json reader saw complete: false next to a
+    detail sentence that read as fully clean."""
+    sweep = _FakeSweep(
+        complete=False,
+        counts={"total": 40, "fails": 1, "warns": 2, "safe": 37,
+                "truncated": 0, "skipped": 0},
+        discovery_incomplete_reasons=["skill discovery under '/x' stopped early"],
+    )
+    p = pl.record_skill_sweep(sweep)
+    assert p.complete is False
+    assert p.not_scanned == []
+    assert "stopped early" in p.detail
+    # Still one sentence (docs/OUTPUT_SCHEMA.md's documented shape): exactly one
+    # trailing period, not a second sentence appended after it.
+    assert p.detail.count(".") == 1
+    assert p.detail.endswith(".")
+
+
+def test_record_skill_sweep_discovery_gap_note_capped_and_counted():
+    reasons = [f"reason {i}" for i in range(5)]
+    sweep = _FakeSweep(complete=False, discovery_incomplete_reasons=reasons)
+    p = pl.record_skill_sweep(sweep)
+    assert "reason 0" in p.detail
+    assert "reason 2" in p.detail
+    assert "reason 3" not in p.detail
+    assert "+2 more" in p.detail
+
+
+def test_record_skill_sweep_no_roots_still_discloses_discovery_gap():
+    """The gap can fire even with checked_dirs empty (a config-declared root that
+    could not be walked at all) -- covered separately from the counts branch since
+    no_roots/no_targets build `detail` differently."""
+    sweep = _FakeSweep(no_roots=True, complete=False,
+                       discovery_incomplete_reasons=["synthetic gap"])
+    p = pl.record_skill_sweep(sweep)
+    assert "no skills directory" in p.detail
+    assert "synthetic gap" in p.detail
+
+
+def test_record_skill_sweep_silent_about_discovery_gap_when_absent():
+    sweep = _FakeSweep(counts={"total": 2, "fails": 0, "warns": 0, "safe": 2,
+                               "truncated": 0, "skipped": 0})
+    p = pl.record_skill_sweep(sweep)
+    assert "could not enumerate" not in p.detail
 
 
 # ---------------------------------------------------------------------------

@@ -275,9 +275,9 @@ def record_skill_sweep(sweep, *, elapsed_s: float = 0.0) -> PhaseResult:
     if sweep is None:
         return _skipped(PHASE_SKILL_SWEEP, "not run.", section=False)
     if sweep.no_roots:
-        detail = "no skills directory found — nothing to sweep."
+        detail = "no skills directory found — nothing to sweep"
     elif sweep.no_targets:
-        detail = "no installed skills found — nothing to sweep."
+        detail = "no installed skills found — nothing to sweep"
     else:
         c = sweep.counts()
         detail = (f"{c['total']} installed skill(s) vetted — {c['fails']} dangerous, "
@@ -286,7 +286,27 @@ def record_skill_sweep(sweep, *, elapsed_s: float = 0.0) -> PhaseResult:
             detail += f", {c['truncated']} partially scanned"
         if c["skipped"]:
             detail += f", {c['skipped']} not scanned (budget exceeded)"
-        detail += "."
+    # B-787: `complete` (below) can be False from `discovery_incomplete_reasons` alone
+    # — the WALK that finds targets didn't finish (a permission-denied skill root, a
+    # discovery/collection cap) — with every row above scanning cleanly, so nothing in
+    # the counts/not_scanned clauses above names it. Without this, a --full --json
+    # reader sees complete: false next to a detail sentence that lists zero skipped/
+    # truncated targets and reads as fully clean. Applies to all three branches above
+    # (including no_roots/no_targets: an empty result from a walk that could not finish
+    # is not the same claim as one that finished and genuinely found nothing — see
+    # sweep_installed_skills's own docstring in cli.py). Same reasons cli.py's own
+    # _discovery_gap_note/_discovery_gap_suffix already disclose for the text/--quiet
+    # paths; this is the one surface that hadn't (not reused directly -- pipeline.py is
+    # Layer 3 and cli.py is Layer 4, so pipeline.py must not import from it). Folded
+    # into the SAME sentence as a trailing clause, not a second sentence: `detail` is
+    # documented (docs/OUTPUT_SCHEMA.md) as one plain-English sentence.
+    reasons = list(getattr(sweep, "discovery_incomplete_reasons", None) or [])
+    if reasons:
+        shown = reasons[:3]
+        extra = f" (+{len(reasons) - len(shown)} more)" if len(reasons) > len(shown) else ""
+        detail += (" — coverage may be missing target(s) the scan could not enumerate: "
+                  + "; ".join(shown) + extra)
+    detail += "."
     return PhaseResult(
         name=PHASE_SKILL_SWEEP,
         status=STATUS_RAN,
