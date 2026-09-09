@@ -749,6 +749,33 @@ SARIF: the vetting modes additionally carry the dossier roll-up on
 `runs[0].properties.vetProfile` and tag each result with `properties.axis` — both additive
 (the per-finding `results` stay finding-oriented).
 
+### `--vet-all --json` (mass sweep, C-516)
+
+`--vet-all` sweeps every installed skill and vets each one; **since C-516** it supports
+`--json` like every other vet-* mode does. The envelope wraps one §11 per-skill payload
+(`mode: "vet-all"` on each, otherwise byte-identical in shape to a single `--vet-skill
+--json` call on that same target) per skill the sweep vetted, plus a top-level completeness
+signal — the same `discoveryIncompleteReasons` vocabulary a `--full --json` run's
+`phases[]` skill-sweep entry uses (§1) — so a script consuming a mass-vet result gets the
+same "was this actually a full sweep" disclosure a human reader gets from the printed
+aggregate summary, rather than silently trusting an empty/short `skills` array as "nothing
+else installed."
+
+| Field | Type | Description |
+|---|---|---|
+| `tool` | `str` | Always `"clawseccheck"`. |
+| `version` | `str` | Tool version string. |
+| `mode` | `str` | Always `"vet-all"`. |
+| `complete` | `bool` | `false` when the sweep could not confirm it discovered/scanned everything (a permission-denied skill root, a discovery cap, a per-skill scan-budget truncation) — the same signal `SkillSweep.complete` reports to the text/`--quiet` paths. |
+| `discoveryIncompleteReasons` | `array[str]` | Named reasons behind `complete: false`, when the gap is at the discovery-walk level (a target the walk never reached, so it cannot appear in `notScanned` either). Empty when the sweep completed cleanly. |
+| `notScanned` | `array[str]` | Every target this sweep found but could not vouch for (SKIPPED/TRUNCATED rows) — distinct from `discoveryIncompleteReasons`, which covers targets the walk never found at all. Empty when nothing was skipped. |
+| `skills` | `array[object]` | One §11-shaped vet payload per skill the sweep vetted, in sweep order. Empty when no installed skill was found (`complete`/`discoveryIncompleteReasons` still tell you why). |
+
+Exit code: `1` if `complete` is `false` (the sweep has no basis to claim a clean fleet), else
+`1` if the worst per-skill row status is not `PASS`/`UNKNOWN`; `0` only when the sweep is
+complete and the worst row is `PASS`/`UNKNOWN` — the same binary rule the text `--vet-all`
+path already used (`SkillSweep.truncated`/`SkillSweep.worst`), unaffected by `--json`.
+
 ---
 
 ### `--advise` keys (mode `"advise"`)

@@ -35,7 +35,7 @@ from .brand import (
     grade_ansi, grade_hex,
 )
 from .dedup import deduplicate_findings
-from .dossier import AXIS_LABEL
+from .dossier import AXIS_LABEL, build_profile
 from .guide import suggest_actions
 from .layers import (
     COVERAGE_COMPLETE,
@@ -4629,13 +4629,12 @@ _AXIS_ICON_ASCII = {"FAIL": "[X]", "WARN": "[!]", "PASS": "[OK]", "UNKNOWN": "[?
 _TOP_FIX_ORDER = {"FAIL": 0, "WARN": 1, "UNKNOWN": 2, "PASS": 3, "N/A": 4}
 
 
-def render_vet_json(profile, *, mode: str, version: str) -> str:
-    """Machine-readable risk dossier for the vetting modes (--vet / --vet-* ).
-
-    `mode` is the sub-command ("vet" / "vet-plugin" / "vet-mcp" / "vet-source"); the target
-    and everything else come from the ``VetProfile``. The envelope keeps the frozen
-    per-finding shape (`_finding_to_dict`) and adds the axis breakdown + Mode C's
-    install-recommendation verdict.
+def _vet_json_payload(profile, *, mode: str, version: str) -> dict:
+    """The dict `render_vet_json` dumps to a string -- extracted (C-516) so a caller that
+    needs several of these nested inside a larger envelope (`render_vet_all_json`, one per
+    swept skill) can build the dict directly instead of stringifying-then-reparsing N
+    single-target JSON blobs. Not sanitized here -- both callers sanitize the whole tree
+    once, after assembly, the same way `render_vet_json` always has.
 
     C427: NO letter grade / numeric score here. ``profile.verdict`` is
     ``dossier.verdict_for(profile.overall_status)``, computed once in `build_profile` --
@@ -4643,7 +4642,7 @@ def render_vet_json(profile, *, mode: str, version: str) -> str:
     them can drift out of agreement. ``profile.overall_grade`` / ``profile.score`` stay
     internal to the dossier's own cap machinery; do not add them back to this payload.
     """
-    payload = {
+    return {
         "tool": "clawseccheck",
         "version": version,
         "mode": mode,
@@ -4662,6 +4661,54 @@ def render_vet_json(profile, *, mode: str, version: str) -> str:
         ],
         "findings": [_finding_to_dict(f) for f in profile.findings],
         "unmapped": list(profile.unmapped),
+    }
+
+
+def render_vet_json(profile, *, mode: str, version: str) -> str:
+    """Machine-readable risk dossier for the vetting modes (--vet / --vet-* ).
+
+    `mode` is the sub-command ("vet" / "vet-plugin" / "vet-mcp" / "vet-source"); the target
+    and everything else come from the ``VetProfile``. The envelope keeps the frozen
+    per-finding shape (`_finding_to_dict`) and adds the axis breakdown + Mode C's
+    install-recommendation verdict.
+    """
+    return json.dumps(_sanitize_tree(_vet_json_payload(profile, mode=mode, version=version)),
+                      ensure_ascii=True, indent=2)
+
+
+def render_vet_all_json(sweep, *, version: str) -> str:
+    """Machine-readable envelope for `--vet-all --json` (C-516) -- one
+    `_vet_json_payload`-shaped entry per installed skill the sweep vetted, wrapped in a
+    top-level completeness signal so a machine consumer gets the same "was this actually a
+    full sweep" disclosure a human reader gets from `_sweep_summary_lines`' printed
+    aggregate. Every other vet-* mode (--vet-skill/--vet-plugin/--vet-mcp/--vet-source)
+    already supports --json via `render_vet_json` above; --vet-all was the one left
+    text-only, not for any structural reason -- `sweep.findings` already carries exactly
+    what each single-target call builds a profile from.
+
+    Duck-typed on `sweep`'s published surface (`findings` / `complete` /
+    `discovery_incomplete_reasons` / `not_scanned()`), not `cli.SkillSweep` imported
+    directly -- report.py is Layer 3, cli.py is Layer 4 and already imports this module,
+    so importing the dataclass back would cycle. Same constraint, same fix, as
+    `pipeline.py::record_skill_sweep`'s identical duck-typing (see its own docstring).
+
+    `discoveryIncompleteReasons` reuses the exact signal B-787 taught
+    `--full --json`'s skill-sweep phase to disclose -- one completeness vocabulary, not a
+    second one invented for this surface.
+    """
+    skills = [
+        _vet_json_payload(build_profile(finding, path, "skill"), mode="vet-all", version=version)
+        for _name, path, finding in sweep.findings
+    ]
+    payload = {
+        "tool": "clawseccheck",
+        "version": version,
+        "mode": "vet-all",
+        "complete": bool(getattr(sweep, "complete", True)),
+        "discoveryIncompleteReasons": list(
+            getattr(sweep, "discovery_incomplete_reasons", None) or []),
+        "notScanned": list(sweep.not_scanned()),
+        "skills": skills,
     }
     return json.dumps(_sanitize_tree(payload), ensure_ascii=True, indent=2)
 

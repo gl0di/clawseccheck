@@ -139,6 +139,12 @@ _NOT_DRIVEN = {
     "report._dossier_top_fix": "needs a VetProfile; reads axis statuses, normalised upstream",
     "report.render_vet_dossier": "needs a VetProfile; reads axis statuses, normalised upstream",
     "report.render_vet_json": "needs a VetProfile; reads axis statuses, normalised upstream",
+    # C-516: the dict-building body render_vet_json used to contain directly, extracted so
+    # render_vet_all_json (--vet-all --json) can build the same per-skill shape without a
+    # stringify/reparse round-trip. Same VetProfile-shaped input, same axis statuses already
+    # normalised by dossier._axis_status upstream -- identical exemption reason, not a new
+    # blind site.
+    "report._vet_json_payload": "needs a VetProfile; reads axis statuses, normalised upstream",
     "dossier._axis_status": "IS the normaliser; its own contract is pinned in test_b751_fail_weight",
     "dossier._danger_coverage_gap": "operates on an axis bucket, downstream of the normaliser",
     "dossier._grade_profile": "operates on already-normalised axis statuses",

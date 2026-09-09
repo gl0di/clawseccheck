@@ -29,7 +29,7 @@ from . import (
     audit, fingerprint, load_events, load_ignore, load_state, make_canary, record_events,
     render_canary, render_card, render_dashboard, render_dashboard_findings, render_events,
     render_json, render_monitor,
-    render_report, render_svg, render_vet_json, save_state, snapshot,
+    render_report, render_svg, render_vet_all_json, render_vet_json, save_state, snapshot,
     vet_mcp, vet_plugin, vet_skill, vet_source,
 )
 from . import __released__, __version__
@@ -1071,23 +1071,36 @@ def vet_all(
     home_dir: Path,
     ascii_only: bool = False,
     sweep_budget_s: float = DEFAULT_VET_ALL_BUDGET_S,
+    json_output: bool = False,
 ) -> int:
     """``--vet-all``: sweep every installed skill and render the result.
 
     Thin shell over :func:`sweep_installed_skills` (which owns the discovery, the
-    budget and the per-target verdicts) plus :func:`_sweep_summary_lines`. Returns
-    0 if every finding is PASS/UNKNOWN and nothing was left unscanned, else 1.
+    budget and the per-target verdicts) plus :func:`_sweep_summary_lines` /
+    :func:`render_vet_all_json` (C-516 -- --vet-all was the one vet-* mode with no
+    --json support; every other one already routes through `render_vet_json`).
+    Returns 0 if every finding is PASS/UNKNOWN and nothing was left unscanned, else 1.
     """
+    # json_output suppresses live per-skill narration during the sweep itself --
+    # interleaving prose before the JSON blob would make stdout not parse as JSON.
     sweep = sweep_installed_skills(home_dir, ascii_only=ascii_only,
-                                   sweep_budget_s=sweep_budget_s, narrate=True)
+                                   sweep_budget_s=sweep_budget_s, narrate=not json_output)
     if sweep.no_targets:
         # B-404: "no targets" is not "clean" when discovery itself could
         # not be confirmed complete (e.g. a permission-denied skill root) — that has
         # no basis for the same 0 a genuinely-empty, fully-enumerated fleet gets. The
-        # reason was already narrated above (sweep_installed_skills ran narrate=True).
+        # reason was already narrated above when narrate=True; the json_output branch
+        # still emits the envelope (empty "skills", real complete/
+        # discoveryIncompleteReasons) rather than staying silent -- a --json caller has
+        # nowhere else to read the completeness signal from.
+        if json_output:
+            _emit(render_vet_all_json(sweep, version=__version__))
         return 1 if sweep.truncated else 0
-    for line in _sweep_summary_lines(sweep, ascii_only=ascii_only):
-        _emit(line)
+    if json_output:
+        _emit(render_vet_all_json(sweep, version=__version__))
+    else:
+        for line in _sweep_summary_lines(sweep, ascii_only=ascii_only):
+            _emit(line)
 
     # F-148 return-code decision: a truncated sweep must NOT return the same 0 a
     # fully-clean sweep would. 0 asserts "checked everything, found nothing" — but
@@ -1680,6 +1693,12 @@ _MODE_HONORS = {
     "vet_plugin": frozenset({"json"}),
     "vet_mcp": frozenset({"json"}),
     "vet_source": frozenset({"json"}),
+    # C-516: was the one vet-* mode left without --json support -- see vet_all()'s
+    # own docstring and render_vet_all_json (report.py).
+    "vet_all": frozenset({"json"}),
+    # C-516: was the one vet-* mode left without --json support -- see vet_all()'s
+    # own docstring and render_vet_all_json (report.py).
+
     "advise": frozenset({"json"}),
     # F-153: --dashboard --full renders the whole combined pipeline report (the
     # phases --full itself runs); --compact only ever modifies THAT combined render.
@@ -3716,7 +3735,7 @@ def _main(argv=None) -> int:
 
     if _mode == "vet_all":
         home_dir = Path(args.home).expanduser()
-        return vet_all(home_dir, ascii_only=ascii_only)
+        return vet_all(home_dir, ascii_only=ascii_only, json_output=bool(args.json))
 
     if _mode == "vet_mcp":
         return _run_vet_mcp(args.vet_mcp if args.vet_mcp else None, args, ascii_only)
