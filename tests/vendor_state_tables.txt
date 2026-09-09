@@ -1,11 +1,11 @@
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
-# openclaw-version: 2026.9.2
-# state-schema-version: 15
-# generated: 2026-09-06
-# tables: 122
+# openclaw-version: 2026.9.3
+# state-schema-version: 16
+# generated: 2026-09-09
+# tables: 125
 #
-# source-bundle: openclaw-state-db-cache-C7ljO0xP.js
+# source-bundle: openclaw-state-db-BhP9yXdl.mjs
 #   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
 #   is build output and rotates between releases, so it is evidence, not a locator.
 #
@@ -81,6 +81,8 @@ gateway_restart_intent
 gateway_restart_sentinel
 github_personal_publication_requests
 github_publication_requests
+github_publication_session_lifecycles
+github_repository_publication_requests
 macos_port_guardian_records
 managed_outgoing_image_records
 mcp_oauth_pending_authorizations
@@ -109,6 +111,7 @@ sandbox_registry_entries
 schema_meta
 secret_store_entries
 session_groups
+session_repository_workspaces
 session_state_events
 session_state_heads
 session_upstream_links
