@@ -1024,7 +1024,7 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
                 else "is the only declared tools.profile (no global tools.profile is set)"
             )
             evidence.append(
-                f"grant includes a per-agent tools.profile that {widen_desc} (B-409): "
+                f"grant includes a per-agent tools.profile that {widen_desc}: "
                 + ", ".join(f'{path}="{profile}"' for path, profile in widenings)
             )
         return _finding(
@@ -1499,8 +1499,7 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                     else "is the only declared tools.profile (no global tools.profile is set)"
                 )
                 ev.append(
-                    f"grant traces to a per-agent tools.profile that {widen_desc} "
-                    "(B-409): "
+                    f"grant traces to a per-agent tools.profile that {widen_desc}: "
                     + ", ".join(f'{path}="{profile}"' for path, profile in widenings)
                     + " -- not an explicit global write/edit/apply_patch grant, and "
                     "the seven still-unread narrowing layers (per-agent allow/deny, "

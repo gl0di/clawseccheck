@@ -575,7 +575,7 @@ def check_behavioral_trifecta(
             "Review the trajectory sidecar for the named thread(s) manually. This is "
             "proof-by-log that an ingress-classified action, a sensitive-data action, "
             "and an egress action ran in that temporal order, in one thread. Verb order "
-            "alone does not prove data actually flowed between them (B-416): three "
+            "alone does not prove data actually flowed between them: three "
             "causally-unrelated actions in an ordinary workflow can satisfy this shape, "
             "so treat it as a lead to review manually, not confirmed exfiltration.",
             firing[:6],

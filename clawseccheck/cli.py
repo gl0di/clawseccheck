@@ -3136,14 +3136,14 @@ def _main(argv=None) -> int:
                         "and exit; add --full to render the WHOLE combined pipeline report "
                         "(Skills/Plugins/MCP vet, RISK chains, behavioural replay, "
                         "adjudication, coverage, worth-a-glance) in one fixed-order card "
-                        "instead of --full's own separate appended sections (F-153)")
+                        "instead of --full's own separate appended sections")
     p.add_argument("--compact", action="store_true",
                    help="only with --dashboard --full: a condensed, ~4096-char "
                         "Telegram-safe layout of the combined pipeline report — headline "
                         "counts only for Plugins/MCP/RISK chains, trimmed why-text/no "
                         "evidence bullets for Findings and Worth-a-glance (nothing "
                         "dropped, just condensed), plus a pointer to --save/--html for "
-                        "the full detail (F-153; named --compact rather than the spec's "
+                        "the full detail (named --compact rather than the spec's "
                         "suggested --card, which already means the shareable "
                         "grade+score+trifecta badge above)")
     p.add_argument("--dashboard-findings", action="store_true",

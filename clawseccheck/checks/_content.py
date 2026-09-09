@@ -7971,7 +7971,7 @@ def check_conditional_sleeper_trigger(ctx: Context) -> Finding:
         return _finding(
             "B65",
             WARN,
-            "Potential conditional sleeper-trigger directive(s) detected (C-080): "
+            "Potential conditional sleeper-trigger directive(s) detected: "
             + "; ".join(evidence[:4]),
             "Remove hidden conditional actions that execute on user-trigger phrases. "
             "Keep sensitive behavior explicit, permission-gated, and impossible to "
@@ -10244,7 +10244,7 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
         return _finding(
             "B66",
             WARN,
-            "Persona / role jailbreak indicator detected (C-078): " + "; ".join(evidence[:4]),
+            "Persona / role jailbreak indicator detected: " + "; ".join(evidence[:4]),
             "Remove role-switch instructions that attempt to reset constraints "
             "or inject a low-trust persona. Enforce fixed policy boundaries: "
             "system constraints should remain the top authority.",
@@ -10631,7 +10631,7 @@ def check_silent_instruction(ctx: Context) -> Finding:
             "from the user, remove it. If it is documentation describing an attack "
             "pattern, wrap it in a fenced code block AND annotate it as a non-executable "
             "example (a nearby 'do NOT do this' / 'example only' note) — a bare fence no "
-            "longer dampens the finding on its own (B-097).",
+            "longer dampens the finding on its own.",
             warn_ev,
             severity=MEDIUM,
         )
