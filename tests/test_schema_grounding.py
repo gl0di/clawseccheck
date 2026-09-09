@@ -1734,11 +1734,19 @@ def _dist_schema_consts_at(dist_dir: str) -> dict:
     zod-schema modules. The schema is spread over several of them (`ToolsSchema` lives in
     `zod-schema.agent-runtime-*.js`, not the main module), so all are read as one namespace.
 
+    Two glob patterns, not one: OpenClaw 2026.9.3 renamed all six zod-schema modules from
+    `.js` to `.mjs` (8.2/9.1/9.2 all shipped `.js`) with no schema change behind it — a pure
+    build-output shift. Anchoring on one extension made this layer parse zero consts on 9.3
+    and trip the anti-vacuity guard below as if the schema had been reshaped (B-782).
+
     Cached on the directory PATH rather than on nothing, so a test that repoints
     `OPENCLAW_DIST` gets a fresh parse instead of the previous directory's schema. Callers
     must treat the result as read-only — it is shared."""
     consts: dict = {}
-    for js_file in sorted(Path(dist_dir).glob("zod-schema*.js")):
+    dist_files = sorted(Path(dist_dir).glob("zod-schema*.js")) + sorted(
+        Path(dist_dir).glob("zod-schema*.mjs")
+    )
+    for js_file in dist_files:
         code = _blank_js_noncode(js_file.read_text(encoding="utf-8", errors="replace"))
         for match in re.finditer(r"(?m)^(?:const|let|var)\s+(" + _JS_IDENT + r")\s*=\s*", code):
             start, depth, i = match.end(), 0, match.end()
@@ -1793,7 +1801,7 @@ def _require_dist() -> dict:
     # this layer must say so rather than quietly grade every path against an empty schema —
     # a guard that can silently see nothing is worse than no guard (B-251).
     assert DIST_ROOT_SCHEMA in consts, (
-        f"'{DIST_ROOT_SCHEMA}' was not found in {OPENCLAW_DIST}/zod-schema*.js "
+        f"'{DIST_ROOT_SCHEMA}' was not found in {OPENCLAW_DIST}/zod-schema*.{{js,mjs}} "
         f"({len(consts)} top-level schema consts parsed). The installed OpenClaw has "
         "reshaped its config schema; re-ground DIST_ROOT_SCHEMA before trusting this layer."
     )
@@ -2242,7 +2250,10 @@ def _write_dist_snapshot() -> int:
     """Regenerate DIST_SNAPSHOT_FILE from the installed dist. Returns the path count."""
     import json
 
-    consts = _dist_schema_consts()
+    # Through _require_dist(), not a bare consts[DIST_ROOT_SCHEMA]: a future reshape/rename
+    # must fail with the same descriptive AssertionError this layer gives everywhere else,
+    # not a bare KeyError that names neither the missing schema nor why (B-782).
+    consts = _require_dist()
     root = consts[DIST_ROOT_SCHEMA]
     verified = sorted(p for p in _parse_manifest_paths() if _dist_accepts(p, root, consts))
     pkg = OPENCLAW_DIST.parent / "package.json"
