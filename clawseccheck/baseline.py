@@ -75,6 +75,26 @@ def apply(findings, ignore: set[str]) -> None:
             f.suppressed = True
 
 
+def dead_entries(findings, ignore: set[str]) -> set[str]:
+    """B-769: fingerprint-form *ignore* entries that matched no finding this run.
+
+    Only fingerprint entries (``<id>:<8-hex>``) can go dead — a bare id always
+    matches its own check's Finding object regardless of status, since every
+    registered check contributes exactly one Finding per run. A fingerprint stops
+    matching when either the underlying issue was genuinely repaired (the good
+    case) or the check's own `detail` wording changed under a ClawSecCheck
+    upgrade (measured directly: 14 checks' fingerprints moved between two real
+    releases over the same two fixture homes) — in the second case the same
+    problem is silently un-suppressed and returns as a fresh, unexplained
+    finding. Call this AFTER `apply()` has run, over the same *findings*/*ignore*
+    pair, so the two can never disagree about what matched.
+    """
+    if not ignore:
+        return set()
+    live = {fingerprint(f) for f in findings}
+    return {e for e in ignore if is_fingerprint(e) and e not in live}
+
+
 def append_entries(home: Path | str, entries, *, comment: str | None = None) -> int:
     """Append *entries* to ``<home>/.clawseccheckignore``, creating it if absent.
 

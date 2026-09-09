@@ -3413,6 +3413,24 @@ def render_report(findings: list[Finding], score: ScoreResult,
                     " review your ignore list."
                 )
 
+    # B-769: a fingerprint entry that matches nothing this run, surfaced in the
+    # ORDINARY run rather than only under the opt-in --show-suppressed. Either the
+    # issue was repaired (fine, the entry is just stale) or the check's own wording
+    # changed under an upgrade and the same problem is back as a fresh, unsuppressed
+    # finding the reader has no reason to connect to the old entry. Both are worth
+    # one line; only the second is worth investigating.
+    _dead = sorted(getattr(ctx, "dead_ignore_entries", None) or []) if ctx is not None else []
+    if _dead:
+        _dead_shown = _dead[:6]
+        _dead_extra = f" (+{len(_dead) - len(_dead_shown)} more)" if len(_dead) > len(_dead_shown) else ""
+        lines.append(
+            f"({len(_dead)} .clawseccheckignore entr{'y' if len(_dead) == 1 else 'ies'} "
+            "no longer match any finding: " + ", ".join(_dead_shown) + _dead_extra
+            + " — either the issue was fixed, or the check's wording changed and the same"
+            " problem is back under a new fingerprint. Run --show-suppressed to confirm"
+            " which, or remove the stale entry.)"
+        )
+
     if native is not None:
         lines.append("--- Also from OpenClaw's built-in `security audit` ---")
         if getattr(native, "status", "") == "ok":
@@ -5567,6 +5585,13 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     _cfg_reason = getattr(ctx, "config_parse_reason", None) if ctx is not None else None
     payload["config_parse_reason"] = _sanitize(_cfg_reason) if _cfg_reason else None
     payload["errors"] = [_sanitize(e) for e in getattr(ctx, "errors", [])] if ctx is not None else []
+    # B-769: same fact as the text report's dead-suppression note, structurally --
+    # a fingerprint .clawseccheckignore entry that matched no finding this run.
+    # Always present (empty list when none), matching this payload's own convention
+    # for "nothing to report" elsewhere (e.g. selfExcludedSkills in sarif.py).
+    payload["dead_ignore_entries"] = (
+        sorted(getattr(ctx, "dead_ignore_entries", None) or []) if ctx is not None else []
+    )
     # F-131 Phase 1: "Inventory by subject" — additive top-level key (design §4.6).
     # Presentation-only: never alters score/grade/findings above; empty/UNKNOWN-shaped
     # when ctx is unavailable (build_inventory's own ctx-is-None fallback).

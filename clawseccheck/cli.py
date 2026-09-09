@@ -43,6 +43,7 @@ from .checks import detect_vet_type_with_reason, resolve_skill_target
 from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
 from .checks import _credential_store_state
 from .invocation import _display_path, command_prefix
+from .locking import journal_lock
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
 from .monitor import (
@@ -2549,7 +2550,25 @@ def _chain_verdict(label: str, path: str, ok: "bool | None", msg: str,
     if ok is True:
         return f"{label} chain OK ({path}): {msg}", 0
     if ok is False:
-        return f"{label} chain BROKEN ({path}): {msg}", 1
+        # B-769: still BROKEN, still exit 1 -- an explicit --verify-* request gets a
+        # direct answer, per B-582's own reasoning above chain_provenance_note (the
+        # PASSIVE --trend/--watch-log viewer softens this; an explicit verify command
+        # does not). But "BROKEN" alone reads as an accusation, and configjournal.py's
+        # own doctrine (a SIBLING hash chain, OpenClaw's config-write journal) already
+        # measured that a broken link is not proof of tampering by itself: 2 of 42 real
+        # links were already broken from a hand edit outside the writer and two writes
+        # racing from a common base, and log rotation produces the identical shape.
+        # This chain's OWN writes are locked against that exact race now (B-108,
+        # locking.journal_lock) -- but that lock did not always exist, and cannot
+        # protect against a hand edit either. One added clause, not a softer verdict.
+        return (
+            f"{label} chain BROKEN ({path}): {msg}. A broken link is not proof of "
+            "tampering by itself -- a hand edit outside this tool's own writer, log "
+            "rotation, or two writes racing from the same point can all produce the "
+            "identical shape. Investigate (who else writes here, was this rotated or "
+            "edited) before concluding an attack.",
+            1,
+        )
     lines = [f"{label} chain NOT VERIFIED ({path}): {msg}"]
     # WHICH sentence follows is decided by whether anything is actually there, not by
     # whether the user typed the flag. An independent pass caught the first version doing
@@ -3181,6 +3200,25 @@ def _main(argv=None) -> int:
                    help="also write INFO-level log output to PATH (only when given; "
                         "raises the FILE's level to INFO, never the console's — pass "
                         "--verbose/--debug for that)")
+    # B-769: --fail-under was REMOVED (C-426), not deprecated-in-place -- it
+    # thresholded the audit SCORE, which the five-layer rule may withhold entirely,
+    # so there was no honest way to keep it parseable (see --fail-on's own comment
+    # above). argparse's generic "unrecognized arguments: --fail-under N" names
+    # nothing a CI owner debugging a failed pipeline at 3am can act on. Intercepted
+    # here, before argparse ever sees it, so the message names the replacement.
+    # Routed through p.error() (usage block + message, sys.exit(2)) rather than a
+    # bare print+return -- the same convention argparse already uses for every other
+    # malformed invocation, so this stays a SystemExit like its neighbours instead
+    # of introducing a second "bad usage" calling convention. Exit code 2 is already
+    # distinct from the 1 a real --fail-on/--exit-code security trip returns.
+    _raw_argv = argv if argv is not None else sys.argv[1:]
+    if any(a == "--fail-under" or a.startswith("--fail-under=") for a in _raw_argv):
+        p.error(
+            "--fail-under was removed -- use --fail-on SEVERITY instead "
+            "(critical/high/medium/low; it gates on findings directly, which a run can "
+            "always report, rather than the score, which the five-layer rule may "
+            "withhold entirely). See CHANGELOG.md."
+        )
     args = p.parse_args(argv)
     # C-419: --monitor writes THREE files and --history defaulted independently of the
     # other two, so redirecting only --state/--events silently kept writing into the real
@@ -5051,54 +5089,90 @@ def _main(argv=None) -> int:
         # lines up already established that leaving a baseline un-advanced is how drift
         # survives a failed write, and this is the same shape chosen deliberately.
         _probe = bool(getattr(args, "probe", False))
-        journal_err = (record_events(alerts, args.events)
-                       if not (_skip_live_test_persist or _probe) else None)
-        state_err = None
-        # F-155: an unseeded VULNERABLE verdict must never be recorded, so the baseline
-        # advance is skipped exactly like a write failure would skip it — except this is
-        # not a failure (state_err stays None; no stderr, no non-zero exit below).
-        if journal_err is None and not _skip_live_test_persist and not _probe:
-            try:
-                save_state(args.state, snap)
-            except OSError as exc:
-                state_err = str(exc)
-        persisted = (journal_err is None and state_err is None
-                     and not _skip_live_test_persist and not _probe)
-        # F-173 Part B: an off-machine anchor for the baseline — on screen always, in the
-        # event chain only when it MOVED.
-        #
-        # Read back from disk after the save (not fingerprinted from `snap` in memory), so
-        # a short write that left the file truncated fails here instead of matching.
-        #
-        # Journaled AFTER save_state, which is the reverse of the B-278 order above —
-        # deliberately, and without conflicting with it. B-278 journals first so a failed
-        # journal cannot let the baseline advance past unrecorded drift. This entry makes a
-        # claim ABOUT the file on disk, so writing it before the save would assert
-        # something not yet true, and a failed save would leave a record of a baseline that
-        # never existed.
-        #
-        # Gated on the value having CHANGED, and that gate is load-bearing. An earlier
-        # version journaled unconditionally and broke three things at once: two tests that
-        # pin "a first monitor run journals nothing", `--brief`'s event count (a daily cron
-        # would report "365 event(s) recorded" over a timeline of nothing), and the
-        # journal's own 5,000-line retention, which would start evicting the genuine drift
-        # alerts a quiet machine had kept.
-        #
-        # A failure here is NOT `MONITORING NOT ESTABLISHED`: the baseline is saved and
-        # drift detection works. What is lost is one local record of the anchor, which is
-        # worth a line on stderr and nothing more.
-        _reference = baseline_reference(args.state)[0] if persisted else ""
-        _prev_reference = snapshot_reference(prev)
-        # `_prev_reference` empty means there was no prior baseline to move FROM — a first
-        # run, or one whose baseline was corrupt. Treating that as "the value changed" is
-        # what a first version did, and it journaled on a first run, which two existing
-        # tests pin as writing nothing. The reference still reaches the user: the screen is
-        # where they get it, and the journal is where its LATER movements are recorded.
-        if _reference and _prev_reference and _reference != _prev_reference:
-            _witness_err = record_events(baseline_witness_event(_reference), args.events)
-            if _witness_err is not None:
-                print(f"Note: the baseline was saved, but its reference value could not be "
-                      f"recorded in {args.events}: {_witness_err}", file=sys.stderr)
+        # B-769: two concurrent --monitor runs racing on the same stale on-disk
+        # baseline independently compute the identical `alerts` (diffed against
+        # `prev`, read above, before either process reaches here) and, without
+        # this, each would append its own copy to the journal and each write its
+        # own copy of `snap` as the new baseline -- duplicating a real event.
+        # record_events' OWN lock (B-108) protects only the events file's hash
+        # chain and releases before save_state ever runs, so a "has the baseline
+        # moved" check placed INSIDE it still races the LATER save_state call --
+        # tried first, and disproven directly against two real racing processes.
+        # The lock has to span the whole check-then-commit-then-witness
+        # sequence, on the ONE resource both processes actually contend over:
+        # the state file itself.
+        with journal_lock(args.state):
+            # True only when someone ELSE already advanced the baseline since
+            # THIS run read `prev`, above -- i.e. we lost the race. A first
+            # writer (the overwhelmingly common case) always sees this False:
+            # read_baseline() here reads the exact same file `prev` came from,
+            # untouched since. Deliberately read_baseline(), not load_state():
+            # both resolve identically on disk (load_state() is defined as
+            # read_baseline()[1]), but load_state is imported into this module
+            # from the package root while read_baseline is imported from
+            # .monitor -- two distinct names, so a test that patches only one
+            # of them (as tests/test_f176_monitor_machine_channel.py's _mock()
+            # does, patching cli.read_baseline to force a scenario) must not
+            # have this re-check silently read through the unpatched twin.
+            _baseline_moved = read_baseline(args.state)[1] != prev
+            if _baseline_moved:
+                # The writer that moved it already recorded both this
+                # transition and (below) its baseline witness -- this run
+                # has nothing new to add. Same no-op contract record_events
+                # already uses for "nothing to record".
+                journal_err = None
+                state_err = None
+            else:
+                journal_err = (record_events(alerts, args.events)
+                               if not (_skip_live_test_persist or _probe) else None)
+                state_err = None
+                # F-155: an unseeded VULNERABLE verdict must never be recorded, so the
+                # baseline advance is skipped exactly like a write failure would skip it —
+                # except this is not a failure (state_err stays None; no stderr, no
+                # non-zero exit below).
+                if journal_err is None and not _skip_live_test_persist and not _probe:
+                    try:
+                        save_state(args.state, snap)
+                    except OSError as exc:
+                        state_err = str(exc)
+            persisted = (journal_err is None and state_err is None
+                         and not _skip_live_test_persist and not _probe
+                         and not _baseline_moved)
+            # F-173 Part B: an off-machine anchor for the baseline — on screen always, in the
+            # event chain only when it MOVED.
+            #
+            # Read back from disk after the save (not fingerprinted from `snap` in memory), so
+            # a short write that left the file truncated fails here instead of matching.
+            #
+            # Journaled AFTER save_state, which is the reverse of the B-278 order above —
+            # deliberately, and without conflicting with it. B-278 journals first so a failed
+            # journal cannot let the baseline advance past unrecorded drift. This entry makes a
+            # claim ABOUT the file on disk, so writing it before the save would assert
+            # something not yet true, and a failed save would leave a record of a baseline that
+            # never existed.
+            #
+            # Gated on the value having CHANGED, and that gate is load-bearing. An earlier
+            # version journaled unconditionally and broke three things at once: two tests that
+            # pin "a first monitor run journals nothing", `--brief`'s event count (a daily cron
+            # would report "365 event(s) recorded" over a timeline of nothing), and the
+            # journal's own 5,000-line retention, which would start evicting the genuine drift
+            # alerts a quiet machine had kept.
+            #
+            # A failure here is NOT `MONITORING NOT ESTABLISHED`: the baseline is saved and
+            # drift detection works. What is lost is one local record of the anchor, which is
+            # worth a line on stderr and nothing more.
+            _reference = baseline_reference(args.state)[0] if persisted else ""
+            _prev_reference = snapshot_reference(prev)
+            # `_prev_reference` empty means there was no prior baseline to move FROM — a first
+            # run, or one whose baseline was corrupt. Treating that as "the value changed" is
+            # what a first version did, and it journaled on a first run, which two existing
+            # tests pin as writing nothing. The reference still reaches the user: the screen is
+            # where they get it, and the journal is where its LATER movements are recorded.
+            if _reference and _prev_reference and _reference != _prev_reference:
+                _witness_err = record_events(baseline_witness_event(_reference), args.events)
+                if _witness_err is not None:
+                    print(f"Note: the baseline was saved, but its reference value could not be "
+                          f"recorded in {args.events}: {_witness_err}", file=sys.stderr)
         # F-176: one boolean saying whether THIS run made every comparison this build knows
         # how to make — the machine-channel analogue of the scoped ✅ C-418 gave the human
         # report. Named `fully_compared`, never `complete`: a first run legitimately has

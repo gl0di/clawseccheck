@@ -576,6 +576,16 @@ class Context:
     config: dict = field(default_factory=dict)
     bootstrap: dict = field(default_factory=dict)   # filename -> text
     errors: list[str] = field(default_factory=list)
+    # B-769: fingerprint-form .clawseccheckignore entries that matched no finding THIS
+    # run -- populated by audit() (__init__.py) after baseline.apply(), via
+    # baseline.dead_entries(). Not filled by collect() itself: computing it needs the
+    # finding list, which does not exist yet at collection time. A bare-id entry can
+    # never appear here (it always matches its own check's Finding object regardless
+    # of status); only a fingerprint can go dead, which happens when the check's
+    # `detail` wording changed under the user's feet (a version upgrade) or the
+    # underlying issue was genuinely repaired -- either way, the suppression is now
+    # doing nothing, silently, and Golden Rule #4 says that is worth saying out loud.
+    dead_ignore_entries: set = field(default_factory=set)
     config_mode: int | None = None                  # octal perms of openclaw.json, or None
     config_found: bool = False                       # openclaw.json present (vs non-OpenClaw setup)
     config_parse_error: bool = False                 # openclaw.json present but unparseable (B-166)

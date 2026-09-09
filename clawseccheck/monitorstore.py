@@ -675,6 +675,17 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS,
     chain_hash and each append, which would otherwise leave a spurious
     "chain BROKEN" that neither writer actually caused.
 
+    B-769: that still leaves room for two concurrent ``--monitor`` runs to
+    DUPLICATE this function's content (not corrupt its chain): both diff against
+    the same stale on-disk baseline before either reaches here, and this
+    function's own lock only covers the events file, not the separate
+    ``save_state`` call that advances the baseline afterward — so a naive
+    "does state.json still match what I diffed against" check made HERE would
+    still race that later save. The actual fix is the caller's: cli.py now
+    holds ONE lock (on the state file) around the whole
+    check-baseline / record_events / save_state sequence — see the comment
+    there. This function is unchanged by that; it never needed to know.
+
     C-164: after appending, the file is opportunistically rotated (pruned +
     re-chained) once it exceeds the retention cap — see ``_rotate_journal``.
     """

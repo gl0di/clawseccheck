@@ -1,7 +1,11 @@
 """Baseline suppression via .clawseccheckignore."""
+import json as _json
+from pathlib import Path
+
 from clawseccheck import audit
-from clawseccheck.baseline import apply, fingerprint, load_ignore
+from clawseccheck.baseline import apply, dead_entries, fingerprint, load_ignore
 from clawseccheck.catalog import CRITICAL, FAIL, HIGH, PASS, WARN, Finding
+from clawseccheck.collector import Context
 from clawseccheck.report import render_json, render_report
 from clawseccheck.scoring import compute
 
@@ -154,10 +158,95 @@ def test_suppressed_critical_surfaced_in_sarif():
 
 def test_suppressed_non_critical_still_omitted_from_sarif():
     """A non-score-capping suppressed finding stays omitted from SARIF results."""
-    import json as _json
-
     from clawseccheck.sarif import render_sarif
     supp = _f("B14", "MEDIUM", WARN, "egress surface")
     supp.suppressed = True
     doc = _json.loads(render_sarif([supp], compute([supp]), tool_version="0.0.0"))
     assert doc["runs"][0]["results"] == []
+
+
+# ---- B-769: a fingerprint entry that matches nothing this run must not stay silent ----
+
+def test_dead_entries_only_fingerprints_can_go_dead():
+    f = _f("B14", "MEDIUM", WARN, "egress surface")
+    live_fp = fingerprint(f)
+    stale_fp = "B14:deadbeef"
+    ignore = {"B14", live_fp, stale_fp}
+    assert dead_entries([f], ignore) == {stale_fp}, (
+        "a bare id always matches its own check's Finding regardless of status, "
+        "and a fingerprint that DOES match the current finding must not be flagged"
+    )
+
+
+def test_dead_entries_empty_when_ignore_is_empty():
+    f = _f("B14", "MEDIUM", WARN, "egress surface")
+    assert dead_entries([f], set()) == set()
+
+
+def test_dead_entries_empty_when_nothing_is_stale():
+    f = _f("B14", "MEDIUM", WARN, "egress surface")
+    assert dead_entries([f], {"B14", fingerprint(f)}) == set()
+
+
+def test_audit_computes_dead_ignore_entries(tmp_path):
+    """End to end: a fingerprint written by a prior run that no longer matches
+    (the B-769 upgrade scenario -- the check's own wording changed) must be
+    visible on ctx after audit(), not just silently dropped."""
+    (tmp_path / "openclaw.json").write_text("{}")
+    _, findings, _ = audit(tmp_path)
+    target = next(f for f in findings if f.status == WARN)
+    stale_fp = f"{target.id}:00000000"
+    (tmp_path / ".clawseccheckignore").write_text(fingerprint(target) + "\n" + stale_fp + "\n")
+    ctx2, findings2, _ = audit(tmp_path)
+    assert next(f for f in findings2 if f.id == target.id).suppressed, (
+        "the live fingerprint must still suppress normally"
+    )
+    assert ctx2.dead_ignore_entries == {stale_fp}
+
+
+def test_dead_entries_note_in_text_report():
+    f = _f("B14", "MEDIUM", WARN, "egress surface")
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.dead_ignore_entries = {"B14:00000000"}
+    out = render_report([f], compute([f]), ctx=ctx)
+    assert "B14:00000000" in out
+    assert "no longer match any finding" in out
+
+
+def test_dead_entries_note_absent_when_none_are_dead():
+    f = _f("B14", "MEDIUM", WARN, "egress surface")
+    ctx = Context(home=Path("/nonexistent"))
+    out = render_report([f], compute([f]), ctx=ctx)
+    assert "no longer match any finding" not in out
+
+
+def test_dead_entries_note_absent_without_ctx():
+    """No ctx at all (several existing callers in this file) must not crash and
+    must not claim anything about dead entries it has no way to know about."""
+    f = _f("B14", "MEDIUM", WARN, "egress surface")
+    out = render_report([f], compute([f]))
+    assert "no longer match any finding" not in out
+
+
+def test_dead_entries_capped_and_counted_past_six():
+    f = _f("B14", "MEDIUM", WARN, "egress surface")
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.dead_ignore_entries = {f"B{i}:00000000" for i in range(8)}
+    out = render_report([f], compute([f]), ctx=ctx)
+    assert "8 .clawseccheckignore entries" in out
+    assert "+2 more" in out
+
+
+def test_dead_entries_in_json_payload():
+    f = _f("B14", "MEDIUM", WARN, "egress surface")
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.dead_ignore_entries = {"B14:00000000"}
+    payload = _json.loads(render_json([f], compute([f]), ctx=ctx))
+    assert payload["dead_ignore_entries"] == ["B14:00000000"]
+
+
+def test_dead_entries_in_json_payload_empty_list_not_absent():
+    f = _f("B14", "MEDIUM", WARN, "egress surface")
+    ctx = Context(home=Path("/nonexistent"))
+    payload = _json.loads(render_json([f], compute([f]), ctx=ctx))
+    assert payload["dead_ignore_entries"] == []

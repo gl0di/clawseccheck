@@ -158,6 +158,10 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     findings = run_all(ctx, check_budget_s=lim.check_budget_s, audit_budget_s=lim.audit_budget_s)
     ignore = _baseline.load_ignore(home)
     _baseline.apply(findings, ignore)
+    # B-769: a fingerprint entry that matched nothing this run is either a repaired
+    # issue (fine) or a suppression silently going dark under an upgrade (not fine,
+    # and previously visible only via the opt-in --show-suppressed).
+    ctx.dead_ignore_entries = _baseline.dead_entries(findings, ignore)
     # I-025/B-309: pass ctx so scoring.compute can also see a trajaudit-style indicator
     # match (needs ctx.installed_skills/bootstrap/home) alongside the B164 exfil_evidence
     # signal it already reads off `findings` alone — see scoring.py's cap-only runtime
