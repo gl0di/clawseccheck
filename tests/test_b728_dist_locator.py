@@ -120,6 +120,43 @@ def test_contains_resolves_several_name_matches_to_the_one_that_declares_it(tmp_
     assert found.name == "agent-id-AAA.js"
 
 
+def test_a_pattern_naming_js_finds_the_same_bundle_rebuilt_as_mjs(tmp_path, monkeypatch):
+    """B-784. OpenClaw 2026.9.3 recompiled every dist chunk from `.js` to `.mjs` with no
+    change behind it, and every caller's pattern still said `.js` — so this locator reported
+    "the bundle was renamed" 26 times in one release and the whole dist-grounding layer, the
+    strongest of the three (CLAUDE.md §2.4), could answer nothing about an installed 9.3.
+
+    The extension is a build-output detail the vendor flips wholesale; the citation is the
+    stem plus the symbol. Fixing it in ten call sites would have left the eleventh."""
+    (tmp_path / "tool-catalog-BBB.mjs").write_text("CORE_TOOL_DEFINITIONS", encoding="utf-8")
+    monkeypatch.setattr(_distgrounding, "OPENCLAW_DIST", tmp_path)
+    with _no_skipping("a .js pattern against a .mjs rebuild"):
+        found = dist_file("tool-catalog-*.js", symbol="CORE_TOOL_DEFINITIONS",
+                          contains="CORE_TOOL_DEFINITIONS")
+    assert found.name == "tool-catalog-BBB.mjs"
+
+
+def test_the_two_spellings_are_one_family_not_two_chances(tmp_path, monkeypatch):
+    """The control for the test above, in both directions.
+
+    Widening a glob is the kind of fix that passes for the wrong reason — it must not turn
+    one citation into two independent chances to match. A stem that matches nothing still
+    fails, and the message must NAME both spellings it tried, or the reader re-greps for the
+    one extension the message happened to print (which is how the 9.3 blindness read as
+    vendor drift in the first place)."""
+    (tmp_path / "tool-catalog-AAA.js").write_text("CORE_TOOL_DEFINITIONS", encoding="utf-8")
+    monkeypatch.setattr(_distgrounding, "OPENCLAW_DIST", tmp_path)
+    with _no_skipping("a .mjs pattern against a .js bundle"):
+        assert dist_file("tool-catalog-*.mjs", symbol="CORE_TOOL_DEFINITIONS").name \
+            == "tool-catalog-AAA.js"
+
+    message = _fails_rather_than_skips(
+        lambda: dist_files("no-such-bundle-*.js", symbol="CORE_TOOL_DEFINITIONS"),
+        "a stem that matches under neither spelling")
+    assert "no-such-bundle-*.js" in message and "no-such-bundle-*.mjs" in message, (
+        "the message must name both spellings tried, so a reader does not re-grep for one")
+
+
 def test_dist_text_joins_every_match(tmp_path, monkeypatch):
     (tmp_path / "a-1.js").write_text("first", encoding="utf-8")
     (tmp_path / "a-2.js").write_text("second", encoding="utf-8")

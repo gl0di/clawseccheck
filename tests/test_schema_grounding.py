@@ -116,6 +116,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
+from _distgrounding import _spellings
 
 from _realhome import REAL_HOME
 
@@ -1743,9 +1744,11 @@ def _dist_schema_consts_at(dist_dir: str) -> dict:
     `OPENCLAW_DIST` gets a fresh parse instead of the previous directory's schema. Callers
     must treat the result as read-only — it is shared."""
     consts: dict = {}
-    dist_files = sorted(Path(dist_dir).glob("zod-schema*.js")) + sorted(
-        Path(dist_dir).glob("zod-schema*.mjs")
-    )
+    # _spellings, not a second hardcoded pair: three copies of "which extensions the
+    # vendor's bundles use" is how the next rename fixes two of them and leaves one
+    # (B-784 — this whole class started as one unswept copy).
+    dist_files = sorted({f for spelling in _spellings("zod-schema*.js")
+                         for f in Path(dist_dir).glob(spelling)})
     for js_file in dist_files:
         code = _blank_js_noncode(js_file.read_text(encoding="utf-8", errors="replace"))
         for match in re.finditer(r"(?m)^(?:const|let|var)\s+(" + _JS_IDENT + r")\s*=\s*", code):

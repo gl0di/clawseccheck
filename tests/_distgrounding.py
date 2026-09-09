@@ -72,9 +72,32 @@ def require_dist() -> Path:
     return OPENCLAW_DIST
 
 
+#: The bundle EXTENSION is not part of a citation. OpenClaw 2026.9.3 recompiled the dist
+#: chunks from ``.js`` to ``.mjs`` — 8.2, 9.1 and 9.2 all shipped ``.js`` — with no change
+#: behind the rename, and that alone blinded 26 grounding tests in one release (B-784).
+#: Every caller was wrong in the same way, so the extension is normalised HERE rather than
+#: restated in ten call sites: a pattern's trailing spelling names the family, not the file.
+#:
+#: This is deliberately narrower than re-anchoring the locator on the symbol alone. That is
+#: already available as ``contains=`` and is strictly stronger (see the module docstring);
+#: what the 9.3 rename showed is that the FILENAME half of the pair must not carry a
+#: build-output detail that the vendor flips wholesale.
+_JS_EXTS = (".js", ".mjs")
+
+
+def _spellings(pattern: str) -> "list[str]":
+    """``pattern`` under every JS bundle extension, or unchanged if it names none."""
+    for ext in _JS_EXTS:
+        if pattern.endswith(ext):
+            stem = pattern[: -len(ext)]
+            return [stem + e for e in _JS_EXTS]
+    return [pattern]
+
+
 def _matches(pattern: str, symbol: str, contains: str | None) -> list:
     dist = require_dist()
-    named = sorted(dist.glob(pattern))
+    spellings = _spellings(pattern)
+    named = sorted({p for spelling in spellings for p in dist.glob(spelling)})
     if contains is None:
         found = named
     else:
@@ -91,13 +114,13 @@ def _matches(pattern: str, symbol: str, contains: str | None) -> list:
             f"({', '.join(p.name for p in named)}) but none declares {contains!r}. The "
             f"dist IS installed, so this is a symbol that moved or was renamed, not a "
             f"missing install — re-locate {symbol!r} with "
-            f"`grep -rl {symbol!r} {dist}/*.js` and re-ground this citation."
+            f"`grep -rl {symbol!r} {dist}/*` and re-ground this citation."
         )
     raise AssertionError(
-        f"nothing under {dist} matches {pattern!r}. The dist IS installed, so this is a "
-        f"bundle that was renamed (filenames are content-hashed and rotate per release), "
-        f"not a missing install — re-locate {symbol!r} with "
-        f"`grep -rl {symbol!r} {dist}/*.js` and re-ground this citation. Standing down "
+        f"nothing under {dist} matches any of {spellings!r}. The dist IS installed, so this "
+        f"is a bundle that was renamed (filenames are content-hashed and rotate per "
+        f"release), not a missing install — re-locate {symbol!r} with "
+        f"`grep -rl {symbol!r} {dist}/*` and re-ground this citation. Standing down "
         f"here would turn the guard off at exactly the moment it is needed."
     )
 

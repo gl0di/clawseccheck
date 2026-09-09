@@ -78,6 +78,7 @@ from pathlib import Path
 
 import pytest
 
+from _distgrounding import _JS_EXTS, _spellings
 from _realhome import REAL_HOME
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -163,8 +164,14 @@ def _find_state_schema_defining_js(dist_dir: Path) -> Path:
     declares a `capture_events` table. The marker names the constant, so that file cannot
     match it at all.
     """
+    # B-784: the SELECTION is by constant, but the CANDIDATE SET was `*.js` — a filename
+    # anchor after all, and the half that 2026.9.3 broke by recompiling every chunk as
+    # `.mjs`. It reported "found 0", which this guard's own message reads as the vendor
+    # having changed how it declares the schema; the constant was there the whole time, in
+    # exactly one file. `_JS_EXTS` is imported rather than restated so the two locators
+    # cannot drift apart on the next rename.
     matches = sorted(
-        p for p in dist_dir.rglob("*.js")
+        p for ext in _JS_EXTS for p in dist_dir.rglob("*" + ext)
         if SCHEMA_SQL_CONST_MARKER in p.read_text(encoding="utf-8", errors="replace")
     )
     if len(matches) != 1:
@@ -258,12 +265,13 @@ def _installed_openclaw_version() -> str:
 
 
 def _installed_state_schema_version() -> int:
-    for path in sorted(OPENCLAW_DIST.glob(STATE_DB_CONTRACT_GLOB)):
+    spellings = _spellings(STATE_DB_CONTRACT_GLOB)   # B-784 — see _find_state_schema_defining_js
+    for path in sorted({p for s in spellings for p in OPENCLAW_DIST.glob(s)}):
         m = SCHEMA_VERSION_RE.search(path.read_text(encoding="utf-8"))
         if m:
             return int(m.group(1))
     raise AssertionError(
-        f"OPENCLAW_STATE_SCHEMA_VERSION not found in any {STATE_DB_CONTRACT_GLOB!r} file"
+        f"OPENCLAW_STATE_SCHEMA_VERSION not found in any {spellings!r} file"
     )
 
 

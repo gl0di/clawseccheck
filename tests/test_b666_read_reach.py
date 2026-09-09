@@ -28,7 +28,7 @@ import re
 import pytest
 
 import clawseccheck.toolpolicy as _toolpolicy
-from _distgrounding import dist_text, require_dist
+from _distgrounding import _spellings, dist_text, require_dist
 
 from clawseccheck import toolpolicy
 from clawseccheck.checks import _shared
@@ -240,7 +240,10 @@ def test_module_docstring_dist_citation_still_declares_the_predicate():
     )
     assert match, "docstring no longer cites a dist location for the predicate"
     pattern = match.group(1)
-    files = sorted(dist.glob(pattern))
+    # B-784: the citation in the docstring names a `.js` bundle; 2026.9.3 recompiled
+    # every chunk as `.mjs` without moving the predicate. The spelling is normalised
+    # rather than re-pinned, for the same reason C-477 stopped pinning the hash.
+    files = sorted({f for s in _spellings(pattern) for f in dist.glob(s)})
     assert files, f"citation {pattern!r} does not resolve against the installed dist"
     text = "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in files)
     assert "function resolveEffectiveToolFsRootExpansionAllowed" in text, (

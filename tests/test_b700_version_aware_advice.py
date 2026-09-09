@@ -29,6 +29,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from _distgrounding import _spellings
 
 import clawseccheck.checks as C
 from clawseccheck.checks._agents import _disk_subagent_disclosure
@@ -278,9 +279,22 @@ for (const [key, kind] of Object.entries(cases)) {
 }
 console.log(JSON.stringify(out));
 """
-    schema = next(iter((root / "dist").glob("zod-schema-*.js")), None)
-    if schema is None:
-        pytest.skip("no root zod schema bundle in the installed dist")
+    # B-784: this was `glob("zod-schema-*.js")` + `pytest.skip`, and 2026.9.3's rebuild to
+    # `.mjs` made it stand down silently with a message naming the wrong cause — the bundle
+    # was there, as `zod-schema-CTg_faEc.mjs`. It never appeared in a red count, which is
+    # what makes this shape worse than the failures beside it. The honest skip is already
+    # above (`skipif _dist_root() is None`); past it the dist IS installed, so zero matches
+    # is a rename and must fail, per tests/_distgrounding.py's three-outcome doctrine.
+    bundles = sorted({p for s in _spellings("zod-schema-*.js")
+                      for p in (root / "dist").glob(s)})
+    assert bundles, (
+        f"no root zod schema bundle under {root / 'dist'} matches any of "
+        f"{_spellings('zod-schema-*.js')!r}, but OpenClaw IS installed — the bundle was "
+        "renamed, not removed. Re-locate the root schema and re-ground this citation; "
+        "standing down here would retire the only guard that asks the vendor whether "
+        "RETIRED_IN_2026_8_1 is still true."
+    )
+    schema = bundles[0]
     cases = {k: ("array" if k.endswith(("list", "Commands")) else "bool")
              for k in RETIRED_IN_2026_8_1}
     # Arguments go through the environment, not argv: `node -e` does not lay out extra
