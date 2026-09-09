@@ -148,3 +148,23 @@ def test_emit_manifest_without_vet_target_is_graceful(capsys):
     err = capsys.readouterr().err
     assert rc == 0
     assert "--emit-manifest requires --vet/--vet-skill on a single skill" in err
+
+
+def test_emit_manifest_on_own_source_discloses_self_exclusion_not_generic_opaque(capsys):
+    """B-786: --vet-skill against ClawSecCheck's OWN installed copy short-circuits in
+    checks/_vet.py::_vet_resolved_skill (the _is_own_source branch, B13 LOW PASS) before
+    ctx.effect_profiles/installed_skill_py are ever populated -- so the manifest used to
+    fall into the same "opaque/unparseable or no Python source" text a genuinely code-free
+    skill gets (see test_emit_manifest_unprofilable_skill_is_all_unknown above), which is
+    false for the single most heavily-documented skill in the whole audit. Real fixture,
+    not synthetic: fixtures/clean_ownname_genuine_clawseccheck carries a genuine embedded
+    copy specifically so _is_own_source's CONTENT verification (B-265) actually fires."""
+    own_copy = (FIXTURES / "clean_ownname_genuine_clawseccheck" / "workspace-home"
+               / "skills" / "clawseccheck")
+    rc = main(["--vet-skill", str(own_copy), "--emit-manifest"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unprofilable: true" in out
+    assert "ClawSecCheck's own source" in out
+    assert "self-scan is deliberately" in out
+    assert "opaque/unparseable or no Python source" not in out

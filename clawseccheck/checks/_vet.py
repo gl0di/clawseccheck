@@ -6290,6 +6290,18 @@ def _vet_resolved_skill(p: Path) -> Finding:
     ctx = Context(home=p)
     if p.is_dir():
         if _is_own_source(p):
+            # B-786: record the same way collector.py's sweep-level self-exclusion does
+            # (ctx.self_excluded_skills, B-265/B-507/B-521) — this is a FRESH per-call
+            # ctx (see above), not the sweep's shared one, so appending here cannot
+            # cross-contaminate anything. render_permission_manifest (report.py) reads
+            # this so --emit-manifest can tell "deliberately not scanned, own source"
+            # apart from "genuinely opaque/unparseable/no code" instead of collapsing
+            # both into the same misleading text — ctx.installed_skill_py/
+            # effect_profiles are never populated on this early-return path (the
+            # assignments live further down, only reached on the non-self-source
+            # branch), so without this a manifest request sees empty maps with no clue
+            # why.
+            ctx.self_excluded_skills.append(p.name)
             finding = _custom(
                 "B13",
                 LOW,

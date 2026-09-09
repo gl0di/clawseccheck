@@ -5354,6 +5354,51 @@ def render_permission_manifest(ctx, target: str) -> str:
     py_map = getattr(ctx, "installed_skill_py", None) or {} if ctx is not None else {}
     present = capability_families(py_map.get(skill_key))
     unprofilable = ctx is None or (not entry_points and not py_map.get(skill_key))
+    # B-786: distinguish "deliberately not scanned because this is ClawSecCheck's own
+    # source" (checks/_vet.py's _is_own_source short-circuit, which returns before
+    # ctx.effect_profiles/installed_skill_py are ever populated -- see its own comment)
+    # from "genuinely opaque/unparseable/no code". Both left entry_points/py_map empty
+    # before this, so this target's manifest said "opaque/unparseable" about the single
+    # most heavily-documented, deliberately-designed skill in the whole audit -- false,
+    # and misleading about the actual reason. Same field the sweep-level exclusion
+    # already uses (ctx.self_excluded_skills, B-265/B-507/B-521) -- extended to this
+    # consumer, not a new parallel mechanism.
+    self_excluded = (
+        ctx is not None and skill_key in (getattr(ctx, "self_excluded_skills", None) or [])
+    )
+
+    if unprofilable and self_excluded:
+        lines = header + [
+            "# this target is ClawSecCheck's own source -- self-scan is deliberately",
+            "# skipped (see its own B13 PASS reason: a security auditor's signature",
+            "# database would otherwise flag itself). This is NOT \"opaque/unparseable/",
+            "# no code\" -- point --emit-manifest at a different skill for a real",
+            "# capability profile.",
+            "unprofilable: true",
+            "filesystem:",
+            "  read: unknown",
+            "  write: unknown",
+            "  deny: []               # always empty in v1 — we propose grants, not denies "
+            "(documented)",
+            "network:",
+            "  allowlist: []           # host/path extraction not available from static "
+            "effect analysis",
+            "  reachable: unknown",
+            "shell:",
+            "  exec: unknown",
+            "memory:",
+            "  read: unknown           # not profiled by the effect sim -> explicit unknown, "
+            "never false",
+            "  write: unknown",
+            "secrets:",
+            "  reads_credentials: unknown",
+            "analysis:",
+            "  entry_points: 0",
+            "  unshielded_effects: []",
+            "  guarded_effects: []",
+            "  unprofilable: true",
+        ]
+        return "\n".join(lines)
 
     if unprofilable:
         lines = header + [
