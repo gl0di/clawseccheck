@@ -23,7 +23,7 @@ def _capped(severity: str, ceiling: str) -> str:
 
 
 def _version_disclaimer(version_boundary: "tuple | None") -> str:
-    """CLAWSECCHECK-B-765: a check transition that crosses a ClawSecCheck version boundary
+    """B-765: a check transition that crosses a ClawSecCheck version boundary
     may be the tool's own logic changing rather than the user's config. Never call this
     "fabricated" -- the verdict genuinely differs between the two runs; nothing is
     invented. What is wrong, absent this disclosure, is the ATTRIBUTION a reader makes."""
