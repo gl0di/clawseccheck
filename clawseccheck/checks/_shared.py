@@ -895,6 +895,59 @@ def _retired_key_note(ctx, legacy: str) -> str:
             "newer builds reject it.")
 
 
+# B-783: the build that REMOVED skills.workshop.allowSymlinkTargetWrites from the config
+# schema entirely (not just defaulted it off -- the vendor deleted the field).
+#
+# Unlike _SCHEMA_LEGACY_MAX/_SCHEMA_MODERN_MIN there is no unmeasured window to straddle:
+# 2026.9.2 (key present) and 2026.9.3 (key absent) are CONSECUTIVE releases and both were
+# executed, so one threshold is honest where the 8.1 split needed two. A correction suffix
+# sorts below it -- (2026,9,2,1) < (2026,9,3) -- which is the conservative direction: it
+# keeps a finding we might not need rather than dropping one we do. Grounded against the
+# installed openclaw@2026.9.3 (2026-09-09): safeParse rejects the key at skills.workshop,
+# whose object holds exactly {approvalPolicy, autonomous, maxPending, maxSkillBytes}, and
+# the vendor ships a defineLegacyConfigMigration entry
+# "skills.workshop.allowSymlinkTargetWrites-retired" whose message says Skill Workshop now
+# writes only inside its own directory. HARDENING: the knob was removed, not defaulted open.
+_SYMLINK_KNOB_RETIRED_MIN = (2026, 9, 3)
+
+
+def _workshop_symlink_knob(ctx) -> str:
+    """Does the reader's OpenClaw still READ skills.workshop.allowSymlinkTargetWrites?
+
+    ``"retired"`` / ``"honoured"`` / ``"unknown"`` -- three answers for the same reason
+    ``_openclaw_generation`` has three: "we could not see the build" is not "the build
+    still reads it", and collapsing them manufactures a claim. Only ``"retired"`` may
+    silence anything; the other two both preserve today's behaviour exactly, so a wrong
+    answer in that direction costs nothing that is not already being paid.
+
+    DELIBERATELY NOT a fourth ``_openclaw_generation`` value: that predicate is compared
+    at some two dozen sites across five modules, most of them ``== "modern"``, and a new
+    member would silently flip every one of them on a 9.3 install.
+
+    Sources are ``_openclaw_generation``'s, in its order and with its asymmetry:
+    ``installed_dist_version`` decides outright, because the installed build is the one
+    that reads or ignores the key; ``meta.lastTouchedVersion`` is consulted only when it
+    lands at 2026.9.3 or later. A stamp of 2026.9.2 proves a 9.2 build once SAVED the
+    config, not that 9.2 is installed now -- reading it as "honoured" is how you keep
+    warning the very user who has already upgraded.
+
+    THE SPELLING IS NOT EVIDENCE HERE, unlike ``check_skill_workshop_autonomy``'s own
+    fallback for the .mode/.enabled split. Writing ``autonomous.mode`` proves the config
+    was authored for 2026.8.1+, which says nothing about 9.3. And the PRESENCE of
+    allowSymlinkTargetWrites is not evidence of a pre-9.3 build either: ``doctor --fix``
+    DELETES a stale line rather than erroring on it, so it survives an upgrade untouched
+    -- which is the entire premise of this bug.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        return "retired" if installed >= _SYMLINK_KNOB_RETIRED_MIN else "honoured"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _SYMLINK_KNOB_RETIRED_MIN:
+        return "retired"
+    return "unknown"
+
+
 def _meta(cid: str):
     return BY_ID[cid]
 

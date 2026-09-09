@@ -17,6 +17,13 @@ exactly one of the three risky fields is set. PASS on the safe default. UNKNOWN 
 an unparseable/unreadable openclaw.json — never on an absent skills.workshop key, which
 is a real, safe, fully-defaulted state.
 
+B-783: OpenClaw 2026.9.3 removed allowSymlinkTargetWrites from the schema outright — the
+table above is current only for 2026.9.2 and earlier. Every case in THIS file leaves
+`installed_dist_version`/`meta.lastTouchedVersion` unset, so all of it exercises the
+version-BLIND behaviour only (the third state `_workshop_symlink_knob` answers). The
+versioned cases — a build that has and has not retired the key — live in
+tests/test_b783_symlink_knob_retired.py.
+
 Offline, read-only, stdlib only.
 """
 from __future__ import annotations
@@ -193,6 +200,11 @@ def test_approval_auto_alone_warns():
 
 
 def test_symlink_target_writes_alone_warns():
+    """`_ctx` sets no installed_dist_version and no `meta`, so `_openclaw_generation` and
+    `_workshop_symlink_knob` both read "unknown" here -- this is the load-bearing pin
+    that the third (version-blind) state still treats the key as live (B-783: it is
+    retired only when the reader's build is affirmatively identified as 2026.9.3+, see
+    tests/test_b783_symlink_knob_retired.py for the versioned cases)."""
     cfg = {"skills": {"workshop": {"allowSymlinkTargetWrites": True}}}
     r = check_skill_workshop_autonomy(_ctx(cfg))
     assert r.status == WARN

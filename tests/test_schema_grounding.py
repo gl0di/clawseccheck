@@ -1441,6 +1441,24 @@ _NOT_IN_CURRENT_SCHEMA = {
         "than a boolean. B175 reads both, and the DEFAULT flipped with the rename — "
         "B-700 and B-702."
     ),
+    # ---- OpenClaw 2026.9.3 retirements (B-783) ----
+    "skills.workshop.allowSymlinkTargetWrites": (
+        "safeParse: unrecognized_keys@skills.workshop keys=[\"allowSymlinkTargetWrites\"] "
+        "(executed against the installed openclaw@2026.9.3 root schema, 2026-09-09 — "
+        "skills.workshop's object holds exactly {approvalPolicy, autonomous, maxPending, "
+        "maxSkillBytes}); REMOVED OUTRIGHT, not renamed — the vendor ships a "
+        "defineLegacyConfigMigration entry "
+        "\"skills.workshop.allowSymlinkTargetWrites-retired\" whose message says Skill "
+        "Workshop now writes only inside its own directory, no override. Hardening, not "
+        "a widening: the escape hatch this key controlled no longer exists on any build "
+        "that reads this. Resolves fine on 2026.9.2 and earlier — a machine still on an "
+        "older build will see this entry as a false claim; that is the register's known, "
+        "documented cost of registering a version-boundary retirement rather than a "
+        "permanent removal, same shape as skills.workshop.autonomous.enabled just above. "
+        "checks/_lifecycle.py::check_skill_workshop_autonomy reads the key through "
+        "_workshop_symlink_knob(ctx) (checks/_shared.py) so a build that still honours "
+        "it is unaffected — only a 2026.9.3+ read is retired."
+    ),
     "gateway.host": (
         "safeParse: unrecognized_keys@gateway; binding is configured via gateway.bind / "
         "gateway.customBindHost. monitordims/_gateway.py::_gateway_bind reads it as the last term of a fallback "

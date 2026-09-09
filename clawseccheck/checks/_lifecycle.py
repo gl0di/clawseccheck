@@ -67,6 +67,7 @@ from ._shared import (
     _skill_corpus_complete,
     _skill_frontmatter_block,
     _surface_absent,
+    _workshop_symlink_knob,
 )
 from ..invocation import command_prefix
 
@@ -3396,6 +3397,13 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
     # The honest third answer: the config sets NOTHING this check reads, and we cannot see
     # which build's default applies. PASS would assert a state we did not read; FAIL would
     # assert a build we did not identify.
+    #
+    # NOT gated on _workshop_symlink_knob(ctx) == "retired": that state IMPLIES
+    # generation == "modern" (both read installed_dist_version first and
+    # meta.lastTouchedVersion second, and 2026.9.3 >= _SCHEMA_MODERN_MIN), so this
+    # conjunct's generation == "unknown" already rules retired out. A control on an
+    # unreachable branch would be a guard that cannot fail; the invariant is pinned
+    # instead, in tests/test_b783_symlink_knob_retired.py.
     undecidable = (
         generation == "unknown"
         and workshop_mode is None
@@ -3410,7 +3418,22 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                   f" NOTE: {stale_key} is present in the config but this OpenClaw build "
                   "does not read it, so its value is NOT in effect — the build default "
                   "applies instead.")
-    symlink_writes = dig(cfg, "skills.workshop.allowSymlinkTargetWrites") is True
+
+    # B-783: OpenClaw 2026.9.3 REMOVED skills.workshop.allowSymlinkTargetWrites from the
+    # schema outright (not merely defaulted it off) — vendor hardening, not a widening.
+    # dig() reads raw JSON regardless of schema validity, so a line `openclaw doctor
+    # --fix` has not yet deleted still arrives here; on a build that retired the key it
+    # is never live, and reporting it as an active risk would describe a state the
+    # runtime cannot be in. `!= "retired"`, not `== "honoured"`: a build we could not
+    # identify keeps the finding rather than losing it.
+    symlink_state = _workshop_symlink_knob(ctx)
+    symlink_present = dig(cfg, "skills.workshop.allowSymlinkTargetWrites") is True
+    symlink_writes = symlink_present and symlink_state != "retired"
+    retired_note = ("" if not (symlink_present and symlink_state == "retired") else
+                    " NOTE: skills.workshop.allowSymlinkTargetWrites is still on disk, "
+                    "but OpenClaw 2026.9.3 removed the setting — Skill Workshop now "
+                    "writes only inside its own directory, so the line grants nothing. "
+                    "`openclaw doctor --fix` deletes it.")
 
     if not (enabled or is_auto or symlink_writes):
         if undecidable:
@@ -3430,14 +3453,25 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                 "skills.workshop.approvalPolicy=\"pending\"; before it, "
                 "skills.workshop.autonomous.enabled=false and the same approvalPolicy.",
             )
+        if stale_key is not None and retired_note:
+            pass_fix = (f"Remove {stale_key} and set the key this build actually reads; "
+                        "`openclaw doctor --fix` also deletes the retired "
+                        "skills.workshop.allowSymlinkTargetWrites line.")
+        elif stale_key is not None:
+            pass_fix = f"Remove {stale_key} and set the key this build actually reads."
+        elif retired_note:
+            pass_fix = ("Delete the retired skills.workshop.allowSymlinkTargetWrites "
+                        "line (`openclaw doctor --fix` removes it). Nothing else to "
+                        "change.")
+        else:
+            pass_fix = "—"
         return _finding(
             "B175",
             PASS,
             "Skill Workshop autonomous authoring is disabled and lifecycle actions "
             "(propose/apply/reject/quarantine) require review — approvalPolicy is not "
-            '"auto".' + stale_note,
-            "—" if not stale_note else
-            f"Remove {stale_key} and set the key this build actually reads.",
+            '"auto".' + stale_note + retired_note,
+            pass_fix,
         )
 
     reasons = []
@@ -3475,7 +3509,7 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                 "Skill Workshop can autonomously AUTHOR new executable skill code from "
                 "conversation signals AND install it with no human review step: "
                 + "; ".join(reasons)
-                + "." + stale_note,
+                + "." + stale_note + retired_note,
                 'Set skills.workshop.approvalPolicy to "pending" so every generated '
                 "proposal needs an explicit `openclaw skills workshop apply` decision "
                 f"before it installs, and set {autonomy_key} to "
@@ -3501,7 +3535,7 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
             WARN,
             "Skill Workshop autonomy is fully configured for unattended authoring + "
             "install, but the skill_workshop tool is not currently reachable: "
-            + stale_note + "; ".join(reasons)
+            + stale_note + retired_note + "; ".join(reasons)
             + ". One tool-policy edit (removing the deny/allow restriction, dropping "
             "out of sandbox.mode=all, or widening tools.profile) re-arms the full "
             "unattended pipeline.",
@@ -3512,15 +3546,31 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
             evidence=reasons,
         )
 
+    # B-783: the advice used to name the bare "allowSymlinkTargetWrites" unconditionally
+    # — on every partial-gap WARN, including one that never set it — which is the same
+    # shape B-700 exists to catch (advice to write a key a build rejects). The full
+    # dotted path makes the advice self-identifying; the three states decide whether it
+    # is said at all, and whether it is version-qualified.
+    if symlink_state == "retired":
+        symlink_advice = ""
+    elif symlink_state == "honoured":
+        symlink_advice = (", and leave skills.workshop.allowSymlinkTargetWrites at its "
+                          "default false unless a shared/trusted skill root genuinely "
+                          "needs it")
+    else:
+        symlink_advice = (", and — on OpenClaw releases before 2026.9.3 — leave "
+                          "skills.workshop.allowSymlinkTargetWrites at its default "
+                          "false unless a shared/trusted skill root genuinely needs it "
+                          "(2026.9.3 removed the setting; Skill Workshop writes only "
+                          "inside its own directory)")
     return _finding(
         "B175",
         WARN,
         "Skill Workshop autonomy posture has a partial gap: " + "; ".join(reasons)
-        + "." + stale_note,
+        + "." + stale_note + retired_note,
         'Set skills.workshop.approvalPolicy to "pending" (never "auto"), turn off '
-        f"{autonomy_key} unless unattended authoring is intended, and leave "
-        "allowSymlinkTargetWrites at its default false unless a shared/trusted skill "
-        "root genuinely needs it.",
+        f"{autonomy_key} unless unattended authoring is intended"
+        + symlink_advice + ".",
         evidence=reasons,
     )
 

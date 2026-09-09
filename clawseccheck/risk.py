@@ -2586,9 +2586,13 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
        pipeline is configured but the tool is currently unreachable (dormant, not live
        — chaining on it here would claim a message can reach a tool the config itself
        blocks); the other WARN branch means only a PARTIAL gap (e.g. just
-       allowSymlinkTargetWrites, with approvalPolicy still at its safe "pending"
-       default) — a real widening, but not the "no review at all" shape this chain
-       describes. Only FAIL proves every ingredient the title claims.
+       allowSymlinkTargetWrites, with autonomous authoring off and approvalPolicy
+       "pending") — a real widening, but not the "no review at all" shape this chain
+       describes. Only FAIL proves every ingredient the title claims. (B-783: that
+       example is now version-dependent — OpenClaw 2026.9.3 removed the key from its
+       schema, so the identical config reads B175 == PASS there, with a disclosure that
+       the stale line grants nothing; it is a live partial gap only on 2026.9.2 and
+       earlier, or where the installed version could not be determined.)
     2. at least one of B26 / B171 / B179 holds — a live ingress path for a message from
        someone other than the owner (see `_R26_INGRESS_ARMS`). B26 accepts its plain
        WARN|FAIL status; B171/B179 are narrowed to their genuinely ingress-shaped
