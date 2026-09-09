@@ -1783,8 +1783,12 @@ hard false positives on real configs.
   *recall* is the measured weak point: between 0.09 (OASB, per-skill FAIL-only) and 0.41
   (SkillTrustBench, malicious-class recall). Most misses were attacks *described in prose*
   rather than shipped as code — a blind spot dedicated detectors have since started closing,
-  though the fix hasn't been re-measured against the same benchmark yet. A PASS tells you
-  what the scanner recognized, not that nothing is wrong.
+  though the fix hasn't been re-measured against the same benchmark yet. Detection patterns
+  are English-word literals plus a narrow hand-authored Chinese/Russian override table for
+  one high-signal family (blanket "ignore previous instructions"-style overrides); other
+  scripts and languages — Japanese, Korean, Arabic, and Russian/Chinese outside that one
+  family — are not covered, so a PASS on non-English/non-covered content proves nothing
+  about it. A PASS tells you what the scanner recognized, not that nothing is wrong.
 - **Does not replace runtime red-teaming.** Static configuration analysis is a starting
   point, not a substitute for adversarial testing against a running agent.
 - **Does not mine what your agent has already logged, by default.** The default report

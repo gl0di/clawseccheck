@@ -35,6 +35,7 @@ from ..skillast import (
 from ..textnorm import (
     _nfkc_ascii_fold_changed,
     confusable_in_ascii_context,
+    has_naked_bidi_override,
     normalize_for_scan,
     obfuscation_signals,
 )
@@ -5384,7 +5385,21 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
         # not FAILed. An actionable payload still FAILs; a bare hidden override with no such
         # heading and no defensive chrome still FAILs (the catalogue flag is False there).
         catalogue_defensive = _b58_text_is_detection_catalogue(norm)
-        for variant, signals, is_extract in variants:
+        # B-766: a bidi OVERRIDE (U+202D/U+202E, Trojan-Source-style) conceals text order
+        # from every pattern the loop below can run — that is exactly what the attack
+        # defeats, so this is checked on the RAW text before the loop, unconditionally on
+        # whether any INJECTION_PATTERNS match. `normalize_for_scan` already strips the
+        # control characters (so `norm` scans clean) without undoing the reordering they
+        # produced — the reversed spelling survives stripping and matches nothing. Same
+        # base_defensive treatment as the rest of this function: a whole-text-defensive
+        # security-education doc may legitimately demonstrate the technique.
+        if has_naked_bidi_override(text) and not base_defensive:
+            fail_ev.append(
+                f"{source_name}: bidi override (Trojan-Source-style) conceals text order "
+                "from byte-level pattern matching — cannot be verified safe"
+            )
+            hidden = True
+        for variant, signals, is_extract in ([] if hidden else variants):
             if not signals:
                 continue
             if variant == norm and base_defensive:
