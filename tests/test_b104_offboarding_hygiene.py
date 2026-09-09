@@ -117,3 +117,18 @@ def test_distinct_names_across_tiers_pass(tmp_path):
     _mk_skill(tmp_path / "skills" / "alpha", "alpha")
     _mk_skill(tmp_path / "workspace" / "skills" / "beta", "beta")
     assert check_offboarding_hygiene(_ctx(tmp_path)).status == PASS
+
+
+def test_unreadable_skill_dir_does_not_crash(tmp_path):
+    """B-767: Path.is_file() on an entry INSIDE a chmod-000 skill dir raises
+    PermissionError, which it does not swallow (only ENOENT/ENOTDIR/EBADF/ELOOP are).
+    A stat unreachable dir must be skipped, not take the whole check down."""
+    _mk_skill(tmp_path / "skills" / "alpha", "alpha")
+    locked = tmp_path / "skills" / "locked"
+    _mk_skill(locked, "locked")
+    locked.chmod(0o000)
+    try:
+        f = check_offboarding_hygiene(_ctx(tmp_path))
+    finally:
+        locked.chmod(0o700)
+    assert f.status == PASS, f.detail

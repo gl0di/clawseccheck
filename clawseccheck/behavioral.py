@@ -1050,6 +1050,9 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "truncated": meta["truncated"],
         "files_total": meta.get("files_total", 0),
         "files_capped": meta.get("files_capped", False),
+        # B-767: a line that looked like a target event and failed to parse -- a
+        # different reason a read is not exhaustive than the byte cap (`truncated`).
+        "unparseable_lines": meta.get("unparseable_lines", False),
         "event_count": len(events),
         "thread_count": 0,
         "findings": [],
@@ -1132,6 +1135,9 @@ def analysis_incompleteness(result: dict) -> "str | None":
                 f"{result.get('files_total')} trajectory file(s) were read")
     if result.get("truncated"):
         return "a trajectory file exceeded the per-file scan cap and was read in part"
+    if result.get("unparseable_lines"):
+        return ("a trajectory file contained a line that could not be parsed as JSON "
+                 "(a possible truncated/interrupted write)")
     scanned, total = result.get("files_scanned"), result.get("files_total")
     if total and scanned is not None and scanned != total:
         # Found by the C-135 pass on B-559: a sidecar the reader could not OPEN (mode

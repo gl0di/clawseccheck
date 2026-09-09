@@ -13,9 +13,11 @@ import binascii
 import html
 import ipaddress
 import json
+import logging
 import os
 import re
 import shutil
+import traceback
 import unicodedata
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -1552,5 +1554,22 @@ def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
         except ScanBudgetExceeded:
             findings.append(_check_budget_finding(chk, "check", check_budget_s))
         except Exception as exc:  # noqa: BLE001 — a bad check must not sink the audit
+            # B-767: the finding tells the user to "re-run with --debug for the
+            # traceback", but nothing ever wrote one -- the exception is caught right
+            # here and never reaches main()'s top-level `--debug: raise`. logger.debug
+            # is a no-op unless --debug set the logger to DEBUG (logsafe.get_logger),
+            # so this costs nothing on a normal run.
+            #
+            # traceback.format_exc() is rendered to a plain string and passed as a %s
+            # ARG, never via exc_info=True: logsafe._RedactingFilter redacts
+            # record.getMessage() (the formatted message, args included), but a
+            # Formatter renders exc_info SEPARATELY via formatException() and appends
+            # it after the filter has already run -- exc_info=True would ship an
+            # unredacted traceback straight past the one thing that exists to stop it.
+            logging.getLogger("clawseccheck").debug(
+                "check %s crashed:\n%s",
+                getattr(chk, "__name__", "unknown_check"),
+                traceback.format_exc(),
+            )
             findings.append(_check_error_finding(chk, exc))
     return findings

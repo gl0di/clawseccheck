@@ -47,6 +47,7 @@ Offline, read-only; nothing is written outside pytest's tmp_path.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -463,3 +464,26 @@ def test_b182_env_ladder_includes_the_openclaw_prefixed_var():
         "CLAWHUB_CONFIG_PATH",
         "CLAWDHUB_CONFIG_PATH",
     }
+
+
+# --------------------------------------------------------------------------------------
+# B-767: shares _b181_provenance_records with B181 — an unreadable skill dir must not
+# take this check down with it either
+# --------------------------------------------------------------------------------------
+def test_unreadable_skill_dir_does_not_crash(tmp_path):
+    home = tmp_path / "home"
+    shutil.copytree(CANONICAL, home)
+    locked = home / "skills" / "locked"
+    (locked / ".clawhub").mkdir(parents=True)
+    (locked / ".clawhub" / "origin.json").write_text(
+        json.dumps({"slug": "locked", "registry": "https://clawhub.ai"}), encoding="utf-8"
+    )
+    (locked / "SKILL.md").write_text("---\nname: locked\n---\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        finding = _run(home)
+    finally:
+        locked.chmod(0o700)
+    # The pre-existing canonical record must still be readable and still PASS -- the
+    # locked dir is skipped, not treated as evidence of anything.
+    assert finding.status == PASS, finding.detail

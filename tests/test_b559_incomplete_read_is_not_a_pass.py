@@ -77,6 +77,18 @@ def _make_unparseable(home: Path) -> Path:
     return home
 
 
+def _make_line_unparseable(home: Path) -> Path:
+    """B-767: append one line that LOOKS like a target event (passes the cheap
+    event-type pre-filter) but fails json.loads -- the shape a truncated/interrupted
+    write leaves behind. Appended AFTER valid content, unlike `_make_unparseable`
+    above which replaces it entirely -- these are two different reasons a read is
+    not exhaustive (empty event set vs. a genuinely lost record)."""
+    for sidecar in home.rglob("*.trajectory.jsonl"):
+        with sidecar.open("a", encoding="utf-8") as fh:
+            fh.write('{"type": "tool.call", "truncated\n')
+    return home
+
+
 # ------------------------------------------------------- the predicate, on its own
 
 
@@ -91,7 +103,7 @@ def test_every_flag_analyze_reports_produces_a_reason():
             "files_capped": False, "unknown_version": False,
             "files_scanned": 78, "files_total": 78}
     assert B.analysis_incompleteness(base) is None
-    for flag in ("truncated", "files_capped", "unknown_version"):
+    for flag in ("truncated", "files_capped", "unknown_version", "unparseable_lines"):
         assert B.analysis_incompleteness({**base, flag: True}), flag
     for absent in ("present", "event_count"):
         assert B.analysis_incompleteness({**base, absent: 0}), absent
@@ -143,6 +155,18 @@ def test_a_complete_read_that_finds_nothing_still_passes(tmp_path):
 
 def test_an_empty_event_set_is_not_a_pass(tmp_path):
     statuses = _statuses(_make_unparseable(_copy(tmp_path, TRAJ_HOME)))
+    assert statuses["T1"] == "UNKNOWN", statuses
+    assert statuses["T2"] == "UNKNOWN", statuses
+
+
+def test_a_truncated_line_after_valid_ones_is_not_a_pass(tmp_path):
+    """B-767: a line that failed mid-parse must not be silently dropped from an
+    otherwise-clean read -- the log genuinely lost a record, distinct from
+    `test_an_empty_event_set_is_not_a_pass`'s "nothing here at all"."""
+    home = _make_line_unparseable(_copy(tmp_path, TRAJ_HOME))
+    result = B.analyze(collect(home))
+    assert result["unparseable_lines"] is True, result
+    statuses = {f.id: f.status for f in result["findings"]}
     assert statuses["T1"] == "UNKNOWN", statuses
     assert statuses["T2"] == "UNKNOWN", statuses
 

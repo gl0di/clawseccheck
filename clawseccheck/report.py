@@ -1884,7 +1884,17 @@ def _skills_roster_text(inv: dict, ctx) -> str:
     # inventory total presents a truncated view as a census. Disclosure wins over tidiness.
     n_skipped = int(getattr(ctx, "skills_capped_count", 0) or 0)
     if n_skills == 0:
-        text = "none installed"
+        # B-767: an empty roster is ambiguous on its own -- the collector genuinely found
+        # nothing, OR a root/entry it tried to walk was not traversable (a chmod-000 skill
+        # dir, most commonly) and the walk gave up early. `_read_installed_skills` already
+        # records the latter as a LIMIT_DOMAIN_SKILL hit (B-289/B-404) whether or not any
+        # skill was ever yielded, so this is the one place that fact needs to be READ
+        # rather than re-derived: "none installed" asserts a completed, empty scan, which
+        # is exactly the inversion Golden Rule #4 forbids when the scan did not finish.
+        from .collector import LIMIT_DOMAIN_SKILL, limit_hits_for  # noqa: PLC0415
+
+        text = ("could not be fully inspected (a skill root or directory was not "
+                 "readable)" if limit_hits_for(ctx, LIMIT_DOMAIN_SKILL) else "none installed")
     elif n_skipped:
         text = f"{n_skills} inspected, {n_skipped} NOT inspected — inspection cap reached"
     elif n_bundled and n_bundled < n_skills:
@@ -2598,7 +2608,13 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
         # filed against the skill subsystem with nothing installed at all.
         subj0 = inv.get("skills_subject") or {}
         fids0 = list(subj0.get("findings") or [])
-        label = f" {SUBJECT_LABEL['skills']} (none installed)"
+        # B-767: same ambiguity, same fix, as `_skills_roster_text` above — an unreadable
+        # root/entry must not render identically to a confirmed-empty roster.
+        from .collector import LIMIT_DOMAIN_SKILL, limit_hits_for  # noqa: PLC0415
+
+        _roster_note = ("could not be fully inspected" if limit_hits_for(ctx, LIMIT_DOMAIN_SKILL)
+                         else "none installed")
+        label = f" {SUBJECT_LABEL['skills']} ({_roster_note})"
         if fids0:
             label += f" — {icon.get(subj0.get('status'), '?')} {len(fids0)} issue(s)"
         lines = [label]
@@ -4030,6 +4046,23 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     _covered_line = _not_fully_covered_line(score)
     if _covered_line:
         grade_lines.append(_covered_line)
+    # B-767: render_report/render_html/pdf.render_pdf all disclose a degraded check
+    # (crashed, timed out, or hit unreadable/corrupted input) unconditionally, above the
+    # grade — this renderer never did, even though it is the ONE artifact SKILL.md tells
+    # the agent to paste into chat. Compact, one line, matching this renderer's format;
+    # same source (`score.degraded_count`) and clause (`_degraded_incomplete_clause`) as
+    # the other three so the fact cannot read differently depending on which output a
+    # reader happens to be looking at.
+    _degraded_n = getattr(score, "degraded_count", 0)
+    if _degraded_n:
+        _degraded_mark = "[!]" if ascii_only else "⚠️ "
+        _plural = "check" if _degraded_n == 1 else "checks"
+        grade_lines.append(
+            f"{_degraded_mark}{_degraded_n} {_plural} could not reach a reliable verdict "
+            f"this run (crashed, timed out, or hit unreadable/corrupted input) — "
+            + _degraded_incomplete_clause(score)
+            + " Re-run with --debug for a crash/timeout traceback."
+        )
     # B-465 / B-467: the card is the ONLY artifact SKILL.md tells the agent to paste, and it
     # was the one renderer that dropped WHY the grade is what it is. Two measured shapes:
     # a directory with no OpenClaw in it produced a confident `Grade F · 49/100 · 4 issues`

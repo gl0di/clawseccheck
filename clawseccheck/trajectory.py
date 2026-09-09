@@ -638,6 +638,16 @@ def read_events(
         "files_total": 0, "files_capped": False,
         # B-683: the named path could not be opened at all.
         "path_unreadable": False,
+        # B-767: a line that passed the event-type pre-filter (so it LOOKED like a
+        # target event) but failed json.loads — a truncated/interrupted write, most
+        # commonly. Scoped to exactly that: ordinary noise (model.completed, etc.)
+        # never reaches json.loads at all, so it can't set this. A file carrying such
+        # a line still counts as `files_scanned` (the OS-level read succeeded), which
+        # is why this needs its own flag rather than reusing `truncated` — the byte
+        # cap and a mid-record parse failure are different reasons a read is not
+        # exhaustive, and behavioral.py's analysis_incompleteness() needs to name
+        # each honestly.
+        "unparseable_lines": False,
     }
 
     if explicit_path:
@@ -672,6 +682,13 @@ def read_events(
                     try:
                         rec = json.loads(line)
                     except ValueError:
+                        # B-767: this line passed the event-type pre-filter above --
+                        # it looked like a target event and failed to parse, which a
+                        # truncated/interrupted write produces. Silently dropping it
+                        # with no trace was the gap: `files_scanned` still counts this
+                        # file as fully read (below), so a caller had no way to tell
+                        # "nothing here" from "something here that could not be read".
+                        meta["unparseable_lines"] = True
                         continue
                     if not isinstance(rec, dict):
                         continue

@@ -545,6 +545,7 @@ The block carries the run's reach.
 | `failCount` | `int` | always | `FAIL` results. |
 | `unknownCount` | `int` | always | `UNKNOWN` results. |
 | `notApplicableCount` | `int` | always | Checks whose surface is confirmed absent. |
+| `engineDegradedCount` | `int` | always | B-767: `UNKNOWN` results caused by a check crashing or hitting its wall-clock budget (`engine_degraded`) — distinct from `notApplicableCount` (surface confirmed absent) and from an ordinary undetermined result. A CI consumer can gate on this being `0` where `unknownCount` alone cannot tell the two apart. Added to `limitations` when nonzero. Counted directly over every finding (not via §2's `undetermined.engine_degraded`, which filters to `scored` findings first and so is always `0` for the real engine-crash producer, which is deliberately `scored: false`). |
 | `suppressedCount` | `int` | always | Findings suppressed via `.clawseccheckignore`. |
 | `failCountsBySeverity` | `object` | always | The numbers `--fail-on` gates on; same shape and predicate as §2's field of the same name. |
 | `selfExcludedSkills` | `array[str]` | always | Skills excluded because they are ClawSecCheck's own installed copy. |

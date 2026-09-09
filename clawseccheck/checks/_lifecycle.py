@@ -2925,7 +2925,9 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
     container-safe; only an absolute path that is absent is a dead-entry signal.
     """
     # local import: avoid a module-load cycle
-    from ..collector import SKILL_TIER_ORDER, skill_load_roots
+    from ..collector import (
+        LIMIT_DOMAIN_SKILL, SKILL_TIER_ORDER, _safe_is_dir, _safe_is_file, skill_load_roots,
+    )
 
     home = getattr(ctx, "home", None)
     if not isinstance(home, Path) or not home.exists():
@@ -2943,7 +2945,7 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
     # stale copies. name -> [(tier, rel_dir), ...].
     name_hits: dict[str, list[tuple[str, str]]] = {}
     for base, tier in skill_load_roots(home, ctx.config, user_home=_b104_user_home(home)):
-        if not base.is_dir():
+        if not _safe_is_dir(base, ctx, what=f"skill root '{base}'", domain=LIMIT_DOMAIN_SKILL):
             continue
         try:
             entries = sorted(base.iterdir())
@@ -2953,7 +2955,12 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             if sd.is_symlink() or not sd.is_dir():
                 continue
             skill_md = sd / "SKILL.md"
-            if not skill_md.is_file():
+            # B-767: stat'ing an entry INSIDE `sd` needs traverse permission on `sd`
+            # itself, which a chmod-000 skill dir (unlike the checks above, which only
+            # stat `sd` from its already-traversable parent) denies -- and
+            # Path.is_file() does NOT swallow EACCES. _safe_is_file degrades this one
+            # directory to "skip it" and records the gap instead of crashing the check.
+            if not _safe_is_file(skill_md, ctx, what=f"'{skill_md.name}' in a skill dir"):
                 continue
             try:
                 blob = skill_md.read_text(encoding="utf-8", errors="replace")
@@ -4526,9 +4533,15 @@ def _b181_skill_dir(slug: str, lock_parent: Path):
         return None
 
 
-def _b181_provenance_records(home: Path):
-    """[(slug, skill_dir | None, record, source_label)] from every lock + origin.json found."""
-    from ..collector import SKILL_DIRS, WORKSPACE_DIRS
+def _b181_provenance_records(home: Path, ctx: "Context | None" = None):
+    """[(slug, skill_dir | None, record, source_label)] from every lock + origin.json found.
+
+    *ctx*, when given, routes an unreadable lock/origin path through `_safe_is_file` so a
+    permission-denied entry (e.g. a chmod-000 skill dir) is skipped and recorded rather
+    than raising -- B-767, shared by both `check_skill_install_tamper` (B181) and
+    `check_clawhub_registry_provenance` (B184), the two callers of this helper.
+    """
+    from ..collector import SKILL_DIRS, WORKSPACE_DIRS, _safe_is_file
 
     records = []
     seen_dirs: set = set()
@@ -4543,7 +4556,7 @@ def _b181_provenance_records(home: Path):
         # was legitimately updated (Golden Rule #5). Mirror the CLI: first parse wins.
         for dot in _B181_DOT_DIRS:
             lock_path = home / rel / dot / "lock.json"
-            if not lock_path.is_file():
+            if not _safe_is_file(lock_path, ctx, what=f"'{lock_path.name}'"):
                 continue
             data = _b181_read_json(lock_path)
             skills = data.get("skills") if data else None
@@ -4577,7 +4590,11 @@ def _b181_provenance_records(home: Path):
                 continue
             for dot in _B181_DOT_DIRS:
                 origin = skill_dir / dot / "origin.json"
-                if not origin.is_file():
+                # B-767: unlike lock_path above (stat'd from an already-traversable
+                # parent), `origin` is stat'd from INSIDE `skill_dir`, which needs
+                # traverse permission on `skill_dir` itself -- the chmod-000 case
+                # Path.is_file() does not swallow (EACCES).
+                if not _safe_is_file(origin, ctx, what=f"'{dot}/origin.json' in a skill dir"):
                     continue
                 data = _b181_read_json(origin)
                 if data is None:
@@ -4604,7 +4621,7 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
               unreadable / too large to hash, or a record's skill directory could not be
               located. Never a fake PASS (Golden Rule #4).
     """
-    records = _b181_provenance_records(ctx.home)
+    records = _b181_provenance_records(ctx.home, ctx)
     if not records:
         return _finding(
             "B181",
@@ -4881,7 +4898,7 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
     env_bad: "list[str]" = []
     observed_canonical = 0
 
-    for slug, _skill_dir, record, source in _b181_provenance_records(ctx.home):
+    for slug, _skill_dir, record, source in _b181_provenance_records(ctx.home, ctx):
         if not isinstance(record, dict):
             continue
         verdict = _b184_is_canonical(record.get("registry"), _B184_CANONICAL_REGISTRY_HOST)
