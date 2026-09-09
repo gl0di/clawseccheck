@@ -2949,7 +2949,10 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # never opened anything at all. `_cfg_found`/`_audited_path` were both computed above,
     # ahead of the cap-reason block, so this line and that one can never disagree.
     if _audited_path is not None and _cfg_found:
-        lines.append(f"Audited config: {_audited_path}")
+        from .checks import _username_safe_path  # noqa: PLC0415
+        # B-757: the resolved config path carries the OS account username
+        # (e.g. /home/<user>/.openclaw/openclaw.json) unless collapsed.
+        lines.append(f"Audited config: {_username_safe_path(_audited_path)}")
 
     # B-306 safe-symlink split: openclaw.json is a symlink whose target leaves ~/.openclaw,
     # and that target is a readable regular file the user owns — a benign dotfiles layout
@@ -5667,8 +5670,17 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     # B-281 (ENV-1): WHICH file was audited, not merely whether one was found. Every
     # verdict in this payload describes exactly this path; a bare `config_found: true`
     # let a report about a stale, dormant config read as a report about the live agent.
+    from .checks import _username_safe_path  # noqa: PLC0415
     _audited = getattr(ctx, "config_path", None) if ctx is not None else None
-    payload["audited_config_path"] = str(_audited) if _audited is not None else None
+    # B-757: home-relative, matching every other renderer -- a JSON consumer that needs
+    # the literal filesystem path can recover it with a single expanduser() call, same as
+    # any other tool reading a `~/...`-shaped path; leaving this one field absolute while
+    # every prose surface collapses it would be the exact inconsistency B-757 exists to
+    # close, and this project's own precedent (report._credential_surface_rel) already
+    # treats machine-readable output as needing the identical protection.
+    payload["audited_config_path"] = (
+        _username_safe_path(_audited) if _audited is not None else None
+    )
     payload["config_parse_error"] = bool(getattr(ctx, "config_parse_error", False)) if ctx is not None else False
     # B-306 safe-symlink split: machine-visible so a JSON consumer can tell a benign
     # dotfiles relocation (config followed + audited) from a genuinely dark config. The

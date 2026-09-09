@@ -159,6 +159,7 @@ _trifecta_leg_sources
 _unclassified_leg_verbs
 _unpinned_deps_in_skill
 _untrusted_input_channels
+_username_safe_path
 _vet_mcp_least_privilege
 _vet_mcp_tool_poisoning
 _web_fetch_enabled

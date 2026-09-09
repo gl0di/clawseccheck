@@ -3797,7 +3797,12 @@ def check_codex_project_trust(ctx: Context) -> Finding:
         except OSError:
             continue
         for project_path in _codex_trusted_projects(text):
-            trusted_ev.append(f"agent {agent_dir.name}: project {project_path!r}")
+            # B-757: the codex-home config stores the project's absolute path;
+            # collapse the OS account home before it reaches rendered evidence.
+            trusted_ev.append(
+                f"agent {agent_dir.name}: project "
+                f"{_shared._username_safe_path(project_path)!r}"
+            )
 
     if not any_config:
         return _finding(

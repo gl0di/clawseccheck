@@ -2044,7 +2044,7 @@ def check_path_safety(ctx: Context) -> Finding:
             return "group-writable", st
         return None
 
-    def _flag(d: Path, prefix: str, suffix: str = "", *, replace_verb: str = "replace") -> None:
+    def _flag(d: Path, label: str, suffix: str = "", *, after: str = "") -> None:
         try:
             rd = d.resolve()
         except OSError:
@@ -2055,6 +2055,11 @@ def check_path_safety(ctx: Context) -> Finding:
         result = _writable_kind(rd)
         if not result:
             return
+        # B-757: build the display prefix from the RESOLVED path so the username-
+        # collapsing (_username_safe_path) always sees the canonical form, regardless
+        # of whether the caller's own path variable was already resolved (bin_dir/cur
+        # are; the raw PATH-dir / attested-install entries below are not until here).
+        prefix = f"{label} {_shared._username_safe_path(rd)}{after}"
         kind, st = result
         # B-127: a purely group-writable dir whose group currently has no members
         # besides the file's owner has no live "other member" to exploit it — note
@@ -2076,14 +2081,14 @@ def check_path_safety(ctx: Context) -> Finding:
         # member replace the whole subtree even when the immediate bin dir is tight.
         cur = start
         for _ in range(levels):
-            _flag(cur, f"{label} {cur}", " — a group member could replace the openclaw install")
+            _flag(cur, label, " — a group member could replace the openclaw install")
             if cur.parent == cur:  # filesystem root
                 break
             cur = cur.parent
 
     if exe:
         bin_dir = Path(exe).resolve().parent
-        _flag(bin_dir, f"openclaw binary dir {bin_dir}")
+        _flag(bin_dir, "openclaw binary dir")
         # NEW: ancestor install dirs above the resolved binary.
         _walk_ancestors(bin_dir.parent, "openclaw install ancestor dir")
 
@@ -2102,15 +2107,16 @@ def check_path_safety(ctx: Context) -> Finding:
             for d in path_dirs[:openclaw_index]:
                 _flag(
                     d,
-                    f"PATH dir {d} (before openclaw dir)",
+                    "PATH dir",
                     " — a fake openclaw could be planted there",
+                    after=" (before openclaw dir)",
                 )
 
     # Discovery-assisted: the agent may point at an install dir that `which` can't
     # resolve (non-PATH install). The engine still stat()s it itself.
     if attested_install:
         inst = Path(attested_install).expanduser()
-        _flag(inst, f"openclaw install dir {inst} [attested]")
+        _flag(inst, "openclaw install dir", after=" [attested]")
         _walk_ancestors(inst.parent, "openclaw install ancestor dir [attested]")
 
     if writable:
@@ -2129,7 +2135,8 @@ def check_path_safety(ctx: Context) -> Finding:
             writable[:6],
         )
 
-    where = exe or f"{attested_install} (attested)"
+    where = (_shared._username_safe_path(exe) if exe
+             else f"{_shared._username_safe_path(attested_install)} (attested)")
     return _custom(
         "C5",
         BY_ID["C5"].severity,

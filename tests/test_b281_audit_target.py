@@ -17,7 +17,7 @@ import pytest
 
 from clawseccheck import audit
 from clawseccheck.catalog import PASS, UNKNOWN, WARN
-from clawseccheck.checks import check_audit_target_divergence
+from clawseccheck.checks import _username_safe_path, check_audit_target_divergence
 from clawseccheck.collector import (
     OPENCLAW_LEGACY_CONFIG_FILENAMES,
     audits_default_state_dir,
@@ -176,9 +176,12 @@ def test_b183_warns_when_config_path_points_elsewhere(tmp_path, monkeypatch):
     f = check_audit_target_divergence(ctx)
     assert f.status == WARN
     # The report must name BOTH files — naming only one is what made this invisible.
+    # B-757: home-relative now, not absolute — both files still under HOME here, so the
+    # collapsed form is what actually appears; _username_safe_path is the same rendering
+    # the finding itself now uses, not a separate assumption about the string shape.
     blob = f.detail + " " + " ".join(f.evidence)
-    assert str(live) in blob
-    assert str(ctx.config_path) in blob
+    assert _username_safe_path(live) in blob
+    assert _username_safe_path(ctx.config_path) in blob
 
 
 def test_b183_warns_on_a_state_dir_profile(tmp_path, monkeypatch):
@@ -208,7 +211,8 @@ def test_b183_warns_on_a_legacy_state_dir_with_no_env_set(tmp_path, monkeypatch)
     assert audits_default_state_dir(home) is True
     f = check_audit_target_divergence(ctx)
     assert f.status == WARN
-    assert str(legacy) in f.detail + " ".join(f.evidence)
+    # B-757: home-relative now — see the equivalent note above.
+    assert _username_safe_path(legacy) in f.detail + " ".join(f.evidence)
 
 
 def test_b183_unknown_wording_does_not_claim_an_explicit_target_wrongly(tmp_path, monkeypatch):

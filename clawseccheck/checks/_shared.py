@@ -48,6 +48,42 @@ def _is_posix() -> bool:
     return os.name == "posix"
 
 
+def _username_safe_path(path) -> str:
+    """Render an absolute filesystem path with the OS account home collapsed to ``~``,
+    so a Finding's ``detail``/``fix`` prose never carries the operator's username (B-757).
+
+    The plain-prose sibling of ``invocation._display_path``, which does the identical
+    substitution but additionally shell-quotes the remainder — right for a command line,
+    wrong here: a quoted path mid-sentence reads as literal quote characters in a "Why:"
+    line. Not reused directly for that reason, and not imported from ``invocation.py``
+    into a check module regardless — invocation.py is a leaf `command_prefix()`/CLI-facing
+    module, and duplicating this narrow piece keeps the check layer independent of it.
+
+    Unlike ``report._credential_surface_rel`` (the other existing precedent for this
+    problem), this does NOT fall back to the bare basename for a path outside the home:
+    C5/B136 name install-tree and workspace paths that are fine to show in full once the
+    username-bearing prefix is gone, whereas the credential-surface map's stricter
+    fallback protects a narrower, different threat model (an out-of-home credential path
+    leaking through that specific channel).
+
+    Falls back to the resolved path unchanged if ``Path.home()`` cannot be determined
+    (no HOME set, e.g. a stripped-down cron environment) — never raises.
+    """
+    try:
+        p = Path(path).resolve()
+    except OSError:
+        p = Path(path)
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        return str(p)
+    try:
+        rest = p.relative_to(home)
+    except ValueError:
+        return str(p)
+    return "~" if str(rest) == "." else f"~/{rest}"
+
+
 def _perms_loose(ctx: Context) -> bool:
     """True only on POSIX when the config file is group/world-readable.
 

@@ -139,6 +139,7 @@ from ._shared import (
     _unclassified_leg_verbs,
     _untrusted_input_channels,
     _UNTRUSTED_INPUT_POLICIES,
+    _username_safe_path,
     _web_fetch_enabled,
 )
 

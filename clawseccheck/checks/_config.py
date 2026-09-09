@@ -86,6 +86,7 @@ from ._shared import (
     _surface_absent,
     _trifecta_leg_sources,
     _trifecta_legs,
+    _username_safe_path,
     _web_fetch_enabled,
 )
 from ..invocation import command_prefix
@@ -4179,12 +4180,14 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             "Re-run the audit with a current build of this skill.",
         )
 
-    # B-349: every branch below names the audited file RELATIVE to the audited home, and
-    # keeps the absolute form in `evidence=` / the fix text. The report header already
-    # prints the absolute audited path once ("Audited config: ..."), so nothing is lost —
-    # but an absolute path inside `detail` is hashed by `baseline.fingerprint()`, which
-    # made a fingerprint suppression for this finding die the moment the profile moved,
-    # and put the reporter's home layout into every shared report.
+    # B-349: every branch below names the audited file RELATIVE to the audited home in
+    # `detail` -- an absolute path there is hashed by `baseline.fingerprint()`, which made
+    # a fingerprint suppression for this finding die the moment the profile moved.
+    # B-757 follow-up: `evidence=`/the fix text used to keep the absolute form on the
+    # reasoning that the report header printed it once anyway ("Audited config: ..."), so
+    # "nothing was lost". That premise is gone -- the header is home-relative now too
+    # (B-757) -- so evidence/fix route through `_username_safe_path` below instead of
+    # carrying the one remaining full absolute path in this finding.
     audited_rel = _detail_path(audited, ctx.home)
 
     if not audits_default_state_dir(ctx.home):
@@ -4197,7 +4200,7 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             "of this process describes a different subject.",
             "Run the audit with no --home argument to have it check whether the agent's "
             "own config resolution points somewhere else.",
-            evidence=[f"audited: {audited}"],
+            evidence=[f"audited: {_username_safe_path(audited)}"],
         )
 
     product, reason = resolve_product_config_path()
@@ -4208,7 +4211,7 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             f"OpenClaw's own config path could not be resolved ({reason}), so it cannot be "
             f"confirmed that the agent reads the audited file {audited_rel}.",
             "Check that HOME (or OPENCLAW_HOME) is set to a real directory, then re-run.",
-            evidence=[f"audited: {audited}"],
+            evidence=[f"audited: {_username_safe_path(audited)}"],
         )
 
     try:
@@ -4226,10 +4229,11 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
             "nothing about the configuration the agent is actually running. Both paths "
             "are named in full in this finding's evidence and in the fix below.",
             f"Re-run the audit against the live target: {command_prefix()} --home "
-            f"{product.parent}. If the audited file is the intended one instead, unset "
+            f"{_username_safe_path(product.parent)}. If the audited file is the intended "
+            "one instead, unset "
             "OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR (these are what "
             "`openclaw --profile` sets) so the agent and the audit agree.",
-            evidence=[f"audited: {audited}", f"OpenClaw resolves: {product}"],
+            evidence=[f"audited: {_username_safe_path(audited)}", f"OpenClaw resolves: {_username_safe_path(product)}"],
         )
 
     return _finding(
@@ -4240,7 +4244,7 @@ def check_audit_target_divergence(ctx: Context) -> Finding:
         "configuration the agent loads on its next start.",
         "Keep OPENCLAW_CONFIG_PATH / OPENCLAW_HOME / OPENCLAW_STATE_DIR unset, or re-run "
         "the audit with --home pointed at the profile you actually run.",
-        evidence=[f"audited: {audited}", f"resolved via {reason}"],
+        evidence=[f"audited: {_username_safe_path(audited)}", f"resolved via {reason}"],
     )
 
 
