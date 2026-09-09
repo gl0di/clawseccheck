@@ -74,12 +74,14 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _SANDBOX_NEVER,
     _SCAN_TRUNCATED_RE,
     _SECURITY_RANK,
+    _SEVERITY_RANK,
     _SIGNAL_CLASS_LABELS,
     _SKILL_VERSION_RE,
     _VALUE_FLAGS_BY_CMD,
     _append_memory_alerts,
     _b62_families,
     _both_dims,
+    _capped,
     _channel_entry,
     _channel_scope_nodes,
     _channel_sig,
@@ -173,6 +175,7 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _snapshot_memory_text,
     _tool_surface_hash,
     _undetermined_reason,
+    _version_disclaimer,
     annotations,
     changed_skills,
 )
@@ -380,6 +383,13 @@ WATCHED_DIMENSIONS = (
     "checks",
     "checks_degraded",
     "checks_not_applicable",
+    # B-765. Written unconditionally on every run (it needs no external input, unlike
+    # host/behavioral_*/credential_store) -- the tool's OWN version, so diff_with_notes()
+    # can tell "your config changed" from "the scanner's own detection changed" for an
+    # existing check id whose verdict moved between two ClawSecCheck builds. Absence on a
+    # stored baseline means only that it predates this field -- the ordinary C-417 story,
+    # same as every other unconditional key here.
+    "clawseccheck_version",
     "config_baseline",
     "config_ever_seen",
     "config_file_sha256",
@@ -530,6 +540,8 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     clean-verdict-about-an-unexamined-surface shape this whole epic exists to remove — and
     on the *next* run it would read as "the signal cleared", inventing a resolution.
     """
+    from . import __version__  # noqa: PLC0415 (avoid import-order coupling)
+
     native = getattr(ctx, "native", None)
     native_count = len(getattr(native, "findings", []) or []) if native else 0
     # B-268: capture each collection's truncation frontier alongside the collection itself,
@@ -537,6 +549,15 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     _mem_capped: list[str] = []
     snap = {
         "version": SNAPSHOT_VERSION,
+        # B-765: the PRODUCER's version, not the snapshot FORMAT's (that's "version"
+        # above). Written unconditionally so diff_with_notes() can tell a genuine config
+        # change from the scanner's own detection changing underneath an existing check
+        # id between two ClawSecCheck builds — see the down-rank/reword this feeds in
+        # monitordims/_checks.py. Deliberately does NOT bump SNAPSHOT_VERSION: membership
+        # in WATCHED_DIMENSIONS is what tells an old baseline this key was never recorded
+        # (see that tuple's own F-179 comment on why a version bump here would be a
+        # no-op tripwire, not a real migration).
+        "clawseccheck_version": __version__,
         # C-417: when this baseline was taken, from the same producer the event journal
         # uses (_now_iso), so "what happened since the last run" is answerable by
         # comparing the two directly instead of inferring it from file mtimes.
@@ -1139,7 +1160,26 @@ def diff_with_notes(prev: dict | None, curr: dict
 
     def _check_title(cid: str) -> str:
         return BY_ID[cid].title if cid in BY_ID else cid
-    _diff_check_transitions(_check_sev, _check_title, _deg_curr, _na_curr, _na_prev, _newly_visible, _reasons_known, _same_scope_flags, _went_dark, alerts, cc, curr_blind, pc, prev_blind)
+
+    # B-765: a version boundary is a THIRD state, not a bool — "we could not tell" must
+    # never collapse into either "definitely the same build" or "definitely different
+    # builds". `curr` always carries the field once this ships (snapshot() writes it
+    # unconditionally); `prev` is the one that can lack it, and that absence IS the B-765
+    # repro itself — the very first run after upgrading across the release that adds this
+    # field. Gated on `_curr_producer` truthiness first so every hand-built-snapshot test
+    # (which never sets this key on either side) leaves `_version_boundary` at None by
+    # construction, not by coincidence.
+    _curr_producer = curr.get("clawseccheck_version")
+    _prev_producer = prev.get("clawseccheck_version")
+    if not _curr_producer:
+        _version_boundary = None
+    elif not _prev_producer:
+        _version_boundary = ("unknown", "", _curr_producer)
+    elif _prev_producer != _curr_producer:
+        _version_boundary = ("known", _prev_producer, _curr_producer)
+    else:
+        _version_boundary = None
+    _diff_check_transitions(_check_sev, _check_title, _deg_curr, _na_curr, _na_prev, _newly_visible, _reasons_known, _same_scope_flags, _version_boundary, _went_dark, alerts, cc, curr_blind, pc, prev_blind)
 
     # B-660: this was the one arm in diff() gated on neither the scope flags nor presence.
     #
