@@ -75,6 +75,15 @@ _RING_EXEMPT = {
     "check_supply_chain",       # B5 (B-362) — supply-chain/plugin-config posture check;
     # reads ctx.installed_skills only to gate its not_applicable flag (whether the disk
     # skill corpus is empty and completely walked), never to scan skill content itself.
+    "check_skill_library_reachability",  # B354 (B-725) — matched on "installed_skill"
+    # appearing only in its own DOCSTRING PROSE (naming _read_installed_skills, the
+    # filesystem walker this check's whole point is that it is NOT on). The function body
+    # reads ctx.skill_library_live_count / ctx.skill_uploads_digest_mismatch_count — state-DB
+    # table posture, never ctx.installed_skills or any skill's content — and it never reads
+    # files_json/archive_blob either (see the check's own docstring, "§8"). A single --vet
+    # target has no "shared skill library" of its own to be reachable through; this is a
+    # whole-install posture check, the same audit-level shape as check_egress/check_monitoring
+    # above, not a per-skill content-threat detector.
 }
 
 

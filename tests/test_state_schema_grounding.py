@@ -717,9 +717,13 @@ _REGISTRY: "dict[str, _Entry]" = {
 
     # ---- task_runs (B709) ----
     "tests/test_b709_cron_run_logs_shapes.py:52": _Entry(LEGACY_COLS, _TASK_RUNS_NO_NOTNULL_LEGACY),
+
+    # ---- skill_library_entries / skill_uploads (B354 / CLAWSECCHECK-B-725) ----
+    "tests/test_b354_b725_skill_library_reachability.py:31": _Entry(MODERN),
+    "tests/test_b354_b725_skill_library_reachability.py:46": _Entry(MODERN),
 }
 
-assert len(_REGISTRY) == 36, f"registry has {len(_REGISTRY)} entries, expected 36"
+assert len(_REGISTRY) == 38, f"registry has {len(_REGISTRY)} entries, expected 38"
 
 
 # ========================================================================================
