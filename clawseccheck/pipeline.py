@@ -1305,6 +1305,14 @@ class PipelineResult:
     budget_s: float = DEFAULT_FULL_BUDGET_S
     fast: bool = False
     coverage_page: dict = field(default_factory=dict)  # F-165: see build_coverage_page
+    # B-792: the LIVE PluginSweep-shaped object P7 swept, not its serialized `.data`
+    # dict (`by_name(PHASE_PLUGIN_SWEEP).data`, what `to_json()["pluginSweep"]` carries).
+    # `report.build_inventory`/`_plugin_inventory` are duck-typed against this object's
+    # `.no_roots`/`.no_targets`/`.rows` attributes, which the summarized dict does not
+    # carry -- without this, cli.py's `--full --json` path had no way to hand a real
+    # sweep to `render_json`, so `inventory.plugins.scanned` stayed `False` even on a
+    # run whose OWN `pluginSweep.complete` was `True` with real rows swept.
+    plugin_sweep_obj: object | None = None
 
     def add(self, phase: PhaseResult) -> PhaseResult:
         self.phases.append(phase)
@@ -1713,4 +1721,5 @@ def run_pipeline(ctx, findings, *, home_dir, skill_sweep=None,
         # name it — "needs --full" was being printed to an operator who had passed --full.
         sweep_skip_reason=("not scanned this run (--fast drops the sweep phases)"
                            if fast else None))
+    result.plugin_sweep_obj = plugin_sweep_obj  # B-792: see the field's own comment
     return result

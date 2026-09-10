@@ -5432,6 +5432,13 @@ def _main(argv=None) -> int:
                             live_test_reason=live_signal.reason,
                             behavioral_fired_ids=behavioral_fired_ids, ledger=layer_ledger)
         body = render_json(findings, score, risk=paths, ctx=ctx, skill_sweep=full_sweep_json,
+                           # B-792: without this, inventory.plugins.scanned stayed False
+                           # even on a run whose own pluginSweep (merged in below) showed
+                           # complete=True with real rows -- render_json's build_inventory
+                           # call never saw the live sweep object, only its serialized
+                           # summary reached the payload, through a different path.
+                           plugin_sweep=(full_pipeline.plugin_sweep_obj
+                                        if full_pipeline is not None else None),
                            live_test_vulnerable=live_signal.hit,
                            live_test_reason=live_signal.reason,
                            behavioral_fired_ids=behavioral_fired_ids,
