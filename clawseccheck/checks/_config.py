@@ -52,6 +52,7 @@ from ._shared import (
     _channels,
     _config_unreadable,
     _credential_store_state,
+    _dir_replaceable_by_others,
     _DM_POLICY_NESTED_ONLY_CHANNELS,
     _enabled_tools,
     EXPOSED_BINDS,
@@ -4735,4 +4736,133 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
         "authenticated tunnel) and confirm the agents it can target run with "
         "sandbox.mode 'all' - OpenClaw refuses the terminal for fully-sandboxed agents, "
         "which is the one mitigation this audit cannot verify for you.",
+    )
+
+
+def check_local_model_service_command(ctx: Context) -> Finding:
+    """B355 (C-408) — models.providers.<id>.localService.command auto-spawns a binary at
+    provider startup, with config-chosen args/cwd/env. Grounded on the installed dist's
+    zod schema (``ModelProviderLocalServiceSchema``, ``zod-schema.core-*.mjs``): the
+    object is ``.strict().optional()`` with ``command: string().min(1)`` required
+    alongside it, and siblings ``args``/``cwd``/``env``/``healthUrl``/``readyTimeoutMs``/
+    ``idleStopMs``. ``env`` values carry the schema's own ``sensitive`` marker.
+
+    **The original stub's FAIL premise (a relative command) is REFUTED by the runtime,
+    not the schema.** The zod type has no absolute-path constraint -- `command` is a bare
+    non-empty string, so a relative value loads fine -- but the actual local-service
+    launcher (``provider-local-service-*.mjs``) calls `validateLocalServiceConfig` before
+    every spawn, which does `if (!path.isAbsolute(service.command)) throw ...`. So a
+    relative command never silently executes via a PATH/cwd lookup; the provider's local
+    service fails to start and OpenClaw logs an error. That closes the exec-hijack angle
+    the original stub worried about for the relative case -- it is a functionality bug,
+    not a security exposure -- so a relative command is deliberately NOT reported here:
+    it can never reach the spawn this check exists to examine.
+
+    What the runtime does NOT check is WHO can write the absolute path it is about to
+    exec. Same shape B352 (``tools.exec.pathPrepend``) already established for a sibling
+    surface, and the same tier: WARN, never FAIL -- "someone else can write it" is a
+    property of the filesystem at audit time, and a FAIL tier needs its own independent
+    C-135 pass against real configs, which this stub explicitly deferred (CLAUDE.md's
+    "WARN/INFO ship first" allowance for this task).
+
+    WARN — an absolute `command` (or its containing directory) is group/world-writable
+           by an account other than the owner (`_dir_replaceable_by_others`, the same
+           predicate B352/C5 use — sticky dirs and owner-singleton groups excluded).
+    PASS — a `command` is configured and safely owned, or no provider declares one.
+    UNKNOWN — the config was not read, or is present but malformed.
+    """
+    unreadable = _config_unreadable("B355", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B355",
+            UNKNOWN,
+            "No config was read, so whether any model provider auto-spawns a local "
+            "service binary could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    providers = dig(cfg, "models.providers")
+    if providers is not None and not isinstance(providers, dict):
+        return _finding(
+            "B355",
+            UNKNOWN,
+            f"models.providers is present but is not an object (found "
+            f"{type(providers).__name__}), so whether any provider auto-spawns a local "
+            f"service binary could not be determined.",
+            "Fix the models.providers block in openclaw.json so it is a JSON object, "
+            "then re-run the audit.",
+        )
+
+    writable: list[str] = []
+    safe: list[str] = []
+    relative_count = 0
+    if isinstance(providers, dict):
+        for pid, pspec in providers.items():
+            if not isinstance(pspec, dict):
+                continue
+            svc = pspec.get("localService")
+            if not isinstance(svc, dict):
+                continue
+            command = svc.get("command")
+            if not isinstance(command, str) or not command.strip():
+                continue
+            command = command.strip()
+            path_ref = f"models.providers.{pid}.localService.command"
+            if not os.path.isabs(command):
+                # Never reaches the spawn this check examines -- see the docstring's
+                # grounding note. Not a security signal; counted only so the PASS
+                # fallback below does not claim "nothing is declared" about a config
+                # that declares one, just one that cannot run.
+                relative_count += 1
+                continue
+            cmd_path = Path(command)
+            why = _dir_replaceable_by_others(cmd_path) or _dir_replaceable_by_others(cmd_path.parent)
+            if why:
+                writable.append(f"{path_ref} ({command}) is {why}")
+            else:
+                safe.append(f"{path_ref} ({command})")
+
+    if writable:
+        return _finding(
+            "B355",
+            WARN,
+            f"{len(writable)} model-provider local-service command(s) are a binary-"
+            f"hijack surface: {'; '.join(sorted(writable)[:3])}. OpenClaw spawns this "
+            "exact path at provider startup, with config-chosen args/cwd/env — another "
+            "local account replacing it runs arbitrary code as whoever runs OpenClaw, "
+            "with no approval prompt.",
+            "Move the binary to a directory only your account can write (owner-only "
+            "mode, owner-only parent directory), or point localService.command at a "
+            "package-managed install path instead of a shared/writable location.",
+            evidence=sorted(writable)[:8] or None,
+        )
+    if safe:
+        return _finding(
+            "B355",
+            PASS,
+            f"{len(safe)} model-provider local-service command(s) are configured and "
+            f"owner-only: {'; '.join(sorted(safe)[:4])}.",
+            "Nothing to do. Re-check if any of those paths later becomes writable by "
+            "another account.",
+            evidence=sorted(safe)[:8] or None,
+        )
+    if relative_count:
+        return _finding(
+            "B355",
+            PASS,
+            f"{relative_count} model-provider local-service command(s) are a relative "
+            "path, which OpenClaw's own launcher refuses to spawn (it requires an "
+            "absolute path) — so no binary is actually auto-spawned by any of them.",
+            "Not a security exposure, but the provider's local service will not start "
+            "until localService.command is changed to an absolute path.",
+        )
+    return _finding(
+        "B355",
+        PASS,
+        "No model provider declares a localService.command, so no binary is "
+        "auto-spawned at provider startup.",
+        "Nothing to do.",
     )

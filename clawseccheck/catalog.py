@@ -2997,6 +2997,19 @@ CATALOG: list[CheckMeta] = [
         "Supply Chain",
         surface="skills",
     ),
+    # B355 (C-408): models.providers.*.localService.command auto-spawns a binary at
+    # provider startup with config-chosen args/cwd/env. WARN-only, never FAIL -- a
+    # writable command path needs its own independent C-135 pass to escalate, per this
+    # task's own "WARN/INFO ship first" allowance (same tier B352 already set for the
+    # sibling tools.exec.pathPrepend surface).
+    CheckMeta(
+        "B355",
+        "Model-provider local-service command is writable by another account",
+        HIGH,
+        "hardening",
+        "Least Privilege",
+        surface="tools",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

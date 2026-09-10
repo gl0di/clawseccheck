@@ -332,6 +332,7 @@ from ._config import (
     check_hooks_enable_toggles,
     check_least_privilege,
     check_local_first,
+    check_local_model_service_command,
     check_privileged_commands_exposure,
     check_proxy_header_forging,
     check_sandbox,
@@ -1409,6 +1410,11 @@ CHECKS = [
     # B352 — tools.exec.pathPrepend: what OpenClaw exports ahead of $PATH for every
     # exec run. Skips scopes where host=node, which the runtime ignores.
     check_exec_path_prepend,
+    # B355 (C-408) — models.providers.*.localService.command: a binary OpenClaw spawns
+    # at provider startup. WARN when writable by another account; the relative-path
+    # case the original stub worried about is refuted (the runtime refuses to spawn
+    # a relative command at all) and is not reported here.
+    check_local_model_service_command,
     check_subagent_spawn_limits,
     check_cachetrace_redaction,
     # B-281/B-282 (ENV-1/ENV-6): is the audited file the one the agent loads, and is a

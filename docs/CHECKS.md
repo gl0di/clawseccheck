@@ -2417,6 +2417,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B355 - Model-provider local-service command is writable by another account
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Least Privilege
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Model-provider local-service command is writable by another account
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.
