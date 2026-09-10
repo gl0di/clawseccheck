@@ -4495,9 +4495,19 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     return _asciify(out) if ascii_only else out
 
 
+#: C-448: how many of the most recent (surviving, post-retention) events `render_events`
+#: prints by default. Deliberately not the same number as history.DEFAULT_TREND_WINDOW
+#: (30) -- an existing test already pins a 40-event journal rendering with no window
+#: disclosure at all (test_c250_journal_honesty.py), and each event line carries far less
+#: on it than a trend row (no arrow, no per-row severity comparison), so a slightly wider
+#: default default here does not defeat the point (bounding a chat-channel-sized output).
+DEFAULT_EVENTS_WINDOW = 50
+
+
 def render_events(events, ascii_only: bool = False, *,
                    journal_exists: "bool | None" = None,
-                   since: "str | None" = None) -> str:
+                   since: "str | None" = None,
+                   window: "int | None" = DEFAULT_EVENTS_WINDOW) -> str:
     """Render the Agent Watch event journal (timeline of what changed when).
 
     C-250: the header used to print "{len(events)} recorded change event(s)" with no
@@ -4528,6 +4538,17 @@ def render_events(events, ascii_only: bool = False, *,
     Neither signal supplied (the default) preserves the original, deliberately vaguer
     "No recorded change events yet." — the safe fallback for callers that have not
     been updated to supply either fact yet, rather than guessing.
+
+    window:
+        C-448: print only the last *window* SURVIVING events (after the retention
+        marker, if any, is already pulled out) — same "cut what is printed, never
+        what is counted" shape as ``history.render_trend``'s own ``window``. ``None``
+        (or a value ``>= len(body)``) prints every surviving event, reproducing the
+        pre-C-448 behaviour exactly; the CLI's ``--all`` flag passes this. Two
+        DIFFERENT kinds of "not shown" can both be true at once and are disclosed
+        separately in the header: the retention marker (events evicted from the FILE
+        by rotation, never loaded at all) and this window (events that WERE loaded
+        but are not among the most recent *window* of them).
     """
     # Same severity vocabulary as render_monitor — a journal entry written at LOW must not
     # lose its glyph on the way into the permanent record.
@@ -4552,11 +4573,23 @@ def render_events(events, ascii_only: bool = False, *,
         pruned_note = events[0]
         body = events[1:]
 
-    header = f"showing {len(body)} event(s) (most recent last)"
+    # C-448: cut what is PRINTED only — `body` (the full surviving list) is what the
+    # "showing N event(s)" count above was always computed from, and stays the
+    # denominator; `visible` is just the tail of it that actually reaches `lines`.
+    shown_from = 0 if window is None or window >= len(body) else len(body) - window
+    visible = body[shown_from:]
+    if shown_from:
+        header = (
+            f"showing the last {len(visible)} of {len(body)} event(s) (most recent "
+            f"last) — {shown_from} older event(s) not shown here, pass --all to see "
+            "them"
+        )
+    else:
+        header = f"showing {len(body)} event(s) (most recent last)"
     if pruned_note is not None:
-        header += f" — {_sanitize(str(pruned_note.get('message', '')))}"
+        header += f"; {_sanitize(str(pruned_note.get('message', '')))}"
     lines = ["Agent Watch journal", "=" * 30, header + ":", ""]
-    for e in body:
+    for e in visible:
         ts = str(e.get("ts", "?"))
         lvl = str(e.get("level", "INFO"))
         msg = _sanitize(str(e.get("message", "")))

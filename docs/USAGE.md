@@ -559,6 +559,14 @@ network-exposed, or a host monitor disappearing**. Each run appends the changes 
 journal (`~/.clawseccheck/events.jsonl`, owner-only, never uploaded); view the timeline with
 `--watch-log`.
 
+`--watch-log` prints only the most recent **50 events by default (C-448)**, same reasoning as
+`--trend`'s own window just below: this journal can reach thousands of events on a long-lived
+box (retention keeps up to 4,000 before rotating), which is more than a chat-relaying agent
+should have to summarize. The header states the count either way (`showing the last 50 of
+327 event(s)`), and separately names any events the journal's own **retention** has evicted —
+two different kinds of "not shown", disclosed on the same header line rather than conflated.
+Pass `--all` to print every surviving event.
+
 A regression alert carries the **catalog severity of the check that regressed**, so a CRITICAL
 check going FAIL is reported as CRITICAL — matching how the full audit renders the same finding —
 rather than a flat HIGH for every check.
@@ -1682,11 +1690,24 @@ python3 audit.py --log audit.log            # also write log to a local file
   client's own viewer where an HTML attachment would just be a download. Attach the file itself;
   never re-render its contents into the chat or substitute a path (same doctrine as `--badge`).
 - **`--trend`** records the current audit result to a local append-only history file and prints
-  a table of past scores with per-run arrows. Every recorded row is shown, each tagged with the
-  run that produced it (`[audit]`, or `[test]`/`[dev]` for a development/CI run picked up via
+  a table of past scores with per-run arrows, each row tagged with the run that produced it
+  (`[audit]`, or `[test]`/`[dev]` for a development/CI run picked up via
   `CLAWSECCHECK_RUN_SOURCE`, `[view]` for a row written by `--trend` itself, or `[legacy]` for
-  a pre-existing entry with no source recorded) — nothing is ever hidden. History stays on your
-  machine only.
+  a pre-existing entry with no source recorded). History stays on your machine only.
+
+  **The table prints only the most recent 30 runs by default (C-448).** A history file grows
+  without bound — 4,600+ rows / 180+ KB was measured on a real machine — and this tool is
+  usually read by a conversational agent relaying the output into chat, where that much text
+  is the wrong answer to "am I improving?". Nothing is hidden *silently*: when the window cuts
+  the table, the line right above it states exactly how many rows are not printed
+  (`Showing the last 30 of 4,604 run(s) — 4,574 older run(s) not shown here`), and pass
+  `--all` to print every row instead, byte-for-byte the same as this tool's output before
+  this default window existed.
+  The window affects **only what is printed** — the ungraded ratio, every arrow, and the
+  pass-rate-fall counts described below are always computed over the **whole** history file,
+  never just the visible slice, the same way the score arrows already look past an ungraded
+  gap. Narrowing those to the window would be the exact `source`/grade-based filter an earlier
+  version of `--trend` deleted (see below), just applied on a different axis.
 
   A `[view]` row records only the act of looking at the trend: no check ran, so it carries no
   score and no letter, and it is excluded from both sides of the "N of M runs have no grade"

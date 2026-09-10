@@ -72,6 +72,7 @@ from .integrity import (
 from .report import _missing_layers_sentence
 from .report import render_html
 from .report import (
+    DEFAULT_EVENTS_WINDOW,
     _evidence_bullets,
     _redact_home_paths,
     _sanitize,
@@ -126,6 +127,7 @@ from .sarif import render_sarif
 from .pdf import render_pdf
 from .history import (
     DEFAULT_HISTORY,
+    DEFAULT_TREND_WINDOW,
     load as history_load,
     load_with_problem as history_load_with_problem,
     record as history_record,
@@ -2178,6 +2180,11 @@ def _flag_coherence_notes(args) -> list[str]:
     _winner = _resolve_mode(args)
     active.sort(key=lambda af: af[0] != _winner)
     notes: list[str] = []
+    # C-448: --all only un-windows --trend/--watch-log's default display cap. Checked
+    # once here, before the active/not-active split below, so both paths (no primary
+    # mode at all, and a primary mode that is neither of these two) get the note.
+    if bool(getattr(args, "all", False)) and _winner not in ("trend", "watch_log"):
+        notes.append("note: --all has no effect without --trend or --watch-log")
     # C-426: the "--fail-under is deprecated and ignored" note lived here. The flag is
     # gone now, so argparse itself reports it (`unrecognized arguments`) and a note
     # about a flag that cannot be parsed would be unreachable code.
@@ -3105,6 +3112,9 @@ def _main(argv=None) -> int:
                    help="exit 1 if any unsuppressed FAIL finding exists")
     p.add_argument("--trend", action="store_true",
                    help="record this run to history, print trend + percentile, and exit")
+    p.add_argument("--all", action="store_true",
+                   help="with --trend or --watch-log, print every row/event instead of "
+                        "the default windowed view")
     p.add_argument("--percentile", action="store_true",
                    # B-536 sibling: "the current score" presupposed every run has one.
                    # `_percentile_line` has withheld the rank on an ungraded run since
@@ -3938,7 +3948,8 @@ def _main(argv=None) -> int:
                 _state = load_state(args.state) if args.state else load_state()
                 _events_since = (_state or {}).get("ts")
         _emit(render_events(_events_rows, ascii_only,
-                            journal_exists=_journal_exists, since=_events_since))
+                            journal_exists=_journal_exists, since=_events_since,
+                            window=None if args.all else DEFAULT_EVENTS_WINDOW))
         # B-582: same tamper-evident check --verify-events already has, run here too
         # — this viewer used to present the journal without ever consulting it. A
         # broken chain is disclosed, never withheld or called tampering (see
@@ -4512,7 +4523,8 @@ def _main(argv=None) -> int:
         # (measured: 0.6% of a --trend run's own cost) — and never withholds a row
         # on a broken chain, only discloses it (see chain_provenance_note).
         _chain_status = history_verify(args.history)
-        _emit(render_trend(rows, ascii_only, chain_status=_chain_status))
+        _emit(render_trend(rows, ascii_only, chain_status=_chain_status,
+                          window=None if args.all else DEFAULT_TREND_WINDOW))
         _emit(_percentile_line(score, ascii_only, args.history))
         return 0
 

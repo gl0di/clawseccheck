@@ -118,8 +118,8 @@ def test_mixed_rows_ratio_reconciles_against_what_is_shown(tmp_path):
     history_record(_Score(None, None, False), path=str(hist), when="2026-08-13T10:00:00", source="view")
 
     out = render_trend(history_load(str(hist)))
-    assert "1 of 2 runs have no grade" in out
-    assert "2 of 4 rows shown above are counted in that ratio" in out
+    assert "1 of 2 runs in this history have no grade" in out
+    assert "2 of 4 rows in this history are counted in that ratio" in out
     assert "the other 2 rows" in out
     # two row lines carry [view]; the reconciliation sentence names it too (3 total)
     assert out.count("[view]") == 3
@@ -133,5 +133,5 @@ def test_no_view_rows_leaves_the_ratio_and_wording_unchanged(tmp_path):
     history_record(_Score(None, None, False), path=str(hist), when="2026-08-11T10:00:00", source="audit")
 
     out = render_trend(history_load(str(hist)))
-    assert "1 of 2 runs have no grade" in out
+    assert "1 of 2 runs in this history have no grade" in out
     assert "rows shown above are counted" not in out

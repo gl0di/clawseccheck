@@ -162,7 +162,7 @@ def test_render_trend_disclosure_present_when_hole_exists():
         {"date": "2026-08-02", "score": None, "grade": None, "graded": False, "source": "audit"},
     ]
     out = render_trend(rows, ascii_only=False)
-    assert "1 of 2 runs have no grade" in out
+    assert "1 of 2 runs in this history have no grade" in out
     assert "five-layer check did not" in out
 
 
