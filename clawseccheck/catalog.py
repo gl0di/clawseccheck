@@ -2984,6 +2984,19 @@ CATALOG: list[CheckMeta] = [
         "Zero Trust / Gateway",
         surface="gateway",
     ),
+    # B354 (B-725): the state DB's shared skill-library/upload surface -- a skill
+    # install/enable channel our filesystem-based skill discovery never sees at all.
+    # WARN-only (can prove a live untracked skill EXISTS, never that it is malicious;
+    # never reads its content) and UNKNOWN, not PASS, when the surface could not be
+    # examined -- absence of the table on this DB is not evidence the feature is unused.
+    CheckMeta(
+        "B354",
+        "Shared skill-library / upload surface bypasses filesystem discovery",
+        HIGH,
+        "hardening",
+        "Supply Chain",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

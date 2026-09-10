@@ -163,6 +163,14 @@ _MAX_CRON_RUN_LOGS = 500
 _MAX_EXEC_APPROVALS_BYTES = _MAX_CONFIG_BYTES
 _MAX_EXEC_APPROVALS_AGENTS = 200
 
+# B-725: the shared skill-library surface in the state DB (skill_library_entries,
+# skill_uploads) -- bounded the same way as the row-scanning readers above. A hostile
+# or padded DB must not turn this into an unbounded scan; the consuming check needs
+# only enough rows to establish reachability/integrity, not a full history.
+_MAX_SKILL_LIBRARY_ENTRIES = 500
+_MAX_SKILL_LIBRARY_SAMPLE = 10
+_MAX_SKILL_UPLOADS = 500
+
 # B-240 (B177): the persisted installed_plugin_index.install_records_json column (OpenClaw's
 # own ClawHub trust verdict per plugin) is read-only and size/entry-capped the same way as
 # the cron/exec-approvals stores above — a huge/padded blob must not load whole into memory
@@ -750,6 +758,24 @@ class Context:
     capture_parse_error: bool = False        # present but could not be read
     capture_event_rows: int = 0              # captured request/response flows on disk
     capture_blob_rows: int = 0               # captured bodies on disk
+    # B-725: the shared skill-library / upload surface in the state DB. Reachable and
+    # published there is NOT reachable by the filesystem walk `_read_installed_skills`
+    # does -- `skill_library`/`skill_uploads` appear nowhere else in this package. Each
+    # table's own `_read` flag is independent: the real machine measured has
+    # skill_library_entries ABSENT while skill_uploads is PRESENT (0 rows), so one
+    # table's absence must never be inferred from the other's.
+    skill_library_entries_read: bool = False       # table present and queried
+    skill_library_entries_parse_error: bool = False  # present but could not be read
+    # An entry counts as LIVE when enabled AND NOT removed -- the two flags that decide
+    # whether THIS OpenClaw install treats it as active, regardless of `shared`.
+    skill_library_live_count: int = 0
+    skill_library_live_sample: list = field(default_factory=list)  # slugs, capped
+    skill_uploads_read: bool = False               # table present and queried
+    skill_uploads_parse_error: bool = False        # present but could not be read
+    # A COMMITTED upload whose received bytes (`actual_sha256`) disagree with its
+    # declared digest (`sha256`) -- an in-progress (uncommitted) upload legitimately
+    # has a partial/absent actual_sha256, so only committed rows are counted.
+    skill_uploads_digest_mismatch_count: int = 0
     # B-236 (B172): standing exec-approvals.json grants, one dict per agent present in
     # the store's `agents` map: {agent_id, security, ask, allow_always_count}. Populated
     # regardless of whether allow_always_count is 0 -- the consuming check filters.
@@ -4624,6 +4650,108 @@ def _collect_capture_state(home: Path, ctx: Context) -> None:
     ctx.capture_blob_rows = int(blobs or 0)
 
 
+def _collect_skill_library_state(home: Path, ctx: Context) -> None:
+    """B-725: read-only reachability/integrity signal from the state DB's shared
+    skill-library surface (``skill_library_entries``, ``skill_uploads``) -- a skill
+    published and enabled there is NOT on the path ``_read_installed_skills`` walks, so
+    it is audited BLIND by everything else in this package. Confirmed by grep: neither
+    ``skill_library`` nor ``skill_uploads`` appears anywhere else in ``clawseccheck/``.
+
+    Two tables, read and reported INDEPENDENTLY -- the real machine measured has
+    ``skill_library_entries`` absent while ``skill_uploads`` is present (0 rows), and
+    inferring one table's state from the other would be exactly the "looked at
+    something adjacent, called it looked" shape Golden Rule #4 forbids.
+
+    ``skill_library_entries``: only ``skill_id, slug, shared, enabled, removed`` are
+    read -- never ``owner_profile_id``/``author_profile_id`` (identity) or
+    ``current_revision`` (which would need ``skill_library_revisions.files_json``,
+    CONTENT, to mean anything). A row counts as LIVE when ``enabled AND NOT removed``,
+    regardless of ``shared`` -- those two flags are what make OpenClaw itself treat it
+    as active.
+
+    ``skill_uploads``: only ``upload_id, sha256, actual_sha256`` are read, and only for
+    ``committed = 1`` rows -- an in-progress upload legitimately has a partial or absent
+    ``actual_sha256`` while chunks are still arriving, so comparing it would be a false
+    positive by construction. ``archive_blob``/``files_json`` (CONTENT, in both this
+    table and ``skill_library_uploads``/``skill_library_revisions``) are never read here
+    or anywhere in this reader -- digesting them is future work, not silently skipped
+    (see the task's own "adjacent surfaces, not in scope" note).
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same
+    pattern every other state-DB reader in this module uses.
+    """
+    state_dir = home / "state"
+    capped: list = []
+    candidates = (
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        # Both *_read stay False -> UNKNOWN downstream, never a fake PASS. A capped
+        # walk that never reached the DB is a DIFFERENT fact than an empty state dir
+        # (GR#4 -- a completeness claim over a scan that stopped early would be false).
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the skill-library surface was not read"
+            )
+        return
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        ctx.errors.append(f"could not open '{db_path}': {exc}")
+        return
+    try:
+        conn.execute("PRAGMA query_only = 1")
+
+        try:
+            rows = conn.execute(
+                # Bound columns, no SELECT * -- this query cannot return a row this
+                # tool is not allowed to see (§8; the same DB holds live OAuth tokens).
+                "SELECT skill_id, slug, shared, enabled, removed "
+                "FROM skill_library_entries LIMIT ?",
+                (_MAX_SKILL_LIBRARY_ENTRIES,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            # A DB predating the skill library is not corrupt -- same honest UNKNOWN as
+            # "no DB" (mirrors _collect_capture_state / _collect_cron_run_logs).
+            if "no such table" not in str(exc).lower():
+                ctx.errors.append(
+                    f"could not read skill_library_entries from {db_path}: {exc}")
+                ctx.skill_library_entries_parse_error = True
+        else:
+            ctx.skill_library_entries_read = True
+            for skill_id, slug, _shared, enabled, removed in rows:
+                if enabled and not removed:
+                    ctx.skill_library_live_count += 1
+                    if len(ctx.skill_library_live_sample) < _MAX_SKILL_LIBRARY_SAMPLE:
+                        name = slug if isinstance(slug, str) and slug else skill_id
+                        if isinstance(name, str) and name:
+                            ctx.skill_library_live_sample.append(name)
+
+        try:
+            rows = conn.execute(
+                "SELECT upload_id, sha256, actual_sha256 FROM skill_uploads "
+                "WHERE committed = 1 LIMIT ?",
+                (_MAX_SKILL_UPLOADS,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            if "no such table" not in str(exc).lower():
+                ctx.errors.append(f"could not read skill_uploads from {db_path}: {exc}")
+                ctx.skill_uploads_parse_error = True
+        else:
+            ctx.skill_uploads_read = True
+            for _upload_id, sha256, actual_sha256 in rows:
+                if (isinstance(sha256, str) and sha256
+                        and isinstance(actual_sha256, str) and actual_sha256
+                        and sha256 != actual_sha256):
+                    ctx.skill_uploads_digest_mismatch_count += 1
+    finally:
+        conn.close()
+
+
 def _collect_exec_approvals(home: Path, ctx: Context) -> None:
     """B-236 (B172): read-only collection of the standing OpenClaw exec-approvals
     store (~/.openclaw/exec-approvals.json) into ``ctx.exec_approvals_grants``.
@@ -6805,6 +6933,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)
     _collect_capture_state(home, ctx)  # B-295: debug-proxy capture row counts (metadata only)
+    _collect_skill_library_state(home, ctx)  # B-725: shared skill-library reachability/integrity
     _collect_subagent_runs(home, ctx)  # B-296: subagent-spawn registry disclosure for B18
     _collect_audit_events(home, ctx)   # F-134 (DISK-1): runtime audit_events trail, --behavioral only
     _read_installed_skills(home, ctx)

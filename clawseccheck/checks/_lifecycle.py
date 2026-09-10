@@ -5363,6 +5363,97 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     )
 
 
+def check_skill_library_reachability(ctx: Context) -> Finding:
+    """B354 (B-725) — OpenClaw's shared skill-library / upload surface in the state DB
+    (``skill_library_entries``, ``skill_uploads``) is a skill install/enable channel
+    this tool's filesystem-based skill discovery never sees at all: confirmed by grep,
+    neither ``skill_library`` nor ``skill_uploads`` appears anywhere else in
+    ``clawseccheck/``. A skill published there with ``enabled AND NOT removed`` is live
+    to OpenClaw and was never on the path ``_read_installed_skills`` walks, so every
+    content-security check this tool has (skill-malware, prompt-injection, the whole
+    ``SKILL_CONTENT_RING``) is BLIND to it.
+
+    WARN, not FAIL: this check can prove a live, unscanned skill EXISTS, never that its
+    content is malicious -- it never reads ``files_json``/``archive_blob`` (CONTENT,
+    §8). It also flags a COMMITTED ``skill_uploads`` row whose received-bytes digest
+    (``actual_sha256``) disagrees with its declared one (``sha256``) -- a real tamper
+    signal sitting in the schema, gated on ``committed`` because an in-progress upload
+    legitimately has a partial/absent ``actual_sha256`` while chunks are still arriving.
+
+    UNKNOWN, never a fake PASS, when the surface could not be examined at all -- the
+    real machine this was grounded against has ``skill_library_entries`` ABSENT while
+    ``skill_uploads`` is present (0 rows), so "the table is not here" is evidence this
+    database never created it, never evidence the library is unused (Golden Rule #4).
+    The two tables are tracked, and reported as unread, INDEPENDENTLY for exactly that
+    reason -- inferring one table's state from the other would silently launder a real
+    blind spot into a clean verdict. A run where only ONE of the two was read and found
+    nothing stays UNKNOWN too: a PASS here is a claim about the WHOLE surface, and half
+    of it was never looked at.
+    """
+    problems: list = []
+    if ctx.skill_library_live_count:
+        sample = ", ".join(f"'{s}'" for s in ctx.skill_library_live_sample[:5])
+        more = ctx.skill_library_live_count - min(len(ctx.skill_library_live_sample), 5)
+        problems.append(
+            f"{ctx.skill_library_live_count} skill(s) published to the shared skill "
+            f"library are enabled ({sample}{f', +{more} more' if more > 0 else ''}) -- "
+            "reachable to OpenClaw but never on the filesystem path this tool's skill "
+            "scanners walk, so their content was never checked"
+        )
+    if ctx.skill_uploads_digest_mismatch_count:
+        problems.append(
+            f"{ctx.skill_uploads_digest_mismatch_count} committed upload(s) in "
+            "skill_uploads have a received-bytes digest that disagrees with their "
+            "declared sha256 -- the bytes OpenClaw accepted are not the bytes that "
+            "were meant to arrive"
+        )
+
+    if problems:
+        return _finding(
+            "B354",
+            WARN,
+            "; ".join(problems) + ".",
+            "Review the shared skill library (openclaw skills library list, or your "
+            "workspace's skill-sharing UI) for entries you did not knowingly publish, "
+            "and disable/remove anything unexpected. A digest mismatch on a committed "
+            "upload warrants re-uploading from a trusted copy and checking who committed "
+            "it.",
+            evidence=problems,
+        )
+
+    read_any = ctx.skill_library_entries_read or ctx.skill_uploads_read
+    if not read_any:
+        return _finding(
+            "B354",
+            UNKNOWN,
+            "The state database's shared skill-library tables (skill_library_entries, "
+            "skill_uploads) were not found or could not be read, so whether any skill "
+            "reaches this OpenClaw install through that channel cannot be determined.",
+            "No action needed if you do not use the shared skill library. If you do, "
+            "confirm ~/.openclaw/state/openclaw.sqlite is readable and re-run.",
+        )
+
+    if ctx.skill_library_entries_read and ctx.skill_uploads_read:
+        return _finding(
+            "B354",
+            PASS,
+            "The shared skill-library tables were read: no enabled, non-removed library "
+            "entry and no committed upload with a digest mismatch.",
+            "No action needed. Re-check after publishing or removing a shared skill.",
+        )
+
+    unread = "skill_uploads" if ctx.skill_library_entries_read else "skill_library_entries"
+    return _finding(
+        "B354",
+        UNKNOWN,
+        f"One half of the shared skill-library surface was read and found nothing, but "
+        f"'{unread}' could not be confirmed -- a PASS here would be a claim about the "
+        "whole surface, and half of it was never examined.",
+        "No action needed if you do not use the shared skill library. If you do, "
+        "confirm ~/.openclaw/state/openclaw.sqlite is readable and re-run.",
+    )
+
+
 def check_supply_chain(ctx: Context) -> Finding:
     """B5 — supply-chain integrity of installed plugins/skills.
 

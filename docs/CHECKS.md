@@ -2405,6 +2405,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B354 - Shared skill-library / upload surface bypasses filesystem discovery
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Shared skill-library / upload surface bypasses filesystem discovery
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

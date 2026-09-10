@@ -406,6 +406,7 @@ from ._lifecycle import (
     check_clawhub_token_store,
     check_session_approval_policy,
     check_skill_install_tamper,
+    check_skill_library_reachability,
     check_skill_workshop_autonomy,
     check_supply_chain,
     check_update_pinning,
@@ -1433,6 +1434,7 @@ CHECKS = [
     check_clawhub_token_store,  # B182 — ClawHub CLI plaintext token store perms, outside the OpenClaw home (B-259)
     check_clawhub_registry_provenance,  # B184 — WHICH ClawHub issued the B135/B177/B181 verdicts (B-291, ENV-5)
     check_declared_skill_reconciliation,  # B158 — declared-but-unresolved skill-load source (F-119)
+    check_skill_library_reachability,  # B354 — shared skill-library/upload surface bypasses filesystem discovery (B-725)
     check_audit_suppressions,  # B173 — security.audit.suppressions self-blinds native audit (B-237)
     check_install_policy_gate,  # B174 — security.installPolicy.* gate + exec-hook escape flags (B-238)
     check_dependency_tree_hooks,  # B349 — obfuscated install-lifecycle hook target in the dependency tree (F-167)
