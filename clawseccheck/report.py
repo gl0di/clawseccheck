@@ -1831,7 +1831,7 @@ def _group_issues_by_subject(issues):
     return out
 
 
-def _subject_count_text(n_issues: int, n_unassessed: int) -> str:
+def _subject_count_text(n_issues: int, n_unassessed: int, n_not_applicable: int = 0) -> str:
     """The one phrase every subject rollup uses for "how did this subject do".
 
     Golden Rule #4: a subject whose checks could not reach a verdict is NOT clear. Saying
@@ -1844,11 +1844,25 @@ def _subject_count_text(n_issues: int, n_unassessed: int) -> str:
     Shared rather than repeated so the three surfaces cannot drift again. `n_unassessed`
     counts genuine UNKNOWNs only — a `not_applicable` finding IS an assessment (the
     surface was positively confirmed absent), so it must not turn a clean subject into an
-    unassessed one."""
+    unassessed one.
+
+    B-791: `n_not_applicable` catches the case `n_unassessed` alone cannot — a subject
+    whose ONLY UNKNOWN members are `not_applicable`. `_worst_status` still rolls the
+    bucket's MARKER to UNKNOWN for such a subject (F-140's rule: not_applicable must
+    never read as PASS), so with `n_not_applicable` unset this function had no way to
+    tell that apart from a genuinely clean subject and returned "clear" — an UNKNOWN
+    marker paired with the word "clear", the exact contradiction this function exists to
+    prevent, just reached through the one path B-472's original fix didn't cover
+    ("Channels (none configured) — ❔ clear"). "not applicable" is neither "clear" (which
+    implies a positive check ran and found nothing) nor "not assessed" (which implies a
+    gap this tool could close) — a subject with a genuine coverage gap alongside any
+    not_applicable members still reads "not assessed", since that is the stronger claim."""
     if n_issues:
         return f"{n_issues} issue(s)"
     if n_unassessed:
         return "not assessed"
+    if n_not_applicable:
+        return "not applicable"
     return "clear"
 
 
@@ -1928,7 +1942,8 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     def _issues_count(subj):
         bucket = inv[subj]
         return _subject_count_text(len(bucket.get("findings") or []),
-                                   int(bucket.get("unassessed") or 0))
+                                   int(bucket.get("unassessed") or 0),
+                                   int(bucket.get("not_applicable_count") or 0))
 
     rows = [
         (SUBJECT_LABEL["openclaw"], inv["openclaw"]["status"], _issues_count("openclaw")),
@@ -1959,7 +1974,8 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     skills = inv["skills"]
     sk_subject = inv.get("skills_subject") or {}
     sk_subject_text = _subject_count_text(len(sk_subject.get("findings") or []),
-                                          int(sk_subject.get("unassessed") or 0))
+                                          int(sk_subject.get("unassessed") or 0),
+                                          int(sk_subject.get("not_applicable_count") or 0))
     sk_flagged = [s for s in skills if s.get("status") in _FLAGGED_OR_UNSEEN]
     sk_status = _worst_of_statuses(
         [s.get("status") for s in sk_flagged] + [sk_subject.get("status", PASS)])
@@ -1975,7 +1991,8 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     mcp = inv["mcp"]
     mcp_subject = inv.get("mcp_subject") or {}
     mcp_subject_text = _subject_count_text(len(mcp_subject.get("findings") or []),
-                                           int(mcp_subject.get("unassessed") or 0))
+                                           int(mcp_subject.get("unassessed") or 0),
+                                           int(mcp_subject.get("not_applicable_count") or 0))
     mcp_bad = [m for m in mcp if m.get("verdict") != "ok"]
     mcp_status = _worst_of_statuses(
         [m.get("verdict") for m in mcp_bad] + [mcp_subject.get("status", PASS)])
@@ -2178,7 +2195,15 @@ def _worst_of_statuses(statuses) -> str:
 
 
 def _worst_status(members) -> str:
-    """Rolled-up worst status across a set of findings; PASS (all-clear) when empty."""
+    """Rolled-up worst status across a set of findings; PASS (all-clear) when empty.
+
+    Deliberately does NOT exclude `not_applicable` members (an earlier B-791 draft of
+    this function tried that, to fix a marker/text mismatch on the Channels row --
+    retracted: it made a not_applicable-only bucket roll to PASS, breaking the F-140
+    invariant `test_not_applicable_finding_never_rolls_up_as_pass` pins on purpose --
+    "doesn't apply" must never read as "all clear". The marker/text mismatch is fixed
+    at the TEXT layer instead: see `_subject_count_text`'s `n_not_applicable` param.
+    """
     return _worst_of_statuses(f.status for f in members)
 
 
@@ -2430,16 +2455,17 @@ def _empty_inventory() -> dict:
     """A fresh, all-clear inventory shape — every nested list/dict is newly allocated
     per call (no shared mutable state across callers) — for when `ctx` is unavailable."""
     return {
-        "openclaw": {"status": PASS, "findings": [], "unassessed": 0},
-        "host": {"status": PASS, "findings": [], "unassessed": 0},
-        "agents": {"status": PASS, "findings": [], "unassessed": 0,
+        "openclaw": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0},
+        "host": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0},
+        "agents": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0,
                    "roster": [], "attested": False},
         "skills": [],
         "self_excluded": [],
         "mcp": [],
         "plugins": {"scanned": False, "rows": []},
-        "channels": {"status": PASS, "findings": [], "unassessed": 0, "roster": []},
-        "logs": {"status": PASS, "findings": [], "unassessed": 0},
+        "channels": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0,
+                     "roster": []},
+        "logs": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0},
     }
 
 
@@ -2500,6 +2526,16 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
             "findings": [f.id for f in issues],
             "unassessed": sum(1 for f in members
                               if f.status == UNKNOWN and not getattr(f, "not_applicable", False)),
+            # B-791: a not_applicable member pushes `status` to UNKNOWN (deliberately --
+            # see _worst_status) but is excluded from `unassessed` above, so a subject
+            # whose only UNKNOWN members are not_applicable had `status=UNKNOWN` alongside
+            # `unassessed=0` and an empty `findings` list -- `_subject_count_text` could
+            # not tell that apart from a genuinely clean subject and printed "clear" next
+            # to the UNKNOWN marker ("Channels (none configured) -- ❔ clear"). Counted
+            # separately so the text layer can say "not applicable" instead, without
+            # touching `status` (F-140: not_applicable must never read as PASS/"clear").
+            "not_applicable_count": sum(1 for f in members
+                                        if f.status == UNKNOWN and getattr(f, "not_applicable", False)),
         }
 
     openclaw = _bucket("openclaw")
@@ -2547,7 +2583,8 @@ def _inventory_bucket_lines(label: str, bucket: dict, by_id: dict, *, ascii_only
     status = bucket.get("status", PASS)
     fids = bucket.get("findings") or []
     marker = icon.get(status, icon.get(UNKNOWN, "?"))
-    count_text = _subject_count_text(len(fids), int(bucket.get("unassessed") or 0))
+    count_text = _subject_count_text(len(fids), int(bucket.get("unassessed") or 0),
+                                     int(bucket.get("not_applicable_count") or 0))
     out = [f" {label} — {marker} {count_text}"]
     for fid in fids:
         f = by_id.get(fid)
@@ -3334,10 +3371,15 @@ def render_report(findings: list[Finding], score: ScoreResult,
             # B-472: this header used a bare `else "clear"` and so contradicted the
             # "N not assessed (config can't tell)" line this same block prints a few lines
             # below, for the same members. Same rule as the inventory block above.
+            # B-791: a not_applicable member counted separately so a subject whose only
+            # UNKNOWN members are not_applicable reads "not applicable" here too, not
+            # "clear" next to an UNKNOWN marker.
             count_text = _subject_count_text(
                 n_bad,
                 sum(1 for f in members
                     if f.status == UNKNOWN and not getattr(f, "not_applicable", False)),
+                sum(1 for f in members
+                    if f.status == UNKNOWN and getattr(f, "not_applicable", False)),
             )
             if ascii_only:
                 lines.append(f"[{label_disp}] — {count_text}")

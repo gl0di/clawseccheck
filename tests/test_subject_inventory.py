@@ -358,17 +358,20 @@ def test_build_inventory_never_invents_a_finding_id():
 
 
 def test_build_inventory_ctx_none_returns_neutral_shape():
+    # B-791: each unassessed-carrying bucket gained a sibling `not_applicable_count`
+    # (0 in the neutral ctx-is-None shape) -- see _subject_count_text's docstring.
     assert build_inventory([], None) == {
-        "openclaw": {"status": PASS, "findings": [], "unassessed": 0},
-        "host": {"status": PASS, "findings": [], "unassessed": 0},
-        "agents": {"status": PASS, "findings": [], "unassessed": 0,
+        "openclaw": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0},
+        "host": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0},
+        "agents": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0,
                    "roster": [], "attested": False},
         "skills": [],
         "self_excluded": [],
         "mcp": [],
         "plugins": {"scanned": False, "rows": []},
-        "channels": {"status": PASS, "findings": [], "unassessed": 0, "roster": []},
-        "logs": {"status": PASS, "findings": [], "unassessed": 0},
+        "channels": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0,
+                     "roster": []},
+        "logs": {"status": PASS, "findings": [], "unassessed": 0, "not_applicable_count": 0},
     }
 
 

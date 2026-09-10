@@ -126,14 +126,14 @@ before assuming a nested key is part of the contract; notably, the subject keys 
   "config_parse_reason": null,
   "errors": [],
   "inventory": {
-    "openclaw": { "status": "FAIL", "findings": ["B2"], "unassessed": 24 },
-    "host": { "status": "WARN", "findings": ["B50"], "unassessed": 0 },
-    "agents": { "status": "PASS", "findings": [], "unassessed": 0, "roster": ["(default)"], "attested": false },
+    "openclaw": { "status": "FAIL", "findings": ["B2"], "unassessed": 24, "not_applicable_count": 0 },
+    "host": { "status": "WARN", "findings": ["B50"], "unassessed": 0, "not_applicable_count": 0 },
+    "agents": { "status": "PASS", "findings": [], "unassessed": 0, "not_applicable_count": 0, "roster": ["(default)"], "attested": false },
     "skills": [ { "name": "pdf", "verdict": "NO KNOWN ISSUE", "status": "PASS", "reasons": [] } ],
     "mcp": [ { "name": "slack", "verdict": "ok", "reasons": [] } ],
     "plugins": { "scanned": false, "rows": [] },
-    "channels": { "status": "WARN", "findings": ["B26"], "unassessed": 0, "roster": ["telegram"] },
-    "logs": { "status": "PASS", "findings": [], "unassessed": 0 }
+    "channels": { "status": "UNKNOWN", "findings": [], "unassessed": 0, "not_applicable_count": 1, "roster": [] },
+    "logs": { "status": "PASS", "findings": [], "unassessed": 0, "not_applicable_count": 0 }
   },
   "scan_receipt": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 }
@@ -1334,12 +1334,12 @@ audit logging, file-integrity monitoring, EDR, native binary PATH). `"plugins"` 
 
 | Field | Type | Description |
 |---|---|---|
-| `openclaw` | `object` | Bucket: `{"status": str, "findings": array[str], "unassessed": int}`. `status` is the worst status (`FAIL` > `WARN` > `UNKNOWN` > `PASS`) among findings on the OpenClaw-core surfaces (gateway, tools, secrets, monitoring, hooks, update, sessions); `findings` lists the ids of that bucket's own FAIL/WARN findings; `unassessed` counts members whose `status` is `UNKNOWN` **and** `not_applicable` is `false` — a surface positively confirmed absent (`not_applicable: true`) was still assessed, so it is deliberately NOT counted here even though it is also `UNKNOWN`. |
+| `openclaw` | `object` | Bucket: `{"status": str, "findings": array[str], "unassessed": int, "not_applicable_count": int}`. `status` is the worst status (`FAIL` > `WARN` > `UNKNOWN` > `PASS`) among findings on the OpenClaw-core surfaces (gateway, tools, secrets, monitoring, hooks, update, sessions); `findings` lists the ids of that bucket's own FAIL/WARN findings; `unassessed` counts members whose `status` is `UNKNOWN` **and** `not_applicable` is `false`; `not_applicable_count` (B-791) counts the complementary set — `status: "UNKNOWN"` **and** `not_applicable: true`, a surface positively confirmed absent. Both are excluded from `status`'s effect on a *clean* reading (a subject whose only UNKNOWN members are `not_applicable` reports its text as "not applicable", never "clear", even though `status` itself still rolls to `"UNKNOWN"` — "doesn't apply" is not "all clear"), but `not_applicable_count` was still assessed (a positive absence finding), which is why it is not folded into `unassessed`. |
 | `host` | `object` | Bucket, same shape as `openclaw`, scoped to the `host` surface (network IDS, audit logging, file-integrity monitoring, EDR, native binary PATH safety, systemd persistence) — answers "is this MACHINE monitored", a distinct question from "is OpenClaw configured well". |
 | `agents` | `object` | Bucket, same shape as `openclaw`, plus: `roster` (`array[str]`) — agent names, preferring an attested roster (`--attest`) over the static `agents.list` config, falling back to `["(default)"]`; `attested` (`bool`) — `true` when the roster came from an attestation self-report. |
 | `skills` | `array[object]` | One entry per installed skill: `{"name": str, "verdict": str, "status": str, "reasons": array[str]}`. `verdict` reuses the same word set `--vet` uses (`"NO KNOWN ISSUE"`, `"SUSPICIOUS"`, `"DANGEROUS"`, `"UNKNOWN"`); `status` is the underlying `PASS`/`WARN`/`FAIL`/`UNKNOWN`; `reasons` holds up to 3 sanitised detail strings. Empty array when no skills are installed. A skill the per-skill scan budget could not reach reports `status: "UNKNOWN"` with a reason explaining why — never a false `"NO KNOWN ISSUE"`. |
 | `mcp` | `array[object]` | One entry per configured MCP server (both `mcp.servers` nesting and legacy `mcpServers`/`mcp_servers`): `{"name": str, "verdict": str, "reasons": array[str]}`. `verdict` is `"ok"` (no supply-chain/trust signal), or `"WARN"`/`"FAIL"`/`"UNKNOWN"`. Empty array when no MCP servers are configured. |
-| `skills_subject` | `object` | B-506: the **bucket** for the Skills subject — same `{"status", "findings", "unassessed"}` shape as `openclaw`. Separate from the `skills` roster above because they answer different questions: the roster says "these installed skills look wrong", this says "the skill subsystem itself carries findings". A finding filed against the subject rather than against one installed item had nowhere to land before, so an empty roster rendered as "clear" above a detail section listing a HIGH. Both counts are reported side by side and never summed. |
+| `skills_subject` | `object` | B-506: the **bucket** for the Skills subject — same `{"status", "findings", "unassessed", "not_applicable_count"}` shape as `openclaw`. Separate from the `skills` roster above because they answer different questions: the roster says "these installed skills look wrong", this says "the skill subsystem itself carries findings". A finding filed against the subject rather than against one installed item had nowhere to land before, so an empty roster rendered as "clear" above a detail section listing a HIGH. Both counts are reported side by side and never summed. |
 | `mcp_subject` | `object` | B-506: the bucket for the MCP subject, same shape and rationale as `skills_subject`. Non-empty is entirely normal with `mcp: []` — a config with no `mcp.servers` block at all can still carry MCP findings (a plugin doc-cache's shell hooks, an orphaned plugin cache), which is exactly the case that printed "none configured" over "2 issue(s)". |
 | `plugins` | `object` | `{"scanned": bool, "rows": array[object]}`. `scanned` is `false` when this run never swept plugins (plain `audit()`/`--json` without `--full` — a plugin sweep is `--full`-only) — distinct from `true` with an empty `rows` (a real sweep found zero installed plugins). Each row: `{"name": str, "status": str}` (`PASS`/`WARN`/`FAIL`/`UNKNOWN`/`"SKIPPED"`/`"TRUNCATED"`). |
 | `channels` | `object` | Bucket, same shape as `openclaw`, plus: `roster` (`array[str]`) — configured channel provider names (the `defaults` pseudo-provider excluded). |
