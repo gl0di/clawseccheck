@@ -164,6 +164,24 @@ def test_an_empty_target_is_not_masked_by_an_earlier_mode(tmp_path, capsys):
     assert "--vet needs a target" in capsys.readouterr().err
 
 
+def test_vet_judged_empty_target_is_refused_even_with_a_valid_vet_skill(tmp_path, capsys):
+    """B-789: --vet-judged is a MODIFIER (used alongside --vet/--vet-skill/--vet-plugin),
+    not a primary mode, so it was invisible to _empty_mode_target/_VALUE_REQUIRED_MODES
+    above -- an empty value fell through to `if args.vet_judged:` being falsy and was
+    silently treated as omitted, unlike every primary vet-* flag's own empty-string
+    rejection just above. Combined with a real --vet-skill target so this pins the DoD's
+    exact scenario, not merely the flag checked in isolation."""
+    skill_dir = tmp_path / "myskill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: myskill\ndescription: test\n---\n# myskill\n", encoding="utf-8")
+    rc = main(["--vet-skill", str(skill_dir), "--vet-judged", "",
+               "--data-dir", str(tmp_path / "dd"), "--no-history"])
+    err = capsys.readouterr().err
+    assert rc == 2, err
+    assert "--vet-judged needs a target" in err, err
+
+
 # ------------------------------------------------------------- end to end on the CLI
 
 def _run(tmp_path, *argv):

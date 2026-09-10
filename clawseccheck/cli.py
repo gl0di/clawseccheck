@@ -3322,6 +3322,16 @@ def _main(argv=None) -> int:
               "Pass a path, slug, or URL.", file=sys.stderr)
         return 2
 
+    # B-789: --vet-judged is a MODIFIER (used alongside --vet/--vet-skill/--vet-plugin),
+    # not a primary mode, so _empty_mode_target/_VALUE_REQUIRED_MODES above never sees
+    # it — an empty value fell through to `if args.vet_judged:` being falsy and was
+    # silently treated as omitted, unlike every primary vet-* flag's own empty-string
+    # rejection just above. Same wording, same rc, checked here for the same reason.
+    if args.vet_judged is not None and not args.vet_judged.strip():
+        print("--vet-judged needs a target — got an empty value. "
+              "Pass a path, slug, or URL.", file=sys.stderr)
+        return 2
+
     # C-426 part B: _PRIMARY_MODES decides which mode runs. Every branch below asks this
     # one value rather than re-testing its own flag, so the table's order IS the dispatch
     # order instead of a hand-maintained mirror of it (see _resolve_mode).
