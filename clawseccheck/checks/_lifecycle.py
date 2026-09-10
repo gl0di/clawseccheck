@@ -5379,6 +5379,11 @@ def check_skill_library_reachability(ctx: Context) -> Finding:
     (``actual_sha256``) disagrees with its declared one (``sha256``) -- a real tamper
     signal sitting in the schema, gated on ``committed`` because an in-progress upload
     legitimately has a partial/absent ``actual_sha256`` while chunks are still arriving.
+    Grounded against the installed dist's commit path (``skills-hbyuy_ia.mjs``): the
+    server computes ``actualSha256 = sha256Hex(archive)`` and, when the client declared
+    one, refuses to commit unless it matches (``"upload sha256 mismatch"``) -- so a
+    COMMITTED row where they disagree is not a race or a normal in-flight state, only a
+    write to the row after that check already passed.
 
     UNKNOWN, never a fake PASS, when the surface could not be examined at all -- the
     real machine this was grounded against has ``skill_library_entries`` ABSENT while
