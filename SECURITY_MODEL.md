@@ -346,6 +346,25 @@ check* further distinguishes an absent baseline from a present-but-unreadable on
 telling a user whose `state.json` is unreadable that none was ever saved sends them to
 re-run `--monitor`, which is the one action that overwrites it.
 
+**A second, automatic check needs no off-box copy — and is weaker than the one that
+does.** `--verify-baseline` also compares the current state file against the last
+reference *this tool itself* recorded moving to (in `events.jsonl`) **for that exact
+state path** — tagged by a digest of the resolved `--state` path, the same identity
+scheme `home_digest` uses for `--home` above, so a witness entry that describes a
+different state file (a stale journal, an `--events` pointed elsewhere, a store that
+predates this check) reads as *no witness on record*, never as a disagreement. An
+earlier, untagged version of exactly this comparison was measured against a real,
+untampered machine before shipping and produced a false "reference moved" report: the
+machine's `state.json` and its journaled witness entries simply described two
+different runs, because nothing enforces that `--state` and `--events` name a paired
+set. The tag closes that specific failure mode, not the underlying limit — an
+attacker with write access to `~/.clawseccheck/` can still rewrite both files
+consistently, and a witness write can fail silently on its own (disclosed at the
+`--monitor` call site, never folded into a false all-clear). So this check is
+reported in its own paragraph, never merged into the primary verdict above, and a
+disagreement moves only `--verify-baseline`'s own exit code — never the score or
+grade, and never worded as proof.
+
 **Concurrency locking is POSIX-only.** The advisory lock (`locking.journal_lock`) that
 keeps two racing appends from both reading the same "last" `chain_hash` is a `flock`
 (`fcntl`) on a sidecar file. Without `fcntl` — most notably **Windows**, which this

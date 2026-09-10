@@ -862,6 +862,16 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   (`--no-host` and `--no-sockets` cover less ground and so fingerprint differently on an
   untouched machine) and **a ClawSecCheck upgrade that adds checks**. `--verify-baseline` prints
   what the stored baseline covered so you can tell that case apart.
+  `--verify-baseline` also runs a second, automatic check that needs no reference to supply: it
+  compares the current state file against the last reference *this tool itself* witnessed (in
+  `events.jsonl`) for that exact state path, and prints its own "Local journal cross-check"
+  paragraph — agreement, disagreement, or "no witness on record" (the ordinary case for a
+  baseline that has not moved since you started using this, or an `--events` path unrelated to
+  this `--state`). It is weaker than the off-box copy above — an attacker with write access to
+  `~/.clawseccheck/` can rewrite both files consistently, and a witness write can fail silently
+  on its own — so it is never presented as proof and never touches the score or grade, only
+  `--verify-baseline`'s own exit code (which flips to 1 on a genuine disagreement between a
+  *found* witness and the current file; "no witness on record" changes nothing).
 - **The events chain only catches naive edits.** A knowledgeable attacker who already has write
   access can recompute the whole chain forward after tampering, truncate the tail, or delete the
   file outright — all three verify "clean". See "What the chain does and does not defend" in

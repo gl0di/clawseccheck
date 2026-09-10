@@ -197,12 +197,15 @@ from .monitorstore import (  # noqa: F401  (re-export: 48 test modules and
     _JOURNAL_KEEP,
     _JOURNAL_MAX_LINES,
     _REFERENCE_VOLATILE_KEYS,
+    _STATE_DIGEST_CHARS,
+    _WITNESS_REF_RE,
     _chain_hash,
     _iter_jsonl,
     _last_chain_hash,
     _now_iso,
     _rotate_journal,
     _schema_ok,
+    _state_path_digest,
     baseline_reference,
     baseline_witness_event,
     chain_provenance_note,
@@ -215,6 +218,7 @@ from .monitorstore import (  # noqa: F401  (re-export: 48 test modules and
     snapshot_reference,
     verify_baseline,
     verify_chain,
+    witnessed_reference_for_state,
 )
 
 

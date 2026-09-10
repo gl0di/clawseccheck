@@ -51,6 +51,7 @@ from .monitor import (
     BASELINE_DIGEST_CHARS, baseline_reference, baseline_witness_event,
     _coverage_signature, _diff_coverage, _home_identity,
     diff_with_notes, home_mismatch, read_baseline, snapshot_reference,
+    witnessed_reference_for_state,
 )
 # Aliased: `args.verify_baseline` holds the user's reference string, and giving the
 # function the same bare name next to it reads as though one were the other.
@@ -3585,12 +3586,42 @@ def _main(argv=None) -> int:
         _b_scope = (read_baseline(args.state)[1] or {}).get("scope")
         _shape = (", ".join(_b_scope) if isinstance(_b_scope, list) and _b_scope
                   else "config only" if isinstance(_b_scope, list) else "not recorded")
+        # C-518: a second, independent check — does the CURRENT state file's reference
+        # agree with the last one THIS TOOL itself witnessed (events.jsonl) for this exact
+        # state path? Computed regardless of the primary verdict above and reported as its
+        # own paragraph rather than folded in: the two can disagree independently of each
+        # other (a witness write can fail silently — see the comment at the --monitor
+        # call site that journals it — and "no witness on record" is the ordinary state
+        # for anyone who has not moved their baseline since adopting this feature, never
+        # evidence of anything). Neither check ever accuses on its own; see
+        # baseline_witness_event's docstring and SECURITY_MODEL.md's "Audit trail"
+        # section for why a naive version of this comparison (no state-path tag)
+        # produced a false positive on a real, healthy machine.
+        _witnessed, _witness_why = witnessed_reference_for_state(args.state, args.events)
+        _journal_mismatch = bool(_witnessed) and not _actual.startswith(_witnessed)
+        if _witness_why == "ok" and not _journal_mismatch:
+            _cross_check = (
+                "\n\nLocal journal cross-check: the last reference this tool recorded for "
+                "this exact state file agrees with what is on disk now — an additional, "
+                "automatic confirmation (not proof; see --watch-log for what changed).")
+        elif _journal_mismatch:
+            _cross_check = (
+                f"\n\nLocal journal cross-check: the last reference this tool recorded for "
+                f"this exact state file was {_witnessed}, but the file now fingerprints to "
+                f"{_actual[:BASELINE_DIGEST_CHARS]}. This is not proof of tampering — a "
+                f"witness write can fail silently on its own — but if you did not expect "
+                f"the baseline to move, it is reason to look closer with --watch-log.")
+        elif _witness_why == "unreadable":
+            _cross_check = (f"\n\nLocal journal cross-check: {args.events} is there but "
+                            f"could not be read, so this second check could not run.")
+        else:  # "no_witness" — the ordinary, uninformative case; not worth a paragraph.
+            _cross_check = ""
         if _ok:
             _emit(f"Baseline still matches your reference "
                   f"({_actual[:BASELINE_DIGEST_CHARS]}). Nothing it records has changed "
                   f"since the run that gave you that value.\n"
-                  f"  covering: {_shape}")
-            return 0
+                  f"  covering: {_shape}" + _cross_check)
+            return 1 if _journal_mismatch else 0
         _emit(f"Baseline does NOT match your reference.\n"
               f"  you gave: {args.verify_baseline.strip().lower()}\n"
               f"  currently: {_actual[:BASELINE_DIGEST_CHARS]}\n"
@@ -3601,7 +3632,7 @@ def _main(argv=None) -> int:
               f"nothing on the machine changed; so do a settings edit, a skill update, a "
               f"changed check result, and a ClawSecCheck upgrade that adds checks. Compare "
               f"the covering line above against how you took your reference first, then run "
-              f"--watch-log to see what was recorded in between.")
+              f"--watch-log to see what was recorded in between." + _cross_check)
         return 1
 
     if _mode == "diff":
@@ -5386,7 +5417,8 @@ def _main(argv=None) -> int:
             # tests pin as writing nothing. The reference still reaches the user: the screen is
             # where they get it, and the journal is where its LATER movements are recorded.
             if _reference and _prev_reference and _reference != _prev_reference:
-                _witness_err = record_events(baseline_witness_event(_reference), args.events)
+                _witness_err = record_events(
+                    baseline_witness_event(_reference, args.state), args.events)
                 if _witness_err is not None:
                     print(f"Note: the baseline was saved, but its reference value could not be "
                           f"recorded in {args.events}: {_witness_err}", file=sys.stderr)

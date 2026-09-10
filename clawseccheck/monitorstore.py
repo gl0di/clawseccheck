@@ -591,7 +591,31 @@ def baseline_reference(path: str | Path = DEFAULT_STATE) -> "tuple[str, str]":
         return "", "unreadable"
     value = snapshot_reference(snap)
     return (value, "ok") if value else ("", "unreadable")
-def baseline_witness_event(reference: str) -> "list[tuple[str, str]]":
+# C-518: how many hex chars of the STATE PATH's identity digest ride along in a witness
+# message. This is a correlation key for a single local journal, not a security boundary
+# (unlike BASELINE_DIGEST_CHARS, which an attacker might try to collide) — 8 hex chars
+# (32 bits) is far more than enough to avoid a same-machine collision between two
+# genuinely different state-file paths, and keeps the sentence short.
+_STATE_DIGEST_CHARS = 8
+_WITNESS_REF_RE = re.compile(
+    r"^Baseline reference is now ([0-9a-f]+) \(state ([0-9a-f]{8})\)")
+
+
+def _state_path_digest(path: "str | Path") -> str:
+    """C-518: a stable identity for the state file a witness event describes.
+
+    Same pattern as monitor.py's ``_home_identity``: sha256 of the RESOLVED absolute
+    path, so ``--state`` spelled two ways (``~`` vs absolute, a trailing slash, a
+    symlink) still correlates as the same file. ``Path.resolve()`` does not require
+    the path to exist, so a ``--state`` that has never been saved still gets a stable
+    identity rather than raising.
+    """
+    resolved = str(Path(path).expanduser().resolve())
+    return hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()
+
+
+def baseline_witness_event(reference: str, state_path: "str | Path" = DEFAULT_STATE
+                           ) -> "list[tuple[str, str]]":
     """The one journal entry recording that the baseline's reference MOVED, or ``[]``.
 
     A list, so the caller passes it straight to ``record_events`` and an unavailable
@@ -603,12 +627,81 @@ def baseline_witness_event(reference: str) -> "list[tuple[str, str]]":
     report "365 event(s) recorded" over a timeline of nothing), and the journal's own
     retention — one unconditional line per run against a 5,000-line cap eventually evicts
     the genuine drift alerts a quiet machine had kept.
+
+    C-518: the message also embeds a short digest of *state_path* — the file this
+    reference actually describes. ``--state``/``--events`` are independent flags with
+    no guaranteed pairing, and an earlier attempt at reading the journal's last
+    witnessed reference back and comparing it against whatever ``state.json`` happens
+    to be on disk (with no such tag) measured the consequence directly: a false
+    "reference moved" report on a healthy, untampered real machine, because the two
+    files simply described different runs (see SECURITY_MODEL.md's "Audit trail"
+    section). Tagging the witness line with which state file it is about lets a
+    reader (``witnessed_reference_for_state``) find the witness that actually
+    corresponds to the file being checked, instead of the most recent one in the
+    journal regardless of pairing.
     """
     if not reference:
         return []
-    return [("INFO", f"Baseline reference is now {reference[:BASELINE_DIGEST_CHARS]}. Keep "
-                     f"it somewhere off this machine; check it later with "
-                     f"--verify-baseline.")]
+    digest = _state_path_digest(state_path)[:_STATE_DIGEST_CHARS]
+    return [("INFO", f"Baseline reference is now {reference[:BASELINE_DIGEST_CHARS]} "
+                     f"(state {digest}). Keep it somewhere off this machine; check it "
+                     f"later with --verify-baseline.")]
+
+
+def witnessed_reference_for_state(state_path: "str | Path" = DEFAULT_STATE,
+                                  events_path: "str | Path" = DEFAULT_EVENTS
+                                 ) -> "tuple[str | None, str]":
+    """C-518: the reference this tool last WITNESSED (``baseline_witness_event``) for
+    *state_path* specifically, read back from *events_path*.
+
+    Returns ``(prefix, reason)``. *prefix* is the ``BASELINE_DIGEST_CHARS``-long
+    reference prefix from the most recent matching witness entry, or ``None``.
+    *reason* is one of:
+
+    - ``"ok"``         — a matching witness entry was found; *prefix* is set.
+    - ``"no_witness"`` — the journal has no witness entry recorded for this exact
+      state path: a fresh baseline, a first use of this feature, or ``--events``
+      genuinely pointing somewhere unrelated are all indistinguishable from here,
+      and none of them is evidence of anything (an absent record is not a finding).
+    - ``"unreadable"`` — *events_path* is present but could not be opened/read.
+
+    C-135: ``record_events`` runs every message through ``logsafe.redact()`` before
+    writing (defence in depth, C-465), and measured over 50,000 realistic references,
+    about 1 in 2,000 collides with the Luhn-validated credit-card-number redactor
+    (a contiguous digit-only run inside the hex reference happens to pass Luhn) and
+    gets partially replaced with the literal ``<redacted>``. This can only ever
+    produce ``"no_witness"`` here, never a wrong value: the substitution always breaks
+    the literal ``" (state "`` boundary ``_WITNESS_REF_RE`` requires immediately after
+    the hex run, so a collided line simply fails to match, the same as any other line
+    this function does not recognise. A rare, silent loss of the reassuring
+    confirmation — never a false disagreement. Accepted rather than special-cased:
+    narrowing what `redact()` touches for one caller would weaken the "redact
+    everything at the journal boundary" guarantee C-465 exists for, to close a gap
+    that already fails safe.
+
+    Deliberately does not compare against the CURRENT state file itself — that stays
+    the caller's job (``baseline_reference``/``snapshot_reference``), so this
+    function is a plain, independently-testable read of what the journal recorded.
+
+    Entries are append-only and therefore already in file order; the LAST matching
+    line encountered is the most recent witness, which is what this returns.
+    """
+    p = Path(events_path).expanduser()
+    if not p.is_file():
+        return None, "no_witness"
+    marker = f"(state {_state_path_digest(state_path)[:_STATE_DIGEST_CHARS]})"
+    found = None
+    try:
+        for entry in _iter_jsonl(p):
+            msg = entry.get("message", "")
+            if not isinstance(msg, str) or marker not in msg:
+                continue
+            m = _WITNESS_REF_RE.match(msg)
+            if m:
+                found = m.group(1)
+    except OSError:
+        return None, "unreadable"
+    return (found, "ok") if found else (None, "no_witness")
 def verify_baseline(expected: str, path: str | Path = DEFAULT_STATE
                     ) -> "tuple[bool | None, str, str]":
     """F-173: does the stored baseline still fingerprint to *expected*?
