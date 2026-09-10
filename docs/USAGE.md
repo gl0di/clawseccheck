@@ -1223,6 +1223,108 @@ at all is its documented "every configured server" form and is likewise untouche
 config lookup behind it, so there is no "not found" state for `2` to describe and it never
 returns it.
 
+### Pipeline recipes
+
+Three complete, copy-pasteable configs — each installs ClawSecCheck, runs it against the
+home the runner checks out (or the default `~/.openclaw` if your pipeline provisions one),
+gates on `--fail-on high`, and archives the report even on the run that fails, because the
+report is usually what the next step (a Code Scanning upload, a build artifact, a human
+review) needs. Pin the install to a released tag (`@vX.Y.Z`) rather than tracking `main`, the
+same recommendation `pipx install` already carries elsewhere in this file.
+
+**GitHub Actions** (`.github/workflows/clawseccheck.yml`) — SARIF uploads straight into
+GitHub Code Scanning, so findings show up as annotations on the PR diff:
+
+```yaml
+name: ClawSecCheck
+on: [push, pull_request]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # required by upload-sarif
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ClawSecCheck
+        run: pipx install "git+https://github.com/gl0di/clawseccheck@vX.Y.Z"
+      - name: Audit and write SARIF
+        id: audit
+        run: clawseccheck --sarif results.sarif --fail-on high
+        continue-on-error: true   # the gate must not skip the upload step below
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+      - name: Fail the job if the audit gate tripped
+        if: steps.audit.outcome == 'failure'
+        run: exit 1
+```
+
+**GitLab CI** (`.gitlab-ci.yml`) — GitLab has no native SARIF viewer and no generic-report
+mapping for this tool's JSON shape, so this recipe uses `--json` and attaches the result as
+a plain artifact rather than claiming an integration GitLab does not have:
+
+```yaml
+clawseccheck:
+  stage: test
+  image: python:3.11-slim
+  before_script:
+    - pip install --quiet pipx
+    - pipx install "git+https://github.com/gl0di/clawseccheck@vX.Y.Z"
+    - export PATH="$PATH:/root/.local/bin"
+  script:
+    - clawseccheck --json --save results.json --fail-on high
+  artifacts:
+    when: always   # keep the report even on the run that fails the gate
+    paths:
+      - results.json
+```
+
+Download `results.json` from the pipeline's artifact browser, or add a later job step that
+parses `fail_counts_by_severity` out of it for a custom summary (see below).
+
+**Jenkins** (declarative `Jenkinsfile`) — a `sh` step already fails the stage on a non-zero
+exit with no extra plumbing, unlike the two CI systems above:
+
+```groovy
+pipeline {
+    agent any
+    stages {
+        stage('ClawSecCheck') {
+            steps {
+                sh 'pipx install "git+https://github.com/gl0di/clawseccheck@vX.Y.Z"'
+                sh 'clawseccheck --sarif results.sarif --fail-on high'
+            }
+        }
+    }
+    post {
+        always {
+            // Runs whether or not the sh step above failed the build, so the report
+            // from a failing run is archived exactly like a passing one.
+            archiveArtifacts artifacts: 'results.sarif', allowEmptyArchive: true
+        }
+    }
+}
+```
+
+**The severity threshold IS the CI allowlist — no extra code or config needed.**
+`--fail-on <severity>` already does what a separate allowlist mechanism would: set it to
+`medium` to let LOW findings through indefinitely while still failing on MEDIUM and above,
+or to `critical` to gate on nothing less than the top tier. There is no separate list to
+maintain and no risk of it drifting from what the report actually shows, because both read
+the identical unsuppressed-FAIL set. For a gate finer than one threshold — say, "fail
+immediately on any HIGH or CRITICAL, but only fail on MEDIUM findings once there are 3 or
+more" — add one small step after the audit that reads the counts already computed for you:
+`--json`'s `fail_counts_by_severity` (`{"critical": N, "high": N, "medium": N, "low": N}`)
+or SARIF's identical `runs[0].properties.analysisCompleteness.failCountsBySeverity`. Both
+are populated from the exact set `--fail-on` gates on, so a script reading them agrees with
+the command line by construction rather than by two people keeping two numbers in sync.
+
 ## More tools
 
 **Quick CLI reference** (every flag is local — no network — and none of them
