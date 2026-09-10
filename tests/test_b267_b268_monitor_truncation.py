@@ -347,6 +347,56 @@ def test_memory_capped_frontier_lists_present_but_uninspected_paths(tmp_path):
     assert not any("small.md" in p for p in snap1["memory_capped"])
 
 
+# ---------------------------------------------------------------------------
+# B-794: an off-whitelist-extension file under memory/ used to be a bare `continue` --
+# absent from the frontier too, unlike every other collection-time exclusion above.
+# ---------------------------------------------------------------------------
+
+def test_off_extension_memory_file_joins_the_capped_frontier(tmp_path):
+    """A .bin file (outside _MEMORY_TEXT_EXTS) must land in memory_capped, the same
+    disclosed-frontier list an oversized .md file already lands in above -- not
+    silently absent from both `memory` and `memory_capped`."""
+    home = _home(tmp_path)
+    mem = _memdir(home)
+    (mem / "dropped.bin").write_bytes(b"MALICIOUS_PAYLOAD_TEST_MARKER_12345")
+    _, snap1 = _snap(home)
+    assert any("dropped.bin" in p for p in snap1["memory_capped"]), snap1["memory_capped"]
+    assert not any("dropped.bin" in p for p in snap1["memory"]), snap1["memory"]
+
+
+def test_planting_an_off_extension_memory_file_is_not_silently_all_clear(tmp_path):
+    """The live repro this task was filed from: baseline, then plant a .bin file under
+    memory/. Before the fix this produced NO alert at all -- not even the disclosed
+    'NOT monitored' cap-frontier alert every other excluded file already triggers."""
+    home = _home(tmp_path)
+    mem = _memdir(home)
+    for i in range(3):
+        (mem / "note_{:03d}.md".format(i)).write_text("benign note {}\n".format(i))
+    _, s1 = _snap(home)
+    (mem / "dropped.bin").write_bytes(b"MALICIOUS_PAYLOAD_TEST_MARKER_12345")
+    _, s2 = _snap(home)
+    msgs = _msgs(diff(s1, s2))
+    assert "dropped.bin" in msgs, msgs
+    assert "NOT monitored" in msgs, msgs
+
+
+def test_extensionless_memory_file_is_unaffected_by_the_extension_gate(tmp_path):
+    """Cross-check: an extensionless file was already correctly detected before this
+    fix (the `and p.suffix` clause is falsy for it) and must stay that way -- this
+    fix must not make MORE files fall into the extension gate, only disclose the ones
+    that already did."""
+    home = _home(tmp_path)
+    mem = _memdir(home)
+    for i in range(3):
+        (mem / "note_{:03d}.md".format(i)).write_text("benign note {}\n".format(i))
+    _, s1 = _snap(home)
+    (mem / "noext").write_text("plain text, no extension")
+    _, s2 = _snap(home)
+    assert "noext" not in s2["memory_capped"]
+    msgs = _msgs(diff(s1, s2))
+    assert "New persistent memory file" in msgs and "noext" in msgs, msgs
+
+
 def test_previously_capped_memory_file_is_not_reported_as_newly_appeared(tmp_path):
     """B-268 repro (c): deleting unrelated notes lets a PRE-EXISTING poisoned file fall
     back inside the cap. Reporting it as newly appeared misdates the incident."""

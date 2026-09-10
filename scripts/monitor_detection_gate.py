@@ -261,6 +261,18 @@ def _memory_becomes_unreadable(home, store):
     os.chmod(home / "workspace-home" / "memory" / "notes.md", 0o000)
 
 
+def _memory_off_extension_planted(home, store):
+    """CLAWSECCHECK-B-794: a file under memory/ whose extension is outside the small
+    text-only whitelist (.md/.txt/.json/.yaml/.yml/.toml/.ini/.cfg) used to be a bare
+    `continue` in the collection walk — absent from BOTH the memory dict and the
+    disclosed `capped` frontier, unlike every other collection-time exclusion (oversized,
+    unreadable, cap-evicted) already caught above. No baseline seed needed: the scenario
+    IS the plant, same shape as `config-unreadable`/`baseline-corrupted` above."""
+    d = home / "workspace-home" / "memory"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "dropped.bin").write_bytes(b"MALICIOUS_PAYLOAD_TEST_MARKER")
+
+
 def _seed_skills_under_the_cap(home, store):
     _make_skills(home, 0, 250)
 
@@ -405,6 +417,8 @@ INCOMPLETENESS = {
         (None, _config_unreadable, 0, "Could not read openclaw.json"),
     "memory-unreadable":
         (_seed_a_memory_file, _memory_becomes_unreadable, 0, "present but NOT monitored"),
+    "memory-off-extension":
+        (None, _memory_off_extension_planted, 0, "present but NOT monitored"),
     "skills-past-the-cap":
         (_seed_skills_under_the_cap, _skills_pushed_past_the_cap, 0, "were NOT collected"),
     "baseline-corrupted":
