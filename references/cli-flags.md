@@ -128,6 +128,14 @@ kept here so the always-loaded playbook stays lean.
   component inventory (always the native shape, regardless of `--format`), and
   `--sbom-diff RUN_ID1 RUN_ID2` reports added/removed/changed components between two
   saved SBOM runs, read-only, no live audit. See `docs/OUTPUT_SCHEMA.md` §25.
+- `--incident-open` — opt-in: persist a mutable incident record (status=open) linked to
+  this run's actionable findings, a best-effort PID/process name when one of them names
+  one, and the current `--monitor` journal position — refuses if nothing actionable was
+  found this run. `--incident-mark ID STATUS` transitions it (`open`/`investigating`/
+  `mitigated`/`closed` — forward one step at a time, backward freely). `--incident-show
+  ID` prints its current status, history, and the live timeline of `--monitor` events
+  since it opened. Separate from the stateless `--incident` evidence pack, which never
+  writes anything. See `docs/OUTPUT_SCHEMA.md` §26.
 - `--dashboard-findings` — print ONLY the Section-2 Findings block for the chat Dashboard
   (non-suppressed FAIL/WARN, high-confidence, grouped by the 7 families, already framed in the
   open 3-sided box) and exit. Agent-facing: SKILL.md Step 3 runs this and pastes the output

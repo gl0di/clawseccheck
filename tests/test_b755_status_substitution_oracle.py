@@ -201,6 +201,14 @@ _NOT_DRIVEN = {
     "scoring.grade_for": "takes an integer score, not findings",
     "percentile.percentile": "takes an integer score, not findings",
     "percentile.render_percentile": "takes an integer score, not findings",
+    # --- C-520: a DIFFERENT vocabulary entirely wearing the same attribute name. Both
+    # read/compare `.status` on an incidentstore.Incident (open/investigating/mitigated/
+    # closed, INCIDENT_STATUSES) -- never a Finding's FAIL-weight status. `_touches_status`
+    # is grammatical (any `.status` attribute access), so it cannot tell the two apart;
+    # `_is_valid_transition` (the actual state-machine comparison) is pinned directly by
+    # tests/test_c520_incident_lifecycle.py, not through this pool.
+    "incidentstore.mark_incident": "reads Incident.status (open/investigating/mitigated/closed), not a Finding status",
+    "incidentstore._incident_to_dict": "reads Incident.status (open/investigating/mitigated/closed), not a Finding status",
 }
 
 #: Consumers whose output differs from itself between two identical runs, so an equivalence

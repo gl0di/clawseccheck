@@ -149,7 +149,10 @@ from .percentile import render_percentile
 from .logsafe import get_logger
 from .safeio import secure_write_bytes, secure_write_text
 from .textnorm import asciify
-from .incident import render_incident
+from .incident import incident_timeline, open_incident_from_audit, render_incident, render_incident_record
+from .incidentstore import INCIDENT_STATUSES, _incident_to_dict, render_incident_json
+from .incidentstore import load_incident as _load_incident
+from .incidentstore import mark_incident as _mark_incident
 from .layers import LAYER_ORDER
 from .trajaudit import render_trajectory_analysis
 from .behavioral import analyze as _behavioral_analyze
@@ -355,6 +358,13 @@ def _sbom_runs_path(args) -> str:
     else. A SEPARATE file from runs.jsonl (not a shared row shape) — see sbom_runs.py's
     own module docstring for why the two stores don't share one."""
     return str(_store_dir(args) / "sbom_runs.jsonl")
+
+
+def _incidents_path(args) -> str:
+    """C-520: this run's --incident-open/--incident-mark/--incident-show store — same
+    reasoning as _runs_path/_sbom_runs_path: no dedicated override flag, --data-dir
+    already moves it with everything else."""
+    return str(_store_dir(args) / "incidents.jsonl")
 
 
 def _record_run(capability: str, args) -> None:
@@ -1670,6 +1680,8 @@ _PRIMARY_MODES = [
     ("verify_baseline", "--verify-baseline", "opt"),
     ("diff", "--diff", "opt"),
     ("sbom_diff", "--sbom-diff", "opt"),
+    ("incident_mark", "--incident-mark", "opt"),
+    ("incident_show", "--incident-show", "opt"),
     ("explain", "--explain", "opt"),
     ("retest", "--retest", "opt"),
     ("vet_plan", "--vet-plan", "opt"),
@@ -1704,6 +1716,7 @@ _PRIMARY_MODES = [
     ("dashboard_findings", "--dashboard-findings", "bool"),
     ("sbom", "--sbom", "bool"),
     ("incident", "--incident", "bool"),
+    ("incident_open", "--incident-open", "bool"),
     ("judge_packet", "--judge-packet", "bool"),
     ("judged", "--judged", "opt"),
     ("propose_ignore", "--propose-ignore", "opt"),
@@ -1782,6 +1795,11 @@ _MODE_HONORS = {
     # gets its own machine-readable payload, same shape as --diff's.
     "sbom": frozenset({"format", "save_sbom_run"}),
     "sbom_diff": frozenset({"json"}),
+    # C-520: each of the three new incident-lifecycle modes gets its own machine-readable
+    # payload, same shape as --diff's/--sbom-diff's.
+    "incident_open": frozenset({"json"}),
+    "incident_mark": frozenset({"json"}),
+    "incident_show": frozenset({"json"}),
 }
 
 # Primary modes that run AFTER the --attest block in main()'s cascade: their ctx and
@@ -1797,7 +1815,7 @@ _MODE_HONORS = {
 # "judged" and "analyze_trajectory" were missing for the same reason.
 _ATTEST_CONSUMERS = frozenset({
     "risk_paths", "badge", "html", "sarif", "pdf", "trend", "percentile",
-    "next", "dashboard", "dashboard_findings", "sbom", "incident",
+    "next", "dashboard", "dashboard_findings", "sbom", "incident", "incident_open",
     "judge_packet", "judged", "propose_ignore", "analyze_trajectory",
     "behavioral", "monitor",
 })
@@ -1826,10 +1844,14 @@ def _mode_active(args, attr: str, kind: str) -> bool:
 # clear error, exit 2), the same outcome this list exists to produce for the others.
 # C-521: "sbom_diff" is excluded for the identical reason — also nargs=2, also
 # self-validated in its own dispatch block.
+# C-520: "incident_mark" is excluded for the identical reason — also nargs=2 (ID,
+# STATUS), also self-validated in its own dispatch block. "incident_show" is a plain
+# single-value "opt" mode (like --explain/--retest) and stays subject to this list's
+# blank-value rejection.
 _VALUE_REQUIRED_MODES = tuple(
     (flag, attr) for attr, flag, kind in _PRIMARY_MODES
     if kind == "opt" and attr not in ("vet_mcp", "analyze_trajectory", "behavioral", "diff",
-                                      "sbom_diff")
+                                      "sbom_diff", "incident_mark")
 )
 
 
@@ -2431,6 +2453,8 @@ _PURGE_FILENAMES = (
     "runs.jsonl",
     # C-521: --save-sbom-run's opt-in per-run SBOM component store. Same reasoning.
     "sbom_runs.jsonl",
+    # C-520: --incident-open's opt-in incident-lifecycle store. Same reasoning.
+    "incidents.jsonl",
 )
 
 
@@ -3187,6 +3211,19 @@ def _main(argv=None) -> int:
                         "credential rotation list, and monitor event history from --events "
                         "(recorded in the pack as monitor_events_source) — never rotates "
                         "or deletes anything itself")
+    p.add_argument("--incident-open", action="store_true", dest="incident_open",
+                   help="C-520: open a PERSISTED incident record (status=open) linked to "
+                        "this run's actionable findings, a best-effort PID when one of them "
+                        "names one, and the current --events journal position — stored under "
+                        "--data-dir, never in the audited home. Refuses if nothing actionable "
+                        "was found this run")
+    p.add_argument("--incident-mark", nargs=2, metavar=("ID", "STATUS"), dest="incident_mark",
+                   help="C-520: transition a --incident-open record's status. STATUS is one "
+                        "of open/investigating/mitigated/closed — forward moves one step at "
+                        "a time, backward moves freely (mirrors Pulse's own task lifecycle)")
+    p.add_argument("--incident-show", metavar="ID", dest="incident_show",
+                   help="C-520: print one incident record's current status, transition "
+                        "history, and the live --monitor timeline since it opened")
     p.add_argument("--analyze-trajectory", nargs="?", const="", default=None, metavar="PATH",
                    dest="analyze_trajectory",
                    help="post-hoc incident analysis: correlate installed skills' credential / "
@@ -3936,6 +3973,63 @@ def _main(argv=None) -> int:
             _emit("No changed components.")
         _emit("")
         _emit(f"{_sbom_diff['unchanged_count']} component(s) unchanged.")
+        return 0
+
+    if _mode == "incident_mark":
+        # C-520: pure local-store operation — no live audit, same class of early-return
+        # as --diff/--sbom-diff above.
+        _inc_id, _inc_status = args.incident_mark
+        if not _inc_id.strip():
+            print("--incident-mark: incident id cannot be blank. Ids are printed by "
+                  "--incident-open.", file=sys.stderr)
+            return 2
+        _inc_store = _incidents_path(args)
+        _inc_updated, _inc_err = _mark_incident(_inc_id, _inc_status, path=_inc_store)
+        if _inc_err == "invalid_status":
+            print(f"--incident-mark: {_inc_status!r} is not a recognized status (one of "
+                  f"{', '.join(INCIDENT_STATUSES)}).", file=sys.stderr)
+            return 2
+        if _inc_err == "not_found":
+            print(f"--incident-mark: no incident {_inc_id!r} found in {_inc_store}. "
+                  f"Incidents are only recorded by --incident-open.", file=sys.stderr)
+            return 1
+        if _inc_err == "invalid_transition":
+            _inc_current = _load_incident(_inc_id, path=_inc_store)
+            print(f"--incident-mark: {_inc_current.status} -> {_inc_status} is not a "
+                  f"valid transition (forward moves one step at a time, backward moves "
+                  f"freely).", file=sys.stderr)
+            return 1
+        if _inc_err == "write_failed":
+            print(f"--incident-mark: could not write to {_inc_store} — see --data-dir's "
+                  f"directory for write access.", file=sys.stderr)
+            return 1
+        _inc_dict = _incident_to_dict(_inc_updated)
+        if args.json:
+            _emit(render_incident_json(_inc_dict, version=__version__))
+            return 0
+        _emit(render_incident_record(_inc_dict))
+        return 0
+
+    if _mode == "incident_show":
+        # C-520: pure local-store operation — no live audit, same class of early-return
+        # as --diff/--sbom-diff above.
+        _inc_store = _incidents_path(args)
+        _inc_id = args.incident_show
+        _inc = _load_incident(_inc_id, path=_inc_store)
+        if _inc is None:
+            print(f"--incident-show: no incident {_inc_id!r} found in {_inc_store}. "
+                  f"Incidents are only recorded by --incident-open.", file=sys.stderr)
+            return 1
+        _inc_dict = _incident_to_dict(_inc)
+        _inc_timeline, _inc_tl_complete = incident_timeline(
+            _inc.monitor_watermark, events=args.events)
+        if args.json:
+            _inc_dict["monitor_timeline"] = _inc_timeline
+            _inc_dict["monitor_timeline_complete"] = _inc_tl_complete
+            _emit(render_incident_json(_inc_dict, version=__version__))
+            return 0
+        _emit(render_incident_record(_inc_dict, timeline=_inc_timeline,
+                                     timeline_complete=_inc_tl_complete))
         return 0
 
     if _mode == "explain":
@@ -5247,6 +5341,27 @@ def _main(argv=None) -> int:
         # harvested the DEFAULT journal no matter what the operator named. Threaded
         # like --watch-log (:~915) and --monitor (:~1078) already do.
         _emit(render_incident(ctx, findings, score, events=args.events))
+        return 0
+
+    if _mode == "incident_open":
+        # C-520: unlike --incident-mark/--incident-show above, this one genuinely needs
+        # this run's own findings — it's what the new record gets linked to — so it
+        # dispatches here, alongside --incident, rather than in the pure-local-store
+        # section before audit() ran.
+        _inc_record, _inc_err = open_incident_from_audit(
+            ctx, findings, path=_incidents_path(args), events=args.events)
+        if _inc_err == "no_actionable_findings":
+            print("--incident-open: no actionable (WARN/FAIL-weight) findings this run — "
+                  "nothing to open an incident about.", file=sys.stderr)
+            return 1
+        if _inc_err == "write_failed":
+            print(f"--incident-open: could not write to {_incidents_path(args)} — see "
+                  f"--data-dir's directory for write access.", file=sys.stderr)
+            return 1
+        if args.json:
+            _emit(render_incident_json(_inc_record, version=__version__))
+            return 0
+        _emit(render_incident_record(_inc_record))
         return 0
 
     if _mode == "judge_packet":

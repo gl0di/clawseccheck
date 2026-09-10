@@ -1958,3 +1958,61 @@ changed" flag that would leave a reader unable to tell which.
 **Not part of the `--json` envelope (§1).** Both `--sbom --format ...` and
 `--sbom-diff --json` are separate, standalone artifacts, like §21's native BOM and §24's
 `--diff --json` before them.
+
+## 26. `--incident-open` / `--incident-mark` / `--incident-show` Output (C-520)
+
+A *persisted*, mutable incident record — separate from §1's one-shot `--incident`
+evidence pack above, which never writes anything. Stored hash-chained-JSONL at
+`~/.clawseccheck/incidents.jsonl` (opt-in: nothing is written until `--incident-open` is
+first used), the same `monitorstore.py` chain-hash idiom §24's `runs.jsonl` and §25's
+`sbom_runs.jsonl` reuse. Incident id = its own creation timestamp — no second identity
+invented, same reasoning those two give for their own run ids.
+
+```json
+{
+  "tool": "clawseccheck", "version": "4.0.1",
+  "id": "2026-09-10T17:41:02",
+  "status": "investigating",
+  "created_at": "2026-09-10T17:41:02",
+  "finding_ids": ["B2", "B340"],
+  "pid": "4821",
+  "process_name": "node",
+  "monitor_watermark": "<sha256 hex, or null — this incident's events.jsonl chain_hash "
+                        "at open time>",
+  "history": [
+    {"status": "open", "ts": "2026-09-10T17:41:02"},
+    {"status": "investigating", "ts": "2026-09-10T18:03:11"}
+  ]
+}
+```
+
+`--incident-show <id> --json` adds two more top-level keys, `monitor_timeline` (the
+`--monitor` events appended after `monitor_watermark`, read live off the SAME journal —
+never a duplicated copy) and `monitor_timeline_complete` (`false` only when
+`monitor_watermark` could no longer be located in the current journal, almost always
+because it rotated away since the incident opened — every currently-available event is
+still returned, but some of them may predate the incident, and a reader must not treat
+`monitor_timeline` as authoritative in that case).
+
+### Notes
+
+**`--incident-open` refuses, rather than fabricates, when there is nothing to link.** It
+filters this run's findings to `catalog.ACTIONABLE_STATUSES` (the same shared FAIL-weight/
+WARN vocabulary every other consumer of that split uses) and exits 1 with no record
+written when none are actionable — an incident record needs a real basis.
+
+**`pid`/`process_name` are best-effort, and narrowly sourced.** The only producer of a
+PID anywhere in this tool is `checks/_config.py`'s `check_effective_bind` (B340), and even
+there it is free text inside a Finding's `evidence`, never a structured field. Both are
+`null` when no linked finding's evidence matches that pattern — never a guessed or
+independently re-scanned PID, which could name a different, now-stale process than the
+one the triggering finding actually observed.
+
+**The status lifecycle mirrors Pulse's own discipline.** `open → investigating →
+mitigated → closed`; a forward move is only ever the single next step, a backward move to
+any earlier status is always allowed, and staying at the same status is rejected. `--incident-mark <id> <status>` reports which of three reasons a rejected transition
+failed for: `invalid_status` (not one of the four), `not_found` (no such id), or
+`invalid_transition` (a real id, a real status, but a move the lifecycle rejects).
+
+**Not part of the `--json` envelope (§1).** All three are separate, standalone
+artifacts, like §24's/§25's diff outputs before them.

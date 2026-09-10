@@ -261,6 +261,7 @@ skill itself uses, see [`SKILL.md`](../SKILL.md#natural-language-to-tool-quick-m
 | "Share my result without leaking my findings" | Produces just the grade + score (+ Lethal Trifecta ratio) — safe to post; your actual findings never appear. On an ungraded run it reads `no grade yet` and names how many layers ran, which is the correct artifact, not an error. | `--card` (prints it) · `--badge grade.svg` (writes an SVG) |
 | "What's actually installed — skills, MCP servers, plugins, versions?" | Exports a local bill-of-materials (skills, MCP servers, **installed plugins**, hashes, declared/unpinned dependencies) as JSON. The export records the `scanned_home` it read and a `config_found`/`complete` pair, so an empty BOM for a path that holds no OpenClaw setup is distinguishable from a real setup with no components — a typo'd `--home` must not read as "everything was uninstalled". `complete` is true only when the config was found, nothing was withheld from `skills` (`self_excluded_skills` empty), **and** the installed-plugin index (the same source `--full`'s plugin sweep reads — `config_machine_state`'s `plugins.installedIndex` row on a folded (state-schema v13+) database, the legacy `installed_plugin_index.plugins_json` column before the fold) was itself read cleanly (`plugins_scanned`) — a home whose plugin index couldn't be read reports `complete: false` rather than a `plugins` array that is silently empty. A skill bundled with a plugin (e.g. an OpenClaw core extension's own skill) names its supplying plugin in `SkillEntry.supplier`, or `"unknown"` when it's confirmed bundled but the specific plugin can't be resolved — never a guess from the name. | `--sbom` |
 | "I think I've been compromised — help me preserve evidence" | Bundles a findings snapshot, skill/MCP hashes, trajectory-log hashes, and a credential rotation list into one local JSON file — a preservation aid, never rotates or deletes anything itself. The rotation list names credentials by **config path only, never by value**, and marks an entry it could not confirm as `unconfirmed` rather than omitting it, so a blank line in it is not evidence of nothing to rotate. | `--incident` |
+| "Track this incident from open to closed" | Opens a *persisted* incident record (separate from the one-shot pack above) linked to this run's actionable findings, a best-effort PID when one of them names one, and the current `--monitor` journal position — stored under `--data-dir`, never in the audited home. Transition it with `--incident-mark <id> <status>` (`open`/`investigating`/`mitigated`/`closed` — forward one step at a time, backward freely, mirroring how Pulse itself tracks task status), and read its current status, transition history, and the live timeline of `--monitor` events since it opened with `--incident-show <id>`. | `--incident-open` · `--incident-mark <id> <status>` · `--incident-show <id>` |
 | "Did a suspicious skill's instruction actually run?" | Post-hoc correlation: checks whether the credential/exfil/secret-path indicators an installed skill names show up in real `tool.call` arguments in your OpenClaw trajectory sidecars — "acted on" vs "present but not acted on". Reads args in memory only; never echoes them. An explicit `PATH` that does not resolve — absent, a directory, or unreadable — is named and exits non-zero, instead of being reported as "this host has no trajectories"; with no `PATH` that message is the correct one and the exit code stays `0`. | `--analyze-trajectory` |
 | "What did my agent actually DO, not just what it could do?" | Reconstructs observed tool-call sequences from your OpenClaw trajectory sidecars and flags a proven-by-log ingress→sensitive→egress verb order, or a repeated-failure-then-success pattern on a sensitive-data call. Also reads OpenClaw's OWN runtime `audit_events` trail (a separate, metadata-only record: `tool_name` alone, no argv/command/path/host) for a runtime tool-block, an evasive/malformed tool name, or a session your trajectory sidecar no longer has (it was disabled or rotated out while `audit_events` still retained it). Metadata-only throughout — verb identity and sequencing, never call/return payloads. WARN-only, never scored. When every detector returns UNKNOWN (no trajectory sidecar, no `audit_events`), the run reports **no verdict** rather than a clean tick — nothing was assessed. An explicit `PATH` that does not resolve is named and exits non-zero, instead of being reported as "this host has no trajectories". | `--behavioral` |
 | "Gate my CI on this" | Machine-readable output plus a non-zero exit. `--fail-on` trips on an unsuppressed **failing** finding at or above the chosen severity — a WARN never trips it, however severe, so `--fail-on high` stays quiet on a HIGH-severity WARN; `--exit-code` trips on any unsuppressed FAIL regardless of severity. Needs no score, so it works on a default (ungraded) run too. | `--json` · `--sarif results.sarif` · `--fail-on high` · `--exit-code` |
@@ -1190,8 +1191,9 @@ artifact: **`--sarif`, `--html`, `--badge`, `--pdf`, `--dashboard`** (with or wi
 exits 1, because uploading it is usually the step after the one that fails. `--monitor` has
 the gate on its own terms (it ranks drift *alerts*, not findings, and defaults to HIGH).
 
-The derived-view modes — `--next`, `--sbom`, `--risk-paths`, `--incident`, `--judge-packet`,
-`--dashboard-findings`, `--show-suppressed`, `--trend`, `--percentile` — do **not** gate, and
+The derived-view modes — `--next`, `--sbom`, `--risk-paths`, `--incident`, `--incident-open`,
+`--judge-packet`, `--dashboard-findings`, `--show-suppressed`, `--trend`, `--percentile` — do
+**not** gate, and
 say so on stderr when you pass one of the flags. The `--vet` family has a separate exit-code
 contract of its own (1 on DO-NOT-INSTALL, 2 on a target that cannot be assessed at all),
 described in its own section.
@@ -1401,6 +1403,7 @@ exists and still works, and the CI/power surface is unchanged. The grouping just
 | Combined pipeline chat card (the headline + findings + the SAME sections `--full` runs, one fixed-order render) | `clawseccheck --dashboard --full` · add `--compact` for a ~4096-char Telegram-safe layout (headline counts only + a `--save`/`--html` pointer) · plain `--dashboard` (no `--full`) is the chat-sized card: headline + inventory-by-subject + most-urgent only, hard-capped under ~4096 chars; pair with `--pdf <path>` to also emit the attachable full report |
 | What already happened, from your own logs | `clawseccheck --behavioral` · `clawseccheck --analyze-trajectory` |
 | Evidence & inventory | `clawseccheck --sbom` · `clawseccheck --incident` |
+| Track an incident open-to-closed | `clawseccheck --incident-open` · `clawseccheck --incident-mark <id> <status>` · `clawseccheck --incident-show <id>` |
 | Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
 | Attachable-into-chat report (mobile-friendly, unlike HTML) | `clawseccheck --pdf report.pdf` |
 | Accept a finding (show suppressed) | edit `.clawseccheckignore` · `clawseccheck --show-suppressed` |
@@ -1834,12 +1837,13 @@ clawseccheck --purge          # lists the files, asks for confirmation, then del
 clawseccheck --purge --yes    # skip the prompt (for scripted uninstall)
 ```
 
-`--purge` only ever touches its own known files: the six store files (`history.jsonl`,
-`events.jsonl`, `state.json`, `coverage.json`, `runs.jsonl`, `sbom_runs.jsonl` — the last two
-are `--save-run`'s and `--save-sbom-run`'s opt-in stores, present only if you ever used them)
+`--purge` only ever touches its own known files: the seven store files (`history.jsonl`,
+`events.jsonl`, `state.json`, `coverage.json`, `runs.jsonl`, `sbom_runs.jsonl`, `incidents.jsonl`
+— the last three are `--save-run`'s, `--save-sbom-run`'s, and `--incident-open`'s opt-in
+stores, present only if you ever used them)
 **and** the four default-named report outputs
 (`openclaw-security-badge.svg`, `openclaw-security-report.html`, `openclaw-security-report.sarif`,
-`openclaw-security-report.pdf`), plus all ten's lock sidecars — never a directory glob or
+`openclaw-security-report.pdf`), plus all eleven's lock sidecars — never a directory glob or
 recursive delete. That means if you save a report with `--pdf`/`--html`/`--sarif`/`--badge`
 under this same store directory using ClawSecCheck's own default filename, `--purge` deletes it
 too; anything else — including one of those same reports saved under a different name, or
