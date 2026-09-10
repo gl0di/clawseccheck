@@ -638,6 +638,14 @@ def _corroboration_groups(findings) -> dict:
     (most packet items) naturally does NOT include its own id -- its corroboration
     reflects purely how much OTHER live signal exists for the same target, which is
     exactly the useful context for an otherwise-uncorroborated UNKNOWN.
+
+    B-669: a finding with no real target -- `_target_from_evidence` fell back to its
+    own SENTINEL, `f.id` -- is excluded from grouping entirely, not grouped under its
+    own id. Grouping it was the original defect: every evidence-less finding became a
+    singleton group keyed on itself, so `count` read 0 on every item measured (87 of
+    87 on a real fixture) -- structurally, never because something corroborated with
+    nothing. See `_attach_corroboration`'s `subject_determinable` for how a caller
+    tells that apart from a real, measured zero.
     """
     groups: dict[str, set] = {}
     for f in findings or []:
@@ -645,7 +653,19 @@ def _corroboration_groups(findings) -> dict:
             continue
         if getattr(f, "suppressed", False):
             continue
-        groups.setdefault(_target_from_evidence(f), set()).add(f.id)
+        target = _target_from_evidence(f)
+        if target == f.id:
+            # B-669: a SENTINEL, not a real subject (see _target_from_evidence's own
+            # docstring) -- grouping it anyway put every evidence-less finding in a
+            # singleton group keyed on its own id, so `count` read 0 on every item
+            # measured (87 of 87 on a real fixture) structurally, never because
+            # something was checked and found alone. Skipped at the source: a
+            # sentinel-only finding never becomes a group KEY, so `_attach_corroboration`
+            # can tell "this target was never grouped because it isn't one" from "this
+            # target WAS grouped and nothing else shares it" by checking group presence
+            # the same way -- see its own sentinel check just below.
+            continue
+        groups.setdefault(target, set()).add(f.id)
     return {target: sorted(ids) for target, ids in groups.items()}
 
 
@@ -657,11 +677,27 @@ def _attach_corroboration(items: list[dict], findings) -> list[dict]:
     `count >= 3 therefore DANGEROUS` policy baked into the panel would duplicate a
     decision this engine deliberately leaves to the judge, and this module's own
     escalate-only/never-lower authority model already governs what a verdict can do).
+
+    B-669: `subject_determinable` is False exactly when THIS item's own `target`
+    equals its own `finding_id` -- the same sentinel `_target_from_evidence` uses
+    internally, read back off the item dict rather than re-derived from a Finding,
+    since not every packet item corresponds to one (the vet/content-ring items build
+    `target` from a skill name directly, never through `_target_from_evidence`, and
+    for those this is always True). `count`/`check_ids` stay `0`/`[]` in that case --
+    unavoidable, since there IS no group to report -- but a consumer can no longer
+    confuse that with "a real target that measurably corroborates with nothing",
+    which is what happened before this field existed: both read as `count: 0`.
     """
     groups = _corroboration_groups(findings)
     for item in items:
-        ids = groups.get(item["target"], [])
-        item["corroboration"] = {"count": len(ids), "check_ids": ids, "scope": "target"}
+        no_subject = item.get("target") == item.get("finding_id")
+        ids = [] if no_subject else groups.get(item["target"], [])
+        item["corroboration"] = {
+            "count": len(ids),
+            "check_ids": ids,
+            "scope": "target",
+            "subject_determinable": not no_subject,
+        }
     return items
 
 

@@ -383,6 +383,62 @@ def test_fixture_clean_f113_adjudication_produces_empty_packet():
 
 
 # ---------------------------------------------------------------------------
+# B-669: corroboration must not read `count: 0` for a finding with no real target
+# ---------------------------------------------------------------------------
+
+def test_corroboration_subject_not_determinable_for_a_sentinel_target():
+    """B-669's actual bug: a finding with NO evidence to parse a target from falls
+    back to `_target_from_evidence`'s sentinel (its own id). Before the fix this
+    read as `count: 0` -- indistinguishable from a real target with no
+    corroboration. Now it must say so explicitly."""
+    f = Finding("C99", "t", MEDIUM, UNKNOWN, "unknown detail", "fix it", "fw")
+    packet = build_judge_packet(Context(home=_HOME_FAKE), [f])
+    assert len(packet) == 1
+    assert packet[0]["target"] == packet[0]["finding_id"] == "C99"
+    corr = packet[0]["corroboration"]
+    assert corr["subject_determinable"] is False
+    assert corr["count"] == 0
+    assert corr["check_ids"] == []
+
+
+def test_corroboration_real_target_with_no_other_signal_is_a_genuine_zero():
+    """The control this fix must not break: a REAL target that happens to have no
+    other corroborating check is still `subject_determinable: True` -- a real
+    measurement of zero, not a sentinel in disguise."""
+    f = Finding("B13", "t", HIGH, WARN, "d", "fix", "fw", evidence=["lonely-skill: sig"])
+    packet = build_judge_packet(Context(home=_HOME_FAKE), [f])
+    assert len(packet) == 1
+    corr = packet[0]["corroboration"]
+    assert corr["subject_determinable"] is True
+    assert corr["count"] == 1  # itself only
+    assert corr["check_ids"] == ["B13"]
+
+
+def test_corroboration_through_the_real_build_judge_packet_on_a_bad_fixture():
+    """DoD: proven through the REAL build_judge_packet on a fixture home (via the
+    real CLI --judge-packet path, same as the other fixture tests in this file),
+    not on _corroboration_groups in isolation.
+    fixtures/bad_b336_chunked_file_exec trips both B13 and DANGEROUS_SINK 3 times
+    each on the same target, AND both ids are themselves packet-eligible (B13 is
+    FN-prone-WARN, DANGEROUS_SINK is a recovered-taint UNKNOWN) -- unlike several
+    other multi-hit fixtures probed here, where the corroborating findings share a
+    target with NO item that actually reaches the packet, so the group exists
+    internally but is invisible to every packet item's own count."""
+    fixture = _require_fixture("bad_b336_chunked_file_exec")
+    data = _run_judge_packet_cli(fixture)
+    packet = data["judgePacket"]
+    assert packet, "fixture produced no packet items -- fixture drifted, re-check it"
+    corroborated = [item for item in packet if item["corroboration"]["count"] >= 2]
+    assert corroborated, (
+        "expected at least one packet item with real multi-check corroboration on "
+        f"this fixture; got: {[(i['finding_id'], i['corroboration']) for i in packet]}"
+    )
+    for item in corroborated:
+        assert item["corroboration"]["subject_determinable"] is True
+        assert len(item["corroboration"]["check_ids"]) == item["corroboration"]["count"]
+
+
+# ---------------------------------------------------------------------------
 # Redaction (mandatory, security-critical): no raw source, no raw secret
 # ---------------------------------------------------------------------------
 
@@ -1060,7 +1116,9 @@ def test_three_findings_on_one_target_yield_count_3():
 def test_lone_finding_yields_count_1():
     findings = [_f("B65", WARN, "skillx")]
     item = build_judge_packet(Context(home=_HOME_FAKE), findings)[0]
-    assert item["corroboration"] == {"count": 1, "check_ids": ["B65"], "scope": "target"}
+    assert item["corroboration"] == {
+        "count": 1, "check_ids": ["B65"], "scope": "target", "subject_determinable": True,
+    }
 
 
 def test_corroboration_is_scoped_per_target_not_global():
@@ -1084,10 +1142,16 @@ def test_pass_and_unknown_findings_never_count_as_corroboration():
     ]
     items = {i["finding_id"]: i for i in build_judge_packet(Context(home=_HOME_FAKE), findings)}
     # B65 is the only WARN/FAIL on this target -- PASS/UNKNOWN never contribute.
-    assert items["B65"]["corroboration"] == {"count": 1, "check_ids": ["B65"], "scope": "target"}
+    assert items["B65"]["corroboration"] == {
+        "count": 1, "check_ids": ["B65"], "scope": "target", "subject_determinable": True,
+    }
     # C99 is itself UNKNOWN (never "fired"), so its own id is absent -- but B65's live
-    # WARN on the SAME target still shows up as context for it.
-    assert items["C99"]["corroboration"] == {"count": 1, "check_ids": ["B65"], "scope": "target"}
+    # WARN on the SAME target still shows up as context for it. C99's OWN target here is
+    # real (its evidence parses one), so this is a measured zero-corroboration-of-itself
+    # case, distinct from B-669's sentinel one.
+    assert items["C99"]["corroboration"] == {
+        "count": 1, "check_ids": ["B65"], "scope": "target", "subject_determinable": True,
+    }
 
 
 def test_suppressed_findings_excluded_from_corroboration():
@@ -1097,14 +1161,18 @@ def test_suppressed_findings_excluded_from_corroboration():
     )
     findings = [_f("B65", WARN, "skillx"), suppressed]
     item = build_judge_packet(Context(home=_HOME_FAKE), findings)[0]
-    assert item["corroboration"] == {"count": 1, "check_ids": ["B65"], "scope": "target"}
+    assert item["corroboration"] == {
+        "count": 1, "check_ids": ["B65"], "scope": "target", "subject_determinable": True,
+    }
 
 
 def test_corroboration_field_carries_ids_only_no_titles_or_evidence():
     findings = [_f("B65", WARN, "skillx"), _f("B100", WARN, "skillx")]
     item = build_judge_packet(Context(home=_HOME_FAKE), findings)[0]
     corroboration = item["corroboration"]
-    assert set(corroboration.keys()) == {"count", "check_ids", "scope"}
+    assert set(corroboration.keys()) == {
+        "count", "check_ids", "scope", "subject_determinable",
+    }
     for cid in corroboration["check_ids"]:
         assert cid in ("B65", "B100")  # bare ids only, no titles/details/evidence/paths
     serialized = json.dumps(corroboration)
@@ -1127,8 +1195,11 @@ def test_vet_judge_packet_corroboration_same_target_scope():
     packet = build_vet_judge_packet(primary, "skillx")
     b65 = [i for i in packet if i["finding_id"] == "B65"][0]
     b100 = [i for i in packet if i["finding_id"] == "B100"][0]
-    assert b65["corroboration"] == {"count": 2, "check_ids": ["B100", "B65"], "scope": "target"}
-    assert b100["corroboration"] == {"count": 2, "check_ids": ["B100", "B65"], "scope": "target"}
+    expected = {
+        "count": 2, "check_ids": ["B100", "B65"], "scope": "target", "subject_determinable": True,
+    }
+    assert b65["corroboration"] == expected
+    assert b100["corroboration"] == expected
 
 
 def test_vet_judge_packet_attest_items_also_get_corroboration():
@@ -1143,7 +1214,9 @@ def test_vet_judge_packet_attest_items_also_get_corroboration():
     attest_items = [i for i in packet if i["finding_id"].startswith("ATTEST-PROSE-")]
     assert attest_items
     for item in attest_items:
-        assert item["corroboration"] == {"count": 1, "check_ids": ["B65"], "scope": "target"}
+        assert item["corroboration"] == {
+            "count": 1, "check_ids": ["B65"], "scope": "target", "subject_determinable": True,
+        }
 
 
 def test_skill_md_states_corroboration_is_context_not_a_threshold():
