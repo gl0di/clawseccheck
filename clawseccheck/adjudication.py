@@ -773,7 +773,20 @@ def _item_from_finding(f) -> dict:
     # would change what a user sees in their own report to fix a problem that only exists
     # on the way out to a model.
     target = _target_from_evidence(f)
-    field_paths = _config_field_paths(f)
+    # F-166 track 1: the STRUCTURED channel (Finding.config_field_paths, a check's own
+    # dig() call-site literal, set at ~9 UNKNOWN-producing checks that have nothing else
+    # to show — see catalog.py's field comment) comes first, since it is set precisely
+    # where evidence is empty and _config_field_paths(f) below would otherwise find
+    # nothing. The evidence-derived list is appended after (deduplicated) for the FAIL/
+    # WARN population that already carries a field-path-prefixed evidence line — neither
+    # channel makes the other redundant, and a finding could in principle carry both.
+    # B-386's lesson again: a frozenset's element type is a hint, not an enforcement, so
+    # stringify BEFORE sorting -- sorted() on a mixed str/int set raises TypeError, which
+    # would take the whole packet down over one malformed producer.
+    field_paths = list(dict.fromkeys((
+        *sorted(str(p) for p in (getattr(f, "config_field_paths", None) or ())),
+        *_config_field_paths(f),
+    )))[:6]
     # C-284/C-361: engine-authored facts only, never copied from prose. Always a
     # dict (empty when nothing could be safely extracted).
     safe_facts: dict = {}

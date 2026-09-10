@@ -3616,6 +3616,24 @@ class Finding:
     # non-guess answer to "whose destination is this?" and the honest output is silence.
     # Every existing Finding() construction site is unaffected.
     destination_hosts: frozenset = field(default_factory=frozenset)
+    # F-166 track 1: config field path(s) a check READ to reach an UNKNOWN verdict, when
+    # the check has one to name. Engine-authored by construction — a string literal in
+    # our own source, one line above the return that sets it, never derived from a
+    # skill's or config's own content — so it needs none of destination_hosts' gating:
+    # the value IS the dig() call site, not something recovered from attacker-reachable
+    # text. adjudication.build_judge_packet publishes it in safe_facts.config_field_paths
+    # so a judge asked to adjudicate an UNKNOWN sees WHICH field was undetermined,
+    # instead of the bare finding id alone.
+    #
+    # Deliberately narrower than the field's name might suggest: this names the path the
+    # check looked at, never the VALUE found there (frequently attacker-choosable free
+    # text — see B-556's destination_hosts comment for why a value channel needs a much
+    # stronger gate than a path does) and never an EXPECTED value (no source exists for
+    # that in this tree — measured 2026-08-28, F-166's own design trail).
+    #
+    # Empty for every producer that does not opt in. Every existing Finding() construction
+    # site is unaffected.
+    config_field_paths: frozenset = field(default_factory=frozenset)
 
     def __post_init__(self):
         # Normalizes, never raises: a Finding built with not_applicable=True at a

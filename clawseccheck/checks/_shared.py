@@ -1235,6 +1235,7 @@ def _finding(
     sub_signals=None,
     engine_degraded=False,
     destination_hosts=None,
+    config_field_paths=None,
 ) -> Finding:
     """*scored*: per-finding override of CheckMeta.scored, same shape as *severity*.
 
@@ -1262,6 +1263,10 @@ def _finding(
 
     *destination_hosts* (B-556): per-finding, same shape — see Finding.destination_hosts.
     Defaults to an empty frozenset when omitted; every existing caller is unaffected.
+
+    *config_field_paths* (F-166 track 1): per-finding, same shape — see
+    Finding.config_field_paths. Defaults to an empty frozenset when omitted; every
+    existing caller is unaffected.
     """
     m = _meta(cid)
     return Finding(
@@ -1280,6 +1285,7 @@ def _finding(
         sub_signals=frozenset(sub_signals) if sub_signals else frozenset(),
         engine_degraded=engine_degraded,
         destination_hosts=frozenset(destination_hosts) if destination_hosts else frozenset(),
+        config_field_paths=frozenset(config_field_paths) if config_field_paths else frozenset(),
     )
 
 
@@ -2787,6 +2793,7 @@ def _custom(
     engine_degraded=False,
     destination_hosts=None,
     sub_signals=None,
+    config_field_paths=None,
 ) -> Finding:
     """Build a finding with an explicit severity (for dynamic-severity checks).
 
@@ -2811,6 +2818,10 @@ def _custom(
     *destination_hosts* (B-556): same contract as ``_finding()``'s own parameter — see
     Finding.destination_hosts. Defaults to an empty frozenset when omitted; every
     existing caller is unaffected.
+
+    *config_field_paths* (F-166 track 1): same contract as ``_finding()``'s own
+    parameter — see Finding.config_field_paths. Defaults to an empty frozenset when
+    omitted; every existing caller is unaffected.
     """
     m = BY_ID[cid]
     return Finding(
@@ -2827,6 +2838,7 @@ def _custom(
         not_applicable=not_applicable,
         engine_degraded=engine_degraded,
         destination_hosts=frozenset(destination_hosts) if destination_hosts else frozenset(),
+        config_field_paths=frozenset(config_field_paths) if config_field_paths else frozenset(),
         sub_signals=frozenset(sub_signals) if sub_signals else frozenset(),
     )
 

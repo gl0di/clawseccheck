@@ -1071,6 +1071,7 @@ def check_exec_strict_inline_eval(ctx: Context) -> Finding:
             "interpreter tools are allowlisted alongside exec.",
             "If interpreter tools are allowlisted with exec enabled, set "
             "tools.exec.strictInlineEval to true.",
+            config_field_paths={"tools.exec.strictInlineEval"},
         )
     exec_mode = dig(cfg, "tools.exec.mode")
     exec_active = (
@@ -1818,6 +1819,7 @@ def check_elevated_default_full(ctx: Context) -> Finding:
             "Avoid interpolating agents.defaults.elevatedDefault from an environment "
             "variable; set it to a literal \"ask\" (or leave it unset) so its effective "
             "value is auditable from config alone.",
+            config_field_paths={"agents.defaults.elevatedDefault"},
         )
 
     if level != "full":

@@ -1110,6 +1110,7 @@ def check_controlui_origins(ctx: Context) -> Finding:
             "If you expose the Control UI beyond loopback, set "
             "gateway.controlUi.allowedOrigins to an explicit list of trusted origins "
             '(never "*").',
+            config_field_paths={"gateway.controlUi.allowedOrigins"},
         )
     vals = [str(o) for o in origins] if isinstance(origins, list) else [str(origins)]
     if "*" in vals:
@@ -2639,6 +2640,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
                     "auth endpoint is brute-forceable.",
                     "Run the audit where it can read the OpenClaw systemd user unit and "
                     "global dotenv files, or set gateway.auth.mode explicitly.",
+                    config_field_paths={"gateway.auth.mode"},
                 )
             # else: env evidence was readable and carried nothing usable (absent, or a
             # sub-24-char value not treated as authenticating) -> mode stays None,
@@ -2971,8 +2973,10 @@ def check_sandbox(ctx: Context) -> Finding:
                 "agents.defaults.sandbox); no exec tools are configured, so it "
                 "is not currently exploitable.",
                 _move_fix,
+                config_field_paths={"agents.defaults.sandbox.mode"},
             )
-        return _finding("B4", UNKNOWN, "No exec tools and no sandbox config — not applicable.", "—")
+        return _finding("B4", UNKNOWN, "No exec tools and no sandbox config — not applicable.", "—",
+                        config_field_paths={"agents.defaults.sandbox.mode"})
     return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
 
 
@@ -4794,6 +4798,7 @@ def check_local_model_service_command(ctx: Context) -> Finding:
             f"service binary could not be determined.",
             "Fix the models.providers block in openclaw.json so it is a JSON object, "
             "then re-run the audit.",
+            config_field_paths={"models.providers"},
         )
 
     writable: list[str] = []

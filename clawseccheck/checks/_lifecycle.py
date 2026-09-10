@@ -2486,6 +2486,7 @@ def check_secrets_provider_exec(ctx: Context) -> Finding:
             "it with a non-empty trustedDirs and avoid allowInsecurePath/"
             "allowSymlinkCommand.",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+            config_field_paths={"secrets.providers"},
         )
 
     # The schema also has a source:"exec" + pluginIntegration variant with no `command`
@@ -2504,6 +2505,7 @@ def check_secrets_provider_exec(ctx: Context) -> Finding:
             "source:\"exec\" -- nothing to assess for exec-source command execution.",
             "—",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+            config_field_paths={"secrets.providers"},
         )
 
     fail_ev: list[str] = []
