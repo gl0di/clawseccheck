@@ -2154,6 +2154,42 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
     lines.append("")
 
 
+def render_explain(f, *, coverage_note: "str | None" = None,
+                   ascii_only: bool = False) -> str:
+    """C-523: everything --explain/--retest show about ONE finding, and nothing else.
+
+    Not a call to `_render_finding`: that renderer is tuned for a findings LIST (why-
+    line truncation, evidence caps meant to keep a 190-check report readable, no
+    remediation text) and is used unmodified everywhere else. A single, deliberately
+    requested finding gets the opposite trade — full detail, no truncation, and the
+    one thing `_render_finding` never shows: `f.fix` (remediation), which today only
+    reaches a reader through `--json`/`guide.py`'s next-actions summary.
+
+    *coverage_note*, when given, is docs/THREAT_COVERAGE.md's own "Notes" text for
+    this finding's `[CHECK: ...]` ledger entry (see cli.py's `_threat_coverage_note`)
+    — appended as its own paragraph, never blended into `f.detail`.
+    """
+    lines = [f"{f.id}  {_sev_token(f.severity, ascii_only=ascii_only)}  {_sanitize(f.title)}",
+             f"  status: {f.status}"]
+    conf = getattr(f, "confidence", "HIGH")
+    if conf != "HIGH":
+        lines.append(f"  confidence: {conf.lower()}")
+    pc = getattr(f, "pass_confidence", None)
+    if f.status == PASS and pc:
+        lines.append(f"  pass basis: {pc.replace('_', ' ')}")
+    if f.detail:
+        lines.append(f"  why: {_sanitize(f.detail)}")
+    if f.evidence:
+        lines.extend(_evidence_bullets(f.evidence, limit=12, indent="    ",
+                                       already_shown=f.detail or ""))
+    if f.fix:
+        lines.append(f"  fix: {_sanitize(f.fix)}")
+    if coverage_note:
+        lines.append("")
+        lines.append(f"  coverage note (docs/THREAT_COVERAGE.md): {_sanitize(coverage_note)}")
+    return "\n".join(lines)
+
+
 # ── Inventory by subject (F-131 Phase 1) ────────────────────────────────────────────
 # Owner-facing regrouping of the SAME findings by the entities an owner actually owns
 # (System / Agents / Skills / MCP / Channels) instead of the 7 analyst-facing families

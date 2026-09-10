@@ -99,6 +99,18 @@ kept here so the always-loaded playbook stays lean.
   and never a change to score or grade; none of it appears in `--json` / `--card` / `--sarif`.
 - `--verify-self` — print SHA-256 digest of ClawSecCheck's source files for tamper detection.
 - `--show-suppressed` — list any findings the user has silenced via `.clawseccheckignore`.
+- `--explain FINDING_ID` — run just the one check named by FINDING_ID (e.g. `--explain B2`)
+  against the current target and print its full detail — severity, status, why, evidence,
+  remediation (`fix`, which the main report never prints), and its `docs/THREAT_COVERAGE.md`
+  coverage note — without re-printing or scoring the rest of the audit. Always a fresh run
+  against the CURRENT target, never a past/saved one. `RISK-*` ids (a different, combinational
+  engine) and the `--behavioral`-only ids (`T1`/`T2`/`T3`/`B191`, never in the per-check
+  registry this reads) each get their own explanatory error rather than a bare "unknown id";
+  a genuine typo does too. Exit 2 on any of those; read-only.
+- `--retest FINDING_ID` — the same targeting and errors as `--explain`, but re-runs the one
+  check and reports only whether it still fires — e.g. confirm a fix cleared it. Never runs
+  the rest of the audit (no other check in the ~190-check registry is invoked), so it is far
+  cheaper than a full re-scan when only one thing needs re-checking. Read-only.
 - `--ask` — emit a JSON attestation template (the facts config can't show: real tool inventory,
   approval gating, host monitors). The running agent fills it from its own ground truth.
 - `--attest PATH` — enrich the audit with that self-report; enables B43 (capability blast-radius)

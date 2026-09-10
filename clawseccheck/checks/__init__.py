@@ -8,15 +8,18 @@ UNKNOWN when the config cannot tell us (excluded from score — honesty).
 
 from __future__ import annotations
 
+import ast
 import base64
 import binascii
 import html
+import inspect
 import ipaddress
 import json
 import logging
 import os
 import re
 import shutil
+import textwrap
 import traceback
 import unicodedata
 from pathlib import Path
@@ -1474,6 +1477,84 @@ CHECKS = [
     # belongs to the full audit only, the same reasoning B105 records for itself.
     check_compiled_tool_poisoning,  # B185 — poisoned tool description already delivered to the model (F-133, RT-1)
 ]
+
+
+# C-523: static (never executed) finding-id -> check-function map, for --explain/--retest.
+#
+# catalog.BY_ID maps an id to its CheckMeta (metadata only) — nothing anywhere maps an id
+# to the CALLABLE that produces it. Building that by running every check to see what id it
+# emits would cost exactly what --retest exists to avoid paying. Instead this reads each
+# check's own SOURCE for the literal id it constructs a Finding with — the same technique
+# scripts/gen_checks_docs.py already uses (AST over source, never exec) for risk.py's
+# RiskPath extraction.
+#
+# Verified against all 190 functions in CHECKS (2026-09, C-523), and cross-checked by hand
+# against catalog.BY_ID (not just trusted from a read): every one passes its id as a plain
+# string literal to _finding(...)/_custom(...)/_config_unreadable(...)/_host_finding(...) —
+# the four _shared.py/_host.py helpers that construct or forward a Finding's id — with the
+# SAME id on every branch. A couple (check_markdown_image_exfil, check_unicode_obfuscation,
+# check_subagents' _disk_subagent_disclosure helper) delegate to a same-module helper
+# function instead of calling one of those four directly; _finding_ids_for recurses into a
+# same-module callee (bounded by _seen) exactly for that shape.
+#
+# CHECKS_BY_ID's key set is a PROPER SUBSET of catalog.BY_ID's, not equal to it: B191 and
+# T1-T3 are real catalog ids (behavioral.py's detectors) that, per that module's own
+# docstring, are "never in CHECKS" by design — they run only under --behavioral, and a
+# fired one is folded into the score as a cap-only signal rather than appearing in CHECKS'
+# per-run findings list. --explain/--retest give those ids a distinct, accurate error
+# rather than a bare "unknown id" (cli.py). tests/test_c523_checks_by_id_completeness.py
+# pins the exact expected gap set — if a future check doesn't fit any of the four shapes
+# above, or the gap set grows for an undocumented reason, it fails loudly there.
+_ID_CARRYING_CALLS = frozenset({"_finding", "_custom", "_config_unreadable", "_host_finding"})
+
+
+def _literal_ids_in_tree(tree) -> "set[str]":
+    ids: "set[str]" = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in _ID_CARRYING_CALLS and node.args):
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                ids.add(first.value)
+    return ids
+
+
+def _finding_ids_for(fn, module, _seen=None) -> "set[str]":
+    """The finding id(s) *fn*'s own source shows it can produce. Never calls *fn*."""
+    _seen = _seen if _seen is not None else set()
+    if fn in _seen:
+        return set()
+    _seen.add(fn)
+    try:
+        source = textwrap.dedent(inspect.getsource(fn))
+        tree = ast.parse(source)
+    except (OSError, TypeError, SyntaxError):
+        return set()
+    ids = _literal_ids_in_tree(tree)
+    if ids:
+        return ids
+    # No direct _finding/_custom/_config_unreadable call in *fn*'s own body -- it may
+    # DELEGATE its whole verdict to a same-module helper. Recurse into any locally-defined
+    # function it calls (bounded by _seen so a cycle or a large fan-out can't loop/explode).
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            callee = getattr(module, node.func.id, None)
+            if callable(callee) and inspect.getmodule(callee) is module:
+                found = _finding_ids_for(callee, module, _seen)
+                if found:
+                    return found
+    return set()
+
+
+def _build_checks_by_id() -> "dict[str, object]":
+    mapping: "dict[str, object]" = {}
+    for chk in CHECKS:
+        for fid in _finding_ids_for(chk, inspect.getmodule(chk)):
+            mapping[fid] = chk
+    return mapping
+
+
+CHECKS_BY_ID = _build_checks_by_id()
 
 
 def _check_error_finding(chk, exc: BaseException) -> Finding:

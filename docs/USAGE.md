@@ -1404,6 +1404,7 @@ exists and still works, and the CI/power surface is unchanged. The grouping just
 | Shareable card / SVG badge | `clawseccheck --card` · `clawseccheck --badge badge.svg` |
 | Attachable-into-chat report (mobile-friendly, unlike HTML) | `clawseccheck --pdf report.pdf` |
 | Accept a finding (show suppressed) | edit `.clawseccheckignore` · `clawseccheck --show-suppressed` |
+| Full detail on one finding / re-check just that one after a fix | `clawseccheck --explain B2` · `clawseccheck --retest B2` — always a fresh, targeted run against the current target, never the whole audit |
 | Second opinion on borderline calls | `clawseccheck --judge-packet` · `clawseccheck --propose-ignore` |
 | Where you stand vs. a reference profile | `clawseccheck --percentile` (an ungraded run ranks your last complete check instead, dated and labelled as such) |
 

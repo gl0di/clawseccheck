@@ -19,6 +19,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import secrets
 import sys
 from dataclasses import dataclass, field
@@ -26,7 +27,8 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import (
-    audit, fingerprint, load_events, load_ignore, load_state, make_canary, record_events,
+    audit, build_context, fingerprint, load_events, load_ignore, load_state, make_canary,
+    record_events,
     render_canary, render_card, render_dashboard, render_dashboard_findings, render_events,
     render_json, render_monitor,
     render_report, render_svg, render_vet_all_json, render_vet_json, save_state, snapshot,
@@ -41,7 +43,7 @@ from .brand import WORDMARK
 # public name — stays exactly as it was, wrapping it.
 from .checks import detect_vet_type_with_reason, resolve_skill_target
 from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
-from .checks import _credential_store_state
+from .checks import CHECKS_BY_ID, _credential_store_state
 from .invocation import _display_path, command_prefix
 from .locking import journal_lock
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
@@ -79,6 +81,7 @@ from .report import (
     _sanitize,
     render_advise,
     render_advise_json,
+    render_explain,
     render_permission_manifest,
     render_vet_dossier,
     render_vet_plan,
@@ -99,6 +102,7 @@ from .scanbudget import (
 from . import pipeline as _pipeline
 from .baseline import append_entries, is_fingerprint, load_ignore_entries
 from .catalog import (
+    BY_ID,
     CRITICAL,
     FAIL_WEIGHT_STATUSES,
     HIGH,
@@ -1653,6 +1657,8 @@ _PRIMARY_MODES = [
     ("verify_events", "--verify-events", "bool"),
     ("verify_baseline", "--verify-baseline", "opt"),
     ("diff", "--diff", "opt"),
+    ("explain", "--explain", "opt"),
+    ("retest", "--retest", "opt"),
     ("vet_plan", "--vet-plan", "opt"),
     ("menu", "--menu", "bool"),
     ("brief", "--brief", "bool"),
@@ -2669,6 +2675,144 @@ def _chain_verdict(label: str, path: str, ok: "bool | None", msg: str,
     return "\n".join(lines), 1
 
 
+# C-523: docs/THREAT_COVERAGE.md's own [CHECK: ...] ledger, read for --explain's coverage
+# note. No production code parses this file today (tests/test_threat_coverage_ledger.py's
+# helpers enforce the file's closure invariants and are private/test-only, a different job
+# from fetching one row's text) so this is a small, standalone reader, not a shared import.
+_THREAT_COVERAGE_TAG_RE = re.compile(r"`?\[CHECK:\s*([^\]]+)\]`?")
+
+
+def _split_table_row(line: str) -> "list[str]":
+    """Split one markdown table row on UNESCAPED ``|`` only, unescaping ``\\|`` back to a
+    literal pipe in the result. A naive ``str.split("|")`` cuts a cell mid-sentence when
+    its prose contains a real pipe written the standard markdown-escaped way — the
+    Installed-skill-malware row's own ``curl\\|sh`` is exactly that case.
+    """
+    cells: "list[str]" = []
+    current: "list[str]" = []
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line) and line[i + 1] == "|":
+            current.append("|")
+            i += 2
+            continue
+        if ch == "|":
+            cells.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    cells.append("".join(current))
+    return cells
+
+
+def _threat_coverage_note(finding_id: str, path: "Path | None" = None) -> "str | None":
+    """The Covered-table row that names *finding_id* in a ``[CHECK: ...]`` tag, as
+    ``"<category>: <notes>"``, or None when docs/THREAT_COVERAGE.md can't be found/read
+    or no row tags this id. Never raises: the doc ships with the source repo but a
+    packaged install is not guaranteed to carry it, and an unavailable coverage note is
+    a smaller problem than a crashed --explain.
+
+    A row's Notes cell (column 3) is sometimes JUST the tag — e.g. "Local-first & model
+    hygiene | B12 | `[CHECK: B12]`" carries all its meaning in the category name, column
+    1, not column 3. Stripping the tag from an already-terse cell then leaves an empty
+    string, which earlier read as "no note found" and fell through to reporting B10/B12/
+    B48/B9/C074/C3 (all real, ledgered ids) as uncovered — wrong, since they ARE covered,
+    just tersely. The category always leads the result now, so an empty Notes cell still
+    surfaces something instead of nothing.
+
+    *path* overrides the default docs/THREAT_COVERAGE.md location — test-only; every
+    real caller leaves it at None.
+    """
+    if path is None:
+        path = Path(__file__).resolve().parent.parent / "docs" / "THREAT_COVERAGE.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not (line.startswith("|") and line.endswith("|")):
+            continue
+        # C-135: every row today carries at most one [CHECK: ...] tag (comma-joined ids,
+        # never two separate tags), but .search() only ever tests the FIRST match — a
+        # future row with two tags on one line would silently skip an id tagged only in
+        # the second. finditer + a union of every tag's ids costs nothing today and
+        # can't be defeated by a future doc edit the way a single .search() could.
+        ids = {tok.strip() for m in _THREAT_COVERAGE_TAG_RE.finditer(line)
+               for tok in m.group(1).split(",")}
+        if finding_id not in ids:
+            continue
+        cells = [c.strip() for c in _split_table_row(line.strip("|"))]
+        if len(cells) < 3:
+            continue
+        category = re.sub(r"\*\*(.+?)\*\*", r"\1", cells[0]).strip()
+        note = _THREAT_COVERAGE_TAG_RE.sub("", cells[2]).strip()
+        return f"{category}: {note}" if note else category
+    return None
+
+
+# C-523: why a finding id could not be resolved to a single check to run, for --explain/
+# --retest's error text. Kept as data (not inlined at each call site) so the two modes'
+# wording only differs by verb ("explain"/"retest"), never by which reason applies.
+def _single_check_lookup(finding_id: str):
+    """Returns (check_fn, error_message) — exactly one is None.
+
+    Three distinct "can't do it" reasons get three distinct sentences, the same
+    "never collapse different causes into one vague error" rule this file already
+    applies to chain verification and baseline checks: a plain typo, a real id this
+    mechanism structurally cannot retest (RISK-*, the behavioral-only T1/T2/T3/B191
+    detectors — see checks/__init__.py's CHECKS_BY_ID docstring for why those four
+    are never in CHECKS), and a real id this mechanism SHOULD cover but doesn't
+    (an internal registry gap — never silently treated as "unknown").
+    """
+    fid = finding_id.strip()
+    if fid.upper().startswith("RISK-"):
+        return None, (
+            f"{fid} is a combinational finding computed from multiple checks together "
+            f"(risk.py), not a single check — --explain/--retest support individual "
+            f"check ids (B###/C###/A1) only. See --risk-paths for the full audit's "
+            f"combinational findings.")
+    if fid not in BY_ID:
+        return None, (
+            f"unknown finding id '{fid}' — not in the check catalog. Run a full audit "
+            f"(or --functions) to see valid ids.")
+    chk = CHECKS_BY_ID.get(fid)
+    if chk is None:
+        return None, (
+            f"{fid} is a real catalog id, but it is produced outside the per-check "
+            f"registry --explain/--retest use (e.g. a --behavioral-only detector) — "
+            f"not retestable this way. Run the relevant mode directly instead.")
+    return chk, None
+
+
+def _run_single_check(finding_id: str, args):
+    """Look up *finding_id* and, only if it resolves, run exactly that one check.
+
+    Returns ``(finding, error_message)`` — exactly one is None. Shared by --explain and
+    --retest's dispatch blocks so the lookup/context-build/invoke sequence exists once;
+    the two modes differ only in what they print with the result.
+
+    Builds the SAME Context a full audit would (`build_context`, honoring --no-host/
+    --no-sockets/--no-deptree/--no-dist/--exhaustive exactly as the default report path
+    does) — Context-building has no per-check shortcut, so this pays that cost — then
+    calls the ONE resolved check function directly. Never calls `audit()`/`run_all()`,
+    which is what makes --retest's "does not run the full audit" DoD requirement true:
+    every OTHER check in CHECKS is never invoked.
+    """
+    chk, err = _single_check_lookup(finding_id)
+    if chk is None:
+        return None, err
+    ctx = build_context(args.home, include_host=not args.no_host,
+                        include_sockets=not args.no_sockets,
+                        include_deptree=not args.no_deptree,
+                        include_dist=not args.no_dist,
+                        exhaustive=args.exhaustive)
+    return chk(ctx), None
+
+
 def main(argv=None) -> int:
     """Thin top-level guard (B-101): never dump a raw traceback at users.
 
@@ -3200,6 +3344,17 @@ def _main(argv=None) -> int:
                         "and report new/fixed/unchanged findings between them; read-only, "
                         "exits without running a live audit. --json prints a machine-readable "
                         "payload (see docs/OUTPUT_SCHEMA.md)")
+    p.add_argument("--explain", metavar="FINDING_ID", dest="explain",
+                   help="run just the one check named by FINDING_ID (e.g. B2) against the "
+                        "current target and print its full detail — severity, status, why, "
+                        "evidence, remediation, and its docs/THREAT_COVERAGE.md coverage "
+                        "note — without re-printing or scoring the rest of the audit. "
+                        "Always reflects a fresh run against the CURRENT target, never a "
+                        "past/saved one; errors clearly on an unknown id")
+    p.add_argument("--retest", metavar="FINDING_ID", dest="retest",
+                   help="re-run just the one check named by FINDING_ID against the current "
+                        "target and report whether it still fires, without running the rest "
+                        "of the audit; read-only, same targeting as --explain")
     p.add_argument("--purge", action="store_true",
                    help="delete ClawSecCheck's local store (history/events/state/coverage "
                         "files, plus the default-named badge/html/sarif/pdf report files if "
@@ -3681,6 +3836,33 @@ def _main(argv=None) -> int:
         if _diff["scope_note"]:
             _emit("")
             _emit(f"note: {_diff['scope_note']}")
+        return 0
+
+    if _mode == "explain":
+        # C-523: read-only, targeted single-check dispatch — same class of early-return
+        # as --diff/--verify-baseline above (before the main audit() call further down).
+        # Deliberately always a FRESH run against the CURRENT target, never a saved/past
+        # one — see --explain's --help text for why. See _run_single_check for why this
+        # costs the same as a full audit's Context-building but skips the OTHER checks.
+        _f, _lookup_err = _run_single_check(args.explain, args)
+        if _f is None:
+            print(f"--explain: {_lookup_err}", file=sys.stderr)
+            return 2
+        _emit(render_explain(_f, coverage_note=_threat_coverage_note(_f.id),
+                             ascii_only=ascii_only))
+        return 0
+
+    if _mode == "retest":
+        # C-523: same targeting as --explain; the DoD-load-bearing property is that this
+        # never runs audit() (which calls run_all() over every OTHER check) — see
+        # _run_single_check.
+        _f, _lookup_err = _run_single_check(args.retest, args)
+        if _f is None:
+            print(f"--retest: {_lookup_err}", file=sys.stderr)
+            return 2
+        _emit(f"Retested {_f.id} against {_sanitize(str(args.home))}:")
+        _emit("")
+        _emit(render_explain(_f, ascii_only=ascii_only))
         return 0
 
     if _mode == "vet_plan":

@@ -78,6 +78,53 @@ __version__ = "4.0.1"
 __released__ = "2026-09-09"
 
 
+def build_context(home: Path | str = "~/.openclaw",
+                  include_host: bool = False, host_root: str = "/",
+                  attestation: dict | None = None,
+                  include_sockets: bool = False, proc_root: str = "/proc",
+                  include_deptree: bool = False, openclaw_pkg_root=None,
+                  include_dist: bool = False,
+                  exhaustive: bool = False):
+    """C-523: the Context-building half of `audit()`, on its own. Returns a Context.
+
+    Extracted so a caller that wants to run ONE check (`--explain`/`--retest`) can build
+    the exact same Context a full audit would, without paying for `run_all()`'s loop over
+    every OTHER check. Context-building itself has no such shortcut — collect() reads the
+    config, all bootstrap files and all installed skills regardless of which checks will
+    run, and the include_* scans below are each a single whole-host pass, not something
+    scoped per check — so this saves the OTHER checks' CPU time, not the I/O, and callers
+    should not expect it to be cheap.
+
+    Deliberately excludes `include_native`/`native_bin`/`native_timeout`: `audit()` below
+    populates `ctx.native` only AFTER `run_all()` returns, so no `check_*` function ever
+    reads it — it exists purely for the report renderer to show native findings
+    alongside this engine's own. A single-check caller has no use for it either, and
+    skipping it also skips its subprocess call.
+
+    Same parameters as `audit()`, same meaning — see its docstring for the reasoning
+    behind each `include_*` default.
+    """
+    ctx = collect(home)
+    ctx.include_host = include_host
+    if include_host:
+        ctx.host = _host_detect(root=host_root)
+    ctx.include_sockets = include_sockets
+    ctx.proc_root = proc_root
+    if include_sockets:
+        ctx.sockets = _scan_listening_sockets(proc_root=proc_root)
+    ctx.include_deptree = include_deptree
+    ctx.openclaw_pkg_root = openclaw_pkg_root
+    if include_deptree:
+        ctx.dep_tree = _deptree_scan(openclaw_pkg_root)
+    ctx.include_dist = include_dist
+    if include_dist:
+        ctx.installed_dist_version = _installed_dist_version()
+    if attestation:
+        ctx.attestation = attestation
+    ctx.exhaustive = exhaustive
+    return ctx
+
+
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
           include_host: bool = False, host_root: str = "/",
           native_bin: str = "openclaw", native_timeout: int = 60,
@@ -137,24 +184,11 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     indicator match; see scoring._runtime_cap_signal). Every runtime-consuming check
     (B83, B84, B85, B164, B180, T1/T2/T3) stays unable to move the grade any other way.
     """
-    ctx = collect(home)
-    ctx.include_host = include_host
-    if include_host:
-        ctx.host = _host_detect(root=host_root)
-    ctx.include_sockets = include_sockets
-    ctx.proc_root = proc_root
-    if include_sockets:
-        ctx.sockets = _scan_listening_sockets(proc_root=proc_root)
-    ctx.include_deptree = include_deptree
-    ctx.openclaw_pkg_root = openclaw_pkg_root
-    if include_deptree:
-        ctx.dep_tree = _deptree_scan(openclaw_pkg_root)
-    ctx.include_dist = include_dist
-    if include_dist:
-        ctx.installed_dist_version = _installed_dist_version()
-    if attestation:
-        ctx.attestation = attestation
-    ctx.exhaustive = exhaustive
+    ctx = build_context(home, include_host=include_host, host_root=host_root,
+                       attestation=attestation, include_sockets=include_sockets,
+                       proc_root=proc_root, include_deptree=include_deptree,
+                       openclaw_pkg_root=openclaw_pkg_root, include_dist=include_dist,
+                       exhaustive=exhaustive)
     lim = limits_for(ctx)
     findings = run_all(ctx, check_budget_s=lim.check_budget_s, audit_budget_s=lim.audit_budget_s)
     ignore = _baseline.load_ignore(home)
@@ -174,7 +208,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
 
 
 __all__ = [
-    "audit", "brand", "collect", "run_all", "compute", "ScoreResult", "run_native_audit",
+    "audit", "build_context", "brand", "collect", "run_all", "compute", "ScoreResult", "run_native_audit",
     "render_report", "render_dashboard", "render_dashboard_findings", "render_card", "render_json", "render_monitor",
     "render_subject_inventory",
     "render_svg", "render_vet_json", "render_vet_all_json", "vet_skill", "vet_mcp", "vet_plugin", "vet_source", "detect_vet_type",
