@@ -1813,18 +1813,25 @@ one entry per line, either a check id (`B14`) or a finding fingerprint (`B14:ab1
 with `--show-suppressed`). Suppressed findings drop out of the **score**, the **report**, and
 **monitor** alerts — so re-runs and `--monitor` stop nagging about things you've accepted.
 
+A trailing `#` comment is optional free text, but may also carry machine-parsed `author=`,
+`date=`, and `expires=` fields (any order, values with no embedded spaces) — `--show-suppressed`
+prints them next to the entry they belong to, and an entry with no such fields is marked
+`[unattributed]`. `expires=YYYY-MM-DD` auto-expires the suppression: once that date has passed,
+the entry stops suppressing (the finding reports normally again) and `--show-suppressed` lists
+it separately under "expired ignore(s) no longer applied" rather than as a dead entry.
+
 **One exception, by design:** a score-capping CRITICAL/HIGH FAIL (or a sensitive id) still
 appears in the report even if suppressed, and still counts — it stays in
 `fail_counts_by_severity`, which is the same predicate `--exit-code` gates on, so a
 `.clawseccheckignore` line cannot silently turn a CI gate green. Instead of silence you get a
 `WARNING:` line naming the id; that is the tool working, not the ignore file failing. Ordinary
 findings below that bar do go quiet. Run `--show-suppressed` to see every entry, which ones
-actually matched this run, and which match nothing any more.
+actually matched this run, which match nothing any more, and which have expired.
 
 ```text
 # ~/.openclaw/.clawseccheckignore
 B14            # accept the egress-surface advisory
-B12:1a2b3c4d   # accept one specific local-model finding
+B12:1a2b3c4d   # author=dave date=2026-09-10 expires=2026-12-10 accept one specific local-model finding
 ```
 
 ## Scoring

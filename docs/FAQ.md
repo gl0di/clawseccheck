@@ -264,8 +264,19 @@ can suppress by:
   B14:ab12cd34
   ```
 
-Lines beginning with `#` are comments. The fingerprint for any finding is shown in the
-`--show-suppressed` output after the check runs.
+Lines beginning with `#` are comments. A `#` partway through a line starts a trailing
+comment on that entry instead — optional free text, or machine-parsed `author=`/`date=`/
+`expires=` fields (any order):
+
+```text
+B12:1a2b3c4d   # author=dave date=2026-09-10 expires=2026-12-10 accept it
+```
+
+`--show-suppressed` prints `author=`/`date=` next to an entry that has them (an entry with
+neither is marked `[unattributed]`), and `expires=YYYY-MM-DD` auto-expires the suppression
+— once that date passes, the finding reports normally again and `--show-suppressed` lists
+the entry separately as expired rather than as a dead entry. The fingerprint for any
+finding is shown in the `--show-suppressed` output after the check runs.
 
 **Step 3 — verify.**
 

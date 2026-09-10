@@ -10,11 +10,27 @@ not by this module — RiskPath objects are not part of the ``findings`` list
 ``apply()`` filters. Suppressing a RISK-id requires listing that RISK-id
 explicitly; suppressing only the underlying check(s) does not implicitly
 suppress a chain derived from it (see B-154).
+
+C-519: a trailing ``#`` comment may carry optional, machine-parseable
+``author=``/``date=``/``expires=`` fields ahead of free text, e.g.::
+
+    B14            # accept the egress-surface advisory
+    B12:1a2b3c4d   # author=dave date=2026-09-10 expires=2026-12-10 accept it
+
+Parsing this out fixed a real bug, not just added a feature: the OLD line-level
+parser (``if line and not line.startswith("#"): entries.add(line)``) never split
+the entry from a trailing comment at all, so ``docs/USAGE.md``'s own shipped
+example -- the first line above, verbatim -- produced the single entry
+``"B14            # accept the egress-surface advisory"``, which matches no
+``Finding.id`` or fingerprint ever, and silently suppressed nothing. A user who
+copy-pasted the documented example got no error and no suppression.
 """
 from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from .safeio import secure_append_text
@@ -42,24 +58,112 @@ def fingerprint(finding) -> str:
     return f"{finding.id}:{digest}"
 
 
-def load_ignore(home: Path | str) -> set[str]:
-    """Read ``<home>/.clawseccheckignore`` and return the set of entries.
+#: C-519: recognized structured fields in a trailing comment. Matched with word
+#: boundaries and no embedded spaces in the value (a value is one whitespace-delimited
+#: token) — good enough for an id/name/ISO-date and simple enough that the leftover
+#: text after stripping them out is unambiguously "everything else", never a fragment
+#: of a field whose own value happened to contain a space.
+_STRUCTURED_FIELD_RE = re.compile(r"\b(author|date|expires)=(\S+)")
 
-    Each non-blank, non-comment line is one entry (bare id or fingerprint).
-    Returns an empty set when the file is absent.
+
+@dataclass(frozen=True)
+class IgnoreEntry:
+    """One parsed ``.clawseccheckignore`` line.
+
+    ``entry`` is the bare id/fingerprint ``apply()``/``risk.risk_paths()`` match
+    against — never the raw line, and never includes the comment. ``author``/``date``/
+    ``expires`` are the structured fields when present (each ``None`` otherwise, not
+    an empty string, so a caller can tell "not given" from "given as empty"). ``reason``
+    is what remains of the comment after the structured fields are removed, stripped,
+    or ``None`` when there was no comment at all. ``expired`` is computed once, here,
+    against ``date.today()`` at LOAD time — never re-derived downstream, so a caller
+    that reads it later in a long-running process cannot see the date change under it
+    mid-run.
+    """
+
+    entry: str
+    author: "str | None"
+    date: "str | None"
+    expires: "str | None"
+    reason: "str | None"
+    expired: bool
+
+
+def _parse_ignore_line(raw: str) -> "IgnoreEntry | None":
+    """One non-blank, non-full-line-comment line -> an ``IgnoreEntry``, or ``None``.
+
+    ``None`` for a blank line, a line that is ENTIRELY a comment (starts with ``#``,
+    the pre-C-519 format for a standalone note — ``append_entries`` still writes these
+    ahead of a batch), or a line whose id half is empty once the comment is split off
+    (a bare ``#`` with nothing before it, which the previous rule already exists to
+    handle — this only catches the case where something is CLAIMED before it but
+    turns out to be blank after stripping, e.g. a line of only whitespace before ``#``).
+    """
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        return None
+    entry_part, sep, comment_part = line.partition("#")
+    entry = entry_part.strip()
+    if not entry:
+        return None
+    comment = comment_part.strip() if sep else ""
+    fields = {}
+    for m in _STRUCTURED_FIELD_RE.finditer(comment):
+        fields[m.group(1)] = m.group(2)
+    reason = _STRUCTURED_FIELD_RE.sub("", comment).strip() or None
+    expires = fields.get("expires")
+    expired = False
+    if expires:
+        try:
+            expired = date.fromisoformat(expires) < date.today()
+        except ValueError:
+            # An unparseable expires= is disclosed (the raw string survives on the
+            # entry, so --show-suppressed can still show it), never treated as
+            # "already expired" or "never expires" by guessing -- silently ranking
+            # a value neither way here would let a genuine typo either drop a real
+            # suppression or keep a genuinely-expired one alive forever.
+            expired = False
+    return IgnoreEntry(
+        entry=entry, author=fields.get("author"), date=fields.get("date"),
+        expires=expires, reason=reason, expired=expired,
+    )
+
+
+def load_ignore_entries(home: Path | str) -> "list[IgnoreEntry]":
+    """Read ``<home>/.clawseccheckignore`` and return every entry, parsed.
+
+    Includes EXPIRED entries — this is the "everything on file" view
+    ``--show-suppressed`` needs to report them; ``load_ignore()`` below is the
+    "currently active" view every suppression-consuming call site uses. Returns an
+    empty list when the file is absent or unreadable, same fail-open-to-nothing shape
+    ``load_ignore()`` always had.
     """
     p = Path(home).expanduser() / ".clawseccheckignore"
     if not p.is_file():
-        return set()
-    entries: set[str] = set()
+        return []
     try:
-        for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = raw.strip()
-            if line and not line.startswith("#"):
-                entries.add(line)
+        text = p.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        pass
-    return entries
+        return []
+    out: "list[IgnoreEntry]" = []
+    for raw in text.splitlines():
+        parsed = _parse_ignore_line(raw)
+        if parsed is not None:
+            out.append(parsed)
+    return out
+
+
+def load_ignore(home: Path | str) -> set[str]:
+    """Read ``<home>/.clawseccheckignore`` and return the set of ACTIVE entries.
+
+    Each non-blank, non-comment line is one entry (bare id or fingerprint) with any
+    trailing ``#`` comment stripped. An entry whose ``expires=`` date (C-519) has
+    already passed is excluded — auto-expiry falls out of this one filter, for free,
+    for every caller: ``apply()``, ``dead_entries()``, and the bare RISK-id match in
+    ``risk.risk_paths(..., ignore=...)`` all consume this same set and none of them
+    needs to know expiry exists. Returns an empty set when the file is absent.
+    """
+    return {e.entry for e in load_ignore_entries(home) if not e.expired}
 
 
 def apply(findings, ignore: set[str]) -> None:

@@ -96,7 +96,7 @@ from .scanbudget import (
     budget_exceeded,
 )
 from . import pipeline as _pipeline
-from .baseline import append_entries, is_fingerprint
+from .baseline import append_entries, is_fingerprint, load_ignore_entries
 from .catalog import (
     CRITICAL,
     FAIL_WEIGHT_STATUSES,
@@ -3854,11 +3854,16 @@ def _main(argv=None) -> int:
         return 0
 
     if _mode == "show_suppressed":
-        ignore = load_ignore(Path(args.home).expanduser())
-        if not ignore:
+        # C-519: load the FULL parsed list first (active + expired) -- an ignore file
+        # holding only already-expired entries must still be reported on (which ones,
+        # and that they no longer apply), not folded into "No entries found" just
+        # because the ACTIVE set (`ignore` below) happens to be empty.
+        _ignore_entries = load_ignore_entries(Path(args.home).expanduser())
+        ignore = {e.entry for e in _ignore_entries if not e.expired}
+        if not _ignore_entries:
             _emit("No .clawseccheckignore entries found.")
         else:
-            _emit(f"{len(ignore)} entry/entries in .clawseccheckignore.")
+            _emit(f"{len(_ignore_entries)} entry/entries in .clawseccheckignore.")
             # B-379: match the real audit path's include_sockets, or B340's finding
             # detail differs here from a normal run (ctx.sockets is None => a
             # different "socket scan was not run" UNKNOWN text) — since
@@ -3902,12 +3907,34 @@ def _main(argv=None) -> int:
             for p in suppressed_risk:
                 matched_entries.update({p.id} & ignore)
             dead = sorted(ignore - matched_entries)
+            # C-519: attribution lookup over the SAME `_ignore_entries` loaded above
+            # (including EXPIRED entries, which the active `ignore` set no longer
+            # carries -- load_ignore()/the filter above already excluded them so
+            # apply()/risk_paths() stop suppressing them). Keyed by the more specific
+            # match first (fingerprint over bare id), same precedence `matched_entries`
+            # above already uses.
+            _entry_meta = {e.entry: e for e in _ignore_entries}
+
+            def _attribution(*candidates: str) -> str:
+                meta = next((_entry_meta[c] for c in candidates if c in _entry_meta), None)
+                if meta is None:
+                    return ""
+                if meta.author or meta.date:
+                    bits = []
+                    if meta.author:
+                        bits.append(f"author={meta.author}")
+                    if meta.date:
+                        bits.append(f"date={meta.date}")
+                    return "  [" + " ".join(bits) + "]"
+                return "  [unattributed]"
+
             if suppressed or suppressed_risk:
                 _emit(f"{len(suppressed) + len(suppressed_risk)} suppressed in this run:")
                 for f in suppressed:
-                    _emit(f"  {f.id}  {fingerprint(f)}  ({f.title})")
+                    _emit(f"  {f.id}  {fingerprint(f)}  ({f.title})"
+                          f"{_attribution(fingerprint(f), f.id)}")
                 for p in suppressed_risk:
-                    _emit(f"  {p.id}  ({p.title})")
+                    _emit(f"  {p.id}  ({p.title}){_attribution(p.id)}")
             if dead:
                 _emit("")
                 _emit(f"{len(dead)} entry/entries match nothing in this run — the finding "
@@ -3915,6 +3942,18 @@ def _main(argv=None) -> int:
                       "no longer in effect:")
                 for entry in dead:
                     _emit(f"  {entry}")
+            # C-519: never silently keep honoring a stale exception forever — an entry
+            # whose expires= date has passed already stopped suppressing (load_ignore()
+            # excludes it), so say so here rather than letting it vanish from both the
+            # "suppressed" and "dead" lists with no explanation for where it went.
+            _expired = [e for e in _ignore_entries if e.expired]
+            if _expired:
+                _emit("")
+                _emit(f"{len(_expired)} expired ignore(s) no longer applied — the "
+                      "expires= date has passed, so these findings report normally "
+                      "again:")
+                for e in _expired:
+                    _emit(f"  {e.entry}  (expired {e.expires})")
         return 0
 
     if _mode == "watch_log":
