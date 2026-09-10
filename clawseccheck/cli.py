@@ -164,7 +164,11 @@ from .skillprovenance import read_provenance as _read_provenance
 from .skillprovenance import workspace_roots as _workspace_roots
 from .monitor import NOTE_INSPECTION_CAPPED, NOTE_UNDETERMINED
 from .monitor import changed_skills as _changed_skills
-from .sbom import render_sbom
+from .sbom import build_sbom, render_sbom, render_sbom_cyclonedx, render_sbom_spdx
+from .sbom_runs import diff_sbom_runs as _diff_sbom_runs
+from .sbom_runs import load_sbom_run as _load_sbom_run
+from .sbom_runs import render_sbom_diff_json as _render_sbom_diff_json
+from .sbom_runs import save_sbom_run as _save_sbom_run_snapshot
 
 
 def _unicode_ok() -> bool:
@@ -343,6 +347,14 @@ def _runs_path(args) -> str:
     the whole store directory together, so a second override flag would just be another
     way to half-redirect it)."""
     return str(_store_dir(args) / "runs.jsonl")
+
+
+def _sbom_runs_path(args) -> str:
+    """C-521: this run's --save-sbom-run/--sbom-diff store — same reasoning as
+    _runs_path: no dedicated override flag, --data-dir already moves it with everything
+    else. A SEPARATE file from runs.jsonl (not a shared row shape) — see sbom_runs.py's
+    own module docstring for why the two stores don't share one."""
+    return str(_store_dir(args) / "sbom_runs.jsonl")
 
 
 def _record_run(capability: str, args) -> None:
@@ -1657,6 +1669,7 @@ _PRIMARY_MODES = [
     ("verify_events", "--verify-events", "bool"),
     ("verify_baseline", "--verify-baseline", "opt"),
     ("diff", "--diff", "opt"),
+    ("sbom_diff", "--sbom-diff", "opt"),
     ("explain", "--explain", "opt"),
     ("retest", "--retest", "opt"),
     ("vet_plan", "--vet-plan", "opt"),
@@ -1765,6 +1778,10 @@ _MODE_HONORS = {
     "next": frozenset({"judged_bundle"}),
     # C-524: --diff's own machine-readable payload, same shape as the vet-* family above.
     "diff": frozenset({"json"}),
+    # C-521: --format/--save-sbom-run are meaningful only alongside --sbom; --sbom-diff
+    # gets its own machine-readable payload, same shape as --diff's.
+    "sbom": frozenset({"format", "save_sbom_run"}),
+    "sbom_diff": frozenset({"json"}),
 }
 
 # Primary modes that run AFTER the --attest block in main()'s cascade: their ctx and
@@ -1807,9 +1824,12 @@ def _mode_active(args, attr: str, kind: str) -> bool:
 # "['a', 'b']" and never catch a genuinely blank run id either side gave. The diff
 # branch validates both values itself instead (empty/whitespace-only run id -> its own
 # clear error, exit 2), the same outcome this list exists to produce for the others.
+# C-521: "sbom_diff" is excluded for the identical reason — also nargs=2, also
+# self-validated in its own dispatch block.
 _VALUE_REQUIRED_MODES = tuple(
     (flag, attr) for attr, flag, kind in _PRIMARY_MODES
-    if kind == "opt" and attr not in ("vet_mcp", "analyze_trajectory", "behavioral", "diff")
+    if kind == "opt" and attr not in ("vet_mcp", "analyze_trajectory", "behavioral", "diff",
+                                      "sbom_diff")
 )
 
 
@@ -2291,6 +2311,13 @@ def _flag_coherence_notes(args) -> list[str]:
     # matching --save's own entry above rather than inventing a separate allowlist.
     if bool(getattr(args, "save_run", False)) and "save_run" not in honored:
         no_effect.append("--save-run")
+    # C-521: --format defaults to "native", so only an EXPLICIT non-default choice can
+    # mean anything was actually asked for — checking truthiness the way the boolean
+    # flags above do would misfire on the default value alone.
+    if getattr(args, "format", "native") != "native" and "format" not in honored:
+        no_effect.append("--format")
+    if bool(getattr(args, "save_sbom_run", False)) and "save_sbom_run" not in honored:
+        no_effect.append("--save-sbom-run")
     if bool(getattr(args, "exit_code", False)) and "exit_code" not in honored:
         no_effect.append("--exit-code")
     if getattr(args, "fail_on", None) is not None and "fail_on" not in honored:
@@ -2402,6 +2429,8 @@ _PURGE_FILENAMES = (
     # one, and the file lives alongside history.jsonl/events.jsonl under the same
     # store directory.
     "runs.jsonl",
+    # C-521: --save-sbom-run's opt-in per-run SBOM component store. Same reasoning.
+    "sbom_runs.jsonl",
 )
 
 
@@ -3401,6 +3430,20 @@ def _main(argv=None) -> int:
     p.add_argument("--sbom", action="store_true",
                    help="export a local bill-of-materials (skills, MCP servers, hashes, "
                         "declared/unpinned deps) as deterministic JSON to stdout and exit")
+    p.add_argument("--format", choices=("native", "cyclonedx", "spdx"), default="native",
+                   help="only with --sbom: the export format — native ClawSecCheck JSON "
+                        "(default, backward compatible), CycloneDX 1.5 JSON, or SPDX 2.3 "
+                        "JSON, all built from the same collected inventory")
+    p.add_argument("--save-sbom-run", action="store_true", dest="save_sbom_run",
+                   help="only with --sbom: also persist this run's component inventory "
+                        "(the native shape, regardless of --format), addressable by its "
+                        "timestamp run id. --sbom-diff RUN_ID1 RUN_ID2 then reports "
+                        "added/removed/changed components between two saved runs")
+    p.add_argument("--sbom-diff", nargs=2, metavar=("RUN_ID1", "RUN_ID2"),
+                   help="compare two SBOM runs saved with --save-sbom-run and report "
+                        "added/removed/changed components; read-only, exits without "
+                        "running a live audit. --json prints a machine-readable payload "
+                        "(see docs/OUTPUT_SCHEMA.md)")
     p.add_argument("--judge-packet", action="store_true", dest="judge_packet",
                    help="export the borderline finding band (UNKNOWN, FN-prone WARN, "
                         "B62, dropped taint) as JSON for a host-agent judge to review "
@@ -3836,6 +3879,63 @@ def _main(argv=None) -> int:
         if _diff["scope_note"]:
             _emit("")
             _emit(f"note: {_diff['scope_note']}")
+        return 0
+
+    if _mode == "sbom_diff":
+        # C-521: pure local-store comparison — no live audit, same class of early-return
+        # as --diff above (deliberately mirrors it; see sbom_runs.py's own module
+        # docstring for why this is a separate store/diff rather than a --diff branch).
+        _sbom_run_id1, _sbom_run_id2 = args.sbom_diff
+        _sbom_blank = [rid for rid in (_sbom_run_id1, _sbom_run_id2) if not rid.strip()]
+        if _sbom_blank:
+            print(f"--sbom-diff: run id cannot be blank ({len(_sbom_blank)} of 2 given "
+                  f"blank). Run ids are the 'ts' a --save-sbom-run invocation printed.",
+                  file=sys.stderr)
+            return 2
+        _sbom_runs_file = _sbom_runs_path(args)
+        _sbom_run1 = _load_sbom_run(_sbom_run_id1, _sbom_runs_file)
+        _sbom_run2 = _load_sbom_run(_sbom_run_id2, _sbom_runs_file)
+        _sbom_missing = [rid for rid, row in ((_sbom_run_id1, _sbom_run1),
+                                              (_sbom_run_id2, _sbom_run2)) if row is None]
+        if _sbom_missing:
+            print(f"--sbom-diff: no saved SBOM run found for {', '.join(_sbom_missing)} "
+                  f"in {_sbom_runs_file}. Runs are only saved with --save-sbom-run — "
+                  f"nothing is recorded there by default.", file=sys.stderr)
+            return 1
+        _sbom_diff = _diff_sbom_runs(_sbom_run1, _sbom_run2)
+        if args.json:
+            _emit(_render_sbom_diff_json(_sbom_diff, version=__version__))
+            return 0
+        _emit(f"Comparing {_sbom_diff['run1_ts']} -> {_sbom_diff['run2_ts']}")
+        _emit("")
+        if _sbom_diff["added"]:
+            _emit(f"{len(_sbom_diff['added'])} added component(s):")
+            for c in _sbom_diff["added"]:
+                _emit(f"  [{c['kind']}] {c.get('name', '<unnamed>')}  "
+                      f"version={c.get('version')}  hash={c.get('hash')}")
+        else:
+            _emit("No added components.")
+        _emit("")
+        if _sbom_diff["removed"]:
+            _emit(f"{len(_sbom_diff['removed'])} removed component(s):")
+            for c in _sbom_diff["removed"]:
+                _emit(f"  [{c['kind']}] {c.get('name', '<unnamed>')}  "
+                      f"version={c.get('version')}  hash={c.get('hash')}")
+        else:
+            _emit("No removed components.")
+        _emit("")
+        if _sbom_diff["changed"]:
+            _emit(f"{len(_sbom_diff['changed'])} changed component(s):")
+            for c in _sbom_diff["changed"]:
+                _fields = ", ".join(
+                    f"{field} {mv['from']!r} -> {mv['to']!r}"
+                    for field, mv in c["changed"].items()
+                )
+                _emit(f"  [{c['kind']}] {c.get('name', '<unnamed>')}: {_fields}")
+        else:
+            _emit("No changed components.")
+        _emit("")
+        _emit(f"{_sbom_diff['unchanged_count']} component(s) unchanged.")
         return 0
 
     if _mode == "explain":
@@ -5119,7 +5219,27 @@ def _main(argv=None) -> int:
         return 0
 
     if _mode == "sbom":
-        _emit(render_sbom(ctx))
+        # C-521: --format only selects OUTPUT rendering — every format is built from the
+        # exact same build_sbom(ctx) inventory (sbom.py's own module docstring), never a
+        # second scan. --save-sbom-run always persists the NATIVE shape regardless of
+        # --format, since that is what --sbom-diff compares (a format-specific rendering
+        # would fold in e.g. SPDX's own wall-clock creationInfo.created and manufacture a
+        # diff on every run of an unchanged setup).
+        _sbom_renderer = {
+            "native": render_sbom,
+            "cyclonedx": render_sbom_cyclonedx,
+            "spdx": render_sbom_spdx,
+        }[args.format]
+        _emit(_sbom_renderer(ctx))
+        if getattr(args, "save_sbom_run", False):
+            _saved_sbom_id = _save_sbom_run_snapshot(build_sbom(ctx), _sbom_runs_path(args),
+                                                      version=__version__)
+            if _saved_sbom_id is None:
+                _emit("\n(could not save SBOM run — see --data-dir's directory for "
+                      "write access)")
+            else:
+                _emit(f"\n(SBOM run saved as {_saved_sbom_id} — diff it later with "
+                      f"--sbom-diff {_saved_sbom_id} <OTHER_RUN_ID>)")
         return 0
 
     if _mode == "incident":

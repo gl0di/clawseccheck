@@ -1834,11 +1834,12 @@ clawseccheck --purge          # lists the files, asks for confirmation, then del
 clawseccheck --purge --yes    # skip the prompt (for scripted uninstall)
 ```
 
-`--purge` only ever touches its own known files: the five store files (`history.jsonl`,
-`events.jsonl`, `state.json`, `coverage.json`, `runs.jsonl` — the last is `--save-run`'s opt-in
-store, present only if you ever used it) **and** the four default-named report outputs
+`--purge` only ever touches its own known files: the six store files (`history.jsonl`,
+`events.jsonl`, `state.json`, `coverage.json`, `runs.jsonl`, `sbom_runs.jsonl` — the last two
+are `--save-run`'s and `--save-sbom-run`'s opt-in stores, present only if you ever used them)
+**and** the four default-named report outputs
 (`openclaw-security-badge.svg`, `openclaw-security-report.html`, `openclaw-security-report.sarif`,
-`openclaw-security-report.pdf`), plus all nine's lock sidecars — never a directory glob or
+`openclaw-security-report.pdf`), plus all ten's lock sidecars — never a directory glob or
 recursive delete. That means if you save a report with `--pdf`/`--html`/`--sarif`/`--badge`
 under this same store directory using ClawSecCheck's own default filename, `--purge` deletes it
 too; anything else — including one of those same reports saved under a different name, or
@@ -2051,7 +2052,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 770 test files and 22,353
+A security tool should be heavily tested — so it is: 789 test files and 22,753
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

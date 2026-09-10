@@ -21,6 +21,7 @@ into a ticket (CLAUDE.md §8; the same fix already applies to sarif.py's
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -249,3 +250,188 @@ def render_sbom(ctx) -> str:
     """Return the BOM as a deterministic, stably-ordered JSON string."""
     payload = build_sbom(ctx)
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+
+
+# C-521: CycloneDX / SPDX export — a PRESENTATION-time transform of the exact same
+# build_sbom(ctx) inventory above, never a second scan. Both interoperability formats
+# want a full-length content hash; monitor.py's _h() (native format's own hash) is
+# DELIBERATELY truncated to 16 hex chars for its own compact-signature use, and a
+# 16-char value would not itself validate as a real SHA-256 digest under either
+# format's schema. _full_hash below reuses the exact same input-construction each
+# native entry builder already uses (the same bytes _h() hashes) — just without the
+# truncation — so this is still "reuse the digest machinery", not a second convention.
+
+
+def _full_hash(text: str) -> str:
+    """Same convention as monitor.py's ``_h()`` (sha256 of UTF-8 text, errors="replace")
+    but UNTRUNCATED, for a hash field a schema will validate the length of."""
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+
+
+def _full_hashes_by_component(ctx) -> dict:
+    """``(kind, name) -> full sha256 hex`` for every skill/mcp/plugin component, hashing
+    the identical input text ``build_sbom``'s own ``_skill_entry``/``_mcp_entry``/
+    ``_plugin_entry`` already hash (truncated) — reads ``ctx`` again, but ``ctx`` is
+    already fully collected in memory by the time any BOM renderer runs, so this is
+    cheap dict iteration, not a second scan."""
+    out = {}
+    for name, blob in ctx.installed_skills.items():
+        out[("skills", name)] = _full_hash(blob)
+    for name, detail in _mcp_detail_sig(ctx).items():
+        out[("mcp_servers", name)] = _full_hash(json.dumps(detail, sort_keys=True, default=str))
+    for rec in getattr(ctx, "plugin_index_records", None) or []:
+        pid = rec.get("plugin_id") or ""
+        out[("plugins", pid)] = _full_hash(json.dumps(rec, sort_keys=True, default=str))
+    return out
+
+
+def render_sbom_cyclonedx(ctx) -> str:
+    """The same inventory as ``render_sbom``, as minimal-but-valid CycloneDX 1.5 JSON.
+
+    License is never asserted: nothing this module reads carries license data for a
+    locally-installed skill/MCP-server/plugin (Golden Rule #4 — report UNKNOWN, never
+    guess), and CycloneDX's ``licenses`` key is optional, so it is omitted rather than
+    populated with a fabricated value. ``purl`` (package-URL) is omitted for the same
+    reason — these components mostly have no package-registry identity to assert.
+    ``version`` is omitted (not "UNKNOWN") when unknown, since CycloneDX only accepts a
+    real version string there; an absent key is the format's own honest "not stated".
+
+    No ``metadata.timestamp`` — that field is optional in the CycloneDX spec, and
+    omitting it keeps this renderer's output exactly as deterministic (same Context,
+    same bytes) as the native format's own documented promise.
+    """
+    payload = build_sbom(ctx)
+    hashes = _full_hashes_by_component(ctx)
+
+    def _component(kind, comp_type, entry):
+        c = {
+            "type": comp_type,
+            "bom-ref": f"{kind[:-1] if kind.endswith('s') else kind}:{entry['name']}",
+            "name": entry["name"],
+            "hashes": [{"alg": "SHA-256", "content": hashes.get((kind, entry["name"]), "")}],
+        }
+        version = entry.get("version")
+        if version:
+            c["version"] = version
+        props = []
+        if "supplier" in entry and entry["supplier"]:
+            props.append({"name": "clawseccheck:supplier", "value": entry["supplier"]})
+        if entry.get("declared_deps"):
+            props.append({"name": "clawseccheck:declaredDeps",
+                          "value": ",".join(entry["declared_deps"])})
+        if entry.get("unpinned_deps"):
+            props.append({"name": "clawseccheck:unpinnedDeps",
+                          "value": ",".join(entry["unpinned_deps"])})
+        if kind == "mcp_servers":
+            props.append({"name": "clawseccheck:transport", "value": entry.get("transport", "")})
+            props.append({"name": "clawseccheck:pinned",
+                          "value": str(entry.get("pinned", False)).lower()})
+        if kind == "plugins":
+            if entry.get("origin"):
+                props.append({"name": "clawseccheck:origin", "value": entry["origin"]})
+            if entry.get("contracts"):
+                props.append({"name": "clawseccheck:contracts",
+                              "value": ",".join(entry["contracts"])})
+        if props:
+            c["properties"] = props
+        return c
+
+    components = (
+        [_component("skills", "application", s) for s in payload["skills"]]
+        + [_component("mcp_servers", "application", m) for m in payload["mcp_servers"]]
+        + [_component("plugins", "application", p) for p in payload["plugins"]]
+    )
+    bom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "components": components,
+    }
+    return json.dumps(bom, ensure_ascii=True, indent=2, sort_keys=True)
+
+
+def render_sbom_spdx(ctx) -> str:
+    """The same inventory as ``render_sbom``, as minimal-but-valid SPDX 2.3 JSON.
+
+    Uses SPDX's own standard ``"NOASSERTION"`` wherever a value is not knowable
+    (version, license, download location) — the format's OWN spelling for exactly
+    Golden Rule #4's "report UNKNOWN, never guess", so no invented convention is
+    needed here the way CycloneDX's key-omission approach required one above.
+
+    ``creationInfo.created`` genuinely is wall-clock "now": SPDX documents are
+    conventionally timestamped at generation, and diffing (``--sbom-diff``) compares
+    the underlying component list, not this rendered text, so this one field being
+    non-deterministic across two runs of an unchanged setup has no effect on the
+    diff feature at all.
+    """
+    from datetime import datetime, timezone
+
+    from . import __version__  # noqa: PLC0415 (avoid import-order coupling)
+
+    payload = build_sbom(ctx)
+    hashes = _full_hashes_by_component(ctx)
+    home_digest = hashlib.sha256(
+        str(payload.get("scanned_home") or "").encode("utf-8", "replace")
+    ).hexdigest()[:16]
+
+    def _package(kind, entry):
+        spdx_id = f"SPDXRef-{kind[:-1] if kind.endswith('s') else kind}-{entry['name']}"
+        # SPDXID must be alnum/dot/hyphen only; a skill/plugin/server name can carry
+        # other characters, so sanitize rather than emit a structurally invalid id.
+        spdx_id = "".join(ch if ch.isalnum() or ch in ".-" else "-" for ch in spdx_id)
+        # C-135: sanitizing can make two DIFFERENT names collide onto the SAME id —
+        # "a/b" and "a b" both fold to "a-b", since both "/" and " " map to the same
+        # replacement character. SPDX requires SPDXID to be unique per document,
+        # and a silent collision would make a strict consumer only see one of the
+        # two components (or reject the document outright). Appending a hash-derived
+        # suffix UNCONDITIONALLY (not just when a collision is detected) keeps each
+        # component's id stable across runs regardless of what else is present —
+        # detect-and-suffix-on-repeat would make an id's shape depend on iteration
+        # order and on which OTHER components happened to be installed that run.
+        spdx_id = f"{spdx_id}-{hashes.get((kind, entry['name']), '')[:8]}"
+        comment_bits = []
+        if entry.get("supplier"):
+            comment_bits.append(f"supplier={entry['supplier']}")
+        if entry.get("declared_deps"):
+            comment_bits.append(f"declaredDeps={','.join(entry['declared_deps'])}")
+        if entry.get("unpinned_deps"):
+            comment_bits.append(f"unpinnedDeps={','.join(entry['unpinned_deps'])}")
+        if kind == "mcp_servers":
+            comment_bits.append(f"transport={entry.get('transport', '')}")
+            comment_bits.append(f"pinned={entry.get('pinned', False)}")
+        if kind == "plugins" and entry.get("origin"):
+            comment_bits.append(f"origin={entry['origin']}")
+        pkg = {
+            "SPDXID": spdx_id,
+            "name": entry["name"],
+            "versionInfo": entry.get("version") or "NOASSERTION",
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": "NOASSERTION",
+            "copyrightText": "NOASSERTION",
+            "checksums": [{"algorithm": "SHA256",
+                          "checksumValue": hashes.get((kind, entry["name"]), "")}],
+        }
+        if comment_bits:
+            pkg["comment"] = "; ".join(comment_bits)
+        return pkg
+
+    packages = (
+        [_package("skills", s) for s in payload["skills"]]
+        + [_package("mcp_servers", m) for m in payload["mcp_servers"]]
+        + [_package("plugins", p) for p in payload["plugins"]]
+    )
+    doc = {
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": "clawseccheck-sbom",
+        "documentNamespace": f"https://clawseccheck.local/sbom/{home_digest}",
+        "creationInfo": {
+            "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "creators": [f"Tool: clawseccheck-{__version__}"],
+        },
+        "packages": packages,
+    }
+    return json.dumps(doc, ensure_ascii=True, indent=2, sort_keys=True)

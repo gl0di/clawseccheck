@@ -121,6 +121,8 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "was a skill's instruction acted on at runtime?"),
         PaletteEntry("Bill of materials", "--sbom",
                      "skills, MCP servers, hashes and pin state as JSON"),
+        PaletteEntry("SBOM diff <id1> <id2>", "--sbom-diff",
+                     "added/removed/changed components between two BOMs"),
         PaletteEntry("Incident pack", "--incident",
                      "findings + hashes + a rotation list, to preserve"),
         PaletteEntry("Judge packet", "--judge-packet",
@@ -245,6 +247,8 @@ _UNLISTED_FLAG_MODES: dict[str, str] = {
     "--dashboard-findings": MODE_A,
     "--compact": MODE_A,         # only with --dashboard --full
     "--exhaustive": MODE_A,      # raises this check's scan caps
+    "--format": MODE_A,          # only with --sbom: native/cyclonedx/spdx
+    "--save-sbom-run": MODE_A,   # opt-in per-run SBOM snapshot; feeds --sbom-diff
     # ── B · Watch: where the periodic state lives ────────────────────────────
     "--state": MODE_B,           # snapshot file for --monitor
     "--events": MODE_B,          # the Agent Watch event journal

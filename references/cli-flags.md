@@ -121,6 +121,13 @@ kept here so the always-loaded playbook stays lean.
   timestamp run id (nothing is saved unless this flag is given). `--diff RUN_ID1 RUN_ID2`
   then reports new/fixed/unchanged findings between two saved runs, read-only, no live audit.
   See `docs/OUTPUT_SCHEMA.md` §24.
+- `--sbom --format {native,cyclonedx,spdx}` — only with `--sbom`; `native` (default,
+  backward compatible) is the existing ClawSecCheck JSON, `cyclonedx` is CycloneDX 1.5
+  JSON, `spdx` is SPDX 2.3 JSON — all built from the same collected inventory, never a
+  second scan. `--save-sbom-run` (opt-in, like `--save-run`) persists this run's
+  component inventory (always the native shape, regardless of `--format`), and
+  `--sbom-diff RUN_ID1 RUN_ID2` reports added/removed/changed components between two
+  saved SBOM runs, read-only, no live audit. See `docs/OUTPUT_SCHEMA.md` §25.
 - `--dashboard-findings` — print ONLY the Section-2 Findings block for the chat Dashboard
   (non-suppressed FAIL/WARN, high-confidence, grouped by the 7 families, already framed in the
   open 3-sided box) and exit. Agent-facing: SKILL.md Step 3 runs this and pastes the output

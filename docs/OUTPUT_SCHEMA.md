@@ -1820,3 +1820,141 @@ regression; it is not double-counted or collapsed into a third bucket anywhere.
 differ, an id only present in `run1` still appears in `fixed` exactly as defined — the note
 is the reader's warning that "fixed" there may only mean "did not run the second time",
 not a claim that has been silently softened or hidden.
+
+---
+
+## 25. `--sbom --format cyclonedx|spdx` Output, and `--sbom-diff` / `~/.clawseccheck/sbom_runs.jsonl` (C-521)
+
+### `--format cyclonedx` — CycloneDX 1.5 JSON
+
+Produced by `--sbom --format cyclonedx`. A presentation-time transform of §21's native
+BOM — the exact same `build_sbom(ctx)` inventory, never a second scan. `--format`
+defaults to `native` (§21, unchanged, backward compatible).
+
+Every component's `hashes[0].content` is the FULL (untruncated) SHA-256 of the same
+input text §21's `SkillEntry.hash`/`McpEntry.hash`/`PluginEntry.hash` already hash —
+those are deliberately truncated to 16 hex characters for their own compact
+drift-signature use, and a 16-char value would not itself validate as a real SHA-256
+digest under CycloneDX's schema. `licenses` and `purl` are never populated — nothing
+this tool collects carries license or package-registry data for a locally installed
+skill/MCP-server/plugin, and both keys are optional in the spec, so omitting them is
+the honest "not asserted" rather than a fabricated value (Golden Rule #4). `version` is
+likewise omitted (not a placeholder string) when the underlying entry's own `version` is
+`null`. No `metadata.timestamp` — optional in the spec, and omitting it keeps this
+format exactly as deterministic (same `Context`, byte-identical output) as §21's native
+format already promises.
+
+```json
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "components": [
+    {
+      "type": "application",
+      "bom-ref": "skill:pdf-tools",
+      "name": "pdf-tools",
+      "version": "1.2.0",
+      "hashes": [{"alg": "SHA-256", "content": "<64-hex-char sha256>"}],
+      "properties": [
+        {"name": "clawseccheck:declaredDeps", "value": "requests"},
+        {"name": "clawseccheck:unpinnedDeps", "value": ""}
+      ]
+    }
+  ]
+}
+```
+
+ClawSecCheck-specific data with no standard CycloneDX field (`supplier`,
+`declaredDeps`/`unpinnedDeps`, MCP `transport`/`pinned`, plugin `origin`/`contracts`)
+rides in `properties`, namespaced `clawseccheck:*` — never invented as a nonstandard
+top-level key a strict consumer might reject.
+
+### `--format spdx` — SPDX 2.3 JSON
+
+Produced by `--sbom --format spdx`. Same inventory, same full-hash reuse, but SPDX's
+own standard `"NOASSERTION"` spells "not knowable" for `versionInfo`/`licenseConcluded`/
+`licenseDeclared`/`downloadLocation` — the format's own vocabulary for exactly Golden
+Rule #4, so no `clawseccheck:*`-style convention was needed the way CycloneDX's
+key-omission approach required one above. `creationInfo.created` genuinely is wall-clock
+"now" (SPDX documents are conventionally timestamped at generation) — the one field in
+this document that is NOT deterministic across two renders of an unchanged `Context`.
+This has no effect on `--sbom-diff` below: that compares the underlying component list
+(the native shape), never this rendered text.
+
+```json
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "clawseccheck-sbom",
+  "documentNamespace": "https://clawseccheck.local/sbom/<16-hex digest of scanned_home>",
+  "creationInfo": {"created": "2026-09-10T13:26:59Z", "creators": ["Tool: clawseccheck-4.0.1"]},
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-skill-pdf-tools",
+      "name": "pdf-tools",
+      "versionInfo": "1.2.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "checksums": [{"algorithm": "SHA256", "checksumValue": "<64-hex-char sha256>"}],
+      "comment": "declaredDeps=requests"
+    }
+  ]
+}
+```
+
+Extra ClawSecCheck-specific data (the same set CycloneDX puts in `properties`) rides in
+each package's free-text `comment` field — SPDX has no generic properties-bag
+equivalent at the package level.
+
+### `--save-sbom-run` / `--sbom-diff RUN_ID1 RUN_ID2` — `~/.clawseccheck/sbom_runs.jsonl`
+
+`--save-sbom-run` (only with `--sbom`) persists this run's component inventory — always
+the NATIVE shape (§21), regardless of `--format` — to `~/.clawseccheck/sbom_runs.jsonl`,
+addressable by its timestamp run id, the same hash-chained-JSONL idiom §24's
+`runs.jsonl` uses (`sbom_runs.py` reuses `monitorstore.py`'s generic chain-hash
+primitives directly, the same way `runstore.py` does — proven generic across three
+independent stores now). Opt-in: nothing is written unless the flag is given.
+
+```json
+{"ts": "2026-09-10T13:26:59", "version": "4.0.1", "_schema": 1,
+ "sbom": { "...": "the exact §21 native BOM shape" },
+ "chain_hash": "..."}
+```
+
+`--sbom-diff RUN_ID1 RUN_ID2` reads two saved rows and buckets every component
+(`skills` + `mcp_servers` + `plugins`, identified by `(kind, name)`) into
+`added`/`removed`/`changed`. Deliberately a SEPARATE store and diff function from §24's
+`--diff` — `runstore.diff_runs()` is hard-coded to Finding fields (`id`/`status`/
+`detail`/`severity`/`title`) throughout, and a component (`name`/`version`/`hash`, no
+severity or status at all) is too different a shape to bolt on without threading a
+shape-selector through code that has none today.
+
+```json
+{
+  "tool": "clawseccheck", "version": "4.0.1",
+  "run1": "2026-09-10T09:15:23", "run2": "2026-09-12T11:02:07",
+  "added": [{"kind": "skills", "name": "new-tool", "version": null, "hash": "..."}],
+  "removed": [],
+  "changed": [{"kind": "skills", "name": "pdf-tools",
+               "changed": {"hash": {"from": "h1", "to": "h2"}}}],
+  "unchangedCount": 3
+}
+```
+
+### Notes
+
+**A `changed` entry names exactly which fields moved.** Only `version` and `hash` are
+compared; either, both, or neither can appear under `"changed"` for a given component.
+A `hash` change with an **unchanged** `version` — same declared version, different
+content — is precisely the supply-chain-swap signal this feature exists to catch, and it
+is reported the same way a version bump is, not folded into a generic "something
+changed" flag that would leave a reader unable to tell which.
+
+**Not part of the `--json` envelope (§1).** Both `--sbom --format ...` and
+`--sbom-diff --json` are separate, standalone artifacts, like §21's native BOM and §24's
+`--diff --json` before them.
