@@ -134,6 +134,10 @@ from .history import (
     render_trend,
     verify as history_verify,
 )
+from .runstore import diff_runs as _diff_runs
+from .runstore import load_run as _load_run
+from .runstore import render_diff_json as _render_diff_json
+from .runstore import save_run as _save_run_snapshot
 from .menu import compute_ages, render_menu, render_onboarding
 from .palette import render_palette
 from .percentile import render_percentile
@@ -326,6 +330,14 @@ def _store_dir(args) -> Path:
 def _coverage_path(args) -> str:
     """This run's coverage/freshness ledger — beside its history, never elsewhere."""
     return str(_store_dir(args) / "coverage.json")
+
+
+def _runs_path(args) -> str:
+    """C-524: this run's --save-run/--diff store — beside its history, never elsewhere.
+    No dedicated --runs flag (same reasoning as _coverage_path: --data-dir already moves
+    the whole store directory together, so a second override flag would just be another
+    way to half-redirect it)."""
+    return str(_store_dir(args) / "runs.jsonl")
 
 
 def _record_run(capability: str, args) -> None:
@@ -1639,6 +1651,7 @@ _PRIMARY_MODES = [
     ("verify_history", "--verify-history", "bool"),
     ("verify_events", "--verify-events", "bool"),
     ("verify_baseline", "--verify-baseline", "opt"),
+    ("diff", "--diff", "opt"),
     ("vet_plan", "--vet-plan", "opt"),
     ("menu", "--menu", "bool"),
     ("brief", "--brief", "bool"),
@@ -1743,6 +1756,8 @@ _MODE_HONORS = {
     # --trend/--monitor already did (see _apply_live_test_cap's call sites below).
     "percentile": frozenset({"judged_bundle"}),
     "next": frozenset({"judged_bundle"}),
+    # C-524: --diff's own machine-readable payload, same shape as the vet-* family above.
+    "diff": frozenset({"json"}),
 }
 
 # Primary modes that run AFTER the --attest block in main()'s cascade: their ctx and
@@ -1779,9 +1794,15 @@ def _mode_active(args, attr: str, kind: str) -> bool:
 # two disagreed for every opt mode given "" — 182 argv shapes, of which `--badge ""`
 # printing a full default report at rc=0 was the visible one. Rejecting the empty value
 # up front removes the disagreement instead of encoding it twice.
+#
+# C-524: "diff" is excluded for a different reason than the other three — its value is a
+# 2-element LIST (nargs=2), not a single string, so `str(v).strip()` below would test
+# "['a', 'b']" and never catch a genuinely blank run id either side gave. The diff
+# branch validates both values itself instead (empty/whitespace-only run id -> its own
+# clear error, exit 2), the same outcome this list exists to produce for the others.
 _VALUE_REQUIRED_MODES = tuple(
     (flag, attr) for attr, flag, kind in _PRIMARY_MODES
-    if kind == "opt" and attr not in ("vet_mcp", "analyze_trajectory", "behavioral")
+    if kind == "opt" and attr not in ("vet_mcp", "analyze_trajectory", "behavioral", "diff")
 )
 
 
@@ -2258,6 +2279,11 @@ def _flag_coherence_notes(args) -> list[str]:
         no_effect.append("--json")
     if getattr(args, "save", None) is not None and "save" not in honored:
         no_effect.append("--save")
+    # C-524: --save-run writes at the SAME tail site as --save (right beside it), so it
+    # is unreachable from exactly the same set of primary modes -- no mode honors it,
+    # matching --save's own entry above rather than inventing a separate allowlist.
+    if bool(getattr(args, "save_run", False)) and "save_run" not in honored:
+        no_effect.append("--save-run")
     if bool(getattr(args, "exit_code", False)) and "exit_code" not in honored:
         no_effect.append("--exit-code")
     if getattr(args, "fail_on", None) is not None and "fail_on" not in honored:
@@ -2364,6 +2390,11 @@ _PURGE_FILENAMES = (
     "history.jsonl", "events.jsonl", "state.json", "coverage.json",
     "openclaw-security-badge.svg", "openclaw-security-report.html",
     "openclaw-security-report.sarif", "openclaw-security-report.pdf",
+    # C-524: --save-run's opt-in per-run findings store. Whitelisted the same way as
+    # the badge/html/sarif/pdf defaults above — inert until --save-run actually writes
+    # one, and the file lives alongside history.jsonl/events.jsonl under the same
+    # store directory.
+    "runs.jsonl",
 )
 
 
@@ -2932,6 +2963,13 @@ def _main(argv=None) -> int:
                         "(C4 corroborates it against meta.lastTouchedVersion to "
                         "surface a version rollback). Read-only PATH lookup, no subprocess")
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")
+    p.add_argument("--save-run", action="store_true", dest="save_run",
+                   help="also persist this run's full finding list, addressable by its "
+                        "timestamp, so a later --diff RUN_ID1 RUN_ID2 can compare it "
+                        "against another saved run. Opt-in: nothing is written here unless "
+                        "this flag is given (unlike --history, which records a bare score "
+                        "line by default) — a full finding list is far heavier per run. "
+                        "Writes to <store dir>/runs.jsonl, same directory as --history")
     p.add_argument("--monitor", action="store_true",
                    help="monitor mode: alert on what changed since the last check")
     p.add_argument("--probe", action="store_true",
@@ -3156,6 +3194,11 @@ def _main(argv=None) -> int:
     p.add_argument("--verify-baseline", metavar="REFERENCE", dest="verify_baseline",
                    help="check the drift baseline (--state) against a reference value a "
                         "previous --monitor run printed, and exit; read-only")
+    p.add_argument("--diff", nargs=2, metavar=("RUN_ID1", "RUN_ID2"),
+                   help="compare two runs saved with --save-run (by their timestamp run id) "
+                        "and report new/fixed/unchanged findings between them; read-only, "
+                        "exits without running a live audit. --json prints a machine-readable "
+                        "payload (see docs/OUTPUT_SCHEMA.md)")
     p.add_argument("--purge", action="store_true",
                    help="delete ClawSecCheck's local store (history/events/state/coverage "
                         "files, plus the default-named badge/html/sarif/pdf report files if "
@@ -3560,6 +3603,54 @@ def _main(argv=None) -> int:
               f"the covering line above against how you took your reference first, then run "
               f"--watch-log to see what was recorded in between.")
         return 1
+
+    if _mode == "diff":
+        # C-524: pure local-store comparison — no live audit, same class of early-return
+        # as --purge/--verify-*/--verify-baseline above (all sit before the audit() call
+        # this cascade makes further down).
+        _run_id1, _run_id2 = args.diff
+        _blank = [rid for rid in (_run_id1, _run_id2) if not rid.strip()]
+        if _blank:
+            print(f"--diff: run id cannot be blank ({len(_blank)} of 2 given blank). "
+                  f"Run ids are the 'ts' a --save-run invocation printed, or one of "
+                  f"--trend's own timestamps.", file=sys.stderr)
+            return 2
+        _runs_file = _runs_path(args)
+        _run1 = _load_run(_run_id1, _runs_file)
+        _run2 = _load_run(_run_id2, _runs_file)
+        _missing = [rid for rid, row in ((_run_id1, _run1), (_run_id2, _run2)) if row is None]
+        if _missing:
+            print(f"--diff: no saved run found for {', '.join(_missing)} in {_runs_file}. "
+                  f"Runs are only saved with --save-run — nothing is recorded there by "
+                  f"default.", file=sys.stderr)
+            return 1
+        _diff = _diff_runs(_run1, _run2)
+        if args.json:
+            _emit(_render_diff_json(_diff, version=__version__))
+            return 0
+        _emit(f"Comparing {_diff['run1_ts']} -> {_diff['run2_ts']}")
+        _emit("")
+        if _diff["new"]:
+            _emit(f"{len(_diff['new'])} new finding(s):")
+            for f in _diff["new"]:
+                _emit(f"  {f['id']}  {f['severity']}  {f['status']}  ({f['title']})")
+                _emit(f"    {f['detail']}")
+        else:
+            _emit("No new findings.")
+        _emit("")
+        if _diff["fixed"]:
+            _emit(f"{len(_diff['fixed'])} fixed finding(s):")
+            for f in _diff["fixed"]:
+                _emit(f"  {f['id']}  {f['severity']}  {f['status']}  ({f['title']})")
+                _emit(f"    {f['detail']}")
+        else:
+            _emit("No fixed findings.")
+        _emit("")
+        _emit(f"{_diff['unchanged_count']} finding(s) unchanged.")
+        if _diff["scope_note"]:
+            _emit("")
+            _emit(f"note: {_diff['scope_note']}")
+        return 0
 
     if _mode == "vet_plan":
         # F-065: zero-network plan emitter — prints commands, touches nothing itself.
@@ -5843,6 +5934,20 @@ def _main(argv=None) -> int:
         except OSError as exc:
             _emit(f"\n(could not save report: {exc})")
             _save_failed = True
+
+    # C-524: same tail slot as --save above, deliberately -- --save-run is reachable
+    # from exactly the same set of primary modes (see the "save_run" no-effect note in
+    # _flag_coherence_notes, which mirrors "save"'s own entry rather than a separate
+    # allowlist).
+    if getattr(args, "save_run", False):
+        _saved_run_id = _save_run_snapshot(findings, _runs_path(args), home=args.home,
+                                            version=__version__)
+        if _saved_run_id is None:
+            _emit("\n(could not save run — see --data-dir/--history's directory "
+                  "for write access)")
+        else:
+            _emit(f"\n(run saved as {_saved_run_id} — diff it later with "
+                  f"--diff {_saved_run_id} <OTHER_RUN_ID>)")
 
     # B-598: the guard this used to spell out inline now lives in
     # `_record_history_point`, which the --dashboard branch calls too. Its docstring

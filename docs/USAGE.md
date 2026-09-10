@@ -755,6 +755,41 @@ emergency.
 Use it for cheap, frequent polling; use a plain `--monitor` for the check whose result you
 read and act on.
 
+### Comparing two specific runs — `--save-run` / `--diff`
+
+`--trend` plots the score over time; `--monitor` watches for drift dimension by dimension.
+Neither answers "show me exactly which findings are new, which are fixed, and which are
+unchanged between these two runs" — that is what `--diff` is for, and it needs a run's
+**full** finding list, which `--trend`'s history store never kept (only score/grade).
+
+```bash
+clawseccheck --save-run                              # prints: (run saved as 2026-09-10T09:15:23 — ...)
+# ... time passes, you fix something ...
+clawseccheck --save-run                              # prints: (run saved as 2026-09-12T11:02:07 — ...)
+clawseccheck --diff 2026-09-10T09:15:23 2026-09-12T11:02:07
+```
+
+`--save-run` is **opt-in** — unlike `--history`'s score line (recorded by default every run),
+nothing is written here unless you pass the flag. A full finding list is far heavier per run
+than a score triple, so this store is not on by default and keeps a much smaller retention
+window (the last 50 saved runs, vs. history's thousands). The run id is its timestamp — the
+same `ts` `--trend`'s own rows already carry, not a second identity to track.
+
+`--diff RUN_ID1 RUN_ID2` reads two saved runs (it runs no live audit itself) and reports:
+
+- **new findings** — a problem present in RUN_ID2 that was not in RUN_ID1.
+- **fixed findings** — the reverse.
+- **an unchanged count** — everything else, including clean checks that stayed clean; a
+  count rather than a list, since normally most checks are exactly that.
+
+A check whose *severity* changed (e.g. WARN → FAIL on the same check id) shows in **both**
+lists — the old WARN is gone (fixed) and the new FAIL appeared (new); read together, that
+pair is the real story. If the two runs did not examine the same set of checks at all (one
+used `--no-host`, say, or a ClawSecCheck upgrade added checks between them), a note says so:
+a "fixed" entry among those checks may only mean the check did not run the second time, not
+that the issue was resolved. `--diff --json` prints a machine-readable payload — see
+`docs/OUTPUT_SCHEMA.md`.
+
 ### Known limits of `--monitor` (read before relying on it)
 
 These are inherent boundaries of a **local, file-based, scheduled** drift detector — not bugs to
@@ -1368,6 +1403,7 @@ exists and still works, and the CI/power surface is unchanged. The grouping just
 |---|---|
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
 | Score trend across past scans | `clawseccheck --trend` (plots the **graded** runs only; ungraded ones are recorded but carry no point) |
+| Compare two specific past runs — new/fixed findings | `clawseccheck --save-run` (opt-in per-run snapshot; prints the run id) · `clawseccheck --diff RUN_ID1 RUN_ID2` |
 | Verify the local stores weren't tampered with | `clawseccheck --verify-history` · `clawseccheck --verify-events` |
 
 **Mode C · Before you install** — is this thing safe to add? Verdict, never a letter.
@@ -1787,10 +1823,11 @@ clawseccheck --purge          # lists the files, asks for confirmation, then del
 clawseccheck --purge --yes    # skip the prompt (for scripted uninstall)
 ```
 
-`--purge` only ever touches its own known files: the four store files (`history.jsonl`,
-`events.jsonl`, `state.json`, `coverage.json`) **and** the four default-named report outputs
+`--purge` only ever touches its own known files: the five store files (`history.jsonl`,
+`events.jsonl`, `state.json`, `coverage.json`, `runs.jsonl` — the last is `--save-run`'s opt-in
+store, present only if you ever used it) **and** the four default-named report outputs
 (`openclaw-security-badge.svg`, `openclaw-security-report.html`, `openclaw-security-report.sarif`,
-`openclaw-security-report.pdf`), plus all eight's lock sidecars — never a directory glob or
+`openclaw-security-report.pdf`), plus all nine's lock sidecars — never a directory glob or
 recursive delete. That means if you save a report with `--pdf`/`--html`/`--sarif`/`--badge`
 under this same store directory using ClawSecCheck's own default filename, `--purge` deletes it
 too; anything else — including one of those same reports saved under a different name, or

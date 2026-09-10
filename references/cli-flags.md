@@ -105,6 +105,10 @@ kept here so the always-loaded playbook stays lean.
   and B44 (self-report ⇄ config drift) at `ATTESTED` confidence. Read-only; introspection only.
 - `--watch-log` — print the Agent Watch event journal (a local timeline of what changed across
   `--monitor` runs); `--events PATH` points it at a different journal file.
+- `--save-run` — opt-in: also persist this run's full finding list, addressable by its
+  timestamp run id (nothing is saved unless this flag is given). `--diff RUN_ID1 RUN_ID2`
+  then reports new/fixed/unchanged findings between two saved runs, read-only, no live audit.
+  See `docs/OUTPUT_SCHEMA.md` §24.
 - `--dashboard-findings` — print ONLY the Section-2 Findings block for the chat Dashboard
   (non-suppressed FAIL/WARN, high-confidence, grouped by the 7 families, already framed in the
   open 3-sided box) and exit. Agent-facing: SKILL.md Step 3 runs this and pastes the output

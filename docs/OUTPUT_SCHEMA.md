@@ -1758,3 +1758,65 @@ the ARRIVAL of a baseline as a fall.
 marker, so the graded prefix stays byte-identical to what earlier builds wrote, and journal
 rotation re-emits each parsed row in its own insertion order — so the position survives
 rotation.
+
+## 24. `--diff` Output / `~/.clawseccheck/runs.jsonl` (C-524)
+
+`--diff RUN_ID1 RUN_ID2` compares two runs saved with `--save-run` and reports which
+findings are new, fixed, or unchanged between them. Unlike `history.jsonl` (§23, a score/
+grade line recorded by default on every run), `runs.jsonl` holds each run's **full**
+finding list and is written **only** when `--save-run` is given — nothing here by default.
+Same hash-chained JSONL idiom as `history.jsonl`/`events.jsonl`, with a far smaller
+retention window (last 50 saved runs) since each row is heavier.
+
+### `runs.jsonl` row fields
+
+| Field | Type | Description |
+|---|---|---|
+| `ts` | `str` | The run id — an ISO datetime, seconds precision. What `--diff` takes as `RUN_ID1`/`RUN_ID2`. |
+| `home` | `str \| null` | The audited home, sanitized. |
+| `version` | `str \| null` | The ClawSecCheck build that saved this run. |
+| `_schema` | `int` | Row schema version — the same shared counter `history.jsonl`/`events.jsonl` use. |
+| `findings` | `array[Finding]` | Every finding from that run, each in the exact `_finding_to_dict` shape §1's `findings` array already uses (same fields, same sanitization). |
+| `chain_hash` | `str` | 64-hex hash-chain link, same semantics as `history.jsonl`'s. |
+
+### `--diff --json` payload
+
+| Field | Type | Description |
+|---|---|---|
+| `tool` | `str` | Always `"clawseccheck"`. |
+| `version` | `str` | Tool version string. |
+| `run1` / `run2` | `str` | The two run ids compared, as given on the command line. |
+| `new` | `array[Finding]` | Problem findings (`status != "PASS"`) present in `run2` but not `run1`, identified the same way `.clawseccheckignore` fingerprints a finding (`<id>:<sha1-8-of-detail>`) — see Notes. |
+| `fixed` | `array[Finding]` | The reverse: present in `run1`, not `run2`. |
+| `unchangedCount` | `int` | Every check id present in both runs whose finding is byte-identical (fingerprint match), including a clean PASS that stayed PASS. A count, not a list. |
+| `scopeNote` | `str \| null` | Non-null when the two runs did not examine the same set of check ids (e.g. one used `--no-host`, or a ClawSecCheck upgrade added/removed checks between them). |
+
+```json
+{
+  "tool": "clawseccheck", "version": "4.0.1",
+  "run1": "2026-09-10T09:15:23", "run2": "2026-09-12T11:02:07",
+  "new": [],
+  "fixed": [{"id": "B2", "title": "Gateway exposure & channel authentication",
+             "severity": "CRITICAL", "status": "PASS", "...": "..."}],
+  "unchangedCount": 187,
+  "scopeNote": null
+}
+```
+
+### Notes
+
+**Fingerprint identity, not raw equality.** `new`/`fixed` are computed exactly the way
+`baseline.fingerprint()` already identifies a finding for `.clawseccheckignore` purposes
+— `<check id>:<sha1-8 of detail>`, over non-`PASS` findings only. This is deliberate: a
+`PASS` whose wording changed between two ClawSecCheck releases must never read as a fake
+regression or a fake resolution.
+
+**The same check id can appear in both `new` and `fixed`.** A severity change on one check
+(e.g. `WARN` → `FAIL`, same id) has two different fingerprints — the old one vanishes
+(`fixed`) and the new one appears (`new`). Read together by id, that pair *is* the
+regression; it is not double-counted or collapsed into a third bucket anywhere.
+
+**A `scopeNote` caveats `fixed`, never suppresses it.** When the two runs' check sets
+differ, an id only present in `run1` still appears in `fixed` exactly as defined — the note
+is the reader's warning that "fixed" there may only mean "did not run the second time",
+not a claim that has been silently softened or hidden.

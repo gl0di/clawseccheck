@@ -160,6 +160,8 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "how your graded scans moved over time"),
         PaletteEntry("Watch log", "--watch-log",
                      "timeline of what changed (Agent Watch journal)"),
+        PaletteEntry("Diff two runs <id1> <id2>", "--diff",
+                     "new/fixed/unchanged findings between two saved runs"),
         PaletteEntry("Verify history", "--verify-history",
                      "the score history's hash-chain is untampered"),
         PaletteEntry("Verify events", "--verify-events",
@@ -245,6 +247,8 @@ _UNLISTED_FLAG_MODES: dict[str, str] = {
     "--history": MODE_B,         # the score-history file --trend reads
     "--data-dir": MODE_B,        # all three of the above, moved together
     "--probe": MODE_B,           # report drift without writing any of the three
+    "--save-run": MODE_B,        # opt-in per-run snapshot; feeds --diff
+    "--all": MODE_B,             # un-windows --trend/--watch-log's default display cap
     # ── C · Before you install: vet-only modifiers ───────────────────────────
     "--recursive": MODE_C,       # alias of --vet-all
     "--vet-judge-packet": MODE_C,
