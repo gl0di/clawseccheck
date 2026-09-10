@@ -4839,6 +4839,11 @@ def _main(argv=None) -> int:
         # below, so a random token can never manufacture drift on the next run.
         score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
         _skip_live_test_persist = _live_signal.hit and not _live_signal.reproducible
+        # F-180: read here (rather than where it is USED below, near the journal/state
+        # writes) so the B-781 home-mismatch early-return just below can also gate its
+        # own history_record call on it -- a probe must never record anything, on any
+        # exit path.
+        _probe = bool(getattr(args, "probe", False))
         # B-270: ONE predicate decides what "no usable baseline" means, and it tells
         # *absent* (a real first run) apart from *corrupt* (a prior baseline existed and is
         # gone). Both used to collapse into `prev is None`, so a destroyed baseline
@@ -4850,8 +4855,19 @@ def _main(argv=None) -> int:
         # the journal filled with alerts about a machine that did not change, and worse,
         # the baseline silently REBASED to the other home's values, so a later genuine
         # regression on the real machine could read as "no change". Checked here, before
-        # any of the (expensive) per-run scanning below, and before `prev` is used for
-        # anything else -- a mismatch means nothing below this point is comparable.
+        # the monitor-specific scans below (behavioural/install/provenance/host-persist/
+        # credentials), the diff, and the journal/state writes -- the audit itself
+        # already ran earlier in this same invocation, but none of ITS output is
+        # comparable against `prev` once the two homes disagree.
+        #
+        # Narrow race, deliberately not closed here: two --monitor processes racing on
+        # the same --data-dir, BOTH a genuine first run (prev is None for both) but
+        # pointed at DIFFERENT homes, both pass this check (nothing to mismatch against
+        # yet). The B-769 `_baseline_moved` re-check inside journal_lock below still
+        # stops the loser from writing -- it just reports the ordinary "someone else
+        # already advanced the baseline" outcome rather than a home-specific one. No
+        # wrong data is ever written (the actual B-781 danger), only a less specific
+        # message in an already-rare window.
         if home_mismatch(prev, ctx.home):
             _prev_home_display = prev.get("home_display") or "(not recorded)"
             _this_home_display = _home_identity(ctx.home)[1]
@@ -4864,6 +4880,15 @@ def _main(argv=None) -> int:
                 "and silently rebase the real baseline to this run's values. Point "
                 "--data-dir at a location dedicated to this home, or re-run with the "
                 "--home this baseline was recorded for.", file=sys.stderr)
+            # The audit already ran and genuinely measured THIS home's score -- recorded
+            # for the same reason the failure paths below are (cli.py's own note there:
+            # "this run's score was really measured, and the trend should not gain a
+            # hole"). history.jsonl is additive and each row already names its own
+            # `home` (B-691), so a foreign row here is inert, never a corrupted baseline
+            # the way state.json would be.
+            if not _skip_live_test_persist and not _probe:
+                history_record(score, args.history, home=args.home,
+                               findings=findings, version=__version__)
             return 1
         # F-173: run the behavioural layer HERE, in the shell, and hand `snapshot()` only
         # the reduced verdict. Two deliberate choices:
@@ -5138,7 +5163,7 @@ def _main(argv=None) -> int:
         # it again. That re-detection is the point, not a duplicate: B-278's note a few
         # lines up already established that leaving a baseline un-advanced is how drift
         # survives a failed write, and this is the same shape chosen deliberately.
-        _probe = bool(getattr(args, "probe", False))
+        # (`_probe` itself is read earlier now — see the B-781 home-mismatch check above.)
         # B-769: two concurrent --monitor runs racing on the same stale on-disk
         # baseline independently compute the identical `alerts` (diffed against
         # `prev`, read above, before either process reaches here) and, without

@@ -133,6 +133,39 @@ def test_a_monitor_run_against_a_different_home_refuses_to_rebase(tmp_path, caps
     assert json.loads(before)["gateway_bind"] != "0.0.0.0:8080"
 
 
+def test_a_monitor_run_against_a_different_home_still_records_its_own_history_point(tmp_path, capsys):
+    """The audit itself already ran and genuinely measured THIS home before the
+    mismatch was even detected -- that real data point must not be lost just because
+    the STORED baseline turned out to describe a different machine. history.jsonl is
+    additive (never rebased the way state.json would be) and each row already names
+    its own `home` (B-691), so a foreign row here is inert."""
+    state = tmp_path / "state.json"
+    events = tmp_path / "events.jsonl"
+    history = tmp_path / "history.jsonl"
+    _run(tmp_path, home=SAFE, state=state, events=events)
+    rc = _run(tmp_path, home=VULN, state=state, events=events)
+    assert rc == 1
+
+    rows = [json.loads(ln) for ln in history.read_text(encoding="utf-8").splitlines() if ln]
+    assert len(rows) == 2
+    assert rows[0]["home"] == "fixtures/home_safe" or rows[0]["home"].endswith("home_safe")
+    assert rows[1]["home"] == "fixtures/home_vuln" or rows[1]["home"].endswith("home_vuln")
+
+
+def test_a_probe_on_a_mismatched_home_still_records_nothing(tmp_path, capsys):
+    """`--probe` must never record anything, on ANY exit path -- including the new
+    home-mismatch one."""
+    state = tmp_path / "state.json"
+    events = tmp_path / "events.jsonl"
+    history = tmp_path / "history.jsonl"
+    _run(tmp_path, home=SAFE, state=state, events=events)
+    before_history = history.read_text(encoding="utf-8")
+
+    rc = _run(tmp_path, "--probe", home=VULN, state=state, events=events)
+    assert rc == 1
+    assert history.read_text(encoding="utf-8") == before_history
+
+
 def test_a_monitor_run_against_a_different_home_does_not_flood_the_journal(tmp_path, capsys):
     """The dangerous half of the bug: a home switch must not manufacture dozens of
     'no longer determinable' alerts and write them into the tamper-evident journal."""
