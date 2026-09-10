@@ -227,6 +227,54 @@ def _ignore_hash(home: Path) -> str:
         return ""
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
 
+
+def _home_identity(home: "Path | str") -> "tuple[str, str]":
+    """B-781: a stable identity for the OpenClaw home a baseline describes.
+
+    Returns ``(digest, display)``. *digest* is a sha256 of the RESOLVED absolute path
+    (symlinks followed, ``~`` expanded, ``..``/a trailing slash collapsed) so the same
+    home reached by two different spellings compares equal -- the legitimate case the
+    caller must not mistake for a different machine. ``Path.resolve()`` does not
+    require the path to exist, so a ``--home`` that has never been audited still gets a
+    stable identity rather than raising.
+
+    *display* is the sanitized, human-readable form (OS account home collapsed to
+    ``~``, secret-shaped substrings redacted -- see report._sanitize / B-381/§8) for a
+    mismatch message. Built from the UNRESOLVED path, the same "user-typed form, not an
+    absolute path naming the operator" choice B-691 already made for history.jsonl's
+    own ``home`` field -- never used for the identity comparison itself.
+    """
+    from .report import _sanitize  # noqa: PLC0415 (Layer 3 cluster; see history._sanitize_home)
+    resolved = str(Path(home).expanduser().resolve())
+    digest = hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()
+    return digest, _sanitize(str(home))
+
+
+def home_mismatch(prev: "dict | None", home: "Path | str") -> bool:
+    """B-781: does *prev* describe a VERIFIABLY DIFFERENT OpenClaw home than *home*?
+
+    True only on a genuine, checkable mismatch -- the caller (cli.py's `--monitor`
+    handling) must then refuse to diff against *prev* or overwrite it: doing either
+    would flood the journal with alerts about a machine that did not change, and
+    silently rebase the real baseline to the other home's values.
+
+    False covers three cases the caller does not need to tell apart here: no usable
+    prior baseline (``prev`` absent/corrupt); a prior baseline that predates per-home
+    tracking (``home_digest`` absent -- WATCHED_DIMENSIONS' own "your baseline
+    predates this" coverage note already discloses that gap on its own, so this stays
+    silent rather than a second, competing voice, and the run proceeds -- a hard block
+    here would treat every pre-existing baseline as a mismatch on the first upgrade);
+    and the two homes being the SAME one once resolved (symlink, trailing slash, ``~``
+    vs. absolute -- see `_home_identity`, whose digest is exactly what makes those
+    spellings compare equal).
+    """
+    if not isinstance(prev, dict) or not prev:
+        return False
+    prev_digest = prev.get("home_digest")
+    if prev_digest is None:
+        return False
+    return prev_digest != _home_identity(home)[0]
+
 # F-147 (Wave 3, rug-pull): bumped 2 -> 3 for the new OPTIONAL `mcp_detail.<server>.
 # surface_tool_sigs` key. As with the 1 -> 2 bump (see git history, v3.11.0's
 # _skill_sig str-vs-dict sniffing), this build carries no version-keyed migration
@@ -417,6 +465,14 @@ WATCHED_DIMENSIONS = (
     # _CONDITIONAL: its absence means a snapshot older than this build, which diff()
     # treats as ungraded rather than assuming the number was shown.
     "graded",
+    # B-781: which OpenClaw home this baseline describes (a digest, not the path
+    # itself -- see `_home_identity`). Written unconditionally, same reasoning as
+    # `clawseccheck_version` just above: it needs no external input, so its absence on
+    # a stored baseline means only that it predates per-home identity tracking, and
+    # that gap is exactly what WATCHED_DIMENSIONS' own "your baseline predates this"
+    # coverage note (C-441) is for -- `home_mismatch()` below stays silent on an absent
+    # `home_digest` rather than being a second, competing voice for the same fact.
+    "home_digest",
     "host",
     # F-179. Conditional: absent when the shell did not hand `snapshot()` a host scan.
     #
@@ -547,8 +603,16 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
     # B-268: capture each collection's truncation frontier alongside the collection itself,
     # so diff() can tell "absent from disk" from "absent from the capped view".
     _mem_capped: list[str] = []
+    _home_digest, _home_display = _home_identity(ctx.home)
     snap = {
         "version": SNAPSHOT_VERSION,
+        # B-781: which OpenClaw home this baseline describes. `home_digest` is the
+        # identity the caller (cli.py) checks a NEW run against before it is allowed to
+        # diff against or overwrite this baseline -- a run pointed at a different home
+        # must never rebase it. `home_display` exists only so a mismatch message can
+        # name the two homes; comparisons must use the digest, never this string.
+        "home_digest": _home_digest,
+        "home_display": _home_display,
         # B-765: the PRODUCER's version, not the snapshot FORMAT's (that's "version"
         # above). Written unconditionally so diff_with_notes() can tell a genuine config
         # change from the scanner's own detection changing underneath an existing check

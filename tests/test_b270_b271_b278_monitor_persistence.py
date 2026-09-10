@@ -53,6 +53,33 @@ def _run(tmp_path: Path, *extra: str, home: str = SAFE, state=None, events=None)
                  "--history", str(tmp_path / "history.jsonl"), *extra])
 
 
+def _drift_home(tmp_path: Path) -> Path:
+    """A writable copy of home_safe a test can mutate in place between two --monitor
+    runs, so both stay the SAME OpenClaw home. Several tests below used to switch to
+    home_vuln for their second run purely to manufacture drift -- exactly the
+    same-data-dir-different-home shape B-781 now refuses to compare (correctly: two
+    genuinely different homes must never be diffed against each other's baseline).
+    """
+    import shutil
+    home = tmp_path / "home"
+    shutil.copytree(FIXTURES / "home_safe", home)
+    for p in home.rglob("*"):
+        if p.is_file():
+            p.chmod(0o600)
+    return home
+
+
+def _flip_gateway_bind(home: Path) -> None:
+    """One real, unambiguous drift on a `_drift_home()` copy: gateway exposed to the
+    network. Same mutation scripts/monitor_detection_gate.py and
+    test_b769_concurrent_monitor.py already use for this exact check."""
+    cfg_path = home / "openclaw.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg.setdefault("gateway", {})["bind"] = "0.0.0.0:8080"
+    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    cfg_path.chmod(0o600)
+
+
 # The payloads that parse as JSON but are not a usable snapshot. Split by the harm each
 # one used to cause so a regression names which arm broke.
 _FALSY_JSON = ["{}", "[]", "0", '""', "false", "null"]          # -> "No new threats" lie
@@ -491,11 +518,13 @@ def test_real_drift_is_still_shown_when_the_save_fails(tmp_path, capsys, monkeyp
     lost (the baseline did not advance), and the user needs to see them now."""
     import clawseccheck.cli as cli
 
-    _run(tmp_path)                                  # establish a real baseline
+    home = _drift_home(tmp_path)
+    _run(tmp_path, home=str(home))                  # establish a real baseline
     capsys.readouterr()
+    _flip_gateway_bind(home)
     monkeypatch.setattr(cli, "save_state",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
-    _run(tmp_path, home=str(FIXTURES / "home_vuln"))
+    _run(tmp_path, home=str(home))
     out = capsys.readouterr().out
     assert "change(s) detected since last check" in out
 
@@ -571,11 +600,13 @@ def test_first_run_with_a_broken_journal_still_establishes_a_baseline(tmp_path, 
 
 
 def test_monitor_journal_failure_returns_nonzero(tmp_path, capsys):
-    _run(tmp_path)                                  # baseline
+    home = _drift_home(tmp_path)
+    _run(tmp_path, home=str(home))                  # baseline
     capsys.readouterr()
+    _flip_gateway_bind(home)
     journal = _readonly_journal(tmp_path)
     try:
-        rc = _run(tmp_path, home=str(FIXTURES / "home_vuln"), events=journal)
+        rc = _run(tmp_path, home=str(home), events=journal)
     finally:
         journal.chmod(0o600)
     assert rc != 0
@@ -583,11 +614,13 @@ def test_monitor_journal_failure_returns_nonzero(tmp_path, capsys):
 
 def test_monitor_journal_failure_warns_on_stderr(tmp_path, capsys):
     """The identical failure on state.json already warned; the durable artifact did not."""
-    _run(tmp_path)
+    home = _drift_home(tmp_path)
+    _run(tmp_path, home=str(home))
     capsys.readouterr()
+    _flip_gateway_bind(home)
     journal = _readonly_journal(tmp_path)
     try:
-        _run(tmp_path, home=str(FIXTURES / "home_vuln"), events=journal)
+        _run(tmp_path, home=str(home), events=journal)
     finally:
         journal.chmod(0o600)
     err = capsys.readouterr().err
@@ -598,21 +631,23 @@ def test_monitor_journal_failure_warns_on_stderr(tmp_path, capsys):
 def test_monitor_journal_failure_does_not_consume_the_event(tmp_path, capsys):
     """The chosen tradeoff, pinned: the baseline is NOT advanced when the journal write
     fails, so the drift is re-detected and gets another chance to be recorded."""
+    home = _drift_home(tmp_path)
     state = tmp_path / "state.json"
-    _run(tmp_path, state=state)
+    _run(tmp_path, home=str(home), state=state)
     capsys.readouterr()
     before = state.read_text(encoding="utf-8")
+    _flip_gateway_bind(home)
 
     journal = _readonly_journal(tmp_path)
     try:
-        _run(tmp_path, home=str(FIXTURES / "home_vuln"), state=state, events=journal)
+        _run(tmp_path, home=str(home), state=state, events=journal)
         assert state.read_text(encoding="utf-8") == before      # unconsumed
     finally:
         journal.chmod(0o600)
 
     # Journal repaired: the SAME drift is re-reported and now recorded.
     capsys.readouterr()
-    rc = _run(tmp_path, home=str(FIXTURES / "home_vuln"), state=state, events=journal)
+    rc = _run(tmp_path, home=str(home), state=state, events=journal)
     out = capsys.readouterr().out
     assert rc == 0
     assert "change(s) detected since last check" in out
@@ -628,13 +663,15 @@ def test_journal_ok_but_state_failure_double_records_next_run(tmp_path, capsys,
     missing one is not."""
     import clawseccheck.cli as cli
 
+    home = _drift_home(tmp_path)
     state, journal = tmp_path / "state.json", tmp_path / "events.jsonl"
-    _run(tmp_path, state=state, events=journal)
+    _run(tmp_path, home=str(home), state=state, events=journal)
     capsys.readouterr()
+    _flip_gateway_bind(home)
 
     monkeypatch.setattr(cli, "save_state",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
-    assert _run(tmp_path, home=str(FIXTURES / "home_vuln"),
+    assert _run(tmp_path, home=str(home),
                 state=state, events=journal) != 0
     first = [json.loads(ln) for ln in
              journal.read_text(encoding="utf-8").splitlines() if ln]
@@ -642,7 +679,7 @@ def test_journal_ok_but_state_failure_double_records_next_run(tmp_path, capsys,
 
     monkeypatch.undo()
     capsys.readouterr()
-    _run(tmp_path, home=str(FIXTURES / "home_vuln"), state=state, events=journal)
+    _run(tmp_path, home=str(home), state=state, events=journal)
     second = [json.loads(ln) for ln in
               journal.read_text(encoding="utf-8").splitlines() if ln]
     assert len(second) > len(first)

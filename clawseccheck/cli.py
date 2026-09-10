@@ -49,8 +49,8 @@ from .locking import journal_lock
 from .monitor import (
     BASELINE_ABSENT, BASELINE_CORRUPT, BASELINE_CORRUPT_ALERT, BASELINE_OK,
     BASELINE_DIGEST_CHARS, baseline_reference, baseline_witness_event,
-    _coverage_signature, _diff_coverage,
-    diff_with_notes, read_baseline, snapshot_reference,
+    _coverage_signature, _diff_coverage, _home_identity,
+    diff_with_notes, home_mismatch, read_baseline, snapshot_reference,
 )
 # Aliased: `args.verify_baseline` holds the user's reference string, and giving the
 # function the same bare name next to it reads as though one were the other.
@@ -4844,6 +4844,27 @@ def _main(argv=None) -> int:
         # gone). Both used to collapse into `prev is None`, so a destroyed baseline
         # rendered the same reassuring "Baseline saved." line as a healthy first run.
         base_status, prev = read_baseline(args.state)
+        # B-781: the monitor's snapshot/journal/baseline are keyed by --data-dir alone,
+        # and --home was never part of that identity -- so a run pointed at a DIFFERENT
+        # home used to write its findings into the same baseline as the real machine:
+        # the journal filled with alerts about a machine that did not change, and worse,
+        # the baseline silently REBASED to the other home's values, so a later genuine
+        # regression on the real machine could read as "no change". Checked here, before
+        # any of the (expensive) per-run scanning below, and before `prev` is used for
+        # anything else -- a mismatch means nothing below this point is comparable.
+        if home_mismatch(prev, ctx.home):
+            _prev_home_display = prev.get("home_display") or "(not recorded)"
+            _this_home_display = _home_identity(ctx.home)[1]
+            print(
+                f"MONITORING NOT ESTABLISHED — {args.state} holds a baseline recorded "
+                f"for a different OpenClaw home ({_prev_home_display}) than the one "
+                f"just scanned ({_this_home_display}).\n"
+                "Refusing to compare against it or overwrite it: doing either would "
+                "flood the journal with alerts about a machine that did not change, "
+                "and silently rebase the real baseline to this run's values. Point "
+                "--data-dir at a location dedicated to this home, or re-run with the "
+                "--home this baseline was recorded for.", file=sys.stderr)
+            return 1
         # F-173: run the behavioural layer HERE, in the shell, and hand `snapshot()` only
         # the reduced verdict. Two deliberate choices:
         #

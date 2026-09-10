@@ -854,12 +854,22 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
 - **`--monitor` writes THREE files — use `--data-dir DIR` to isolate a run.** `--state` and
   `--events` alone do not: `--history` defaults independently to
   `~/.clawseccheck/history.jsonl`, so redirecting only the first two leaves a sandboxed or CI
-  run appending a real-looking row to your live history. Each history row's `home` field is
-  always `null` (no call site populates it with the audited path), so a foreign row is not
-  distinguishable from a genuine one afterwards. `--data-dir` moves the whole local store
-  together — those three plus the coverage/freshness ledger `coverage.json`, which follows
-  `--history`'s directory (the same place `--purge` looks for it). The individual flags still
-  work and still win when given explicitly.
+  run appending a real-looking row to your live history. Each history row's `home` field names
+  the audited path (as typed, sanitized — never an absolute path naming the operator), so a
+  foreign row can be told apart by reading it, though nothing currently filters `--trend` by it.
+  `--data-dir` moves the whole local store together — those three plus the coverage/freshness
+  ledger `coverage.json`, which follows `--history`'s directory (the same place `--purge` looks
+  for it). The individual flags still work and still win when given explicitly.
+- **A `--monitor` baseline is bound to the `--home` it was recorded for.** `--state` (or
+  `--data-dir`) does not itself scope a baseline to one OpenClaw home — nothing stops two
+  different homes from sharing one path. Pointing `--monitor` at the same `--state`/`--data-dir`
+  with a *different* `--home` than the one the stored baseline describes is refused outright
+  (`MONITORING NOT ESTABLISHED`, exit 1): nothing is compared and nothing is written, so the real
+  baseline is never silently rebased to the other home's values and the journal never fills with
+  alerts about a machine that did not change. The identity check follows the resolved,
+  symlink-and-`~`-expanded path, so the same home reached by two different spellings is never
+  treated as a mismatch. A baseline saved before this check existed degrades to "unverified" on
+  its first run afterward (disclosed, not silently trusted) rather than being blocked.
 - Also worth knowing: `--state`/`--events`/`--history`'s containing directory is created `0700`
   (owner-only) the first time any of them is written (`safeio.secure_dir`) — a silent side effect
   outside the target file itself, with no message printed, from a tool that otherwise promises
