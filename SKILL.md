@@ -590,13 +590,11 @@ before the pipeline blocks below add more). You do not have to estimate this: wh
 card is too large to relay whole, the CLI says so on stderr with the measured character count
 and names both remedies (B-605). Relaying part of an oversized card as if it were the whole is
 the one response that is never right. If the destination channel truncates long
-messages, drop `--pdf` and add `--compact` instead — `--compact` has no effect while
-`--pdf` is present (with an attachment the card is already collapsed to an overview;
-the CLI says so on stderr). So the truncation remedy is `--dashboard --full --compact`.
-It condenses Plugins/MCP/RISK
-Chains to headline counts, trims each Findings/"Worth a glance" finding's "why" text and
-drops its evidence bullets (kept, not dropped — just condensed, since Findings is what
-actually scales with a bad config's FAIL/WARN count), and appends a `--save`/`--html`
+messages, drop `--pdf` and add `--compact` instead — the truncation remedy is
+`--dashboard --full --compact`. It condenses Plugins/MCP/RISK Chains to headline
+counts, trims each Findings/"Worth a glance" finding's "why" text and drops its
+evidence bullets entirely (Findings is what actually scales with a bad config's
+FAIL/WARN count, so it is what needs trimming), and appends a `--save`/`--html`
 pointer for the full detail — or fall back to `--card` (grade + score + trifecta only)
 and offer to save the full report via `--save <path>` / `--html <path>`.
 
