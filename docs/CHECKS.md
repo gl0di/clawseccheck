@@ -2429,6 +2429,32 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B356 - Legacy pre-migration runtime-state file(s) present (allowFrom/device-auth)
+
+- Severity: LOW
+- Block: advisory
+- Framework: Patch hygiene
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Legacy pre-migration runtime-state file(s) present (allowFrom/device-auth)
+- Remediation:
+  - none
+
+### B357 - Supervisor restart-handoff file outlived its own expiry
+
+- Severity: LOW
+- Block: advisory
+- Framework: Monitoring
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Supervisor restart-handoff file outlived its own expiry
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

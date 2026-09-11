@@ -3010,6 +3010,27 @@ CATALOG: list[CheckMeta] = [
         "Least Privilege",
         surface="tools",
     ),
+    # B356/B357 (C-409): re-scoped by measurement against openclaw@2026.9.3 — the
+    # filed "reconcile a live allowFrom/device-auth store against config" premise no
+    # longer holds (both files are now migration-only markers; see checks/_lifecycle.py's
+    # docstrings for the full grounding trail). Advisory/hygiene, never FAIL: presence
+    # means "run openclaw doctor --fix", not "you were tampered with".
+    CheckMeta(
+        "B356",
+        "Legacy pre-migration runtime-state file(s) present (allowFrom/device-auth)",
+        LOW,
+        "advisory",
+        "Patch hygiene",
+        surface="secrets",
+    ),
+    CheckMeta(
+        "B357",
+        "Supervisor restart-handoff file outlived its own expiry",
+        LOW,
+        "advisory",
+        "Monitoring",
+        surface="host",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

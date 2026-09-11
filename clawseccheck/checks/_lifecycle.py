@@ -5268,6 +5268,215 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
     )
 
 
+#: OpenClaw's OWN migration-doctor marker for a legacy per-channel allow-sender store
+#: (dist-grounded: state-migrations.doctor's `ALLOW_FROM_SUFFIX`, C-409).
+_LEGACY_ALLOWFROM_SUFFIX = "-allowFrom.json"
+
+
+def check_legacy_state_migration_pending(ctx: Context) -> Finding:
+    """B356 (C-409) — unmigrated legacy runtime-state files OpenClaw's own doctor still
+    checks the presence of.
+
+    Grounded against the installed dist (openclaw@2026.9.3, not the recon notes, which
+    predate both of these moves): `credentials/<channel>-allowFrom.json` and
+    `identity/device-auth.json` are BOTH legacy-only presence markers now —
+    `state-migrations.doctor` and `device-auth-store` read them only to detect an
+    unmigrated install, never as live-authoritative state. The modern allow-sender
+    mechanism lives entirely in `openclaw.json` (`channels.<name>.allowFrom` and its
+    nested `groupAllowFrom`/per-group/per-topic variants — see `checks/_agents.py`'s
+    `groupAllowFrom`-wins-for-groups handling and `checks/_capability.py`'s `dmPolicy`/
+    `groupPolicy` reading, which already model that shape); device-auth tokens now live
+    in the state SQLite DB (`device_auth_tokens`/`gateway_origin_device_tokens`).
+
+    So this is not "an attacker added a sender ID" — it is "this install has not run
+    `openclaw doctor --fix`", and for the device-auth file specifically that carries an
+    unusually sharp consequence: OpenClaw's own `assertNoLegacyDeviceAuth` makes the
+    GATEWAY ITSELF refuse to start while that file is present.
+
+    Filename presence only (§8) — this never opens either file. An allow-sender list or
+    a device-auth token is exactly the kind of content this tool must never read, and
+    doesn't need to: the file's mere existence is the whole signal.
+
+    WARN    — a legacy file is present.
+    PASS    — neither is present.
+    UNKNOWN — the credentials/ directory exists but could not be listed.
+    """
+    found: list[str] = []
+    unreadable: list[str] = []
+
+    cred_dir = ctx.home / "credentials"
+    if cred_dir.is_dir():
+        try:
+            entries = list(cred_dir.iterdir())
+        except OSError:
+            unreadable.append("credentials/ is present but could not be listed")
+            entries = []
+        for entry in entries:
+            if entry.name.endswith(_LEGACY_ALLOWFROM_SUFFIX) and entry.is_file():
+                channel = entry.name[: -len(_LEGACY_ALLOWFROM_SUFFIX)]
+                found.append(
+                    f"credentials/{channel}{_LEGACY_ALLOWFROM_SUFFIX} "
+                    "(legacy per-channel allow-sender store)"
+                )
+
+    device_auth = ctx.home / "identity" / "device-auth.json"
+    if device_auth.is_file():
+        found.append("identity/device-auth.json (legacy device-auth store)")
+
+    if found:
+        found.sort()
+        return _finding(
+            "B356",
+            WARN,
+            "Legacy pre-migration runtime-state file(s) present, which OpenClaw's own "
+            "migration checks still look for: " + "; ".join(found) + ". Their presence "
+            "means `openclaw doctor --fix` has not migrated this install onto "
+            "current-generation state — for the device-auth file specifically, the "
+            "gateway refuses to start at all until it is migrated away.",
+            "Stop the OpenClaw gateway and run `openclaw doctor --fix` to migrate this "
+            "legacy state, then confirm the file(s) above are gone.",
+            evidence=found,
+        )
+    if unreadable:
+        return _finding(
+            "B356",
+            UNKNOWN,
+            "Could not fully check for legacy pre-migration runtime-state files: "
+            + "; ".join(unreadable) + ".",
+            "Ensure ~/.openclaw/credentials/ is owner-readable, or check manually for "
+            "*-allowFrom.json files there and for identity/device-auth.json.",
+        )
+    return _finding(
+        "B356",
+        PASS,
+        "No legacy pre-migration runtime-state files found (checked for "
+        "credentials/*-allowFrom.json and identity/device-auth.json).",
+        "No action needed.",
+    )
+
+
+def check_restart_handoff_stale(ctx: Context) -> Finding:
+    """B357 (C-409) — a supervisor restart-handoff blob that outlived its own expiry.
+
+    `~/.openclaw/gateway-supervisor-restart-handoff.json` is a short-lived IPC blob a
+    restarting/crashed gateway supervisor writes — confirmed shape on a real install:
+    `kind, version, intentId, pid, processInstanceId, createdAt, expiresAt, reason,
+    source, restartKind, supervisorMode`. It should be consumed and removed by the
+    supervisor well before its own `expiresAt`; one still present past that time means
+    the restart it describes either never completed or the supervisor crashed before
+    cleaning it up.
+
+    Staleness is judged purely from the blob's own declared `expiresAt` timestamp —
+    never a live process check (no subprocess, no /proc read of `pid`), matching this
+    tool's read-only-from-state-files-only doctrine. `expiresAt`/`createdAt` are epoch
+    MILLISECONDS (ints), not ISO strings — measured by hand-reading a real file, not
+    assumed from the field name.
+
+    The "now" side of the comparison is `time.time()`, never `datetime.now()` — the
+    same discipline `check_paired_device_operator_authority` (B176) already established
+    for this exact reason: `tests/test_finding_fingerprint_manifest.py`'s
+    ``test_no_finding_detail_is_clock_dependent`` patches `time.time` (only) and
+    re-audits the whole fixture corpus with the clock frozen 45 days ahead, asserting no
+    fingerprint drifts — `datetime.now()` would silently evade that patch and could
+    still pass today's corpus (no fixture currently ships this file) while remaining
+    wrong for the next one that does. `datetime.fromtimestamp()` on the file's own,
+    already-read `expiresAt` value is a pure format transform, not a second clock read.
+
+    WARN    — present and its own expiresAt has already passed.
+    PASS    — present and not yet expired (a normal, still-open handoff window), or
+              absent entirely.
+    UNKNOWN — present but unreadable/unparseable, or missing/malformed expiresAt.
+    """
+    import json as _json
+    import time as _time
+    from datetime import datetime
+
+    path = ctx.home / "gateway-supervisor-restart-handoff.json"
+    if not path.is_file():
+        return _finding(
+            "B357",
+            PASS,
+            "No gateway-supervisor-restart-handoff.json found.",
+            "No action needed.",
+        )
+
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "gateway-supervisor-restart-handoff.json present but unreadable — cannot "
+            "determine whether it is stale.",
+            "Ensure it is owner-readable, or review it manually.",
+        )
+    except ValueError:
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "gateway-supervisor-restart-handoff.json present but not valid JSON — "
+            "cannot determine whether it is stale.",
+            "Review it manually.",
+        )
+
+    if not isinstance(data, dict):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "gateway-supervisor-restart-handoff.json present but not in the expected "
+            "format — cannot determine whether it is stale.",
+            "Review it manually.",
+        )
+
+    # Measured on a real install: expiresAt/createdAt are epoch MILLISECONDS (ints), not
+    # ISO strings — confirmed by hand-reading the real file before trusting the dist's
+    # field-name-only citation of it.
+    expires_raw = data.get("expiresAt")
+    if isinstance(expires_raw, bool) or not isinstance(expires_raw, (int, float)):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "gateway-supervisor-restart-handoff.json present but has no readable "
+            "expiresAt field — cannot determine whether it is stale.",
+            "Review it manually.",
+        )
+
+    try:
+        expires_label = datetime.fromtimestamp(expires_raw / 1000.0).isoformat(
+            timespec="seconds"
+        )
+    except (ValueError, OSError, OverflowError):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            f"gateway-supervisor-restart-handoff.json present but its expiresAt "
+            f"({expires_raw!r}) is not a parseable timestamp — cannot determine whether "
+            "it is stale.",
+            "Review it manually.",
+        )
+
+    now_ms = _time.time() * 1000.0
+    if now_ms > expires_raw:
+        return _finding(
+            "B357",
+            WARN,
+            "gateway-supervisor-restart-handoff.json is present and its own expiresAt "
+            f"({expires_label}) has already passed — the restart it describes did not "
+            "complete and get cleaned up as expected (a crashed supervisor, most "
+            "likely).",
+            "Restart the OpenClaw gateway supervisor cleanly; if this file persists "
+            "after a clean restart, remove it manually and investigate why the "
+            "supervisor did not clean it up.",
+        )
+    return _finding(
+        "B357",
+        PASS,
+        "gateway-supervisor-restart-handoff.json present but still within its own "
+        f"expiresAt window ({expires_label}) — a normal, in-progress restart handoff.",
+        "No action needed.",
+    )
+
+
 def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     """B158 (F-119) — a config declares a skill/plugin LOAD SOURCE that resolves to nothing on
     disk right now. The audit can only scan what is present, so a declared-but-absent source is

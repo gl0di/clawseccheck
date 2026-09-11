@@ -401,11 +401,13 @@ from ._lifecycle import (
     check_install_policy_gate,
     check_secrets_provider_exec,
     check_known_vulns,
+    check_legacy_state_migration_pending,
     check_memory_poisoning,
     check_memory_reconsumption_injection,
     check_offboarding_hygiene,
     check_paired_device_operator_authority,
     check_pending_device_pairing_scope,
+    check_restart_handoff_stale,
     check_self_modification,
     check_clawhub_token_store,
     check_session_approval_policy,
@@ -1441,6 +1443,8 @@ CHECKS = [
     check_clawhub_lock_verification,  # B135 — accepted-despite-failed-verification install
     check_skill_install_tamper,  # B181 — installed skill modified since its recorded install hash (B-257)
     check_clawhub_token_store,  # B182 — ClawHub CLI plaintext token store perms, outside the OpenClaw home (B-259)
+    check_legacy_state_migration_pending,  # B356 — unmigrated allowFrom/device-auth legacy state files (C-409)
+    check_restart_handoff_stale,  # B357 — supervisor restart-handoff file outlived its own expiry (C-409)
     check_clawhub_registry_provenance,  # B184 — WHICH ClawHub issued the B135/B177/B181 verdicts (B-291, ENV-5)
     check_declared_skill_reconciliation,  # B158 — declared-but-unresolved skill-load source (F-119)
     check_skill_library_reachability,  # B354 — shared skill-library/upload surface bypasses filesystem discovery (B-725)
