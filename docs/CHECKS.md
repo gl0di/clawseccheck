@@ -2493,6 +2493,56 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B361 - Cross-agent session-tool access unrestricted, reachable from an open channel
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Multi-Agent
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM06 Excessive Agency
+- What it checks: Cross-agent session-tool access unrestricted, reachable from an open channel
+- Remediation:
+  - none
+
+### B362 - session.scope=global shares one session across every sender on an open channel
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Session Isolation
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: session.scope=global shares one session across every sender on an open channel
+- Remediation:
+  - none
+
+### B363 - Cross-provider message sends allowed (tools.message.crossContext.allowAcrossProviders)
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Cross-Context Messaging
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: Cross-provider message sends allowed (tools.message.crossContext.allowAcrossProviders)
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B364 - session.resetTriggers configures inbound phrases that force a session reset
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Session Isolation
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: session.resetTriggers configures inbound phrases that force a session reset
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

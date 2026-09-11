@@ -3063,6 +3063,48 @@ CATALOG: list[CheckMeta] = [
         "Zero Trust / Control-UI Origin",
         surface="gateway",
     ),
+    # B361-B364 (C-411): remote-ingress / multi-user session hardening, re-grounded
+    # against openclaw@2026.9.3. sessions.visibility was DROPPED from this task's
+    # scope — already covered by the pre-existing B39 (checks/_agents.py) — and its
+    # own default was found to be "all" (the permissive end), not "tree" as the
+    # C-411 stub assumed; filed separately as a bug against B39, not fixed here.
+    # requireMention/chatmode/allowBots were DROPPED from scope: each is nested
+    # differently per channel provider (top-level for some, .groups.*/.guilds.* for
+    # others), needing its own dedicated grounding pass rather than one bullet
+    # among four in this task.
+    CheckMeta(
+        "B361",
+        "Cross-agent session-tool access unrestricted, reachable from an open channel",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Multi-Agent",
+        surface="agents",
+    ),
+    CheckMeta(
+        "B362",
+        "session.scope=global shares one session across every sender on an open channel",
+        MEDIUM,
+        "hardening",
+        "Session Isolation",
+        surface="sessions",
+    ),
+    CheckMeta(
+        "B363",
+        "Cross-provider message sends allowed (tools.message.crossContext.allowAcrossProviders)",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Cross-Context Messaging",
+        surface="tools",
+    ),
+    CheckMeta(
+        "B364",
+        "session.resetTriggers configures inbound phrases that force a session reset",
+        MEDIUM,
+        "advisory",
+        "Session Isolation",
+        scored=False,
+        surface="sessions",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -3158,6 +3200,9 @@ AST_MAP = {
     "B22": ("AST03", "AST06"),
     "B175": ("AST03", "AST06"),  # skill workshop auto-author + no-review install = over-privileged self-modification (cf. B22)
     "B39": ("AST06",),
+    "B362": ("AST06",),  # session.scope=global on an open channel = weak isolation (cf. B39)
+    "B361": ("AST03",),  # unrestricted agent-to-agent pivot reachable from an open channel = over-privileged reach (cf. B72)
+    "B363": ("AST03",),  # cross-provider message send = over-privileged reach (cf. B76)
     "B48": ("AST06", "AST03"),
     "B70": ("AST06",),
     "B25": ("AST02", "AST07"),
@@ -3279,6 +3324,9 @@ OWASP_MAP = {
     "B32": ("LLM06",),
     "B33": ("LLM03",),
     "B39": ("LLM02",),
+    "B362": ("LLM02",),  # session.scope=global cross-sender context bleed = Sensitive Info Disclosure (cf. B39)
+    "B361": ("LLM06",),  # agent-to-agent pivot = Excessive Agency (cf. B72)
+    "B363": ("LLM02",),  # cross-provider message egress = Sensitive Info Disclosure (cf. B12/C014)
     "B41": ("LLM02", "LLM06"),
     "B42": ("LLM03",),
     "B174": ("LLM03",),

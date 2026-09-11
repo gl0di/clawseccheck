@@ -123,9 +123,14 @@ secrets.providers
 security.audit.suppressions
 security.installPolicy
 session.dmScope
+session.resetTriggers
+session.scope
 skills.workshop.allowSymlinkTargetWrites
 skills.workshop.approvalPolicy
 skills.workshop.autonomous.enabled
+tools.agentToAgent
+tools.agentToAgent.allow
+tools.agentToAgent.enabled
 tools.allow
 tools.alsoAllow
 tools.codeMode
@@ -143,6 +148,8 @@ tools.exec.safeBins
 tools.exec.security
 tools.exec.strictInlineEval
 tools.mcp
+tools.message.crossContext
+tools.message.crossContext.allowAcrossProviders
 tools.profile
 tools.sessions
 tools.web
@@ -177,4 +184,6 @@ relative:tools.codeMode
 relative:tools.deny
 relative:tools.exec
 relative:tools.fs.workspaceOnly
+relative:tools.message.crossContext
+relative:tools.message.crossContext.allowAcrossProviders
 relative:tools.profile

@@ -213,7 +213,8 @@ _EXEMPT = {
                              "why it's WARN-only and correcting a prior false "
                              "\"per-agent layers can only narrow\" claim in two docstrings. "
                              "A finer split is a later cycle.",
-    "checks/_agents.py": "~1,358 lines — the multi-agent / subagent-exposure topic "
+    "checks/_agents.py": "~1,798 lines (restated 2026-09-11, C-411 — was ~1,358) — "
+                        "the multi-agent / subagent-exposure topic "
                         "(check_agent_separation, check_untrusted_context, "
                         "check_subagents_allow_agents, etc.). Crossed the budget with "
                         "E-060's check_embedded_agent_project_settings_policy (B327) — "

@@ -242,9 +242,13 @@ from ._agents import (
     _reassembly,
     check_embedded_agent_project_settings_policy,
     check_agent_separation,
+    check_agent_to_agent_pivot,
+    check_cross_context_send,
     check_delegation_reassembly,
     check_multiagent_exposure,
     check_sender_identity,
+    check_session_reset_triggers,
+    check_session_scope_global,
     check_session_visibility,
     check_subagent_spawn_limits,
     check_subagents,
@@ -1351,6 +1355,15 @@ CHECKS = [
     check_outbound_proxy,
     check_provider_baseurl,  # B178 — models.providers.<id>.baseUrl cleartext http:// leak
     check_session_visibility,
+    # B361-B364 (C-411) — remote-ingress / multi-user session hardening: unrestricted
+    # cross-agent session-tool access reachable from an open channel; session.scope
+    # sharing one session across senders; cross-provider message egress (global +
+    # per-agent, since an agent can widen past a safe global default); disclosure of
+    # any inbound-phrase session-reset trigger.
+    check_agent_to_agent_pivot,
+    check_session_scope_global,
+    check_cross_context_send,
+    check_session_reset_triggers,
     check_untrusted_context,
     check_wildcard_group_ingress,
     check_known_vulns,
