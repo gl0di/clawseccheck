@@ -91,6 +91,7 @@ hooks.internal.load.extraDirs
 hooks.mappings
 hooks.token
 logging.file
+memory.search.remote
 meta.lastTouchedVersion
 models.providers
 plugins.allow
@@ -103,6 +104,7 @@ proxy.enabled
 proxy.proxyUrl
 relative:heartbeat
 relative:mcp.servers
+relative:memory.search.remote
 relative:sandbox.docker.dangerouslyAllowContainerNamespaceJoin
 relative:sandbox.docker.dangerouslyAllowExternalBindSources
 relative:sandbox.docker.dangerouslyAllowReservedContainerTargets

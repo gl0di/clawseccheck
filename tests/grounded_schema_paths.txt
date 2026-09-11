@@ -107,6 +107,7 @@ logging.file
 logging.redactSensitive
 marketplaces.feeds
 marketplaces.sources
+memory.search.remote
 meta.lastTouchedVersion
 models.providers
 plugins.allow
@@ -169,6 +170,7 @@ relative:config.appServer.command
 relative:config.permissionMode
 relative:heartbeat
 relative:mcp.servers
+relative:memory.search.remote
 relative:network.dangerouslyAllowPrivateNetwork
 relative:openclaw.disable-model-invocation
 relative:openclaw.install

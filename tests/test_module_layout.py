@@ -166,9 +166,10 @@ _EXEMPT = {
                       "_content.py first, learn what the shared-machinery module wants to "
                       "look like, then decide here. That is a sequencing decision, not a "
                       "deferral for its own sake.",
-    "checks/_egress.py": "~4,077 lines — the egress-hardening topic (proxy/TLS/SSRF/"
-                         "data-at-rest + web-fetch/log checks). Crossed the budget with "
-                         "B178's check_provider_baseurl (models.providers.<id>.baseUrl "
+    "checks/_egress.py": "~4,736 lines (restated 2026-09-12, C-412 — was ~4,077) — the "
+                         "egress-hardening topic (proxy/TLS/SSRF/data-at-rest + "
+                         "web-fetch/log checks). Crossed the budget with B178's "
+                         "check_provider_baseurl (models.providers.<id>.baseUrl "
                          "cleartext http:// leak) — kept adjacent to B155's "
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "

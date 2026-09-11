@@ -707,6 +707,49 @@ CATALOG: list[CheckMeta] = [
         "Proxy / Egress Hardening",
         surface="tools",
     ),
+    # B365-B366 (C-412, child of E-074): raw-content egress the filed task's own stub
+    # got wrong on two of its three items — re-grounded against openclaw@2026.9.3.
+    #
+    # B365: diagnostics.otel.captureContent is a plain boolean (zod-schema-CTg_faEc.mjs
+    # :1278), not the granular {enabled,inputMessages,outputMessages,...} object the stub
+    # described — that shape is retired (legacy-D51FqLiI.mjs's migrateFinalLayoutKills
+    # collapses it to a boolean on every load). The real content-capture gate, traced
+    # from resolveDiagnosticModelContentCapturePolicy (dist/worker/worker.mjs), is a
+    # 4-key conjunction: diagnostics.enabled not-false AND otel.enabled===true AND
+    # otel.traces not-false AND captureContent===true — reading captureContent alone
+    # (the stub's own proposed condition) would false-positive on otel.enabled unset.
+    # FAIL-capable but narrow (HIGH severity, mirrors B178's classify-host bar exactly)
+    # to hold Golden Rule #5.
+    #
+    # B366: the stub's cited path `agents.defaults.memorySearch.remote.*` does not
+    # exist — real path is `memory.search.remote.*`, at the config ROOT (global) and,
+    # separately, PER-AGENT (agents.entries.<id>.memory.search.remote.*, NOT reachable
+    # under agents.defaults at all — AgentDefaultsSchema has no memory key). Checks both
+    # scopes independently via agent_roster(). FAIL-capable, same classify-host bar as
+    # B178/B365.
+    #
+    # `memory.qmd.sessions.exportDir` (the stub's third item) is dropped entirely: the
+    # QMD memory backend is RETIRED (legacy-D51FqLiI.mjs names it explicitly —
+    # "memory.qmd is retired because the QMD memory backend was removed; configured
+    # external paths migrate to memory.search.extraPaths") — there is no field left to
+    # audit.
+    CheckMeta(
+        "B365",
+        "OpenTelemetry content capture ships raw agent turns to a network collector",
+        HIGH,
+        "hardening",
+        "Data Protection",
+        surface="secrets",
+    ),
+    CheckMeta(
+        "B366",
+        "memory.search.remote sends embedded memory chunks to a third-party endpoint "
+        "over cleartext http://",
+        HIGH,
+        "hardening",
+        "Proxy / Egress Hardening",
+        surface="tools",
+    ),
     CheckMeta(
         "B39",
         "Session visibility / cross-user transcript leak",
@@ -3237,6 +3280,8 @@ AST_MAP = {
     "B360": ("AST06",),  # Control-UI embed sandbox "trusted" removes origin isolation = weak isolation (cf. B330)
     "B81": ("AST03",),  # raised subagent spawn limits = over-privileged delegation (cf. B72)
     "B82": ("AST02",),  # bulk turn transcripts at rest = sensitive-data exposure (cf. C5)
+    "B365": ("AST02",),  # otel content capture ships raw turns off-host = sensitive-data exposure (cf. B82)
+    "B366": ("AST02",),  # memory.search.remote embeds/sends memory chunks off-host = sensitive-data exposure (cf. B82)
     "B83": ("AST06",),  # excessive redirect-follow on fetch = weak isolation/SSRF (cf. B38)
     "B84": (
         "AST03",
@@ -3386,6 +3431,8 @@ OWASP_MAP = {
     "B80": ("LLM10",),  # no rate limiting on an exposed auth'd gateway = Unbounded Consumption
     "B81": ("LLM06",),  # raised subagent spawn limits = Excessive Agency (cf. B72)
     "B82": ("LLM02",),  # unredacted transcripts persisted at rest = Sensitive Info Disclosure
+    "B365": ("LLM02",),  # otel content capture ships raw turns off-host = Sensitive Info Disclosure
+    "B366": ("LLM02",),  # memory.search.remote embeds/sends memory chunks off-host = Sensitive Info Disclosure
     "B83": (
         "LLM02",
     ),  # excessive redirect-follow on fetch = SSRF data-disclosure surface (cf. B38)

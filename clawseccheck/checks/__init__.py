@@ -196,6 +196,8 @@ from ._egress import (
     _whatwg_url,
     check_outbound_proxy,
     check_provider_baseurl,
+    check_otel_content_capture_egress,
+    check_memory_search_remote_egress,
     check_cachetrace_redaction,
     check_config_audit_log,
     check_config_health_integrity,
@@ -1354,6 +1356,12 @@ CHECKS = [
     check_browser_ssrf,
     check_outbound_proxy,
     check_provider_baseurl,  # B178 — models.providers.<id>.baseUrl cleartext http:// leak
+    # B365-B366 (C-412) — raw-content egress: diagnostics.otel content capture ships full
+    # model turns to a network collector (gated on a 4-key conjunction traced from the
+    # runtime, not the schema description); memory.search.remote sends every embedded
+    # memory chunk to a configured third-party endpoint (global + per-agent scope).
+    check_otel_content_capture_egress,
+    check_memory_search_remote_egress,
     check_session_visibility,
     # B361-B364 (C-411) — remote-ingress / multi-user session hardening: unrestricted
     # cross-agent session-tool access reachable from an open channel; session.scope

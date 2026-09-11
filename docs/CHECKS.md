@@ -589,6 +589,30 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B365 - OpenTelemetry content capture ships raw agent turns to a network collector
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Data Protection
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: OpenTelemetry content capture ships raw agent turns to a network collector
+- Remediation:
+  - none
+
+### B366 - memory.search.remote sends embedded memory chunks to a third-party endpoint over cleartext http://
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Proxy / Egress Hardening
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: memory.search.remote sends embedded memory chunks to a third-party endpoint over cleartext http://
+- Remediation:
+  - none
+
 ### B39 - Session visibility / cross-user transcript leak
 
 - Severity: MEDIUM
