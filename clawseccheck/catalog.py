@@ -3031,6 +3031,38 @@ CATALOG: list[CheckMeta] = [
         "Monitoring",
         surface="host",
     ),
+    # B358/B359/B360 (C-410): gateway HTTP/remote/embed hardening, re-grounded against
+    # openclaw@2026.9.3 (the filed "hot"/"hybrid" reload.mode item was dropped — that
+    # enum is now "off"/"hybrid" and "hybrid" is the vendor's own default/recommended
+    # posture, not a hardening gap; see the task's Pulse trail). All three are
+    # WARN-only: the filed FAIL premise for B358 (SSRF to cloud metadata/internal
+    # services via images.allowUrl with no urlAllowlist) is REFUTED by the runtime's
+    # own unconditional allowPrivateNetwork=false SSRF guard — see the check's
+    # docstring (checks/_config.py) for the full grounding trail.
+    CheckMeta(
+        "B358",
+        "OpenAI-compatible chat-completions endpoint (remote ingress; open-proxy-shaped image-URL fetch)",
+        MEDIUM,
+        "hardening",
+        "Zero Trust / Gateway",
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B359",
+        "Remote-gateway SSH host-key policy delegated to OpenSSH instead of pinned",
+        HIGH,
+        "hardening",
+        "Zero Trust / Gateway",
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B360",
+        "Control-UI embed sandbox set to 'trusted' (allow-same-origin)",
+        MEDIUM,
+        "hardening",
+        "Zero Trust / Control-UI Origin",
+        surface="gateway",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -3155,6 +3187,9 @@ AST_MAP = {
     "C032": ("AST06",),  # trusting spoofable forwarded headers = weak boundary (cf. B70)
     "B80": ("AST06",),  # no rate limiting on an exposed auth'd gateway = weak isolation (cf. B70)
     "B340": ("AST06",),  # effective listening-socket bind diverges from declared gateway.bind = weak isolation (cf. B2/B70)
+    "B358": ("AST06",),  # chat-completions remote ingress / SSRF via images.allowUrl = weak isolation (cf. B83)
+    "B359": ("AST06",),  # remote-gateway SSH host-key verification delegated to OpenSSH = weak isolation (cf. B340)
+    "B360": ("AST06",),  # Control-UI embed sandbox "trusted" removes origin isolation = weak isolation (cf. B330)
     "B81": ("AST03",),  # raised subagent spawn limits = over-privileged delegation (cf. B72)
     "B82": ("AST02",),  # bulk turn transcripts at rest = sensitive-data exposure (cf. C5)
     "B83": ("AST06",),  # excessive redirect-follow on fetch = weak isolation/SSRF (cf. B38)
@@ -3306,6 +3341,9 @@ OWASP_MAP = {
     "B83": (
         "LLM02",
     ),  # excessive redirect-follow on fetch = SSRF data-disclosure surface (cf. B38)
+    "B358": ("LLM02",),  # images.allowUrl = open-proxy-shaped server-side URL fetch, data-disclosure-adjacent (cf. B83)
+    "B360": ("LLM01",),  # embedSandbox=trusted removes origin isolation = Control-UI origin/session compromise (cf. B56)
+    # B359 (SSH host-key MITM) stays unmapped — no clean LLM analog, same as B38/C3/B77/B78.
     "B84": (
         "LLM06",
     ),  # proven high-blast verb with an ungated posture = Excessive Agency (cf. B43/B44)

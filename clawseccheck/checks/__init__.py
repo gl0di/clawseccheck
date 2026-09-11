@@ -324,6 +324,8 @@ from ._config import (
     check_control_plane_mutation,
     check_env_breakglass_toggles,
     check_shell_env_fallback,
+    check_chat_completions_endpoint,
+    check_control_ui_embed_sandbox,
     check_controlui_origins,
     check_credential_blast_radius,
     check_dangerous_overrides,
@@ -331,6 +333,7 @@ from ._config import (
     check_gateway,
     check_gateway_operator_terminal,
     check_gateway_rate_limit,
+    check_gateway_remote_ssh_host_key_policy,
     check_hook_template_content,
     check_hooks_enable_toggles,
     check_least_privilege,
@@ -1420,6 +1423,17 @@ CHECKS = [
     # case the original stub worried about is refuted (the runtime refuses to spawn
     # a relative command at all) and is not reported here.
     check_local_model_service_command,
+    # B358 (C-410) — gateway.http.endpoints.chatCompletions: WARN on the OpenAI-shaped
+    # remote ingress; WARN (never FAIL) when images.allowUrl is also on — the vendor's
+    # own SSRF guard unconditionally blocks private/internal/metadata targets, so an
+    # absent urlAllowlist is open-proxy-shaped (any public host), not SSRF.
+    check_chat_completions_endpoint,
+    # B359 (C-410) — gateway.remote.sshHostKeyPolicy: WARN when host-key verification
+    # for the remote-gateway SSH tunnel is delegated to OpenSSH instead of pinned.
+    check_gateway_remote_ssh_host_key_policy,
+    # B360 (C-410) — gateway.controlUi.embedSandbox="trusted": WARN when a hosted
+    # Control UI embed gets allow-same-origin (XSS in the embed reaches the operator).
+    check_control_ui_embed_sandbox,
     check_subagent_spawn_limits,
     check_cachetrace_redaction,
     # B-281/B-282 (ENV-1/ENV-6): is the audited file the one the agent loads, and is a

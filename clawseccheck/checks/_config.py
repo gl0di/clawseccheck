@@ -4871,3 +4871,321 @@ def check_local_model_service_command(ctx: Context) -> Finding:
         "auto-spawned at provider startup.",
         "Nothing to do.",
     )
+
+
+def _gateway_http_reach(cfg: dict, surface: str) -> str:
+    """Disclosure clause for a gateway-HTTP-surface finding: whether *surface* (a short
+    noun phrase, e.g. "this endpoint", "the Control UI") is reachable beyond loopback.
+
+    Same idiom as ``check_gateway_operator_terminal`` (B350) — reuses
+    ``_gateway_remote_exposure_reason`` rather than re-deriving the classification, so
+    B340/B350/B358/B360 can never disagree about what counts as "exposed".
+    """
+    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    if bind_host in LOOPBACK:
+        return f"the gateway is bound to loopback, so {surface} is reachable only from this host"
+    reason = _gateway_remote_exposure_reason(cfg)
+    if reason:
+        return f"the gateway is reachable beyond loopback ({reason}), so {surface} is too"
+    return (
+        f"the gateway bind cannot be resolved from config alone, so whether {surface} "
+        "is reachable off-host is not established here"
+    )
+
+
+def check_chat_completions_endpoint(ctx: Context) -> Finding:
+    """B358 (C-410) — gateway.http.endpoints.chatCompletions: an OpenAI-compatible
+    ``POST /v1/chat/completions`` endpoint, off by default. Grounded on the installed
+    dist (openclaw@2026.9.3, ``zod-schema-CTg_faEc.mjs:928-937``):
+    ``chatCompletions: strictObject({ enabled: boolean().optional(), images:
+    strictObject({...ResponsesEndpointUrlFetchShape}).optional() }).optional()``, where
+    ``ResponsesEndpointUrlFetchShape`` (:530-537) is ``{allowUrl, urlAllowlist,
+    allowedMimes, maxBytes, maxRedirects, timeoutMs}``. Both ``enabled`` and
+    ``allowUrl`` default to false (``schema-C9vBoeg0.mjs:845,847`` and
+    ``DEFAULT_OPENAI_IMAGE_LIMITS`` in ``openai-http--Ewj8T0W.mjs``).
+
+    **The original stub's FAIL premise — "allowUrl=true with no urlAllowlist is SSRF
+    to cloud metadata endpoints / internal services" — is REFUTED by the runtime, not
+    the schema, and was caught before it was ever committed.** The image-URL fetch
+    (``extractImageContentFromSource`` → ``fetchWithGuard``, both
+    ``input-files-B_YpQBG_.mjs``) always calls ``fetchWithSsrFGuard``
+    (``fetch-guard-BTiQPMkc.mjs``) with ``policy: {allowPrivateNetwork: false,
+    hostnameAllowlist: limits.urlAllowlist}`` — ``allowPrivateNetwork`` is hardcoded
+    false regardless of config, and the guard's private-IP predicate
+    (``ssrf-BqLj-h8H.mjs``) imports a dedicated ``isCloudMetadataIpAddress`` alongside
+    RFC1918/loopback/link-local/CGNAT checks. The check is DNS-PINNED and re-applied
+    on every redirect hop inside the same guarded-fetch loop (defeats DNS rebinding
+    and redirect-based bypass), not just on the initial URL. So an absent
+    ``urlAllowlist`` does not expose the internal network or cloud metadata — that
+    path is unconditionally closed by the vendor. What an EMPTY/absent allowlist
+    actually means (``matchesHostnameAllowlist``: an empty list matches everything) is
+    narrower: the gateway will fetch an attacker-chosen *public* URL server-side, an
+    open-proxy-shaped capability, not an SSRF-to-internal one. That does not clear the
+    FAIL bar (Golden Rule #5) — reporting it as SSRF to metadata/internal services
+    would have been a spurious FAIL — so this stays a disclosure at WARN.
+
+    PASS    — the endpoint is not enabled (the shipped default).
+    WARN    — enabled, and ``images.allowUrl`` is not true: a remote, OpenAI-shaped
+              ingress exists (anything reaching the gateway's HTTP surface can drive
+              agent turns through it, outside whatever per-channel restrictions
+              — allowed senders, DM policy — a configured channel would apply), but
+              no server-side URL fetch.
+    WARN    — enabled and ``images.allowUrl`` is true: same ingress, plus the gateway
+              will fetch an attacker-chosen URL server-side (private/internal/cloud-
+              metadata targets are blocked by the runtime unconditionally). The
+              wording distinguishes a non-empty ``images.urlAllowlist`` (fetch scoped
+              to named public hosts) from an absent/empty one (any public host).
+    UNKNOWN — the config was not read, or ``chatCompletions``/``images`` is present
+              but not an object.
+    """
+    unreadable = _config_unreadable("B358", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B358",
+            UNKNOWN,
+            "No config was read, so whether the gateway's OpenAI-compatible "
+            "chat-completions endpoint is enabled could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    node = dig(cfg, "gateway.http.endpoints.chatCompletions")
+    if node is not None and not isinstance(node, dict):
+        return _finding(
+            "B358",
+            UNKNOWN,
+            f"gateway.http.endpoints.chatCompletions is present but is not an object "
+            f"(found {type(node).__name__}), so whether the endpoint is enabled could "
+            "not be determined.",
+            "Fix the gateway.http.endpoints.chatCompletions block in openclaw.json so "
+            "it is a JSON object, then re-run the audit.",
+            config_field_paths={"gateway.http.endpoints.chatCompletions"},
+        )
+    if dig(cfg, "gateway.http.endpoints.chatCompletions.enabled") is not True:
+        return _finding(
+            "B358",
+            PASS,
+            "gateway.http.endpoints.chatCompletions.enabled is absent or not true, so "
+            "the OpenAI-compatible chat-completions endpoint is not served (the "
+            "shipped default).",
+            "Nothing to do; keep it off unless an OpenAI-compatible client "
+            "integration genuinely needs it.",
+        )
+    images = dig(cfg, "gateway.http.endpoints.chatCompletions.images")
+    if images is not None and not isinstance(images, dict):
+        return _finding(
+            "B358",
+            UNKNOWN,
+            "gateway.http.endpoints.chatCompletions.enabled is true, but its images "
+            f"block is present and not an object (found {type(images).__name__}), so "
+            "whether server-side image-URL fetching is enabled could not be "
+            "determined.",
+            "Fix the gateway.http.endpoints.chatCompletions.images block in "
+            "openclaw.json so it is a JSON object, then re-run the audit.",
+            config_field_paths={"gateway.http.endpoints.chatCompletions.images"},
+        )
+
+    reach = _gateway_http_reach(cfg, "this endpoint")
+    if dig(cfg, "gateway.http.endpoints.chatCompletions.images.allowUrl") is True:
+        allowlist = dig(cfg, "gateway.http.endpoints.chatCompletions.images.urlAllowlist")
+        scoped = isinstance(allowlist, list) and bool(allowlist)
+        scope_clause = (
+            "scoped to an explicit images.urlAllowlist"
+            if scoped
+            else "with no images.urlAllowlist, so any public hostname is fetchable"
+        )
+        return _finding(
+            "B358",
+            WARN,
+            "gateway.http.endpoints.chatCompletions.enabled is true and "
+            f"images.allowUrl is true, {scope_clause}: an OpenAI-shaped request can "
+            "pass an image_url and the gateway will fetch it server-side "
+            "(private/internal/cloud-metadata targets are blocked unconditionally by "
+            f"the gateway's own SSRF guard). Right now {reach}.",
+            "Set images.urlAllowlist to the specific hostnames image URLs are "
+            "expected to come from, or set images.allowUrl to false if server-side "
+            "URL fetching is not needed (data URIs keep working either way).",
+            config_field_paths={
+                "gateway.http.endpoints.chatCompletions.images.allowUrl",
+                "gateway.http.endpoints.chatCompletions.images.urlAllowlist",
+            },
+        )
+    return _finding(
+        "B358",
+        WARN,
+        "gateway.http.endpoints.chatCompletions.enabled is true: the gateway serves "
+        "an OpenAI-compatible POST /v1/chat/completions endpoint, a remote ingress "
+        f"that can drive agent turns outside any configured channel. Right now "
+        f"{reach}.",
+        "Keep this endpoint off unless an OpenAI-compatible client integration "
+        "genuinely needs it, and keep the gateway behind auth (B2/B70).",
+    )
+
+
+def check_gateway_remote_ssh_host_key_policy(ctx: Context) -> Finding:
+    """B359 (C-410) — gateway.remote.sshHostKeyPolicy: how THIS machine verifies the
+    SSH host key when it connects OUT to a remote OpenClaw gateway over an SSH tunnel
+    (the remote-gateway-link feature). Grounded on the installed dist
+    (openclaw@2026.9.3, ``zod-schema-CTg_faEc.mjs:473``):
+    ``union([literal("strict"), literal("openssh")]).optional()``. Default "strict"
+    — corroborated by both the schema description ("'strict' requires an already
+    trusted host key") and ``FIELD_PLACEHOLDERS["gateway.remote.sshHostKeyPolicy"]``
+    (``schema-C9vBoeg0.mjs:2823``), which shows "strict" as the field's own example
+    value.
+
+    This is a CLIENT-side setting for the machine initiating the SSH tunnel — unlike
+    B358/B360 it says nothing about whether THIS host's own gateway is exposed, so it
+    does not use ``_gateway_http_reach``.
+
+    PASS    — "strict" (the default) or absent.
+    WARN    — "openssh": host-key verification is delegated to the effective OpenSSH
+              configuration (``~/.ssh/config``, ``known_hosts``,
+              ``StrictHostKeyChecking``) instead of requiring an already-trusted key —
+              anything able to intercept the first connection to the remote gateway's
+              address (DNS/routing spoofing) can MITM it undetected.
+    UNKNOWN — present but neither known literal (a malformed/future value this audit
+              cannot reason about), or the config was not read.
+    """
+    unreadable = _config_unreadable("B359", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B359",
+            UNKNOWN,
+            "No config was read, so the remote-gateway SSH host-key policy could not "
+            "be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    remote = dig(cfg, "gateway.remote")
+    if remote is not None and not isinstance(remote, dict):
+        return _finding(
+            "B359",
+            UNKNOWN,
+            f"gateway.remote is present but is not an object (found "
+            f"{type(remote).__name__}), so the SSH host-key policy could not be "
+            "determined.",
+            "Fix the gateway.remote block in openclaw.json so it is a JSON object, "
+            "then re-run the audit.",
+            config_field_paths={"gateway.remote"},
+        )
+    policy = dig(cfg, "gateway.remote.sshHostKeyPolicy")
+    if policy is None or policy == "strict":
+        return _finding(
+            "B359",
+            PASS,
+            "gateway.remote.sshHostKeyPolicy is 'strict' (or unset, which defaults to "
+            "'strict') — connecting to a remote gateway over SSH requires an already "
+            "trusted host key.",
+            "Nothing to do.",
+        )
+    if policy == "openssh":
+        return _finding(
+            "B359",
+            WARN,
+            "gateway.remote.sshHostKeyPolicy is 'openssh': host-key verification for "
+            "the remote-gateway SSH tunnel is delegated to the effective OpenSSH "
+            "configuration instead of requiring an already-trusted key. Anything "
+            "able to intercept the first connection to the remote gateway's address "
+            "(DNS/routing spoofing) can MITM it undetected.",
+            "Set gateway.remote.sshHostKeyPolicy to 'strict' unless you "
+            "specifically manage host-key trust through OpenSSH's own config/"
+            "known_hosts and StrictHostKeyChecking.",
+            config_field_paths={"gateway.remote.sshHostKeyPolicy"},
+        )
+    return _finding(
+        "B359",
+        UNKNOWN,
+        f"gateway.remote.sshHostKeyPolicy is {policy!r}, neither 'strict' nor "
+        "'openssh' — not a value this audit recognizes, so its effect could not be "
+        "determined.",
+        "Set gateway.remote.sshHostKeyPolicy to 'strict' (recommended) or "
+        "'openssh'.",
+        config_field_paths={"gateway.remote.sshHostKeyPolicy"},
+    )
+
+
+def check_control_ui_embed_sandbox(ctx: Context) -> Finding:
+    """B360 (C-410) — gateway.controlUi.embedSandbox: the iframe sandbox policy for
+    hosted Control UI embeds. Grounded on the installed dist (openclaw@2026.9.3,
+    ``zod-schema-CTg_faEc.mjs:849-853``): ``union([literal("strict"),
+    literal("scripts"), literal("trusted")]).optional()``. Default "scripts" per the
+    schema description (``schema-C9vBoeg0.mjs:830``): "'strict' disables scripts,
+    'scripts' allows interactive embeds while keeping origin isolation (default), and
+    'trusted' adds `allow-same-origin` for same-site documents that intentionally
+    need stronger privileges."
+
+    "trusted" is the one value that removes origin isolation from an embedded
+    iframe, so any XSS in whatever page hosts the embed reaches the Control UI's own
+    origin — the operator's authenticated session. Same gateway-reachability
+    disclosure as B358/B350 (``_gateway_http_reach``), since an outside document can
+    only reach the embed at all when the gateway itself is reachable.
+
+    PASS    — "strict", "scripts" (the default), or absent.
+    WARN    — "trusted".
+    UNKNOWN — present but none of the three known literals, or the config was not
+              read.
+    """
+    unreadable = _config_unreadable("B360", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B360",
+            UNKNOWN,
+            "No config was read, so the Control UI embed sandbox policy could not be "
+            "determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    control_ui = dig(cfg, "gateway.controlUi")
+    if control_ui is not None and not isinstance(control_ui, dict):
+        return _finding(
+            "B360",
+            UNKNOWN,
+            f"gateway.controlUi is present but is not an object (found "
+            f"{type(control_ui).__name__}), so the embed sandbox policy could not be "
+            "determined.",
+            "Fix the gateway.controlUi block in openclaw.json so it is a JSON "
+            "object, then re-run the audit.",
+            config_field_paths={"gateway.controlUi"},
+        )
+    mode = dig(cfg, "gateway.controlUi.embedSandbox")
+    if mode is None or mode in ("strict", "scripts"):
+        state = "unset, which defaults to 'scripts'" if mode is None else f"{mode!r}"
+        return _finding(
+            "B360",
+            PASS,
+            f"gateway.controlUi.embedSandbox is {state} — hosted Control UI embeds "
+            "keep origin isolation from their embedding page.",
+            "Nothing to do.",
+        )
+    if mode == "trusted":
+        reach = _gateway_http_reach(cfg, "the Control UI — and any embed of it")
+        return _finding(
+            "B360",
+            WARN,
+            "gateway.controlUi.embedSandbox is 'trusted': hosted Control UI embeds "
+            "get allow-same-origin, so an XSS in whatever page hosts the embed "
+            "reaches the Control UI's own origin — the operator's authenticated "
+            f"session. Right now {reach}.",
+            "Set gateway.controlUi.embedSandbox to 'scripts' (the default) unless "
+            "the embedding document is fully trusted and genuinely needs "
+            "same-origin privileges.",
+            config_field_paths={"gateway.controlUi.embedSandbox"},
+        )
+    return _finding(
+        "B360",
+        UNKNOWN,
+        f"gateway.controlUi.embedSandbox is {mode!r}, not one of 'strict'/'scripts'/"
+        "'trusted' — not a value this audit recognizes, so its effect could not be "
+        "determined.",
+        "Set gateway.controlUi.embedSandbox to 'strict', 'scripts' (recommended "
+        "default), or 'trusted' only if genuinely needed.",
+        config_field_paths={"gateway.controlUi.embedSandbox"},
+    )

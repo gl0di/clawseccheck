@@ -2455,6 +2455,44 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
+### B358 - OpenAI-compatible chat-completions endpoint (remote ingress; open-proxy-shaped image-URL fetch)
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Zero Trust / Gateway
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: OpenAI-compatible chat-completions endpoint (remote ingress; open-proxy-shaped image-URL fetch)
+- Remediation:
+  - none
+
+### B359 - Remote-gateway SSH host-key policy delegated to OpenSSH instead of pinned
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Zero Trust / Gateway
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Remote-gateway SSH host-key policy delegated to OpenSSH instead of pinned
+- Remediation:
+  - none
+
+### B360 - Control-UI embed sandbox set to 'trusted' (allow-same-origin)
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Zero Trust / Control-UI Origin
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM01 Prompt Injection
+- What it checks: Control-UI embed sandbox set to 'trusted' (allow-same-origin)
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

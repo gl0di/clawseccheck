@@ -58,7 +58,8 @@ _EXEMPT = {
                   "`assessment_coverage()`. Over budget by 17 lines since B-558 added "
                   "`layer_coverage`. Split candidate named above; tracked debt, not a "
                   "design statement.",
-    "checks/_config.py": "~4,410 lines — the config-hardening topic (15 checks + helpers); "
+    "checks/_config.py": "~5,191 lines (restated 2026-09-11, C-410 — was ~4,410, +18% "
+                         "stale) — the config-hardening topic (29 checks + helpers); "
                          "topic-faithful and over budget by design. A finer split is a "
                          "later cycle (I-022 secondary target).",
     # Restated 2026-09-04 (B-727): 5,662 -> 6,172. The tolerance is min(25%, 500 LINES),
