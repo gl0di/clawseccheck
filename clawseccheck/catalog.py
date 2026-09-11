@@ -516,6 +516,34 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="mcp",
     ),
+    # B369-B370 (C-413, child of E-074): runtime-exec inventory, disclosure-only
+    # (scored=False), matching B364's precedent — neither attempts to classify a value
+    # as safe/risky, only discloses it. acp.backend/fallbacks/runtime.installCommand
+    # (zod-schema-CTg_faEc.mjs:1390-1403) are real, current, top-level fields — a richer
+    # surface than the filed task's stub named. agentRuntime.id's real path is
+    # agents.{defaults,entries.<id>}.models.<ref>.agentRuntime.id
+    # (zod-schema.agent-runtime-BigQghiZ.mjs:569-594), NOT the stub's cited
+    # models.providers.*.agentRuntime.id — B331's own pre-existing grounding note
+    # (above) already declined to characterize this field's value vocabulary as
+    # safe/risky for the same reasons B370 inherits.
+    CheckMeta(
+        "B369",
+        "acp.backend routes agent turn execution to a plugin backend",
+        MEDIUM,
+        "advisory",
+        "Supply Chain",
+        scored=False,
+        surface="mcp",
+    ),
+    CheckMeta(
+        "B370",
+        "agentRuntime.id names the external process that runs a model's turns",
+        MEDIUM,
+        "advisory",
+        "Supply Chain",
+        scored=False,
+        surface="mcp",
+    ),
     CheckMeta(
         "B25", "Update / pinning hygiene", MEDIUM, "hardening", "Supply Chain", surface="skills"
     ),
@@ -2293,6 +2321,30 @@ CATALOG: list[CheckMeta] = [
         "Write Integrity / Self-Modification",
         surface="skills",
     ),
+    # B367-B368 (C-413, child of E-074): skills.load's other two siblings of
+    # extraDirs (zod-schema-CTg_faEc.mjs:1502-1508, live and current — the LOAD side,
+    # distinct from skills.workshop.allowSymlinkTargetWrites, the WRITE side B175 covers
+    # and which OpenClaw 2026.9.3 removed entirely, see B175's own B-783 note).
+    # B367's FAIL classifier reuses _shared._dir_replaceable_by_others (the discriminator
+    # B186, checks/_host.py, replaced a "well-known broad root" string heuristic with
+    # after that shape was tried and retracted there) rather than inventing a new one.
+    CheckMeta(
+        "B367",
+        "skills.load.allowSymlinkTargets widens where executable skill code may load "
+        "from via a symlink",
+        HIGH,
+        "hardening",
+        "Write Integrity / Self-Modification",
+        surface="skills",
+    ),
+    CheckMeta(
+        "B368",
+        "skills.load.watch hot-reloads skill definitions with no gateway restart",
+        MEDIUM,
+        "hardening",
+        "Write Integrity / Self-Modification",
+        surface="skills",
+    ),
     # B179 (B-250): hooks.webhooks / hooks.internal(.load.extraDirs) enable-toggle
     # inventory. The originating bug report's field name "hooks.webhooks" is NOT a real
     # config path -- grounded against the dist, the native audit's own inventory line
@@ -3325,6 +3377,8 @@ AST_MAP = {
     "B184": ("AST02",),  # skills installed from a redirected registry = supply-chain compromise at the source (cf. B135/B177/B181)
     "B185": ("AST04", "AST05"),  # poisoned tool description delivered to the model = insecure metadata carrying untrusted external instructions (cf. B62/B64)
     "B186": ("AST02",),  # relocated bundled skills/hooks root = supply-chain code-load root the scanners never enumerated (cf. B184)
+    "B367": ("AST02",),  # skills.load.allowSymlinkTargets writable-by-others = supply-chain code-load root (cf. B186)
+    "B368": ("AST02",),  # skills.load.watch hot-reloads live from an extraDir = supply-chain code-load, no restart boundary (cf. B186/B367)
     "B187": ("AST02",),  # non-bundled plugin declares agentToolResultMiddleware = supply-chain interception capability disclosure (cf. B151/B152/B177)
     "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
     "B348": ("AST02",),  # plugins.load.paths entry not in plugins.entries = supply-chain visibility gap (cf. B152/B158)
@@ -3456,6 +3510,8 @@ OWASP_MAP = {
     "B184": ("LLM03",),  # skills installed from a redirected registry = Supply Chain
     "B185": ("LLM01",),  # poisoned tool description already delivered to the model = Prompt Injection
     "B186": ("LLM03",),  # relocated bundled skills/hooks code-load root = Supply Chain
+    "B367": ("LLM03",),  # skills.load.allowSymlinkTargets writable-by-others = Supply Chain (cf. B186)
+    "B368": ("LLM03",),  # skills.load.watch hot-reloads live from an extraDir = Supply Chain (cf. B186/B367)
     "B187": ("LLM03", "LLM05"),  # non-bundled plugin declares agentToolResultMiddleware = Supply Chain + Improper Output Handling
     "B193": ("LLM02",),  # gateway secret inlined in the service unit = Sensitive Information Disclosure
 }

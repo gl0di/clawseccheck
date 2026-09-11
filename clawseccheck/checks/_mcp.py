@@ -29,6 +29,7 @@ from ..catalog import (
 from ..collector import (
     LIMIT_DOMAIN_CONFIG,
     Context,
+    agent_roster,
     classify_bytes,
     collect,
     dig,
@@ -4787,6 +4788,169 @@ def check_mcp_host_sanitizer_gap(ctx: Context) -> Finding:
         f"{surfaces_seen} MCP server(s) with embedded tool definitions carry no "
         "detected content-security signal in their declared tool descriptions.",
         "No action needed.",
+    )
+
+
+def check_acp_backend_inventory(ctx: Context) -> Finding:
+    """B369 (C-413) — acp.backend routes agent turn execution to a plugin backend.
+
+    Grounded against the INSTALLED dist (openclaw@2026.9.3): ``acp`` is a top-level
+    strictObject (zod-schema-CTg_faEc.mjs:1390-1403) — ``enabled``, ``dispatch.enabled``,
+    ``backend`` (string), ``fallbacks`` (array(string())), ``defaultAgent``,
+    ``allowedAgents``, ``stream.*``, ``runtime.installCommand``. This is a real, current
+    field — a richer surface than the filed task's stub named (it also cited
+    ``acp.runtime.installCommand``, confirmed real too). When ``backend`` is set, EVERY
+    agent turn is dispatched to that registered ACP plugin instead of OpenClaw's own
+    embedded runtime; ``fallbacks`` is an ordered list of further backends silently tried
+    when the primary is unavailable — the owner has no visibility into which plugin ran
+    a given turn without reading this config directly.
+
+    Deliberately disclosure-only (scored=False), matching B364's precedent: this check
+    does NOT attempt to classify a backend id as "known/trusted" vs "unknown/risky" by
+    cross-referencing installed plugins — the same reasoning B331's own grounding note
+    (this module, above) already gives for the adjacent ``agentRuntime.id`` field:
+    determining which plugin actually handles a given id requires resolving the
+    installed-plugin registry and the runtime's own fallback-on-unavailable behavior,
+    which this check's narrow inventory purpose does not warrant. An operator reading
+    the disclosure can judge legitimacy directly.
+
+    WARN  — acp.backend is a non-empty string, or acp.fallbacks is a non-empty list.
+    PASS  — neither is set (OpenClaw's own embedded runtime handles every turn).
+    UNKNOWN — unread config, or acp present but not an object, or backend present but
+              not a string, or fallbacks present but not a list.
+    """
+    unreadable = _config_unreadable("B369", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    acp = cfg.get("acp")
+    if "acp" in cfg and not isinstance(acp, dict):
+        return _finding(
+            "B369", UNKNOWN,
+            "acp is present but is not a JSON object, so which agent-turn-execution "
+            "backend (if any) is configured cannot be determined. OpenClaw declares acp "
+            "as a strict schema and rejects the whole config at load time when the "
+            "shape is wrong.",
+            "Set acp to a JSON object, or remove it entirely, then re-run the audit.",
+            evidence=[f"acp={acp!r}"],
+        )
+    backend = acp.get("backend") if isinstance(acp, dict) else None
+    if backend is not None and not isinstance(backend, str):
+        return _finding(
+            "B369", UNKNOWN,
+            "acp.backend is present but is not a string, so which plugin backend (if "
+            "any) executes agent turns cannot be determined.",
+            "Set acp.backend to a string backend id, or remove it entirely, then "
+            "re-run the audit.",
+            evidence=[f"acp.backend={backend!r}"],
+        )
+    fallbacks = acp.get("fallbacks") if isinstance(acp, dict) else None
+    if fallbacks is not None and not (
+        isinstance(fallbacks, list) and all(isinstance(f, str) for f in fallbacks)
+    ):
+        return _finding(
+            "B369", UNKNOWN,
+            "acp.fallbacks is present but is not a list of strings, so the ordered "
+            "fallback backends (if any) cannot be determined.",
+            "Set acp.fallbacks to a list of backend id strings, or remove it entirely, "
+            "then re-run the audit.",
+            evidence=[f"acp.fallbacks={fallbacks!r}"],
+        )
+
+    backend_set = isinstance(backend, str) and bool(backend.strip())
+    fallbacks_set = isinstance(fallbacks, list) and len(fallbacks) > 0
+    if not backend_set and not fallbacks_set:
+        return _finding(
+            "B369", PASS,
+            "acp.backend is not set — OpenClaw's own embedded runtime executes every "
+            "agent turn.",
+            "Nothing to do.",
+        )
+    evidence = []
+    if backend_set:
+        evidence.append(f"acp.backend={backend!r}")
+    if fallbacks_set:
+        evidence.append(f"acp.fallbacks={fallbacks!r}")
+    install_cmd = dig(cfg, "acp.runtime.installCommand")
+    if isinstance(install_cmd, str) and install_cmd.strip():
+        evidence.append("acp.runtime.installCommand is also configured")
+    return _finding(
+        "B369", WARN, "; ".join(evidence),
+        "Every agent turn is dispatched to the named ACP plugin backend (and, on "
+        "unavailability, silently to each fallback in order) instead of OpenClaw's own "
+        "embedded runtime. Confirm the backend id(s) name a plugin you installed and "
+        "trust.",
+        evidence=evidence,
+    )
+
+
+def check_agent_runtime_id_inventory(ctx: Context) -> Finding:
+    """B370 (C-413) — agentRuntime.id decides which external process runs a model's
+    turns.
+
+    Grounded against the INSTALLED dist (openclaw@2026.9.3), correcting the filed
+    task's cited path (``models.providers.*.agentRuntime.id`` — not a real path on this
+    build): ``agentRuntime.id`` (``AgentRuntimePolicySchema``, ``{id: string().optional()}``
+    .strict().optional(), zod-schema.agent-runtime-BigQghiZ.mjs:569-576) is a field of
+    ``AgentModelRuntimeEntrySchema``, itself the value type of ``AgentModelMapSchema`` —
+    which is used as ``models`` at exactly TWO config locations: ``AgentDefaultsSchema``
+    (global — reachable at ``agents.defaults.models.<modelRef>.agentRuntime.id``) and
+    ``AgentEntrySchema`` (per-agent — ``agents.entries.<id>.models.<modelRef>
+    .agentRuntime.id`` / legacy ``agents.list[].models.<modelRef>.agentRuntime.id``, both
+    read via the shared ``agent_roster()``, B-699).
+
+    This module's own B331 grounding note (above, dated 2026-07-25 against
+    openclaw@2026.7.1-2) describes ``agentRuntime.id`` as reachable from "5 different
+    schema locations" with value vocabulary "openclaw" | "auto" | a plugin harness id |
+    a CLI alias, and explicitly declines to read it for path-attribution because its
+    resolution is too provider/build-dependent to ground safely. That reasoning is
+    inherited here unchanged and taken further: this check does not attempt to
+    characterize a value as safe/risky at all (not even the "openclaw"/"auto" pair the
+    older note names as defaults) since that vocabulary claim was not independently
+    re-verified against the current dist and the cost of doing so is disproportionate to
+    an inventory-tier check. Flat, unconditional disclosure of every non-empty value
+    found — matching B364's precedent — is what stays inside what this check actually
+    knows.
+
+    WARN  — at least one agentRuntime.id is a non-empty string, at either scope.
+    PASS  — none found.
+    UNKNOWN — unread config.
+    """
+    unreadable = _config_unreadable("B370", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+
+    found: list[str] = []
+
+    def _scan(models, label: str) -> None:
+        if not isinstance(models, dict):
+            return
+        for model_ref, entry in models.items():
+            if not isinstance(entry, dict):
+                continue
+            runtime_id = dig(entry, "agentRuntime.id")
+            if isinstance(runtime_id, str) and runtime_id.strip():
+                found.append(f"{label}.models.{model_ref}.agentRuntime.id={runtime_id!r}")
+
+    _scan(dig(cfg, "agents.defaults.models"), "agents.defaults")
+    for agent in agent_roster(cfg):
+        name = agent.entry.get("name") or agent.id or agent.index
+        _scan(dig(agent.entry, "models"), agent.labelled(name))
+
+    if not found:
+        return _finding(
+            "B370", PASS,
+            "No agentRuntime.id override is configured on any model entry — every "
+            "model's turns run through OpenClaw's own default runtime resolution.",
+            "Nothing to do.",
+        )
+    return _finding(
+        "B370", WARN, "; ".join(found[:8]),
+        "One or more model entries name an explicit agentRuntime.id — confirm each "
+        "value is the CLI backend / plugin harness you intend, since it decides which "
+        "external process actually runs that model's turns.",
+        evidence=found[:8],
     )
 
 

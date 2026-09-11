@@ -381,6 +381,34 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B369 - acp.backend routes agent turn execution to a plugin backend
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Supply Chain
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: acp.backend routes agent turn execution to a plugin backend
+- Remediation:
+  - none
+
+### B370 - agentRuntime.id names the external process that runs a model's turns
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Supply Chain
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: agentRuntime.id names the external process that runs a model's turns
+- Remediation:
+  - none
+
+## Hardening checks
+
 ### B25 - Update / pinning hygiene
 
 - Severity: MEDIUM
@@ -2014,6 +2042,30 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: LLM04 Data and Model Poisoning, LLM06 Excessive Agency
 - What it checks: Skill Workshop autonomous authoring + no-review install (approvalPolicy=auto)
+- Remediation:
+  - none
+
+### B367 - skills.load.allowSymlinkTargets widens where executable skill code may load from via a symlink
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Write Integrity / Self-Modification
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: skills.load.allowSymlinkTargets widens where executable skill code may load from via a symlink
+- Remediation:
+  - none
+
+### B368 - skills.load.watch hot-reloads skill definitions with no gateway restart
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Write Integrity / Self-Modification
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: skills.load.watch hot-reloads skill definitions with no gateway restart
 - Remediation:
   - none
 

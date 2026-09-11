@@ -3584,6 +3584,207 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
     )
 
 
+def check_skill_symlink_target_writability(ctx: Context) -> Finding:
+    """B367 (C-413) — skills.load.allowSymlinkTargets widens where executable skill code
+    may load from via a symlink.
+
+    Grounded against the INSTALLED dist (openclaw@2026.9.3): ``skills.load`` is a
+    strictObject with ``extraDirs``/``allowSymlinkTargets``/``watch``
+    (zod-schema-CTg_faEc.mjs:1502-1508) — this is the LOAD side, a live, distinct field
+    from ``skills.workshop.allowSymlinkTargetWrites`` (the WRITE side B175 already
+    covers, and which OpenClaw 2026.9.3 removed from the schema entirely — see B175's
+    own B-783 note). ``allowSymlinkTargets`` is genuinely consumed:
+    ``resolveAllowedSkillSymlinkTargetRealPaths`` (symlink-targets-*.mjs) resolves each
+    entry to a real path, and ``findContainingAllowedSkillSymlinkTarget`` lets a skill
+    directory that is a symlink resolving OUTSIDE its normal source root load anyway,
+    as long as the symlink's real target sits inside one of these roots.
+
+    The classifier is NOT "is this path a well-known broad root" (``/``, ``/tmp``,
+    ``~``) — that shape was tried for the analogous B186 (bundled-root-override) check
+    and explicitly RETRACTED there (see checks/_host.py's B186 comment block, point 3):
+    a 0700 directory under ``/tmp`` is as private as one in the user's home, so keying a
+    verdict on the path STRING rather than on an actual privilege is unsound, and the
+    task that filed C-413 proposed exactly that retracted shape ("FAIL if any entry is a
+    broad/writable/non-narrow root"). This check reuses the discriminator B186 replaced
+    it with instead: ``_shared._dir_replaceable_by_others`` — sticky-bit-aware,
+    singleton-group-aware, POSIX-only — the same helper, so the two checks agree on what
+    "someone else could plant code here" means.
+
+    FAIL    — at least one configured target directory exists locally and is
+              group/world-writable by another real account (mirrors B186's FAIL bar
+              exactly).
+    WARN    — allowSymlinkTargets is a non-empty list, but no entry triggers FAIL —
+              disclosure only: the symlink-resolution trust boundary is genuinely
+              widened beyond the skill source root, which is legitimate for a
+              source-checkout/monorepo developer (same framing as B186's own WARN).
+              Includes an entry this audit could not resolve locally (a path that does
+              not exist on THIS machine, e.g. auditing someone else's exported config,
+              or a bare RELATIVE entry — the real resolveHomeRelativePath resolves a
+              non-``~`` entry via ``path.resolve()`` against the OpenClaw process's own
+              cwd at agent start, a value this offline audit has no way to know; guessing
+              a base and statting whatever that guess resolves to would risk a fabricated
+              verdict against an unrelated real directory, so a relative entry is treated
+              exactly like an unresolvable one rather than resolved against any guessed
+              root) — Golden Rule #4 forbids asserting it is safe just because it could
+              not be read.
+    PASS    — absent or an empty list.
+    UNKNOWN — unread config, or the value present but not a list of strings (the schema
+              is a ``.strict()`` object; a malformed shape means the config does not
+              load as written).
+    """
+    unreadable = _config_unreadable("B367", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    targets = dig(cfg, "skills.load.allowSymlinkTargets")
+    if targets is None:
+        return _finding(
+            "B367", PASS,
+            "skills.load.allowSymlinkTargets is not configured — skill directories that "
+            "are symlinks may only resolve inside their normal configured source root.",
+            "Nothing to do.",
+        )
+    if not isinstance(targets, list) or not all(isinstance(t, str) for t in targets):
+        return _finding(
+            "B367", UNKNOWN,
+            "skills.load.allowSymlinkTargets is present but is not a list of strings, "
+            "so which extra symlink-resolution roots (if any) are trusted cannot be "
+            "determined. OpenClaw declares skills.load as a strict schema and rejects "
+            "the whole config at load time when the shape is wrong.",
+            "Set skills.load.allowSymlinkTargets to a list of path strings, or remove "
+            "it entirely, then re-run the audit.",
+            evidence=[f"skills.load.allowSymlinkTargets={targets!r}"],
+        )
+    if not targets:
+        return _finding(
+            "B367", PASS,
+            "skills.load.allowSymlinkTargets is an empty list — no extra symlink-"
+            "resolution roots are trusted.",
+            "Nothing to do.",
+        )
+
+    from ..collector import _expand_user_path  # noqa: PLC0415
+
+    fails: list[str] = []
+    warns: list[str] = []
+    for raw in targets:
+        # _expand_user_path mirrors resolveUserPath -> resolveHomeRelativePath exactly
+        # (collector.py, itself grounded against paths-BMBAvkNf.js:68-73): a leading ~
+        # expands against ctx.home (the EFFECTIVE OpenClaw home, which OPENCLAW_HOME may
+        # itself have moved — never the audit process's own OS home), and a bare
+        # relative entry is left AS-IS rather than resolved against any guessed base.
+        p = _expand_user_path(raw, ctx.home)
+        if not p.is_absolute():
+            # The real runtime resolves a relative entry via path.resolve(trimmed) —
+            # i.e. against the OpenClaw process's own cwd AT AGENT START, not this
+            # audit's cwd, ctx.home, or any other value this offline read can know.
+            # Golden Rule #4: do not guess a base and stat whatever that guess happens
+            # to resolve to — a wrong guess could land on an unrelated real directory
+            # and manufacture a false FAIL/PASS. Treated like "could not be resolved".
+            warns.append(
+                f"skills.load.allowSymlinkTargets entry {raw!r} is a relative path — "
+                "it resolves against the OpenClaw process's own working directory at "
+                "agent start, which this audit cannot know, so its permissions cannot "
+                "be verified from here"
+            )
+            continue
+        why = _shared._dir_replaceable_by_others(p)
+        if why is not None:
+            fails.append(
+                f"skills.load.allowSymlinkTargets entry {raw!r} is {why} — another "
+                "local account could plant a symlink target there for the agent to "
+                "load as skill code"
+            )
+        elif not p.exists():
+            warns.append(
+                f"skills.load.allowSymlinkTargets entry {raw!r} could not be resolved "
+                "on this machine — its permissions cannot be verified from here"
+            )
+        else:
+            warns.append(
+                f"skills.load.allowSymlinkTargets trusts {raw!r} as an extra "
+                "symlink-resolution root outside the normal skill source root"
+            )
+
+    if fails:
+        return _finding(
+            "B367", FAIL, "; ".join(fails),
+            "Remove the writable-by-others target from skills.load.allowSymlinkTargets, "
+            "or lock down its permissions (chmod g-w,o-w) so only the agent's own "
+            "account can write there — a symlink resolving into a writable root lets "
+            "another local account substitute the skill code the agent runs.",
+            evidence=fails + warns,
+        )
+    return _finding(
+        "B367", WARN, "; ".join(warns),
+        "This is a real widening of where skill code may load from via a symlink — "
+        "legitimate for a source-checkout/monorepo developer. Keep every trusted root "
+        "locked to the agent's own account.",
+        evidence=warns,
+    )
+
+
+def check_skill_load_hot_reload(ctx: Context) -> Finding:
+    """B368 (C-413) — skills.load.watch hot-reloads skill definitions with no restart.
+
+    Grounded against the INSTALLED dist (openclaw@2026.9.3): ``skills.load.watch`` is a
+    plain boolean (zod-schema-CTg_faEc.mjs:1507), a sibling of ``allowSymlinkTargets``
+    checked by B367 above. When true, a planted or mutated skill file is loaded and run
+    live — it defeats the restart boundary B158 (extraDirs inventory) and B21/B22
+    (install-time review) implicitly assume, but only where there is somewhere for a
+    planted file to land: ``skills.load.extraDirs`` names any root outside the normal
+    managed install tree.
+
+    WARN    — watch is true AND at least one extraDir is configured — a live-reloadable
+              root exists outside the managed skill tree.
+    PASS    — watch is false/absent, OR watch is true but no extraDirs are configured
+              (hot-reload has nothing unusual to pick up from).
+    UNKNOWN — unread config, or watch present but not a boolean.
+    """
+    unreadable = _config_unreadable("B368", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    watch = dig(cfg, "skills.load.watch")
+    if watch is not None and not isinstance(watch, bool):
+        return _finding(
+            "B368", UNKNOWN,
+            "skills.load.watch is present but is not a boolean, so whether skill "
+            "definitions hot-reload cannot be determined. OpenClaw declares skills.load "
+            "as a strict schema and rejects the whole config at load time when the "
+            "shape is wrong.",
+            "Set skills.load.watch to true or false, or remove it entirely, then "
+            "re-run the audit.",
+            evidence=[f"skills.load.watch={watch!r}"],
+        )
+    if watch is not True:
+        return _finding(
+            "B368", PASS,
+            "skills.load.watch is not enabled — skill definitions only reload on a "
+            "gateway restart.",
+            "Nothing to do.",
+        )
+    extra_dirs = dig(cfg, "skills.load.extraDirs")
+    if not isinstance(extra_dirs, list) or not extra_dirs:
+        return _finding(
+            "B368", PASS,
+            "skills.load.watch is enabled, but no skills.load.extraDirs are configured "
+            "— there is no root outside the managed skill tree for hot-reload to pick "
+            "up a planted or mutated file from.",
+            "Nothing to do.",
+        )
+    return _finding(
+        "B368", WARN,
+        f"skills.load.watch is enabled with {len(extra_dirs)} skills.load.extraDirs "
+        "root(s) configured — a planted or mutated skill file in one of those roots is "
+        "loaded and run live, with no gateway restart to interrupt it.",
+        "If skills.load.watch is only needed for local development, disable it in any "
+        "environment where skills.load.extraDirs points at a root you do not fully "
+        "control.",
+        evidence=[str(d) for d in extra_dirs[:8]],
+    )
+
+
 # B-727: appended when a sampled session file exceeded the 1 MB scan budget. Wording is
 # deliberately narrower than B77's: this check already says "sampled", so the note names
 # the extra bound rather than retracting the verdict.
@@ -5727,9 +5928,12 @@ def check_update_pinning(ctx: Context) -> Finding:
     A malicious skill UPDATE is a supply-chain risk (runs with agent permissions).
 
     WARN  — auto-update for skills/plugins is enabled (blind trust in upstream);
+            OR update.channel is "dev"/"beta" (C-413 — the same blind-trust risk
+            applied to OpenClaw's own build, not just skills/plugins);
             OR a plugin/skill entry records a floating ref (branch name / 'latest').
     PASS  — at least one entry is present and all have a pinned tag/commit or an
-            integrity hash; no auto-update enabled.
+            integrity hash; no auto-update enabled; update.channel is unset,
+            "stable", or "extended-stable".
     UNKNOWN — no plugin/skill config from which pinning can be determined.
     """
     cfg = ctx.config
@@ -5751,6 +5955,22 @@ def check_update_pinning(ctx: Context) -> Finding:
     ):
         warn_ev.append(
             "auto-update for skills/plugins is enabled — blind trust in upstream is a supply-chain risk"
+        )
+
+    # ---- signal 1b (C-413): update.channel on a pre-release tier ----
+    # Grounded against the INSTALLED dist (openclaw@2026.9.3): update.channel is a
+    # strictObject sibling of update.auto.enabled (zod-schema-CTg_faEc.mjs:1299-1308),
+    # union(["stable","extended-stable","beta","dev"]).optional() — four literals, not
+    # the stub's assumed two ("dev"/"beta"); "extended-stable" is a real, safe tier and
+    # must not be swept in as if it were a pre-release channel. dev/beta pull
+    # bleeding-edge git+npm installs the same way an unpinned skill/plugin ref does —
+    # same signal family as signal 1, so it is folded into this check rather than a new
+    # one, per the stub's own "extend B25" framing.
+    channel = dig(cfg, "update.channel")
+    if isinstance(channel, str) and channel.strip().lower() in ("dev", "beta"):
+        warn_ev.append(
+            f"update.channel={channel!r} pulls pre-release builds — the same "
+            "blind-trust-in-upstream risk as auto-update, applied to OpenClaw itself"
         )
 
     # ---- signal 2: per-entry pinning ----

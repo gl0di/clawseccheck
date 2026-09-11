@@ -13,10 +13,12 @@
 # `agents.list`). Keep each section sorted independently.
 #
 # --- read off the OpenClaw config ROOT ---------------------------------------------
+acp.runtime.installCommand
 agents.defaults.elevatedDefault
 agents.defaults.embeddedAgent.projectSettingsPolicy
 agents.defaults.heartbeat
 agents.defaults.model
+agents.defaults.models
 agents.defaults.sandbox.docker.binds
 agents.defaults.sandbox.docker.dangerouslyAllowContainerNamespaceJoin
 agents.defaults.sandbox.docker.dangerouslyAllowExternalBindSources
@@ -126,6 +128,9 @@ security.installPolicy
 session.dmScope
 session.resetTriggers
 session.scope
+skills.load.allowSymlinkTargets
+skills.load.extraDirs
+skills.load.watch
 skills.workshop.allowSymlinkTargetWrites
 skills.workshop.approvalPolicy
 skills.workshop.autonomous.enabled
@@ -159,18 +164,21 @@ tools.web.fetch.maxRedirects
 tools.web.fetch.useTrustedEnvProxy
 update.auto
 update.auto.enabled
+update.channel
 
 # --- read off a NESTED object, not the config root ---------------------------------
 # An `agents.list` entry, an MCP server entry, a plugin entry, a skill's frontmatter
 # metadata object, ... The `relative:` prefix is a manifest namespace, not part of the
 # path: it keeps a relative leaf from granting blanket grounding to the same string
 # used against the config root (and the reverse). See CLAWSECCHECK B-251.
+relative:agentRuntime.id
 relative:config.allowPrivateNetwork
 relative:config.appServer.command
 relative:config.permissionMode
 relative:heartbeat
 relative:mcp.servers
 relative:memory.search.remote
+relative:models
 relative:network.dangerouslyAllowPrivateNetwork
 relative:openclaw.disable-model-invocation
 relative:openclaw.install

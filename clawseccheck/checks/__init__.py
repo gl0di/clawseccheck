@@ -423,6 +423,8 @@ from ._lifecycle import (
     check_skill_install_tamper,
     check_skill_library_reachability,
     check_skill_workshop_autonomy,
+    check_skill_symlink_target_writability,
+    check_skill_load_hot_reload,
     check_supply_chain,
     check_update_pinning,
     check_version,
@@ -864,6 +866,8 @@ from ._mcp import (
     _vet_mcp_scope_is_broad,
     _vet_mcp_server,
     _vet_mcp_tool_poisoning,
+    check_acp_backend_inventory,
+    check_agent_runtime_id_inventory,
     check_mcp,
     check_mcp_bypass_highblast,
     check_mcp_external_endpoint,
@@ -1335,6 +1339,12 @@ CHECKS = [
     check_mcp_codex_preapproved_tools,  # B353 — MCP server pre-approves every tool (F-185)
     check_mcp_host_sanitizer_gap,  # B331 — MCP tool-description injection past the host sanitizer (F-144/W2.2)
     check_mcp_tool_name_shadowing,  # B332 — cross-server tool-name collision/homoglyph/near-miss (F-145/W2.3)
+    # B369-B370 (C-413) — runtime-exec inventory: acp.backend routes agent turns to a
+    # plugin backend; agentRuntime.id names the external process that runs a model's
+    # turns (real path corrected from the filed task's models.providers.*.agentRuntime.id
+    # to agents.{defaults,entries.<id>}.models.<ref>.agentRuntime.id).
+    check_acp_backend_inventory,
+    check_agent_runtime_id_inventory,
     check_proxy_header_forging,
     check_monitoring,
     check_autonomy,
@@ -1345,6 +1355,11 @@ CHECKS = [
     check_bootstrap_write_protection,
     check_self_modification,
     check_skill_workshop_autonomy,  # B175 — skills.workshop autonomous authoring + approvalPolicy=auto
+    # B367-B368 (C-413) — skills.load.allowSymlinkTargets widens where executable skill
+    # code loads from via a symlink; skills.load.watch hot-reloads skill definitions with
+    # no gateway restart to interrupt a planted/mutated file.
+    check_skill_symlink_target_writability,
+    check_skill_load_hot_reload,
     check_backups,
     check_version,
     check_tool_output_trust,
