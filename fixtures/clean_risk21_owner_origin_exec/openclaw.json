@@ -8,5 +8,13 @@
         }
       }
     }
+  },
+  "session": {
+    "dmScope": "per-peer"
+  },
+  "tools": {
+    "sessions": {
+      "visibility": "self"
+    }
   }
 }

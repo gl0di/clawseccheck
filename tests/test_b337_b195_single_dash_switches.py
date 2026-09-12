@@ -56,7 +56,12 @@ _BASE_CONFIG = {
         "auth": {"mode": "token", "token": "a-very-long-token-of-32-characters"},
     },
     "channels": {"telegram": {"dmPolicy": "allowlist", "groupPolicy": "allowlist"}},
-    "tools": {"profile": "minimal"},
+    # session.dmScope/tools.sessions.visibility pinned safe (B-796/B-797) so this base
+    # config does not carry its own B39 FAIL, which would cap the score identically
+    # across every comparison this module makes (see test_b195_browser_extra_args.py's
+    # identical note).
+    "session": {"dmScope": "per-peer"},
+    "tools": {"profile": "minimal", "sessions": {"visibility": "self"}},
     "logging": {"redactSensitive": "tools"},
     "models": {"main": {"provider": "ollama/llama3"}},
 }

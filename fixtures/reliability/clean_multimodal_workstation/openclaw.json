@@ -7,8 +7,10 @@
   },
   "tools": {
     "profile": "minimal",
-    "exec": { "mode": "ask" }
+    "exec": { "mode": "ask" },
+    "sessions": { "visibility": "self" }
   },
+  "session": { "dmScope": "per-peer" },
   "sandbox": {
     "mode": "enabled",
     "network_mode": "bridge",

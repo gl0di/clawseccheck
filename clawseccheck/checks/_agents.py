@@ -612,52 +612,177 @@ def check_sender_identity(ctx: Context) -> Finding:
     )
 
 
+_B39_DM_SCOPE_VALUES = ("main", "per-peer", "per-channel-peer", "per-account-channel-peer")
+_B39_VISIBILITY_VALUES = ("self", "tree", "agent", "all")
+
+
 def check_session_visibility(ctx: Context) -> Finding:
     """B39 — Session visibility / cross-user transcript leak.
 
-    FAIL    — session.dmScope == "main" AND any channel allows non-owner senders
-              (open/allowlist/paired, incl. per-account policies — cross-user risk).
-    WARN    — tools.sessions.visibility in ("agent", "all") regardless of dmScope
-              (one session can read other sessions' transcripts).
-    PASS    — dmScope is per-peer-ish AND visibility is "self" or "tree".
-    UNKNOWN — no session config (not applicable).
-              F-140: sets ``not_applicable`` only when the config locus was read
-              COMPLETELY and NEITHER ``session`` NOR ``tools.sessions`` is a dict —
-              i.e. the whole session-isolation surface this check models is genuinely
-              undeclared, not merely unreadable. Both loci are plain ``ctx.config``
-              reads, so config-locus completeness is the whole proof obligation.
-    """
-    cfg = ctx.config
-    session_cfg = cfg.get("session")
-    tools_sessions = dig(cfg, "tools.sessions")
+    Grounded against the INSTALLED dist (openclaw@2026.9.3), fixing two absent-case
+    bugs found while grounding C-411 (B-796/B-797): both fields default to their
+    RISKIEST value when unset, not a safer one, so the previous code — which only
+    matched the explicit string — silently missed the common case of a config that
+    never touches either key.
 
-    has_session_config = isinstance(session_cfg, dict) or isinstance(tools_sessions, dict)
-    if not has_session_config:
+      - session.dmScope (B-797): base-session-key-*.mjs's own session-key builder
+        resolves ``cfg.session?.dmScope ?? "main"`` — absent is "main", the value that
+        triggers this check's FAIL branch, not something safer. Corroborated by
+        dm-policy-shared-*.mjs's ``resolvePinnedMainDmOwnerFromAllowlist``
+        (``(params.dmScope ?? "main") !== "main"``) and the schema's own description of
+        a DIFFERENT field that reads dmScope ("Defaults on only when global
+        session.dmScope is unset or \"main\"" — schema-C9vBoeg0.mjs).
+      - tools.sessions.visibility (B-796): ``resolveSessionToolsVisibility``
+        (session-visibility-*.mjs) defaults ANY missing or unrecognized value to
+        "all" — its own comment reads "Resolve configured session-tool visibility,
+        defaulting invalid or missing values to all."
+
+    Both fields are declared inside strict zod objects — SessionSchema.dmScope and
+    ToolsSchema.sessions.visibility are each an ``_enum(...).optional()`` — so a config
+    carrying anything OTHER than one of the accepted literals is rejected by OpenClaw's
+    own loader at parse time; this check reads both by hand (not via ``dig()``, which
+    collapses "absent" and "present-but-wrong-type" to the same ``None``) so a
+    present-but-invalid value reports UNKNOWN rather than silently taking the
+    resolved-default path meant for genuine absence.
+
+    A sandboxed agent's EFFECTIVE session-tools visibility is further clamped to
+    "tree" by ``resolveEffectiveSessionToolsVisibility`` when
+    ``agents.defaults.sandbox.sessionToolsVisibility`` is at ITS OWN default
+    ("spawned") — this check does not model that clamp: whether a given agent session
+    is "sandboxed" at runtime depends on ``agents.defaults.sandbox.mode`` and per-agent
+    overrides this check does not fully resolve, and guessing would risk exactly the
+    kind of fabricated confidence Golden Rule #4 forbids. The WARN text names the
+    clamp as a mitigating factor to check rather than assuming it applies.
+
+    Pre-existing, unchanged scope limitation carried forward from before this fix:
+    ``bindings[].session.dmScope`` (SessionSchema at zod-schema-CTg_faEc.mjs:1103,
+    confirmed real) lets an operator override dmScope for one specific route/channel.
+    This check reads only the GLOBAL ``session.dmScope`` — a config that pins the
+    global default to (or leaves it at) "main" while using a per-binding override to
+    isolate one specific exposed channel would still FAIL here on that channel's
+    apparent exposure. This was already true of the check's PRE-FIX behavior for an
+    EXPLICIT global "main" (B-797 only widens which configs reach that same coarse
+    global-only FAIL condition, from "explicit main" to "explicit main or absent") — it
+    is an accepted, pre-existing model limitation (global-config-only), not a new gap
+    this fix introduces, and per-binding overrides are a narrow enough audience that
+    modeling them is left for a dedicated follow-up if it proves to matter in practice.
+
+    FAIL    — dmScope resolves to "main" (explicit, or unset — see above) AND any
+              channel allows non-owner senders (open/allowlist/paired, incl.
+              per-account policies — cross-user risk).
+    WARN    — visibility resolves to "agent" or "all" (explicit, or unset/unrecognized
+              — see above) regardless of dmScope (one session can read other
+              sessions' transcripts, unless a sandbox clamp narrows it — see above).
+    PASS    — dmScope resolves to something other than "main" AND visibility resolves
+              to "self" or "tree".
+    UNKNOWN — unread config; no openclaw.json found for this home at all (mirrors
+              B175's own "genuinely no config, but the default is dangerous" framing —
+              the fact is stated, not asserted as a verdict about a setup never read);
+              or session/tools/tools.sessions present but not an object; or
+              dmScope/visibility present but not one of the schema's own accepted
+              values.
+    """
+    unreadable = _config_unreadable("B39", ctx)
+    if unreadable is not None:
+        return unreadable
+    if not ctx.config and not getattr(ctx, "config_found", True):
         return _finding(
             "B39",
             UNKNOWN,
-            "No session config — session isolation not applicable.",
-            "—",
-            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+            "No openclaw.json was found for this home, so session isolation cannot "
+            'be read. OpenClaw defaults session.dmScope to "main" and '
+            'tools.sessions.visibility to "all" when unset, so a genuinely bare '
+            "install would be exposed on both counts.",
+            "Point --home at the OpenClaw home you mean to audit, then re-run. If "
+            "this IS the right home and OpenClaw has never written a config here, it "
+            "is running on those defaults.",
+        )
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+
+    session_cfg = cfg.get("session")
+    if "session" in cfg and not isinstance(session_cfg, dict):
+        return _finding(
+            "B39", UNKNOWN,
+            "session is present but is not a JSON object, so DM session scoping "
+            "cannot be determined.",
+            "Set session to a JSON object, or remove it entirely, then re-run the "
+            "audit.",
+            evidence=[f"session={session_cfg!r}"],
+        )
+    dm_scope_raw = session_cfg.get("dmScope") if isinstance(session_cfg, dict) else None
+    if dm_scope_raw is not None and dm_scope_raw not in _B39_DM_SCOPE_VALUES:
+        return _finding(
+            "B39", UNKNOWN,
+            f"session.dmScope={dm_scope_raw!r} is not one of the values OpenClaw "
+            "accepts, so DM session scoping cannot be determined. OpenClaw declares "
+            "it as a strict enum and rejects the whole config at load time when the "
+            "value is wrong.",
+            'Set session.dmScope to one of "main", "per-peer", "per-channel-peer", '
+            '"per-account-channel-peer", or remove it entirely, then re-run the audit.',
+            evidence=[f"session.dmScope={dm_scope_raw!r}"],
         )
 
-    dm_scope = session_cfg.get("dmScope") if isinstance(session_cfg, dict) else None
-    visibility = tools_sessions.get("visibility") if isinstance(tools_sessions, dict) else None
+    tools_cfg = cfg.get("tools")
+    if "tools" in cfg and not isinstance(tools_cfg, dict):
+        return _finding(
+            "B39", UNKNOWN,
+            "tools is present but is not a JSON object, so session-tool visibility "
+            "cannot be determined.",
+            "Set tools to a JSON object, or remove it entirely, then re-run the "
+            "audit.",
+            evidence=[f"tools={tools_cfg!r}"],
+        )
+    tools_sessions = tools_cfg.get("sessions") if isinstance(tools_cfg, dict) else None
+    if (
+        isinstance(tools_cfg, dict)
+        and "sessions" in tools_cfg
+        and not isinstance(tools_sessions, dict)
+    ):
+        return _finding(
+            "B39", UNKNOWN,
+            "tools.sessions is present but is not a JSON object, so session-tool "
+            "visibility cannot be determined.",
+            "Set tools.sessions to a JSON object, or remove it entirely, then "
+            "re-run the audit.",
+            evidence=[f"tools.sessions={tools_sessions!r}"],
+        )
+    visibility_raw = (
+        tools_sessions.get("visibility") if isinstance(tools_sessions, dict) else None
+    )
+    if visibility_raw is not None and visibility_raw not in _B39_VISIBILITY_VALUES:
+        return _finding(
+            "B39", UNKNOWN,
+            f"tools.sessions.visibility={visibility_raw!r} is not one of the values "
+            "OpenClaw accepts, so session-tool visibility cannot be determined. "
+            "OpenClaw declares it as a strict enum and rejects the whole config at "
+            "load time when the value is wrong.",
+            'Set tools.sessions.visibility to one of "self", "tree", "agent", "all", '
+            "or remove it entirely, then re-run the audit.",
+            evidence=[f"tools.sessions.visibility={visibility_raw!r}"],
+        )
 
-    # FAIL: dmScope=="main" combined with open/allowlist channels
-    # (when dmScope=="main" all DM senders contaminate the same session)
+    dm_scope_resolved = dm_scope_raw or "main"
+    visibility_resolved = visibility_raw or "all"
+
+    # FAIL: dmScope resolves (explicitly or by default) to "main" combined with
+    # open/allowlist channels (when dmScope=="main" all DM senders contaminate the
+    # same session)
     fail_ev: list[str] = []
-    if dm_scope == "main":
+    if dm_scope_resolved == "main":
         # Any channel that admits non-owner senders (open/allowlist/paired), INCLUDING
         # policies nested under channels.<p>.accounts.<id>. _external_input_channels is
         # accounts-aware; the previous top-level-only allowlist read missed account-nested
         # DM allowlists (B-058), returning a false PASS on a real cross-user-leak config.
         non_owner_channels = _external_input_channels(cfg)
         if non_owner_channels:
+            source = (
+                'session.dmScope="main"' if dm_scope_raw is not None
+                else 'session.dmScope is not set, and OpenClaw defaults this to "main"'
+            )
             fail_ev.append(
-                'session.dmScope="main" — all DM peers share ONE session '
-                f"(cross-user contamination / transcript leak); "
-                f"non-owner channels: {', '.join(non_owner_channels[:5])}"
+                f"{source} — all DM peers share ONE session (cross-user "
+                "contamination / transcript leak); non-owner channels: "
+                f"{', '.join(non_owner_channels[:5])}"
             )
 
     if fail_ev:
@@ -667,18 +792,25 @@ def check_session_visibility(ctx: Context) -> Finding:
             "; ".join(fail_ev),
             'Set session.dmScope to "per-peer", "per-channel-peer", or '
             '"per-account-channel-peer" so each DM sender gets an isolated session. '
-            'With dmScope="main" any DM peer can read and influence another user\'s '
-            "conversation history.",
+            'With dmScope="main" (OpenClaw\'s own default when the key is unset) any '
+            "DM peer can read and influence another user's conversation history.",
             evidence=fail_ev,
         )
 
-    # WARN: visibility lets one session read other sessions' transcripts
+    # WARN: visibility resolves (explicitly or by default) to a value that lets one
+    # session read other sessions' transcripts
     warn_ev: list[str] = []
-    if visibility in ("agent", "all"):
+    if visibility_resolved in ("agent", "all"):
+        source = (
+            f'tools.sessions.visibility="{visibility_resolved}"'
+            if visibility_raw is not None
+            else 'tools.sessions.visibility is not set, and OpenClaw defaults this '
+            'to "all"'
+        )
         warn_ev.append(
-            f'tools.sessions.visibility="{visibility}" — '
-            "a session (or tool) can read transcripts from other sessions "
-            "(cross-user data leak risk)"
+            f"{source} — a session (or tool) can read transcripts from other "
+            "sessions (cross-user data leak risk), unless a sandboxed agent's own "
+            "sandbox.sessionToolsVisibility clamp narrows this at runtime"
         )
 
     if warn_ev:
@@ -688,25 +820,23 @@ def check_session_visibility(ctx: Context) -> Finding:
             "; ".join(warn_ev),
             'Set tools.sessions.visibility to "self" or "tree" to restrict '
             'transcript access to the current session only. Values "agent" and '
-            '"all" allow cross-session transcript reads.',
+            '"all" (OpenClaw\'s own default when the key is unset) allow '
+            "cross-session transcript reads — check "
+            "agents.defaults.sandbox.sessionToolsVisibility if you believe a sandbox "
+            "clamp already narrows this for the agents you run.",
             evidence=warn_ev,
         )
 
-    # Build PASS detail from what we observed
-    details = []
-    if dm_scope:
-        details.append(f'session.dmScope="{dm_scope}"')
-    if visibility:
-        details.append(f'tools.sessions.visibility="{visibility}"')
-    pass_detail = (
-        ("Session isolation looks good: " + "; ".join(details) + ".")
-        if details
-        else "Session config present; no cross-user leak signals detected."
-    )
+    # Build PASS detail from what we observed (both fields always resolve to a
+    # concrete value by this point, explicit or default)
+    details = [
+        f'session.dmScope="{dm_scope_resolved}"',
+        f'tools.sessions.visibility="{visibility_resolved}"',
+    ]
     return _finding(
         "B39",
         PASS,
-        pass_detail,
+        "Session isolation looks good: " + "; ".join(details) + ".",
         "Keep session.dmScope at per-peer or narrower and "
         'tools.sessions.visibility at "self" or "tree".',
     )

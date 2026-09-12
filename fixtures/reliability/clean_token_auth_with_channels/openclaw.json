@@ -8,8 +8,10 @@
   "tools": {
     "profile": "minimal",
     "exec": { "mode": "ask" },
-    "elevated": { "allowFrom": ["owner-uid-7f3a"] }
+    "elevated": { "allowFrom": ["owner-uid-7f3a"] },
+    "sessions": { "visibility": "self" }
   },
+  "session": { "dmScope": "per-peer" },
   "sandbox": {
     "mode": "enabled",
     "network_mode": "bridge",

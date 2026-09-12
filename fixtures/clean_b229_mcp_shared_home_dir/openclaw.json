@@ -2,8 +2,10 @@
   "channels": {
     "telegram": { "enabled": true, "dmPolicy": "allowlist" }
   },
+  "session": { "dmScope": "per-peer" },
   "tools": {
-    "web": { "fetch": { "enabled": true } }
+    "web": { "fetch": { "enabled": true } },
+    "sessions": { "visibility": "self" }
   },
   "mcp": {
     "servers": {

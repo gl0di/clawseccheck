@@ -350,8 +350,15 @@ def test_b39_no_session_config_unknown():
     assert check_session_visibility(_ctx({})).status == UNKNOWN
 
 
-def test_b39_empty_config_unknown():
-    assert check_session_visibility(_ctx({"gateway": {}})).status == UNKNOWN
+# B-796: a config that WAS found (non-empty, just unrelated to sessions) now correctly
+# WARNs rather than UNKNOWN -- OpenClaw defaults tools.sessions.visibility to "all"
+# when the key is absent, so "this config never mentions sessions" is the single most
+# exposed state B39 can observe, not a neutral one. Only a config that was never found
+# at all stays UNKNOWN (test_b39_no_session_config_unknown, above, via config_found).
+def test_b39_config_present_without_session_keys_warns_on_visibility_default():
+    f = check_session_visibility(_ctx({"gateway": {}}))
+    assert f.status == WARN
+    assert "defaults this to" in f.detail
 
 
 # --- FAIL: dmScope == "main" with non-owner channels ---
@@ -414,9 +421,16 @@ def test_b39_main_scope_paired_channel_fails():
     assert check_session_visibility(_ctx(cfg)).status == FAIL
 
 
-# clean control: an owner-only channel is NOT external ingress -> no cross-user risk
+# clean control: an owner-only channel is NOT external ingress -> no cross-user risk.
+# tools.sessions.visibility is set explicitly to "self" here so this test isolates the
+# dmScope+channel dimension from the (correctly, separately-WARNing since B-796)
+# visibility-default dimension.
 def test_b39_main_scope_owner_only_channel_passes():
-    cfg = {"session": {"dmScope": "main"}, "channels": {"tg": {"dmPolicy": "owner"}}}
+    cfg = {
+        "session": {"dmScope": "main"},
+        "channels": {"tg": {"dmPolicy": "owner"}},
+        "tools": {"sessions": {"visibility": "self"}},
+    }
     assert check_session_visibility(_ctx(cfg)).status == PASS
 
 
@@ -484,15 +498,113 @@ def test_b39_per_channel_peer_scope_passes():
 
 
 def test_b39_per_account_channel_peer_scope_passes():
-    cfg = {"session": {"dmScope": "per-account-channel-peer"}}
+    # tools.sessions.visibility set explicitly so this isolates the dmScope dimension
+    # from the visibility-default dimension (see B-796 note above).
+    cfg = {
+        "session": {"dmScope": "per-account-channel-peer"},
+        "tools": {"sessions": {"visibility": "self"}},
+    }
     f = check_session_visibility(_ctx(cfg))
     assert f.status == PASS
 
 
-def test_b39_session_cfg_only_no_vis_passes():
+# B-796: this used to assert PASS -- "dmScope set, visibility never mentioned" was
+# exactly the lying-PASS shape the fix closes. tools.sessions.visibility absent
+# resolves to OpenClaw's own "all" default (resolveSessionToolsVisibility,
+# session-visibility-*.mjs), which is a real cross-session exposure this check must
+# not stay silent about just because the operator only touched the OTHER field.
+def test_b39_session_cfg_only_no_vis_warns_on_visibility_default():
     cfg = {"session": {"dmScope": "per-peer"}}
     f = check_session_visibility(_ctx(cfg))
-    assert f.status == PASS
+    assert f.status == WARN
+    assert "defaults this to" in f.detail
+
+
+# ============================================================
+# B-796/B-797 — absent-case defaults (2026.9.3 dist, verified by direct read of the
+# canonical runtime resolvers, not inferred from a schema description):
+#   resolveSessionToolsVisibility (session-visibility-*.mjs) defaults ANY missing or
+#   unrecognized tools.sessions.visibility to "all".
+#   base-session-key-*.mjs's session-key builder resolves an absent session.dmScope to
+#   "main" (cfg.session?.dmScope ?? "main").
+# Both fields are declared as strict zod enums, so a present-but-invalid value is a
+# config OpenClaw's own loader would reject outright -- UNKNOWN, never guessed into
+# the resolved-default path meant for genuine absence.
+# ============================================================
+
+def test_b39_absent_dmscope_fails_like_explicit_main():
+    """B-797: no session.dmScope at all, but an open channel -- must FAIL exactly as
+    an explicit dmScope="main" would, not silently pass because the key was never
+    set. tools.sessions.visibility pinned safe to isolate this from B-796's own WARN."""
+    cfg = {
+        "channels": {"discord": {"dmPolicy": "open"}},
+        "tools": {"sessions": {"visibility": "self"}},
+    }
+    f = check_session_visibility(_ctx(cfg))
+    assert f.status == FAIL
+    assert "defaults this to" in f.detail
+
+
+def test_b39_absent_visibility_alone_warns():
+    """B-796: a config that touches NEITHER field at all -- both resolved defaults are
+    unsafe, but the FAIL branch needs a channel to fire on; with none configured, the
+    WARN (visibility only) is what should surface. Uses a non-empty config so
+    Context's config_found=False default doesn't route this into the "no openclaw.json
+    found at all" branch instead (see test_b39_no_session_config_unknown for that
+    case)."""
+    f = check_session_visibility(_ctx({"agents": {"defaults": {}}}))
+    assert f.status == WARN
+    assert "defaults this to" in f.detail
+
+
+def test_b39_both_absent_fails_when_channel_open():
+    """FAIL takes priority over WARN even when BOTH fields are resolved defaults, not
+    explicit values -- the same priority the pre-existing
+    test_b39_fail_takes_priority_over_warn pins for explicit values."""
+    cfg = {"channels": {"telegram": {"dmPolicy": "allowlist"}}}
+    f = check_session_visibility(_ctx(cfg))
+    assert f.status == FAIL
+
+
+def test_b39_invalid_dmscope_value_is_unknown():
+    """session.dmScope is a strict zod enum -- a config carrying a value outside its
+    four literals is one OpenClaw's own loader rejects at parse time, so this check
+    must say UNKNOWN, never guess the runtime default applies to a config that
+    wouldn't actually load."""
+    cfg = {"session": {"dmScope": "everyone"}}
+    f = check_session_visibility(_ctx(cfg))
+    assert f.status == UNKNOWN
+
+
+def test_b39_invalid_visibility_value_is_unknown():
+    cfg = {"tools": {"sessions": {"visibility": "everyone"}}}
+    f = check_session_visibility(_ctx(cfg))
+    assert f.status == UNKNOWN
+
+
+def test_b39_non_dict_session_is_unknown():
+    f = check_session_visibility(_ctx({"session": "not-a-dict"}))
+    assert f.status == UNKNOWN
+
+
+def test_b39_non_dict_tools_is_unknown():
+    f = check_session_visibility(_ctx({"tools": "not-a-dict"}))
+    assert f.status == UNKNOWN
+
+
+def test_b39_non_dict_tools_sessions_is_unknown():
+    f = check_session_visibility(_ctx({"tools": {"sessions": "not-a-dict"}}))
+    assert f.status == UNKNOWN
+
+
+def test_b39_genuinely_no_config_stays_unknown_even_with_exposure_shaped_input():
+    """Golden Rule #4: a home with no openclaw.json at all must never be scored as if
+    it were a real, exposed install -- config_found=False takes priority over any
+    resolved-default reasoning, matching B175's own precedent for the same shape."""
+    c = Context(home=Path("/nonexistent"), config_found=False, config_parse_error=False)
+    c.config = {}
+    f = check_session_visibility(c)
+    assert f.status == UNKNOWN
 
 
 # --- Evidence populated on FAIL ---

@@ -157,7 +157,6 @@ tools.mcp
 tools.message.crossContext
 tools.message.crossContext.allowAcrossProviders
 tools.profile
-tools.sessions
 tools.web
 tools.web.fetch.enabled
 tools.web.fetch.maxRedirects

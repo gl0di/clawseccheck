@@ -390,11 +390,17 @@ def test_empty_config_no_paths():
 
 
 def test_minimal_config_no_paths():
+    # session.dmScope/tools.sessions.visibility pinned safe (B-796/B-797): both default
+    # to their riskiest value when unset ("main"/"all"), so a config with an allowlist
+    # channel and no explicit session isolation genuinely trips RISK-08 -- this test's
+    # own "minimal, no paths" intent needs the explicit safe values to hold.
     cfg = {
         "gateway": {"bind": "127.0.0.1:8080", "auth": {"mode": "token",
                     "token": "a-very-long-token-of-32-characters"}},
         "channels": {"telegram": {"dmPolicy": "allowlist", "groupPolicy": "allowlist"}},
         "logging": {"redactSensitive": "tools"},
+        "session": {"dmScope": "per-peer"},
+        "tools": {"sessions": {"visibility": "self"}},
     }
     paths = _paths(cfg)
     assert paths == []
