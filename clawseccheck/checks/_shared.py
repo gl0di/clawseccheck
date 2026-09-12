@@ -1883,6 +1883,73 @@ def _external_input_channels(cfg: dict) -> list[str]:
     return out
 
 
+# B371/B372 (C-525): container-key vocabulary for per-conversation mention-gate /
+# bot-admission overrides. Grounded programmatically, not read by eye: the installed
+# dist (openclaw@2026.9.3) ships every bundled channel plugin's config JSON Schema in
+# one runtime-parsed registry (`dist/ids-*.mjs`'s `RAW_BUNDLED_CHANNEL_CONFIG_METADATA`,
+# an array of string chunks joined then `JSON.parse`d — 27 plugins: a2a, buzz,
+# clickclack, discord, feishu, googlechat, imessage, irc, line, matrix, mattermost,
+# msteams, nextcloud-talk, nostr, qa-channel, raft, reef, signal, slack, sms,
+# synology-chat, telegram, tlon, twitch, whatsapp, zalo, zalouser). Walking all 27
+# schemas' `properties` recursively for requireMention/chatmode/allowBots (script, not
+# manual reading — a blob this size cannot be eyeballed reliably) found every
+# per-conversation override lives under exactly one of the five container keys below,
+# in one of three shapes:
+#   - flat: an entry under the container carries the field directly (most providers'
+#     ``groups.*``/``rooms.*``; Discord's ``guilds.*``; Slack's ``channels.*``).
+#   - one level deeper: Discord's ``guilds.*.channels.*`` and Telegram's
+#     ``groups.*.topics.*`` / ``direct.*.topics.*``.
+# No provider needs a hardcoded branch (Golden Rule #6): the walk below just checks
+# whether each key is PRESENT with a dict-of-dicts shape and recurses if so, so an
+# unfamiliar 28th provider that reuses one of these container names is covered for
+# free, and one that doesn't simply contributes no scopes beyond its own root.
+# ``chatmode`` is deliberately checked only at the root/account level, never inside a
+# nested container — grounded fact, not an oversight: of the 27 schemas, only
+# Mattermost declares ``chatmode`` at all, and even there it never appears inside
+# ``groups.*``.
+_MENTION_GATE_CONTAINERS = ("groups", "rooms", "guilds", "channels", "direct")
+_MENTION_GATE_SUBCONTAINERS = {
+    "groups": ("topics",),
+    "guilds": ("channels",),
+    "direct": ("topics",),
+}
+
+
+def _mention_gate_scopes(node: dict) -> list:
+    """``[(label, scope_dict), ...]`` for *node* itself and every per-conversation
+    override scope nested under it, per the container vocabulary above.
+
+    *node* must already be a single RESOLVED channel node (the channel root, or one
+    merged account from ``_resolved_channel_nodes``) — this only walks conversation-
+    scoped nesting WITHIN one already-resolved node; it does not itself merge
+    accounts. ``label`` is ``""`` for *node* itself, else a dotted path like
+    ``"groups.*"`` or ``"guilds.123.channels.456"`` naming the scope for evidence
+    text. A container/entry that isn't the expected dict shape (schema drift, or a
+    provider that simply doesn't use that container) contributes nothing for that
+    branch rather than raising — the caller decides what an absent scope means.
+    """
+    if not isinstance(node, dict):
+        return []
+    scopes = [("", node)]
+    for container in _MENTION_GATE_CONTAINERS:
+        entries = node.get(container)
+        if not isinstance(entries, dict):
+            continue
+        for key, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            scopes.append((f"{container}.{key}", entry))
+            for sub in _MENTION_GATE_SUBCONTAINERS.get(container, ()):
+                sub_entries = entry.get(sub)
+                if not isinstance(sub_entries, dict):
+                    continue
+                for sub_key, sub_entry in sub_entries.items():
+                    if not isinstance(sub_entry, dict):
+                        continue
+                    scopes.append((f"{container}.{key}.{sub}.{sub_key}", sub_entry))
+    return scopes
+
+
 # B-072: cap recursion depth for config walkers so a pathologically deep (but
 # validly-parsed) structure degrades gracefully instead of raising an uncaught
 # RecursionError. High enough that it never affects any real-world config shape.

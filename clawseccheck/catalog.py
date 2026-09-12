@@ -3200,6 +3200,25 @@ CATALOG: list[CheckMeta] = [
         scored=False,
         surface="sessions",
     ),
+    # B371/B372 (C-525, split out of C-411 2026-09-11 — the requireMention/chatmode/
+    # allowBots bullets needed their own grounding pass: nesting is genuinely
+    # heterogeneous per channel provider, not one config path).
+    CheckMeta(
+        "B371",
+        "Group/room mention gate disabled or bypassed on an externally-reachable channel",
+        MEDIUM,
+        "hardening",
+        "Untrusted Input Gating",
+        surface="channels",
+    ),
+    CheckMeta(
+        "B372",
+        "Bot-authored messages accepted (allowBots) on an externally-reachable channel",
+        MEDIUM,
+        "hardening",
+        "Untrusted Input Gating",
+        surface="channels",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -3297,6 +3316,8 @@ AST_MAP = {
     "B39": ("AST06",),
     "B362": ("AST06",),  # session.scope=global on an open channel = weak isolation (cf. B39)
     "B361": ("AST03",),  # unrestricted agent-to-agent pivot reachable from an open channel = over-privileged reach (cf. B72)
+    "B371": ("AST05",),  # mention-gate bypass on a reachable channel = untrusted external instructions (cf. B140)
+    "B372": ("AST05",),  # bot-authored input admitted on a reachable channel = untrusted external instructions (cf. B140)
     "B363": ("AST03",),  # cross-provider message send = over-privileged reach (cf. B76)
     "B48": ("AST06", "AST03"),
     "B70": ("AST06",),
@@ -3425,6 +3446,8 @@ OWASP_MAP = {
     "B39": ("LLM02",),
     "B362": ("LLM02",),  # session.scope=global cross-sender context bleed = Sensitive Info Disclosure (cf. B39)
     "B361": ("LLM06",),  # agent-to-agent pivot = Excessive Agency (cf. B72)
+    "B371": ("LLM01",),  # mention-gate bypass on a reachable channel = Prompt Injection surface (cf. B140)
+    "B372": ("LLM01",),  # bot-authored input admitted on a reachable channel = Prompt Injection surface (cf. B140)
     "B363": ("LLM02",),  # cross-provider message egress = Sensitive Info Disclosure (cf. B12/C014)
     "B41": ("LLM02", "LLM06"),
     "B42": ("LLM03",),

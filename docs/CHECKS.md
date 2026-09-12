@@ -2619,6 +2619,32 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
+### B371 - Group/room mention gate disabled or bypassed on an externally-reachable channel
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Untrusted Input Gating
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM01 Prompt Injection
+- What it checks: Group/room mention gate disabled or bypassed on an externally-reachable channel
+- Remediation:
+  - none
+
+### B372 - Bot-authored messages accepted (allowBots) on an externally-reachable channel
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Untrusted Input Gating
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM01 Prompt Injection
+- What it checks: Bot-authored messages accepted (allowBots) on an externally-reachable channel
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

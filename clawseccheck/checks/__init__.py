@@ -245,6 +245,8 @@ from ._agents import (
     check_embedded_agent_project_settings_policy,
     check_agent_separation,
     check_agent_to_agent_pivot,
+    check_channel_allow_bots,
+    check_channel_mention_gate_bypass,
     check_cross_context_send,
     check_delegation_reassembly,
     check_multiagent_exposure,
@@ -1387,6 +1389,13 @@ CHECKS = [
     check_session_scope_global,
     check_cross_context_send,
     check_session_reset_triggers,
+    # B371/B372 (C-525, split out of C-411) — requireMention/chatmode mention-gate
+    # bypass and allowBots bot-authored-input admission, both scoped to channels
+    # that admit non-owner senders; nesting is genuinely heterogeneous per
+    # provider (root/account/groups/rooms/guilds.channels/groups.topics/channels),
+    # see _mention_gate_scopes in checks/_shared.py for the grounding trail.
+    check_channel_mention_gate_bypass,
+    check_channel_allow_bots,
     check_untrusted_context,
     check_wildcard_group_ingress,
     check_known_vulns,

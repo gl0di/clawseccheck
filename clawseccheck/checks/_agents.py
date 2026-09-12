@@ -39,6 +39,7 @@ from ._shared import (
     _has_approval_gate,
     _hint,
     _key_advice,
+    _mention_gate_scopes,
     _resolved_channel_nodes,
     _surface_absent,
     _trifecta_legs,
@@ -1192,6 +1193,240 @@ def check_session_reset_triggers(ctx: Context) -> Finding:
         evidence=sorted(triggers)[:8],
         config_field_paths={"session.resetTriggers"},
         scored=False,
+    )
+
+
+def check_channel_mention_gate_bypass(ctx: Context) -> Finding:
+    """B371 (C-525) — requireMention/chatmode: whether an externally-reachable
+    channel's group/room/topic mention gate is disabled or bypassed, letting every
+    message in a busy shared conversation reach the agent as untrusted input rather
+    than only ones that @-mention it. Split out of C-411 (filed as C-525) because
+    these two fields nest differently per provider — see ``_mention_gate_scopes``
+    in ``_shared.py`` for the full grounding trail (27 bundled channel plugin
+    schemas walked programmatically against openclaw@2026.9.3) and the container
+    vocabulary (groups/rooms/guilds/guilds.channels/channels/direct.topics/
+    groups.topics) this reuses.
+
+    Two independent bypass shapes, found across different providers:
+
+    - ``requireMention: false`` — the mention gate is explicitly off, at the
+      channel root, an account, or any nested group/room/topic/guild-channel
+      scope.
+    - ``chatmode: "onmessage"`` — Mattermost-specific: replies to every channel
+      message regardless of mention, the same effective bypass under a different
+      name (its sibling values ``"oncall"``/``"onchar"`` stay mention/trigger-
+      gated). Of the 27 bundled schemas, only Mattermost declares ``chatmode`` at
+      all, and only at the channel-root/account level — never inside a nested
+      group/room scope, so this is checked there only.
+
+    Scoped to what can actually receive untrusted content: a channel that admits
+    no non-owner sender at all (``_external_input_channels``, the same gate
+    B39/B361/B362 use) has no one to bypass the gate for, so its own bypassed
+    setting is not reported. This is a coarse, channel-level reachability gate
+    (dmPolicy/groupPolicy/wildcard-group posture), not a per-group one — the same
+    granularity B361/B362 already accept.
+
+    WARN    — at least one externally-reachable channel has ``requireMention:
+              false`` or ``chatmode: "onmessage"`` at its root, an account, or a
+              nested group/room/topic/guild-channel scope.
+    PASS    — no externally-reachable channel has such a bypass anywhere
+              (including when no channel admits non-owner senders at all).
+    UNKNOWN — the config was not read, ``channels`` is present but not an object,
+              or every scope was free of an explicit bypass but at least one scope
+              set requireMention/chatmode to a value this audit does not
+              recognize (schema drift) — since that value's real effect could not
+              be determined, PASS cannot be certified either.
+    """
+    unreadable = _config_unreadable("B371", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B371",
+            UNKNOWN,
+            "No config was read, so whether any channel's mention gate is "
+            "disabled or bypassed could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    channels_raw = cfg.get("channels")
+    if channels_raw is not None and not isinstance(channels_raw, dict):
+        return _finding(
+            "B371",
+            UNKNOWN,
+            "channels is present but is not a JSON object, so no channel's "
+            "mention-gate settings could be read.",
+            "Fix the channels block in openclaw.json so it is a JSON object, "
+            "then re-run the audit.",
+            config_field_paths={"channels"},
+        )
+    reachable = set(_external_input_channels(cfg))
+    bypassed: list = []
+    drifted: list = []
+    for name, c in _channels(cfg).items():
+        if name == "defaults" or name not in reachable or not isinstance(c, dict):
+            continue
+        for node in _resolved_channel_nodes(c):
+            for label, scope in _mention_gate_scopes(node):
+                prefix = f"{name}.{label}" if label else name
+                rm = scope.get("requireMention")
+                if rm is False:
+                    bypassed.append(f"{prefix}.requireMention=false")
+                elif rm is not None and not isinstance(rm, bool):
+                    drifted.append(f"{prefix}.requireMention")
+                if not label:  # chatmode only ever appears at the root/account scope
+                    cm = scope.get("chatmode")
+                    if cm == "onmessage":
+                        bypassed.append(f"{prefix}.chatmode=onmessage")
+                    elif cm is not None and cm not in ("oncall", "onmessage", "onchar"):
+                        drifted.append(f"{prefix}.chatmode")
+    if bypassed:
+        evidence = sorted(dict.fromkeys(bypassed))
+        return _finding(
+            "B371",
+            WARN,
+            f"{len(evidence)} channel scope(s) admit non-owner senders with the "
+            "mention gate disabled or bypassed (requireMention=false, or "
+            'Mattermost chatmode="onmessage") — every message in the '
+            "conversation reaches the agent as untrusted input, not only ones "
+            "that @-mention it.",
+            "Set requireMention to true (or Mattermost chatmode to "
+            '"oncall"/"onchar") for any group/room/channel that admits '
+            "non-owner senders, unless replying to every message is a "
+            "deliberate choice.",
+            evidence=evidence[:8],
+            config_field_paths={
+                "channels.*.requireMention",
+                "channels.mattermost.chatmode",
+            },
+        )
+    if drifted:
+        evidence = sorted(dict.fromkeys(drifted))
+        return _finding(
+            "B371",
+            UNKNOWN,
+            f"{len(evidence)} channel scope(s) set requireMention or chatmode to "
+            "a value this audit does not recognize, so whether the mention gate "
+            "is bypassed there could not be determined.",
+            "Fix the listed field(s) in openclaw.json to a recognized value, "
+            "then re-run the audit.",
+            evidence=evidence[:8],
+        )
+    return _finding(
+        "B371",
+        PASS,
+        "No externally-reachable channel has its mention gate disabled or "
+        'bypassed (requireMention=false, or Mattermost chatmode="onmessage").',
+        "Nothing to do.",
+    )
+
+
+def check_channel_allow_bots(ctx: Context) -> Finding:
+    """B372 (C-525) — allowBots: whether an externally-reachable channel accepts
+    messages authored by OTHER bot accounts as agent input. Grounded against the
+    installed dist (openclaw@2026.9.3) the same way as B371 (see
+    ``_mention_gate_scopes`` in ``_shared.py`` for the full trail): of the 27
+    bundled channel plugin schemas, five declare ``allowBots`` — ClickClack,
+    Discord, Feishu, GoogleChat and Slack take a plain boolean at the channel
+    root/account level (ClickClack and Slack ALSO at their nested groups/channels
+    container); Matrix takes ``boolean | "mentions"`` at its groups/rooms
+    container only (it has no channel-root form).
+
+    Bot-authored input is machine-speed untrusted injection — named in OpenClaw's
+    own ``botLoopProtection`` (a rate limiter for accepted bot-pair traffic, not a
+    gate on whether it is accepted at all): a compromised or malicious bot account
+    on the same channel can drive the agent exactly as fast as it can generate
+    messages, with no human in the loop. Matrix's ``"mentions"`` value still
+    admits bot-authored content whenever the bot names the agent — a mention is
+    not authentication — so it is treated the same as ``true`` here.
+
+    Scoped the same way as B371: only channels that admit non-owner senders at all
+    (``_external_input_channels``, the same gate B39/B361/B362/B371 use) are
+    considered, since a fully closed channel has no bot account to admit in the
+    first place.
+
+    WARN    — at least one externally-reachable channel/scope has
+              ``allowBots: true`` or ``allowBots: "mentions"``.
+    PASS    — no externally-reachable channel/scope has allowBots enabled
+              (including when no channel admits non-owner senders at all).
+    UNKNOWN — the config was not read, ``channels`` is present but not an object,
+              or every scope was free of an enabled allowBots but at least one
+              scope set it to a value this audit does not recognize.
+    """
+    unreadable = _config_unreadable("B372", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B372",
+            UNKNOWN,
+            "No config was read, so whether any channel accepts bot-authored "
+            "messages could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    channels_raw = cfg.get("channels")
+    if channels_raw is not None and not isinstance(channels_raw, dict):
+        return _finding(
+            "B372",
+            UNKNOWN,
+            "channels is present but is not a JSON object, so no channel's "
+            "allowBots setting could be read.",
+            "Fix the channels block in openclaw.json so it is a JSON object, "
+            "then re-run the audit.",
+            config_field_paths={"channels"},
+        )
+    reachable = set(_external_input_channels(cfg))
+    enabled: list = []
+    drifted: list = []
+    for name, c in _channels(cfg).items():
+        if name == "defaults" or name not in reachable or not isinstance(c, dict):
+            continue
+        for node in _resolved_channel_nodes(c):
+            for label, scope in _mention_gate_scopes(node):
+                prefix = f"{name}.{label}" if label else name
+                ab = scope.get("allowBots")
+                if ab is True:
+                    enabled.append(f"{prefix}.allowBots=true")
+                elif ab == "mentions":
+                    enabled.append(f'{prefix}.allowBots="mentions"')
+                elif ab is not None and ab is not False:
+                    drifted.append(f"{prefix}.allowBots")
+    if enabled:
+        evidence = sorted(dict.fromkeys(enabled))
+        return _finding(
+            "B372",
+            WARN,
+            f"{len(evidence)} channel scope(s) admit non-owner senders with "
+            "allowBots enabled — messages authored by other bot accounts reach "
+            "the agent as input, at whatever rate the bot account can generate "
+            "them.",
+            "Set allowBots to false for any group/room/channel that admits "
+            "non-owner senders, unless accepting bot-authored input is a "
+            "deliberate integration.",
+            evidence=evidence[:8],
+            config_field_paths={"channels.*.allowBots"},
+        )
+    if drifted:
+        evidence = sorted(dict.fromkeys(drifted))
+        return _finding(
+            "B372",
+            UNKNOWN,
+            f"{len(evidence)} channel scope(s) set allowBots to a value this "
+            "audit does not recognize, so whether bot-authored input is "
+            "accepted there could not be determined.",
+            "Fix the listed field(s) in openclaw.json to a recognized value "
+            '(true, false, or "mentions"), then re-run the audit.',
+            evidence=evidence[:8],
+        )
+    return _finding(
+        "B372",
+        PASS,
+        "No externally-reachable channel accepts bot-authored input "
+        "(allowBots).",
+        "Nothing to do.",
     )
 
 
