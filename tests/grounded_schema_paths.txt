@@ -40,6 +40,8 @@ auth.profiles
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
 channels
 channels.defaults.contextVisibility
+cloudWorkers.preparedPool.maxTotal
+cloudWorkers.profiles
 commands.allowFrom
 commands.bash
 commands.config

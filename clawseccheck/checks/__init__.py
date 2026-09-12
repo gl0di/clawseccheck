@@ -329,6 +329,7 @@ from ._config import (
     check_env_vars_path_override,
     check_audit_target_divergence,
     check_audit_suppressions,
+    check_cloudworkers_prepared_pool,
     check_control_plane_mutation,
     check_env_breakglass_toggles,
     check_shell_env_fallback,
@@ -336,6 +337,7 @@ from ._config import (
     check_control_ui_embed_sandbox,
     check_controlui_origins,
     check_credential_blast_radius,
+    check_config_externally_managed,
     check_dangerous_overrides,
     check_effective_bind,
     check_gateway,
@@ -1400,6 +1402,7 @@ CHECKS = [
     check_wildcard_group_ingress,
     check_known_vulns,
     check_credential_blast_radius,
+    check_config_externally_managed,  # B373 — OPENCLAW_CONFIG_READONLY / Nix mode (C-527)
     check_effective_tools,
     check_host_network_ids,
     check_host_audit,
@@ -1539,6 +1542,7 @@ CHECKS = [
     # vetted skill — a category error that adds no signal to a pre-install verdict. It
     # belongs to the full audit only, the same reasoning B105 records for itself.
     check_compiled_tool_poisoning,  # B185 — poisoned tool description already delivered to the model (F-133, RT-1)
+    check_cloudworkers_prepared_pool,  # B374 — cloudWorkers 9.4 prepared-pool default-on warm reserve (C-526)
 ]
 
 

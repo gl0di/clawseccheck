@@ -192,6 +192,7 @@ check_codex_project_trust
 check_compiled_tool_poisoning
 check_conditional_sleeper_trigger
 check_config_audit_log
+check_config_externally_managed
 check_config_health_integrity
 check_config_trust_widening
 check_control_plane_mutation

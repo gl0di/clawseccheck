@@ -2645,6 +2645,32 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B373 - Externally-managed, read-only config posture (OPENCLAW_CONFIG_READONLY / Nix mode)
+
+- Severity: LOW
+- Block: advisory
+- Framework: Config Integrity / External Management
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Externally-managed, read-only config posture (OPENCLAW_CONFIG_READONLY / Nix mode)
+- Remediation:
+  - none
+
+### B374 - cloudWorkers prepared-pool default-on warm reserve
+
+- Severity: LOW
+- Block: advisory
+- Framework: Off-Machine Execution
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: cloudWorkers prepared-pool default-on warm reserve
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

@@ -306,7 +306,8 @@ _EXEMPT = {
                  "layer they share) is still deferred, but it is no longer only an "
                  "I-022 secondary target — it is the second-largest structural debt "
                  "after checks/_content.py.",
-    "catalog.py": "~3,404 lines — the CheckMeta CATALOG (one entry per check) + BY_ID + "
+    "catalog.py": "~3,916 lines (restated 2026-09-12, C-526/C-527 — was ~3,404) — the "
+                  "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
     "collector.py": "~6,951 lines — the read-only collection layer (config / bootstrap / skill "

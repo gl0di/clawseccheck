@@ -3221,6 +3221,41 @@ CATALOG: list[CheckMeta] = [
         "Untrusted Input Gating",
         surface="channels",
     ),
+    # B373 (C-527): OPENCLAW_CONFIG_READONLY / OPENCLAW_NIX_MODE — new in
+    # OpenClaw 2026.9.4, grounded against the live installed 9.4 dist. See the module
+    # comment above check_config_externally_managed (checks/_config.py) for the full
+    # resolver/isBlockedConfigEnvVar grounding. Disclosure-only by construction: an
+    # externally-managed read-only config is a deliberate hardening posture an operator
+    # opts into (Nix, a container/K8s-managed deployment); its absence is simply the
+    # default OpenClaw setup, not a gap. LOW/advisory/scored=False — there is no
+    # plausible FAIL or WARN shape for "the config is protected from being rewritten"
+    # (Golden Rule #5), so this can only ever report PASS or UNKNOWN.
+    CheckMeta(
+        "B373",
+        "Externally-managed, read-only config posture (OPENCLAW_CONFIG_READONLY / Nix mode)",
+        LOW,
+        "advisory",
+        "Config Integrity / External Management",
+        scored=False,
+        surface="monitoring",
+    ),
+    # B374 (C-526): cloudWorkers prepared-pool — new in OpenClaw 2026.9.4, grounded
+    # against the live installed 9.4 dist. See the module comment above
+    # check_cloudworkers_prepared_pool (checks/_config.py) for the full
+    # createPreparedWorkerPool/DEFAULT_READY_WORKERS/DEFAULT_MAX_TOTAL grounding.
+    # Gated on cloudWorkers.profiles actually being configured (UNKNOWN otherwise —
+    # the overwhelming majority of installs today). WARN/advisory/scored=False: a
+    # default-on warm remote-worker reserve existing is not itself a hole, so this
+    # never reaches FAIL and needed no C-135 pass.
+    CheckMeta(
+        "B374",
+        "cloudWorkers prepared-pool default-on warm reserve",
+        LOW,
+        "advisory",
+        "Off-Machine Execution",
+        scored=False,
+        surface="agents",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

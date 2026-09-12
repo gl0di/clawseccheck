@@ -1372,6 +1372,151 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     )
 
 
+# ---------------------------------------------------------------------------
+# B373 (C-527): OPENCLAW_CONFIG_READONLY — an externally-managed,
+# read-only config posture. New in the OpenClaw 2026.9.4 release; grounded against the
+# LIVE installed 9.4 dist (not the changelog), verbatim:
+#
+#   paths-V8kKIUzt.mjs:60-67
+#     function resolveIsNixMode(env = process.env) {
+#         return env.OPENCLAW_NIX_MODE === "1";
+#     }
+#     function resolveIsConfigReadOnly(env = process.env) {
+#         return env.OPENCLAW_CONFIG_READONLY === "1" || resolveIsNixMode(env);
+#     }
+#
+# So Nix mode implies config-read-only, and only the exact string "1" enables either.
+# `config-write-guard-Y0VYnQza.mjs` throws a dedicated `ConfigReadOnlyError`
+# ("Config is externally managed (`OPENCLAW_CONFIG_READONLY=1`), so OpenClaw treats
+# openclaw.json as immutable.") from every config-mutating command path
+# (`management-mutations`, `plugins-{install,update,uninstall}-command`,
+# `update-repair-command`, `onboarding-plugin-install`, …) — this is wired through the
+# whole write surface, not a single guarded call site.
+#
+# The vendor treats the variable as security-relevant itself: `isBlockedConfigEnvVar`
+# (config-env-vars-CteCTHfF.mjs:43-45) refuses to let `config.env` set
+# OPENCLAW_CONFIG_READONLY (alongside OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS /
+# OPENCLAW_INCLUDE_ROOTS / the isDangerousHostEnvVarName family) — a config cannot switch
+# off its own read-only protection. It also sits in the path/identity env allowlist
+# (`GATEWAY_CONFIG_SELECTION_ENV_KEYS`, io.read-helpers-C4y9IMNv.mjs:19-36) next to
+# OPENCLAW_AGENT_DIR/OPENCLAW_CONFIG_PATH/OPENCLAW_HOME/OPENCLAW_STATE_DIR/
+# OPENCLAW_WORKSPACE_DIR, and daemon installs deliberately PRESERVE it across a service
+# reinstall (`PRESERVED_OPENCLAW_OPERATOR_OPT_IN_ENV_KEYS`, daemon-install-helpers-
+# 0_9NLfzd.mjs:373-377) rather than wiping it like every other OPENCLAW_* key.
+#
+# WHY THIS IS DISCLOSURE-ONLY, NEVER A FAIL/WARN (per Golden Rule #5 and the task brief):
+# there is no plausible bad state here. An externally-managed, read-only config is a
+# hardening measure an operator opts into on purpose (Nix module, container/K8s-managed
+# deployment); its ABSENCE is simply the default OpenClaw setup, not a gap. Reporting
+# absence as a WARN would be recommending an operational posture (giving up in-place
+# config mutation, wizard flows, plugin install/update) that is wrong advice for the
+# overwhelming majority of installs.
+#
+# DETECTION CHANNEL: identical to B186/B41 — `persistent_env_evidence` (systemd
+# Environment=/EnvironmentFile= for an OpenClaw-related unit, then the two global runtime
+# dotenv files). Never `os.environ`: that is the auditing shell's environment, not the
+# audited gateway process's, and the ambient-shell channel (an interactive export) is
+# consciously left as the same permanent PASS-confidence ceiling B186 documents — it can
+# never be seen by a persistent, on-disk read, however complete.
+#
+# CONSUMER CONTEXT (angle 1 of C-527, deliberately NOT wired into verdict logic here):
+# under this mode OpenClaw itself never writes openclaw.json, so configjournal.py's
+# journal-head comparison and the monitor's config-file identity dimension
+# (monitordims/_configfile.py) both lose their usual "no journal entry between two runs"
+# baseline — a config that DOES change while this mode is active is a STRONGER signal
+# (nothing OpenClaw does should touch the file at all), not a weaker one. This check
+# surfaces the mode itself, every run, which gives a reader the context needed to
+# reinterpret a config-drift alert correctly without threading mode-awareness into
+# configjournal.py or the monitordims C-433 dimension package (a materially larger,
+# differentially-tested surface) — deferred, not implemented, see the C-527 Pulse
+# comment for the full reasoning.
+_CONFIG_READONLY_MODE_VARS = (
+    ("OPENCLAW_CONFIG_READONLY", "read-only"),
+    ("OPENCLAW_NIX_MODE", "Nix"),
+)
+
+
+def check_config_externally_managed(ctx: Context) -> Finding:
+    """B373 — externally-managed, read-only config posture (OPENCLAW_CONFIG_READONLY /
+    OPENCLAW_NIX_MODE), new in OpenClaw 2026.9.4.
+
+    PASS    — a persistent artifact (systemd unit or global runtime dotenv file) shows
+              OPENCLAW_CONFIG_READONLY=1 or OPENCLAW_NIX_MODE=1: OpenClaw refuses to
+              rewrite openclaw.json while this is active. This is a positive, hardening
+              observation, not a risk.
+    PASS    — no such value was observed, but at least one persistent artifact was
+              actually read (``env_evidence_readable``). Absence is the default OpenClaw
+              posture and is not itself a finding; carries ``pass_confidence="no_signal"``
+              because an ambient-shell export is invisible to any on-disk read, the same
+              permanent ceiling B186 documents.
+    UNKNOWN — no persistent artifact was even present to read (no OpenClaw-related
+              systemd unit, no global dotenv file). There is no evidence to build a PASS
+              on at all.
+
+    Never WARN/FAIL — see the module comment above this function for why no adverse
+    state exists for this signal.
+    """
+    hits: "list[tuple[str, str, str, str]]" = []  # (var, mode_label, value, source)
+    for var, mode_label in _CONFIG_READONLY_MODE_VARS:
+        value, source = persistent_env_evidence(ctx, var)
+        if isinstance(value, str) and value.strip() == "1":
+            hits.append((var, mode_label, value, source or "a persistent artifact"))
+
+    if hits:
+        evidence = [
+            f"{var}=1 ({mode_label} mode) via {_detail_path(source, ctx.home)}"
+            for var, mode_label, _value, source in hits
+        ]
+        return _finding(
+            "B373",
+            PASS,
+            "This OpenClaw install is externally managed: " + "; ".join(evidence) + ". "
+            "OpenClaw refuses every config-mutating command path (plugin install/update/"
+            "uninstall, onboarding, repair, ordinary config writes) while this is active "
+            "and treats openclaw.json as immutable. Because OpenClaw itself will not "
+            "write this file, a config change observed while this mode is active did not "
+            "come from OpenClaw's own writer and is worth confirming, not dismissing.",
+            "No action needed — this is a deliberate hardening posture. Manage "
+            "openclaw.json through your external deployment source (Nix module, "
+            "container image, config-management tool) rather than through OpenClaw's "
+            "own wizard/plugin-install flows, which will refuse to write while this is "
+            "active.",
+            evidence=evidence,
+            confidence="HIGH",
+        )
+
+    if env_evidence_readable(ctx):
+        return _finding(
+            "B373",
+            PASS,
+            "No externally-managed read-only config mode (OPENCLAW_CONFIG_READONLY / "
+            "OPENCLAW_NIX_MODE) was found in the systemd user unit(s) and global dotenv "
+            "file(s) that were readable. This is the default OpenClaw posture — OpenClaw "
+            "manages openclaw.json directly — and is not itself a finding. This PASS "
+            "carries reduced confidence on purpose and can never reach full confidence: "
+            "either variable can also be exported into the interactive shell that "
+            "launches the agent, which leaves no artifact on disk for any local, "
+            "read-only audit to see, however complete its read of persistent files is.",
+            "No action needed. If you intend to manage this config externally (a Nix "
+            "deployment or a container-managed install), set OPENCLAW_CONFIG_READONLY=1 "
+            "(or rely on OPENCLAW_NIX_MODE=1) in a persistent unit/dotenv file so it "
+            "survives a restart.",
+            pass_confidence="no_signal",
+            confidence="HIGH",
+        )
+
+    return _finding(
+        "B373",
+        UNKNOWN,
+        "No externally-managed read-only config mode was found, but no systemd user "
+        "unit or global dotenv file was present to read — so there is no evidence to "
+        "build even a reduced-confidence PASS on.",
+        "No action needed unless you intend to run OpenClaw under an externally-managed "
+        "read-only config (Nix, a container-managed deployment).",
+        confidence="HIGH",
+    )
+
+
 def check_dangerous_overrides(ctx: Context) -> Finding:
     """B48 — flag OpenClaw 'dangerously*/allowUnsafe*' break-glass toggles that are ACTIVE.
 
@@ -5188,4 +5333,143 @@ def check_control_ui_embed_sandbox(ctx: Context) -> Finding:
         "Set gateway.controlUi.embedSandbox to 'strict', 'scripts' (recommended "
         "default), or 'trusted' only if genuinely needed.",
         config_field_paths={"gateway.controlUi.embedSandbox"},
+    )
+
+
+# B374 (C-526): the 9.4 "cloud ready workers" defaults, grounded verbatim
+# against the INSTALLED 2026.9.4 dist (not the recon, which omits the cloudWorkers
+# namespace entirely — see tests/grounded_schema_paths.txt / dist_verified_paths.txt).
+# dist/service-DTQsk1L5.mjs's `createPreparedWorkerPool` (~:216-221):
+#   target:   profile.readyWorkers ?? DEFAULT_READY_WORKERS
+#   maxTotal: config?.preparedPool?.maxTotal ?? DEFAULT_MAX_TOTAL
+# with (same file, ~:217-218) `DEFAULT_READY_WORKERS = 1` / `DEFAULT_MAX_TOTAL = 4` — and
+# the schema's own help text (dist/zod-schema.cloud-workers-CfJaNmxt.mjs) says the same
+# thing in prose ("Target ... (default: 1)" / "Gateway-wide cap ... (default: 4)").
+_B374_DEFAULT_READY_WORKERS = 1
+_B374_DEFAULT_MAX_TOTAL = 4
+
+
+def check_cloudworkers_prepared_pool(ctx: Context) -> Finding:
+    """B374 — cloudWorkers 9.4 prepared-pool: a default-on, warm,
+    off-machine worker reserve.
+
+    ``cloudWorkers`` provisions off-machine execution environments from a
+    plugin-supplied provider (`CloudWorkerProfileShape.provider`: "Worker provider id
+    registered by a plugin"). 9.4 added a PREPARED POOL on top of that: unless disabled,
+    OpenClaw keeps ``readyWorkers`` machines (default 1, per eligible project/profile)
+    running and warm, up to ``preparedPool.maxTotal`` (default 4, gateway-wide) — see the
+    module comment above for the exact grounding.
+
+    Gated, not universal. The pool only ever targets a nonzero count once a real
+    ``cloudWorkers.profiles.<id>`` entry exists (the runtime's own gate:
+    ``configured: Boolean(profile && normalizeCapabilityProviderId(profile.provider)
+    === record.providerId)``) — a vanilla install with no cloud-worker plugin/profile
+    gets nothing, hence UNKNOWN below rather than a blanket WARN on every config.
+
+    WARN/advisory only (a reserve existing is not itself a
+    hole, so no FAIL tier and no C-135 pass; unscored, mirroring B12/check_local_first).
+    Each active reserve is a RUNNING remote machine — the 9.4 CHANGELOG's own words:
+    "Ready workers incur provider running-machine charges until deleted" — held warm
+    with the eligible project's source already prepared on it before any session binds,
+    and eligibility reaches past the operator's own repos to "public GitHub repository
+    sessions" per that same changelog, so a session against a public (not necessarily
+    owned) repository can also cause a reserve to be provisioned.
+
+    Deliberately config-only. 9.4 also added a state-DB table,
+    ``node_worker_prepared_workspaces``, materializing ``workspace_dir``/``home_dir`` on
+    disk for a prepared workspace. Verified NOT to apply here: that table lives under
+    ``src/node-host/`` (`node-worker-prepared-workspace-store.ts`, bundled into
+    `dist/daemon-DW2kkFGl.mjs`) and is absent from this machine's own
+    ``~/.openclaw/state/openclaw.sqlite`` (confirmed empty/missing on a live gateway that
+    dispatches, but does not itself run as, a cloud worker node) — it materializes on the
+    REMOTE node's own state DB, never the local gateway's. So it never lands in
+    ``skillprovenance.py``'s ``WORKSPACE_DIRS`` or the derived-agent-workspace invariant
+    ``tests/test_b610_derived_agent_workspaces.py`` pins, and this check has no local
+    on-disk row to read; only ``worker_environments`` (local, no workspace_dir/home_dir
+    columns) tracks anything about these environments on the audited machine, and
+    reading it is a separate, larger state-DB-reader piece of work, out of scope here.
+    """
+    unreadable = _config_unreadable("B374", ctx)
+    if unreadable is not None:
+        return unreadable
+
+    cfg = ctx.config
+    profiles = dig(cfg, "cloudWorkers.profiles")
+    valid_profiles = (
+        {pid: prof for pid, prof in profiles.items() if isinstance(prof, dict)}
+        if isinstance(profiles, dict)
+        else {}
+    )
+    if not valid_profiles:
+        return _finding(
+            "B374",
+            UNKNOWN,
+            "cloudWorkers.profiles is not configured, so no cloud worker provider is "
+            "available and the 9.4 prepared-pool reserve cannot be active.",
+            "—",
+        )
+
+    max_total_raw = dig(cfg, "cloudWorkers.preparedPool.maxTotal")
+    max_total = (
+        max_total_raw
+        if isinstance(max_total_raw, (int, float))
+        and not isinstance(max_total_raw, bool)
+        and max_total_raw >= 0
+        else None
+    )
+    effective_max_total = max_total if max_total is not None else _B374_DEFAULT_MAX_TOTAL
+
+    if effective_max_total == 0:
+        return _finding(
+            "B374",
+            PASS,
+            f"cloudWorkers.preparedPool.maxTotal is 0 — the gateway-wide prepared-worker "
+            f"reserve is disabled ({len(valid_profiles)} cloud worker profile(s) "
+            "configured).",
+            "Keep it at 0 unless a warm reserve is genuinely wanted.",
+        )
+
+    active, disabled, evidence = [], [], []
+    for pid in sorted(valid_profiles):
+        prof = valid_profiles[pid]
+        rw_raw = prof.get("readyWorkers")
+        explicit = (
+            isinstance(rw_raw, (int, float))
+            and not isinstance(rw_raw, bool)
+            and rw_raw >= 0
+        )
+        rw = rw_raw if explicit else _B374_DEFAULT_READY_WORKERS
+        if rw > 0:
+            active.append(pid)
+            shown = str(rw) if explicit else f"unset (defaults to {rw})"
+            evidence.append(f"profile '{pid}': readyWorkers={shown} — reserve active")
+        else:
+            disabled.append(pid)
+            evidence.append(f"profile '{pid}': readyWorkers=0 — reserve disabled")
+
+    if not active:
+        return _finding(
+            "B374",
+            PASS,
+            "Every configured cloud worker profile disables its ready reserve "
+            f"(readyWorkers: 0): {', '.join(disabled)}.",
+            "Keep readyWorkers at 0 on profiles that should not pre-warm a reserve.",
+            evidence,
+        )
+
+    return _finding(
+        "B374",
+        WARN,
+        f"cloudWorkers prepared-pool reserve is active for {len(active)} profile(s) "
+        f"({', '.join(active)}), gateway-wide cap {effective_max_total}: each is a "
+        "RUNNING off-machine worker held warm with the eligible project's source "
+        "already prepared on it before any session binds, so it keeps incurring "
+        "provider running-machine charges and stays a live remote target until deleted "
+        "— and this is the DEFAULT posture (readyWorkers defaults to 1 per profile) "
+        "unless explicitly disabled.",
+        "Set cloudWorkers.profiles.<id>.readyWorkers: 0 on profiles that should not "
+        "pre-warm a reserve, or cloudWorkers.preparedPool.maxTotal: 0 to disable the "
+        "gateway-wide reserve; either stops new reserves while preserving snapshot "
+        "reuse and active sessions.",
+        evidence,
     )
