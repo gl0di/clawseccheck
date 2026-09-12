@@ -86,6 +86,7 @@ from ._shared import (
     _active_channels,
     _agent_is_powerful,
     _agent_legs,
+    _agent_tools_widenings,
     _bind_mode_is_ro,
     _canon_tool,
     _canonical_ipv4,

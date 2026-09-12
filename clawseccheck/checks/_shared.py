@@ -21,6 +21,7 @@ from ..catalog import (
 )
 from ..collector import (
     Context,
+    agent_roster,
     dig,
     limit_hits_for,
 )
@@ -40,6 +41,7 @@ from ..collector import (  # noqa: F401
 from ..iocdb import known_bad_host_records as _iocdb_known_bad_host_records
 from ..safeio import walk_dir_safely
 from .. import toolpolicy as _toolpolicy
+from .. import toolgrant as _toolgrant
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist
 
@@ -1979,6 +1981,101 @@ def _secret_paths(obj, prefix="", depth=0) -> list[str]:
     return found
 
 
+def _agent_tools_widenings(cfg: dict) -> "tuple[list, list]":
+    """Per-agent ``tools.alsoAllow`` entries and per-agent powerful ``tools.profile``
+    values, each as ``(evidence_label, value)`` pairs — the two vendor-real WIDENING
+    layers ``_enabled_tools()`` / ``_enabled_tools_sources()`` / ``_tool_hint_sources()``
+    union in on top of the global config (B-672).
+
+    A per-agent ``tools.alsoAllow`` is not a separate AND-ed policy: the real resolver
+    merges it directly into the resolved profile policy, ``??``-replacing (not adding
+    to) a global ``tools.alsoAllow`` (``resolveConfiguredToolPolicies`` — see
+    ``toolgrant.py``'s module docstring for the full resolution order and dist
+    citations, re-grounded against the installed 2026.9.4). A per-agent
+    ``tools.profile`` is the SAME kind of ``??`` coalesce and can likewise widen past a
+    weaker global profile. Neither is symmetric with a per-agent EXPLICIT
+    ``tools.allow``, which is a separate, independently AND-ed layer that can only
+    NARROW — deliberately not read here (B-672's K3 negative control: reading it would
+    manufacture a capability the real resolver never grants). Mirrors
+    ``checks/_capability.py``'s ``_agent_profile_widenings``/``_b68_fs_tools_granted``,
+    which established this exact distinction for the filesystem-tool family; this is
+    the same fix for the document-wide "what tools does this config expose" question
+    every ``_enabled_tools()`` consumer asks.
+
+    Both returns are unions across the WHOLE roster: these callers ask "could ANY
+    agent have this", not a per-agent one, so which agent contributed a token matters
+    only for the evidence string, never for the verdict.
+
+    Also reads ``agents.defaults.tools`` — the second DECLARED per-agent surface
+    ``_b68_fs_tools_granted`` already models (its own docstring's "S3" section) — and
+    for the identical reason: ``resolveEffectiveToolPolicy`` falls back to it as the
+    resolved ``agentTools`` ONLY when the config declares NO roster key at all (dist
+    lines 238-239), so it is a live, widening scope precisely when there is no roster
+    entry to read instead. Gated on the roster KEY being declared, not on the roster
+    RESOLVING non-empty — an ``agents.entries: {}`` config still has a roster property,
+    and the real resolver ignores ``agents.defaults.tools`` there (verified by
+    executing ``toolgrant.granted()``, which already carries this distinction as
+    ``_has_agent_roster``).
+
+    C-135: an ``alsoAllow`` candidate is kept only when ``toolgrant.granted()`` — the
+    already battery-tested port of the full resolver, deny included — agrees it is
+    actually granted at that scope. A first version of this fix echoed every
+    ``alsoAllow`` literal unconditionally and was caught firing on
+    ``tools.alsoAllow: ["x"], tools.deny: ["x"]`` (global scope) and its per-agent/
+    per-``agents.defaults`` equivalents: measured, each one flips `check_egress`/
+    `check_human_approval` to a false WARN over a token the runtime denies outright.
+    The pre-existing ``tools.allow`` literal echo below is NOT filtered the same way —
+    that coarseness (it has never deny-filtered, at any scope) predates this task and
+    is out of its scope; only the NEW surface this fix adds is held to the stricter
+    standard, because only new surface can create a new conviction (per this task's
+    own C-135 charge).
+    """
+    also_allow: list = []
+    powerful_profiles: list = []
+    roster = agent_roster(cfg)
+    for agent in roster:
+        entry_tools = agent.entry.get("tools") if isinstance(agent.entry, dict) else None
+        if not isinstance(entry_tools, dict):
+            continue
+        name = agent.entry.get("name") or agent.id or agent.index
+        also = entry_tools.get("alsoAllow")
+        if isinstance(also, list):
+            for t in also:
+                if _toolgrant.granted(cfg, str(t), agent.id):
+                    also_allow.append((agent.labelled(name), t))
+        profile = entry_tools.get("profile")
+        if isinstance(profile, str) and profile and _profile_is_powerful(profile):
+            powerful_profiles.append((agent.labelled(name), profile))
+    agents_block = cfg.get("agents") if isinstance(cfg, dict) else None
+    has_roster_key = isinstance(agents_block, dict) and (
+        "entries" in agents_block or "list" in agents_block
+    )
+    if not has_roster_key:
+        default_tools = dig(cfg, "agents.defaults.tools")
+        if isinstance(default_tools, dict):
+            also = default_tools.get("alsoAllow")
+            if isinstance(also, list):
+                for t in also:
+                    if _toolgrant.granted(cfg, str(t), _toolgrant.GLOBAL_SCOPE):
+                        also_allow.append(("agents.defaults.tools", t))
+            profile = default_tools.get("profile")
+            if isinstance(profile, str) and profile and _profile_is_powerful(profile):
+                powerful_profiles.append(("agents.defaults.tools", profile))
+    return also_allow, powerful_profiles
+
+
+def _global_also_allow_granted(cfg: dict) -> list:
+    """The GLOBAL ``tools.alsoAllow`` literals that ``toolgrant.granted()`` confirms are
+    actually granted (deny included) — the single source both ``_enabled_tools()`` and
+    ``_tool_hint_sources()`` read, so the two can never again drift the way a first
+    version of B-672 let them (see ``_agent_tools_widenings``'s C-135 note for the
+    measured false-WARN this closes)."""
+    return [
+        t for t in (dig(cfg, "tools.alsoAllow") or [])
+        if _toolgrant.granted(cfg, str(t), _toolgrant.GLOBAL_SCOPE)
+    ]
+
+
 def _enabled_tools(cfg: dict) -> list[str]:
     tools = []
     allow = dig(cfg, "tools.elevated.allowFrom")
@@ -1990,18 +2087,41 @@ def _enabled_tools(cfg: dict) -> list[str]:
     exec_host = dig(cfg, "tools.exec.host")
     exec_mode = dig(cfg, "tools.exec.mode")
     sandbox_mode = dig(cfg, "agents.defaults.sandbox.mode")
+    agent_also_allow, agent_powerful_profiles = _agent_tools_widenings(cfg)
     if (
         exec_security is not None
         or exec_host is not None
         or exec_mode is not None
         or _profile_is_powerful(dig(cfg, "tools.profile"))
+        or agent_powerful_profiles  # B-672: a per-agent tools.profile can widen past a weaker global one
         or (sandbox_mode is not None and sandbox_mode != "off")
     ):
         tools.append("exec")
-    # collect any explicitly listed tool names
-    listed = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
-    if isinstance(listed, list):
-        tools.extend(str(t) for t in listed)
+    # Collect any explicitly listed tool names. B-672: gateway.tools.allow is NOT a
+    # grant — the real resolver only ever uses it to remove entries from a fixed
+    # HTTP-surface tool-deny list, never to add a tool to an agent's policy (see
+    # toolgrant.py's module docstring) — so it is no longer read as a tools.allow
+    # fallback here; doing so invented capabilities a config never actually granted.
+    # tools.alsoAllow (global, and per agent via _agent_tools_widenings) IS a real
+    # grant field the previous version missed entirely. The global alsoAllow list is
+    # toolgrant-verified for the same C-135 reason _agent_tools_widenings' own
+    # per-agent/defaults reads are: a bare `tools.alsoAllow: ["x"], tools.deny: ["x"]`
+    # must not echo "x" as granted. tools.allow itself is NOT filtered this way —
+    # that coarseness is pre-existing at every scope and out of this task's charge.
+    listed: list = []
+    seen: set = set()
+    for src in (
+        dig(cfg, "tools.allow"),
+        _global_also_allow_granted(cfg),
+        [t for _, t in agent_also_allow],
+    ):
+        if isinstance(src, list):
+            for t in src:
+                s = str(t)
+                if s not in seen:
+                    seen.add(s)
+                    listed.append(s)
+    tools.extend(listed)
     return tools
 
 
@@ -2031,10 +2151,12 @@ def _enabled_tools_sources(cfg: dict) -> dict:
 
     Mirrors ``_enabled_tools()``'s own conditions exactly (same fields, same order) —
     see that function. "exec" here is the BROADER signal it uses (includes
-    ``agents.defaults.sandbox.mode`` != "off"), which is why B-064's own comment on
-    ``_trifecta_legs`` says the outbound leg's ``_hint(tools, OUTBOUND_TOOL_HINTS)`` term
-    is "intentionally left unchanged" — narrower ``_real_exec_enabled()`` (see
-    ``_exec_enabled_sources`` below) is what feeds the sensitive leg instead.
+    ``agents.defaults.sandbox.mode`` != "off" and, since B-672, a per-agent
+    ``tools.profile`` widening past a weaker global one), which is why B-064's own
+    comment on ``_trifecta_legs`` says the outbound leg's
+    ``_hint(tools, OUTBOUND_TOOL_HINTS)`` term is "intentionally left unchanged" —
+    narrower ``_real_exec_enabled()`` (see ``_exec_enabled_sources`` below) is what
+    feeds the sensitive leg instead.
     """
     out = {}
     if dig(cfg, "tools.elevated.allowFrom"):
@@ -2044,6 +2166,7 @@ def _enabled_tools_sources(cfg: dict) -> dict:
     exec_mode = dig(cfg, "tools.exec.mode")
     profile = dig(cfg, "tools.profile")
     sandbox_mode = dig(cfg, "agents.defaults.sandbox.mode")
+    _, agent_powerful_profiles = _agent_tools_widenings(cfg)
     if exec_security is not None:
         out["exec"] = f"tools.exec.security={exec_security!r}"
     elif exec_host is not None:
@@ -2052,6 +2175,12 @@ def _enabled_tools_sources(cfg: dict) -> dict:
         out["exec"] = f"tools.exec.mode={exec_mode!r}"
     elif _profile_is_powerful(profile):
         out["exec"] = f"tools.profile={profile!r} (a powerful profile)"
+    elif agent_powerful_profiles:
+        label, agent_profile = agent_powerful_profiles[0]
+        out["exec"] = (
+            f"{label}.tools.profile={agent_profile!r} "
+            "(a powerful profile, widening past the global profile)"
+        )
     elif sandbox_mode is not None and sandbox_mode != "off":
         out["exec"] = f"agents.defaults.sandbox.mode={sandbox_mode!r}"
     return out
@@ -2124,10 +2253,11 @@ def _tool_hint_sources(cfg: dict, hints) -> list:
     """``_enabled_tools(cfg)`` entries that satisfy *hints*, attributed to their actual
     config field instead of collapsed to a bool.
 
-    Mirrors ``_hint(_enabled_tools(cfg), hints)`` exactly: the same
-    ``tools.allow OR gateway.tools.allow`` precedence ``_enabled_tools()`` uses (never
-    both — an "or", not a merge), plus the synthetic "elevated"/"exec" tags it injects
-    (see ``_enabled_tools_sources``). So
+    Mirrors ``_hint(_enabled_tools(cfg), hints)`` exactly: the same union of
+    ``tools.allow`` + ``tools.alsoAllow`` (global) + per-agent ``tools.alsoAllow``
+    ``_enabled_tools()`` uses — never ``gateway.tools.allow``, which is not a grant
+    (B-672) — plus the synthetic "elevated"/"exec" tags it injects (see
+    ``_enabled_tools_sources``). So
     ``bool(_tool_hint_sources(cfg, hints)) == _hint(_enabled_tools(cfg), hints)`` always
     holds (pinned by ``test_b493_trifecta_leg_sources.py``).
     """
@@ -2135,11 +2265,16 @@ def _tool_hint_sources(cfg: dict, hints) -> list:
     for tag, source in _enabled_tools_sources(cfg).items():
         if any(h in tag for h in hints):
             out.append(source)
-    listed = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
-    if isinstance(listed, list):
-        field = "tools.allow" if dig(cfg, "tools.allow") else "gateway.tools.allow"
-        for name in _hint_matches([str(t) for t in listed], hints):
-            out.append(f"{field} entry {name!r}")
+    allow_listed = dig(cfg, "tools.allow")
+    if isinstance(allow_listed, list):
+        for name in _hint_matches([str(t) for t in allow_listed], hints):
+            out.append(f"tools.allow entry {name!r}")
+    for name in _hint_matches([str(t) for t in _global_also_allow_granted(cfg)], hints):
+        out.append(f"tools.alsoAllow entry {name!r}")
+    agent_also_allow, _ = _agent_tools_widenings(cfg)
+    for label, t in agent_also_allow:
+        for name in _hint_matches([str(t)], hints):
+            out.append(f"{label}.tools.alsoAllow entry {name!r}")
     return out
 
 
