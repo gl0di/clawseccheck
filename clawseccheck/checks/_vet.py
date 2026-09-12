@@ -3523,6 +3523,79 @@ def _has_cred_exfil_outside_fence(blob: str, fence_ranges: list[tuple[int, int]]
     return False
 
 
+# B-748: a skill that reads a config/identity file to learn its OWN legitimate
+# destination, then talks to exactly that destination, is not exfiltration —
+# _EXFIL_RE has no taint, so on its own it cannot see that distinction (a
+# `.npmrc` read followed by a `fetch()` to the npm registry, or a K8s
+# in-cluster service-account token read followed by a request to the cluster's
+# own API server, both FAILed here with zero connection between the two
+# halves). Two narrow, well-known, non-arbitrary destinations are exempted,
+# mirroring skillast.py's B-415 in-cluster-auth exemption (a specific
+# credential SOURCE paired with its own specific DESTINATION) — but checked
+# against what an exfil-shaped match's OWN forward call-argument text actually
+# names, never whether the destination string merely appears somewhere in the
+# blob. That distinction is deliberate: the RETRACTED attempts recorded above
+# this check (case_04843, case_04193) share exactly one root cause — a
+# document-wide "some exempt signal exists anywhere" test that a single decoy
+# string anywhere in the skill silently defeats for the WHOLE finding. Binding
+# the check to each exfil match's own forward window means one genuinely
+# unexplained call (an arbitrary/attacker host, or the cross-file split-stage
+# shape this check exists to catch) is never masked by an unrelated exempt
+# call elsewhere in the same skill. Host-anchored (`://host` + a path/quote/
+# whitespace/end boundary) so `registry.npmjs.org.evil.com` cannot pass by
+# substring containment. The paired credential-source regex is checked only
+# for PRESENCE anywhere in the blob (not windowed) — it exists to keep the
+# exemption SCOPED to its own pairing (an npm-registry destination exempts only
+# when an `.npmrc` read is also present; it does not blanket-exempt every
+# exfil call whose target happens to be that host when the skill's actual
+# payload is a different credential type entirely, e.g. AWS keys smuggled
+# toward the npm registry as a covert channel) — the forward-window
+# destination check above is what does the anti-bypass work.
+_CRED_EXFIL_OWN_DEST_WINDOW = 200  # chars after the exfil verb — matches _PERSIST_WINDOW's scale
+_CRED_EXFIL_OWN_DEST_PAIRS = (
+    (re.compile(r"\.npmrc"), re.compile(r'://registry\.npmjs\.org(?=[/"\'\s]|$)', re.I)),
+    (
+        re.compile(r"/var/run/secrets/kubernetes\.io/serviceaccount/token"),
+        re.compile(r'://kubernetes\.default\.svc(?=[/"\'\s]|$)', re.I),
+    ),
+)
+
+
+def _exfil_hits_all_target_own_known_destination(blob: str) -> bool:
+    """True when EVERY ``_EXFIL_RE`` match in *blob* has one of the narrow
+    "credential source's own destination" hosts above (B-748) in its own
+    forward call-argument window, with that pairing's credential-source
+    pattern present and NON-NEGATED somewhere in the blob. False when there
+    are no exfil matches at all, or when even one exfil match cannot be
+    explained this way — so a caller can use this to SUPPRESS a co-occurrence
+    finding only when every exfil-shaped hit is accounted for, never merely
+    one of several.
+
+    Self-driven C-135: an EARLIER version checked only bare presence of the
+    credential-source pattern, which a denial-framed decoy defeats — "We do
+    not read your .npmrc file" + a REAL ``.aws/credentials`` read + a send to
+    ``registry.npmjs.org`` PASSed, because the npmrc text was present even
+    though negated and the real credential leaked was a different one
+    entirely. ``_negation_governs_trigger`` closes that the same way
+    ``_has_non_negated_cred_match`` already does for the base check.
+    """
+    matches = list(_EXFIL_RE.finditer(blob))
+    if not matches:
+        return False
+    for m in matches:
+        forward = blob[m.end() : m.end() + _CRED_EXFIL_OWN_DEST_WINDOW]
+        if not any(
+            dest_rx.search(forward)
+            and any(
+                not _negation_governs_trigger(blob, cm.start())
+                for cm in cred_rx.finditer(blob)
+            )
+            for cred_rx, dest_rx in _CRED_EXFIL_OWN_DEST_PAIRS
+        ):
+            return False
+    return True
+
+
 def _local_sink_exfil_hits(name: str, blob: str, fence_ranges: list[tuple[int, int]]) -> list[str]:
     """F-023: same-line credential-source AND local-sink (log/tempfile/report), fence-aware.
 
@@ -4425,6 +4498,11 @@ def check_installed_skills(ctx: Context) -> Finding:
         _has_cross = bool(
             _has_non_negated_cred_match(_blob_nofence) and _EXFIL_RE.search(_blob_nofence)
         )
+        # B-748: every exfil-shaped hit resolves to its own credential source's
+        # known-legitimate destination (npm registry / in-cluster K8s API) — not
+        # exfiltration, so this specific co-occurrence is explained away.
+        if _has_cross and _exfil_hits_all_target_own_known_destination(_blob_nofence):
+            _has_cross = False
         if not _has_same_line and _has_cross:
             high.append(
                 f"{name}: credential path and exfil sink both present in skill (split-stage risk)"
