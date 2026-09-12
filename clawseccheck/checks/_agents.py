@@ -656,8 +656,9 @@ def check_session_visibility(ctx: Context) -> Finding:
     clamp as a mitigating factor to check rather than assuming it applies.
 
     Pre-existing, unchanged scope limitation carried forward from before this fix:
-    ``bindings[].session.dmScope`` (SessionSchema at zod-schema-CTg_faEc.mjs:1103,
-    confirmed real) lets an operator override dmScope for one specific route/channel.
+    ``bindings[].session.dmScope`` (SessionSchema at openclaw@2026.9.4,
+    ``zod-schema-Q1KXOooO.mjs:1103``, confirmed real) lets an operator override dmScope
+    for one specific route/channel.
     This check reads only the GLOBAL ``session.dmScope`` — a config that pins the
     global default to (or leaves it at) "main" while using a per-binding override to
     isolate one specific exposed channel would still FAIL here on that channel's

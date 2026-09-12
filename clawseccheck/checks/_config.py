@@ -4901,18 +4901,18 @@ def check_chat_completions_endpoint(ctx: Context) -> Finding:
     strictObject({...ResponsesEndpointUrlFetchShape}).optional() }).optional()``, where
     ``ResponsesEndpointUrlFetchShape`` (:530-537) is ``{allowUrl, urlAllowlist,
     allowedMimes, maxBytes, maxRedirects, timeoutMs}``. Both ``enabled`` and
-    ``allowUrl`` default to false (``schema-C9vBoeg0.mjs:845,847`` and
+    ``allowUrl`` default to false (``schema-DbKC3IUo.mjs:845,847`` and
     ``DEFAULT_OPENAI_IMAGE_LIMITS`` in ``openai-http--Ewj8T0W.mjs``).
 
     **The original stub's FAIL premise — "allowUrl=true with no urlAllowlist is SSRF
     to cloud metadata endpoints / internal services" — is REFUTED by the runtime, not
     the schema, and was caught before it was ever committed.** The image-URL fetch
     (``extractImageContentFromSource`` → ``fetchWithGuard``, both
-    ``input-files-B_YpQBG_.mjs``) always calls ``fetchWithSsrFGuard``
-    (``fetch-guard-BTiQPMkc.mjs``) with ``policy: {allowPrivateNetwork: false,
+    ``input-files-_8dvEDQG.mjs``) always calls ``fetchWithSsrFGuard``
+    (``fetch-guard-BMnKD1l7.mjs``) with ``policy: {allowPrivateNetwork: false,
     hostnameAllowlist: limits.urlAllowlist}`` — ``allowPrivateNetwork`` is hardcoded
     false regardless of config, and the guard's private-IP predicate
-    (``ssrf-BqLj-h8H.mjs``) imports a dedicated ``isCloudMetadataIpAddress`` alongside
+    (``ssrf-DNi3J6fi.mjs``) imports a dedicated ``isCloudMetadataIpAddress`` alongside
     RFC1918/loopback/link-local/CGNAT checks. The check is DNS-PINNED and re-applied
     on every redirect hop inside the same guarded-fetch loop (defeats DNS rebinding
     and redirect-based bypass), not just on the initial URL. So an absent
@@ -5032,7 +5032,7 @@ def check_gateway_remote_ssh_host_key_policy(ctx: Context) -> Finding:
     ``union([literal("strict"), literal("openssh")]).optional()``. Default "strict"
     — corroborated by both the schema description ("'strict' requires an already
     trusted host key") and ``FIELD_PLACEHOLDERS["gateway.remote.sshHostKeyPolicy"]``
-    (``schema-C9vBoeg0.mjs:2823``), which shows "strict" as the field's own example
+    (``schema-DbKC3IUo.mjs:2823``), which shows "strict" as the field's own example
     value.
 
     This is a CLIENT-side setting for the machine initiating the SSH tunnel — unlike
@@ -5114,7 +5114,7 @@ def check_control_ui_embed_sandbox(ctx: Context) -> Finding:
     hosted Control UI embeds. Grounded on the installed dist (openclaw@2026.9.3,
     ``zod-schema-CTg_faEc.mjs:849-853``): ``union([literal("strict"),
     literal("scripts"), literal("trusted")]).optional()``. Default "scripts" per the
-    schema description (``schema-C9vBoeg0.mjs:830``): "'strict' disables scripts,
+    schema description (``schema-DbKC3IUo.mjs:830``): "'strict' disables scripts,
     'scripts' allows interactive embeds while keeping origin isolation (default), and
     'trusted' adds `allow-same-origin` for same-site documents that intentionally
     need stronger privileges."

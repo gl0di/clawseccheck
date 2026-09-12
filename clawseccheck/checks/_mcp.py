@@ -4795,7 +4795,7 @@ def check_acp_backend_inventory(ctx: Context) -> Finding:
     """B369 (C-413) — acp.backend routes agent turn execution to a plugin backend.
 
     Grounded against the INSTALLED dist (openclaw@2026.9.3): ``acp`` is a top-level
-    strictObject (zod-schema-CTg_faEc.mjs:1390-1403) — ``enabled``, ``dispatch.enabled``,
+    strictObject (zod-schema-Q1KXOooO.mjs:1390-1403) — ``enabled``, ``dispatch.enabled``,
     ``backend`` (string), ``fallbacks`` (array(string())), ``defaultAgent``,
     ``allowedAgents``, ``stream.*``, ``runtime.installCommand``. This is a real, current
     field — a richer surface than the filed task's stub named (it also cited

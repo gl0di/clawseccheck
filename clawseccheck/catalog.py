@@ -519,10 +519,11 @@ CATALOG: list[CheckMeta] = [
     # B369-B370 (C-413, child of E-074): runtime-exec inventory, disclosure-only
     # (scored=False), matching B364's precedent — neither attempts to classify a value
     # as safe/risky, only discloses it. acp.backend/fallbacks/runtime.installCommand
-    # (zod-schema-CTg_faEc.mjs:1390-1403) are real, current, top-level fields — a richer
-    # surface than the filed task's stub named. agentRuntime.id's real path is
+    # (openclaw@2026.9.4, zod-schema-Q1KXOooO.mjs:1390-1403) are real, current,
+    # top-level fields — a richer surface than the filed task's stub named.
+    # agentRuntime.id's real path is
     # agents.{defaults,entries.<id>}.models.<ref>.agentRuntime.id
-    # (zod-schema.agent-runtime-BigQghiZ.mjs:569-594), NOT the stub's cited
+    # (openclaw@2026.9.4, zod-schema.agent-runtime-Ca6cjqf9.mjs:28-32), NOT the stub's cited
     # models.providers.*.agentRuntime.id — B331's own pre-existing grounding note
     # (above) already declined to characterize this field's value vocabulary as
     # safe/risky for the same reasons B370 inherits.
@@ -757,7 +758,8 @@ CATALOG: list[CheckMeta] = [
     # B178/B365.
     #
     # `memory.qmd.sessions.exportDir` (the stub's third item) is dropped entirely: the
-    # QMD memory backend is RETIRED (legacy-D51FqLiI.mjs names it explicitly —
+    # QMD memory backend is RETIRED (openclaw@2026.9.4, legacy-fR_P797G.mjs:3668 names it
+    # explicitly —
     # "memory.qmd is retired because the QMD memory backend was removed; configured
     # external paths migrate to memory.search.extraPaths") — there is no field left to
     # audit.

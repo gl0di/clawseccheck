@@ -3590,7 +3590,7 @@ def check_skill_symlink_target_writability(ctx: Context) -> Finding:
 
     Grounded against the INSTALLED dist (openclaw@2026.9.3): ``skills.load`` is a
     strictObject with ``extraDirs``/``allowSymlinkTargets``/``watch``
-    (zod-schema-CTg_faEc.mjs:1502-1508) — this is the LOAD side, a live, distinct field
+    (zod-schema-Q1KXOooO.mjs:1502-1508) — this is the LOAD side, a live, distinct field
     from ``skills.workshop.allowSymlinkTargetWrites`` (the WRITE side B175 already
     covers, and which OpenClaw 2026.9.3 removed from the schema entirely — see B175's
     own B-783 note). ``allowSymlinkTargets`` is genuinely consumed:
@@ -3728,7 +3728,7 @@ def check_skill_load_hot_reload(ctx: Context) -> Finding:
     """B368 (C-413) — skills.load.watch hot-reloads skill definitions with no restart.
 
     Grounded against the INSTALLED dist (openclaw@2026.9.3): ``skills.load.watch`` is a
-    plain boolean (zod-schema-CTg_faEc.mjs:1507), a sibling of ``allowSymlinkTargets``
+    plain boolean (zod-schema-Q1KXOooO.mjs:1507), a sibling of ``allowSymlinkTargets``
     checked by B367 above. When true, a planted or mutated skill file is loaded and run
     live — it defeats the restart boundary B158 (extraDirs inventory) and B21/B22
     (install-time review) implicitly assume, but only where there is somewhere for a
@@ -5791,7 +5791,7 @@ def check_skill_library_reachability(ctx: Context) -> Finding:
     (``actual_sha256``) disagrees with its declared one (``sha256``) -- a real tamper
     signal sitting in the schema, gated on ``committed`` because an in-progress upload
     legitimately has a partial/absent ``actual_sha256`` while chunks are still arriving.
-    Grounded against the installed dist's commit path (``skills-hbyuy_ia.mjs``): the
+    Grounded against the installed dist's commit path (``skills-6ygwYcmZ.mjs``): the
     server computes ``actualSha256 = sha256Hex(archive)`` and, when the client declared
     one, refuses to commit unless it matches (``"upload sha256 mismatch"``) -- so a
     COMMITTED row where they disagree is not a race or a normal in-flight state, only a
@@ -5959,7 +5959,7 @@ def check_update_pinning(ctx: Context) -> Finding:
 
     # ---- signal 1b (C-413): update.channel on a pre-release tier ----
     # Grounded against the INSTALLED dist (openclaw@2026.9.3): update.channel is a
-    # strictObject sibling of update.auto.enabled (zod-schema-CTg_faEc.mjs:1299-1308),
+    # strictObject sibling of update.auto.enabled (zod-schema-Q1KXOooO.mjs:1299-1308),
     # union(["stable","extended-stable","beta","dev"]).optional() — four literals, not
     # the stub's assumed two ("dev"/"beta"); "extended-stable" is a real, safe tier and
     # must not be swept in as if it were a pre-release channel. dev/beta pull

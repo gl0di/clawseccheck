@@ -1521,7 +1521,7 @@ def check_provider_baseurl(ctx: Context) -> Finding:
 def _otel_undeterminable(cid: str, path: str, value: object, expected: str) -> Finding:
     """Shared UNKNOWN shape for B365's malformed-container branches — same reasoning as
     B82's ``_b82_undeterminable`` (this module): ``diagnostics``/``diagnostics.otel`` are
-    declared inside ``.strict()`` zod objects (zod-schema-CTg_faEc.mjs:1255-1281) with no
+    declared inside ``.strict()`` zod objects (zod-schema-Q1KXOooO.mjs:1255-1281) with no
     ``.nullable()`` anywhere, so a malformed shape means the config does not load at all
     and the real state cannot be determined from this file — UNKNOWN, never an
     affirmative claim in either direction.
@@ -1544,13 +1544,13 @@ def check_otel_content_capture_egress(ctx: Context) -> Finding:
 
     Grounded against the INSTALLED dist (openclaw@2026.9.3), not the filed task's stub.
 
-    Schema (zod-schema-CTg_faEc.mjs:1258-1279) — diagnostics.otel is a strictObject with
+    Schema (zod-schema-Q1KXOooO.mjs:1258-1279) — diagnostics.otel is a strictObject with
     enabled/endpoint/tracesEndpoint/metricsEndpoint/logsEndpoint/protocol/headers/
     serviceName/metricNamePrefix/traces/metrics/logs/logsExporter/sampleRate/
     flushIntervalMs/captureContent. captureContent is ``boolean().optional()`` — NOT the
     granular {enabled, inputMessages, outputMessages, toolInputs, toolOutputs,
     systemPrompt, toolDefinitions} object the filed stub described. That granular shape
-    is retired: legacy-D51FqLiI.mjs's migrateFinalLayoutKills collapses any old
+    is retired: legacy-fR_P797G.mjs's migrateFinalLayoutKills collapses any old
     object-shaped captureContent to a plain boolean on every config load ("Collapsed
     diagnostics.otel.captureContent to a boolean."), so a check keyed on the sub-fields
     would silently never fire on a current install.
@@ -1575,7 +1575,7 @@ def check_otel_content_capture_egress(ctx: Context) -> Finding:
     _b178_classify_host) rather than a second copy. Content capture piggybacks on the
     TRACE signal specifically (the gate checks otel.traces, not .metrics/.logs), so the
     destination is tracesEndpoint if set, else the shared endpoint — per-signal-overrides
-    -shared is grounded from the schema descriptions map (schema-C9vBoeg0.mjs:
+    -shared is grounded from the schema descriptions map (schema-DbKC3IUo.mjs:
     "diagnostics.otel.tracesEndpoint": "... overrides diagnostics.otel.endpoint and
     OTEL_EXPORTER_OTLP_ENDPOINT for trace export only."). Neither set -> the exporter
     falls back to the standard OTEL_EXPORTER_OTLP_ENDPOINT environment variable, which
@@ -1748,11 +1748,11 @@ def check_memory_search_remote_egress(ctx: Context) -> Finding:
     Grounded against the INSTALLED dist (openclaw@2026.9.3), not the filed task's stub:
     the real config path is ``memory.search.remote.{baseUrl,apiKey,headers,
     batch.enabled}`` (zod-schema.agent-runtime-BigQghiZ.mjs:514-558, MemorySearchSchema —
-    the sibling of MemorySchema.search at zod-schema-CTg_faEc.mjs:517-524), NOT
+    the sibling of MemorySchema.search at zod-schema-Q1KXOooO.mjs:517-524), NOT
     ``agents.defaults.memorySearch.remote.*`` as filed: the leaf name is ``memorySearch``
     nowhere in the current schema (it is ``memory.search``), and ``remote`` is not
     reachable under ``agents.defaults`` at all — AgentDefaultsSchema
-    (zod-schema-CTg_faEc.mjs:137ff) has no ``memory`` key (only an unrelated
+    (zod-schema-Q1KXOooO.mjs:137ff) has no ``memory`` key (only an unrelated
     ``memoryFlush``). ``memory.search`` exists at TWO scopes instead: the config ROOT
     (global default, MemorySchema) and PER-AGENT (AgentEntrySchema.memory.search,
     zod-schema.agent-runtime-BigQghiZ.mjs:628) — reached via
