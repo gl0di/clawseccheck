@@ -639,6 +639,16 @@ _CONFIG_MACHINE_STATE_LOOSE_LEGACY = (
     "constraint on the vendor table; not a subset since every real column is nullable "
     "here, not merely a fewer-columns slice."
 )
+_AUTH_PROFILE_TABLES_DIFFERENT_DB = (
+    "auth_profile_store/auth_profile_state (F-187) live in the PER-AGENT database "
+    "(agents/<agent>/agent/openclaw-agent.sqlite), never in the state database "
+    "(state/openclaw.sqlite) this snapshot/registry classifies -- a different SQLite "
+    "file, with its own separate schema this module does not model at all. Absent from "
+    "the vendor snapshot for that reason, not because the shape is wrong; the fixture "
+    "models the real per-agent shape closely enough to prove trajectorystore.corroborate() "
+    "never reaches it (see that test file's own module docstring), but there is no vendor "
+    "comparison possible for it within this file's scope."
+)
 
 _REGISTRY: "dict[str, _Entry]" = {
     # ---- fixtures/clean_b188_state_db/state/openclaw.sqlite -- the binary fixture no
@@ -721,9 +731,13 @@ _REGISTRY: "dict[str, _Entry]" = {
     # ---- skill_library_entries / skill_uploads (B354 / CLAWSECCHECK-B-725) ----
     "tests/test_b354_b725_skill_library_reachability.py:31": _Entry(MODERN),
     "tests/test_b354_b725_skill_library_reachability.py:46": _Entry(MODERN),
+
+    # ---- auth_profile_store / auth_profile_state (F-187, per-agent DB, different file) ----
+    "tests/test_f187_trajectory_sqlite_corroborator.py:94": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:101": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
 }
 
-assert len(_REGISTRY) == 38, f"registry has {len(_REGISTRY)} entries, expected 38"
+assert len(_REGISTRY) == 40, f"registry has {len(_REGISTRY)} entries, expected 40"
 
 
 # ========================================================================================
