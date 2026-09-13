@@ -6846,6 +6846,88 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     ``CLAWHUB_BLOCKING_MODERATION_STATES`` are the anchors to re-locate this by. The
     bundle hash rotates every release, and 2026.9.1 showed a whole family of bundles can
     vanish outright (B-720) — a filename here would be evidence, never a locator.
+
+    C-479 FOLLOW-UP (2026-09-13, EXECUTED against the real installed openclaw@2026.9.4
+    dist, not read only): the concern above ("only a hand-edited config could produce
+    this") was resolved into three separately EXECUTED answers.
+
+    (1) Does the normal ClawHub-download install path ever PERSIST
+    ``clawhubTrustDisposition: "blocked"`` to an install record? NO — it is
+    structurally unreachable, not just untested. Ran
+    ``checkClawHubPackageTrust()`` (``clawhub-install-trust-<hash>.mjs``) directly
+    with ``globalThis.fetch`` mocked to return a malicious ``/security`` response
+    (``scanStatus: "malicious"``, ``moderationState: "blocked"``): it returned
+    ``{ok: false, code: "clawhub_download_blocked"}`` with NO
+    ``trustInstallRecordFields`` key at all. Reading why: inside the function,
+    ``if (assessment.disposition === "blocked") return {ok: false, ...}`` fires
+    and returns BEFORE ``buildClawHubTrustInstallRecordFields()`` is ever called —
+    that builder only runs via ``acceptTrust()``, reached solely through the
+    ``clean`` / ``review-required`` / ``review-recommended`` branches. So
+    ``trustInstallRecordFields.clawhubTrustDisposition`` can never literally
+    contain the string ``"blocked"`` — the one disposition value this check's FAIL
+    branch keys on is the one value the builder can never emit. Confirmed one
+    layer up too: ran ``installPluginFromClawHub()`` (``clawhub-Co7qJynn.mjs``)
+    end-to-end with the same mocked malicious response — it returned before ever
+    calling ``downloadClawHubPackageArchive`` (observed: the archive-download mock
+    was never invoked) and before building its own persisted ``clawhub: {...}``
+    return field (observed: the result object carries no ``clawhub`` key at all).
+    Both runs used the actual installed dist, not a reimplementation.
+
+    (2a) Is there a DIFFERENT route than the network install path that reaches the
+    same install-record store — specifically, would a hand-authored
+    ``plugins.installs.<id>.clawhubTrustDisposition: "blocked"`` in ``openclaw.json``
+    (the "hand-edited config" scenario the FAIL justification above already
+    anticipated) ever reach ``installed_plugin_index`` / the sibling
+    ``config_machine_state`` key ``plugins.installedIndex`` this check's collector
+    reads? YES. Ran ``inspectShippedPluginInstallConfigRecords()``
+    (``plugin-install-config-migration-<hash>.mjs``, a pure parse — no I/O) on a
+    synthetic config with exactly that hand-authored record: it returned
+    ``status: "valid"`` with ``clawhubTrustDisposition: "blocked"`` intact.
+    ``clawhubTrustDisposition`` is an explicit, four-literal-enum field in
+    ``PluginInstallRecordShape`` (``plugin-install-record-map-<hash>.mjs``) — it
+    survives because the schema models it directly, not because of the schema's
+    trailing ``.passthrough()`` (confirmed separately: a genuinely unmodelled key
+    also survives, via passthrough, as a distinct code path). Reading (not
+    executing — the write path opens the real config file and the real state DB
+    under an exclusive lease with no override, so running it for real would mutate
+    this machine's actual OpenClaw install) ``importShippedPluginInstallConfigForDoctor``
+    in ``plugin-registry-migration-<hash>.mjs`` shows it is invoked
+    UNCONDITIONALLY on every ``openclaw doctor`` run (the call is gated only on
+    ``inspectShippedPluginInstallConfigRecords(...).status === "valid"``, never on
+    ``--fix``/``--yes``/``shouldRepair``) and copies each config-authored record
+    into the persisted install index for any plugin id NOT ALREADY present there
+    (``if (!persisted || !Object.hasOwn(persisted, pluginId))``). So the reachable
+    route for a FAIL-qualifying "blocked" record is the retired
+    ``plugins.installs`` config key surviving into a ``doctor`` run, not a live
+    ClawHub verdict — the FAIL is still correct (it is still OpenClaw's own
+    persisted record, per the ladder above), just reached by a different door than
+    originally assumed.
+
+    (2b) Once written, does a "blocked" (or any) verdict get rewritten cleanly on
+    the next re-scan, or can stale sibling fields (``clawhubTrustModerationState``,
+    ``clawhubTrustScanStatus``, ``clawhubTrustReasons``) linger after the
+    disposition itself moves on? Ran the real ``recordPluginInstall()``
+    (``installed-plugin-index-records-<hash>.mjs``) with an old record carrying a
+    full "blocked" verdict (scanStatus/moderationState/reasons all set) and a
+    fresh "clean" update record (as a real ``buildClawHubTrustInstallRecordFields``
+    output for a clean verdict would look — no risk fields at all): the result
+    was a full replacement, not a merge — none of the three stale fields survived,
+    confirmed by direct ``hasOwnProperty`` checks on the returned record. Every
+    writer discards the prior record wholesale rather than spreading it forward
+    (also visible directly in ``installPluginFromClawHub``'s and
+    ``syncPluginsForUpdateChannel``'s own record construction, neither of which
+    spreads the previous record). So a verdict cannot go stale IN PLACE — but it
+    CAN linger unchanged indefinitely, because nothing else rewrites it: an
+    exhaustive grep of the installed dist for every reference to
+    ``clawhubTrustDisposition`` / ``checkClawHubPackageTrust`` /
+    ``buildClawHubTrustInstallRecordFields`` turns up exactly two writers (the
+    plugin install/update path here, and the structurally identical skill
+    install/update path in ``clawhub-DJyfzTkY.mjs``) and one reader
+    (``capability-summary-<hash>.mjs``) — no periodic, background, or
+    ``doctor``-triggered re-scan of an already-installed, untouched plugin exists.
+    A disposition — real or config-migrated per (2a) — sits on disk exactly as
+    written until that specific plugin goes through another explicit
+    install/update.
     """
     if not ctx.plugin_trust_found:
         return _finding(
