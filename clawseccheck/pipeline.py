@@ -787,8 +787,19 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
         lines.append("Nothing is in the borderline band — no item needs adjudication.")
 
     second_opinion: list[dict] = []
-    if bundle and bundle.get("judged") is not None:
-        verdicts_map = _parse_verdicts(json.dumps(bundle["judged"]))
+    # B-804: gate on the PARSED verdict map, never on the raw bundle shape. An
+    # explicitly empty "verdicts": [] (or a "judged" bucket with no usable entries at
+    # all, e.g. {}) must read as "nothing submitted" — exactly like no bundle at all —
+    # matching _parse_verdicts' own documented contract ("An explicitly empty
+    # 'verdicts': [] IS 'no verdicts submitted'"). This call site used to set
+    # verdictsSubmitted=True whenever the RAW "judged" key was merely present,
+    # regardless of whether anything actually parsed out of it.
+    verdicts_map = (
+        _parse_verdicts(json.dumps(bundle["judged"]))
+        if bundle and bundle.get("judged") is not None
+        else {}
+    )
+    if verdicts_map:
         try:
             second_opinion = _second_opinion(ctx, findings, verdicts_map)
         except Exception:  # noqa: BLE001 — an advisory panel must never break the run

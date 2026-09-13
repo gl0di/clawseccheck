@@ -482,16 +482,17 @@ def test_run_adjudication_no_bundle_is_pending_not_a_verdict():
     assert "secondOpinion" not in p.data
 
 
-def test_run_adjudication_with_empty_judged_bundle_emits_second_opinion():
+def test_run_adjudication_with_empty_judged_bundle_is_not_submitted():
+    """B-804: a "judged" bucket present but with no "verdicts" array at all (e.g. {})
+    parses to zero usable entries, same as an explicit {"verdicts": []} -- must read as
+    "nothing submitted", not as a submitted-but-empty panel. See
+    tests/test_b804_verdicts_submitted_and_blind_collapse.py for the full family."""
     ctx = collect(FIXTURES / "home_vuln")
     from clawseccheck.checks import run_all
     findings = run_all(ctx)
     p = pl.run_adjudication(ctx, findings, bundle={"judged": {}})
-    assert p.data["verdictsSubmitted"] is True
-    assert isinstance(p.data["secondOpinion"], list)
-    # unreviewed items still appear, per adjudication._second_opinion's own contract
-    if p.data["secondOpinion"]:
-        assert all(row["judge_verdict"] is None for row in p.data["secondOpinion"])
+    assert p.data["verdictsSubmitted"] is False
+    assert "secondOpinion" not in p.data
 
 
 def test_run_adjudication_vet_packets_are_scoped_per_target():
@@ -569,17 +570,36 @@ def test_run_adjudication_own_config_safe_verdict_only_annotates(monkeypatch):
     """Regression: a SAFE verdict in the `judged` (own-config) bucket must still only
     annotate — vet_targets/escalation must never even be consulted for it."""
     ctx = collect(FIXTURES / "home_vuln")
+    from clawseccheck.adjudication import build_judge_packet
     from clawseccheck.checks import run_all
     findings = run_all(ctx)
+    packet = build_judge_packet(ctx, findings)
+    assert packet, "fixture must offer at least one borderline item for this test to mean anything"
+    item = packet[0]
     called = []
     monkeypatch.setattr(pl, "_vet_second_opinion",
                         lambda *a, **k: called.append(1) or [])
-    p = pl.run_adjudication(ctx, findings, bundle={"judged": {"verdicts": []}})
+    bundle = {"judged": {"verdicts": [
+        {"finding_id": item["finding_id"], "target": item["target"], "verdict": "SAFE"},
+    ]}}
+    p = pl.run_adjudication(ctx, findings, bundle=bundle)
     assert p.data["verdictsSubmitted"] is True
     assert "vetSecondOpinion" not in p.data
     assert called == []  # vetJudged path never even runs for an own-config-only bundle
     # Hard invariant (docs/OUTPUT_SCHEMA.md §13): findings/score are never touched here.
     assert findings == run_all(collect(FIXTURES / "home_vuln"))
+
+
+def test_run_adjudication_empty_judged_verdicts_is_not_submitted():
+    """B-804: an explicitly empty judged.verdicts must NOT be reported as submitted —
+    this used to be the exact bug this test's sibling above once pinned as correct.
+    See tests/test_b804_verdicts_submitted_and_blind_collapse.py for the full family."""
+    ctx = collect(FIXTURES / "home_vuln")
+    from clawseccheck.checks import run_all
+    findings = run_all(ctx)
+    p = pl.run_adjudication(ctx, findings, bundle={"judged": {"verdicts": []}})
+    assert p.data["verdictsSubmitted"] is False
+    assert "secondOpinion" not in p.data
 
 
 def test_vetjudged_safe_verdict_never_downgrades_a_vet_target_finding():

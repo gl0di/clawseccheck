@@ -235,14 +235,19 @@ def test_the_frame_never_contradicts_the_payload_it_rides_in(tmp_path, nested, t
     ("judged.json", _JUDGED_BUNDLE, True),
     ("vet.json", _VET_BUNDLE, True),
     ("empty-vet.json", '{"vetJudged": []}', False),
-    ("empty-judged.json", '{"judged": {}}', True),
+    ("empty-judged.json", '{"judged": {}}', False),
 ], ids=["no-bundle", "live-only", "judged", "vetJudged", "empty-vetJudged", "empty-judged"])
 def test_verdicts_submitted_tracks_verdict_buckets_not_live_tests(tmp_path, name, body,
                                                                   expected):
     """Measured semantics, not assumed. `verdictsSubmitted` is raised by the `judged` branch
     and by the `vetJudged` branch, and NOT by a `liveTest`-only bundle -- so it is a
     different question from `"secondOpinion" in payload`, which is why carrying it is worth
-    a key rather than being derivable by the consumer."""
+    a key rather than being derivable by the consumer.
+
+    B-804: "raised by the judged branch" means at least one USABLE verdict actually
+    parsed out of it -- a "judged" bucket with no "verdicts" array at all (`{}`, this
+    module's `empty-judged` case) carries zero usable entries, same as an explicit
+    `{"verdicts": []}`, so it must NOT raise the flag either."""
     extra = () if body is None else ("--judged-bundle", _bundle(tmp_path, name, body))
     payload = _full_json(tmp_path, *extra)
     assert payload["verdictsSubmitted"] is expected, payload.get("secondOpinion")

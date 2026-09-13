@@ -159,10 +159,23 @@ def test_full_json_top_level_keys_match_schema_doc(capsys):
 
 def test_full_json_with_judged_bundle_emits_second_opinion(capsys, tmp_path):
     """The one top-level key conditional on --judged-bundle, not merely --full,
-    actually appears once a bundle is supplied — the presence half the exclusion
-    above carves out of the general check."""
+    actually appears once a bundle carrying a USABLE verdict is supplied — the
+    presence half the exclusion above carves out of the general check.
+
+    B-804: an empty bucket (`{"judged": {}}`) no longer counts as "supplied" for this
+    purpose — it parses to zero usable entries, same as no bundle at all — so this
+    needs a real verdict to prove the key's presence half of the contract."""
+    from clawseccheck.adjudication import build_judge_packet
+    from clawseccheck.checks import run_all
+    from clawseccheck.collector import collect
+    ctx = collect(VULN)
+    packet = build_judge_packet(ctx, run_all(ctx))
+    assert packet, "fixture must offer at least one borderline item for this test to mean anything"
+    item = packet[0]
     bundle_path = tmp_path / "bundle.json"
-    bundle_path.write_text(json.dumps({"judged": {}}), encoding="utf-8")
+    bundle_path.write_text(json.dumps({"judged": {"verdicts": [
+        {"finding_id": item["finding_id"], "target": item["target"], "verdict": "SAFE"},
+    ]}}), encoding="utf-8")
     main(["--home", VULN] + BASE + ["--full", "--json",
                                     "--judged-bundle", str(bundle_path)])
     payload = json.loads(capsys.readouterr().out)

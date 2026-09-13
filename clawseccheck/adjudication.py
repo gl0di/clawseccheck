@@ -931,6 +931,75 @@ def _is_borderline(f) -> bool:
     )
 
 
+# B-804: the two engine-authored, canonical strings every config-surface check already
+# emits when it cannot read openclaw.json at all -- `checks/_shared._config_unreadable`'s
+# one literal string (present-but-unparseable/unreadable, ~9 call sites) and the
+# "No openclaw.json found" prefix its ~11 sibling per-check branches share (absent
+# entirely). Both are plain string literals in OUR OWN source, never built from skill
+# text or a config value -- the same engine-authored guarantee `_ID_QUESTIONS`/
+# `_RULE_QUESTIONS` already lean on -- so anchoring on them cannot be spoofed by
+# attacker-controlled content the way matching on a keyword in `detail` in general
+# would be.
+_CONFIG_BLIND_DETAIL_PREFIXES = (
+    "No openclaw.json found",
+    "openclaw.json present but unparseable/unreadable",
+)
+
+# Collapsing a single item would only rename it (its real check id moves from
+# `finding_id` into `safe_facts.collapsed_finding_ids`) with nothing gained — the flood
+# this exists to prevent only appears once several checks share the exact same cause.
+_CONFIG_BLIND_COLLAPSE_MIN = 2
+
+_CONFIG_BLIND_REASON_TEXT = {
+    "absent": "no openclaw.json (or legacy clawdbot.json) was found in the audited home",
+    "unreadable": "openclaw.json is present but could not be parsed/read",
+}
+
+
+def _config_blind_only_cause(f) -> bool:
+    """True when *f*'s own ``detail`` says the SOLE reason it is UNKNOWN is that
+    openclaw.json could not be read this run at all -- never a status/id heuristic,
+    so an UNKNOWN with a genuinely different cause (a disk-based skill scan, a
+    trajectory read, a B62/taint item -- none of which read `detail` this way) can
+    never match by construction.
+    """
+    detail = getattr(f, "detail", None)
+    return isinstance(detail, str) and detail.startswith(_CONFIG_BLIND_DETAIL_PREFIXES)
+
+
+def _config_blind_collapsed_item(reason: str | None, finding_ids: list) -> dict:
+    """B-804: one disclosed, run-level packet item standing in for every UNKNOWN whose
+    sole cause is the same missing/unreadable config, instead of one near-identical
+    item per check flooding the packet (a real incident measured 157-174 such items,
+    nearly all of them the generic "could not be automatically resolved" question).
+
+    Nothing is silently dropped: `safe_facts.collapsed_finding_ids` names every id this
+    item stands in for. The question steers a judge toward the one thing actually worth
+    confirming -- that the host genuinely has no OpenClaw config, or that the audit was
+    pointed at the wrong home -- rather than asking it to adjudicate the same fact 150+
+    times over.
+    """
+    reason_text = _CONFIG_BLIND_REASON_TEXT.get(reason, "openclaw.json could not be read this run")
+    ids = sorted(set(finding_ids))
+    return {
+        "finding_id": "CONFIG_BLIND",
+        "target": "audit run",
+        "redacted_evidence": redact(
+            f"{len(ids)} check(s) returned UNKNOWN for this single reason: {reason_text}."
+        ),
+        "engine_disposition": UNKNOWN,
+        "question": redact(
+            f"{len(ids)} config-dependent check(s) could not be assessed because "
+            f"{reason_text} -- there is nothing to read for any of them individually. "
+            "Confirm this host genuinely has no OpenClaw config (or that the audit was "
+            "pointed at the wrong home) rather than judging each one. "
+            "[SAFE / SUSPICIOUS / DANGEROUS + reason]"
+        ),
+        "verdict_schema": _VERDICT_SCHEMA,
+        "safe_facts": {"collapsed_finding_ids": ids, "collapsed_count": len(ids)},
+    }
+
+
 def _with_documented_shape(items: list) -> list:
     """B-571: every packet item carries `safe_facts`, even when it is empty.
 
@@ -1020,20 +1089,43 @@ def build_judge_packet(ctx, findings) -> list[dict]:
     results in _FN_PRONE_WARN_IDS. Does not re-run any check and never alters a
     Finding's status/severity/score. Deterministic: same inputs always sort to
     the same output order, regardless of dict-iteration order upstream.
+
+    B-804: on a config-blind run (``scoring._config_blind_signal`` -- the same
+    structural ``ctx.config_found``/``ctx.config_parse_error`` signal the score's own
+    CONFIG_BLIND_CAP reads, never a text/keyword match on its own), the UNKNOWNs whose
+    *own* ``detail`` says the sole cause is that missing/unreadable config are folded
+    into one disclosed run-level item (see :func:`_config_blind_collapsed_item`)
+    instead of flooding the packet with 150+ near-identical items. A run with config
+    found is completely unaffected -- the gate is the structural signal, not the
+    per-item text match alone.
     """
+    from .scoring import _config_blind_signal  # noqa: PLC0415 — see the module note on layering
+    config_blind, config_blind_reason = _config_blind_signal(ctx)
+
     items: list[dict] = []
+    config_blind_candidates: list[tuple[str, dict]] = []
     for f in (findings or []):
         if not _is_borderline(f):
             continue
         item = _item_from_finding(f)
         # C-361: scoped to this population only -- the B62/recovered-taint/env-auth
         # sources below always carry real evidence by construction.
-        if _is_judgeable(item, f):
-            items.append(item)
+        if not _is_judgeable(item, f):
+            continue
+        if config_blind and _config_blind_only_cause(f):
+            config_blind_candidates.append((f.id, item))
+            continue
+        items.append(item)
 
     items.extend(_b62_items(ctx))
     items.extend(_recover_dropped_taint(ctx))
     items.extend(_env_auth_kwarg_items(ctx))
+
+    if len(config_blind_candidates) >= _CONFIG_BLIND_COLLAPSE_MIN:
+        items.append(_config_blind_collapsed_item(
+            config_blind_reason, [fid for fid, _item in config_blind_candidates]))
+    else:
+        items.extend(item for _fid, item in config_blind_candidates)
 
     items = _attach_corroboration(items, findings)
     items = _with_documented_shape(items)
