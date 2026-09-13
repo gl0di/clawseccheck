@@ -565,6 +565,16 @@ def run_behavioral(ctx, *, ascii_only: bool = False,
             "was analysed."
         ))
 
+    # B-800: "replay complete" is a claim about records actually having been read —
+    # `analysis_incompleteness` (behavioral.py, the single source of truth for what
+    # this module's own result means) is the honest answer to whether that happened.
+    # Zero sidecars read (an empty home, or a 9.x host whose trajectories now live in
+    # SQLite — see F-187) must not be worded as a completed replay in the same
+    # document whose header/dashboard already say "not fully covered" for the exact
+    # same reason (`PipelineResult.layer_ledger`'s own `logs_not_reached`, elsewhere
+    # in this module).
+    incompleteness_reason = behavioral_analysis_incompleteness(analysis)
+
     if incident:
         detail = ("trajectory replay complete — an INCIDENT SIGNAL was found in the "
                   "trajectory incident analysis below (that signal itself is advisory "
@@ -572,6 +582,11 @@ def run_behavioral(ctx, *, ascii_only: bool = False,
                   "capped the grade — see F-154).")
         quiet_line = ("behavioural replay complete — INCIDENT SIGNAL found (advisory). "
                      "Full detail: --analyze-trajectory.")
+    elif incompleteness_reason is not None:
+        detail = (f"trajectory replay found nothing to replay: {incompleteness_reason}; "
+                  "this replay itself never scores a FAIL (F-154).")
+        quiet_line = (f"behavioural replay found nothing to replay: "
+                     f"{incompleteness_reason}.")
     else:
         detail = ("trajectory replay complete — a fired behavioral detector may have "
                   "capped the grade (F-154); this replay itself never scores a FAIL.")

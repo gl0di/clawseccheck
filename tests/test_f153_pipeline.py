@@ -393,6 +393,35 @@ def test_run_behavioral_no_incident_signal_detail_and_quiet_line_stay_generic():
     assert "INCIDENT SIGNAL" not in p.quiet_line
 
 
+# ---------------------------------------------------------------------------
+# B-800 — "replay complete" must not be claimed when nothing was replayed
+# ---------------------------------------------------------------------------
+
+def test_run_behavioral_zero_sidecars_does_not_claim_replay_is_complete():
+    """No trajectory sidecar was read (an empty home / traj_no_sidecar) — the
+    detail/quiet_line text must say so, matching `behavioral.analysis_incompleteness`,
+    and must never say "complete" while the header's own `not_checked` says the same
+    thing in the same document. Status stays `ran` (B-715) — only the wording changes.
+    """
+    ctx = collect(FIXTURES / "traj_no_sidecar")
+    p = pl.run_behavioral(ctx)
+    assert p.status == pl.STATUS_RAN
+    assert "complete" not in p.detail
+    assert "no trajectory sidecar was read" in p.detail
+    assert "complete" not in p.quiet_line
+    assert "no trajectory sidecar was read" in p.quiet_line
+
+
+def test_run_behavioral_real_sidecar_keeps_the_replay_complete_wording():
+    """A fixture that actually has a `.trajectory.jsonl` sidecar (records were read,
+    `analysis_incompleteness` is None) must keep today's F-154 wording unchanged."""
+    ctx = collect(FIXTURES / "traj_present_not_acted")
+    p = pl.run_behavioral(ctx)
+    assert p.status == pl.STATUS_RAN
+    assert "trajectory replay complete" in p.detail
+    assert "behavioural replay complete" in p.quiet_line
+
+
 def test_run_behavioral_preserves_the_existing_behavioral_block():
     """The pre-existing render_behavioral_analysis section must still render in full —
     this is an ADDITIONAL block, never a replacement."""
