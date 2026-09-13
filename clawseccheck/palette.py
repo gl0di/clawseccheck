@@ -164,6 +164,10 @@ _PALETTE: tuple[PaletteCategory, ...] = (
     PaletteCategory("Watch", READONLY, MODE_B, (
         PaletteEntry("What changed", "--monitor",
                      "diff against your last scan"),
+        PaletteEntry("Watch continuously", "--watch",
+                     "long-running — re-scans itself on a relevant change"),
+        PaletteEntry("Watch heartbeat", "--watch-status",
+                     "ALIVE / STALE / STOPPED / NOT RUNNING"),
         PaletteEntry("Is the watch alive", "--brief",
                      "last check, its age, and anything logged since"),
         PaletteEntry("Watch on a schedule", "--cron-recipe",
@@ -261,6 +265,7 @@ _UNLISTED_FLAG_MODES: dict[str, str] = {
     "--history": MODE_B,         # the score-history file --trend reads
     "--data-dir": MODE_B,        # all three of the above, moved together
     "--probe": MODE_B,           # report drift without writing any of the three
+    "--watch-debounce": MODE_B,  # modifier of --watch, same reach
     "--save-run": MODE_B,        # opt-in per-run snapshot; feeds --diff
     "--all": MODE_B,             # un-windows --trend/--watch-log's default display cap
     # ── C · Before you install: vet-only modifiers ───────────────────────────
