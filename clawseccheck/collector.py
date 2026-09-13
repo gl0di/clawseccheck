@@ -596,6 +596,13 @@ class Context:
     dead_ignore_entries: set = field(default_factory=set)
     config_mode: int | None = None                  # octal perms of openclaw.json, or None
     config_found: bool = False                       # openclaw.json present (vs non-OpenClaw setup)
+    # B-776: True when THIS PROCESS's own environment (not the audited --home target)
+    # shows the OpenClaw sandbox-sync marker AND no config was found this run. Set by
+    # `_sandbox_signal()`, called from `collect()` right after `config_found` above —
+    # never derived from the audited home's own contents, since the whole point is that a
+    # sandboxed run's --home target (default or explicit) resolves nowhere real. See that
+    # function's docstring for the two conditions and why both are required.
+    sandboxed: bool = False
     config_parse_error: bool = False                 # openclaw.json present but unparseable (B-166)
     # B-306 safe-symlink split: WHY config_parse_error is (or was) considered — the raw
     # loader message for a genuine-blind config, or a note that a dotfiles-style symlink
@@ -6106,6 +6113,59 @@ def audits_this_users_own_home(home: Path) -> bool:
     return audited.parent == user_home and audited.name.startswith(OPENCLAW_NEW_STATE_DIRNAME)
 
 
+#: B-776: written by the OpenClaw gateway into EVERY sandbox workspace's `skills/`
+#: directory, never into a real user's `~/.openclaw/workspace` or any other non-sandboxed
+#: skill root. Measured on a real host: 17 copies, every one under
+#: `~/.openclaw/sandboxes/*/skills/`, none under the real workspace. This is a filesystem
+#: artifact the sandboxing machinery itself writes — readable from INSIDE the sandbox even
+#: though the real `~/.openclaw` is not, which is exactly the asymmetry this signal needs.
+_SANDBOX_SYNC_MARKER = ".openclaw-sync.json"
+
+
+def sandbox_sync_marker_present() -> bool:
+    """B-776: True when the sandbox-sync marker sits beside THIS PROCESS's own HOME or
+    cwd — never the audited ``--home`` target.
+
+    Under ``sandbox_exec`` ``$HOME`` == ``/workspace`` == the process cwd, a fact
+    independent of whatever ``--home``/the default ``~/.openclaw`` resolved to (which is
+    why a genuinely-blind-but-fixable run — wrong ``--home``, config just not at the
+    default path — must never trip this: it is not read at all). Both HOME and cwd are
+    checked because the two coincide in the sandbox but are not guaranteed to in every
+    embedding this tool runs under.
+
+    Deliberately weak alone — see ``_sandbox_signal`` below, the only caller, which
+    ANDs this with "no config resolvable this run" before it means anything.
+    ``OPENCLAW_CLI=1`` and ``/.dockerenv`` are NOT used here: both fire for ordinary host
+    `exec`/cron too (measured), so neither is evidence of a *sandboxed* session on its own.
+    """
+    bases: list[Path] = []
+    try:
+        bases.append(Path.home())
+    except (OSError, RuntimeError):
+        pass
+    try:
+        bases.append(Path.cwd())
+    except OSError:
+        pass
+    for base in bases:
+        try:
+            if (base / "skills" / _SANDBOX_SYNC_MARKER).is_file():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _sandbox_signal(config_found: bool) -> bool:
+    """B-776: the compound gate for ``ctx.sandboxed`` — the sync marker ALONE is not
+    enough, since a legitimately Docker-hosted gateway with its own real config must stay
+    quiet. Combined with "no config resolvable this run" (*config_found*, from the SAME
+    `collect()` call), a host that genuinely has a config at the audited path never trips
+    this even if the marker happens to be present for some other reason.
+    """
+    return (not config_found) and sandbox_sync_marker_present()
+
+
 # ---------------------------------------------------------------------------
 # B-282 (ENV-2/ENV-6): the two GLOBAL runtime dotenv files.
 #
@@ -6794,6 +6854,9 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     cfg_path, cfg_found = resolve_config_in_home(home)
     ctx.config_path = cfg_path
     ctx.config_found = cfg_found
+    # B-776: computed right here, before anything below can raise — a sandboxed run must
+    # still get an honest `ctx.sandboxed` even if the rest of collection degrades.
+    ctx.sandboxed = _sandbox_signal(cfg_found)
     parsed_ok = False
     if cfg_found:
         _cfg_digest: list = []

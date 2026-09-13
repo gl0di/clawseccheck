@@ -42,9 +42,9 @@ from .brand import WORDMARK
 # carries WHY a classification may be undetermined, and `detect_vet_type` — the curated
 # public name — stays exactly as it was, wrapping it.
 from .checks import detect_vet_type_with_reason, resolve_skill_target
-from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
+from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for, sandbox_sync_marker_present
 from .checks import CHECKS_BY_ID, _credential_store_state
-from .invocation import _display_path, cmd, command_prefix
+from .invocation import cmd, command_prefix, display_path_for_delivery
 from .locking import journal_lock
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
@@ -4727,8 +4727,12 @@ def _main(argv=None) -> int:
         first_run = _onboarding_reason(Path(args.home).expanduser())
         if first_run:
             from .checks import CHECKS  # noqa: PLC0415
+            # B-776: "nothing at --home" already holds by construction here (that's what
+            # `first_run` means) — the compound gate's other half — so the sandbox marker
+            # alone decides whether the advice below can name a fixable --home.
             _emit(render_onboarding(reason=first_run, home=_sanitize(args.home),
-                                    n_checks=len(CHECKS), ascii_only=ascii_only))
+                                    n_checks=len(CHECKS), ascii_only=ascii_only,
+                                    sandboxed=sandbox_sync_marker_present()))
             return 0
 
     logger.info("auditing home=%s", args.home)
@@ -4942,7 +4946,11 @@ def _main(argv=None) -> int:
         """
         if not path:
             return
-        _media_path = _display_path(path)
+        # B-776: a sandboxed run must never collapse this to `~/...` — the gateway
+        # re-expands that against the HOST's real home, not the sandbox's, and the
+        # resulting path lands outside the sandbox root and gets rejected on delivery.
+        # See `display_path_for_delivery`'s docstring for the full mechanism.
+        _media_path = display_path_for_delivery(path, sandboxed=getattr(ctx, "sandboxed", False))
         _fallback_line = (
             "      This run could not confirm OpenClaw's managed attachment directory "
             "(it did not exist, or was not writable), so the report fell back to a "

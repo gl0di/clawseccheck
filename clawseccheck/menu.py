@@ -102,12 +102,22 @@ def compute_ages(*, released=None, last_check=None, today=None):
 
 
 def render_onboarding(*, reason: str, home: str, n_checks: int | None = None,
-                      ascii_only: bool = False) -> str:
+                      ascii_only: bool = False, sandboxed: bool = False) -> str:
     """Screen 13 — first-run onboarding when there is nothing to audit.
 
     Shown instead of a wall of UNKNOWNs when the OpenClaw home is *missing*
     (``reason="missing"``) or an *empty* directory (``reason="empty"``). Pure —
-    no I/O; the caller passes the (already-sanitized) home path and check count.
+    no I/O; the caller passes the (already-sanitized) home path, check count, and
+    (B-776) whether this run's own process carries the sandbox signal.
+
+    *sandboxed* is a SEPARATE axis from *reason*, not a third reason value: it changes
+    only the ADVICE, never the diagnosis — a sandboxed run genuinely does have "nothing
+    there" at *home*, exactly like the ordinary missing/empty case, but "re-run with
+    --home <path>" is not an instruction a container with no view of the host filesystem
+    can act on. Distinguish it from the case this advice DOES fit: a config that simply
+    isn't at the default path but is reachable somewhere else on the same filesystem —
+    that case has no sandbox signal, and keeps the unchanged --home advice below.
+
     English only; the host agent localizes. Read-only, fabricates no findings.
     """
     head = brand.header(subtitle="welcome", ascii_only=ascii_only)
@@ -119,18 +129,36 @@ def render_onboarding(*, reason: str, home: str, n_checks: int | None = None,
 
     count = str(n_checks) if n_checks else "the full set of"
     bullet = "-" if ascii_only else "•"
-    lines = [
-        head,
-        "",
-        lead,
-        "",
-        "ClawSecCheck audits an OpenClaw setup for security holes — I just need to find yours:",
-        f"  {bullet} Default location:  ~/.openclaw",
-        f"  {bullet} Config elsewhere?  re-run with  --home <path>",
-        f"  {bullet} No OpenClaw yet?   install it, then run me again.",
-        "",
-        f'Once I can see it, say "check" and I\'ll run {count} security checks across your setup.',
-    ]
+    if sandboxed:
+        # B-776: this chat session IS the sandbox — no `--home` on this filesystem can
+        # ever reach the host's real OpenClaw setup, so the ordinary bullets below would
+        # be sending the reader to fix something that cannot be fixed from here.
+        lines = [
+            head,
+            "",
+            lead,
+            "",
+            "This chat session runs inside a sandboxed container, with no access to your "
+            "host's real OpenClaw setup — that isn't fixable by pointing --home anywhere "
+            "else on this filesystem, because the host's config simply isn't reachable "
+            "from in here.",
+            "",
+            f"  {bullet} To audit your real setup: run me from your agent's main session "
+            "(not a sandboxed/dashboard one), or from a terminal on the host itself.",
+        ]
+    else:
+        lines = [
+            head,
+            "",
+            lead,
+            "",
+            "ClawSecCheck audits an OpenClaw setup for security holes — I just need to find yours:",
+            f"  {bullet} Default location:  ~/.openclaw",
+            f"  {bullet} Config elsewhere?  re-run with  --home <path>",
+            f"  {bullet} No OpenClaw yet?   install it, then run me again.",
+            "",
+            f'Once I can see it, say "check" and I\'ll run {count} security checks across your setup.',
+        ]
     out = "\n".join(lines)
     return _ascii(out) if ascii_only else out
 

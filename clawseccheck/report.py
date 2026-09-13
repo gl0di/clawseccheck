@@ -687,6 +687,39 @@ def _not_fully_covered_line(score: ScoreResult) -> str:
     return "Not fully covered: " + "; ".join(not_checked)
 
 
+# ── B-776: sandboxed + config-blind ──────────────────────────────────────────
+# A chat/dashboard session driven from INSIDE an OpenClaw sandbox has no access to the
+# host's real ~/.openclaw at all — `$HOME` under `sandbox_exec` IS the sandbox workspace,
+# so a bare run finds no config there, the same shape as B-306's "absent" case — but the
+# remedy is different. "Point --home at the directory that holds your config" is not an
+# instruction a container with no view of the host filesystem can act on; it needs to say
+# plainly that this session is sandboxed instead. One sentence, reused by both the
+# terminal report and the card, same discipline the B-600 follow-up established for the
+# cap phrases above — so the two surfaces cannot drift into disagreeing about why.
+_SANDBOX_BLIND_SENTENCE = (
+    "this chat session runs inside a sandboxed container, with no access to your host's "
+    "real OpenClaw setup — no config exists to find from here, and pointing --home "
+    "elsewhere on this filesystem will not change that. Run this from your agent's main "
+    "session (not a sandboxed one) or a host terminal to audit your real config."
+)
+
+
+def _sandbox_config_blind(ctx, score) -> bool:
+    """True when this run's blindness is the sandbox case (B-776), not merely a
+    misdirected/missing ``--home``.
+
+    Requires BOTH ``ctx.sandboxed`` (collector.py's own-process signal, itself already
+    gated on "no config resolvable this run" — see ``collector._sandbox_signal``) and the
+    "absent" reason — a present-but-corrupt config found INSIDE a container is a fixable
+    file, not a sandbox-visibility problem, and keeps the ordinary B-306 "unreadable"
+    wording.
+    """
+    return (
+        getattr(ctx, "sandboxed", False)
+        and getattr(score, "config_blind_reason", None) == "absent"
+    )
+
+
 # ── B-520: the scope note describes THIS run, not a static assumption ────────
 # The paragraph under the score used to assert, unconditionally, three things the run
 # "does not" do. On the maintainer's own `--full` run all three were false: the live
@@ -3323,7 +3356,9 @@ def render_report(findings: list[Finding], score: ScoreResult,
         # one is "fix the file", the other is "you are pointing at the wrong directory".
         # The graded branch below gets this from `_cap_primary_reason_text`; the ungraded
         # branch was written flat and said the unreadable thing in both cases.
-        if getattr(score, "config_blind_reason", None) == "absent":
+        if _sandbox_config_blind(ctx, score):
+            lines.append(f"Config visibility (B-776): {_SANDBOX_BLIND_SENTENCE}")
+        elif getattr(score, "config_blind_reason", None) == "absent":
             lines.append(
                 "Config visibility (B-306): no OpenClaw config found in this home, so"
                 " config-derived checks degraded to UNKNOWN. Point --home at the"
@@ -3335,6 +3370,12 @@ def render_report(findings: list[Finding], score: ScoreResult,
                 " so config-derived checks degraded to UNKNOWN. Fix openclaw.json (valid"
                 " JSON, owner-readable) and re-run."
             )
+    elif _sandbox_config_blind(ctx, score):
+        # B-776: this GRADED branch (unlike the ungraded one above) never distinguished
+        # "absent" from "unreadable" — both said "could not be read/parsed", which is
+        # simply untrue when nothing was ever found. The sandboxed case needs its own
+        # wording regardless, so it is checked first rather than folded into that gap.
+        lines.append(f"Config visibility (B-776): {_SANDBOX_BLIND_SENTENCE}")
     elif score.config_blind_capped:
         lines.append(
             "Config visibility (B-306): openclaw.json could not be read/parsed this run, so"
@@ -4234,10 +4275,17 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         # is rephrased rather than dropped: the reader needs it most precisely when
         # there is no grade to explain it away.
         _subject = "This grade" if getattr(score, "graded", True) else "This result"
-        grade_lines.append(
-            f"   {_subject} reflects what could NOT be checked, not a verdict on your "
-            "setup — point --home at the directory that holds your OpenClaw config."
-        )
+        if _sandbox_config_blind(ctx, score):
+            # B-776: the card is what a --dashboard chat session pastes verbatim — the
+            # one surface most likely to actually reach a sandboxed user, so the plain
+            # sandboxed statement belongs here as much as in the terminal report above.
+            grade_lines.append(f"   {_subject} reflects what could NOT be checked: "
+                               f"{_SANDBOX_BLIND_SENTENCE}")
+        else:
+            grade_lines.append(
+                f"   {_subject} reflects what could NOT be checked, not a verdict on your "
+                "setup — point --home at the directory that holds your OpenClaw config."
+            )
     # `--full` keeps its existing header (grade card + the "· Findings ·" section label
     # immediately below); the C-373 default card opens with the grade lines only and
     # labels its own sections as it goes.
@@ -5814,6 +5862,10 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     # read as a silent all-clear — config_parse_error is a clean gating boolean and errors
     # carries the human-readable parse message(s) that were previously only in the text run.
     payload["config_found"] = bool(getattr(ctx, "config_found", False)) if ctx is not None else False
+    # B-776: machine-visible so a JSON consumer (or a host agent deciding whether to
+    # retry with a different --home) can tell "sandboxed, --home cannot help" apart from
+    # an ordinary missing/misdirected config — see collector.Context.sandboxed.
+    payload["sandboxed"] = bool(getattr(ctx, "sandboxed", False)) if ctx is not None else False
     # B-281 (ENV-1): WHICH file was audited, not merely whether one was found. Every
     # verdict in this payload describes exactly this path; a bare `config_found: true`
     # let a report about a stale, dormant config read as a report about the live agent.
