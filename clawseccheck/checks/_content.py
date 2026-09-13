@@ -10573,6 +10573,82 @@ def check_python_runtime_persist_install(ctx: Context) -> Finding:
     )
 
 
+def check_sitecustomize_pythonstartup_scoped_install(ctx: Context) -> Finding:
+    """B375 (F-177) — sitecustomize/PYTHONSTARTUP persistence install, AST
+    function-scope precision.
+
+    dossier.py's Persistence axis has exactly three feeders (B86/B87/B89), all
+    AST-backed, and no AST0x category fallback reaches it. B335 just above
+    (`check_python_runtime_persist_install`) already recognizes this exact install
+    shape via a whole-file regex + a character-proximity window, but it lives in the
+    advisory block with no AST rule of its own, so it cannot genuinely feed the axis
+    the way B86/B87/B89 do (see dossier.py's `_AXIS_BY_ID` comment on the dual-axis
+    stopgap this check replaces with a real fourth feeder). This is the AST-
+    persistence-layer twin of B335, at a tighter, function-scope precision
+    (`skillast._persist_install_function_findings`):
+
+    Mechanism A — within ONE function: a site.getsitepackages()/getusersitepackages()
+    call, a sitecustomize.py/usercustomize.py string constant, and a write/append-mode
+    open() call.
+    Mechanism B — within ONE function: a shell-rc path string constant
+    (.bashrc/.zshrc/.bash_profile/.profile/.zprofile), a PYTHONSTARTUP= assignment-
+    shaped string constant (never a bare mention), and a write/append-mode open() call.
+
+    Scope-locality (same function, not merely the same file) is what keeps this from
+    firing on dev tooling that only ever *reads* site.getsitepackages() elsewhere in
+    the file, or on a helper that writes some unrelated file in a function that
+    separately, incidentally mentions a shell-rc filename.
+
+    WARN when either mechanism fires — a real install act, but the same shape can
+    appear in an unusual-but-legitimate REPL-customization tool, so this never
+    escalates past WARN (matching B335's own reasoning). Advisory (scored=False);
+    PASS when no installed skill's Python source shows either shape; UNKNOWN when
+    there are no installed skills to inspect.
+    """
+    if not getattr(ctx, "installed_skills", None):
+        return _custom(
+            "B375",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for sitecustomize/PYTHONSTARTUP "
+            "persistence installs.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    warns: list[str] = []
+    for name, files in getattr(ctx, "installed_skill_py", {}).items():
+        for relpath, src in files:
+            for af in analyze_python(src, relpath):
+                if af.rule in ("SITECUSTOMIZE_SCOPED_INSTALL", "PYTHONSTARTUP_SCOPED_INSTALL"):
+                    warns.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _custom(
+            "B375",
+            HIGH,
+            WARN,
+            "Sitecustomize/PYTHONSTARTUP persistence install (function-scoped): "
+            + "; ".join(warns[:4])
+            + extra,
+            "Avoid computing a sitecustomize/usercustomize target path and writing to "
+            "it, and avoid assigning PYTHONSTARTUP while writing/appending to a shell "
+            "rc file, within a single function, unless the auto-execution is "
+            "genuinely required — document why if so.",
+            warns,
+        )
+    return _custom(
+        "B375",
+        MEDIUM,
+        PASS,
+        "No function-scoped sitecustomize/usercustomize install or PYTHONSTARTUP "
+        "shell-rc install pattern found.",
+        "Avoid computing a sitecustomize/usercustomize target path and writing to it, "
+        "and avoid assigning PYTHONSTARTUP while writing/appending to a shell rc "
+        "file, within a single function.",
+    )
+
+
 def check_silent_instruction(ctx: Context) -> Finding:
     """B63 — Silent-instruction detector (C-075).
 

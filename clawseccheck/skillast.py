@@ -4532,6 +4532,146 @@ def _decode_signal_is_only_artifact_relative_reads(
     return found_any
 
 
+# F-177/B375: sitecustomize.py/usercustomize.py + PYTHONSTARTUP auto-execution
+# persistence INSTALL, resolved at AST function-scope precision — the persistence-
+# axis-feeding twin of checks/_content.py's check_python_runtime_persist_install
+# (B335), which already recognizes this exact shape via a whole-file regex + a
+# character-proximity window but carries no AST0x rule of its own (see catalog.py's
+# B375 comment and dossier.py's _AXIS_BY_ID for why that matters).
+#
+# Mechanism A: within ONE function — a site.getsitepackages()/getusersitepackages()
+# call, a sitecustomize.py/usercustomize.py string constant (the install TARGET), and
+# a write/append-mode open() call.
+# Mechanism B: within ONE function — a shell-rc path string constant (.bashrc/.zshrc/
+# .bash_profile/.profile/.zprofile), a PYTHONSTARTUP=-shaped string constant (an
+# assignment, never a bare mention — the same discriminator B335 uses), and a
+# write/append-mode open() call.
+#
+# "Same function scope" (ast.walk(fn), not the whole file) is the deliberate boundary
+# — the same co-occurrence precision as `_function_has_history_file_read` above — so a
+# skill that merely INTROSPECTS site.getsitepackages() in one function while an
+# unrelated function elsewhere in the same file happens to open() some other,
+# unrelated file for writing does not convict. Dev tooling / venv doctors are exactly
+# the first half with no second half anywhere in the file (fixtures/
+# clean_b335_devtooling), and a doc/example skill never reaches this at all (its
+# fenced examples live in a .md file, which the Python collector never feeds here).
+_AST_SITECUSTOMIZE_TARGET_RE = re.compile(r"(?:site|user)customize\.py", re.IGNORECASE)
+_AST_SHELL_RC_TARGET_RE = re.compile(r"\.(?:bashrc|zshrc|bash_profile|profile|zprofile)\b")
+_AST_PYTHONSTARTUP_ASSIGN_RE = re.compile(r"PYTHONSTARTUP[\"']?\]?\s*=")
+
+
+def _is_write_or_append_open_call(node: ast.AST) -> bool:
+    """True for `open(path, "w"/"wb"/"a"/"ab")` (positional or `mode=` keyword) — the
+    AST twin of checks/_content.py's `_WRITE_MODE_OPEN_RE` (same `[wa]b?` shape, so a
+    read-only open() or an unrecognized mode like "w+"/"x" never matches either)."""
+    if not isinstance(node, ast.Call) or not _is_open_call(node):
+        return False
+    mode = _literal_str(node.args[1]) if len(node.args) > 1 else ""
+    for kw in node.keywords:
+        if kw.arg == "mode":
+            mode = _literal_str(kw.value)
+    if not mode:
+        return False
+    return mode.rstrip("b") in ("w", "a")
+
+
+def _is_sitepackages_lookup_call(node: ast.AST) -> bool:
+    """True for a call to `getsitepackages()`/`getusersitepackages()` under any base
+    name — the AST match works on the attribute/name alone and needs no literal
+    `site.` prefix text the way a regex would."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    name = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
+    return name in ("getsitepackages", "getusersitepackages")
+
+
+def _bare_string_stmt_constant_ids(fn: ast.AST) -> set:
+    """id() of every Constant that is the WHOLE value of a bare string-literal
+    expression statement anywhere in *fn* -- a docstring, or a rarer mid-function
+    string used as an inline comment.
+
+    C-135 adversarial finding (F-177/B375): a docstring that DISCLAIMS an install
+    ("Does not touch sitecustomize.py -- read-only") still contains the target
+    filename as a string, and combined with an unrelated write elsewhere in the same
+    function, false-WARNed before this exclusion -- mirrors B335's own disclaiming-
+    docstring/comment carve-out (checks/_content.py), ported to the AST layer. Prose
+    that merely MENTIONS a filename is not the same as USING it as a real value: a
+    functioning install always needs the filename to appear inside an expression
+    actually in use (an assignment RHS, a call argument, an f-string), never merely
+    as an orphaned bare string statement — so excluding these loses no true
+    positive."""
+    ids: set = set()
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            ids.add(id(node.value))
+    return ids
+
+
+def _function_has_sitecustomize_install(fn: ast.AST) -> bool:
+    """Mechanism A (F-177/B375) — see the module comment above
+    `_AST_SITECUSTOMIZE_TARGET_RE` for the full co-occurrence rationale."""
+    nodes = list(ast.walk(fn))
+    prose_ids = _bare_string_stmt_constant_ids(fn)
+    if not any(_is_sitepackages_lookup_call(n) for n in nodes):
+        return False
+    if not any(
+        isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and id(n) not in prose_ids
+        and _AST_SITECUSTOMIZE_TARGET_RE.search(n.value)
+        for n in nodes
+    ):
+        return False
+    return any(_is_write_or_append_open_call(n) for n in nodes)
+
+
+def _function_has_pythonstartup_shell_rc_install(fn: ast.AST) -> bool:
+    """Mechanism B (F-177/B375) — see the module comment above
+    `_AST_SHELL_RC_TARGET_RE` for the full co-occurrence rationale."""
+    nodes = list(ast.walk(fn))
+    prose_ids = _bare_string_stmt_constant_ids(fn)
+    if not any(
+        isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and id(n) not in prose_ids
+        and _AST_SHELL_RC_TARGET_RE.search(n.value)
+        for n in nodes
+    ):
+        return False
+    if not any(
+        isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and id(n) not in prose_ids
+        and _AST_PYTHONSTARTUP_ASSIGN_RE.search(n.value)
+        for n in nodes
+    ):
+        return False
+    return any(_is_write_or_append_open_call(n) for n in nodes)
+
+
+def _persist_install_function_findings(tree: ast.AST) -> list[tuple[int, str, str]]:
+    """Scan every function scope in *tree* for mechanism A or B (F-177/B375).
+
+    Returns (lineno, mechanism, funcname) for each function whose OWN scope trips
+    either mechanism — mirrors `_telemetry_collector_funcnames`'s per-function walk
+    above. A function that somehow trips both mechanisms reports only A (mechanism
+    identity is informational evidence text, not a distinct verdict)."""
+    hits: list[tuple[int, str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if _function_has_sitecustomize_install(node):
+            hits.append((getattr(node, "lineno", 0), "A", node.name))
+        elif _function_has_pythonstartup_shell_rc_install(node):
+            hits.append((getattr(node, "lineno", 0), "B", node.name))
+    return hits
+
+
 def analyze_python(
     source: str, filename: str = "<skill>", own_host: str | None = None
 ) -> list[ASTFinding]:
@@ -5323,6 +5463,28 @@ def analyze_python(
             getattr(node, "lineno", 0),
             f"hardcoded provider-shaped secret assigned to {target_name!r}",
         )
+
+    # F-177/B375: sitecustomize/PYTHONSTARTUP persistence install, scoped to a single
+    # function — see the module comment above `_AST_SITECUSTOMIZE_TARGET_RE`.
+    for _pi_ln, _pi_mech, _pi_fn in _persist_install_function_findings(tree):
+        if _pi_mech == "A":
+            add(
+                "SITECUSTOMIZE_SCOPED_INSTALL",
+                "info",
+                _pi_ln,
+                f"{_pi_fn}() computes a site-packages sitecustomize/usercustomize "
+                "target and opens a file for write/append — auto-execution "
+                "persistence install (mechanism A)",
+            )
+        else:
+            add(
+                "PYTHONSTARTUP_SCOPED_INSTALL",
+                "info",
+                _pi_ln,
+                f"{_pi_fn}() names a shell-rc path and a PYTHONSTARTUP assignment "
+                "while opening a file for write/append — PYTHONSTARTUP persistence "
+                "install (mechanism B)",
+            )
 
     return out
 

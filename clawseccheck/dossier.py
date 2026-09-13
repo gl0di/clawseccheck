@@ -118,6 +118,11 @@ _AXIS_BY_ID: dict[str, str | None] = {
     "B89": "persistence",  # dormant / unreachable-yet-code-bearing = staged
     "B86": "persistence",  # writable import path = staging / tamper surface
     "B87": "persistence",  # symlink escape to a sensitive path = staged exfil primitive
+    # F-177: the fourth, genuinely-new persistence feeder the B-613 comment on B335
+    # below was a stopgap for — B375 is the AST/function-scope-backed sitecustomize/
+    # PYTHONSTARTUP install detector, so it routes here directly like B86/B87/B89
+    # rather than through a dual-axis special case.
+    "B375": "persistence",
     "B62": "build",  # capability over-grant = a build-quality / least-privilege defect
     "B59": "connections",  # markdown-image data-exfil = outbound channel
     "B338": "connections",  # covert tunnel / mesh-VPN enrollment = outbound channel (E-065)

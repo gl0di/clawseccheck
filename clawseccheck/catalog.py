@@ -3256,6 +3256,27 @@ CATALOG: list[CheckMeta] = [
         scored=False,
         surface="agents",
     ),
+    # B375 (F-177): the AST-persistence-layer twin of B335. B335 already recognizes this
+    # exact sitecustomize/usercustomize + PYTHONSTARTUP install shape via a whole-file
+    # regex + character-proximity window, but it carries no AST0x rule of its own, and
+    # dossier.py's Persistence axis has exactly three feeders (B86/B87/B89) with no
+    # AST0x category fallback reaching it (see dossier.py's _AXIS_BY_ID comment on
+    # B335's own dual-axis stopgap). This check reruns the same two mechanisms at
+    # FUNCTION-SCOPE precision via skillast.py's AST walk (not a whole-file regex), so
+    # Persistence gets a genuine fourth feeder rather than a re-routed existing id — see
+    # this check's own docstring for the two mechanisms. Advisory (scored=False);
+    # WARN-only, never FAIL. MEDIUM confidence, same as B335 — a multi-signal
+    # co-occurrence heuristic, not an exact filename match.
+    CheckMeta(
+        "B375",
+        "Sitecustomize/PYTHONSTARTUP persistence install, function-scoped (AST)",
+        HIGH,
+        "advisory",
+        "Persistence / Supply-Chain Tamper",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -3420,6 +3441,7 @@ AST_MAP = {
     "B96": ("AST04",),  # config-driven trust widening (heuristic) = insecure metadata (cf. B62/B88)
     "B98": ("AST04",),  # missing capability declaration = insecure/absent least-privilege metadata (cf. B62/B88/B96)
     "B99": ("AST02",),  # .pth/sitecustomize auto-execution persistence = supply-chain tamper (cf. B86/B94)
+    "B375": ("AST02",),  # function-scoped sitecustomize/PYTHONSTARTUP install (AST) = supply-chain tamper (cf. B86/B99/B335)
     "B100": ("AST01", "AST02"),  # ClickFix paste-into-terminal + remote-fetch = malicious skill / supply-chain (cf. B13)
     "B135": ("AST02",),  # accepted-despite-failed-verification install = supply-chain trust bypass (cf. B103/B95)
     "B136": ("AST06",),  # codex trust_level="trusted" disables approval/sandbox gating = weak isolation (cf. B4/B48/B70)

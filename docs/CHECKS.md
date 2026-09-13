@@ -2671,6 +2671,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B375 - Sitecustomize/PYTHONSTARTUP persistence install, function-scoped (AST)
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Persistence / Supply-Chain Tamper
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Sitecustomize/PYTHONSTARTUP persistence install, function-scoped (AST)
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

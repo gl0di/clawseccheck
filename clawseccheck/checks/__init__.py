@@ -697,6 +697,7 @@ from ._content import (
     check_self_modification_directive,
     check_self_privesc_directive,
     check_silent_instruction,
+    check_sitecustomize_pythonstartup_scoped_install,
     check_social_engineering_phishing,
     check_symlink_escape,
     check_tool_output_trust_inversion,

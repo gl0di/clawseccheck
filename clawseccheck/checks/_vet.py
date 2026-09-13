@@ -146,6 +146,7 @@ from ._content import (
     check_self_modification_directive,
     check_self_privesc_directive,
     check_silent_instruction,
+    check_sitecustomize_pythonstartup_scoped_install,
     check_social_engineering_phishing,
     check_symlink_escape,
     check_tool_output_trust_inversion,
@@ -7181,6 +7182,7 @@ SKILL_CONTENT_RING = (
     check_manifest_absent,  # B98 — undeclared privilege: risky effects, no tools manifest
     check_pth_persistence,  # B99 — .pth/sitecustomize auto-execution persistence (F-088)
     check_python_runtime_persist_install,  # B335 — runtime-computed sitecustomize/PYTHONSTARTUP install (T06/B-343)
+    check_sitecustomize_pythonstartup_scoped_install,  # B375 — AST function-scoped sitecustomize/PYTHONSTARTUP install (F-177)
     check_clickfix_setup_section,  # B100 — ClickFix paste-into-terminal + remote-fetch (F-090)
     check_config_trust_widening,  # B96 — config-driven trust widening, heuristic-only (F-100)
     check_install_directive_supply_chain,  # B103 — install[] supply-chain provenance (B-099)
