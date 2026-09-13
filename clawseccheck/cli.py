@@ -44,7 +44,7 @@ from .brand import WORDMARK
 from .checks import detect_vet_type_with_reason, resolve_skill_target
 from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
 from .checks import CHECKS_BY_ID, _credential_store_state
-from .invocation import _display_path, command_prefix
+from .invocation import _display_path, cmd, command_prefix
 from .locking import journal_lock
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
@@ -2479,7 +2479,7 @@ def _run_watch_cli(args) -> int:
     """
     home = Path(args.home).expanduser()
     if not home.is_dir():
-        print(f"clawseccheck --watch: '{home}' is not a directory — nothing to watch.",
+        print(f"{cmd('--watch')}: '{home}' is not a directory — nothing to watch.",
               file=sys.stderr)
         return 1
     _emit(f"Watching {home} for changes (Ctrl-C to stop) — a change triggers "

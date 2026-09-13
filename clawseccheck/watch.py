@@ -38,6 +38,7 @@ import sys
 import time
 from pathlib import Path
 
+from .invocation import cmd
 from .monitorstore import _now_iso
 from .safeio import secure_dir, secure_write_text
 
@@ -417,7 +418,7 @@ def _run_monitor_once(home: Path, state_path, events_path, history_path,
             capture_output=True, text=True,
         )
     except OSError as exc:
-        return 1, f"clawseccheck --watch: could not run the re-scan: {exc}\n"
+        return 1, f"{cmd('--watch')}: could not run the re-scan: {exc}\n"
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
@@ -526,7 +527,7 @@ def run_watch(
             cycles += 1
             last_scan_at = _now_iso()
             last_scan_rc = rc
-            out.write(f"\n=== clawseccheck --watch: change detected, re-scanned at "
+            out.write(f"\n=== {cmd('--watch')}: change detected, re-scanned at "
                       f"{last_scan_at} (rc={rc}) ===\n")
             out.write(output)
             if hasattr(out, "flush"):
