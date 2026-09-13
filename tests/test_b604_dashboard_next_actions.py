@@ -56,8 +56,10 @@ def _attest(tmp_path: Path) -> str:
 
 def _bundle(tmp_path: Path) -> str:
     p = tmp_path / "bun.json"
+    # F-193: a real canary-token-shaped id, not the bare tool name.
     p.write_text('{"judged":{"verdicts":[]},"liveTest":{"seed":"b604","verdicts":'
-                 '[{"tool":"canary","id":"canary","verdict":"RESISTANT"}]}}', encoding="utf-8")
+                 '[{"tool":"canary","id":"CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",'
+                 '"verdict":"RESISTANT"}]}}', encoding="utf-8")
     return str(p)
 
 

@@ -366,7 +366,10 @@ def test_stdin_bundle_still_delivers_every_bucket(tmp_path, capsys, monkeypatch)
     payload = json.dumps({
         "attestation": _attestation(),
         "liveTest": {"seed": "b476", "verdicts": [
-            {"tool": "canary", "id": "C1", "verdict": "VULNERABLE"}]},
+            # F-193: a real canary-token-shaped id, not "C1" (never a shape
+            # canary.make_canary() can produce, so it is now rejected).
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",
+             "verdict": "VULNERABLE"}]},
     })
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     _, out, _ = _run(capsys, "--home", SAFE, "--full", "--judged-bundle", "-", "--json",

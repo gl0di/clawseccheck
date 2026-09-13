@@ -61,7 +61,15 @@ from .behavioral import analysis_incompleteness as behavioral_analysis_incomplet
 from .behavioral import analysis_is_conclusive as behavioral_is_conclusive
 from .behavioral import analyze as behavioral_analyze
 from .behavioral import render_behavioral_analysis
+from .canary import TOKEN_PREFIX as _CANARY_TOKEN_PREFIX
 from .catalog import UNKNOWN
+# F-193 (interim check): the real scenario-id-generating functions themselves, so the
+# liveTest id validator below asks "did make_*() actually produce this?" instead of a
+# free-form regex — see _valid_live_test_entries()'s own docstring. All four are pure
+# leaves (textnorm/brand only), so this cannot cycle.
+from .dryrun import make_scenarios as _make_dryrun_scenarios
+from .multiturn import make_multiturn as _make_multiturn_scenarios
+from .redteam import make_suite as _make_redteam_suite
 from .layers import (            # noqa: F401 — re-exported for existing importers
     STATUS_ERROR, STATUS_NOT_REACHED, STATUS_NOT_SUBMITTED, STATUS_RAN, STATUS_SKIPPED,
     STATUS_UNAVAILABLE,
@@ -80,6 +88,13 @@ from .report import _sanitize
 from .scanbudget import (
     DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, budget_deadline, budget_exceeded,
 )
+# B-799: the ONE structural "was the config actually read this run" signal, reused
+# from scoring.py rather than re-derived here — see to_ledger()'s own docstring. Safe:
+# scoring.py's own module-level import graph reaches only catalog.py (verified by a
+# BFS over every relative import), so this cannot cycle back — and pipeline.py already
+# imports report.py above, which itself imports scoring.py, so scoring.py is fully
+# initialized well before this import would ever run anyway.
+from .scoring import _config_blind_signal
 from .trajaudit import render_trajectory_analysis
 
 # ── phase identity ───────────────────────────────────────────────────────────
@@ -1078,13 +1093,86 @@ LIVE_TEST_TOOLS = frozenset({"canary", "redteam", "dryrun", "multiturn"})
 # literal strings) — never a third value.
 _LIVE_TEST_VERDICTS = frozenset({"VULNERABLE", "RESISTANT"})
 
-# Bounded, structural scenario-id shape (e.g. "canary", "PI-01", "DR-07", "MT-02") — the
-# real ids every harness's own make_*() emits are short alnum-plus-hyphen tokens. Enforced
-# here because a validated id ends up embedded verbatim in `LiveTestSignal.reason`, a
-# stable label `scoring`/`report` read — this is untrusted input from the agent under
-# test, so it is validated the same "narrow shape, never free text" way as
-# adjudication.py's `_CONFIG_PATH_RE`/`_LDH_HOST_RE`, never trusted as arbitrary prose.
-_LIVE_TEST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+# Bounded, structural scenario-id shape (e.g. "PI-01", "DR-07", "MT-02", or a canary
+# token) — the real ids every harness's own make_*() emits are short alnum-plus-hyphen
+# tokens. Enforced here because a validated id ends up embedded verbatim in
+# `LiveTestSignal.reason`, a stable label `scoring`/`report` read — this is untrusted
+# input from the agent under test, so it is validated the same "narrow shape, never
+# free text" way as adjudication.py's `_CONFIG_PATH_RE`/`_LDH_HOST_RE`, never trusted
+# as arbitrary prose.
+#
+# F-193: 36, not 32 — canary.make_canary()'s own UNSEEDED token is
+# `len(TOKEN_PREFIX) + 16` = 36 chars (`TOKEN_PREFIX` is 20; `secrets.token_hex(8)` is
+# 16 hex chars), and that real, legitimate value must not be rejected by the generic
+# shape gate before it ever reaches the per-tool `_is_generated_scenario_id` check
+# below. 40 leaves a little headroom above that exact figure, the same "generous, not
+# exact" choice `_MAX_LIVE_TEST_SEED_LEN`'s own docstring already makes.
+_LIVE_TEST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
+
+# ── F-193 (interim check) ───────────────────────────────────────────────────────
+#
+# The gap this closes: until now, `_LIVE_TEST_ID_RE` above accepted ANY id of that
+# generic shape — including the bare tool name itself. A real incident submitted
+# `{"tool": "canary", "id": "canary", "verdict": "RESISTANT"}` and it sailed through
+# unchallenged, because nothing ever asked "did `canary.make_canary()` actually produce
+# this id" — only "does it look like an id-shaped string". This is NOT the full fix
+# (a separate, in-flight effort verifies against the agent's own recorded trajectory
+# instead); it is the cheap, static half F-193's own comment calls for: reject an id
+# that could not possibly have come from the real scenario generator for that tool,
+# using the SAME `make_*()` functions SKILL.md tells an operator to run — never a
+# hand-maintained mirror of their output that could drift.
+#
+# redteam/dryrun/multiturn each enumerate a FIXED set of scenario ids from their own
+# `_TEMPLATES`/`_SCENARIOS` tables — independent of `seed` (only the per-scenario TOKEN
+# varies with the seed; the id set itself does not, verified by reading each module's own
+# `make_*()` above). So calling each once, with no seed, and keeping only the `"id"`
+# values is the real, non-drifting set — computed once at import time rather than per
+# verdict-entry, since it can never change within a process.
+_REDTEAM_SCENARIO_IDS = frozenset(e["id"] for e in _make_redteam_suite())
+_DRYRUN_SCENARIO_IDS = frozenset(e["id"] for e in _make_dryrun_scenarios())
+_MULTITURN_SCENARIO_IDS = frozenset(e["id"] for e in _make_multiturn_scenarios())
+
+# canary is different in kind, not just in list: `canary.make_canary()` builds ONE
+# scenario per run and has no `"id"` field at all — its real per-run identity is the
+# TOKEN it hands the agent under test (`canary.TOKEN_PREFIX` + a hex digest). There is
+# therefore no fixed SET to check membership against the way the three list-shaped
+# harnesses above have. What IS grounded in the real generator is its FORMAT:
+# `make_canary(seed=...)` always emits `TOKEN_PREFIX` + exactly 10 uppercase hex chars
+# (`hashlib.sha256(seed).hexdigest()[:10].upper()`), and an unseeded run emits
+# `TOKEN_PREFIX` + exactly 16 uppercase hex chars (`secrets.token_hex(8).upper()`) — see
+# `canary.make_canary()`'s own body for both branches. This is a SHAPE check, not an
+# exact-value one: verifying the precise seeded token would require re-deriving it from
+# the bucket's own `seed` field for every entry, which is a real strengthening but not
+# what closes THIS gap — the literal string "canary" (or any other bare word) can never
+# satisfy this shape regardless, which is exactly what the incident bundle submitted and
+# what SKILL.md's own example used to teach. Same "shape, not authenticity" honesty this
+# module already states for `_live_test_reproducible()`'s seed check.
+_CANARY_TOKEN_RE = re.compile(
+    rf"^{re.escape(_CANARY_TOKEN_PREFIX)}[0-9A-F]{{10}}$"
+    rf"|^{re.escape(_CANARY_TOKEN_PREFIX)}[0-9A-F]{{16}}$"
+)
+
+
+def _is_generated_scenario_id(tool: str, entry_id: str) -> bool:
+    """F-193: could `tool`'s real ``make_*()`` function actually have produced this id?
+
+    *tool* is already known to be one of :data:`LIVE_TEST_TOOLS` and *entry_id* has
+    already passed :data:`_LIVE_TEST_ID_RE`'s generic shape gate — this is the
+    ADDITIONAL, per-tool check layered on top, grounded in each harness's own real
+    generator (see the module-level comment above for how each set/pattern was built).
+    An unrecognized *tool* (should not reach here — callers gate on ``LIVE_TEST_TOOLS``
+    first) reads as False, never as "no opinion" — this function is a pure predicate,
+    not a partial one.
+    """
+    if tool == "redteam":
+        return entry_id in _REDTEAM_SCENARIO_IDS
+    if tool == "dryrun":
+        return entry_id in _DRYRUN_SCENARIO_IDS
+    if tool == "multiturn":
+        return entry_id in _MULTITURN_SCENARIO_IDS
+    if tool == "canary":
+        return bool(_CANARY_TOKEN_RE.fullmatch(entry_id))
+    return False
 
 # F-155: only a SEEDED run's tokens are deterministic/reproducible (canary.make_canary /
 # redteam.make_suite / dryrun.make_scenarios all draw a fresh `secrets` value unless an
@@ -1116,15 +1204,33 @@ class LiveTestSignal:
     reproducible: bool = False
 
 
-def _valid_live_test_entries(bucket) -> list[tuple[str, str, str]]:
+def _valid_live_test_entries(
+    bucket, *, multiturn_freshly_issued: bool = False
+) -> list[tuple[str, str, str]]:
     """Every structurally-valid ``(tool, id, verdict)`` triple in *bucket*'s
     ``"verdicts"`` list.
 
     Bounded and defensive — this is untrusted input from the agent under test. Any
     entry that is not a dict, names an unrecognized tool, carries an id outside
-    ``_LIVE_TEST_ID_RE``'s shape, or carries anything but exactly "VULNERABLE"/
-    "RESISTANT" is simply dropped — mirroring `adjudication._parse_verdicts`'
-    per-entry tolerance (one bad entry never loses the rest, and never raises).
+    ``_LIVE_TEST_ID_RE``'s generic shape, carries an id :func:`_is_generated_scenario_id`
+    says that tool's own ``make_*()`` could not have produced (F-193), or carries
+    anything but exactly "VULNERABLE"/"RESISTANT" is simply dropped — mirroring
+    `adjudication._parse_verdicts`' per-entry tolerance (one bad entry never loses the
+    rest, and never raises).
+
+    *multiturn_freshly_issued* (F-193, additive — every existing caller that omits it
+    sees byte-identical behaviour) is True only when THIS SAME invocation also just
+    generated a fresh multiturn plant (``--multiturn``/``--self-test``). multiturn is a
+    TWO-PHASE harness by construction (plant now, trigger on a LATER turn/session — see
+    ``multiturn.py``'s own module docstring): a verdict for it cannot be genuine within
+    the same run that issued the plant, no later turn has happened yet. Every multiturn
+    entry is dropped outright in that case, regardless of how well-formed its id is.
+    Today's CLI dispatch (``cli._PRIMARY_MODES``) already makes ``--multiturn``/
+    ``--self-test`` exclusive, early-returning modes that never reach
+    ``--judged-bundle`` processing in the same invocation — so this is a real,
+    defensive invariant for library/test callers rather than a currently-reachable CLI
+    bug, and is kept load-bearing (not just documented) so a future dispatch change
+    cannot silently reopen it.
     """
     if not isinstance(bucket, dict):
         return []
@@ -1144,6 +1250,14 @@ def _valid_live_test_entries(bucket) -> list[tuple[str, str, str]]:
         # single-line grade-cap banner. `.fullmatch()` anchors both ends against the
         # WHOLE string, closing that gap without widening the charset itself.
         if not (isinstance(entry_id, str) and _LIVE_TEST_ID_RE.fullmatch(entry_id)):
+            continue
+        # F-193: the generic shape check above is necessary but not sufficient — it is
+        # exactly what let the real incident's tool-name-as-id ("canary"/"canary")
+        # through. This asks whether the tool's OWN real generator could have produced
+        # this specific id.
+        if not _is_generated_scenario_id(tool, entry_id):
+            continue
+        if tool == "multiturn" and multiturn_freshly_issued:
             continue
         if verdict not in _LIVE_TEST_VERDICTS:
             continue
@@ -1181,7 +1295,7 @@ def _live_test_reproducible(bucket) -> bool:
 _MAX_LIVE_TEST_REASON_ENTRIES = 6
 
 
-def live_test_cap_signal(bucket) -> LiveTestSignal:
+def live_test_cap_signal(bucket, *, multiturn_freshly_issued: bool = False) -> LiveTestSignal:
     """F-155: reduce a ``--judged-bundle`` ``"liveTest"`` bucket to a cap-only signal.
 
     *bucket* is whatever :func:`split_judged_bundle` put at ``["liveTest"]`` — ``None``
@@ -1195,8 +1309,12 @@ def live_test_cap_signal(bucket) -> LiveTestSignal:
     or to an absent submission — both simply produce no VULNERABLE entries to find, so
     the natural "nothing found" result (``LiveTestSignal()``, every field at its
     zero-effect default) is what they get, not a special case carved out for them.
+
+    *multiturn_freshly_issued* — F-193, additive, threaded straight through to
+    :func:`_valid_live_test_entries`; see that function's own docstring.
     """
-    entries = _valid_live_test_entries(bucket)
+    entries = _valid_live_test_entries(
+        bucket, multiturn_freshly_issued=multiturn_freshly_issued)
     vulnerable = [(tool, entry_id) for tool, entry_id, verdict in entries if verdict == "VULNERABLE"]
     if not vulnerable:
         return LiveTestSignal()
@@ -1383,17 +1501,54 @@ class PipelineResult:
 
     def to_ledger(self, findings, *, degraded_count: int = 0,
                  attestation: dict | None = None, live_test_bucket=None,
-                 behavioral_analysis: dict | None = None) -> LayerLedger:
+                 behavioral_analysis: dict | None = None, ctx=None,
+                 multiturn_freshly_issued: bool = False) -> LayerLedger:
         """C-425: project this pipeline's phases onto the five-layer ledger (layers.py).
 
         The mapping (decided; implemented as specified, not redesigned):
 
-        * ``static`` — always ``ran`` on an audit path (the checks engine itself
-          already ran to produce *findings*). ``not_reached`` names *degraded_count*
-          — the SAME figure ``scoring.compute``'s own DEGRADED_CHECK_CAP already
-          discloses (``score.degraded_count``) — passed in by the caller rather than
-          re-derived here, so the ledger's line and the score's own cap can never
-          disagree.
+        * ``static`` — B-799: ``ran`` only when a real config was actually read this
+          run. Before this, the static layer was unconditionally ``ran`` on any audit
+          path (the checks engine itself always executes) — which let a session that
+          saw ZERO OpenClaw config still earn a letter grade: the config-derived
+          checks correctly degraded to UNKNOWN, nothing else caught it, and the ledger
+          said the layer had run regardless. *ctx* is optional and additive, exactly
+          like every other optional argument on this method — every pre-existing call
+          site that omits it (or passes ``None``) sees byte-identical ``STATUS_RAN``
+          behaviour, which is what keeps ``tests/test_c425_full_ledger.py``'s
+          ctx-less constructions pinned. When *ctx* IS supplied, the status is read
+          through :func:`scoring._config_blind_signal` — the SAME adversarially
+          reviewed B-306/B-363 structural signal ``scoring.compute`` already trusts to
+          cap the grade, reused here rather than re-derived so the ledger and the
+          score's own cap can never disagree about what "blind" means (including its
+          B-306 safe-symlink exemption — a dotfiles-style config symlink the collector
+          safely followed is NOT blind, and neither reads this layer as anything but
+          ``ran``). Two distinct non-``ran`` outcomes, matching the two structurally
+          different facts that signal already tells apart:
+
+            - reason ``"absent"`` (no openclaw.json/clawdbot.json found at all) →
+              :data:`~clawseccheck.layers.STATUS_UNAVAILABLE` — there was nothing to
+              ask, by construction; an environment fact, not a tool failure, so this
+              must not read as "the layer tried and blew up" to
+              ``--exit-code-scheme graduated`` (that scheme's own STATUS_ERROR-only
+              reading is deliberate — see ``cli._findings_exit_gate``'s docstring).
+              ``cli.py``'s ``--exit-code``/``--fail-on`` gates already trip on this
+              run through their own direct ``ctx.config_found`` read, independent of
+              this ledger, so a caller does not depend on this status for that.
+            - reason ``"unreadable"`` (present but unparseable/unreadable bytes) →
+              :data:`~clawseccheck.layers.STATUS_ERROR` — the tool DID try to read a
+              real file this run and failed; this is exactly the state
+              ``STATUS_ERROR`` is reserved for elsewhere in this method (the plugin
+              sweep / behavioral replay below), so the graduated exit-code scheme
+              correctly ranks it as "could not produce a trustworthy verdict".
+
+          ``not_reached`` names *degraded_count* — the SAME figure ``scoring.compute``'s
+          own DEGRADED_CHECK_CAP already discloses (``score.degraded_count``) — passed
+          in by the caller rather than re-derived here, so the ledger's line and the
+          score's own cap can never disagree. That disclosure is unconditional and
+          additive to either blind-config branch above: a blind config and a handful
+          of unrelated degraded checks are two different facts, and neither may hide
+          the other.
         * ``installed_sweep`` — ``ran`` only when BOTH :data:`PHASE_SKILL_SWEEP` and
           :data:`PHASE_PLUGIN_SWEEP` are present in ``self.phases`` and each is
           itself ``ran``; otherwise the WORSE of the two (:func:`_worse_status`) — a
@@ -1426,6 +1581,13 @@ class PipelineResult:
           as ``not_reached`` and lose their grade for PASSING it. Presence +
           well-formedness only, never the verdict's value — that asymmetry stays
           exactly where it already lives, in the score's cap-only signal, not here.
+          "Structurally-valid" is F-193-strengthened as of this change: it now also
+          requires the id to be one the tool's own ``make_*()`` generator could
+          actually have produced (:func:`_is_generated_scenario_id`), and — via
+          *multiturn_freshly_issued* — excludes any multiturn entry submitted in the
+          same invocation that issued the plant. A submission this layer used to
+          accept and no longer does is not a regression; it is exactly the gap this
+          change exists to close.
 
         B-558 adds a SECOND, independent axis on top of the mapping above:
         ``LayerState.coverage`` — did a layer that *ran* also exhaust its subject?
@@ -1464,8 +1626,13 @@ class PipelineResult:
           whenever ``ran``, because attestation freshness is unverifiable by
           construction — completeness there is a constant, not a measurement, so it
           stays UNKNOWN rather than a permanent, unearned PARTIAL.
-        * ``static`` — could be reported, but is excluded from the scope note by
-          ``test_static_layer_is_not_in_the_scope_note``; out of scope here.
+        * ``static`` — this axis (did a ``ran`` static layer exhaust its subject) is
+          a separate question from B-799's *status* fix above and is still not
+          answered here — ``coverage`` stays :data:`~clawseccheck.layers.
+          COVERAGE_UNKNOWN` regardless. The layer is also still excluded from the
+          scope note by ``test_static_layer_is_not_in_the_scope_note`` — see
+          ``report.py``'s own ``_missing_layers_sentence``/config-blind paragraphs for
+          where a non-``ran`` static layer IS explained to the reader instead.
         """
         skill = self.by_name(PHASE_SKILL_SWEEP)
         plugin = self.by_name(PHASE_PLUGIN_SWEEP)
@@ -1510,12 +1677,34 @@ class PipelineResult:
                 logs_coverage = COVERAGE_COMPLETE
                 logs_not_reached = b164_not_reached
 
-        static_not_reached: tuple = ()
+        static_reasons: list[str] = []
         if degraded_count > 0:
             plural = "check" if degraded_count == 1 else "checks"
-            static_not_reached = (
-                f"{degraded_count} {plural} could not reach a verdict this run",
+            static_reasons.append(
+                f"{degraded_count} {plural} could not reach a verdict this run")
+
+        # B-799: reuse scoring.py's own B-306/B-363 structural signal rather than
+        # re-derive it — see this method's own docstring for the full reasoning.
+        # ctx=None (every pre-existing caller) makes config_blind permanently False,
+        # so static_status falls through to STATUS_RAN unchanged.
+        config_blind, config_blind_reason = _config_blind_signal(ctx)
+        if config_blind and config_blind_reason == "absent":
+            static_status = STATUS_UNAVAILABLE
+            static_reasons.insert(
+                0,
+                "no openclaw.json (or legacy clawdbot.json) was found in the audited "
+                "home — there was nothing for the static config audit to read",
             )
+        elif config_blind and config_blind_reason == "unreadable":
+            static_status = STATUS_ERROR
+            static_reasons.insert(
+                0,
+                "openclaw.json is present but could not be parsed — the static "
+                "config audit could not read it",
+            )
+        else:
+            static_status = STATUS_RAN
+        static_not_reached: tuple = tuple(static_reasons)
 
         if attestation:
             self_report_status = STATUS_RAN
@@ -1531,15 +1720,18 @@ class PipelineResult:
             self_report_not_reached = ()
 
         live_status = (
-            STATUS_RAN if _valid_live_test_entries(live_test_bucket)
+            STATUS_RAN if _valid_live_test_entries(
+                live_test_bucket, multiturn_freshly_issued=multiturn_freshly_issued)
             else STATUS_NOT_SUBMITTED
         )
 
         return LayerLedger(states={
-            # B-558: could be reported, but excluded from the scope note by
-            # test_static_layer_is_not_in_the_scope_note — out of scope for this slice.
+            # B-799: status now honestly reflects whether a config was actually read
+            # (see this method's own docstring) — coverage stays UNKNOWN (B-558, not
+            # this slice's concern), and the layer is still excluded from the scope
+            # note by test_static_layer_is_not_in_the_scope_note.
             LAYER_STATIC: LayerState(
-                status=STATUS_RAN, not_reached=static_not_reached,
+                status=static_status, not_reached=static_not_reached,
                 coverage=COVERAGE_UNKNOWN),
             # B-558/B-723: this layer's phases are fabricated from a
             # commit_full_phases PROMISE before the sweep runs (cli._build_layer_ledger)

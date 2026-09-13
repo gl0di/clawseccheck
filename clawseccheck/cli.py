@@ -1179,13 +1179,19 @@ def vet_all(
 def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
                         attestation: dict | None = None, live_test_bucket=None,
                         behavioral_ran: bool = False, behavioral_analysis: dict | None = None,
-                        commit_full_phases: bool = False):
+                        commit_full_phases: bool = False, ctx=None):
     """C-425/C-426: the ONE producer of the five-layer ledger (``layers.py`` via
     ``pipeline.PipelineResult.to_ledger``) — extracted from ``_resolve_runtime_caps``
     (C-425) so the bare (non-`--full`) audit path (C-426) can call the SAME code
     instead of a second, competing builder. Every call site funnels through here;
     the mapping itself still lives in ``PipelineResult.to_ledger`` and is never
     re-derived by hand anywhere else.
+
+    ``ctx`` — B-799: threaded straight through to ``to_ledger``, unchanged. Optional
+    and additive like every other kwarg here: a caller that omits it (none did before
+    this) sees byte-identical behaviour, since ``to_ledger(ctx=None)`` keeps the
+    static layer unconditionally ``ran``. Every real call site in this module has a
+    ``ctx`` in scope by the time it calls this helper, so all of them now pass it.
 
     ``commit_full_phases`` — deliberately NOT just ``bool(args.full)`` read
     internally — is True only from a call site that has actually committed to
@@ -1255,9 +1261,14 @@ def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
                 status=_pipeline.STATUS_RAN if behavioral_ran else _pipeline.STATUS_ERROR,
                 detail=("behavioral replay completed." if behavioral_ran
                         else "behavioral replay raised — see run_behavioral's own section.")))
+    # F-193: derived from `args` directly (already in scope here) rather than threaded
+    # as a fresh kwarg through every call site — see `live_test_cap_signal`'s own inline
+    # comment at its call sites for why this reads False on every live invocation today.
+    _mt_fresh = bool(getattr(args, "multiturn", False) or getattr(args, "self_test", False))
     return prelim.to_ledger(findings, degraded_count=degraded_count,
                             attestation=attestation, live_test_bucket=live_test_bucket,
-                            behavioral_analysis=behavioral_analysis)
+                            behavioral_analysis=behavioral_analysis, ctx=ctx,
+                            multiturn_freshly_issued=_mt_fresh)
 
 
 def _last_complete_history_row(path=None):
@@ -1464,7 +1475,16 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     # exception: it calls this helper too, so its card shows the identical capped grade
     # `--full`'s own report/--json would for the same run.
     live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
-    live_signal = _pipeline.live_test_cap_signal(live_test_bucket)
+    # F-193: True only when THIS SAME invocation also just generated a fresh multiturn
+    # plant — see pipeline._valid_live_test_entries's own docstring for why that makes
+    # any multiturn verdict in live_test_bucket definitionally forged. `_PRIMARY_MODES`
+    # already makes `--multiturn`/`--self-test` exclusive, early-returning modes that
+    # never reach this function in the same invocation, so this reads False on every
+    # live call today — kept anyway as the real, load-bearing guard rather than a
+    # comment, so a future dispatch change cannot silently reopen the gap.
+    _mt_fresh = bool(getattr(args, "multiturn", False) or getattr(args, "self_test", False))
+    live_signal = _pipeline.live_test_cap_signal(
+        live_test_bucket, multiturn_freshly_issued=_mt_fresh)
     # F-154: the behavioral cap-only signal (T1/T2/T3/B191), gated on THIS invocation
     # having ACTUALLY run `behavioral.analyze(ctx)` — mirrors --fast's own skip of P8
     # (`_pipeline.run_pipeline`'s `run_behavioral`), so a --full --fast run (or any
@@ -1508,7 +1528,7 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     ledger = _build_layer_ledger(
         args, findings, degraded_count=score.degraded_count, attestation=attestation,
         live_test_bucket=live_test_bucket, behavioral_ran=_behavioral_ran,
-        behavioral_analysis=_behavioral_analysis, commit_full_phases=args.full,
+        behavioral_analysis=_behavioral_analysis, commit_full_phases=args.full, ctx=ctx,
     )
 
     if args.full:
@@ -1568,7 +1588,10 @@ def _apply_live_test_cap(ctx, findings, score, args):
         if args.judged_bundle is not None else None
     )
     live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
-    live_signal = _pipeline.live_test_cap_signal(live_test_bucket)
+    # F-193: see the matching comment at `_resolve_runtime_caps`'s own call site.
+    _mt_fresh = bool(getattr(args, "multiturn", False) or getattr(args, "self_test", False))
+    live_signal = _pipeline.live_test_cap_signal(
+        live_test_bucket, multiturn_freshly_issued=_mt_fresh)
     if live_signal.hit:
         # C-426: the ledger MUST be threaded through this recompute. `_main` already
         # built a bare one and computed `score` against it, so the run reaching here
@@ -1582,7 +1605,7 @@ def _apply_live_test_cap(ctx, findings, score, args):
         ledger = _build_layer_ledger(
             args, findings, degraded_count=score.degraded_count,
             attestation=getattr(ctx, "attestation", None),
-            live_test_bucket=live_test_bucket,
+            live_test_bucket=live_test_bucket, ctx=ctx,
         )
         score = compute(findings, ctx, live_test_vulnerable=True,
                         live_test_reason=live_signal.reason, ledger=ledger)
@@ -4780,6 +4803,7 @@ def _main(argv=None) -> int:
     # resolved one.
     _bare_ledger = _build_layer_ledger(
         args, findings, degraded_count=score.degraded_count, attestation=attestation,
+        ctx=ctx,
     )
     score = compute(findings, ctx, ledger=_bare_ledger)
     logger.debug("ran %d checks", len(findings))
@@ -5411,7 +5435,8 @@ def _main(argv=None) -> int:
             _dashboard_phases.add(behavioral_phase)
         _ledger = _dashboard_phases.to_ledger(
             findings, degraded_count=score.degraded_count, attestation=attestation,
-            live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis)
+            live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis,
+            ctx=ctx)
         score = compute(findings, ctx, live_test_vulnerable=_live_signal.hit,
                         live_test_reason=_live_signal.reason,
                         behavioral_fired_ids=_behavioral_fired_ids, ledger=_ledger)
@@ -6231,7 +6256,8 @@ def _main(argv=None) -> int:
             # same local this function already threads into every ledger build.
             layer_ledger = full_pipeline.to_ledger(
                 findings, degraded_count=score.degraded_count, attestation=attestation,
-                live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis)
+                live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis,
+                ctx=ctx)
             score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
                             live_test_reason=live_signal.reason,
                             behavioral_fired_ids=behavioral_fired_ids, ledger=layer_ledger)
@@ -6330,7 +6356,7 @@ def _main(argv=None) -> int:
             layer_ledger = _hoisted_pipeline.to_ledger(
                 findings, degraded_count=score.degraded_count, attestation=attestation,
                 live_test_bucket=_live_test_bucket,
-                behavioral_analysis=_behavioral_analysis)
+                behavioral_analysis=_behavioral_analysis, ctx=ctx)
             score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
                             live_test_reason=live_signal.reason,
                             behavioral_fired_ids=behavioral_fired_ids, ledger=layer_ledger)

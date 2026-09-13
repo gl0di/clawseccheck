@@ -49,8 +49,11 @@ def _run(capsys, *argv):
 
 def _live_bundle(tmp_path: Path) -> str:
     p = tmp_path / "live.json"
+    # F-193: a real canary-token-shaped id, not "C1" (which is not a shape
+    # canary.make_canary() can ever produce, so it is now rejected).
     p.write_text(json.dumps({"liveTest": {"seed": "abc123", "verdicts": [
-        {"tool": "canary", "id": "C1", "verdict": "VULNERABLE"}]}}), encoding="utf-8")
+        {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",
+         "verdict": "VULNERABLE"}]}}), encoding="utf-8")
     return str(p)
 
 

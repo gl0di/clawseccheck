@@ -227,13 +227,13 @@ class TestLiveBehaviourLayerTheTrap:
         verdict must read `ran`, not `not_reached` -- reading `live_test_cap_signal
         (...).hit` here instead (True only for VULNERABLE) would make a user who
         PASSED their live test lose their grade for it."""
-        bucket = {"verdicts": [{"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}
+        bucket = {"verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}
         assert pl.live_test_cap_signal(bucket).hit is False  # sanity: .hit really is False here
         ledger = _empty_pipeline().to_ledger([], live_test_bucket=bucket)
         assert ledger.status(LAYER_LIVE_BEHAVIOUR) == STATUS_RAN
 
     def test_ran_on_vulnerable_bucket(self):
-        bucket = {"verdicts": [{"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}
+        bucket = {"verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}
         ledger = _empty_pipeline().to_ledger([], live_test_bucket=bucket)
         assert ledger.status(LAYER_LIVE_BEHAVIOUR) == STATUS_RAN
 
@@ -273,7 +273,7 @@ class TestResolveRuntimeCapsWiring:
         """The CLI-level twin of the trap test above: a RESISTANT-only submission
         must not cost this run its `live_behaviour` layer."""
         bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}})
         ctx, findings, score = audit(SAFE)
         args = _args(full=True, fast=False, judged_bundle=bundle)
         out_score, *_rest = cli._resolve_runtime_caps(ctx, findings, score, args,
@@ -286,7 +286,7 @@ class TestResolveRuntimeCapsWiring:
 
     def test_vulnerable_live_test_layer5_ran_and_cap_still_applies(self, tmp_path):
         bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
         ctx, findings, score = audit(SAFE)
         args = _args(full=True, fast=False, judged_bundle=bundle)
         out_score, *_rest = cli._resolve_runtime_caps(ctx, findings, score, args,
@@ -321,7 +321,7 @@ class TestResolveRuntimeCapsWiring:
         `PipelineResult`, which is what the shipping surfaces now do.
         """
         bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}})
         ctx, findings, score = audit(SAFE)
         args = _args(full=True, fast=False, judged_bundle=bundle)
         out_score, *_rest = cli._resolve_runtime_caps(ctx, findings, score, args,
@@ -341,7 +341,7 @@ class TestResolveRuntimeCapsWiring:
         grade-identical to the same run with no ledger at all.
         """
         bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}})
         ctx, findings, score = audit(SAFE)
         args = _args(full=True, fast=False, judged_bundle=bundle)
         (out_score, _deadline, judged_bundle, live_signal, fired, _ledger,

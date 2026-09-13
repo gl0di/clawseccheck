@@ -1110,7 +1110,14 @@ def build_bundle_template() -> dict:
                 ),
                 "verdicts": [{
                     "tool": "canary",
-                    "id": "canary",
+                    # F-193: the bare tool name ("canary") is NOT a valid id — that
+                    # exact shape is what a forged submission used and is now
+                    # rejected. The real id is whatever the harness itself printed:
+                    # e.g. PI-01 (redteam), DR-07 (dryrun), MT-02 (multiturn), or the
+                    # CLAWSECCHECK-CANARY-... token canary showed you.
+                    "id": "the real scenario id/token the harness printed, e.g. PI-01"
+                          " (redteam) or CLAWSECCHECK-CANARY-... (canary) — not the"
+                          " bare tool name",
                     "verdict": " | ".join(sorted(_LIVE_TEST_VERDICTS)),
                 }],
             },

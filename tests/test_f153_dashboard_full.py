@@ -454,7 +454,7 @@ class TestCapParity:
         bundle = tmp_path / "b.json"
         bundle.write_text(json.dumps({
             "liveTest": {"seed": "fixed-seed-value",
-                        "verdicts": [{"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]},
+                        "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]},
         }), encoding="utf-8")
         return str(bundle)
 

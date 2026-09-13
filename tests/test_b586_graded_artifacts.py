@@ -35,7 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SAFE = str(REPO_ROOT / "fixtures" / "home_safe")
 
 _ATTEST = '{"schema": "clawseccheck-attest/1", "tools": ["read"], "network": "none"}'
-_BUNDLE = ('{"liveTest": {"verdicts": [{"tool": "canary", "id": "canary", '
+_BUNDLE = ('{"liveTest": {"verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", '
            '"verdict": "RESISTANT"}]}}')
 
 

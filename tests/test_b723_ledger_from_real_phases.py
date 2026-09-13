@@ -213,7 +213,7 @@ def test_the_early_ledger_can_never_be_complete_whatever_it_is_given():
         _Args(), findings,
         attestation={"tools": ["read", "write"]},
         live_test_bucket={"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]},
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]},
         behavioral_ran=True, behavioral_analysis={},
         commit_full_phases=True,
     )

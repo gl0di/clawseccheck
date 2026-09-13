@@ -72,7 +72,7 @@ def _graded_inputs(tmp_path):
     bundle_path = tmp_path / "bundle.json"
     bundle_path.write_text(json.dumps({"liveTest": {
         "seed": "b536b536b536b536",
-        "verdicts": [{"tool": "canary", "id": "canary", "verdict": "RESISTANT"}],
+        "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}],
     }}))
     return str(attest_path), str(bundle_path)
 
