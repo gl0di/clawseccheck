@@ -337,7 +337,7 @@ _EXEMPT = {
                     "growth to whoever crosses the line, not to whoever accumulated it, so "
                     "the commit a staleness guard fires on is rarely the commit that caused "
                     "most of the drift.",
-    "cli.py": "~5,967 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
+    "cli.py": "~6,489 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "
               "the dispatch cascade: each `_mode` branch that returns early has to repeat "
@@ -352,7 +352,10 @@ _EXEMPT = {
               "time after a batch of small dispatch-cascade additions (C-448's --all window "
               "opt-out, C-519's --show-suppressed attribution/expiry, C-524's --save-run/"
               "--diff) — each individually a few lines by design, same as every other primary "
-              "mode this entry already names; not a new argument, the same one landing again.",
+              "mode this entry already names; not a new argument, the same one landing again. "
+              "Restated a fourth time after C-517's --watch/--watch-status: two new primary "
+              "modes plus their argparse registration and CLI-side helpers (the loop itself "
+              "lives in the new watch.py, not here) — same shape, same cause.",
     "pipeline.py": "~1,550 lines — the --full P7-P10 orchestration. Crossed the budget with "
                    "C-425's PipelineResult.to_ledger(), which projects the run's phases onto "
                    "the five-layer ledger (layers.py). It belongs here and nowhere else: it "

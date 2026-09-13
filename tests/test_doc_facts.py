@@ -735,24 +735,36 @@ def test_the_network_guard_bites_on_an_import_and_on_a_socket_that_connects():
     ]) == []
 
 
-def test_the_only_program_this_package_spawns_is_the_users_own_openclaw_cli():
+def test_the_only_programs_this_package_spawns_are_named_and_understood():
     """"0 network calls" is an import-level claim, and an import audit cannot see a network
-    call made by a program we START. So the one place this package starts anything is pinned
-    by argv shape: `openclaw security audit --json`, the user's own already-installed CLI
-    reading their own machine.
+    call made by a program we START. So every place this package starts anything is pinned
+    by argv shape, and each one is examined for what it actually is:
 
-    A second spawn site, or a changed argv, reddens the build -- which is the point. It
-    forces whoever adds it to re-examine the badge's promise rather than inherit it.
+    - `clawseccheck/native.py`: `openclaw security audit --json` -- the user's own
+      already-installed CLI, reading their own machine.
+    - `clawseccheck/watch.py` (C-517): `sys.executable -m clawseccheck --monitor ...` -- the
+      package invoking ITSELF (its own installed entry point) to re-run the identical local,
+      offline `--monitor` check in a fresh process when `--watch` sees a relevant file
+      change. Not a third-party program and not a network call -- see watch.py's own comment
+      at the call site.
+
+    A third spawn site, or a changed argv on either of these two, reddens the build -- which
+    is the point. It forces whoever adds it to re-examine the badge's promise rather than
+    inherit it.
     """
     sites = _spawn_sites()
-    assert len(sites) == 1, "\n".join(f"{f}:{ln} argv={argv}" for f, ln, argv in sites)
-    where, _, argv = sites[0]
-    assert where == "clawseccheck/native.py", where
-    assert argv == ["security", "audit", "--json"], argv
+    by_file = {where: argv for where, _ln, argv in sites}
+    assert set(by_file) == {"clawseccheck/native.py", "clawseccheck/watch.py"}, sites
+    assert by_file["clawseccheck/native.py"] == ["security", "audit", "--json"]
+    assert by_file["clawseccheck/watch.py"] == [
+        "-m", "clawseccheck", "--monitor", "--verbose",
+        "--home", "--state", "--events", "--history",
+    ]
 
 
-def test_the_spawn_guard_bites_on_a_second_call_site():
-    """Guard the guard: the assertion above is `== 1`, so it must be shown to reach 2."""
+def test_the_spawn_guard_bites_on_a_third_call_site():
+    """Guard the guard: the assertion above is an exact two-site set, so it must be shown to
+    notice a third."""
     planted = _spawn_sites([
         ("clawseccheck/_synthetic.py",
          "import subprocess, os\n"

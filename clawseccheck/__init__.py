@@ -36,6 +36,7 @@ from .pdf import render_pdf
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 from .guide import suggest_actions, render_next_actions
 from .update import update_notice, read_latest_hint, DEFAULT_LATEST
+from .watch import describe_liveness, probe_inotify, read_heartbeat, run_watch
 
 
 def _deptree_scan(root=None):
@@ -223,4 +224,5 @@ __all__ = [
     "suggest_actions", "render_next_actions",
     "risk_paths", "render_risk_paths",
     "read_last_mode", "record_mode",
+    "run_watch", "probe_inotify", "read_heartbeat", "describe_liveness",
 ]

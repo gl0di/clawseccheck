@@ -172,6 +172,7 @@ from .sbom_runs import diff_sbom_runs as _diff_sbom_runs
 from .sbom_runs import load_sbom_run as _load_sbom_run
 from .sbom_runs import render_sbom_diff_json as _render_sbom_diff_json
 from .sbom_runs import save_sbom_run as _save_sbom_run_snapshot
+from . import watch as _watch
 
 
 def _unicode_ok() -> bool:
@@ -365,6 +366,12 @@ def _incidents_path(args) -> str:
     reasoning as _runs_path/_sbom_runs_path: no dedicated override flag, --data-dir
     already moves it with everything else."""
     return str(_store_dir(args) / "incidents.jsonl")
+
+
+def _watch_heartbeat_path(args) -> Path:
+    """C-517: --watch's liveness surface — same reasoning as _runs_path/_incidents_path:
+    no dedicated override flag, --data-dir already moves it with everything else."""
+    return _store_dir(args) / "watch_heartbeat.json"
 
 
 def _record_run(capability: str, args) -> None:
@@ -1673,6 +1680,8 @@ _REVET_SEVERITY = {"FAIL": HIGH, "WARN": MEDIUM, UNKNOWN: "INFO"}
 # always been decided by _main()'s cascade and is untouched.
 _PRIMARY_MODES = [
     ("purge", "--purge", "bool"),
+    ("watch", "--watch", "bool"),
+    ("watch_status", "--watch-status", "bool"),
     ("apply_ignore_proposals", "--apply-ignore-proposals", "opt"),
     ("verify_self", "--verify-self", "bool"),
     ("verify_history", "--verify-history", "bool"),
@@ -2458,6 +2467,44 @@ _PURGE_FILENAMES = (
 )
 
 
+def _run_watch_cli(args) -> int:
+    """Continuous file-system watch (C-517): re-run `--monitor` on a debounced
+    relevant change instead of waiting for the next scheduled invocation.
+
+    Standalone, like --purge/--brief above: it needs no audit() pass of its own —
+    every actual scan is a `--monitor` subprocess (see watch.run_watch), so this
+    function only resolves paths and hands off to the loop. Never returns until the
+    loop does (SIGTERM/SIGINT), which is the one deliberate way this command differs
+    from every other mode in this file.
+    """
+    home = Path(args.home).expanduser()
+    if not home.is_dir():
+        print(f"clawseccheck --watch: '{home}' is not a directory — nothing to watch.",
+              file=sys.stderr)
+        return 1
+    _emit(f"Watching {home} for changes (Ctrl-C to stop) — a change triggers "
+          f"`--monitor --verbose` after a {args.watch_debounce:g}s debounce window.\n"
+          f"Heartbeat: {_watch_heartbeat_path(args)}")
+    return _watch.run_watch(
+        home,
+        state_path=args.state,
+        events_path=args.events,
+        history_path=args.history,
+        heartbeat_path=_watch_heartbeat_path(args),
+        debounce_s=args.watch_debounce,
+        stream=sys.stdout,
+    )
+
+
+def _run_watch_status(args) -> int:
+    """--watch-status: read the heartbeat --watch writes and say whether it is
+    still alive — read-only, writes nothing (same contract as --brief)."""
+    hb = _watch.read_heartbeat(_watch_heartbeat_path(args))
+    word, sentence = _watch.describe_liveness(hb)
+    _emit(f"{word}: {sentence}")
+    return 0 if word == "ALIVE" else 1
+
+
 def _confirm_purge(paths: "list[Path]") -> "tuple[bool, bool]":
     """Print the exact files to be deleted and ask for confirmation.
 
@@ -3181,6 +3228,23 @@ def _main(argv=None) -> int:
                         f"written by --monitor (default: {DEFAULT_EVENTS})")
     p.add_argument("--watch-log", action="store_true",
                    help="print the Agent Watch event journal (timeline of what changed)")
+    p.add_argument("--watch", action="store_true",
+                   help="continuous watch mode (C-517): stay running, and re-run "
+                        "--monitor --verbose automatically on a relevant filesystem "
+                        "change under --home (debounced) — real-time inotify on Linux, "
+                        "a bounded stat-poll fallback elsewhere; see "
+                        "docs/design/watch-mechanism.md. Never returns until stopped "
+                        "(Ctrl-C / SIGTERM); writes only under --data-dir, same as "
+                        "--monitor")
+    p.add_argument("--watch-debounce", type=float, default=_watch.DEFAULT_DEBOUNCE_S,
+                   metavar="SECONDS",
+                   help=f"with --watch: quiet window after the last detected change "
+                        f"before the re-scan runs, so one burst of writes triggers one "
+                        f"re-scan, not several (default: {_watch.DEFAULT_DEBOUNCE_S:g})")
+    p.add_argument("--watch-status", action="store_true",
+                   help="is a --watch process still alive? Reads its heartbeat file "
+                        "under --data-dir and reports ALIVE / STALE / STOPPED / NOT "
+                        "RUNNING — read-only, writes nothing, does not start a watch")
     p.add_argument("--vet", metavar="TARGET",
                    help="vet a skill / plugin / MCP target BEFORE installing it — the type is "
                         "autodetected by content (explicit flags below force an engine)")
@@ -3631,6 +3695,15 @@ def _main(argv=None) -> int:
         # Dispatched FIRST, before any audit()/history-record call-site below, so
         # purge can never race its own uninstall by writing a fresh history point.
         return _run_purge(args)
+
+    if _mode == "watch":
+        # C-517: standalone, like --purge above — every actual scan it triggers is a
+        # `--monitor` subprocess (watch.run_watch), so this needs no audit() of its own.
+        return _run_watch_cli(args)
+
+    if _mode == "watch_status":
+        # Read-only liveness check for a --watch process; needs no audit() either.
+        return _run_watch_status(args)
 
     if _mode == "apply_ignore_proposals":
         # C-253: like --purge, this only touches its own known file (.clawseccheckignore

@@ -675,8 +675,50 @@ python3 audit.py --monitor --verbose       # also list what could not be compare
 ```
 
 Schedule it via OpenClaw's heartbeat or cron; when an alert fires, have your agent message you.
-It stores one small snapshot at `~/.clawseccheck/state.json`. (Scheduled re-audit + drift
-detection — not a real-time runtime IDS; that heavier model is intentionally out of scope.)
+It stores one small snapshot at `~/.clawseccheck/state.json`. This is scheduled re-audit + drift
+detection, not a continuously-running watcher — for that, see
+[`--watch`](#--watch--continuous-real-time-monitoring) just below, which re-runs this exact
+check automatically the moment something relevant changes.
+
+### `--watch` — continuous, real-time monitoring
+
+`--monitor` above is one-shot: it compares now against last time, whenever it is invoked.
+`--watch` stays running and invokes it FOR you, the moment a relevant file under `--home`
+changes:
+
+```bash
+clawseccheck --watch --home ~/.openclaw
+clawseccheck --watch --home ~/.openclaw --data-dir ~/.clawseccheck --watch-debounce 5
+```
+
+It never returns until stopped (`Ctrl-C`, or `SIGTERM` from a process supervisor) and prints
+each triggered check in the exact same format as `clawseccheck --monitor --verbose` — because
+that is literally what it runs, as a subprocess, on every relevant change. Nothing about
+detection is reimplemented: the alert text, severity mapping, and the tamper-evident event
+journal `--monitor` already writes to are all untouched.
+
+A burst of writes collapses to **one** re-scan, not one per file touched: `--watch` waits for a
+quiet window (`--watch-debounce`, default 2s) after the last detected change before running the
+check, and any further change inside that window resets the wait.
+
+**Mechanism:** real inotify (Linux) via a `ctypes` binding to libc — no new runtime dependency —
+with a bounded stat-polling fallback for any other platform or a sandbox that refuses the
+syscall. See `docs/design/watch-mechanism.md` for what was actually verified versus assumed.
+
+**Liveness:** a watcher that dies silently is worse than no watcher. `--watch` writes a
+heartbeat file under its store directory (`<data-dir>/watch_heartbeat.json`) on start, after
+every re-scan, and periodically while idle. Check on it from anywhere with:
+
+```bash
+clawseccheck --watch-status --home ~/.openclaw --data-dir ~/.clawseccheck
+```
+
+which reports `ALIVE`, `STALE` (no heartbeat update in a while — it may have hung), `STOPPED`
+(a clean shutdown was recorded, or the process is confirmed gone), or `NOT RUNNING` (never
+started, or pointed at the wrong `--data-dir`). Read-only — it never starts a watch itself.
+
+Like `--monitor`, `--watch` only ever writes under its own store directory — never under the
+audited `--home`.
 
 Verify the event journal's own tamper-evident chain by name (not the score-history one) with:
 
