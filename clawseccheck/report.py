@@ -1363,6 +1363,7 @@ def _capability_graph(ctx) -> dict:
         _B55_FS_WRITE_TOOLS,
         _agent_legs,
         _b55_write_tools_granted,
+        _b351_resolvable_agents,
         _canon_tool,
         _credential_store_state,
         _enabled_tools,
@@ -1372,7 +1373,7 @@ def _capability_graph(ctx) -> dict:
         _mcp_servers,
         _web_fetch_enabled,
     )
-    from .collector import dig  # noqa: PLC0415
+    from .collector import agent_roster, dig  # noqa: PLC0415
 
     cfg = getattr(ctx, "config", {}) or {}
     att = getattr(ctx, "attestation", {}) or {}
@@ -1451,10 +1452,45 @@ def _capability_graph(ctx) -> dict:
         or _credential_store_state(getattr(ctx, "home", None))["secret_files"]
         or any(_hint([t], SENSITIVE_TOOL_HINTS) for t in main_tools)
     )
-    main_write = bool(
-        write_tools
-        or dig(cfg, "agents.defaults.sandbox.workspaceAccess") == "rw"
-    )
+    # B-671: `agents.defaults.sandbox.workspaceAccess` alone is the DEFAULTS scope only.
+    # The runtime resolves it PER AGENT (`resolveSandboxConfigForAgent`,
+    # dist/config-Dy4vED5-.js:~156, re-grounded 2026.8.2 at
+    # workspace-state-dirs-Dgbx3Vel.js:21): `agentSandbox?.workspaceAccess ??
+    # agent?.workspaceAccess ?? "none"` -- the RESTRICTIVE end, unlike `mode`'s "off"
+    # fallback, and resolved per FIELD, not per object (an agent's `sandbox` with only
+    # `workspaceAccess` set still inherits `mode` from the default). Reading defaults-only
+    # flips `can_write_memory` both ways versus a per-agent override on the entry that
+    # resolves to the "main" agent id: over-reports write when that agent narrows to
+    # "none"/"ro" under a permissive default, and — the more dangerous direction, since
+    # this graph is what a reader uses to reason about reachability — under-reports when
+    # the agent widens to "rw" under a restrictive or absent default.
+    #
+    # Agent-id resolution uses B351's ported, dist-verified normaliser via
+    # `_b351_resolvable_agents` (first-match-wins, same as the vendor's own
+    # `listAgentEntries`/`normalizeAgentId`): an entry with no `id` normalises to "main"
+    # and therefore COLLIDES with one explicitly named "main" rather than being skipped.
+    # This mirrors the same per-field `?? default` loop already vetted in
+    # `risk.py::_fs_writes_contained` (:556-570) rather than re-deriving a second model
+    # of the same resolution.
+    #
+    # NOT `dig(cfg, "agents.defaults.sandbox")`: that is a bare NON-LEAF object read,
+    # which test_schema_grounding.py's manifest guard cannot verify by construction (the
+    # dist-verified snapshot enumerates LEAF paths only) -- risk.py's own docstring there
+    # records the same trap. Plain dict traversal instead, exactly like that loop already
+    # does for this identical node.
+    agents_node = cfg.get("agents")
+    defaults_node = agents_node.get("defaults") if isinstance(agents_node, dict) else None
+    default_sandbox = defaults_node.get("sandbox") if isinstance(defaults_node, dict) else None
+    default_sandbox = default_sandbox if isinstance(default_sandbox, dict) else {}
+    main_access = default_sandbox.get("workspaceAccess")
+    for agent_id, agent in _b351_resolvable_agents(agent_roster(cfg)):
+        if agent_id != "main":
+            continue
+        agent_sandbox = agent.entry.get("sandbox")
+        if isinstance(agent_sandbox, dict) and agent_sandbox.get("workspaceAccess") is not None:
+            main_access = agent_sandbox.get("workspaceAccess")
+        break
+    main_write = bool(write_tools or main_access == "rw")
     main_egress = bool(
         any(_hint([t], OUTBOUND_TOOL_HINTS) for t in main_tools)
         or dig(cfg, "tools.elevated.allowFrom")
