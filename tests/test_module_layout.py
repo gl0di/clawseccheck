@@ -356,12 +356,16 @@ _EXEMPT = {
               "Restated a fourth time after C-517's --watch/--watch-status: two new primary "
               "modes plus their argparse registration and CLI-side helpers (the loop itself "
               "lives in the new watch.py, not here) — same shape, same cause.",
-    "pipeline.py": "~1,550 lines — the --full P7-P10 orchestration. Crossed the budget with "
+    "pipeline.py": "~1,961 lines — the --full P7-P10 orchestration. Crossed the budget with "
                    "C-425's PipelineResult.to_ledger(), which projects the run's phases onto "
                    "the five-layer ledger (layers.py). It belongs here and nowhere else: it "
                    "reads PhaseResult state, and layers.py must stay a leaf that scoring.py "
-                   "can import, so the projection cannot live down there. A finer split "
-                   "(phase runners vs. roll-up) is a later cycle.",
+                   "can import, so the projection cannot live down there. Restated after an "
+                   "E-087 incident-response batch (B-799's ctx-aware to_ledger honesty and "
+                   "F-193's live-test scenario-id validation, B-800's behavioral-incompleteness "
+                   "wording, B-804's verdictsSubmitted gating, B-758's runState reprojection) — "
+                   "five fixes landing in the same module in one pass, not scope creep in any "
+                   "one of them. A finer split (phase runners vs. roll-up) is a later cycle.",
     "behavioral.py": "~1,263 lines — the --behavioral replay ring: the trajectory reader's "
                      "consumers, the four detectors (T1/T2/T3/B191), the F-154 cap reducer "
                      "and the renderer. Sat three lines under the budget until B-559, which "
