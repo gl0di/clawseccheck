@@ -6278,8 +6278,17 @@ def _main(argv=None) -> int:
             # these keys belong to the pipeline, not to the audit payload, and every
             # existing key keeps its meaning and its value. Re-serialized with the same
             # dumps() settings render_json uses, so the base document is unchanged.
+            #
+            # B-758 (item #4): `score=score` passes the FINAL, post-reprojection score
+            # (recomputed above at line 6261 from the re-projected `layer_ledger`) —
+            # the same score `render_json` just used to build `body`'s top-level
+            # `graded`/`missing_layers`. Without it, `to_json()` falls back to the
+            # adjudication phase's own `runState` snapshot, built from the score as it
+            # stood when the pipeline ran (before this re-projection), so the merged
+            # document could state the run was graded in one field and ungraded in the
+            # other. See PipelineResult.to_json()'s docstring.
             _doc = json.loads(body)
-            _doc.update(full_pipeline.to_json())
+            _doc.update(full_pipeline.to_json(score=score))
             body = json.dumps(_doc, ensure_ascii=True, indent=2)
     elif args.card:
         body = render_card(score, findings, ascii_only)

@@ -1469,7 +1469,7 @@ class PipelineResult:
             out.extend(p.not_scanned)
         return out
 
-    def to_json(self) -> dict:
+    def to_json(self, *, score=None) -> dict:
         """The additive top-level keys ``--full --json`` gains.
 
         Additive by construction: every existing key keeps its meaning and its value,
@@ -1481,6 +1481,21 @@ class PipelineResult:
         plugin content, so "the producer already sanitized it" is not a property this
         boundary may assume — it enforces it, exactly as the existing ``--json``
         renderer does for the audit payload.
+
+        B-758 (item #4): ``adj.data["runState"]`` below is whatever P9
+        (:func:`run_adjudication`) built it as — from the score that existed at the
+        moment the pipeline ran, which in the ``--full --json`` caller is *before*
+        ``cli.py`` re-projects the ledger (B-723) and recomputes the final score. Left
+        alone, that stale ``runState`` disagreed with the top-level ``graded``/
+        ``missing_layers`` the SAME document's ``render_json`` derives from the final
+        score — one document, two different answers to "did this run get graded".
+        *score*, when supplied, is that final, post-reprojection score: passing it
+        here overrides the phase's own stale snapshot with a freshly built
+        :func:`adjudication.run_state`, so both fields can only ever describe the one
+        score the caller actually settled on. ``None`` (the default) keeps the old
+        behaviour — the phase's own snapshot — for every caller that has no later
+        reprojection to reconcile against (e.g. a bare ``PipelineResult.to_json()`` in
+        a test).
         """
         payload: dict = {
             "phases": [p.to_json() for p in self.phases],
@@ -1493,6 +1508,9 @@ class PipelineResult:
             for key in _ADJUDICATION_JSON_KEYS:
                 if key in adj.data:
                     payload[key] = adj.data[key]
+        if score is not None:
+            from .adjudication import run_state  # noqa: PLC0415 — see the module note on layering
+            payload["runState"] = run_state(score)
         plugins = self.by_name(PHASE_PLUGIN_SWEEP)
         if plugins is not None and isinstance(plugins.data, dict):
             payload["pluginSweep"] = plugins.data
