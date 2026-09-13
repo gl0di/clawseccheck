@@ -1244,6 +1244,41 @@ Note that `rc 1` from an artifact mode has two possible causes: the gate tripped
 file could not be written. A failed write always exits non-zero and prints the reason, so a
 non-zero exit can never be read as "the artifact is there and clean".
 
+**Telling a real FAIL apart from a run that could not complete
+(`--exit-code-scheme graduated`).** By default (`--exit-code-scheme binary` — unchanged from
+every release before this flag existed), a genuine severity-tripping FAIL and a run that
+never produced a trustworthy verdict at all — a tool crash, a scan cut short by its own time
+budget, an unusable `--vet` path, or an unreadable/absent config — are the same exit code
+(1). A CI job reading only `$?` cannot tell "your setup has a real problem" apart from "the
+tool itself did not finish". `--exit-code-scheme graduated` reuses `--monitor`'s own 0/1/3
+convention instead of inventing a second one:
+
+- **0** — clean; the gate did not trip.
+- **1** — could not produce a trustworthy verdict: a crash, `ScanBudgetExceeded`, an unusable
+  `--vet` path, an unreadable/absent config, or (under `--full`) a layer that was actually
+  attempted and errored out.
+- **3** — a real, severity-tripping FAIL at the `--fail-on`/`--exit-code` gate.
+- **2 is never returned by this logic** — argparse itself owns exit code 2 for a usage error
+  (a mistyped flag), the identical reservation `--monitor`'s own 0/1/3 scheme already makes.
+
+```bash
+clawseccheck --fail-on high --exit-code-scheme graduated
+case $? in
+  0) exit 0 ;;                                        # clean
+  3) echo "real FAIL at HIGH or above"; exit 1 ;;
+  2) echo "bad usage"; exit 1 ;;                       # argparse: a mistyped flag
+  *) echo "could not produce a verdict — see stderr"; exit 1 ;;
+esac
+```
+
+Purely additive and opt-in: omitting `--exit-code-scheme`, or passing
+`--exit-code-scheme binary` explicitly, changes nothing about an existing `--fail-on`/
+`--exit-code` invocation — every case in the "What `--exit-code` actually trips on" list
+below still exits exactly `1` under the default scheme. `--exit-code-scheme` has no effect
+on a run that passes neither `--fail-on` nor `--exit-code` (the exit code stays whatever that
+run already returns), and no effect on `--monitor`, which has always had its own graduated
+0/1/3 contract.
+
 **`--fail-on SEVERITY` (`critical` / `high` / `medium` / `low`).** Exits 1 when any
 **unsuppressed FAIL finding at or above SEVERITY** exists — inclusive, so `--fail-on high`
 also trips on a `critical`. "Unsuppressed" is the identical rule `--exit-code` already uses:

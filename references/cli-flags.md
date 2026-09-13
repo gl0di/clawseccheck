@@ -50,6 +50,15 @@ kept here so the always-loaded playbook stays lean.
   unreadable, or a `--vet-mcp` name that is neither a configured server nor a readable
   spec file — which is a usage error, not a verdict, and prints no dossier). `--advise`
   shares that contract.
+- `--exit-code-scheme {binary,graduated}` (default `binary`) — how `--fail-on`/`--exit-code`
+  map a trip to a process exit code. `binary` is unchanged from every release before this
+  flag existed: sources 1-6 above and a tool crash/`ScanBudgetExceeded`/unusable `--vet`
+  path are all exit 1, indistinguishable by exit code alone. `graduated` reuses `--monitor`'s
+  own convention: 0 clean, 1 could-not-produce-a-trustworthy-verdict (a crash, the scan's own
+  time budget, an unusable `--vet` path, sources 5-6 above, or a `--full` layer that was
+  actually attempted and errored out), 3 a real threshold-tripping FAIL (sources 1-4 above);
+  2 is never returned by this logic (argparse owns it for a usage error). Purely additive and
+  opt-in — see `docs/USAGE.md` ("CI / automation") for the full contract and a recipe.
 - `--fast` — only with `--full`: skip the plugin sweep, behavioral replay, and skill sweep,
   keeping the audit + self-test + vet-mcp + the (free) adjudication packet. For CI runs where
   the deep phases are too slow; this is the pre-F-150 `--full` shape.

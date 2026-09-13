@@ -153,7 +153,7 @@ from .incident import incident_timeline, open_incident_from_audit, render_incide
 from .incidentstore import INCIDENT_STATUSES, _incident_to_dict, render_incident_json
 from .incidentstore import load_incident as _load_incident
 from .incidentstore import mark_incident as _mark_incident
-from .layers import LAYER_ORDER
+from .layers import LAYER_ORDER, STATUS_ERROR
 from .trajaudit import render_trajectory_analysis
 from .behavioral import analyze as _behavioral_analyze
 from .behavioral import analysis_incompleteness as _behavioral_incompleteness
@@ -2935,6 +2935,19 @@ def main(argv=None) -> int:
     function — including the try/except below — because an unpacked (non-pip)
     install on Python <3.9 parses cleanly (no clean ImportError) but can fail later
     with a confusing runtime error; see docs/TROUBLESHOOTING.md.
+
+    I-038: all three ``except`` arms below already return exactly the exit code
+    ``--exit-code-scheme graduated`` reserves for "could not produce a trustworthy
+    verdict" (1), which is also what they have always returned under the (default)
+    ``binary`` scheme — so none of them needed to change, or to learn which scheme
+    was requested, for that flag to exist. `--exit-code-scheme` only changes what
+    `_findings_exit_gate` (several frames below `_main`, never reached from here)
+    returns for a REAL threshold-tripping FAIL, from 1 to 3. Left as a note rather
+    than left implicit: it would be easy for a future reader adding a fourth arm
+    here to assume it needs threading a scheme lookup through `sys.argv` (as the
+    existing `"--debug" in raw` checks do) to pick the "right" code — it does not;
+    1 is already the right code for "the tool itself did not finish" under both
+    schemes.
     """
     if sys.version_info < (3, 9):
         print(
@@ -3017,7 +3030,7 @@ def _judged_bundle(path: str) -> dict:
     return _JUDGED_BUNDLE_CACHE[path]
 
 
-def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int:
+def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False, score=None) -> int:
     """The `--fail-on` / `--exit-code` gate: 1 when it trips, 0 otherwise.
 
     B-584: extracted so the artifact-rendering modes can reach it. It used to live inline
@@ -3032,7 +3045,30 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
     no severity attached, and a severity-gated flag cannot rank what carries no severity.
     A caller that ran no sweep passes nothing — an ABSENT verdict is not a FAIL, which is
     the doctrine the disjunction's own comments already state.
+
+    I-038: *score* is optional and used ONLY by `--exit-code-scheme graduated` (see that
+    flag's own `--help`), to look for a layer that genuinely blew up
+    (`layers.STATUS_ERROR` inside `score.missing_layers`) rather than one that simply was
+    never in scope for this run. It is deliberately NOT "any non-empty `missing_layers`":
+    `_bare_ledger` (see the pre-dispatch block in `_main`) attaches a five-layer ledger to
+    `score` on EVERY invocation, bare or `--full`, and a bare run's own `to_ledger()`
+    leaves four of the five layers `not_reached`/`unavailable` by design — that is the
+    documented, supported "ungraded run" shape `--fail-on`/`--exit-code` already promise
+    to work on without a score (docs/USAGE.md, "Needs no score"). Treating that routine
+    shape as "could not produce a trustworthy verdict" would make the graduated scheme
+    return 1 on nearly every invocation that omits `--full`, which is the opposite of
+    what it exists to do. `STATUS_ERROR` is the one status in `layers.py` reserved for
+    "the layer tried and blew up" (plugin sweep / behavioral replay / adjudication can
+    all set it — see `pipeline.py`), so it is the only member of `missing_layers` that
+    means what "could not complete" means everywhere else in this gate. A caller that
+    never resolved a ledger (a duck-typed `score`, or simply omitting the kwarg) passes
+    `score=None`, which reads as "nothing errored" — the same permissive default every
+    other `getattr(score, ...)` read in this module already uses.
     """
+    _graduated = getattr(args, "exit_code_scheme", "binary") == "graduated"
+    _errored_layer = any(
+        status == STATUS_ERROR for _, status in (getattr(score, "missing_layers", ()) or ())
+    )
     # I3/C-426: --fail-on gates on FINDINGS (like --exit-code), never on a score. It
     # replaced `--fail-under N`, which thresholded the audit score and was removed once
     # the five-layer rule meant an ordinary run does not produce one — see the argparse
@@ -3050,7 +3086,7 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
     # disjunction; it reads `findings` only, same as --exit-code's own `has_fail` term.
     if args.fail_on is not None:
         _fail_on_rank = _SEVERITY_RANK[args.fail_on.upper()]
-        if any(
+        _fail_on_tripped = any(
             # B-751 follow-up: the shared vocabulary, not the bare literal. A confirmed
             # zip-slip carries `SKILL_ARCHIVE_PATH_TRAVERSAL`, and this gate is what a CI
             # pipeline reads -- comparing to "FAIL" made it blind to the one finding the
@@ -3062,8 +3098,7 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
                 or surfaced_despite_suppression(f)
             )
             for f in findings
-        ):
-            return 1
+        )
         # C-426/B-166/B-363: a config the tool could not read produces only UNKNOWN and
         # WARN, never a FAIL — so a purely FAIL-driven gate stays GREEN on a run that
         # audited nothing. `--exit-code` has tripped on this explicitly since B-166
@@ -3077,9 +3112,24 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
         # Deliberately NOT severity-ranked: "I could not read your config" has no
         # severity, and gating it on the operator's chosen floor would let
         # `--fail-on critical` pass a run that read nothing at all.
-        if (getattr(ctx, "config_parse_error", False)
-                or not getattr(ctx, "config_found", True)):
-            return 1
+        _fail_on_blind = (
+            getattr(ctx, "config_parse_error", False)
+            or not getattr(ctx, "config_found", True)
+        )
+        if _graduated:
+            # I-038: "could not produce a trustworthy verdict" (1) outranks a real FAIL
+            # (3) — a blind or errored run's own findings are, per the comment above,
+            # only ever UNKNOWN/WARN, so the two do not actually race in practice; this
+            # ordering just states that explicitly instead of relying on it holding.
+            if _fail_on_blind or _errored_layer:
+                return 1
+            if _fail_on_tripped:
+                return 3
+        else:
+            if _fail_on_tripped:
+                return 1
+            if _fail_on_blind:
+                return 1
 
     if args.exit_code:
         has_fail = any(
@@ -3120,10 +3170,24 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
         # never read anything. `config_found` defaults True via getattr so a duck-typed
         # ScoreResult/ctx stand-in some tests build (which predates this field) stays
         # inert, same tolerance as the config_parse_error term above.
-        if (has_fail or extra_fail
-                or getattr(ctx, "config_parse_error", False)
-                or not getattr(ctx, "config_found", True)):
-            return 1
+        _exit_code_blind = (
+            getattr(ctx, "config_parse_error", False)
+            or not getattr(ctx, "config_found", True)
+        )
+        if _graduated:
+            # I-038: same split and same priority as the --fail-on block above — a
+            # blind/errored run outranks a real FAIL, because it is a fact about
+            # whether this run could be trusted at all, not about how bad the subject
+            # is. `extra_fail` (vm/sweep/pipeline) joins the FAIL side only, exactly as
+            # it does in the binary scheme below — those sources carry no config-blind
+            # signal of their own.
+            if _exit_code_blind or _errored_layer:
+                return 1
+            if has_fail or extra_fail:
+                return 3
+        else:
+            if (has_fail or extra_fail or _exit_code_blind):
+                return 1
 
     return 0
 
@@ -3423,6 +3487,27 @@ def _main(argv=None) -> int:
                         "chosen severity floor instead of any FAIL")
     p.add_argument("--exit-code", action="store_true",
                    help="exit 1 if any unsuppressed FAIL finding exists")
+    # I-038: purely additive and opt-in. `binary` (the default) is BYTE-FOR-BYTE what
+    # `--fail-on`/`--exit-code` have always done, on every path that calls
+    # `_findings_exit_gate` — a real threshold-tripping FAIL and a run that could not
+    # produce a trustworthy verdict at all (a crash, `ScanBudgetExceeded`, an unusable
+    # `--vet` path, or an unreadable/absent config) are both exit 1, indistinguishable
+    # to a CI/cron consumer reading only `$?`. `graduated` reuses `--monitor`'s own
+    # 0/1/3 convention (never 2 — argparse itself owns that code for a usage error,
+    # the identical reservation `--monitor` already makes and documents) so the two
+    # can be told apart: 1 stays "could not complete", 3 is the real FAIL.
+    p.add_argument("--exit-code-scheme", choices=["binary", "graduated"], default="binary",
+                   help="how --fail-on/--exit-code map a trip to a process exit code. "
+                        "'binary' (default, unchanged from every release before this flag "
+                        "existed): 1 on either a real FAIL or a run that could not produce "
+                        "a trustworthy verdict (crash, a scan cut short by its own time "
+                        "budget, an unusable --vet path, or an unreadable/absent config) — "
+                        "the two are not distinguishable by exit code alone. 'graduated': "
+                        "reuses --monitor's own convention instead — 0 clean, 1 "
+                        "could-not-produce-a-trustworthy-verdict, 3 a real threshold-"
+                        "tripping FAIL; 2 is never returned by this logic (argparse owns "
+                        "it for a usage error). Opt-in: omitting this flag, or passing "
+                        "'binary', changes nothing about an existing invocation")
     p.add_argument("--trend", action="store_true",
                    help="record this run to history, print trend + percentile, and exit")
     p.add_argument("--all", action="store_true",
@@ -4760,7 +4845,7 @@ def _main(argv=None) -> int:
             # not be written is one the user will repeat, and two lines for one intended
             # audit is a worse timeline than none.
             _record_history_point(score, args, _live_signal, findings)
-            return _findings_exit_gate(args, findings, ctx)
+            return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
             _emit(f"(could not write badge: {exc})")
             return 1
@@ -4774,7 +4859,7 @@ def _main(argv=None) -> int:
             )
             _emit(f"(HTML report written to {args.html})")
             _record_history_point(score, args, _live_signal, findings)
-            return _findings_exit_gate(args, findings, ctx)
+            return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
             _emit(f"(could not write HTML report: {exc})")
             return 1
@@ -4785,7 +4870,7 @@ def _main(argv=None) -> int:
             secure_write_text(_report_dest(args.sarif), render_sarif(findings, score, __version__, ctx=ctx))
             _emit(f"(SARIF written to {args.sarif})")
             _record_history_point(score, args, _live_signal, findings)
-            return _findings_exit_gate(args, findings, ctx)
+            return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
             return 1
@@ -5046,7 +5131,7 @@ def _main(argv=None) -> int:
                 "opens a PDF inline where an HTML attachment would just be a download)"
             )
             _record_history_point(score, args, _live_signal, findings)          # B-601
-            return _findings_exit_gate(args, findings, ctx)
+            return _findings_exit_gate(args, findings, ctx, score=score)
         if _mode != "dashboard" and pdf_written:
             # B-459: `and pdf_written` — everything in this block SPEAKS ABOUT A FILE. With
             # the fall-through above, a failed write now reaches here with pdf_written
@@ -5192,7 +5277,7 @@ def _main(argv=None) -> int:
             _emit(_card)
             _emit_attach_instruction(pdf_written)
             _record_history_point(score, args, _live_signal, findings)
-            return _findings_exit_gate(args, findings, ctx)
+            return _findings_exit_gate(args, findings, ctx, score=score)
         # F-153: Dave settled 2026-07-30 that --dashboard must fully render
         # everything --full does, in the fixed order (Skills · Plugins · MCP · RISK
         # chains · Behavioural · "Second opinion (advisory)" · Coverage · "Worth a
@@ -5375,6 +5460,7 @@ def _main(argv=None) -> int:
             args, findings, ctx,
             extra_fail=bool(getattr(plugin_sweep, "has_fail", False))
             or bool(getattr(skill_sweep, "has_fail", False)),
+            score=score,
         )
 
     if _mode == "dashboard_findings":
@@ -6482,6 +6568,7 @@ def _main(argv=None) -> int:
     return _findings_exit_gate(
         args, findings, ctx,
         extra_fail=vm_has_fail or sweep_has_fail or pipeline_has_fail,
+        score=score,
     )
 
 

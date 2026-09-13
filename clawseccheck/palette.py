@@ -273,6 +273,7 @@ _UNLISTED_FLAG_MODES: dict[str, str] = {
     "--json": CROSS,
     "--exit-code": CROSS,
     "--fail-on": CROSS,
+    "--exit-code-scheme": CROSS,  # modifier of the two rows above, same reach
     "--ascii": CROSS,
     "--no-color": CROSS,
     "--quiet": CROSS,
