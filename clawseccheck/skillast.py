@@ -5276,6 +5276,54 @@ def analyze_python(
             f"hardcoded provider-shaped secret written to os.environ[{key_repr!r}]",
         )
 
+    # B-740: a plain assignment of a provider-shaped literal — e.g. module-level
+    # `STRIPE_SECRET_KEY = "sk_live_..."` — reached neither os.environ-entangled shape
+    # above and produced NO finding at all. Third call site of the same
+    # `_is_hardcoded_provider_secret` predicate (the predicate itself is unchanged);
+    # `ast.walk` does not distinguish scope, so this also catches the identical shape
+    # inside a function body or a class body (a class attribute target is `ast.Name`
+    # too), not only true module level. Only a single, simple `Name` target is matched
+    # — a tuple/attribute/subscript target, or a value that isn't a plain string
+    # constant (an f-string, a `+` concatenation, a name reference), is left alone; a
+    # value split across adjacent string-literal boundaries (`"a" "b"`) still matches,
+    # since Python folds those into one `ast.Constant` before this ever runs.
+    #
+    # C-135 note (B-740, not a new defect): a genuine pytest/unittest file that assigns
+    # a well-known provider TEST-mode key (e.g. Stripe's own documented `sk_test_...`
+    # convention) as mock data for its own test suite fires here — measured, and
+    # reproduced identically through BOTH already-shipped call sites above
+    # (os.environ[...] = / os.getenv(..., <default>)), so this is a PRE-EXISTING,
+    # shared characteristic of `_is_hardcoded_provider_secret`, not something this call
+    # site introduces. `checks/_content.py` has a path-shape "is this a test file"
+    # carve-out for a different check (`_pos_in_test_fixture_file`), but wiring an
+    # equivalent here would mean either touching the other two call sites (changing
+    # already-shipped behavior) or importing a Layer-2 `checks/` helper into this
+    # Layer-1 leaf module (a banned reverse dependency, see CLAUDE.md's layering rule)
+    # — left as-is, flagged for a follow-up task rather than fixed unilaterally here.
+    for node in ast.walk(tree):
+        if len(out) >= _MAX_FINDINGS_PER_FILE:
+            break
+        if isinstance(node, ast.Assign):
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            target_name = node.targets[0].id
+            value_node = node.value
+        elif isinstance(node, ast.AnnAssign):
+            if not isinstance(node.target, ast.Name) or node.value is None:
+                continue
+            target_name = node.target.id
+            value_node = node.value
+        else:
+            continue
+        if not _is_hardcoded_provider_secret(value_node):
+            continue
+        add(
+            "HARDCODED_PROVIDER_SECRET",
+            "crit",
+            getattr(node, "lineno", 0),
+            f"hardcoded provider-shaped secret assigned to {target_name!r}",
+        )
+
     return out
 
 
