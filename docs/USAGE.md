@@ -1997,10 +1997,11 @@ Two different lines can appear near the grade, and they answer different questio
 When a grade IS issued, it is a weighted pass-rate (CRITICAL=10, HIGH=6, MEDIUM=3, LOW=1).
 **Honesty hard-caps:** an open FAIL caps the score by its severity — CRITICAL at 49, HIGH
 at 79, MEDIUM at 89, LOW at 94 — so you can never show an "A" with a critical hole. Grades:
-A 90+ · B 80–89 · C 70–79 · D 50–69 · F <50. Three further caps fire with **no FAIL
-finding at all** (a crashed or timed-out check, an unreadable config, or a corroborated
-runtime signal) — see [FAQ.md — "Why is my grade F?"](FAQ.md#why-is-my-grade-f) for the
-complete table.
+A 90+ · B 80–89 · C 70–79 · D 50–69 · F <50. Further caps fire with **no FAIL finding at
+all** (a crashed or timed-out check, or a corroborated runtime signal) — see [FAQ.md —
+"Why is my grade F?"](FAQ.md#why-is-my-grade-f) for the complete table. An absent or
+unreadable `openclaw.json` is a different case: it withholds the letter entirely rather
+than capping it — see [FAQ.md — "Why is there no grade at all?"](FAQ.md#why-is-there-no-grade-at-all).
 
 The shareable card follows the same rule: on a graded run it shows **only the grade +
 score + trifecta ratio — never the findings** (sharing must not hand attackers your map);

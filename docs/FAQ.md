@@ -75,7 +75,7 @@ agent:
 
 | # | Layer | Runs on its own? | How to close it |
 |---|---|---|---|
-| 1 | Static: config, files, permissions | yes — the default run | (default) |
+| 1 | Static: config, files, permissions | yes, **provided a config was found and could be read** | point `--home` at the directory that holds `openclaw.json`, or fix a corrupt/unparseable one |
 | 2 | Sweep of what's installed: skills + plugins | yes | `--full` |
 | 3 | Logs and trajectories: what already happened | yes, budget-bounded | `--full` |
 | 4 | Agent self-report | **no** | `--ask`, then `--attest <file>` |
@@ -89,6 +89,23 @@ line naming exactly which layers did not run and why:
 Most urgent: CRITICAL — Lethal Trifecta (untrusted input × sensitive data × outbound)  [A1]
 No grade yet — 2 of 5 layers did not run: agent self-report (not submitted), live behaviour test (not submitted).
 ```
+
+**Layer 1 can be missing too — an absent or unreadable `openclaw.json` withholds the letter
+entirely, it does not just lower it.** This is the common case inside a sandboxed OpenClaw
+session (`agents.defaults.sandbox.mode: non-main`), where the container never sees your real
+`~/.openclaw`:
+
+```text
+No grade yet — 4 of 5 layers did not run: static config audit (not available here), installed-
+skill/plugin sweep (not reached), agent self-report (not submitted), live behaviour test (not
+submitted).
+```
+
+Even if you separately hand in a self-report and a live-test bundle, the missing static layer
+alone still withholds the letter — there is no config-blind score to show instead (see
+["Why is my grade F?"](#why-is-my-grade-f) for why this changed from an earlier capped-F
+behaviour). If you are in a sandboxed chat session, this is expected; run the audit from the
+agent's main session or a host terminal where the real config is reachable instead.
 
 This is deliberately stronger than capping the grade. A cap still prints a number, and a number
 gets read as a score; the absence of one cannot be misread as "fine". So a bare run leaves 3 of 5
@@ -134,16 +151,13 @@ A single CRITICAL FAIL (for example B1 — plaintext secrets, or B2 — open gat
 no auth) locks the score at or below 49, which is always an F, regardless of how well
 everything else scores.
 
-**Five more caps fire with no FAIL finding at all.** If you are hunting the report for a
+**Four more caps fire with no FAIL finding at all.** If you are hunting the report for a
 CRITICAL that explains your F and cannot find one, it is one of these. They are caps only:
-they never add or remove a scored point, they just lower the ceiling. (`report.py`'s
-`_cap_signal_active` tracks six cap signals in total; the severity-FAIL cap above is the
-only one of the six that needs an actual FAIL finding.)
+they never add or remove a scored point, they just lower the ceiling.
 
 | Signal | Score capped at | Grade ceiling | What the report says |
 |---|---|---|---|
 | A check **crashed, timed out, or hit an unreadable/corrupted input it needed** | 49 | F | `N check(s) could not reach a reliable verdict this run: cannot rule out a CRITICAL condition`, plus an `N checks could not reach a reliable verdict this run` banner above the score |
-| `openclaw.json` is present but **unreadable / unparseable**, or **wholly absent** (no config file found at all) | 49 | F | `openclaw.json unreadable/unparseable this run: cannot rule out a CRITICAL condition` — or, when no config was found at all, `no OpenClaw config found[ at <path>]: cannot rule out a CRITICAL condition` |
 | A **corroborated runtime signal** in your own trajectory log | 79 | C | `corroborated runtime signal: …` |
 | A **live injection-test harness** (`--canary`/`--dryrun`/`--redteam`/`--multiturn`) reported a **VULNERABLE** verdict, submitted via `--judged-bundle`'s `liveTest` bucket | 49 | F | `a live injection-test scenario reported VULNERABLE (…)` |
 | A **behavioral detector** (T1/T2/T3/B191) fired — only when `--full` ran without `--fast` | 89 | B | `a behavioral detector fired (…)` |
@@ -153,18 +167,25 @@ timeout — B-313), or a check ran fine but honestly couldn't tell you its own a
 because something it needed to read was unreadable, corrupt, or malformed (B-399) — as
 opposed to a check finding nothing to look at, which never triggers this cap. "There was
 nothing to check" and "something broke while we tried to check" are different facts, and
-only the second one caps the grade. The second row treats a wholly absent config as
-strictly LESS evidence than an unreadable one, so it is capped the same way, never scored
-better.
+only the second one caps the grade.
 
-The first three rows share the same reasoning, and it is deliberate: the audit lost
-visibility into something, and the honest assumption about an unexamined check is
-worst-case, not average-case. Otherwise "make the scanner blind" would be the cheapest way
-to improve a grade. Fix the underlying visibility problem — a quieter machine or `--debug`
-for a timeout, valid JSON (or any config file at all) for the config — and the cap lifts on
-the next run. The last two rows are different: they are *positive* evidence (a self-tested
-injection actually succeeded, or a proven-by-log behavioral pattern actually fired), not
-lost visibility — the cap lifts only by fixing what the test/detector found.
+These rows share the same reasoning, and it is deliberate: the audit lost visibility into
+something, and the honest assumption about an unexamined check is worst-case, not
+average-case. Otherwise "make the scanner blind" would be the cheapest way to improve a
+grade. Fix the underlying visibility problem — a quieter machine or `--debug` for a
+timeout — and the cap lifts on the next run. The last two rows are different: they are
+*positive* evidence (a self-tested injection actually succeeded, or a proven-by-log
+behavioral pattern actually fired), not lost visibility — the cap lifts only by fixing
+what the test/detector found.
+
+**An absent or unreadable `openclaw.json` no longer belongs in this table.** Earlier
+versions capped that case at F/49 like the row above it; today the static layer itself
+never completes, so the run is **ungraded** — no letter at all, capped or otherwise. See
+["Why is there no grade at all?"](#why-is-there-no-grade-at-all) instead. (The one
+exception is calling `clawseccheck`'s Python API directly with your own hand-built ledger
+object omitted entirely — that bare library path still reproduces the old capped-F
+behaviour, since there is no ledger to say the layer never ran; every CLI invocation, bare
+or `--full`, goes through the ledger and is ungraded instead.)
 
 **What to look at first:**
 
@@ -185,9 +206,10 @@ lost visibility — the cap lifts only by fixing what the test/detector found.
   device auto-pairing to ANY sender/IP (**B48**, the wildcard-authority case
   specifically — a plain break-glass override on its own is HIGH severity and caps
   the grade at C, not F).
-- **No FAIL at all** — a check crashed, timed out, hit an unreadable/corrupted input it
-  needed, or `openclaw.json` could not be parsed. See the cap table above; the report
-  names which one it was.
+- **No FAIL at all** — a check crashed, timed out, or hit an unreadable/corrupted input
+  it needed. See the cap table above; the report names which one it was. (If
+  `openclaw.json` itself was absent or unparseable, you get no grade at all rather than
+  an F — see ["Why is there no grade at all?"](#why-is-there-no-grade-at-all).)
 
 After fixing the underlying issue, re-run `clawseccheck` to see the new score.
 
