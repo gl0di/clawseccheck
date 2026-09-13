@@ -7203,9 +7203,66 @@ _JS_EVAL_REMOTE_RE = re.compile(
     re.I,
 )
 # child_process exec-family with an interpolated command — command-injection surface.
+# Three receiver shapes, captured so the caller can tell `child_process.exec(` apart
+# from an unrelated method of the same name on some other object (a DB client's own
+# `.exec()`, a compiled RegExp's `.exec()`, ...) — see _js_child_process_bindings:
+#   group 1 — a simple identifier receiver, e.g. `cp.exec(` (needs a resolved binding)
+#   group 2 — an inline `require('child_process').exec(` chain (unambiguous, no
+#             binding needed: the module name is right there in the same expression)
+#   group 3 — the exec-family function name actually called
 _JS_CP_TEMPLATE_RE = re.compile(
-    r"\b(?:exec|execSync|execFile|spawn|spawnSync)\s*\(\s*`[^`]*\$\{",
+    r"\b(?:([A-Za-z_$][\w$]*)\."
+    r"|(require\(\s*['\"](?:node:)?child_process['\"]\s*\)\s*\.))?"
+    r"(exec|execSync|execFile|spawn|spawnSync)\s*\(\s*`[^`]*\$\{",
 )
+# Binds a name to the child_process module: `const cp = require('child_process')`,
+# `import cp from 'node:child_process'`, `import * as cp from 'child_process'`.
+_JS_CP_NAMESPACE_BIND_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['\"](?:node:)?child_process['\"]\s*\)"
+    r"|\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s+['\"](?:node:)?child_process['\"]",
+)
+# Destructures exec-family names directly out of child_process: `const { exec, spawn } =
+# require('child_process')`, `import { exec, spawn as sp } from 'node:child_process'`.
+_JS_CP_DESTRUCTURE_BIND_RE = re.compile(
+    r"\{\s*([^}]+?)\s*\}\s*=\s*require\(\s*['\"](?:node:)?child_process['\"]\s*\)"
+    r"|\bimport\s*\{\s*([^}]+?)\s*\}\s*from\s+['\"](?:node:)?child_process['\"]",
+)
+
+
+def _js_child_process_bindings(masked: str) -> "tuple[set, set]":
+    """Which local names actually resolve to the child_process module (`receivers`,
+    e.g. `cp` in `cp.exec(...)`) or to one of its exec-family functions destructured
+    directly (`names`, e.g. `exec` in `const {exec} = require('child_process')`).
+
+    `child_process` itself is always a valid receiver — it is the module's own,
+    unambiguous canonical name, usable inline (`require('child_process').exec(...)`)
+    with no assignment for this lexical pass to see. Every other receiver or bare name
+    must be traced to an actual binding: this is what stops `this.db.exec(...)` (a
+    SQLite client's own `.exec()`) or a compiled RegExp's `.exec()` from reading as
+    child_process merely because the file also imports it for something else,
+    somewhere else, under a different name.
+    """
+    receivers = {"child_process"}
+    names: set = set()
+    for m in _JS_CP_NAMESPACE_BIND_RE.finditer(masked):
+        bound = m.group(1) or m.group(2)
+        if bound:
+            receivers.add(bound)
+    for m in _JS_CP_DESTRUCTURE_BIND_RE.finditer(masked):
+        group = m.group(1) or m.group(2)
+        if not group:
+            continue
+        for entry in group.split(","):
+            # `exec` or `exec: myExec` (rename) or `exec as myExec` (ESM rename) —
+            # the LOCAL bound name is what a call site actually uses, so take the
+            # part after the alias operator when one is present, else the whole entry.
+            entry = entry.strip()
+            if not entry:
+                continue
+            local = re.split(r":\s*|\s+as\s+", entry)[-1].strip()
+            if local:
+                names.add(local)
+    return receivers, names
 # require() of a non-literal (bareword identifier or template) — dynamic module load.
 _JS_DYN_REQUIRE_RE = re.compile(
     r"\brequire\s*\(\s*(?:`[^`]*\$\{|[A-Za-z_$][\w$.]*\s*[)+])",
@@ -7282,8 +7339,11 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
       JS_EVAL_REMOTE (crit) — remote code fetched then executed: a dynamic import of a
         URL, a then-eval chained on a fetch, or an eval over an awaited fetch.
       JS_CHILD_PROCESS_DYNAMIC (warn) — a child_process exec-family call with an
-        interpolated command (a template-string git command): command-injection surface. Only
-        emitted when the file references child_process (kills the RegExp.exec FP).
+        interpolated command: command-injection surface. The matched call's own receiver
+        (or, for a bare call, its destructured origin) must actually resolve to
+        child_process — kills both the RegExp.exec FP and an unrelated method of the
+        same name on some other object (e.g. a DB client's own `.exec()`) merely
+        because the file imports child_process for something else (B-806).
       JS_DYNAMIC_REQUIRE (warn) — require() of a non-literal (variable / template):
         an attacker-influenced module path.
       JS_NATIVE_DLOPEN (warn) — process.dlopen(): a direct native-addon (.node) load,
@@ -7323,14 +7383,23 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
         )
 
     if "child_process" in masked:
+        cp_receivers, cp_names = _js_child_process_bindings(masked)
         for m in _JS_CP_TEMPLATE_RE.finditer(masked):
+            receiver, inline_require, fn_name = m.group(1), m.group(2), m.group(3)
+            if inline_require is not None:
+                pass  # require('child_process').exec(...) — unambiguous, no binding needed
+            elif receiver is not None:
+                if receiver not in cp_receivers:
+                    continue
+            elif fn_name not in cp_names:
+                continue
             ln = masked.count("\n", 0, m.start()) + 1
             add(
                 "JS_CHILD_PROCESS_DYNAMIC",
                 "warn",
                 ln,
-                "child_process exec/spawn with an interpolated command "
-                "(`git ${x}`) — command-injection surface",
+                f"child_process {fn_name}() called with an interpolated "
+                "command — command-injection surface",
             )
 
     for m in _JS_DYN_REQUIRE_RE.finditer(masked):

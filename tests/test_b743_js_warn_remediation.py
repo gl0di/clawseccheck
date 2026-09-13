@@ -233,9 +233,19 @@ def test_the_child_process_advice_fits_the_shell_less_forms_too(tmp_path):
     skill controls" is answered *yes* for ``execSync(`git tag ${tag}`)`` where `tag` comes
     from model output — the skill does control the interpolation site — so a reader
     following it clears a real injection.
+
+    Fixtures destructure `execFile`/`spawn` out of `require("child_process")` explicitly
+    (B-806): the rule now resolves a bare call's origin instead of treating any
+    `require("child_process")` anywhere in the file as license to fire on any later bare
+    call by one of these names — the old unassigned-require fixture, which no receiver or
+    destructure ever bound `execFile`/`spawn` to, is exactly the false-positive shape B-806
+    closed (a DB client's own `.exec()` in a file that imports child_process for something
+    else, unrelated).
     """
-    for src, label in ((r'require("child_process");execFile(`${bin}`, ["--v"]);', "execFile"),
-                       (r'require("child_process");spawn(`${bin}`, ["--v"]);', "spawn")):
+    for src, label in (
+        (r'const { execFile } = require("child_process");execFile(`${bin}`, ["--v"]);', "execFile"),
+        (r'const { spawn } = require("child_process");spawn(`${bin}`, ["--v"]);', "spawn"),
+    ):
         f = vet_skill(_skill(tmp_path / label, "s", src))
         assert "child_process" in f.fix, (label, f.fix)
         assert "which program runs" in f.fix, (label, f.fix)
