@@ -2906,6 +2906,134 @@ def _has_approval_gate(cfg: dict) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# B-663: B8 affirmed "Destructive actions require human approval" while a named
+# agent's own `tools.exec` override left it with no gate at all.
+#
+# `_has_approval_gate` above answers the question for the GLOBAL `tools.exec` layer
+# only. OpenClaw resolves the policy a given agent actually runs under by layering
+# `agents.list[].tools.exec` (or the 2026.8.1 `agents.entries` record shape) OVER the
+# global one — `resolveNodeExecConfigPolicy` (dist `daemon-*.mjs`, grounded against the
+# installed openclaw@2026.9.4): `applyExecPolicyLayer(applyExecPolicyLayer(defaults,
+# globalExec), agentExec)`. So an agent can be outside a gate the owner set globally,
+# and the check said the gate held regardless. B-663.
+#
+# The mode-deletion subtlety (re-grounded against 2026.9.4, `exec-policy-Dbl6pUSh.mjs`,
+# unchanged from the citation that originally filed this task against 2026.7.1-2):
+#
+#     function applyExecPolicyLayer(base, layer) {
+#         if (!layer) return base;
+#         if (layer.mode) return {...base, mode: layer.mode, ...resolveExecPolicyForMode(layer.mode)};
+#         if (layer.security !== void 0 || layer.ask !== void 0) {
+#             const { mode: _mode, ...baseWithoutMode } = base;   // <- base's mode DELETED
+#             return {...baseWithoutMode, security: layer.security ?? base.security, ask: layer.ask ?? base.ask};
+#         }
+#         return base;
+#     }
+#
+# An agent layer that sets only `security` (or only `ask`) does not merge under whatever
+# `mode` produced the base — it REPLACES security/ask wholesale and the base's `mode`
+# identity is discarded. A merge that instead let an inherited `mode` win over an agent's
+# own explicit `security` would reproduce this task's exact false PASS (global
+# `mode: "ask"` + agent `tools.exec.security: "full"` must resolve to ungated `full`, not
+# stay `ask`) — this is `_layer_exec_policy` below's whole reason for being a small,
+# self-contained port rather than a "merge the two dicts" shortcut.
+#
+# `resolveExecPolicyForMode` (`exec-approvals-core-BZ3ECkXD.mjs`) is unchanged from the
+# closed 5-row table already cited on `_has_approval_gate` above.
+_EXEC_MODE_SECURITY_ASK = {
+    "deny": ("deny", "off"),
+    "allowlist": ("allowlist", "off"),
+    "ask": ("allowlist", "on-miss"),
+    "auto": ("allowlist", "on-miss"),
+    "full": ("full", "off"),
+}
+
+# `defaultSecurity = effectiveHost === "sandbox" ? "deny" : "full"`, `ask: "off"`
+# (`exec-defaults-Bt0sKd7t.mjs`, grounded against 2026.9.4) — the non-sandboxed default,
+# i.e. the same scope `_has_approval_gate` above already covers. The sandbox/host layer
+# is a separate, already-modelled surface (`monitordims/_execpolicy.py`, a HIGHER layer
+# that consumes `checks/` and so cannot be imported from here — CLAUDE.md's dependency
+# flow is one-directional); this per-agent gate re-derives nothing about it, matching the
+# precision `_has_approval_gate` itself already has (a raw-field read, no sandbox
+# resolution either) rather than introducing a new, asymmetric gap.
+_EXEC_DEFAULT_SECURITY = "full"
+_EXEC_DEFAULT_ASK = "off"
+
+
+def _layer_exec_policy(base_security: str, base_ask: str, layer) -> "tuple[str, str]":
+    """One `tools.exec` layer applied over an already-resolved (security, ask) pair.
+
+    Port of `applyExecPolicyLayer`, restricted to the (security, ask) outputs this
+    module needs (the `mode` field is an OUTPUT label for the mode branch, never an input
+    to the security/ask branch — see the module note above). *layer* is the raw,
+    unresolved `tools.exec` dict for one scope (global or one agent); it is not itself
+    layered before being passed in.
+    """
+    if not isinstance(layer, dict):
+        return base_security, base_ask
+    mode = layer.get("mode")
+    if isinstance(mode, str) and mode in _EXEC_MODE_SECURITY_ASK:
+        return _EXEC_MODE_SECURITY_ASK[mode]
+    security, ask = layer.get("security"), layer.get("ask")
+    if security is not None or ask is not None:
+        new_security = security if isinstance(security, str) and security else base_security
+        new_ask = ask if isinstance(ask, str) and ask else base_ask
+        return new_security, new_ask
+    return base_security, base_ask
+
+
+def _exec_policy_is_gated(security: str, ask: str) -> bool:
+    """True when a resolved (security, ask) pair blocks unattended execution.
+
+    `resolveExecModeFromPolicy` (ported verbatim as
+    `monitordims/_execpolicy.py::_resolve_mode_from_policy`) is a closed table, and the
+    ONLY combination it resolves to `full` — OpenClaw's sole ungated mode — is
+    `security == "full" and ask != "always"`. Every other combination resolves to
+    `deny`/`allowlist`/`ask`, each of which either refuses a non-matching command
+    outright or routes it to a human/auto-reviewer before it runs. So "has a gate" is
+    exactly the negation of that one combination, not an independent threshold — the same
+    binary PASS/WARN granularity `_has_approval_gate` above already uses (it never
+    distinguishes among deny/allowlist/ask/auto, only whether the state is `full`).
+    """
+    return not (security == "full" and ask != "always")
+
+
+def _agents_without_exec_gate(cfg: dict) -> "list[str]":
+    """Named agents whose EFFECTIVE `tools.exec` policy has no approval gate.
+
+    Only agents that declare their own `tools.exec` override are considered — an agent
+    with no override runs the global policy, which `_has_approval_gate` above already
+    covers. Dedup is by normalised agent id, FIRST match wins
+    (`toolgrant._normalize_agent_id`, already battery-tested against the dist): a second
+    roster entry whose id normalises to one already seen is unreachable at runtime
+    (`resolveAgentConfig` never sees it) and must not be read, even if it looks more
+    dangerous than the entry that shadows it.
+    """
+    global_exec = dig(cfg, "tools.exec")
+    base_security, base_ask = _layer_exec_policy(
+        _EXEC_DEFAULT_SECURITY, _EXEC_DEFAULT_ASK,
+        global_exec if isinstance(global_exec, dict) else None,
+    )
+    seen_ids: set = set()
+    ungated: "list[str]" = []
+    for agent in agent_roster(cfg):
+        raw_id = agent.entry.get("id")
+        normalized = _toolgrant._normalize_agent_id(raw_id)
+        if normalized in seen_ids:
+            continue  # shadowed by an earlier entry with the same normalised id
+        seen_ids.add(normalized)
+        tools = agent.entry.get("tools")
+        agent_exec = tools.get("exec") if isinstance(tools, dict) else None
+        if not isinstance(agent_exec, dict):
+            continue  # no override: this agent runs the (already-checked) global policy
+        security, ask = _layer_exec_policy(base_security, base_ask, agent_exec)
+        if not _exec_policy_is_gated(security, ask):
+            label = raw_id if isinstance(raw_id, str) and raw_id else normalized
+            ungated.append(label)
+    return ungated
+
+
 def _is_public_ip(ip: str) -> bool:
     """True for a routable IPv4 — excludes private / loopback / link-local / TEST-NET doc
     ranges so example addresses in documentation don't fire."""

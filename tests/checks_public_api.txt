@@ -61,6 +61,7 @@ _agent_config_write_hits
 _agent_is_powerful
 _agent_legs
 _agent_profile_widenings
+_agents_without_exec_gate
 _allow_from_is_present
 _ancestors_allow_other_access
 _attested_tool_id_sources
@@ -97,6 +98,7 @@ _defensive_section
 _dep_names_in_skill
 _effective_group_allow_from
 _enabled_tools
+_exec_policy_is_gated
 _external_input_channels
 _fence_ranges
 _finding
@@ -119,6 +121,7 @@ _is_owner_wildcard_allow_from
 _is_posix
 _is_wildcard_allow_entry
 _key_advice
+_layer_exec_policy
 _levenshtein
 _local_sink_exfil_hits
 _loopback_ip

@@ -53,6 +53,7 @@ from ._shared import (
     SECRET_KEY_RE,
     _DESTRUCTIVE_HINTS,
     _HOOK_EXEC_RE,
+    _agents_without_exec_gate,
     _config_unreadable,
     _custom,
     _enabled_tools,
@@ -1852,20 +1853,46 @@ def check_human_approval(ctx: Context) -> Finding:
     destructive = _hint(tools, OUTBOUND_TOOL_HINTS)
     if not destructive:
         return _finding("B8", UNKNOWN, "No destructive/outbound tools detected.", "—")
-    if _has_approval_gate(cfg):
+    if not _has_approval_gate(cfg):
         return _finding(
             "B8",
-            PASS,
-            "Destructive actions require human approval.",
-            "Keep approval gating on all high-impact tools.",
+            WARN,
+            "Destructive tools (exec/send/write) present with no clear approval gate.",
+            "Set tools.exec.mode to 'ask' (a command that is not on the allow list is put "
+            "to you) or 'allowlist' (it is refused outright) — not 'full'. Use "
+            "tools.exec.ask='always' to be asked before every command.",
+        )
+    # B-663: the global layer is gated, but `agents.list[]`/`agents.entries`
+    # can override `tools.exec` PER AGENT, and that override REPLACES the global for that
+    # agent rather than merging under it — so the global gate above proves nothing about
+    # what a specific named agent can actually run unattended.
+    ungated_agents = _agents_without_exec_gate(cfg)
+    if ungated_agents:
+        return _finding(
+            "B8",
+            WARN,
+            "The global exec policy requires approval, but " +
+            (
+                f"agent '{ungated_agents[0]}' overrides it with no gate at all."
+                if len(ungated_agents) == 1
+                else "these agents override it with no gate at all: "
+                + ", ".join(f"'{a}'" for a in ungated_agents) + "."
+            ),
+            "Remove or tighten the per-agent tools.exec override (set its mode to "
+            "'ask'/'allowlist'/'deny', or drop it so the agent inherits the gated global "
+            "policy) for " + (
+                f"agent '{ungated_agents[0]}'."
+                if len(ungated_agents) == 1
+                else "each named agent above."
+            ),
+            evidence=[f"agents.*.tools.exec resolves to 'full' (no gate) for '{a}'"
+                      for a in ungated_agents],
         )
     return _finding(
         "B8",
-        WARN,
-        "Destructive tools (exec/send/write) present with no clear approval gate.",
-        "Set tools.exec.mode to 'ask' (a command that is not on the allow list is put "
-        "to you) or 'allowlist' (it is refused outright) — not 'full'. Use "
-        "tools.exec.ask='always' to be asked before every command.",
+        PASS,
+        "Destructive actions require human approval.",
+        "Keep approval gating on all high-impact tools.",
     )
 
 
