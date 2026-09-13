@@ -58,6 +58,18 @@ _AUTO_GATE_BLAST = {
 }
 
 
+# Inverse of _AUTO_GATE_BLAST: which approval_gates class (if any) covers a given
+# held high-blast class. COMMERCE has no entry — the attestation schema's
+# approval_gates only covers exec/send/write (see attest.GATE_CLASSES), so a held
+# COMMERCE verb never has a confirmable gate either way.
+_GATE_CLASS_FOR_BLAST = {
+    "EXEC": ("exec",),
+    "EGRESS": ("send",),
+    "DESTRUCTIVE": ("write",),
+    "MAILBOX_CONFIG": ("write",),
+}
+
+
 _B31_BYPASS_CANDIDATES = ("apply_patch", "exec", "process")
 
 
@@ -264,7 +276,10 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
 
     PASS    — every held verb is reversible / non-egress: forward-exfil and
               delete-evidence are physically impossible (the verb isn't in hand).
-    WARN    — a high-blast verb is held but a human-approval gate is reported.
+    WARN    — a high-blast verb is held. The wording distinguishes, per the
+              specific held class's own reported gate (never any other class'
+              gate — B-805), whether that class is confirmed gated, confirmed
+              running without approval ('auto'), or unreported.
     FAIL    — a high-blast verb is held AND a side-effect can fire without approval.
     UNKNOWN — no tool inventory attested (run --ask, then --attest).
     """
@@ -319,6 +334,37 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
             "Drop the dangerous verbs the agent does not need (least privilege at "
             "the capability level), or require human approval before send/exec/write "
             "and for any mailbox-config change.",
+            evidence=evidence,
+        )
+    # B-805: this used to say "An approval gate is reported" whenever ANY class
+    # anywhere in approval_gates was 'required' — including a class the agent does
+    # NOT hold (e.g. 'send: required' while only 'exec' is held, with 'exec:
+    # auto'). Judge the HELD class(es) by their OWN mapped gate only: if any held
+    # class's own gate is confirmed 'auto', say plainly that it runs ungated,
+    # regardless of what an unheld class's gate says. Every other case (a genuine
+    # 'required' gate on the held class, or no approval_gates reported at all)
+    # keeps the original wording unchanged.
+    gates_map = att.get("approval_gates")
+    gates_map = gates_map if isinstance(gates_map, dict) else {}
+    applicable_gates = set()
+    for cls in high:
+        applicable_gates.update(_GATE_CLASS_FOR_BLAST.get(cls, ()))
+    auto_confirmed = sorted(
+        gc for gc in applicable_gates
+        if str(gates_map.get(gc, "")).strip().lower() == "auto"
+    )
+    if auto_confirmed:
+        auto_label = ", ".join(auto_confirmed)
+        return _finding(
+            "B43",
+            WARN,
+            f"The agent holds high-blast-radius verbs ({label}). {auto_label} "
+            f"run{'s' if len(auto_confirmed) == 1 else ''} without approval per "
+            "the agent's self-report — there is no gate to bypass for that verb "
+            "in the first place, and holding it at all widens the blast radius.",
+            "Remove any dangerous verb the agent does not strictly need; "
+            "require human approval (not 'auto') before exec/send/write and "
+            "for any mailbox-config change.",
             evidence=evidence,
         )
     return _finding(

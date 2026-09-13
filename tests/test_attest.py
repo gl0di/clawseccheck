@@ -333,6 +333,52 @@ def test_b43_warns_when_a_gate_is_auto_with_cron_or_heartbeat_bypass():
     assert any("approval bypass actor(s):" in e for e in f.evidence)
 
 
+# --------------------------------------------------------------- B-805
+# B43 must judge the HELD class by its OWN reported gate, never by whether SOME
+# OTHER (unheld) class happens to say 'required' elsewhere in approval_gates.
+def test_b805_does_not_claim_a_gate_for_the_held_auto_class():
+    # exec is the only HELD high-blast verb (Bash); its own gate is 'auto' (no
+    # gate). 'send' says 'required', but send is NOT held — that must not make
+    # the finding claim exec is gated.
+    att = {
+        "tools": ["Bash"],
+        "approval_gates": {"exec": "auto", "send": "required", "write": "auto"},
+    }
+    f = check_capability_blast_radius(_ctx(attestation=att))
+    assert f.status == WARN
+    assert "An approval gate is reported" not in f.detail
+    assert "exec" in f.detail
+    assert "without approval" in f.detail
+
+
+def test_b805_held_class_genuinely_gated_text_unchanged():
+    # exec is the only held high-blast verb and its OWN gate is 'required' — the
+    # original "An approval gate is reported" wording is true here and must be
+    # left exactly as it was.
+    att = {"tools": ["Bash"], "approval_gates": {"exec": "required"}}
+    f = check_capability_blast_radius(_ctx(attestation=att))
+    assert f.status == WARN
+    assert f.detail == (
+        "The agent holds high-blast-radius verbs (exec). An approval gate is "
+        "reported, but holding these at all widens the blast radius if the gate is "
+        "ever bypassed."
+    )
+
+
+def test_b805_no_gates_reported_at_all_text_unchanged():
+    # No approval_gates field at all — the pre-existing no-gate-info branch must
+    # be untouched by the B-805 fix (it only special-cases a HELD class whose OWN
+    # gate is confirmed 'auto').
+    att = {"tools": ["Bash"]}
+    f = check_capability_blast_radius(_ctx(attestation=att))
+    assert f.status == WARN
+    assert f.detail == (
+        "The agent holds high-blast-radius verbs (exec). An approval gate is "
+        "reported, but holding these at all widens the blast radius if the gate is "
+        "ever bypassed."
+    )
+
+
 # --------------------------------------------------------------- B44 verdicts
 def test_b44_unknown_without_attestation():
     f = check_attestation_mismatch(_ctx(config={"tools": {"allow": ["send_email"]}}))
