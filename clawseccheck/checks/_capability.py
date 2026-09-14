@@ -2493,9 +2493,13 @@ def check_exec_path_prepend(ctx: Context) -> Finding:
     setting the engine discards would be a finding about nothing, so that scope is
     skipped and the skip is named in the detail.
 
-    Windows - `wrapPosixCommandWithPathPrepend` returns the command unchanged on win32.
-    This is a self-audit, so the auditing platform IS the target platform; the detail
-    says so rather than silently assuming POSIX.
+    Windows - `wrapPosixCommandWithPathPrepend` returns the command unchanged on win32,
+    so a prepend entry never actually reaches the shell there. This function itself has
+    no `_is_posix()` branch or win32-specific wording, though: this is a self-audit, so
+    the auditing platform IS the target platform, and the writability legs it calls
+    (`_dir_replaceable_by_others`/group-membership resolution) already degrade to "could
+    not determine" rather than a false PASS/WARN on a platform where st_mode isn't
+    meaningful — see those helpers' own docstrings, not this one, for the actual guard.
 
     TILDE ENTRIES ARE NOT RELATIVE. `normalize-paths` puts `pathPrepend` in
     `PATH_LIST_KEYS` and resolves `~` through `resolveUserPath` (io-By0s-a_s.js), so

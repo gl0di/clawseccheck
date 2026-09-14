@@ -62,6 +62,7 @@ from ._shared import (
     _hint,
     _hooks_session_key_exposures,
     INPUT_TOOL_HINTS,
+    _is_posix,
     _is_secret_reference,  # noqa: F401 — re-exported for existing importers
     _LEG_KEYS,
     LOOPBACK,
@@ -3163,6 +3164,26 @@ def check_secrets(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B1", ctx)
     if unreadable is not None:
         return unreadable
+    # Same gap as B11 (check_tls): config_mode stays None when openclaw.json parsed
+    # fine but the separate permission-bits stat() call itself raised OSError, which
+    # _config_unreadable() does not catch. config_found is required too -- config_mode
+    # is ALSO None, legitimately, on a plain non-OpenClaw host where there is no
+    # openclaw.json to stat() at all (config_found is False there), which must keep
+    # reading as the ordinary "nothing to flag" PASS below, not a fake UNKNOWN. Only
+    # matters here when there is something to protect (secret_paths) — an empty
+    # config has nothing this check would flag regardless of whether perms could be
+    # verified.
+    if secret_paths and ctx.config_found and _is_posix() and ctx.config_mode is None:
+        return _finding(
+            "B1",
+            UNKNOWN,
+            f"{len(secret_paths)} token(s) in config, but file permissions could not "
+            "be verified (the file parsed but its permission bits could not be read) "
+            "— cannot confirm openclaw.json is not group/world-readable.",
+            "Check why the audit could not stat() openclaw.json (see the run's errors) "
+            "and re-run; in the meantime, manually confirm `chmod 600 "
+            "~/.openclaw/openclaw.json`.",
+        )
     note = ""
     pc = "verified"
     if secret_paths:
@@ -3299,6 +3320,29 @@ def check_tls(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B11", ctx)
     if unreadable is not None:
         return unreadable
+    # config_mode stays None when openclaw.json parsed fine but the SEPARATE stat()
+    # call that reads its permission bits (collector.py) itself raised OSError —
+    # config_parse_error is False in that case (the content WAS read), so the guard
+    # above does not catch it. _perms_loose() then folds that "never checked" state
+    # into the same False as "checked and found tight" (deliberately, for the
+    # non-POSIX case — see tests/test_windows.py), which would make this a fake PASS
+    # on the one POSIX sub-case that has no such excuse. config_found is required too
+    # -- config_mode is ALSO None, legitimately, on a plain non-OpenClaw host with no
+    # openclaw.json to stat() at all, which must keep reading as the ordinary
+    # "nothing to flag" PASS below. Gated on _is_posix() as well: Windows keeps its
+    # existing, intentionally-tested "skip, don't fabricate an NTFS-ACL verdict from
+    # st_mode" PASS.
+    if ctx.config_found and _is_posix() and ctx.config_mode is None:
+        return _finding(
+            "B11",
+            UNKNOWN,
+            "Config file permissions could not be verified (the file parsed but its "
+            "permission bits could not be read) — cannot confirm openclaw.json is not "
+            "group/world-readable.",
+            "Check why the audit could not stat() openclaw.json (see the run's errors) "
+            "and re-run; in the meantime, manually confirm `chmod 600 "
+            "~/.openclaw/openclaw.json`.",
+        )
     return _finding(
         "B11",
         PASS,

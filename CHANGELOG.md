@@ -252,6 +252,14 @@ name, or an inline `require('child_process').exec(...)` chain) before firing.
   ostensibly explaining; and `--vet-source`'s IOC-coverage notice claimed "no
   indicators for url" immediately above a FAIL that had, in fact, matched a real
   known-bad-infrastructure entry from a separate table the notice never mentioned.
+- **B1/B11 no longer fake a full-confidence PASS when `openclaw.json`'s permission
+  bits genuinely could not be read.** A `stat()` failure on the config file — separate
+  from, and after, successfully parsing its contents — left the permission check
+  silently untested, but B1 ("No exposed plaintext secrets") and B11 ("config perms
+  are tight") still asserted a verified-safe state. Both now report UNKNOWN in that one
+  narrow case; the existing, deliberately-tested Windows behavior (POSIX mode bits
+  don't apply to NTFS ACLs, so the check is skipped there, not marked UNKNOWN) is
+  unchanged.
 
 ### Security
 
