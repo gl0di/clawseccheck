@@ -416,6 +416,26 @@ def coverage_notice() -> list:
             "It also carries no " + " and no ".join(empty_tables)
             + " at all, so those surfaces contribute no signal either."
         )
+    # B-758 item #3: a "url" or "git" source is ALSO checked against HOSTS -- a
+    # separate infrastructure (host/IP) IOC table, independent of the name-based
+    # per-ecosystem pool this notice describes coverage for (checks/_vet.py's
+    # vet_source, step 1b). When HOSTS carries records, a source in one of those
+    # ecosystems can still FAIL on a host match alone -- and that FAIL's own text
+    # cites "catalog: url" for it -- even though its name-based pool above is listed
+    # as carrying nothing. Reproduced live: `vet_source` on a URL whose host is a
+    # real HOSTS entry FAILs immediately below this notice while "url" is listed
+    # missing. Disclosing the exception keeps the "nothing is known here" claim
+    # truthful for what it actually describes (the name-based pool) instead of
+    # reading as contradicted by the very next FAIL.
+    _host_scoped = {"url", "git"} & set(missing)
+    if _host_scoped and HOSTS:
+        lines.append(
+            "Exception: " + " and ".join(sorted(_host_scoped))
+            + " sources are also checked against a separate known-bad-infrastructure "
+            "(host/IP) list, which is NOT empty -- such a source can still fail on "
+            "that check alone even though its own name-based pool above carries "
+            "nothing."
+        )
     lines.append(
         "(offline notice: a property of the shipped dataset, not of your setup; no network "
         "call was made)"

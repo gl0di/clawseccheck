@@ -636,7 +636,7 @@ def _missing_layers_sentence(score: ScoreResult) -> str:
     )
 
 
-def _urgent_headline(findings: list[Finding]) -> str:
+def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
     """``"Most urgent: CRITICAL — Lethal trifecta reachable  [B1]"``, or the all-clear
     variant when there is no unsuppressed FAIL.
 
@@ -645,14 +645,43 @@ def _urgent_headline(findings: list[Finding]) -> str:
     Selection mirrors `render_report`'s own `issues` sort (severity first), narrowed to
     FAIL only (a WARN is not "urgent" in the sense this headline means), with the
     finding id as the tie-break for determinism.
+
+    B-758 item #1: a RISK-* dangerous-capability CHAIN carries its own severity —
+    a property of the combination, not summed from its legs — and this report renders
+    a separate "Highest-risk paths"/"RISK Chains" section for those (`render_risk_paths`
+    / `_risk_chain_lines`, fed from the same `risk` list). Before this fix this headline
+    never looked at that list, so a reader could see "Most urgent: HIGH" here and a
+    CRITICAL chain two sections later, with neither block acknowledging the other.
+    `risk` is optional and compared on equal footing with findings by severity, with a
+    finding winning an exact-severity tie (so a caller that passes no `risk` — e.g.
+    `render_html`, which does not render a risk-chain section — reproduces the prior
+    behavior byte-for-byte). A chosen chain is always worded "dangerous capability
+    chain" so the one-line headline never pretends to be the chain's own multi-step
+    explanation and instead points at the fuller section for it.
     """
-    def _rank(f):
-        return (_SEV_ORDER.get(f.severity, 9), f.id)
+    def _pick(pool_findings, pool_risk):
+        best_f = sorted(pool_findings, key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.id))[0] \
+            if pool_findings else None
+        best_p = sorted(pool_risk, key=lambda p: (_SEV_ORDER.get(p.severity, 9), p.id))[0] \
+            if pool_risk else None
+        if best_p is not None and (
+            best_f is None
+            or _SEV_ORDER.get(best_p.severity, 9) < _SEV_ORDER.get(best_f.severity, 9)
+        ):
+            return "risk", best_p
+        if best_f is not None:
+            return "finding", best_f
+        return None, None
 
     live = [f for f in findings if not getattr(f, "suppressed", False)]
-    candidates = [f for f in live if f.status in FAIL_WEIGHT_STATUSES]
-    if candidates:
-        top = sorted(candidates, key=_rank)[0]
+    live_risk = [p for p in (risk or []) if not getattr(p, "suppressed", False)]
+    fail_candidates = [f for f in live if f.status in FAIL_WEIGHT_STATUSES]
+
+    kind, top = _pick(fail_candidates, live_risk)
+    if kind == "risk":
+        return (f"Most urgent: {top.severity} — dangerous capability chain: "
+                f"{_sanitize(top.title)}  [{top.id}]")
+    if kind == "finding":
         return f"Most urgent: {top.severity} — {_sanitize(top.title)}  [{top.id}]"
 
     # C-426: the all-clear must not out-run the evidence. This headline leads every
@@ -664,10 +693,15 @@ def _urgent_headline(findings: list[Finding]) -> str:
     #
     # FAIL-only remains the right bar for the word "urgent" (a WARN is not urgent in
     # the sense a reader acts on within the hour), so the fix is not to widen the bar
-    # but to stop claiming more than "no FAIL" when something is still open.
+    # but to stop claiming more than "no FAIL" when something is still open. A live
+    # RISK-* chain is evidenced the same positive-evidence-per-leg way a FAIL is, so it
+    # is checked here on the same footing as a WARN, not held to a stricter bar.
     warns = [f for f in live if f.status == WARN]
-    if warns:
-        top = sorted(warns, key=_rank)[0]
+    kind, top = _pick(warns, live_risk)
+    if kind == "risk":
+        return (f"Nothing failed outright — most serious open item: {top.severity} — "
+                f"dangerous capability chain: {_sanitize(top.title)}  [{top.id}]")
+    if kind == "finding":
         return (f"Nothing failed outright — most serious open item: {top.severity} — "
                 f"{_sanitize(top.title)}  [{top.id}]")
     return "Nothing urgent found in what was checked."
@@ -2052,9 +2086,25 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     # out here — this row used to hand-roll "N installed" and so kept saying it after
     # B-507 had corrected the detail block.
     _sk_roster = _skills_roster_text(inv, ctx)
-    sk_count = f"{len(sk_flagged)} flagged · {_sk_roster}" if skills else _sk_roster
-    if sk_subject_text != "clear":
-        sk_count += f" · {sk_subject_text}"
+    # B-758 item #2: the two FAIL-driving numbers (per-item flagged, subject issues)
+    # used to be split apart by the roster DESCRIPTION sitting between them — "0
+    # flagged · 2 bundled with a plugin · 1 self-excluded · 5 issue(s)   FAIL" reads as
+    # a contradiction because a skimming reader hits "0 flagged" and the FAIL dot
+    # before ever reaching the "5 issue(s)" that actually explains it. The terminal
+    # "Inventory by subject" block (`_roster_and_subject_count_text`) never had this
+    # problem because it keeps flagged/issue adjacent and puts the roster description
+    # in a separate parenthetical; this keeps that same adjacency in one flat string
+    # (the HTML table / PDF summary / chat card all render a single cell here) by
+    # moving the roster description to the end instead.
+    if skills:
+        sk_count = f"{len(sk_flagged)} flagged"
+        if sk_subject_text != "clear":
+            sk_count += f" · {sk_subject_text}"
+        sk_count += f" · {_sk_roster}"
+    else:
+        sk_count = _sk_roster
+        if sk_subject_text != "clear":
+            sk_count += f" · {sk_subject_text}"
     rows.append((SUBJECT_LABEL["skills"], sk_status, sk_count))
 
     mcp = inv["mcp"]
@@ -2065,9 +2115,17 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     mcp_bad = [m for m in mcp if m.get("verdict") != "ok"]
     mcp_status = _worst_of_statuses(
         [m.get("verdict") for m in mcp_bad] + [mcp_subject.get("status", PASS)])
-    mcp_count = f"{len(mcp_bad)} flagged · {len(mcp)} configured" if mcp else "none configured"
-    if mcp_subject_text != "clear":
-        mcp_count += f" · {mcp_subject_text}"
+    # B-758 item #2: same adjacency fix as the skills row above — flagged/issue counts
+    # stay together, the roster size trails.
+    if mcp:
+        mcp_count = f"{len(mcp_bad)} flagged"
+        if mcp_subject_text != "clear":
+            mcp_count += f" · {mcp_subject_text}"
+        mcp_count += f" · {len(mcp)} configured"
+    else:
+        mcp_count = "none configured"
+        if mcp_subject_text != "clear":
+            mcp_count += f" · {mcp_subject_text}"
     rows.append((SUBJECT_LABEL["mcp"], mcp_status, mcp_count))
 
     plug = inv["plugins"]
@@ -3012,7 +3070,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(f"Score: {score.score}/100   Grade: {grade_disp}")
         lines.append(_score_bar(score.score, score.grade, ascii_only=ascii_only, color=color))
     else:
-        lines.append(_urgent_headline(findings))
+        lines.append(_urgent_headline(findings, risk=risk))
         lines.append(_missing_layers_sentence(score))
     # C-423: the mandatory "not fully covered" line — appears on GRADED runs too,
     # whenever a layer that DID run still didn't exhaust its subject.
@@ -4216,7 +4274,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         ]
     else:
         grade_lines = [
-            f"{head} {sep} {_urgent_headline(findings)}",
+            f"{head} {sep} {_urgent_headline(findings, risk=risk)}",
             f"{_missing_layers_sentence(score)}  {sep}  {n_issues} {issues_word}",
         ]
     _covered_line = _not_fully_covered_line(score)
