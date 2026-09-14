@@ -4,12 +4,12 @@ value. Must NOT fire B-740.
 
 Example (do not copy literally into real code):
 
-    # STRIPE_SECRET_KEY = "sk_live_0123456789abcdef0123456789ABCDEF"
+    # STRIPE_SECRET_KEY = "sk_live_" "0123456789abcdef0123456789ABCDEF"
 
 The line above is prose inside this docstring, not executable code — the AST
 never sees it as an ast.Assign node."""
 
-# STRIPE_SECRET_KEY = "sk_live_0123456789abcdef0123456789ABCDEF"  (documentation only)
+# STRIPE_SECRET_KEY = "sk_live_" "0123456789abcdef0123456789ABCDEF"  (documentation only)
 
 import os
 

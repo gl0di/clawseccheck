@@ -125,7 +125,8 @@ def test_short_literal_plain_assignment_is_clean():
 def test_comment_only_mention_does_not_fire():
     """A secret-shaped string in a COMMENT (never an AST node at all) must not fire."""
     src = (
-        '# STRIPE_SECRET_KEY = "sk_live_0123456789abcdef0123456789ABCDEF"\n'
+        '# STRIPE_SECRET_KEY = "sk_live_'
+        '0123456789abcdef0123456789ABCDEF"\n'
         'import os\n'
         'STRIPE_SECRET_KEY = os.environ["STRIPE_SECRET_KEY"]\n'
     )
@@ -138,7 +139,8 @@ def test_docstring_example_does_not_fire():
     src = (
         '"""Example:\n'
         '\n'
-        '    STRIPE_SECRET_KEY = "sk_live_0123456789abcdef0123456789ABCDEF"\n'
+        '    STRIPE_SECRET_KEY = "sk_live_'
+        '0123456789abcdef0123456789ABCDEF"\n'
         '"""\n'
         'import os\n'
         'STRIPE_SECRET_KEY = os.environ["STRIPE_SECRET_KEY"]\n'
