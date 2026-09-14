@@ -6167,6 +6167,14 @@ def _sandbox_signal(config_found: bool) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# DATA-HANDLING INVARIANT (applies to this block and the EnvironmentFile= reader below):
+# every value parsed here is read only to be TESTED — truthy/falsy, string length,
+# hostname equality — never to be displayed. No consumer places a raw value into a
+# Finding.detail/evidence/fix, none of it is ever logged (this module has no
+# logger/print call anywhere), and none of it is written to ~/.clawseccheck/ or any
+# other on-disk store — it lives only in this Context for the one CLI process's
+# lifetime. Pinned by a regression test: tests/test_b290_env_supplied_gateway_auth.py.
+#
 # B-282 (ENV-2/ENV-6): the two GLOBAL runtime dotenv files.
 #
 # Grounded against dotenv-global-mWLbBl_z.js:85-111 (loadGlobalRuntimeDotEnvFiles) and

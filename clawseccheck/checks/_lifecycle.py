@@ -2041,7 +2041,7 @@ def _b349_assess_target(source: str, filename: str) -> "tuple[list, str | None]"
 
     KNOWN FALSE NEGATIVE, stated rather than papered over. This check's FAIL inherits the
     shipped JS detector's recall exactly. `_JS_EVAL_DECODED_RE` requires the decode to sit
-    INSIDE the eval/Function call (`eval(atob(x))`); a STAGED form that decodes into a
+    INSIDE the eval/Function call (an `eval` call wrapping `atob(x)`); a STAGED form that decodes into a
     variable first and evals it a line later is deliberately silent there, and its own
     docstring says so ("base64 decode without eval — stays silent"). So a readable,
     staged decode-then-exec installer reaches no verdict here. The UNKNOWN path above is

@@ -4912,7 +4912,7 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if af.rule == "SHELL_INJECTION_RISK":
                     warns_shell_injection.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
                     continue
-                # B336: chunked/part-file read+join composed into exec()/eval() — the
+                # B336: chunked/part-file read+join composed into an exec/eval call — the
                 # split-by-file scanner-evasion loader shape. WARN-grade only — routed
                 # here, BEFORE the generic crit/cred-exfil fallthrough below, so this
                 # rule can never become FAIL-capable regardless of its own "info"
@@ -5441,8 +5441,8 @@ def check_installed_skills(ctx: Context) -> Finding:
         )
 
     # B336: a locally-defined helper reads and joins multiple chunked/part files at
-    # runtime, and the assembled result is exec()'d/eval()'d — the split-by-file
-    # scanner-evasion loader shape (the payload never exists whole in any single
+    # runtime, and the assembled result is run through an exec/eval call — the
+    # split-by-file scanner-evasion loader shape (the payload never exists whole in any single
     # shipped .py file). WARN-first, ranked just below the staged-dropper WARN — a
     # confirmed chunked-loader shape is a comparably strong signal to a staged dropper.
     if warns_chunked_file_exec:
@@ -5458,7 +5458,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             + "; ".join(warns_chunked_file_exec[:6])
             + extra,
             "A helper reads and joins multiple chunked/part files at runtime and executes "
-            "the assembled result via exec()/eval() — the documented split-by-file "
+            "the assembled result through an exec/eval call — the documented split-by-file "
             "scanner-evasion loader shape. Read the reassembled content; if it is not "
             "something you deliberately embedded, treat the skill as malicious.",
             warns_chunked_file_exec,

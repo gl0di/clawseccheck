@@ -2186,12 +2186,13 @@ _B97_SIGNAL_MARKER = "fires every turn and"
 # regexes (_HOOK_NET_SINK_RE/_HOOK_ENV_READ_RE/_HOOK_MUTATE_RE, checks/_content.py) do
 # not cover a hook that shells out via node:child_process -- exactly the shape a
 # self-reinstalling persistence hook would use to re-run the very commands that plant
-# the OTHER anchors (e.g. `execSync("systemctl --user enable --now ...")` +
-# `execSync("tailscale up ...")` on every turn). B97's Finding text alone cannot see
-# this -- it falls in the "no sink/mutation seen" bucket -- so `_b97_anchor_signal`
-# below independently re-scans the same hook source for this ONE narrow pattern.
-# Deliberately excludes a bare `exec(` alternative: unqualified `exec(` collides with
-# JS's own `RegExp.prototype.exec()`, an extremely common, unrelated call shape that
+# the OTHER anchors (e.g. an `execSync` call on "systemctl --user enable --now ..." +
+# an `execSync` call on "tailscale up ..." on every turn). B97's Finding text alone
+# cannot see this -- it falls in the "no sink/mutation seen" bucket -- so
+# `_b97_anchor_signal` below independently re-scans the same hook source for this ONE
+# narrow pattern. Deliberately excludes a bare exec-name alternative: an unqualified
+# JS `exec` call collides with JS's own `RegExp.prototype.exec()`, an extremely common,
+# unrelated call shape that
 # would turn this into a false-signal generator. Named child_process functions
 # (execSync/execFileSync/spawnSync/execFile) are unambiguous and never legitimately
 # used for anything else; a bare `require`/`import` of the module is also treated as

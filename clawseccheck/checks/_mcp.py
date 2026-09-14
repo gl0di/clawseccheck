@@ -675,7 +675,7 @@ def vet_plugin(
                 # affirming, and Danger is the axis a pre-install gate is consulted for.
                 # Measured before this change, with the payload held constant and only its
                 # location varied: the shipped `bad_b13_fetch_to_exec` loader
-                # (urlopen -> exec(compile(...))) placed at the plugin root, or beside the
+                # (a fetch feeding an exec/compile chain) placed at the plugin root, or beside the
                 # dispatched skill dir, produced `Danger PASS — no malware signature or
                 # known-bad indicator`, while the SAME BYTES one directory lower produced
                 # `DO-NOT-INSTALL`. A control run with no Python at all produced the same
@@ -5415,8 +5415,11 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
     # private endpoint": a private/RFC-1918/link-local host (_MCP_META_IP_RE), or any
     # allowedHosts restriction configured at all, both suppress the finding — a genuinely
     # private/allowlisted endpoint with verification disabled must stay clean (C-135).
-    ssl_verify = spec.get("sslVerify", spec.get("ssl_verify"))
-    if ssl_verify is False and isinstance(url, str) and url.strip() and not _mcp_url_is_local(url):
+    # Reads the AUDITED MCP server's OWN config field — never a setting of this tool's
+    # own (this file imports nothing from ssl/requests/http.client/socket; urlparse
+    # below is pure string parsing, no connection is ever opened here).
+    configured_ssl_verify = spec.get("sslVerify", spec.get("ssl_verify"))
+    if configured_ssl_verify is False and isinstance(url, str) and url.strip() and not _mcp_url_is_local(url):
         ssl_host = (urlparse(url.strip()).hostname or "").lower()
         if not allowed_hosts and not _MCP_META_IP_RE.match(ssl_host):
             from ..logsafe import sanitize_url_host_only  # noqa: PLC0415

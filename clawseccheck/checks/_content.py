@@ -13866,6 +13866,10 @@ _EXFIL_OBJECT_WINDOW = 300  # the object may be described a workflow step earlie
 # `?access_token=` key, then actually send an unrelated, real stolen secret through it.
 # Staying at WARN (not PASS) keeps that residual visible rather than fully blind, while
 # still fixing the reported hard-FAIL false positive on the mainstream idiom.
+# Detection-pattern data, not a credential -- these are REST-API auth QUERY-PARAMETER
+# NAMES (never a secret VALUE), matched against text found in a SCANNED skill's prose
+# to recognize the "?api_key=", "?access_token=", "?client_secret=" REST-auth idiom.
+# Never sent anywhere; clawseccheck makes no network calls (CLAUDE.md Golden Rule #1).
 _URL_AUTH_QUERY_PARAM_NAME_RE = re.compile(
     r"(?:^|[?&])(?:"
     r"access[_-]?token|auth[_-]?token|bearer[_-]?token|refresh[_-]?token|"

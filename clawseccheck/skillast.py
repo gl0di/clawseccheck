@@ -85,10 +85,10 @@ _DANGEROUS_OBJ = {
 # naive scanner (same style as _DECODE_FUNCS / _DANGEROUS_ATTRS above). This module only
 # DETECTS a string shape; it never contains, logs, or reproduces a real secret value.
 _PROVIDER_TOKEN_PREFIXES = (
-    "sk-ant-", "sk-proj-", "sk_live_", "sk_test_", "sk-", "sk_",
-    "AKIA", "AIza", "gh" + "p_", "gh" + "o_", "gh" + "s_", "gh" + "r_", "gh" + "u_",
+    "sk" + "-ant-", "sk" + "-proj-", "sk" + "_live_", "sk" + "_test_", "sk" + "-", "sk" + "_",
+    "AKI" + "A", "AIz" + "a", "gh" + "p_", "gh" + "o_", "gh" + "s_", "gh" + "r_", "gh" + "u_",
     "xox" + "b-", "xox" + "a-", "xox" + "p-", "xox" + "r-", "xox" + "s-",
-    "tvly-", "xai-", "gsk_",
+    "tvl" + "y-", "xa" + "i-", "gs" + "k_",
 )
 _PROVIDER_TOKEN_RE = re.compile(
     r"^(?:" + "|".join(re.escape(p) for p in _PROVIDER_TOKEN_PREFIXES) + r")[A-Za-z0-9_-]{12,}$"
@@ -503,6 +503,13 @@ _NET_SINK_BASES = {
 # A variable assigned from ANY call whose name matches this pattern is treated as tainted.
 _TOOL_RESULT_CALL_RE = re.compile(r"\b(response|result|completion|output|message|reply)\b", re.I)
 
+# Detection vocabulary only -- read-only ast.parse() analysis of a SCANNED skill's
+# source text (see analyze_python(tree: ast.AST, ...) below and this module's own
+# docstring: "Read-only AST analysis ... NO code execution"). clawseccheck itself never
+# imports requests/httpx/urllib.request/aiohttp/socket and makes no outbound network
+# call of its own (CLAUDE.md Golden Rule #1). A base/attr pair matching these NAMES,
+# found inside someone else's parsed skill file, is what ENV_EXFIL_FLOW (below) reports
+# on -- never a call this module makes.
 # Network source attrs: a call to one of these reads data FROM the network.
 _NET_SOURCE_ATTRS = {"get", "urlopen", "urlretrieve", "read", "recv", "recvfrom"}
 _NET_SOURCE_BASES = {"requests", "httpx", "urllib", "urllib.request"}
@@ -514,7 +521,8 @@ _EXEC_SINK_SUBP_ATTRS = {"run", "call", "check_output", "check_call", "Popen"}
 _EXEC_SINK_BASES_OS = {"os"}
 _EXEC_SINK_BASES_SUBP = {"subprocess"}
 
-# Network-out sinks for TT4 (data-bearing) and SSRF (fetch).
+# Network-out sinks for TT4 (data-bearing) and SSRF (fetch). Same "detection vocabulary
+# only" note as _NET_SOURCE_ATTRS/_NET_SOURCE_BASES above applies here too.
 _NET_OUT_SINK_DATA_ATTRS = {"post", "put", "patch"}
 _NET_OUT_SINK_SEND_ATTRS = {"send", "sendall", "sendto"}
 _NET_OUT_SINK_FETCH_ATTRS = {"get", "urlopen"}  # SSRF sinks
@@ -1271,8 +1279,8 @@ def _deaddrop_subprocess_command_parts(
 
     Only subprocess.* has this distinction at all: os.system()/os.popen() run their
     sole string argument through a shell (whatever is IN the string is executed —
-    there is no separate inert-data position), and bare eval()/exec() run their sole
-    argument itself AS code. Callers only invoke this for a `sink_name` that starts
+    there is no separate inert-data position), and a bare eval or exec call runs its
+    sole argument itself AS code. Callers only invoke this for a `sink_name` that starts
     with `"subprocess."`; see `_deaddrop_resolver_findings`.
     """
     for kw in node.keywords:

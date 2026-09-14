@@ -505,6 +505,11 @@ def save_state(path: str | Path, snap: dict) -> None:
     p = Path(path).expanduser()
     # Symlink-safe: create the dir 0700 and refuse to follow a symlinked target,
     # so a planted symlink can never turn this write into an arbitrary-file clobber.
+    # state.json itself is unauthenticated -- no hash chain, unlike history.jsonl/
+    # events.jsonl (record_events()/verify_chain() below) -- see SECURITY_MODEL.md's
+    # "Audit trail" section for why (local single-user trust boundary; local signing
+    # would live behind the same 0700 dir it would defend) and the off-machine
+    # baseline_reference()/--verify-baseline mitigation this module ships instead.
     secure_dir(p.parent)
     secure_write_text(p, json.dumps(snap, indent=2))
 # F-173: snapshot fields deliberately EXCLUDED from the baseline reference.
