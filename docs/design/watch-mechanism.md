@@ -50,7 +50,7 @@ fallback logic was written to depend on it, not inferred from `sys.platform == "
 
 Verified directly (Linux 6.x, glibc, no container/sandbox restriction beyond the ordinary):
 
-```
+```text
 inotify_init1 OK fd= 3
 add_watch OK wd= 1 dir= /tmp/tmpXXXXXXXX
 select readable: True

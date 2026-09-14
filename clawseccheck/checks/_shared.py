@@ -70,9 +70,27 @@ def _username_safe_path(path) -> str:
 
     Falls back to the resolved path unchanged if ``Path.home()`` cannot be determined
     (no HOME set, e.g. a stripped-down cron environment) — never raises.
+
+    Only calls ``.resolve()`` — which walks the filesystem, ``lstat``-ing each
+    ancestor to follow symlinks — when *path* actually exists. Some callers (B136)
+    pass a path parsed out of a THIRD PARTY config file, describing a location that
+    need not exist on the machine running this audit at all (every fixture/test path
+    is a synthetic example, never present on disk). Resolving a nonexistent path is
+    still well-defined on POSIX in principle (``strict=False`` just appends whatever
+    doesn't exist, unchanged) — but on macOS, an absolute path's first component can
+    be ``/home``, which is a live *autofs* trigger (``/etc/auto_master`` -> the
+    ``auto_home`` map), not an inert missing directory the way it is on Linux.
+    Touching it via ``lstat`` — which is exactly what the ``.resolve()`` walk does —
+    invokes ``automountd``, so the very same input path can render differently (or,
+    in the worst case, block) depending on what that triggers, breaking the
+    cross-platform finding-fingerprint manifest (C-433-style). Skipping the real
+    filesystem walk for anything not already known to exist sidesteps that
+    trigger entirely while leaving the genuine local-path case — the one this
+    helper exists for — untouched.
     """
     try:
-        p = Path(path).resolve()
+        p = Path(path)
+        p = p.resolve() if p.exists() else Path(os.path.normpath(str(p)))
     except OSError:
         p = Path(path)
     try:
