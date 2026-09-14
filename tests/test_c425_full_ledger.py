@@ -345,7 +345,7 @@ class TestResolveRuntimeCapsWiring:
         ctx, findings, score = audit(SAFE)
         args = _args(full=True, fast=False, judged_bundle=bundle)
         (out_score, _deadline, judged_bundle, live_signal, fired, _ledger,
-         live_bucket, behavioral_analysis) = cli._resolve_runtime_caps(
+         live_bucket, behavioral_analysis, _live_test_proof) = cli._resolve_runtime_caps(
             ctx, findings, score, args, attestation={"tools": ["x"]})
         assert out_score.graded is False  # precondition, not decoration
 

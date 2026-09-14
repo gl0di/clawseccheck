@@ -1200,6 +1200,17 @@ def build_bundle_template() -> dict:
                     "caps THIS run but is never written to history/trend/baseline, because "
                     "an unseeded token is not reproducible (F-155)."
                 ),
+                # F-193: optional. A canary verdict is cross-checked against this
+                # agent's own local trajectory log when one is readable — omit this
+                # entirely and the audited home's own sidecars are scanned
+                # automatically; there is nothing to fill in for the common case.
+                # Set ONLY when the run used a non-default session or an explicit
+                # trajectory file the agent wants pointed at directly (a path outside
+                # --home is ignored, not followed).
+                "trajectory": {
+                    "sessionId": "optional — narrows the scan to one session",
+                    "path": "optional — an explicit .trajectory.jsonl, must be inside --home",
+                },
                 "verdicts": [{
                     "tool": "canary",
                     # F-193: the bare tool name ("canary") is NOT a valid id — that

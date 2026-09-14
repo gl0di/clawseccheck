@@ -223,8 +223,17 @@ class TestGenuineBundleStillCompletesLayer5:
             "agents": [],
             "delegation": [],
         }
-        genuine_bucket = {"seed": "x", "verdicts": [
-            {"tool": "canary", "id": _VALID_CANARY_ID, "verdict": "RESISTANT"}]}
+        # F-193 (trajectory cross-check): a submitted canary id is now also checked
+        # against what THIS seed's own make_canary() would actually have produced —
+        # an id that is merely shape-valid (like _VALID_CANARY_ID above, used by the
+        # other tests in this file that test the shape gate in isolation) is no
+        # longer enough once the run goes through the real seed-binding leg, so this
+        # positive control needs a genuinely-derived id to stay a positive control.
+        from clawseccheck.canary import make_canary
+        real_seed = "x"
+        real_token = make_canary(real_seed)["token"]
+        genuine_bucket = {"seed": real_seed, "verdicts": [
+            {"tool": "canary", "id": real_token, "verdict": "RESISTANT"}]}
         attest_path = _bundle_file(tmp_path, attest, name="attest.json")
         bundle_path = _bundle_file(
             tmp_path, {"liveTest": genuine_bucket}, name="bundle.json")

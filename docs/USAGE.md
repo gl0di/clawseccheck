@@ -1638,7 +1638,11 @@ python3 audit.py --log audit.log            # also write log to a local file
     object carrying a `--canary`/`--dryrun`/`--redteam`/`--multiturn` verdict (F-155): only
     `VULNERABLE` ever caps the grade — `RESISTANT` or nothing submitted changes nothing — and
     only a run submitted with a `seed` is recorded into history/trend (see
-    `docs/OUTPUT_SCHEMA.md` §12 for the exact shape). `--full`'s own printed section is
+    `docs/OUTPUT_SCHEMA.md` §12 for the exact shape). A `canary` entry is also cross-checked
+    against your own local trajectory when one is readable (F-193): a submitted id that could
+    not have come from the bucket's own `seed`, or a verdict the trajectory disproves, is
+    dropped before it can complete the live-behaviour ledger layer or set the cap — the same
+    treatment as no submission at all, not a special case. `--full`'s own printed section is
     banner-titled `ADJUDICATION`; in `--json` the same data is the `secondOpinion` array.
 
     A bundle is advisory, so anything malformed degrades to inert rather than stopping the

@@ -411,11 +411,18 @@ class TestCliEndToEnd:
         # Rebuilt rather than `del`eted in place: `dict()` copies shallowly, so mutating
         # the nested dict would also change `with_resistant`, which the assertions below
         # still read.
+        #
+        # F-193: `not_checked`/`runState.notChecked` join the same exclusion for the
+        # same reason -- a submitted-but-uncorroborated verdict now earns its own
+        # disclosure line there ("no trajectory evidence was readable..."), which
+        # "nothing submitted" correctly never gets. That is a second real, intended
+        # difference this test's own premise ("the ledger is the ONE thing that
+        # differs") no longer states — asserted explicitly below instead.
         def _without_the_ledger(payload):
             trimmed = {k: v for k, v in _drop_elapsed(payload).items()
-                       if k != "missing_layers"}
+                       if k not in ("missing_layers", "not_checked")}
             trimmed["runState"] = {k: v for k, v in trimmed["runState"].items()
-                                   if k != "missingLayers"}
+                                   if k not in ("missingLayers", "notChecked")}
             return trimmed
 
         assert _without_the_ledger(with_resistant) == _without_the_ledger(without_bundle)
@@ -430,6 +437,14 @@ class TestCliEndToEnd:
             {"layer": "self_report", "status": "not_submitted"},
             {"layer": "live_behaviour", "status": "not_submitted"},
         ]
+
+        # F-193: only the submission that actually happened earns an uncorroborated
+        # disclosure -- "nothing submitted" is a different fact from "submitted,
+        # unverifiable" and must not carry the same line.
+        with_joined = " ".join(with_resistant["not_checked"])
+        without_joined = " ".join(without_bundle["not_checked"])
+        assert "live-test verdict uncorroborated" in with_joined
+        assert "live-test verdict uncorroborated" not in without_joined
 
     def test_nothing_submitted_byte_identical_across_runs(self, capsys):
         main(["--home", SAFE] + BASE + ["--full", "--json"])

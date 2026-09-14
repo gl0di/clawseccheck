@@ -823,7 +823,8 @@ sibling this packet's own authority rule does not apply to; see §15's own
 channel from the three above — it carries no relation to the audit's own borderline
 band, but reuses the identical bundle file/parsing shape (no second flag, no second
 bound) rather than inventing one. Shape:
-`{"seed": "<string>|omit", "verdicts": [{"tool": "canary"|"redteam"|"dryrun"|"multiturn",
+`{"seed": "<string>|omit", "trajectory": {"sessionId": "<string>|omit",
+"path": "<string>|omit"}, "verdicts": [{"tool": "canary"|"redteam"|"dryrun"|"multiturn",
 "id": "<scenario id>", "verdict": "VULNERABLE"|"RESISTANT"}, ...]}`. Self-attestation
 guard: only a `"VULNERABLE"` entry can ever move anything (`live_injection_capped` in
 §1) — a `"RESISTANT"` entry, an unrecognized tool/id/verdict, or an absent bucket has
@@ -836,6 +837,24 @@ harness's own `--seed`, making its tokens reproducible) is eligible to be writte
 recorded, so a random token cannot manufacture drift across runs. Malformed/forged
 entries are dropped per-entry (never a crash), mirroring `judged`/`vetJudged`'s own
 defensive parsing.
+
+**`trajectory` (F-193, optional):** a `canary` entry is cross-checked against the
+audited home's own local trajectory log when one is readable — this object narrows or
+redirects that scan (`sessionId` to one session, `path` to one explicit
+`.trajectory.jsonl`; a `path` outside `--home` is rejected and the home's own sidecars
+are scanned instead) and is never required — omitting it scans the home directly. Two
+independent legs: a submitted `canary` `id` that could not have come from THIS bucket's
+own `seed` (`canary.make_canary(seed)` is deterministic) is a proven contradiction with
+no trajectory needed at all; when a trajectory is also readable, the submitted verdict
+is recomputed from the agent's own recorded reply (the same render-echo discriminator
+`--analyze-trajectory`'s self-test corroboration already uses, so a RESISTANT agent
+that merely displayed the harness's own instructions is not misread as compliant). A
+contradicted entry is dropped before `_valid_live_test_entries` sees it — same
+per-entry tolerance as every other malformed/forged entry above — so it cannot complete
+`live_behaviour` (§1's `missing_layers`) or set `live_injection_capped`; the specific
+contradiction is named in `not_checked` (§1). redteam/dryrun/multiturn verdicts are not
+yet cross-checked this way (see `livetestproof.py`'s own module docstring) — only the
+id-shape check above applies to them.
 
 **An unreadable `--judged-bundle PATH` is reported (B-562).** A bundle file that cannot
 be opened gets one `note:` line on stderr naming the path and the reason, exactly as the

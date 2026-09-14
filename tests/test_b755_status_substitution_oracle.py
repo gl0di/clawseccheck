@@ -209,6 +209,15 @@ _NOT_DRIVEN = {
     # tests/test_c520_incident_lifecycle.py, not through this pool.
     "incidentstore.mark_incident": "reads Incident.status (open/investigating/mitigated/closed), not a Finding status",
     "incidentstore._incident_to_dict": "reads Incident.status (open/investigating/mitigated/closed), not a Finding status",
+    # F-193: same C-520 shape — a different vocabulary wearing the same attribute name.
+    # All three read/compare EntryProof.status (CORROBORATION_UNCHECKED/ABSENT/AGREES/
+    # CONTRADICTS), a canary live-test verdict's corroboration outcome against a
+    # trajectory log — never a Finding's FAIL-weight status. `_touches_status` is
+    # grammatical, so it cannot tell the two apart. Pinned directly by
+    # tests/test_f193_live_test_trajectory_proof.py, not through this pool.
+    "livetestproof.prove": "reads/produces EntryProof.status (corroboration outcome), not a Finding status",
+    "livetestproof.contradicted_ids": "reads EntryProof.status (corroboration outcome), not a Finding status",
+    "livetestproof.not_reached_lines": "reads EntryProof.status (corroboration outcome), not a Finding status",
 }
 
 #: Consumers whose output differs from itself between two identical runs, so an equivalence

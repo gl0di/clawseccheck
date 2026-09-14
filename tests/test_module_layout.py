@@ -295,18 +295,16 @@ _EXEMPT = {
     # means — the table needs one restate-and-reconsider pass, not an entry bumped each
     # time the next commit trips it — and this bump is exactly the pattern it warned about.
     # Recorded rather than quietly corrected: the split below is now owed twice over.
-    "report.py": "~6,178 lines — the output renderers; grew further with F-131's "
+    "report.py": "~6,699 lines — the output renderers; grew further with F-131's "
                  "Inventory-by-subject block (its own additive presentation layer, not "
                  "branching check logic), then with the B-617 inert-disclosure channel "
-                 "and the B-547 scope-note rewiring. The +10% that tripped the staleness "
-                 "guard is mostly explanatory comment, not new branching — but the "
-                 "pattern is worth naming: this file now hosts the scope note, the "
-                 "disclosure block, the inventory, the coverage page's text half and "
-                 "every renderer, and each honesty fix lands here because it is where "
-                 "claims are phrased. The split (renderers vs the disclosure/scope "
-                 "layer they share) is still deferred, but it is no longer only an "
-                 "I-022 secondary target — it is the second-largest structural debt "
-                 "after checks/_content.py.",
+                 "and the B-547 scope-note rewiring, then with B-758's three report "
+                 "self-contradiction fixes (_urgent_headline gained risk-chain awareness; "
+                 "the skills/MCP inventory rows were reordered) — each landed here because "
+                 "each is a claim this file phrases. The split (renderers vs the "
+                 "disclosure/scope layer they share) is still deferred, but it is no "
+                 "longer only an I-022 secondary target — it is the second-largest "
+                 "structural debt after checks/_content.py.",
     "catalog.py": "~3,916 lines (restated 2026-09-12, C-526/C-527 — was ~3,404) — the "
                   "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "

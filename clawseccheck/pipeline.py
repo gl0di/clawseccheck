@@ -68,6 +68,7 @@ from .catalog import UNKNOWN
 # free-form regex — see _valid_live_test_entries()'s own docstring. All four are pure
 # leaves (textnorm/brand only), so this cannot cycle.
 from .dryrun import make_scenarios as _make_dryrun_scenarios
+from . import livetestproof as _livetestproof
 from .multiturn import make_multiturn as _make_multiturn_scenarios
 from .redteam import make_suite as _make_redteam_suite
 from .layers import (            # noqa: F401 — re-exported for existing importers
@@ -1231,7 +1232,7 @@ class LiveTestSignal:
 
 
 def _valid_live_test_entries(
-    bucket, *, multiturn_freshly_issued: bool = False
+    bucket, *, multiturn_freshly_issued: bool = False, proof=None
 ) -> list[tuple[str, str, str]]:
     """Every structurally-valid ``(tool, id, verdict)`` triple in *bucket*'s
     ``"verdicts"`` list.
@@ -1243,6 +1244,15 @@ def _valid_live_test_entries(
     anything but exactly "VULNERABLE"/"RESISTANT" is simply dropped — mirroring
     `adjudication._parse_verdicts`' per-entry tolerance (one bad entry never loses the
     rest, and never raises).
+
+    *proof* (F-193, additive — every existing caller that omits it sees byte-identical
+    behaviour) is an optional :class:`livetestproof.LiveTestProof` from cross-checking
+    the bucket against the agent's own trajectory. An entry whose ``(tool, id)`` is in
+    :func:`livetestproof.contradicted_ids(proof) <clawseccheck.livetestproof.contradicted_ids>`
+    is dropped here too, on the same "one bad entry never loses the rest" footing as
+    every other per-entry gate above — the id-shape/generator checks catch a forged
+    id; this catches a real-shaped id whose claimed verdict the local evidence
+    disproves.
 
     *multiturn_freshly_issued* (F-193, additive — every existing caller that omits it
     sees byte-identical behaviour) is True only when THIS SAME invocation also just
@@ -1287,6 +1297,8 @@ def _valid_live_test_entries(
             continue
         if verdict not in _LIVE_TEST_VERDICTS:
             continue
+        if proof is not None and (tool, entry_id) in _livetestproof.contradicted_ids(proof):
+            continue
         out.append((tool, entry_id, verdict))
     return out
 
@@ -1321,7 +1333,8 @@ def _live_test_reproducible(bucket) -> bool:
 _MAX_LIVE_TEST_REASON_ENTRIES = 6
 
 
-def live_test_cap_signal(bucket, *, multiturn_freshly_issued: bool = False) -> LiveTestSignal:
+def live_test_cap_signal(bucket, *, multiturn_freshly_issued: bool = False,
+                         proof=None) -> LiveTestSignal:
     """F-155: reduce a ``--judged-bundle`` ``"liveTest"`` bucket to a cap-only signal.
 
     *bucket* is whatever :func:`split_judged_bundle` put at ``["liveTest"]`` — ``None``
@@ -1338,9 +1351,14 @@ def live_test_cap_signal(bucket, *, multiturn_freshly_issued: bool = False) -> L
 
     *multiturn_freshly_issued* — F-193, additive, threaded straight through to
     :func:`_valid_live_test_entries`; see that function's own docstring.
+
+    *proof* — F-193, additive, threaded straight through to
+    :func:`_valid_live_test_entries` too, so a contradicted VULNERABLE entry cannot
+    set the cap either — a caller that dropped the entry from the ledger but left it
+    live here would still cap the score on a scenario just proven not to have fired.
     """
     entries = _valid_live_test_entries(
-        bucket, multiturn_freshly_issued=multiturn_freshly_issued)
+        bucket, multiturn_freshly_issued=multiturn_freshly_issued, proof=proof)
     vulnerable = [(tool, entry_id) for tool, entry_id, verdict in entries if verdict == "VULNERABLE"]
     if not vulnerable:
         return LiveTestSignal()
@@ -1546,7 +1564,8 @@ class PipelineResult:
     def to_ledger(self, findings, *, degraded_count: int = 0,
                  attestation: dict | None = None, live_test_bucket=None,
                  behavioral_analysis: dict | None = None, ctx=None,
-                 multiturn_freshly_issued: bool = False) -> LayerLedger:
+                 multiturn_freshly_issued: bool = False,
+                 live_test_proof=None) -> LayerLedger:
         """C-425: project this pipeline's phases onto the five-layer ledger (layers.py).
 
         The mapping (decided; implemented as specified, not redesigned):
@@ -1765,8 +1784,18 @@ class PipelineResult:
 
         live_status = (
             STATUS_RAN if _valid_live_test_entries(
-                live_test_bucket, multiturn_freshly_issued=multiturn_freshly_issued)
+                live_test_bucket, multiturn_freshly_issued=multiturn_freshly_issued,
+                proof=live_test_proof)
             else STATUS_NOT_SUBMITTED
+        )
+        # F-193: the same disclosure idiom LAYER_SELF_REPORT uses below for attestation
+        # freshness — what this layer could NOT confirm, in plain English, rather than
+        # a silent gap. `not_reached_lines` returns () when live_test_proof is None
+        # (no caller has cross-checked anything, byte-identical to before this
+        # feature) or when every checked entry agreed with its evidence.
+        live_not_reached = (
+            _livetestproof.not_reached_lines(live_test_proof)
+            if live_test_proof is not None else ()
         )
 
         return LayerLedger(states={
@@ -1792,10 +1821,13 @@ class PipelineResult:
             LAYER_SELF_REPORT: LayerState(
                 status=self_report_status, not_reached=self_report_not_reached,
                 coverage=COVERAGE_UNKNOWN),
-            # B-558: unobservable — this method never attaches not_reached to this
-            # layer at all, and "were all scenario kinds exercised" is not derivable
-            # from the raw live-test bundle.
-            LAYER_LIVE_BEHAVIOUR: LayerState(status=live_status, coverage=COVERAGE_UNKNOWN),
+            # B-558: "were all scenario kinds exercised" is still not derivable from
+            # the raw live-test bundle, so coverage stays UNKNOWN regardless. F-193:
+            # not_reached DOES now carry something, when a caller passed a
+            # live_test_proof — see live_not_reached above.
+            LAYER_LIVE_BEHAVIOUR: LayerState(
+                status=live_status, not_reached=live_not_reached,
+                coverage=COVERAGE_UNKNOWN),
         })
 
 

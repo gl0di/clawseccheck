@@ -99,6 +99,7 @@ from .scanbudget import (
     DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, ScanBudgetExceeded, budget_deadline,
     budget_exceeded,
 )
+from . import livetestproof as _livetestproof
 from . import pipeline as _pipeline
 from .baseline import append_entries, is_fingerprint, load_ignore_entries
 from .catalog import (
@@ -1179,7 +1180,7 @@ def vet_all(
 def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
                         attestation: dict | None = None, live_test_bucket=None,
                         behavioral_ran: bool = False, behavioral_analysis: dict | None = None,
-                        commit_full_phases: bool = False, ctx=None):
+                        commit_full_phases: bool = False, ctx=None, live_test_proof=None):
     """C-425/C-426: the ONE producer of the five-layer ledger (``layers.py`` via
     ``pipeline.PipelineResult.to_ledger``) — extracted from ``_resolve_runtime_caps``
     (C-425) so the bare (non-`--full`) audit path (C-426) can call the SAME code
@@ -1234,6 +1235,11 @@ def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
     straight through to ``to_ledger`` unchanged; this function does not interpret it
     itself — see that method's own docstring for the coverage rule it drives.
 
+    ``live_test_proof`` — F-193, additive: a ``livetestproof.LiveTestProof`` from
+    cross-checking ``live_test_bucket`` against the agent's own trajectory, when the
+    caller already computed one (both real call sites below do). Threaded straight
+    through to ``to_ledger`` unchanged.
+
     Returns a ``layers.LayerLedger`` — never ``None``. A bare/incomplete ledger is
     exactly what a bare run's own ``to_ledger()`` mapping already produces; there is
     no "no ledger" state left to represent once this is the shared entry point.
@@ -1268,7 +1274,8 @@ def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
     return prelim.to_ledger(findings, degraded_count=degraded_count,
                             attestation=attestation, live_test_bucket=live_test_bucket,
                             behavioral_analysis=behavioral_analysis, ctx=ctx,
-                            multiturn_freshly_issued=_mt_fresh)
+                            multiturn_freshly_issued=_mt_fresh,
+                            live_test_proof=live_test_proof)
 
 
 def _last_complete_history_row(path=None):
@@ -1398,12 +1405,15 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     behaviour is unchanged for that call site.
 
     Returns `(score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids,
-    ledger, live_test_bucket, behavioral_analysis)`. The last two (B-723) are this
-    function's own internal inputs to `_build_layer_ledger`, threaded OUT rather than
-    left as locals: a caller that later re-projects the ledger from a real
-    `pipeline.PipelineResult` (once the sweep this function only promised has actually
-    run) needs the SAME `live_test_bucket`/`behavioral_analysis` this function's own
-    `to_ledger` call used, not a second, independently re-derived copy of either.
+    ledger, live_test_bucket, behavioral_analysis, live_test_proof)`. The last three
+    (B-723, F-193) are this function's own internal inputs to `_build_layer_ledger`,
+    threaded OUT rather than left as locals: a caller that later re-projects the
+    ledger from a real `pipeline.PipelineResult` (once the sweep this function only
+    promised has actually run) needs the SAME `live_test_bucket`/`behavioral_analysis`/
+    `live_test_proof` this function's own `to_ledger` call used, not a second,
+    independently re-derived copy of any of them — a re-projection that recomputed
+    `live_test_proof` fresh would still work (it is a pure function of the same
+    bucket/home), but would scan the trajectory log a second time for nothing.
     `score` is the SAME object passed in when neither cap fires, a freshly recomputed
     one otherwise (mirrors `scoring.compute`'s own "never mutate, always return"
     contract). `live_signal` is returned (not just consumed here) because the caller
@@ -1483,8 +1493,15 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     # live call today — kept anyway as the real, load-bearing guard rather than a
     # comment, so a future dispatch change cannot silently reopen the gap.
     _mt_fresh = bool(getattr(args, "multiturn", False) or getattr(args, "self_test", False))
+    # F-193: cross-check the bucket's canary entries against this home's own
+    # trajectory before either the cap or the ledger trusts them. `ctx.home` is
+    # already required by this function's own contract (every real call site has a
+    # ctx by now — see _build_layer_ledger's docstring); an absent ctx (test-only
+    # direct calls) makes prove() a no-op via its own defensive isinstance checks.
+    _live_test_proof = _livetestproof.prove(
+        live_test_bucket, getattr(ctx, "home", None))
     live_signal = _pipeline.live_test_cap_signal(
-        live_test_bucket, multiturn_freshly_issued=_mt_fresh)
+        live_test_bucket, multiturn_freshly_issued=_mt_fresh, proof=_live_test_proof)
     # F-154: the behavioral cap-only signal (T1/T2/T3/B191), gated on THIS invocation
     # having ACTUALLY run `behavioral.analyze(ctx)` — mirrors --fast's own skip of P8
     # (`_pipeline.run_pipeline`'s `run_behavioral`), so a --full --fast run (or any
@@ -1529,6 +1546,7 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
         args, findings, degraded_count=score.degraded_count, attestation=attestation,
         live_test_bucket=live_test_bucket, behavioral_ran=_behavioral_ran,
         behavioral_analysis=_behavioral_analysis, commit_full_phases=args.full, ctx=ctx,
+        live_test_proof=_live_test_proof,
     )
 
     if args.full:
@@ -1547,7 +1565,7 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     # very number the top-level `score` key was withholding -- one key apart in the
     # same document. Caught by test_full_json_projection_current_matches_top_level_score.
     return (score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids, ledger,
-            live_test_bucket, _behavioral_analysis)
+            live_test_bucket, _behavioral_analysis, _live_test_proof)
 
 
 def _apply_live_test_cap(ctx, findings, score, args):
@@ -1590,8 +1608,10 @@ def _apply_live_test_cap(ctx, findings, score, args):
     live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
     # F-193: see the matching comment at `_resolve_runtime_caps`'s own call site.
     _mt_fresh = bool(getattr(args, "multiturn", False) or getattr(args, "self_test", False))
+    _live_test_proof = _livetestproof.prove(
+        live_test_bucket, getattr(ctx, "home", None))
     live_signal = _pipeline.live_test_cap_signal(
-        live_test_bucket, multiturn_freshly_issued=_mt_fresh)
+        live_test_bucket, multiturn_freshly_issued=_mt_fresh, proof=_live_test_proof)
     if live_signal.hit:
         # C-426: the ledger MUST be threaded through this recompute. `_main` already
         # built a bare one and computed `score` against it, so the run reaching here
@@ -1606,6 +1626,7 @@ def _apply_live_test_cap(ctx, findings, score, args):
             args, findings, degraded_count=score.degraded_count,
             attestation=getattr(ctx, "attestation", None),
             live_test_bucket=live_test_bucket, ctx=ctx,
+            live_test_proof=_live_test_proof,
         )
         score = compute(findings, ctx, live_test_vulnerable=True,
                         live_test_reason=live_signal.reason, ledger=ledger)
@@ -5334,7 +5355,7 @@ def _main(argv=None) -> int:
         # capped grade a plain --full run of the same config would — and, C-425, the
         # IDENTICAL five-layer ledger / graded state too.
         (score, full_deadline, judged_bundle, _live_signal, _behavioral_fired_ids, _ledger,
-         _live_test_bucket, _behavioral_analysis) = (
+         _live_test_bucket, _behavioral_analysis, _live_test_proof) = (
             _resolve_runtime_caps(ctx, findings, score, args, attestation=attestation)
         )
         # B-586: AFTER the recompute, never before. `score` above is the phase-aware,
@@ -5436,7 +5457,7 @@ def _main(argv=None) -> int:
         _ledger = _dashboard_phases.to_ledger(
             findings, degraded_count=score.degraded_count, attestation=attestation,
             live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis,
-            ctx=ctx)
+            ctx=ctx, live_test_proof=_live_test_proof)
         score = compute(findings, ctx, live_test_vulnerable=_live_signal.hit,
                         live_test_reason=_live_signal.reason,
                         behavioral_fired_ids=_behavioral_fired_ids, ledger=_ledger)
@@ -6199,7 +6220,7 @@ def _main(argv=None) -> int:
     # (see the `render_json` call below) so `payload["projection"]["current"]` can
     # never disagree with `payload["score"]`/`payload["grade"]` for the same run.
     (score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids, layer_ledger,
-     _live_test_bucket, _behavioral_analysis) = (
+     _live_test_bucket, _behavioral_analysis, _live_test_proof) = (
         _resolve_runtime_caps(ctx, findings, score, args, attestation=attestation)
     )
     if args.json:
@@ -6257,7 +6278,7 @@ def _main(argv=None) -> int:
             layer_ledger = full_pipeline.to_ledger(
                 findings, degraded_count=score.degraded_count, attestation=attestation,
                 live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis,
-                ctx=ctx)
+                ctx=ctx, live_test_proof=_live_test_proof)
             score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
                             live_test_reason=live_signal.reason,
                             behavioral_fired_ids=behavioral_fired_ids, ledger=layer_ledger)
@@ -6365,7 +6386,8 @@ def _main(argv=None) -> int:
             layer_ledger = _hoisted_pipeline.to_ledger(
                 findings, degraded_count=score.degraded_count, attestation=attestation,
                 live_test_bucket=_live_test_bucket,
-                behavioral_analysis=_behavioral_analysis, ctx=ctx)
+                behavioral_analysis=_behavioral_analysis, ctx=ctx,
+                live_test_proof=_live_test_proof)
             score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
                             live_test_reason=live_signal.reason,
                             behavioral_fired_ids=behavioral_fired_ids, ledger=layer_ledger)
