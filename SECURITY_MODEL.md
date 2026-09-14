@@ -26,13 +26,24 @@ flag but one only reads and reports. Its permitted operations are:
 - **Read**, beyond config and bootstrap markdown, a bounded set of other OpenClaw-home
   artifacts needed for specific checks: the cron job store (JSON and, where present,
   its SQLite tables), the two global OpenClaw dotenv files, OpenClaw-related systemd
-  user-unit `Environment=`/`EnvironmentFile=` lines, session/audit log files, and the
-  plugin trust index. Also, for the ClawHub credential-hygiene check (B182), the
-  ClawHub CLI's own token-store path **outside** the OpenClaw home. Every domain the
-  *collector* reads from is named explicitly in `collector.py`'s `LIMIT_DOMAIN_*`
-  constants; the three reads that do not go through the collector are each bounded by
-  their own module and named in the two bullets below plus the socket bullet under
-  "It does not scan your entire filesystem".
+  user-unit `Environment=`/`EnvironmentFile=` lines, session/audit log files (including,
+  where the runtime has migrated to it, the per-agent SQLite `trajectory_runtime_events`
+  table — opened `mode=ro`, one literal `SELECT session_id, seq ...`, never another
+  column or table in that database file), and the plugin trust index. Also, for the
+  ClawHub credential-hygiene check (B182), the ClawHub CLI's own token-store path
+  **outside** the OpenClaw home. Every domain the *collector* reads from is named
+  explicitly in `collector.py`'s `LIMIT_DOMAIN_*` constants; several reads do not go
+  through the collector at all and are each bounded by their own module: the deptree,
+  host-monitor and socket-scan bullets below and under "It does not scan your entire
+  filesystem", plus two more named here since they are easy to miss precisely because
+  they are not part of the collector's `LIMIT_DOMAIN_*` accounting — OpenClaw's own
+  OAuth credential store (`<home>/credentials/`, `checks/_shared.py`'s
+  `_credential_store_state`, feeding the default-on Lethal Trifecta check A1 — see the
+  bullet on credential-store checks above for exactly what it reads and discards), and
+  the host's own persistence surface (`hostpersist.py`, F-179 — systemd user
+  units/timers, shell startup files, world-readable `/etc/cron.*`, `.pth`/
+  `sitecustomize` on `sys.path` — **digests only, never file content**, and read only
+  under `--monitor`, not the default audit path).
 - **Read the installed npm dependency tree** (B349, default-on, skip with `--no-deptree`),
   **outside** the OpenClaw home: the OpenClaw package root is resolved from `PATH` without
   a subprocess, then its `node_modules` is walked to read each package's `package.json`,
@@ -242,9 +253,21 @@ before it belongs in code.
   handler it creates, so redaction is defense-in-depth: even a caller that forgot to
   redact a value before logging it is still covered at the handler level.
 - **No PII or secret value ever appears in logs, reports, fixtures, or output** — by
-  construction, not by policy. Credential-store checks (`.env`, SSH key directories,
-  keychain/keyring, browser cookie stores) inventory **path existence only**; their
-  contents are never opened or read.
+  construction, not by policy. The path-existence credential-store checks (`.env`, SSH
+  key directories, keychain/keyring, browser cookie stores; `report.py`) inventory
+  **path existence only** and never open those files. One check does open and read file
+  *content*: OpenClaw's own OAuth credential store (`<home>/credentials/`,
+  `checks/_shared.py`'s `_credential_store_state`) is read file-by-file so the Lethal
+  Trifecta check (A1) and the `--monitor` credential-store dimension can tell whether a
+  plaintext secret is present and whether a stored credential changed. What survives
+  that read is a boolean, a filename, and a truncated SHA-256 digest — the file's actual
+  bytes, and any secret value detected in them, are discarded in the same function call
+  and never reach a finding, a log, or any output channel. The two global OpenClaw
+  dotenv files (`.env`, `gateway.env`) and OpenClaw-related systemd `EnvironmentFile=`
+  content work the same way: `collector.py` parses every `KEY=VALUE` pair into memory
+  for the run, but only a handful of named toggle/URL keys and length/truthy checks are
+  ever echoed into a finding — never a credential-shaped value (`tests/
+  test_b290_env_supplied_gateway_auth.py` pins this with a leak-marker regression test).
 - **Nothing is ever transmitted anywhere.** There is no code path in this project that
   sends a redacted (or unredacted) value off the machine — see "zero network, forever"
   above.
@@ -346,6 +369,25 @@ check* further distinguishes an absent baseline from a present-but-unreadable on
 telling a user whose `state.json` is unreadable that none was ever saved sends them to
 re-run `--monitor`, which is the one action that overwrites it.
 
+**A second, automatic check needs no off-box copy — and is weaker than the one that
+does.** `--verify-baseline` also compares the current state file against the last
+reference *this tool itself* recorded moving to (in `events.jsonl`) **for that exact
+state path** — tagged by a digest of the resolved `--state` path, the same identity
+scheme `home_digest` uses for `--home` above, so a witness entry that describes a
+different state file (a stale journal, an `--events` pointed elsewhere, a store that
+predates this check) reads as *no witness on record*, never as a disagreement. An
+earlier, untagged version of exactly this comparison was measured against a real,
+untampered machine before shipping and produced a false "reference moved" report: the
+machine's `state.json` and its journaled witness entries simply described two
+different runs, because nothing enforces that `--state` and `--events` name a paired
+set. The tag closes that specific failure mode, not the underlying limit — an
+attacker with write access to `~/.clawseccheck/` can still rewrite both files
+consistently, and a witness write can fail silently on its own (disclosed at the
+`--monitor` call site, never folded into a false all-clear). So this check is
+reported in its own paragraph, never merged into the primary verdict above, and a
+disagreement moves only `--verify-baseline`'s own exit code — never the score or
+grade, and never worded as proof.
+
 **Concurrency locking is POSIX-only.** The advisory lock (`locking.journal_lock`) that
 keeps two racing appends from both reading the same "last" `chain_hash` is a `flock`
 (`fcntl`) on a sidecar file. Without `fcntl` — most notably **Windows**, which this
@@ -407,7 +449,20 @@ regexes, the `"child_process" in masked` logic, and every check's label/severity
 left completely unchanged, and the full test suite stayed green throughout. The
 project's own `--vet` run against its own source (`clawseccheck --vet .`) reports this honestly rather than
 hiding it: a security tool necessarily ships attack signatures as data, and that is
-disclosed as a note, not papered over.
+disclosed as a note, not papered over. That pass is repeated as new detector vocabulary
+is added — it is a rewording sweep, not a one-time fix, so re-flag a specific new
+file:line if this note goes stale rather than assuming the class was never addressed.
+
+The same reasoning covers two more shapes a scanner may key on: (a) `skillast.py`'s
+`ENV_EXFIL_FLOW` taint rule and its `_NET_SOURCE_*`/`_NET_OUT_SINK_*` vocabulary tables
+are plain `set`/`tuple` literals of library and attribute **names** compared against an
+already-`ast.parse()`d **scanned skill's** nodes — this tool imports none of those
+libraries and makes no network call of its own (see "Allowed behavior" above); (b) a
+provider-token-shaped prefix constant (`skillast.py`'s `_PROVIDER_TOKEN_PREFIXES`) is
+assembled from string-literal fragments, the same idiom `tests/test_logsafe.py` uses for
+its own test fixtures, specifically so no contiguous secret-shaped substring sits at rest
+for a byte-level scanner to match — it holds prefixes only, never a full token, real or
+synthetic.
 
 ## Own capability declaration
 

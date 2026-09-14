@@ -46,12 +46,42 @@ def test_fail_under_is_gone(capsys):
     --help that can never pass.
 
     argparse rejects it now, which is a louder and more debuggable failure for a CI
-    script than either.
+    script than either -- and B-769 made the message itself name the replacement
+    rather than leaving a CI owner to grep the CHANGELOG at 3am (see the sibling test
+    below).
     """
     with pytest.raises(SystemExit) as exc:
         main(["--home", VULN] + BASE + ["--fail-under", "100"])
-    assert exc.value.code != 0
-    assert "unrecognized arguments" in capsys.readouterr().err
+    assert exc.value.code == 2, "distinct from the 1 a real --fail-on/--exit-code trip returns"
+    err = capsys.readouterr().err
+    # NOT "--fail-on" alone: that flag is real and so is listed in EVERY argparse
+    # usage block regardless of what actually failed -- asserting only its presence
+    # would pass even with the redirect deleted. "was removed" is unique to the
+    # custom message; "unrecognized arguments" is argparse's own generic wording
+    # and must be ABSENT, or the custom message never actually fired.
+    assert "was removed" in err
+    assert "unrecognized arguments" not in err
+
+
+def test_fail_under_names_fail_on_for_the_equals_form_too(capsys):
+    """B-769: the interception matches --fail-under=N as well as the space form --
+    argparse itself accepts both, so a CI script using either form must get the
+    same redirect rather than falling through to the generic argparse error only
+    for one of them."""
+    with pytest.raises(SystemExit) as exc:
+        main(["--home", VULN] + BASE + ["--fail-under=100"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "was removed" in err
+    assert "unrecognized arguments" not in err
+
+
+def test_fail_under_message_never_says_deprecated(capsys):
+    """C-426's own reasoning: the flag was REMOVED, not deprecated-in-place --
+    'deprecated' would wrongly imply it still works, just discouraged."""
+    with pytest.raises(SystemExit):
+        main(["--home", VULN] + BASE + ["--fail-under", "100"])
+    assert "deprecated" not in capsys.readouterr().err.lower()
 
 
 def test_fail_on_is_the_replacement_and_needs_no_score(capsys):

@@ -38,6 +38,13 @@ VULN = str(FIXTURES / "home_vuln")
 SAFE = str(FIXTURES / "home_safe")
 BASE = ["--no-native", "--no-history"]
 
+# F-193: every "id": "canary" literal in this file was rewritten to
+# "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123" — a real canary-token-shaped id
+# (TOKEN_PREFIX + 16 uppercase hex chars, the unseeded shape canary.make_canary()
+# itself emits), not the bare tool name. The bare word is exactly the forged shape
+# F-193 now rejects (pipeline._is_generated_scenario_id) — it is what the real
+# incident submitted and what SKILL.md's own example used to (wrongly) teach.
+
 
 def _pass_finding(fid: str = "B9", severity: str = LOW) -> Finding:
     return Finding(id=fid, title="t", severity=severity, status=PASS,
@@ -215,14 +222,14 @@ class TestLiveTestCapSignal:
         assert sig.reproducible is True
 
     def test_resistant_only_does_not_hit(self):
-        bucket = {"verdicts": [{"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}
+        bucket = {"verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}
         sig = pl.live_test_cap_signal(bucket)
         assert sig.hit is False
         assert sig.reason is None
 
     def test_mixed_entries_any_vulnerable_hits(self):
         bucket = {"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "RESISTANT"},
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"},
             {"tool": "redteam", "id": "JB-01", "verdict": "VULNERABLE"},
         ]}
         sig = pl.live_test_cap_signal(bucket)
@@ -230,14 +237,19 @@ class TestLiveTestCapSignal:
         assert sig.reason == "redteam:JB-01"
 
     def test_unseeded_hit_still_caps_but_is_not_reproducible(self):
-        bucket = {"verdicts": [{"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}
+        bucket = {"verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}
         sig = pl.live_test_cap_signal(bucket)
         assert sig.hit is True
         assert sig.reproducible is False
 
     def test_many_vulnerable_entries_reason_is_capped(self):
-        entries = [{"tool": "redteam", "id": f"PI-{i:02d}", "verdict": "VULNERABLE"}
-                  for i in range(10)]
+        # F-193: real redteam scenario ids, not a fabricated "PI-00".."PI-09" sequence
+        # (redteam only ever generates PI-01/PI-02, never PI-00 or PI-03+) — the first
+        # 10 of the real, sorted set (redteam.make_suite()'s own 22 ids) so the "(+4
+        # more)" collapsing at _MAX_LIVE_TEST_REASON_ENTRIES=6 is still exercised.
+        real_ids = sorted(pl._REDTEAM_SCENARIO_IDS)[:10]
+        entries = [{"tool": "redteam", "id": entry_id, "verdict": "VULNERABLE"}
+                  for entry_id in real_ids]
         sig = pl.live_test_cap_signal({"verdicts": entries})
         assert sig.hit is True
         assert "(+4 more)" in sig.reason
@@ -292,24 +304,24 @@ class TestLiveTestCapSignal:
         assert pl.live_test_cap_signal(bucket).hit is False
 
     def test_unrecognized_verdict_dropped(self):
-        bucket = {"verdicts": [{"tool": "canary", "id": "canary", "verdict": "MAYBE"}]}
+        bucket = {"verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "MAYBE"}]}
         assert pl.live_test_cap_signal(bucket).hit is False
 
     def test_seed_wrong_type_not_reproducible(self):
         bucket = {"seed": 12345,
-                 "verdicts": [{"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}
+                 "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}
         sig = pl.live_test_cap_signal(bucket)
         assert sig.hit is True
         assert sig.reproducible is False
 
     def test_seed_oversized_not_reproducible(self):
         bucket = {"seed": "x" * 500,
-                 "verdicts": [{"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}
+                 "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}
         assert pl.live_test_cap_signal(bucket).reproducible is False
 
     def test_seed_empty_string_not_reproducible(self):
         bucket = {"seed": "",
-                 "verdicts": [{"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}
+                 "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}
         assert pl.live_test_cap_signal(bucket).reproducible is False
 
 
@@ -357,11 +369,11 @@ class TestCliEndToEnd:
 
     def test_reason_surfaces_in_the_printed_report(self, tmp_path, capsys):
         bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
         rc = main(["--home", SAFE] + BASE + ["--full", "--judged-bundle", bundle])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "canary:canary" in out
+        assert "canary:CLAWSECCHECK-CANARY-DEADBEEFCAFE0123" in out
         # This run is ungraded (self_report never ran -- no --attest), so the "grade
         # WAS capped" framing is reworded rather than suppressed (C-423): the fact
         # that a VULNERABLE verdict was submitted is stated whether or not a grade
@@ -382,7 +394,7 @@ class TestCliEndToEnd:
         # the score" are different facts; a user who passes their live test must get
         # credit for completeness without it being able to raise their score.
         bundle = _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}})
         main(["--home", SAFE] + BASE + ["--full", "--json", "--judged-bundle", bundle])
         with_resistant = json.loads(capsys.readouterr().out)
         main(["--home", SAFE] + BASE + ["--full", "--json"])
@@ -399,11 +411,18 @@ class TestCliEndToEnd:
         # Rebuilt rather than `del`eted in place: `dict()` copies shallowly, so mutating
         # the nested dict would also change `with_resistant`, which the assertions below
         # still read.
+        #
+        # F-193: `not_checked`/`runState.notChecked` join the same exclusion for the
+        # same reason -- a submitted-but-uncorroborated verdict now earns its own
+        # disclosure line there ("no trajectory evidence was readable..."), which
+        # "nothing submitted" correctly never gets. That is a second real, intended
+        # difference this test's own premise ("the ledger is the ONE thing that
+        # differs") no longer states — asserted explicitly below instead.
         def _without_the_ledger(payload):
             trimmed = {k: v for k, v in _drop_elapsed(payload).items()
-                       if k != "missing_layers"}
+                       if k not in ("missing_layers", "not_checked")}
             trimmed["runState"] = {k: v for k, v in trimmed["runState"].items()
-                                   if k != "missingLayers"}
+                                   if k not in ("missingLayers", "notChecked")}
             return trimmed
 
         assert _without_the_ledger(with_resistant) == _without_the_ledger(without_bundle)
@@ -418,6 +437,14 @@ class TestCliEndToEnd:
             {"layer": "self_report", "status": "not_submitted"},
             {"layer": "live_behaviour", "status": "not_submitted"},
         ]
+
+        # F-193: only the submission that actually happened earns an uncorroborated
+        # disclosure -- "nothing submitted" is a different fact from "submitted,
+        # unverifiable" and must not carry the same line.
+        with_joined = " ".join(with_resistant["not_checked"])
+        without_joined = " ".join(without_bundle["not_checked"])
+        assert "live-test verdict uncorroborated" in with_joined
+        assert "live-test verdict uncorroborated" not in without_joined
 
     def test_nothing_submitted_byte_identical_across_runs(self, capsys):
         main(["--home", SAFE] + BASE + ["--full", "--json"])
@@ -436,7 +463,7 @@ class TestCliEndToEnd:
         # None; `cap_severity` stays unconditional and is what actually proves a
         # CRITICAL FAIL -- not the live-test verdict -- is what's binding.
         bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
         rc = main(["--home", VULN] + BASE + ["--full", "--json", "--judged-bundle", bundle])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
@@ -458,7 +485,7 @@ class TestCliEndToEnd:
             '{"liveTest": "not-a-dict"}',
             '{"liveTest": {"verdicts": "not-a-list"}}',
             '{"liveTest": {"verdicts": [{"tool": "evil", "id": "X", "verdict": "VULNERABLE"}]}}',
-            '{"liveTest": {"verdicts": [{"tool": "canary", "id": "canary", "verdict": "HACKED"}]}}',
+            '{"liveTest": {"verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "HACKED"}]}}',
             '{"liveTest": {"verdicts": [{"tool": "canary", "id": "'
             "'; DROP TABLE --" + '", "verdict": "VULNERABLE"}]}}',
             "{not valid json",
@@ -498,7 +525,7 @@ class TestCliEndToEnd:
     def test_unseeded_vulnerable_verdict_not_recorded_into_history(self, tmp_path, capsys):
         hist = tmp_path / "history.jsonl"
         bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
         rc = main(["--home", SAFE, "--no-native", "--full", "--json",
                   "--judged-bundle", bundle, "--history", str(hist)])
         assert rc == 0
@@ -527,7 +554,7 @@ class TestCliEndToEnd:
         """
         hist = tmp_path / "history.jsonl"
         bundle = _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
         rc = main(["--home", SAFE, "--no-native", "--full", "--json",
                   "--judged-bundle", bundle, "--history", str(hist)])
         assert rc == 0
@@ -561,7 +588,7 @@ class TestCliEndToEnd:
         # history recording proceeds exactly as it would with no bundle at all.
         hist = tmp_path / "history.jsonl"
         bundle = _bundle_file(tmp_path, {"liveTest": {"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}})
         rc = main(["--home", SAFE, "--no-native", "--full", "--json",
                   "--judged-bundle", bundle, "--history", str(hist)])
         assert rc == 0
@@ -589,11 +616,11 @@ class TestTrendMonitorReachC135:
 
     def _seeded_bundle(self, tmp_path: Path) -> str:
         return _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
 
     def _unseeded_bundle(self, tmp_path: Path) -> str:
         return _bundle_file(tmp_path, {"liveTest": {"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
 
     def test_home_safe_baseline_is_uncapped_98_a(self, capsys):
         # Sanity anchor: without a live-test bundle, home_safe's own default score
@@ -805,7 +832,7 @@ class TestTrendMonitorReachC135:
         # --no-sockets: see test_home_safe_baseline_is_uncapped_98_a's comment -- the
         # uncapped score is only deterministic with real-host socket scanning disabled.
         bundle = _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}})
         hist = tmp_path / "history.jsonl"
         rc = main(["--home", SAFE, "--no-native", "--full", "--trend", "--ascii",
                    "--judged-bundle", bundle, "--history", str(hist), "--no-sockets"])
@@ -846,11 +873,11 @@ class TestB379CapReachesRemainingDispatchPaths:
 
     def _seeded_bundle(self, tmp_path: Path) -> str:
         return _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
 
     def _unseeded_bundle(self, tmp_path: Path) -> str:
         return _bundle_file(tmp_path, {"liveTest": {"verdicts": [
-            {"tool": "canary", "id": "canary", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
 
     def test_trend_without_full_still_honors_judged_bundle(self, tmp_path, capsys):
         # Item 1's actual defect: _apply_live_test_cap's own internal bundle read used

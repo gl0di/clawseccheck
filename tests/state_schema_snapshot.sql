@@ -1,9 +1,9 @@
 -- state_schema_snapshot.sql -- GENERATED. Do not hand-edit.
 --
--- openclaw-version: 2026.9.2
--- state-schema-version: 15
--- generated: 2026-09-06
--- tables: 7
+-- openclaw-version: 2026.9.4
+-- state-schema-version: 17
+-- generated: 2026-09-12
+-- tables: 9
 --
 -- What this is
 -- ------------
@@ -11,7 +11,7 @@
 -- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL`, projected to the state-SQLite tables this tree
 -- declares in a test DDL or that clawseccheck/ reads.
 --
--- source-bundle: openclaw-state-db-cache-C7ljO0xP.js
+-- source-bundle: openclaw-state-db-DoQEJuhr.mjs
 --   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. The bundle
 --   carrying this constant is build output and its name rotates -- 2026.9.1 moved it from
 --   openclaw-state-db-readonly-*.js to openclaw-state-db-cache-*.js while BOTH files still
@@ -129,6 +129,36 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   sort_order INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (store_key, job_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS skill_library_entries (
+  skill_id TEXT NOT NULL PRIMARY KEY,
+  owner_profile_id TEXT,
+  author_profile_id TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  current_revision TEXT NOT NULL,
+  shared INT NOT NULL,
+  enabled INT NOT NULL,
+  removed INT NOT NULL,
+  created_at INT NOT NULL,
+  updated_at INT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS skill_uploads (
+  upload_id TEXT NOT NULL PRIMARY KEY,
+  kind TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  force INTEGER NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  sha256 TEXT,
+  actual_sha256 TEXT,
+  received_bytes INTEGER NOT NULL,
+  archive_blob BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  committed INTEGER NOT NULL,
+  committed_at INTEGER,
+  idempotency_key_hash TEXT UNIQUE
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS subagent_runs (

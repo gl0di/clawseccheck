@@ -116,6 +116,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
+from _distgrounding import _spellings
 
 from _realhome import REAL_HOME
 
@@ -1440,6 +1441,24 @@ _NOT_IN_CURRENT_SCHEMA = {
         "than a boolean. B175 reads both, and the DEFAULT flipped with the rename — "
         "B-700 and B-702."
     ),
+    # ---- OpenClaw 2026.9.3 retirements (B-783) ----
+    "skills.workshop.allowSymlinkTargetWrites": (
+        "safeParse: unrecognized_keys@skills.workshop keys=[\"allowSymlinkTargetWrites\"] "
+        "(executed against the installed openclaw@2026.9.3 root schema, 2026-09-09 — "
+        "skills.workshop's object holds exactly {approvalPolicy, autonomous, maxPending, "
+        "maxSkillBytes}); REMOVED OUTRIGHT, not renamed — the vendor ships a "
+        "defineLegacyConfigMigration entry "
+        "\"skills.workshop.allowSymlinkTargetWrites-retired\" whose message says Skill "
+        "Workshop now writes only inside its own directory, no override. Hardening, not "
+        "a widening: the escape hatch this key controlled no longer exists on any build "
+        "that reads this. Resolves fine on 2026.9.2 and earlier — a machine still on an "
+        "older build will see this entry as a false claim; that is the register's known, "
+        "documented cost of registering a version-boundary retirement rather than a "
+        "permanent removal, same shape as skills.workshop.autonomous.enabled just above. "
+        "checks/_lifecycle.py::check_skill_workshop_autonomy reads the key through "
+        "_workshop_symlink_knob(ctx) (checks/_shared.py) so a build that still honours "
+        "it is unaffected — only a 2026.9.3+ read is retired."
+    ),
     "gateway.host": (
         "safeParse: unrecognized_keys@gateway; binding is configured via gateway.bind / "
         "gateway.customBindHost. monitordims/_gateway.py::_gateway_bind reads it as the last term of a fallback "
@@ -1734,11 +1753,21 @@ def _dist_schema_consts_at(dist_dir: str) -> dict:
     zod-schema modules. The schema is spread over several of them (`ToolsSchema` lives in
     `zod-schema.agent-runtime-*.js`, not the main module), so all are read as one namespace.
 
+    Two glob patterns, not one: OpenClaw 2026.9.3 renamed all six zod-schema modules from
+    `.js` to `.mjs` (8.2/9.1/9.2 all shipped `.js`) with no schema change behind it — a pure
+    build-output shift. Anchoring on one extension made this layer parse zero consts on 9.3
+    and trip the anti-vacuity guard below as if the schema had been reshaped (B-782).
+
     Cached on the directory PATH rather than on nothing, so a test that repoints
     `OPENCLAW_DIST` gets a fresh parse instead of the previous directory's schema. Callers
     must treat the result as read-only — it is shared."""
     consts: dict = {}
-    for js_file in sorted(Path(dist_dir).glob("zod-schema*.js")):
+    # _spellings, not a second hardcoded pair: three copies of "which extensions the
+    # vendor's bundles use" is how the next rename fixes two of them and leaves one
+    # (B-784 — this whole class started as one unswept copy).
+    dist_files = sorted({f for spelling in _spellings("zod-schema*.js")
+                         for f in Path(dist_dir).glob(spelling)})
+    for js_file in dist_files:
         code = _blank_js_noncode(js_file.read_text(encoding="utf-8", errors="replace"))
         for match in re.finditer(r"(?m)^(?:const|let|var)\s+(" + _JS_IDENT + r")\s*=\s*", code):
             start, depth, i = match.end(), 0, match.end()
@@ -1793,7 +1822,7 @@ def _require_dist() -> dict:
     # this layer must say so rather than quietly grade every path against an empty schema —
     # a guard that can silently see nothing is worse than no guard (B-251).
     assert DIST_ROOT_SCHEMA in consts, (
-        f"'{DIST_ROOT_SCHEMA}' was not found in {OPENCLAW_DIST}/zod-schema*.js "
+        f"'{DIST_ROOT_SCHEMA}' was not found in {OPENCLAW_DIST}/zod-schema*.{{js,mjs}} "
         f"({len(consts)} top-level schema consts parsed). The installed OpenClaw has "
         "reshaped its config schema; re-ground DIST_ROOT_SCHEMA before trusting this layer."
     )
@@ -2242,7 +2271,10 @@ def _write_dist_snapshot() -> int:
     """Regenerate DIST_SNAPSHOT_FILE from the installed dist. Returns the path count."""
     import json
 
-    consts = _dist_schema_consts()
+    # Through _require_dist(), not a bare consts[DIST_ROOT_SCHEMA]: a future reshape/rename
+    # must fail with the same descriptive AssertionError this layer gives everywhere else,
+    # not a bare KeyError that names neither the missing schema nor why (B-782).
+    consts = _require_dist()
     root = consts[DIST_ROOT_SCHEMA]
     verified = sorted(p for p in _parse_manifest_paths() if _dist_accepts(p, root, consts))
     pkg = OPENCLAW_DIST.parent / "package.json"

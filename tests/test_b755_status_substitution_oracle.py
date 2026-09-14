@@ -139,6 +139,12 @@ _NOT_DRIVEN = {
     "report._dossier_top_fix": "needs a VetProfile; reads axis statuses, normalised upstream",
     "report.render_vet_dossier": "needs a VetProfile; reads axis statuses, normalised upstream",
     "report.render_vet_json": "needs a VetProfile; reads axis statuses, normalised upstream",
+    # C-516: the dict-building body render_vet_json used to contain directly, extracted so
+    # render_vet_all_json (--vet-all --json) can build the same per-skill shape without a
+    # stringify/reparse round-trip. Same VetProfile-shaped input, same axis statuses already
+    # normalised by dossier._axis_status upstream -- identical exemption reason, not a new
+    # blind site.
+    "report._vet_json_payload": "needs a VetProfile; reads axis statuses, normalised upstream",
     "dossier._axis_status": "IS the normaliser; its own contract is pinned in test_b751_fail_weight",
     "dossier._danger_coverage_gap": "operates on an axis bucket, downstream of the normaliser",
     "dossier._grade_profile": "operates on already-normalised axis statuses",
@@ -195,6 +201,23 @@ _NOT_DRIVEN = {
     "scoring.grade_for": "takes an integer score, not findings",
     "percentile.percentile": "takes an integer score, not findings",
     "percentile.render_percentile": "takes an integer score, not findings",
+    # --- C-520: a DIFFERENT vocabulary entirely wearing the same attribute name. Both
+    # read/compare `.status` on an incidentstore.Incident (open/investigating/mitigated/
+    # closed, INCIDENT_STATUSES) -- never a Finding's FAIL-weight status. `_touches_status`
+    # is grammatical (any `.status` attribute access), so it cannot tell the two apart;
+    # `_is_valid_transition` (the actual state-machine comparison) is pinned directly by
+    # tests/test_c520_incident_lifecycle.py, not through this pool.
+    "incidentstore.mark_incident": "reads Incident.status (open/investigating/mitigated/closed), not a Finding status",
+    "incidentstore._incident_to_dict": "reads Incident.status (open/investigating/mitigated/closed), not a Finding status",
+    # F-193: same C-520 shape — a different vocabulary wearing the same attribute name.
+    # All three read/compare EntryProof.status (CORROBORATION_UNCHECKED/ABSENT/AGREES/
+    # CONTRADICTS), a canary live-test verdict's corroboration outcome against a
+    # trajectory log — never a Finding's FAIL-weight status. `_touches_status` is
+    # grammatical, so it cannot tell the two apart. Pinned directly by
+    # tests/test_f193_live_test_trajectory_proof.py, not through this pool.
+    "livetestproof.prove": "reads/produces EntryProof.status (corroboration outcome), not a Finding status",
+    "livetestproof.contradicted_ids": "reads EntryProof.status (corroboration outcome), not a Finding status",
+    "livetestproof.not_reached_lines": "reads EntryProof.status (corroboration outcome), not a Finding status",
 }
 
 #: Consumers whose output differs from itself between two identical runs, so an equivalence

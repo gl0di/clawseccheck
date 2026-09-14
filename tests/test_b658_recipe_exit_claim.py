@@ -6,8 +6,11 @@ orders. That payload said:
     Exit 0 means nothing changed — say nothing and stop.
 
 which is not what exit 0 means. A bare `--exit-code` pages at HIGH and above, and the arm
-that reports a check leaving PASS (`No longer passing: ...`) emits at MEDIUM unconditionally,
-so the whole status-regression arm sat below the line. Measured on the tree that shipped it:
+that reports a check leaving PASS (`No longer passing: ...`) emits at MEDIUM for a
+same-producer-version comparison — the shape this test drives, one real CLI invocation
+comparing a baseline against itself, so B-765's version-boundary down-rank to LOW never
+applies here — so the whole status-regression arm sat below the line. Measured on the
+tree that shipped it:
 `gateway.auth.mode` token -> none printed `2 change(s) detected since last check` on screen
 and exited **0** — and the agent, obeying the recipe, said nothing about the gateway losing
 authentication. That is the very case B-273's source comment names as its reason to exist.

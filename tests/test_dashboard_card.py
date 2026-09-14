@@ -542,10 +542,17 @@ class TestCompactCharBudget:
         brittle here: at 40 extra findings the card reaches the hard-truncate fallback,
         which cuts at a newline boundary and happens to leave exactly enough room, so
         that size cannot see the bug at all. The overrun only appears when the ladder
-        fits the card with LESS headroom than the pointer needs — measured at 14 and 20.
+        fits the card with LESS headroom than the pointer needs — re-measured at 36
+        after B-796/B-797 (2026-09-11) fixed check_session_visibility's absent-case
+        defaults (session.dmScope/tools.sessions.visibility both silently resolved to
+        their riskiest value). home_vuln never set either key, so it now correctly
+        earns a stronger B39 finding than before, which shifted every card length in
+        the sweep enough to move the busting point (previously 14 and 20). The sweep
+        upper bound stays just short of 40 on purpose, not widened further, to stay
+        clear of the hard-truncate fallback noted above.
         """
         ctx, findings, _score = audit(home=FIXTURES / "home_vuln")
-        counts = range(0, 26, 2)
+        counts = range(0, 40, 2)
         busts_without_reserve = []
 
         for n in counts:

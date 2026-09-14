@@ -36,7 +36,6 @@ from clawseccheck.checks import (
     check_plugin_permission_mode,
     check_secrets_provider_exec,
     check_sender_identity,
-    check_session_visibility,
     check_subagents,
 )
 from clawseccheck.collector import (
@@ -46,16 +45,30 @@ from clawseccheck.collector import (
     note_limit,
 )
 
-# The nine config-locus checks migrated by F-140. C5 is deliberately absent: its locus
-# is the host PLATFORM, not openclaw.json, so none of the three config degradations
-# below can move its flag -- it gets its own discrimination test in
+# B39 (check_session_visibility) is DELIBERATELY ABSENT here as of B-796/B-797
+# (2026-09-11) -- it was one of the original nine F-140 sites, retracted rather than
+# restated. F-140's whole premise is that "neither `session` nor `tools.sessions` is a
+# dict" is a genuine SURFACE ABSENCE worth excluding from scoring. Grounding B-796/B-797
+# against the installed dist proved that premise wrong for this check specifically:
+# OpenClaw's own runtime resolvers give BOTH fields an unsafe default when unset --
+# resolveSessionToolsVisibility defaults to "all" (session-visibility-*.mjs) and the
+# session-key builder defaults dmScope to "main" (base-session-key-*.mjs) -- so "nothing
+# configured" is not a neutral state to mute, it is the single most exposed state this
+# check can observe. B39 now resolves every absence to that concrete default and
+# evaluates it normally instead of returning not_applicable=True; see its own docstring.
+# This is the same class of correction as B-666's toolFsRootExpansionAllowed finding:
+# "both layers default to the PERMISSIVE end, so an unread layer inverts the answer
+# rather than muting it."
+
+# The eight remaining config-locus checks migrated by F-140. C5 is deliberately absent
+# too: its locus is the host PLATFORM, not openclaw.json, so none of the three config
+# degradations below can move its flag -- it gets its own discrimination test in
 # tests/test_f140_not_applicable_adversarial.py instead.
 _CONFIG_LOCUS_CHECKS = pytest.mark.parametrize(
     "check_fn",
     [
         check_multiagent_exposure,
         check_sender_identity,
-        check_session_visibility,
         check_subagents,
         check_control_plane_mutation,
         check_plugin_permission_mode,
@@ -63,7 +76,7 @@ _CONFIG_LOCUS_CHECKS = pytest.mark.parametrize(
         check_secrets_provider_exec,
         check_outbound_proxy,
     ],
-    ids=["B46", "B30", "B39", "B18", "B32", "B57", "B167", "B194", "B155"],
+    ids=["B46", "B30", "B18", "B32", "B57", "B167", "B194", "B155"],
 )
 
 
@@ -184,7 +197,7 @@ def test_b18_config_locus_still_required_alongside_the_disk_locus():
 _MIGRATED = {
     "B46": check_multiagent_exposure,
     "B30": check_sender_identity,
-    "B39": check_session_visibility,
+    # B39 removed (B-796/B-797) -- see the retraction note above _CONFIG_LOCUS_CHECKS.
     "B18": check_subagents,
     "B32": check_control_plane_mutation,
     "B57": check_plugin_permission_mode,

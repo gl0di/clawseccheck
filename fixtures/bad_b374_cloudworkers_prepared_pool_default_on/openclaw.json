@@ -1,0 +1,9 @@
+{
+  "cloudWorkers": {
+    "profiles": {
+      "default": {
+        "provider": "acme-cloud-workers"
+      }
+    }
+  }
+}

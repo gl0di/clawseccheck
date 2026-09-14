@@ -42,9 +42,9 @@ VULN = str(REPO_ROOT / "fixtures" / "home_vuln")
 SAFE = str(REPO_ROOT / "fixtures" / "home_safe")
 
 _ATTEST = '{"schema": "clawseccheck-attest/1", "tools": ["read"], "network": "none"}'
-_SEEDED = ('{"liveTest": {"seed": "s", "verdicts": [{"tool": "canary", "id": "canary",'
+_SEEDED = ('{"liveTest": {"seed": "s", "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",'
            ' "verdict": "RESISTANT"}]}}')
-_UNSEEDED_VULN = ('{"liveTest": {"verdicts": [{"tool": "canary", "id": "canary",'
+_UNSEEDED_VULN = ('{"liveTest": {"verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",'
                   ' "verdict": "VULNERABLE"}]}}')
 
 # Every mode that MEASURES a verdict. The artifact-writing ones need a destination, so the

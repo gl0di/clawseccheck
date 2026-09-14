@@ -3,11 +3,32 @@
     "bind": "127.0.0.1:8080",
     "auth": {
       "mode": "trusted-proxy",
-      "trustedProxy": { "userHeader": "x-forwarded-user" }
+      "trustedProxy": {
+        "userHeader": "x-forwarded-user"
+      }
     }
   },
-  "channels": { "telegram": { "dmPolicy": "allowlist", "groupPolicy": "allowlist" } },
-  "tools": { "profile": "minimal" },
-  "logging": { "redactSensitive": "tools" },
-  "models": { "main": { "provider": "ollama/llama3" } }
+  "channels": {
+    "telegram": {
+      "dmPolicy": "allowlist",
+      "groupPolicy": "allowlist"
+    }
+  },
+  "tools": {
+    "profile": "minimal",
+    "sessions": {
+      "visibility": "self"
+    }
+  },
+  "logging": {
+    "redactSensitive": "tools"
+  },
+  "models": {
+    "main": {
+      "provider": "ollama/llama3"
+    }
+  },
+  "session": {
+    "dmScope": "per-peer"
+  }
 }

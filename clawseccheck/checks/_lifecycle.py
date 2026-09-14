@@ -53,6 +53,7 @@ from ._shared import (
     SECRET_KEY_RE,
     _DESTRUCTIVE_HINTS,
     _HOOK_EXEC_RE,
+    _agents_without_exec_gate,
     _config_unreadable,
     _custom,
     _enabled_tools,
@@ -67,6 +68,7 @@ from ._shared import (
     _skill_corpus_complete,
     _skill_frontmatter_block,
     _surface_absent,
+    _workshop_symlink_knob,
 )
 from ..invocation import command_prefix
 
@@ -1851,20 +1853,46 @@ def check_human_approval(ctx: Context) -> Finding:
     destructive = _hint(tools, OUTBOUND_TOOL_HINTS)
     if not destructive:
         return _finding("B8", UNKNOWN, "No destructive/outbound tools detected.", "—")
-    if _has_approval_gate(cfg):
+    if not _has_approval_gate(cfg):
         return _finding(
             "B8",
-            PASS,
-            "Destructive actions require human approval.",
-            "Keep approval gating on all high-impact tools.",
+            WARN,
+            "Destructive tools (exec/send/write) present with no clear approval gate.",
+            "Set tools.exec.mode to 'ask' (a command that is not on the allow list is put "
+            "to you) or 'allowlist' (it is refused outright) — not 'full'. Use "
+            "tools.exec.ask='always' to be asked before every command.",
+        )
+    # B-663: the global layer is gated, but `agents.list[]`/`agents.entries`
+    # can override `tools.exec` PER AGENT, and that override REPLACES the global for that
+    # agent rather than merging under it — so the global gate above proves nothing about
+    # what a specific named agent can actually run unattended.
+    ungated_agents = _agents_without_exec_gate(cfg)
+    if ungated_agents:
+        return _finding(
+            "B8",
+            WARN,
+            "The global exec policy requires approval, but " +
+            (
+                f"agent '{ungated_agents[0]}' overrides it with no gate at all."
+                if len(ungated_agents) == 1
+                else "these agents override it with no gate at all: "
+                + ", ".join(f"'{a}'" for a in ungated_agents) + "."
+            ),
+            "Remove or tighten the per-agent tools.exec override (set its mode to "
+            "'ask'/'allowlist'/'deny', or drop it so the agent inherits the gated global "
+            "policy) for " + (
+                f"agent '{ungated_agents[0]}'."
+                if len(ungated_agents) == 1
+                else "each named agent above."
+            ),
+            evidence=[f"agents.*.tools.exec resolves to 'full' (no gate) for '{a}'"
+                      for a in ungated_agents],
         )
     return _finding(
         "B8",
-        WARN,
-        "Destructive tools (exec/send/write) present with no clear approval gate.",
-        "Set tools.exec.mode to 'ask' (a command that is not on the allow list is put "
-        "to you) or 'allowlist' (it is refused outright) — not 'full'. Use "
-        "tools.exec.ask='always' to be asked before every command.",
+        PASS,
+        "Destructive actions require human approval.",
+        "Keep approval gating on all high-impact tools.",
     )
 
 
@@ -2013,7 +2041,7 @@ def _b349_assess_target(source: str, filename: str) -> "tuple[list, str | None]"
 
     KNOWN FALSE NEGATIVE, stated rather than papered over. This check's FAIL inherits the
     shipped JS detector's recall exactly. `_JS_EVAL_DECODED_RE` requires the decode to sit
-    INSIDE the eval/Function call (`eval(atob(x))`); a STAGED form that decodes into a
+    INSIDE the eval/Function call (an `eval` call wrapping `atob(x)`); a STAGED form that decodes into a
     variable first and evals it a line later is deliberately silent there, and its own
     docstring says so ("base64 decode without eval — stays silent"). So a readable,
     staged decode-then-exec installer reaches no verdict here. The UNKNOWN path above is
@@ -2485,6 +2513,7 @@ def check_secrets_provider_exec(ctx: Context) -> Finding:
             "it with a non-empty trustedDirs and avoid allowInsecurePath/"
             "allowSymlinkCommand.",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+            config_field_paths={"secrets.providers"},
         )
 
     # The schema also has a source:"exec" + pluginIntegration variant with no `command`
@@ -2503,6 +2532,7 @@ def check_secrets_provider_exec(ctx: Context) -> Finding:
             "source:\"exec\" -- nothing to assess for exec-source command execution.",
             "—",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+            config_field_paths={"secrets.providers"},
         )
 
     fail_ev: list[str] = []
@@ -2924,7 +2954,9 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
     container-safe; only an absolute path that is absent is a dead-entry signal.
     """
     # local import: avoid a module-load cycle
-    from ..collector import SKILL_TIER_ORDER, skill_load_roots
+    from ..collector import (
+        LIMIT_DOMAIN_SKILL, SKILL_TIER_ORDER, _safe_is_dir, _safe_is_file, skill_load_roots,
+    )
 
     home = getattr(ctx, "home", None)
     if not isinstance(home, Path) or not home.exists():
@@ -2942,7 +2974,7 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
     # stale copies. name -> [(tier, rel_dir), ...].
     name_hits: dict[str, list[tuple[str, str]]] = {}
     for base, tier in skill_load_roots(home, ctx.config, user_home=_b104_user_home(home)):
-        if not base.is_dir():
+        if not _safe_is_dir(base, ctx, what=f"skill root '{base}'", domain=LIMIT_DOMAIN_SKILL):
             continue
         try:
             entries = sorted(base.iterdir())
@@ -2952,7 +2984,12 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             if sd.is_symlink() or not sd.is_dir():
                 continue
             skill_md = sd / "SKILL.md"
-            if not skill_md.is_file():
+            # B-767: stat'ing an entry INSIDE `sd` needs traverse permission on `sd`
+            # itself, which a chmod-000 skill dir (unlike the checks above, which only
+            # stat `sd` from its already-traversable parent) denies -- and
+            # Path.is_file() does NOT swallow EACCES. _safe_is_file degrades this one
+            # directory to "skip it" and records the gap instead of crashing the check.
+            if not _safe_is_file(skill_md, ctx, what=f"'{skill_md.name}' in a skill dir"):
                 continue
             try:
                 blob = skill_md.read_text(encoding="utf-8", errors="replace")
@@ -3396,6 +3433,13 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
     # The honest third answer: the config sets NOTHING this check reads, and we cannot see
     # which build's default applies. PASS would assert a state we did not read; FAIL would
     # assert a build we did not identify.
+    #
+    # NOT gated on _workshop_symlink_knob(ctx) == "retired": that state IMPLIES
+    # generation == "modern" (both read installed_dist_version first and
+    # meta.lastTouchedVersion second, and 2026.9.3 >= _SCHEMA_MODERN_MIN), so this
+    # conjunct's generation == "unknown" already rules retired out. A control on an
+    # unreachable branch would be a guard that cannot fail; the invariant is pinned
+    # instead, in tests/test_b783_symlink_knob_retired.py.
     undecidable = (
         generation == "unknown"
         and workshop_mode is None
@@ -3410,7 +3454,22 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                   f" NOTE: {stale_key} is present in the config but this OpenClaw build "
                   "does not read it, so its value is NOT in effect — the build default "
                   "applies instead.")
-    symlink_writes = dig(cfg, "skills.workshop.allowSymlinkTargetWrites") is True
+
+    # B-783: OpenClaw 2026.9.3 REMOVED skills.workshop.allowSymlinkTargetWrites from the
+    # schema outright (not merely defaulted it off) — vendor hardening, not a widening.
+    # dig() reads raw JSON regardless of schema validity, so a line `openclaw doctor
+    # --fix` has not yet deleted still arrives here; on a build that retired the key it
+    # is never live, and reporting it as an active risk would describe a state the
+    # runtime cannot be in. `!= "retired"`, not `== "honoured"`: a build we could not
+    # identify keeps the finding rather than losing it.
+    symlink_state = _workshop_symlink_knob(ctx)
+    symlink_present = dig(cfg, "skills.workshop.allowSymlinkTargetWrites") is True
+    symlink_writes = symlink_present and symlink_state != "retired"
+    retired_note = ("" if not (symlink_present and symlink_state == "retired") else
+                    " NOTE: skills.workshop.allowSymlinkTargetWrites is still on disk, "
+                    "but OpenClaw 2026.9.3 removed the setting — Skill Workshop now "
+                    "writes only inside its own directory, so the line grants nothing. "
+                    "`openclaw doctor --fix` deletes it.")
 
     if not (enabled or is_auto or symlink_writes):
         if undecidable:
@@ -3430,14 +3489,25 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                 "skills.workshop.approvalPolicy=\"pending\"; before it, "
                 "skills.workshop.autonomous.enabled=false and the same approvalPolicy.",
             )
+        if stale_key is not None and retired_note:
+            pass_fix = (f"Remove {stale_key} and set the key this build actually reads; "
+                        "`openclaw doctor --fix` also deletes the retired "
+                        "skills.workshop.allowSymlinkTargetWrites line.")
+        elif stale_key is not None:
+            pass_fix = f"Remove {stale_key} and set the key this build actually reads."
+        elif retired_note:
+            pass_fix = ("Delete the retired skills.workshop.allowSymlinkTargetWrites "
+                        "line (`openclaw doctor --fix` removes it). Nothing else to "
+                        "change.")
+        else:
+            pass_fix = "—"
         return _finding(
             "B175",
             PASS,
             "Skill Workshop autonomous authoring is disabled and lifecycle actions "
             "(propose/apply/reject/quarantine) require review — approvalPolicy is not "
-            '"auto".' + stale_note,
-            "—" if not stale_note else
-            f"Remove {stale_key} and set the key this build actually reads.",
+            '"auto".' + stale_note + retired_note,
+            pass_fix,
         )
 
     reasons = []
@@ -3475,7 +3545,7 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                 "Skill Workshop can autonomously AUTHOR new executable skill code from "
                 "conversation signals AND install it with no human review step: "
                 + "; ".join(reasons)
-                + "." + stale_note,
+                + "." + stale_note + retired_note,
                 'Set skills.workshop.approvalPolicy to "pending" so every generated '
                 "proposal needs an explicit `openclaw skills workshop apply` decision "
                 f"before it installs, and set {autonomy_key} to "
@@ -3501,7 +3571,7 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
             WARN,
             "Skill Workshop autonomy is fully configured for unattended authoring + "
             "install, but the skill_workshop tool is not currently reachable: "
-            + stale_note + "; ".join(reasons)
+            + stale_note + retired_note + "; ".join(reasons)
             + ". One tool-policy edit (removing the deny/allow restriction, dropping "
             "out of sandbox.mode=all, or widening tools.profile) re-arms the full "
             "unattended pipeline.",
@@ -3512,16 +3582,233 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
             evidence=reasons,
         )
 
+    # B-783: the advice used to name the bare "allowSymlinkTargetWrites" unconditionally
+    # — on every partial-gap WARN, including one that never set it — which is the same
+    # shape B-700 exists to catch (advice to write a key a build rejects). The full
+    # dotted path makes the advice self-identifying; the three states decide whether it
+    # is said at all, and whether it is version-qualified.
+    if symlink_state == "retired":
+        symlink_advice = ""
+    elif symlink_state == "honoured":
+        symlink_advice = (", and leave skills.workshop.allowSymlinkTargetWrites at its "
+                          "default false unless a shared/trusted skill root genuinely "
+                          "needs it")
+    else:
+        symlink_advice = (", and — on OpenClaw releases before 2026.9.3 — leave "
+                          "skills.workshop.allowSymlinkTargetWrites at its default "
+                          "false unless a shared/trusted skill root genuinely needs it "
+                          "(2026.9.3 removed the setting; Skill Workshop writes only "
+                          "inside its own directory)")
     return _finding(
         "B175",
         WARN,
         "Skill Workshop autonomy posture has a partial gap: " + "; ".join(reasons)
-        + "." + stale_note,
+        + "." + stale_note + retired_note,
         'Set skills.workshop.approvalPolicy to "pending" (never "auto"), turn off '
-        f"{autonomy_key} unless unattended authoring is intended, and leave "
-        "allowSymlinkTargetWrites at its default false unless a shared/trusted skill "
-        "root genuinely needs it.",
+        f"{autonomy_key} unless unattended authoring is intended"
+        + symlink_advice + ".",
         evidence=reasons,
+    )
+
+
+def check_skill_symlink_target_writability(ctx: Context) -> Finding:
+    """B367 (C-413) — skills.load.allowSymlinkTargets widens where executable skill code
+    may load from via a symlink.
+
+    Grounded against the INSTALLED dist (openclaw@2026.9.3): ``skills.load`` is a
+    strictObject with ``extraDirs``/``allowSymlinkTargets``/``watch``
+    (zod-schema-Q1KXOooO.mjs:1502-1508) — this is the LOAD side, a live, distinct field
+    from ``skills.workshop.allowSymlinkTargetWrites`` (the WRITE side B175 already
+    covers, and which OpenClaw 2026.9.3 removed from the schema entirely — see B175's
+    own B-783 note). ``allowSymlinkTargets`` is genuinely consumed:
+    ``resolveAllowedSkillSymlinkTargetRealPaths`` (symlink-targets-*.mjs) resolves each
+    entry to a real path, and ``findContainingAllowedSkillSymlinkTarget`` lets a skill
+    directory that is a symlink resolving OUTSIDE its normal source root load anyway,
+    as long as the symlink's real target sits inside one of these roots.
+
+    The classifier is NOT "is this path a well-known broad root" (``/``, ``/tmp``,
+    ``~``) — that shape was tried for the analogous B186 (bundled-root-override) check
+    and explicitly RETRACTED there (see checks/_host.py's B186 comment block, point 3):
+    a 0700 directory under ``/tmp`` is as private as one in the user's home, so keying a
+    verdict on the path STRING rather than on an actual privilege is unsound, and the
+    task that filed C-413 proposed exactly that retracted shape ("FAIL if any entry is a
+    broad/writable/non-narrow root"). This check reuses the discriminator B186 replaced
+    it with instead: ``_shared._dir_replaceable_by_others`` — sticky-bit-aware,
+    singleton-group-aware, POSIX-only — the same helper, so the two checks agree on what
+    "someone else could plant code here" means.
+
+    FAIL    — at least one configured target directory exists locally and is
+              group/world-writable by another real account (mirrors B186's FAIL bar
+              exactly).
+    WARN    — allowSymlinkTargets is a non-empty list, but no entry triggers FAIL —
+              disclosure only: the symlink-resolution trust boundary is genuinely
+              widened beyond the skill source root, which is legitimate for a
+              source-checkout/monorepo developer (same framing as B186's own WARN).
+              Includes an entry this audit could not resolve locally (a path that does
+              not exist on THIS machine, e.g. auditing someone else's exported config,
+              or a bare RELATIVE entry — the real resolveHomeRelativePath resolves a
+              non-``~`` entry via ``path.resolve()`` against the OpenClaw process's own
+              cwd at agent start, a value this offline audit has no way to know; guessing
+              a base and statting whatever that guess resolves to would risk a fabricated
+              verdict against an unrelated real directory, so a relative entry is treated
+              exactly like an unresolvable one rather than resolved against any guessed
+              root) — Golden Rule #4 forbids asserting it is safe just because it could
+              not be read.
+    PASS    — absent or an empty list.
+    UNKNOWN — unread config, or the value present but not a list of strings (the schema
+              is a ``.strict()`` object; a malformed shape means the config does not
+              load as written).
+    """
+    unreadable = _config_unreadable("B367", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    targets = dig(cfg, "skills.load.allowSymlinkTargets")
+    if targets is None:
+        return _finding(
+            "B367", PASS,
+            "skills.load.allowSymlinkTargets is not configured — skill directories that "
+            "are symlinks may only resolve inside their normal configured source root.",
+            "Nothing to do.",
+        )
+    if not isinstance(targets, list) or not all(isinstance(t, str) for t in targets):
+        return _finding(
+            "B367", UNKNOWN,
+            "skills.load.allowSymlinkTargets is present but is not a list of strings, "
+            "so which extra symlink-resolution roots (if any) are trusted cannot be "
+            "determined. OpenClaw declares skills.load as a strict schema and rejects "
+            "the whole config at load time when the shape is wrong.",
+            "Set skills.load.allowSymlinkTargets to a list of path strings, or remove "
+            "it entirely, then re-run the audit.",
+            evidence=[f"skills.load.allowSymlinkTargets={targets!r}"],
+        )
+    if not targets:
+        return _finding(
+            "B367", PASS,
+            "skills.load.allowSymlinkTargets is an empty list — no extra symlink-"
+            "resolution roots are trusted.",
+            "Nothing to do.",
+        )
+
+    from ..collector import _expand_user_path  # noqa: PLC0415
+
+    fails: list[str] = []
+    warns: list[str] = []
+    for raw in targets:
+        # _expand_user_path mirrors resolveUserPath -> resolveHomeRelativePath exactly
+        # (collector.py, itself grounded against paths-BMBAvkNf.js:68-73): a leading ~
+        # expands against ctx.home (the EFFECTIVE OpenClaw home, which OPENCLAW_HOME may
+        # itself have moved — never the audit process's own OS home), and a bare
+        # relative entry is left AS-IS rather than resolved against any guessed base.
+        p = _expand_user_path(raw, ctx.home)
+        if not p.is_absolute():
+            # The real runtime resolves a relative entry via path.resolve(trimmed) —
+            # i.e. against the OpenClaw process's own cwd AT AGENT START, not this
+            # audit's cwd, ctx.home, or any other value this offline read can know.
+            # Golden Rule #4: do not guess a base and stat whatever that guess happens
+            # to resolve to — a wrong guess could land on an unrelated real directory
+            # and manufacture a false FAIL/PASS. Treated like "could not be resolved".
+            warns.append(
+                f"skills.load.allowSymlinkTargets entry {raw!r} is a relative path — "
+                "it resolves against the OpenClaw process's own working directory at "
+                "agent start, which this audit cannot know, so its permissions cannot "
+                "be verified from here"
+            )
+            continue
+        why = _shared._dir_replaceable_by_others(p)
+        if why is not None:
+            fails.append(
+                f"skills.load.allowSymlinkTargets entry {raw!r} is {why} — another "
+                "local account could plant a symlink target there for the agent to "
+                "load as skill code"
+            )
+        elif not p.exists():
+            warns.append(
+                f"skills.load.allowSymlinkTargets entry {raw!r} could not be resolved "
+                "on this machine — its permissions cannot be verified from here"
+            )
+        else:
+            warns.append(
+                f"skills.load.allowSymlinkTargets trusts {raw!r} as an extra "
+                "symlink-resolution root outside the normal skill source root"
+            )
+
+    if fails:
+        return _finding(
+            "B367", FAIL, "; ".join(fails),
+            "Remove the writable-by-others target from skills.load.allowSymlinkTargets, "
+            "or lock down its permissions (chmod g-w,o-w) so only the agent's own "
+            "account can write there — a symlink resolving into a writable root lets "
+            "another local account substitute the skill code the agent runs.",
+            evidence=fails + warns,
+        )
+    return _finding(
+        "B367", WARN, "; ".join(warns),
+        "This is a real widening of where skill code may load from via a symlink — "
+        "legitimate for a source-checkout/monorepo developer. Keep every trusted root "
+        "locked to the agent's own account.",
+        evidence=warns,
+    )
+
+
+def check_skill_load_hot_reload(ctx: Context) -> Finding:
+    """B368 (C-413) — skills.load.watch hot-reloads skill definitions with no restart.
+
+    Grounded against the INSTALLED dist (openclaw@2026.9.3): ``skills.load.watch`` is a
+    plain boolean (zod-schema-Q1KXOooO.mjs:1507), a sibling of ``allowSymlinkTargets``
+    checked by B367 above. When true, a planted or mutated skill file is loaded and run
+    live — it defeats the restart boundary B158 (extraDirs inventory) and B21/B22
+    (install-time review) implicitly assume, but only where there is somewhere for a
+    planted file to land: ``skills.load.extraDirs`` names any root outside the normal
+    managed install tree.
+
+    WARN    — watch is true AND at least one extraDir is configured — a live-reloadable
+              root exists outside the managed skill tree.
+    PASS    — watch is false/absent, OR watch is true but no extraDirs are configured
+              (hot-reload has nothing unusual to pick up from).
+    UNKNOWN — unread config, or watch present but not a boolean.
+    """
+    unreadable = _config_unreadable("B368", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    watch = dig(cfg, "skills.load.watch")
+    if watch is not None and not isinstance(watch, bool):
+        return _finding(
+            "B368", UNKNOWN,
+            "skills.load.watch is present but is not a boolean, so whether skill "
+            "definitions hot-reload cannot be determined. OpenClaw declares skills.load "
+            "as a strict schema and rejects the whole config at load time when the "
+            "shape is wrong.",
+            "Set skills.load.watch to true or false, or remove it entirely, then "
+            "re-run the audit.",
+            evidence=[f"skills.load.watch={watch!r}"],
+        )
+    if watch is not True:
+        return _finding(
+            "B368", PASS,
+            "skills.load.watch is not enabled — skill definitions only reload on a "
+            "gateway restart.",
+            "Nothing to do.",
+        )
+    extra_dirs = dig(cfg, "skills.load.extraDirs")
+    if not isinstance(extra_dirs, list) or not extra_dirs:
+        return _finding(
+            "B368", PASS,
+            "skills.load.watch is enabled, but no skills.load.extraDirs are configured "
+            "— there is no root outside the managed skill tree for hot-reload to pick "
+            "up a planted or mutated file from.",
+            "Nothing to do.",
+        )
+    return _finding(
+        "B368", WARN,
+        f"skills.load.watch is enabled with {len(extra_dirs)} skills.load.extraDirs "
+        "root(s) configured — a planted or mutated skill file in one of those roots is "
+        "loaded and run live, with no gateway restart to interrupt it.",
+        "If skills.load.watch is only needed for local development, disable it in any "
+        "environment where skills.load.extraDirs points at a root you do not fully "
+        "control.",
+        evidence=[str(d) for d in extra_dirs[:8]],
     )
 
 
@@ -3740,7 +4027,12 @@ def check_codex_project_trust(ctx: Context) -> Finding:
         except OSError:
             continue
         for project_path in _codex_trusted_projects(text):
-            trusted_ev.append(f"agent {agent_dir.name}: project {project_path!r}")
+            # B-757: the codex-home config stores the project's absolute path;
+            # collapse the OS account home before it reaches rendered evidence.
+            trusted_ev.append(
+                f"agent {agent_dir.name}: project "
+                f"{_shared._username_safe_path(project_path)!r}"
+            )
 
     if not any_config:
         return _finding(
@@ -4476,9 +4768,15 @@ def _b181_skill_dir(slug: str, lock_parent: Path):
         return None
 
 
-def _b181_provenance_records(home: Path):
-    """[(slug, skill_dir | None, record, source_label)] from every lock + origin.json found."""
-    from ..collector import SKILL_DIRS, WORKSPACE_DIRS
+def _b181_provenance_records(home: Path, ctx: "Context | None" = None):
+    """[(slug, skill_dir | None, record, source_label)] from every lock + origin.json found.
+
+    *ctx*, when given, routes an unreadable lock/origin path through `_safe_is_file` so a
+    permission-denied entry (e.g. a chmod-000 skill dir) is skipped and recorded rather
+    than raising -- B-767, shared by both `check_skill_install_tamper` (B181) and
+    `check_clawhub_registry_provenance` (B184), the two callers of this helper.
+    """
+    from ..collector import SKILL_DIRS, WORKSPACE_DIRS, _safe_is_file
 
     records = []
     seen_dirs: set = set()
@@ -4493,7 +4791,7 @@ def _b181_provenance_records(home: Path):
         # was legitimately updated (Golden Rule #5). Mirror the CLI: first parse wins.
         for dot in _B181_DOT_DIRS:
             lock_path = home / rel / dot / "lock.json"
-            if not lock_path.is_file():
+            if not _safe_is_file(lock_path, ctx, what=f"'{lock_path.name}'"):
                 continue
             data = _b181_read_json(lock_path)
             skills = data.get("skills") if data else None
@@ -4527,7 +4825,11 @@ def _b181_provenance_records(home: Path):
                 continue
             for dot in _B181_DOT_DIRS:
                 origin = skill_dir / dot / "origin.json"
-                if not origin.is_file():
+                # B-767: unlike lock_path above (stat'd from an already-traversable
+                # parent), `origin` is stat'd from INSIDE `skill_dir`, which needs
+                # traverse permission on `skill_dir` itself -- the chmod-000 case
+                # Path.is_file() does not swallow (EACCES).
+                if not _safe_is_file(origin, ctx, what=f"'{dot}/origin.json' in a skill dir"):
                     continue
                 data = _b181_read_json(origin)
                 if data is None:
@@ -4554,7 +4856,7 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
               unreadable / too large to hash, or a record's skill directory could not be
               located. Never a fake PASS (Golden Rule #4).
     """
-    records = _b181_provenance_records(ctx.home)
+    records = _b181_provenance_records(ctx.home, ctx)
     if not records:
         return _finding(
             "B181",
@@ -4831,7 +5133,7 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
     env_bad: "list[str]" = []
     observed_canonical = 0
 
-    for slug, _skill_dir, record, source in _b181_provenance_records(ctx.home):
+    for slug, _skill_dir, record, source in _b181_provenance_records(ctx.home, ctx):
         if not isinstance(record, dict):
             continue
         verdict = _b184_is_canonical(record.get("registry"), _B184_CANONICAL_REGISTRY_HOST)
@@ -5194,6 +5496,215 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
     )
 
 
+#: OpenClaw's OWN migration-doctor marker for a legacy per-channel allow-sender store
+#: (dist-grounded: state-migrations.doctor's `ALLOW_FROM_SUFFIX`, C-409).
+_LEGACY_ALLOWFROM_SUFFIX = "-allowFrom.json"
+
+
+def check_legacy_state_migration_pending(ctx: Context) -> Finding:
+    """B356 (C-409) — unmigrated legacy runtime-state files OpenClaw's own doctor still
+    checks the presence of.
+
+    Grounded against the installed dist (openclaw@2026.9.3, not the recon notes, which
+    predate both of these moves): `credentials/<channel>-allowFrom.json` and
+    `identity/device-auth.json` are BOTH legacy-only presence markers now —
+    `state-migrations.doctor` and `device-auth-store` read them only to detect an
+    unmigrated install, never as live-authoritative state. The modern allow-sender
+    mechanism lives entirely in `openclaw.json` (`channels.<name>.allowFrom` and its
+    nested `groupAllowFrom`/per-group/per-topic variants — see `checks/_agents.py`'s
+    `groupAllowFrom`-wins-for-groups handling and `checks/_capability.py`'s `dmPolicy`/
+    `groupPolicy` reading, which already model that shape); device-auth tokens now live
+    in the state SQLite DB (`device_auth_tokens`/`gateway_origin_device_tokens`).
+
+    So this is not "an attacker added a sender ID" — it is "this install has not run
+    `openclaw doctor --fix`", and for the device-auth file specifically that carries an
+    unusually sharp consequence: OpenClaw's own `assertNoLegacyDeviceAuth` makes the
+    GATEWAY ITSELF refuse to start while that file is present.
+
+    Filename presence only (§8) — this never opens either file. An allow-sender list or
+    a device-auth token is exactly the kind of content this tool must never read, and
+    doesn't need to: the file's mere existence is the whole signal.
+
+    WARN    — a legacy file is present.
+    PASS    — neither is present.
+    UNKNOWN — the credentials/ directory exists but could not be listed.
+    """
+    found: list[str] = []
+    unreadable: list[str] = []
+
+    cred_dir = ctx.home / "credentials"
+    if cred_dir.is_dir():
+        try:
+            entries = list(cred_dir.iterdir())
+        except OSError:
+            unreadable.append("credentials/ is present but could not be listed")
+            entries = []
+        for entry in entries:
+            if entry.name.endswith(_LEGACY_ALLOWFROM_SUFFIX) and entry.is_file():
+                channel = entry.name[: -len(_LEGACY_ALLOWFROM_SUFFIX)]
+                found.append(
+                    f"credentials/{channel}{_LEGACY_ALLOWFROM_SUFFIX} "
+                    "(legacy per-channel allow-sender store)"
+                )
+
+    device_auth = ctx.home / "identity" / "device-auth.json"
+    if device_auth.is_file():
+        found.append("identity/device-auth.json (legacy device-auth store)")
+
+    if found:
+        found.sort()
+        return _finding(
+            "B356",
+            WARN,
+            "Legacy pre-migration runtime-state file(s) present, which OpenClaw's own "
+            "migration checks still look for: " + "; ".join(found) + ". Their presence "
+            "means `openclaw doctor --fix` has not migrated this install onto "
+            "current-generation state — for the device-auth file specifically, the "
+            "gateway refuses to start at all until it is migrated away.",
+            "Stop the OpenClaw gateway and run `openclaw doctor --fix` to migrate this "
+            "legacy state, then confirm the file(s) above are gone.",
+            evidence=found,
+        )
+    if unreadable:
+        return _finding(
+            "B356",
+            UNKNOWN,
+            "Could not fully check for legacy pre-migration runtime-state files: "
+            + "; ".join(unreadable) + ".",
+            "Ensure ~/.openclaw/credentials/ is owner-readable, or check manually for "
+            "*-allowFrom.json files there and for identity/device-auth.json.",
+        )
+    return _finding(
+        "B356",
+        PASS,
+        "No legacy pre-migration runtime-state files found (checked for "
+        "credentials/*-allowFrom.json and identity/device-auth.json).",
+        "No action needed.",
+    )
+
+
+def check_restart_handoff_stale(ctx: Context) -> Finding:
+    """B357 (C-409) — a supervisor restart-handoff blob that outlived its own expiry.
+
+    `~/.openclaw/gateway-supervisor-restart-handoff.json` is a short-lived IPC blob a
+    restarting/crashed gateway supervisor writes — confirmed shape on a real install:
+    `kind, version, intentId, pid, processInstanceId, createdAt, expiresAt, reason,
+    source, restartKind, supervisorMode`. It should be consumed and removed by the
+    supervisor well before its own `expiresAt`; one still present past that time means
+    the restart it describes either never completed or the supervisor crashed before
+    cleaning it up.
+
+    Staleness is judged purely from the blob's own declared `expiresAt` timestamp —
+    never a live process check (no subprocess, no /proc read of `pid`), matching this
+    tool's read-only-from-state-files-only doctrine. `expiresAt`/`createdAt` are epoch
+    MILLISECONDS (ints), not ISO strings — measured by hand-reading a real file, not
+    assumed from the field name.
+
+    The "now" side of the comparison is `time.time()`, never `datetime.now()` — the
+    same discipline `check_paired_device_operator_authority` (B176) already established
+    for this exact reason: `tests/test_finding_fingerprint_manifest.py`'s
+    ``test_no_finding_detail_is_clock_dependent`` patches `time.time` (only) and
+    re-audits the whole fixture corpus with the clock frozen 45 days ahead, asserting no
+    fingerprint drifts — `datetime.now()` would silently evade that patch and could
+    still pass today's corpus (no fixture currently ships this file) while remaining
+    wrong for the next one that does. `datetime.fromtimestamp()` on the file's own,
+    already-read `expiresAt` value is a pure format transform, not a second clock read.
+
+    WARN    — present and its own expiresAt has already passed.
+    PASS    — present and not yet expired (a normal, still-open handoff window), or
+              absent entirely.
+    UNKNOWN — present but unreadable/unparseable, or missing/malformed expiresAt.
+    """
+    import json as _json
+    import time as _time
+    from datetime import datetime
+
+    path = ctx.home / "gateway-supervisor-restart-handoff.json"
+    if not path.is_file():
+        return _finding(
+            "B357",
+            PASS,
+            "No gateway-supervisor-restart-handoff.json found.",
+            "No action needed.",
+        )
+
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "gateway-supervisor-restart-handoff.json present but unreadable — cannot "
+            "determine whether it is stale.",
+            "Ensure it is owner-readable, or review it manually.",
+        )
+    except ValueError:
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "gateway-supervisor-restart-handoff.json present but not valid JSON — "
+            "cannot determine whether it is stale.",
+            "Review it manually.",
+        )
+
+    if not isinstance(data, dict):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "gateway-supervisor-restart-handoff.json present but not in the expected "
+            "format — cannot determine whether it is stale.",
+            "Review it manually.",
+        )
+
+    # Measured on a real install: expiresAt/createdAt are epoch MILLISECONDS (ints), not
+    # ISO strings — confirmed by hand-reading the real file before trusting the dist's
+    # field-name-only citation of it.
+    expires_raw = data.get("expiresAt")
+    if isinstance(expires_raw, bool) or not isinstance(expires_raw, (int, float)):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "gateway-supervisor-restart-handoff.json present but has no readable "
+            "expiresAt field — cannot determine whether it is stale.",
+            "Review it manually.",
+        )
+
+    try:
+        expires_label = datetime.fromtimestamp(expires_raw / 1000.0).isoformat(
+            timespec="seconds"
+        )
+    except (ValueError, OSError, OverflowError):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            f"gateway-supervisor-restart-handoff.json present but its expiresAt "
+            f"({expires_raw!r}) is not a parseable timestamp — cannot determine whether "
+            "it is stale.",
+            "Review it manually.",
+        )
+
+    now_ms = _time.time() * 1000.0
+    if now_ms > expires_raw:
+        return _finding(
+            "B357",
+            WARN,
+            "gateway-supervisor-restart-handoff.json is present and its own expiresAt "
+            f"({expires_label}) has already passed — the restart it describes did not "
+            "complete and get cleaned up as expected (a crashed supervisor, most "
+            "likely).",
+            "Restart the OpenClaw gateway supervisor cleanly; if this file persists "
+            "after a clean restart, remove it manually and investigate why the "
+            "supervisor did not clean it up.",
+        )
+    return _finding(
+        "B357",
+        PASS,
+        "gateway-supervisor-restart-handoff.json present but still within its own "
+        f"expiresAt window ({expires_label}) — a normal, in-progress restart handoff.",
+        "No action needed.",
+    )
+
+
 def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     """B158 (F-119) — a config declares a skill/plugin LOAD SOURCE that resolves to nothing on
     disk right now. The audit can only scan what is present, so a declared-but-absent source is
@@ -5291,6 +5802,102 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     )
 
 
+def check_skill_library_reachability(ctx: Context) -> Finding:
+    """B354 (B-725) — OpenClaw's shared skill-library / upload surface in the state DB
+    (``skill_library_entries``, ``skill_uploads``) is a skill install/enable channel
+    this tool's filesystem-based skill discovery never sees at all: confirmed by grep,
+    neither ``skill_library`` nor ``skill_uploads`` appears anywhere else in
+    ``clawseccheck/``. A skill published there with ``enabled AND NOT removed`` is live
+    to OpenClaw and was never on the path ``_read_installed_skills`` walks, so every
+    content-security check this tool has (skill-malware, prompt-injection, the whole
+    ``SKILL_CONTENT_RING``) is BLIND to it.
+
+    WARN, not FAIL: this check can prove a live, unscanned skill EXISTS, never that its
+    content is malicious -- it never reads ``files_json``/``archive_blob`` (CONTENT,
+    §8). It also flags a COMMITTED ``skill_uploads`` row whose received-bytes digest
+    (``actual_sha256``) disagrees with its declared one (``sha256``) -- a real tamper
+    signal sitting in the schema, gated on ``committed`` because an in-progress upload
+    legitimately has a partial/absent ``actual_sha256`` while chunks are still arriving.
+    Grounded against the installed dist's commit path (``skills-6ygwYcmZ.mjs``): the
+    server computes ``actualSha256 = sha256Hex(archive)`` and, when the client declared
+    one, refuses to commit unless it matches (``"upload sha256 mismatch"``) -- so a
+    COMMITTED row where they disagree is not a race or a normal in-flight state, only a
+    write to the row after that check already passed.
+
+    UNKNOWN, never a fake PASS, when the surface could not be examined at all -- the
+    real machine this was grounded against has ``skill_library_entries`` ABSENT while
+    ``skill_uploads`` is present (0 rows), so "the table is not here" is evidence this
+    database never created it, never evidence the library is unused (Golden Rule #4).
+    The two tables are tracked, and reported as unread, INDEPENDENTLY for exactly that
+    reason -- inferring one table's state from the other would silently launder a real
+    blind spot into a clean verdict. A run where only ONE of the two was read and found
+    nothing stays UNKNOWN too: a PASS here is a claim about the WHOLE surface, and half
+    of it was never looked at.
+    """
+    problems: list = []
+    if ctx.skill_library_live_count:
+        sample = ", ".join(f"'{s}'" for s in ctx.skill_library_live_sample[:5])
+        more = ctx.skill_library_live_count - min(len(ctx.skill_library_live_sample), 5)
+        problems.append(
+            f"{ctx.skill_library_live_count} skill(s) published to the shared skill "
+            f"library are enabled ({sample}{f', +{more} more' if more > 0 else ''}) -- "
+            "reachable to OpenClaw but never on the filesystem path this tool's skill "
+            "scanners walk, so their content was never checked"
+        )
+    if ctx.skill_uploads_digest_mismatch_count:
+        problems.append(
+            f"{ctx.skill_uploads_digest_mismatch_count} committed upload(s) in "
+            "skill_uploads have a received-bytes digest that disagrees with their "
+            "declared sha256 -- the bytes OpenClaw accepted are not the bytes that "
+            "were meant to arrive"
+        )
+
+    if problems:
+        return _finding(
+            "B354",
+            WARN,
+            "; ".join(problems) + ".",
+            "Review the shared skill library (openclaw skills library list, or your "
+            "workspace's skill-sharing UI) for entries you did not knowingly publish, "
+            "and disable/remove anything unexpected. A digest mismatch on a committed "
+            "upload warrants re-uploading from a trusted copy and checking who committed "
+            "it.",
+            evidence=problems,
+        )
+
+    read_any = ctx.skill_library_entries_read or ctx.skill_uploads_read
+    if not read_any:
+        return _finding(
+            "B354",
+            UNKNOWN,
+            "The state database's shared skill-library tables (skill_library_entries, "
+            "skill_uploads) were not found or could not be read, so whether any skill "
+            "reaches this OpenClaw install through that channel cannot be determined.",
+            "No action needed if you do not use the shared skill library. If you do, "
+            "confirm ~/.openclaw/state/openclaw.sqlite is readable and re-run.",
+        )
+
+    if ctx.skill_library_entries_read and ctx.skill_uploads_read:
+        return _finding(
+            "B354",
+            PASS,
+            "The shared skill-library tables were read: no enabled, non-removed library "
+            "entry and no committed upload with a digest mismatch.",
+            "No action needed. Re-check after publishing or removing a shared skill.",
+        )
+
+    unread = "skill_uploads" if ctx.skill_library_entries_read else "skill_library_entries"
+    return _finding(
+        "B354",
+        UNKNOWN,
+        f"One half of the shared skill-library surface was read and found nothing, but "
+        f"'{unread}' could not be confirmed -- a PASS here would be a claim about the "
+        "whole surface, and half of it was never examined.",
+        "No action needed if you do not use the shared skill library. If you do, "
+        "confirm ~/.openclaw/state/openclaw.sqlite is readable and re-run.",
+    )
+
+
 def check_supply_chain(ctx: Context) -> Finding:
     """B5 — supply-chain integrity of installed plugins/skills.
 
@@ -5348,9 +5955,12 @@ def check_update_pinning(ctx: Context) -> Finding:
     A malicious skill UPDATE is a supply-chain risk (runs with agent permissions).
 
     WARN  — auto-update for skills/plugins is enabled (blind trust in upstream);
+            OR update.channel is "dev"/"beta" (C-413 — the same blind-trust risk
+            applied to OpenClaw's own build, not just skills/plugins);
             OR a plugin/skill entry records a floating ref (branch name / 'latest').
     PASS  — at least one entry is present and all have a pinned tag/commit or an
-            integrity hash; no auto-update enabled.
+            integrity hash; no auto-update enabled; update.channel is unset,
+            "stable", or "extended-stable".
     UNKNOWN — no plugin/skill config from which pinning can be determined.
     """
     cfg = ctx.config
@@ -5372,6 +5982,22 @@ def check_update_pinning(ctx: Context) -> Finding:
     ):
         warn_ev.append(
             "auto-update for skills/plugins is enabled — blind trust in upstream is a supply-chain risk"
+        )
+
+    # ---- signal 1b (C-413): update.channel on a pre-release tier ----
+    # Grounded against the INSTALLED dist (openclaw@2026.9.3): update.channel is a
+    # strictObject sibling of update.auto.enabled (zod-schema-Q1KXOooO.mjs:1299-1308),
+    # union(["stable","extended-stable","beta","dev"]).optional() — four literals, not
+    # the stub's assumed two ("dev"/"beta"); "extended-stable" is a real, safe tier and
+    # must not be swept in as if it were a pre-release channel. dev/beta pull
+    # bleeding-edge git+npm installs the same way an unpinned skill/plugin ref does —
+    # same signal family as signal 1, so it is folded into this check rather than a new
+    # one, per the stub's own "extend B25" framing.
+    channel = dig(cfg, "update.channel")
+    if isinstance(channel, str) and channel.strip().lower() in ("dev", "beta"):
+        warn_ev.append(
+            f"update.channel={channel!r} pulls pre-release builds — the same "
+            "blind-trust-in-upstream risk as auto-update, applied to OpenClaw itself"
         )
 
     # ---- signal 2: per-entry pinning ----

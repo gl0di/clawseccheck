@@ -39,6 +39,7 @@ from ._shared import (
     _has_approval_gate,
     _hint,
     _key_advice,
+    _mention_gate_scopes,
     _resolved_channel_nodes,
     _surface_absent,
     _trifecta_legs,
@@ -612,52 +613,178 @@ def check_sender_identity(ctx: Context) -> Finding:
     )
 
 
+_B39_DM_SCOPE_VALUES = ("main", "per-peer", "per-channel-peer", "per-account-channel-peer")
+_B39_VISIBILITY_VALUES = ("self", "tree", "agent", "all")
+
+
 def check_session_visibility(ctx: Context) -> Finding:
     """B39 — Session visibility / cross-user transcript leak.
 
-    FAIL    — session.dmScope == "main" AND any channel allows non-owner senders
-              (open/allowlist/paired, incl. per-account policies — cross-user risk).
-    WARN    — tools.sessions.visibility in ("agent", "all") regardless of dmScope
-              (one session can read other sessions' transcripts).
-    PASS    — dmScope is per-peer-ish AND visibility is "self" or "tree".
-    UNKNOWN — no session config (not applicable).
-              F-140: sets ``not_applicable`` only when the config locus was read
-              COMPLETELY and NEITHER ``session`` NOR ``tools.sessions`` is a dict —
-              i.e. the whole session-isolation surface this check models is genuinely
-              undeclared, not merely unreadable. Both loci are plain ``ctx.config``
-              reads, so config-locus completeness is the whole proof obligation.
-    """
-    cfg = ctx.config
-    session_cfg = cfg.get("session")
-    tools_sessions = dig(cfg, "tools.sessions")
+    Grounded against the INSTALLED dist (openclaw@2026.9.3), fixing two absent-case
+    bugs found while grounding C-411 (B-796/B-797): both fields default to their
+    RISKIEST value when unset, not a safer one, so the previous code — which only
+    matched the explicit string — silently missed the common case of a config that
+    never touches either key.
 
-    has_session_config = isinstance(session_cfg, dict) or isinstance(tools_sessions, dict)
-    if not has_session_config:
+      - session.dmScope (B-797): base-session-key-*.mjs's own session-key builder
+        resolves ``cfg.session?.dmScope ?? "main"`` — absent is "main", the value that
+        triggers this check's FAIL branch, not something safer. Corroborated by
+        dm-policy-shared-*.mjs's ``resolvePinnedMainDmOwnerFromAllowlist``
+        (``(params.dmScope ?? "main") !== "main"``) and the schema's own description of
+        a DIFFERENT field that reads dmScope ("Defaults on only when global
+        session.dmScope is unset or \"main\"" — schema-C9vBoeg0.mjs).
+      - tools.sessions.visibility (B-796): ``resolveSessionToolsVisibility``
+        (session-visibility-*.mjs) defaults ANY missing or unrecognized value to
+        "all" — its own comment reads "Resolve configured session-tool visibility,
+        defaulting invalid or missing values to all."
+
+    Both fields are declared inside strict zod objects — SessionSchema.dmScope and
+    ToolsSchema.sessions.visibility are each an ``_enum(...).optional()`` — so a config
+    carrying anything OTHER than one of the accepted literals is rejected by OpenClaw's
+    own loader at parse time; this check reads both by hand (not via ``dig()``, which
+    collapses "absent" and "present-but-wrong-type" to the same ``None``) so a
+    present-but-invalid value reports UNKNOWN rather than silently taking the
+    resolved-default path meant for genuine absence.
+
+    A sandboxed agent's EFFECTIVE session-tools visibility is further clamped to
+    "tree" by ``resolveEffectiveSessionToolsVisibility`` when
+    ``agents.defaults.sandbox.sessionToolsVisibility`` is at ITS OWN default
+    ("spawned") — this check does not model that clamp: whether a given agent session
+    is "sandboxed" at runtime depends on ``agents.defaults.sandbox.mode`` and per-agent
+    overrides this check does not fully resolve, and guessing would risk exactly the
+    kind of fabricated confidence Golden Rule #4 forbids. The WARN text names the
+    clamp as a mitigating factor to check rather than assuming it applies.
+
+    Pre-existing, unchanged scope limitation carried forward from before this fix:
+    ``bindings[].session.dmScope`` (SessionSchema at openclaw@2026.9.4,
+    ``zod-schema-Q1KXOooO.mjs:1103``, confirmed real) lets an operator override dmScope
+    for one specific route/channel.
+    This check reads only the GLOBAL ``session.dmScope`` — a config that pins the
+    global default to (or leaves it at) "main" while using a per-binding override to
+    isolate one specific exposed channel would still FAIL here on that channel's
+    apparent exposure. This was already true of the check's PRE-FIX behavior for an
+    EXPLICIT global "main" (B-797 only widens which configs reach that same coarse
+    global-only FAIL condition, from "explicit main" to "explicit main or absent") — it
+    is an accepted, pre-existing model limitation (global-config-only), not a new gap
+    this fix introduces, and per-binding overrides are a narrow enough audience that
+    modeling them is left for a dedicated follow-up if it proves to matter in practice.
+
+    FAIL    — dmScope resolves to "main" (explicit, or unset — see above) AND any
+              channel allows non-owner senders (open/allowlist/paired, incl.
+              per-account policies — cross-user risk).
+    WARN    — visibility resolves to "agent" or "all" (explicit, or unset/unrecognized
+              — see above) regardless of dmScope (one session can read other
+              sessions' transcripts, unless a sandbox clamp narrows it — see above).
+    PASS    — dmScope resolves to something other than "main" AND visibility resolves
+              to "self" or "tree".
+    UNKNOWN — unread config; no openclaw.json found for this home at all (mirrors
+              B175's own "genuinely no config, but the default is dangerous" framing —
+              the fact is stated, not asserted as a verdict about a setup never read);
+              or session/tools/tools.sessions present but not an object; or
+              dmScope/visibility present but not one of the schema's own accepted
+              values.
+    """
+    unreadable = _config_unreadable("B39", ctx)
+    if unreadable is not None:
+        return unreadable
+    if not ctx.config and not getattr(ctx, "config_found", True):
         return _finding(
             "B39",
             UNKNOWN,
-            "No session config — session isolation not applicable.",
-            "—",
-            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+            "No openclaw.json was found for this home, so session isolation cannot "
+            'be read. OpenClaw defaults session.dmScope to "main" and '
+            'tools.sessions.visibility to "all" when unset, so a genuinely bare '
+            "install would be exposed on both counts.",
+            "Point --home at the OpenClaw home you mean to audit, then re-run. If "
+            "this IS the right home and OpenClaw has never written a config here, it "
+            "is running on those defaults.",
+        )
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+
+    session_cfg = cfg.get("session")
+    if "session" in cfg and not isinstance(session_cfg, dict):
+        return _finding(
+            "B39", UNKNOWN,
+            "session is present but is not a JSON object, so DM session scoping "
+            "cannot be determined.",
+            "Set session to a JSON object, or remove it entirely, then re-run the "
+            "audit.",
+            evidence=[f"session={session_cfg!r}"],
+        )
+    dm_scope_raw = session_cfg.get("dmScope") if isinstance(session_cfg, dict) else None
+    if dm_scope_raw is not None and dm_scope_raw not in _B39_DM_SCOPE_VALUES:
+        return _finding(
+            "B39", UNKNOWN,
+            f"session.dmScope={dm_scope_raw!r} is not one of the values OpenClaw "
+            "accepts, so DM session scoping cannot be determined. OpenClaw declares "
+            "it as a strict enum and rejects the whole config at load time when the "
+            "value is wrong.",
+            'Set session.dmScope to one of "main", "per-peer", "per-channel-peer", '
+            '"per-account-channel-peer", or remove it entirely, then re-run the audit.',
+            evidence=[f"session.dmScope={dm_scope_raw!r}"],
         )
 
-    dm_scope = session_cfg.get("dmScope") if isinstance(session_cfg, dict) else None
-    visibility = tools_sessions.get("visibility") if isinstance(tools_sessions, dict) else None
+    tools_cfg = cfg.get("tools")
+    if "tools" in cfg and not isinstance(tools_cfg, dict):
+        return _finding(
+            "B39", UNKNOWN,
+            "tools is present but is not a JSON object, so session-tool visibility "
+            "cannot be determined.",
+            "Set tools to a JSON object, or remove it entirely, then re-run the "
+            "audit.",
+            evidence=[f"tools={tools_cfg!r}"],
+        )
+    tools_sessions = tools_cfg.get("sessions") if isinstance(tools_cfg, dict) else None
+    if (
+        isinstance(tools_cfg, dict)
+        and "sessions" in tools_cfg
+        and not isinstance(tools_sessions, dict)
+    ):
+        return _finding(
+            "B39", UNKNOWN,
+            "tools.sessions is present but is not a JSON object, so session-tool "
+            "visibility cannot be determined.",
+            "Set tools.sessions to a JSON object, or remove it entirely, then "
+            "re-run the audit.",
+            evidence=[f"tools.sessions={tools_sessions!r}"],
+        )
+    visibility_raw = (
+        tools_sessions.get("visibility") if isinstance(tools_sessions, dict) else None
+    )
+    if visibility_raw is not None and visibility_raw not in _B39_VISIBILITY_VALUES:
+        return _finding(
+            "B39", UNKNOWN,
+            f"tools.sessions.visibility={visibility_raw!r} is not one of the values "
+            "OpenClaw accepts, so session-tool visibility cannot be determined. "
+            "OpenClaw declares it as a strict enum and rejects the whole config at "
+            "load time when the value is wrong.",
+            'Set tools.sessions.visibility to one of "self", "tree", "agent", "all", '
+            "or remove it entirely, then re-run the audit.",
+            evidence=[f"tools.sessions.visibility={visibility_raw!r}"],
+        )
 
-    # FAIL: dmScope=="main" combined with open/allowlist channels
-    # (when dmScope=="main" all DM senders contaminate the same session)
+    dm_scope_resolved = dm_scope_raw or "main"
+    visibility_resolved = visibility_raw or "all"
+
+    # FAIL: dmScope resolves (explicitly or by default) to "main" combined with
+    # open/allowlist channels (when dmScope=="main" all DM senders contaminate the
+    # same session)
     fail_ev: list[str] = []
-    if dm_scope == "main":
+    if dm_scope_resolved == "main":
         # Any channel that admits non-owner senders (open/allowlist/paired), INCLUDING
         # policies nested under channels.<p>.accounts.<id>. _external_input_channels is
         # accounts-aware; the previous top-level-only allowlist read missed account-nested
         # DM allowlists (B-058), returning a false PASS on a real cross-user-leak config.
         non_owner_channels = _external_input_channels(cfg)
         if non_owner_channels:
+            source = (
+                'session.dmScope="main"' if dm_scope_raw is not None
+                else 'session.dmScope is not set, and OpenClaw defaults this to "main"'
+            )
             fail_ev.append(
-                'session.dmScope="main" — all DM peers share ONE session '
-                f"(cross-user contamination / transcript leak); "
-                f"non-owner channels: {', '.join(non_owner_channels[:5])}"
+                f"{source} — all DM peers share ONE session (cross-user "
+                "contamination / transcript leak); non-owner channels: "
+                f"{', '.join(non_owner_channels[:5])}"
             )
 
     if fail_ev:
@@ -667,18 +794,25 @@ def check_session_visibility(ctx: Context) -> Finding:
             "; ".join(fail_ev),
             'Set session.dmScope to "per-peer", "per-channel-peer", or '
             '"per-account-channel-peer" so each DM sender gets an isolated session. '
-            'With dmScope="main" any DM peer can read and influence another user\'s '
-            "conversation history.",
+            'With dmScope="main" (OpenClaw\'s own default when the key is unset) any '
+            "DM peer can read and influence another user's conversation history.",
             evidence=fail_ev,
         )
 
-    # WARN: visibility lets one session read other sessions' transcripts
+    # WARN: visibility resolves (explicitly or by default) to a value that lets one
+    # session read other sessions' transcripts
     warn_ev: list[str] = []
-    if visibility in ("agent", "all"):
+    if visibility_resolved in ("agent", "all"):
+        source = (
+            f'tools.sessions.visibility="{visibility_resolved}"'
+            if visibility_raw is not None
+            else 'tools.sessions.visibility is not set, and OpenClaw defaults this '
+            'to "all"'
+        )
         warn_ev.append(
-            f'tools.sessions.visibility="{visibility}" — '
-            "a session (or tool) can read transcripts from other sessions "
-            "(cross-user data leak risk)"
+            f"{source} — a session (or tool) can read transcripts from other "
+            "sessions (cross-user data leak risk), unless a sandboxed agent's own "
+            "sandbox.sessionToolsVisibility clamp narrows this at runtime"
         )
 
     if warn_ev:
@@ -688,27 +822,612 @@ def check_session_visibility(ctx: Context) -> Finding:
             "; ".join(warn_ev),
             'Set tools.sessions.visibility to "self" or "tree" to restrict '
             'transcript access to the current session only. Values "agent" and '
-            '"all" allow cross-session transcript reads.',
+            '"all" (OpenClaw\'s own default when the key is unset) allow '
+            "cross-session transcript reads — check "
+            "agents.defaults.sandbox.sessionToolsVisibility if you believe a sandbox "
+            "clamp already narrows this for the agents you run.",
             evidence=warn_ev,
         )
 
-    # Build PASS detail from what we observed
-    details = []
-    if dm_scope:
-        details.append(f'session.dmScope="{dm_scope}"')
-    if visibility:
-        details.append(f'tools.sessions.visibility="{visibility}"')
-    pass_detail = (
-        ("Session isolation looks good: " + "; ".join(details) + ".")
-        if details
-        else "Session config present; no cross-user leak signals detected."
-    )
+    # Build PASS detail from what we observed (both fields always resolve to a
+    # concrete value by this point, explicit or default)
+    details = [
+        f'session.dmScope="{dm_scope_resolved}"',
+        f'tools.sessions.visibility="{visibility_resolved}"',
+    ]
     return _finding(
         "B39",
         PASS,
-        pass_detail,
+        "Session isolation looks good: " + "; ".join(details) + ".",
         "Keep session.dmScope at per-peer or narrower and "
         'tools.sessions.visibility at "self" or "tree".',
+    )
+
+
+def check_agent_to_agent_pivot(ctx: Context) -> Finding:
+    """B361 (C-411) — tools.agentToAgent: whether one agent's session tools
+    (sends/list/history/search/status) can be invoked by ANOTHER agent at runtime.
+    Grounded on the installed dist (openclaw@2026.9.3, ``zod-schema-CTg_faEc.mjs``):
+    ``agentToAgent: strictObject({ enabled: boolean().optional(), allow:
+    array(string()).optional() }).optional()``. Global only — no per-agent override
+    exists in the schema. Both legs default to the PERMISSIVE end:
+    ``createAgentToAgentPolicy`` (``session-visibility-DihshKLi.mjs``) resolves
+    ``enabled = routingA2A?.enabled !== false`` (absent → true) and, when ``allow`` is
+    empty or absent, ``matchesAllow`` unconditionally returns true — so a wholly
+    ABSENT ``tools.agentToAgent`` block is the SAME runtime posture as an explicit
+    ``{enabled: true}`` with no restriction, not a safer one.
+
+    Reported only when the pivot is actually meaningful: fewer than two declared
+    agents means there is no second agent to invoke, and no channel admitting
+    non-owner senders (``_external_input_channels``, the same gate B39/B362 use)
+    means no untrusted input can reach any agent to begin a pivot in the first place.
+
+    WARN    — cross-agent access is effectively unrestricted (``enabled`` is not
+              explicitly false, and ``allow`` is absent, empty, or contains a bare
+              ``"*"`` entry), two or more agents are declared, and at least one
+              channel admits non-owner senders.
+    PASS    — ``enabled`` is explicitly false, or ``allow`` is a real non-wildcard
+              list, or fewer than two agents are declared, or no channel admits
+              non-owner senders.
+    UNKNOWN — the config was not read, or ``tools.agentToAgent`` is present but not
+              an object.
+    """
+    unreadable = _config_unreadable("B361", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B361",
+            UNKNOWN,
+            "No config was read, so whether cross-agent session-tool access is "
+            "restricted could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    node = dig(cfg, "tools.agentToAgent")
+    if node is not None and not isinstance(node, dict):
+        return _finding(
+            "B361",
+            UNKNOWN,
+            f"tools.agentToAgent is present but is not an object (found "
+            f"{type(node).__name__}), so whether cross-agent session-tool access is "
+            "restricted could not be determined.",
+            "Fix the tools.agentToAgent block in openclaw.json so it is a JSON "
+            "object, then re-run the audit.",
+            config_field_paths={"tools.agentToAgent"},
+        )
+    if dig(cfg, "tools.agentToAgent.enabled") is False:
+        return _finding(
+            "B361",
+            PASS,
+            "tools.agentToAgent.enabled is false: cross-agent session-tool access "
+            "is blocked.",
+            "Nothing to do.",
+        )
+    allow = dig(cfg, "tools.agentToAgent.allow")
+    if isinstance(allow, list) and allow and "*" not in allow:
+        return _finding(
+            "B361",
+            PASS,
+            f"tools.agentToAgent.allow restricts cross-agent access to "
+            f"{len(allow)} declared agent id/pattern(s), with no unrestricted "
+            'wildcard ("*") entry.',
+            "Nothing to do.",
+        )
+    roster = agent_roster(cfg)
+    if len(roster) <= 1:
+        return _finding(
+            "B361",
+            PASS,
+            "Cross-agent session-tool access is effectively unrestricted "
+            "(tools.agentToAgent.enabled is not false, and .allow is absent, "
+            "empty, or unrestricted), but fewer than two agents are declared, so "
+            "there is no second agent to pivot into.",
+            "Nothing to do; re-check if a second agent is added later.",
+        )
+    reachable = sorted(_external_input_channels(cfg))
+    if not reachable:
+        return _finding(
+            "B361",
+            PASS,
+            "Cross-agent session-tool access is effectively unrestricted and "
+            f"{len(roster)} agents are declared, but no channel admits non-owner "
+            "senders, so no untrusted input can reach any agent to begin a pivot.",
+            "Nothing to do; re-check if a channel is later opened to non-owner "
+            "senders.",
+        )
+    return _finding(
+        "B361",
+        WARN,
+        "tools.agentToAgent.enabled is not false and .allow does not restrict the "
+        'target agent set (absent, empty, or containing a "*" wildcard) — '
+        f"{len(roster)} agents are declared, and {', '.join(reachable[:5])} admit "
+        "non-owner senders. A low-trust agent reached through one of those "
+        "channels can invoke another agent's session tools (sends/list/history/"
+        "search/status) — a privilege pivot.",
+        "Set tools.agentToAgent.allow to the specific agent id pairs that "
+        "genuinely need cross-agent access, or set tools.agentToAgent.enabled to "
+        "false if no agent needs it.",
+        evidence=reachable[:8] or None,
+        config_field_paths={"tools.agentToAgent.enabled", "tools.agentToAgent.allow"},
+    )
+
+
+def check_session_scope_global(ctx: Context) -> Finding:
+    """B362 (C-411) — session.scope: the base session-grouping strategy. Grounded on
+    the installed dist (openclaw@2026.9.3): ``union([literal("per-sender"),
+    literal("global")]).optional()``, default ``"per-sender"`` — confirmed at
+    multiple independent call sites (``cfg.session?.scope ?? "per-sender"``,
+    ``agent-list-CY6uJSkj.mjs:45``, ``acp-spawn-DlnxbQgq.mjs:748``), not merely the
+    schema's own description text. ``"global"`` shares ONE session per channel
+    context across every sender instead of isolating by sender — the schema's own
+    words: "Keep 'per-sender' for safer multi-user behavior unless deliberate shared
+    context is required."
+
+    Reported only when it matters: gated on the same ``_external_input_channels``
+    helper B39/B361 use, since a single-owner setup has no second sender for one
+    sender's injected context to bleed into.
+
+    WARN    — session.scope is explicitly "global" AND at least one channel admits
+              non-owner senders.
+    PASS    — absent (the safe default), explicitly "per-sender", or "global" with
+              no channel admitting non-owner senders.
+    UNKNOWN — present but neither known literal, or the config was not read.
+    """
+    unreadable = _config_unreadable("B362", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B362",
+            UNKNOWN,
+            "No config was read, so the session-grouping scope could not be "
+            "determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    scope = dig(cfg, "session.scope")
+    if scope is None or scope == "per-sender":
+        return _finding(
+            "B362",
+            PASS,
+            "session.scope is 'per-sender' (or unset, which defaults to "
+            "'per-sender') — each sender gets an isolated session.",
+            "Nothing to do.",
+        )
+    if scope != "global":
+        return _finding(
+            "B362",
+            UNKNOWN,
+            f"session.scope is {scope!r}, neither 'per-sender' nor 'global' — not "
+            "a value this audit recognizes, so its effect could not be determined.",
+            "Set session.scope to 'per-sender' (recommended) or 'global'.",
+            config_field_paths={"session.scope"},
+        )
+    reachable = sorted(_external_input_channels(cfg))
+    if not reachable:
+        return _finding(
+            "B362",
+            PASS,
+            "session.scope is 'global', but no channel admits non-owner senders, "
+            "so there is no second sender for one sender's context to bleed into.",
+            "Nothing to do; re-check if a channel is later opened to non-owner "
+            "senders.",
+        )
+    return _finding(
+        "B362",
+        WARN,
+        "session.scope is 'global': every sender in a channel context shares ONE "
+        f"session instead of getting an isolated one, and {', '.join(reachable[:5])} "
+        "admit non-owner senders — one sender's injected context (including a "
+        "prompt-injection payload) persists into every other sender's turns.",
+        "Set session.scope to 'per-sender' unless deliberate shared context across "
+        "senders is genuinely required.",
+        evidence=reachable[:8] or None,
+        config_field_paths={"session.scope"},
+    )
+
+
+def check_cross_context_send(ctx: Context) -> Finding:
+    """B363 (C-411) — tools.message.crossContext.allowAcrossProviders (+ the
+    per-agent override ``agents.entries.<id>.tools.message.crossContext.
+    allowAcrossProviders``). Grounded on the installed dist (openclaw@2026.9.3):
+    global default false (``schema-C9vBoeg0.mjs``: "Allow sends across different
+    providers (default: false)"). **The per-agent leg is not optional to check**: the
+    runtime merges global and per-agent crossContext with a shallow spread where the
+    agent's own keys win (``outbound-policy-CVmm1s67.mjs:68-70``,
+    ``{...globalConfig?.crossContext, ...agentConfig.crossContext}``), so one agent
+    can widen past a safe global default on its own — reading only the global key
+    would miss that agent entirely. The actual runtime gate this models:
+    ``messageConfig?.crossContext?.allowAcrossProviders === true``
+    (``outbound-policy-CVmm1s67.mjs:122``) lets the message tool send into a
+    conversation on a DIFFERENT provider than the one the agent is currently bound
+    to — a prompt-injected agent's egress path to an attacker-controlled
+    destination on a different channel provider.
+
+    WARN    — the global value is effectively true, or any individual agent's
+              merged value is effectively true (each named in evidence).
+    PASS    — effectively false everywhere (the shipped default).
+    UNKNOWN — the config was not read, or crossContext is present but not an
+              object at the global or an agent scope.
+    """
+    unreadable = _config_unreadable("B363", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B363",
+            UNKNOWN,
+            "No config was read, so whether cross-provider message sends are "
+            "allowed could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    global_node = dig(cfg, "tools.message.crossContext")
+    if global_node is not None and not isinstance(global_node, dict):
+        return _finding(
+            "B363",
+            UNKNOWN,
+            "tools.message.crossContext is present but is not an object (found "
+            f"{type(global_node).__name__}), so whether cross-provider message "
+            "sends are allowed could not be determined.",
+            "Fix the tools.message.crossContext block in openclaw.json so it is a "
+            "JSON object, then re-run the audit.",
+            config_field_paths={"tools.message.crossContext"},
+        )
+    offenders: list[str] = []
+    if dig(cfg, "tools.message.crossContext.allowAcrossProviders") is True:
+        offenders.append("tools.message.crossContext.allowAcrossProviders")
+    malformed = False
+    for agent in agent_roster(cfg):
+        agent_node = dig(agent.entry, "tools.message.crossContext")
+        if agent_node is not None and not isinstance(agent_node, dict):
+            malformed = True
+            continue
+        if dig(agent.entry, "tools.message.crossContext.allowAcrossProviders") is True:
+            name = agent.entry.get("name") or agent.id or agent.index
+            offenders.append(f"{agent.labelled(name)}.tools.message.crossContext.allowAcrossProviders")
+    if offenders:
+        return _finding(
+            "B363",
+            WARN,
+            f"{len(offenders)} scope(s) resolve tools.message.crossContext."
+            f"allowAcrossProviders to true: {'; '.join(offenders[:5])} — the "
+            "message tool can send into a conversation on a different channel "
+            "provider than the one it is currently bound to.",
+            "Keep allowAcrossProviders false unless an agent genuinely needs to "
+            "relay across providers; if it does, prefer the per-agent override "
+            "over the global default so unrelated agents stay confined.",
+            evidence=offenders[:8],
+            config_field_paths={"tools.message.crossContext.allowAcrossProviders"},
+        )
+    if malformed:
+        return _finding(
+            "B363",
+            UNKNOWN,
+            "One or more agents' tools.message.crossContext is present but not an "
+            "object, so whether cross-provider message sends are allowed for "
+            "those agents could not be determined.",
+            "Fix the malformed tools.message.crossContext block(s) in "
+            "openclaw.json, then re-run the audit.",
+            config_field_paths={"tools.message.crossContext"},
+        )
+    return _finding(
+        "B363",
+        PASS,
+        "tools.message.crossContext.allowAcrossProviders resolves to false (or is "
+        "unset, the shipped default) globally and for every declared agent.",
+        "Nothing to do.",
+    )
+
+
+def check_session_reset_triggers(ctx: Context) -> Finding:
+    """B364 (C-411) — session.resetTriggers: inbound-message phrases that force a
+    session reset when matched. Grounded on the installed dist (openclaw@2026.9.3,
+    ``zod-schema-CTg_faEc.mjs:1111``): ``resetTriggers: array(string()).optional()``
+    — absent by default (no trigger phrases at all).
+
+    An attacker who can send a matching phrase forces a reset, dropping whatever
+    context the session held. Severity is deliberately NOT a "does this phrase look
+    like ordinary conversation" judgment call — that is not a fact a static audit
+    can determine (Golden Rule #4) — so this is disclosure-only: an intentional,
+    narrow reset phrase and a guessable one are indistinguishable from config alone,
+    same reasoning B341 already uses for a comparable grant. The phrases themselves
+    are named in evidence so the operator can judge exploitability directly.
+
+    WARN    — resetTriggers is a non-empty list of strings.
+    PASS    — resetTriggers is absent or an empty list.
+    UNKNOWN — present but not a list of strings, or the config was not read.
+    """
+    unreadable = _config_unreadable("B364", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B364",
+            UNKNOWN,
+            "No config was read, so whether session.resetTriggers is configured "
+            "could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    triggers = dig(cfg, "session.resetTriggers")
+    if triggers is None:
+        return _finding(
+            "B364",
+            PASS,
+            "session.resetTriggers is not set — no inbound phrase forces a "
+            "session reset.",
+            "Nothing to do.",
+        )
+    if not isinstance(triggers, list) or not all(isinstance(t, str) for t in triggers):
+        return _finding(
+            "B364",
+            UNKNOWN,
+            "session.resetTriggers is present but is not a list of strings, so "
+            "its effect could not be determined.",
+            "Fix session.resetTriggers in openclaw.json so it is a JSON array of "
+            "strings, then re-run the audit.",
+            config_field_paths={"session.resetTriggers"},
+        )
+    if not triggers:
+        return _finding(
+            "B364",
+            PASS,
+            "session.resetTriggers is an empty list — no inbound phrase forces a "
+            "session reset.",
+            "Nothing to do.",
+        )
+    return _finding(
+        "B364",
+        WARN,
+        f"session.resetTriggers configures {len(triggers)} inbound phrase(s) that "
+        "force a session reset when matched — anything able to send a matching "
+        "message to the agent can force a reset, dropping whatever context the "
+        "session held.",
+        "Confirm the phrase(s) are specific enough that ordinary conversation, or "
+        "an attacker's guess, will not trigger them by accident.",
+        evidence=sorted(triggers)[:8],
+        config_field_paths={"session.resetTriggers"},
+        scored=False,
+    )
+
+
+def check_channel_mention_gate_bypass(ctx: Context) -> Finding:
+    """B371 (C-525) — requireMention/chatmode: whether an externally-reachable
+    channel's group/room/topic mention gate is disabled or bypassed, letting every
+    message in a busy shared conversation reach the agent as untrusted input rather
+    than only ones that @-mention it. Split out of C-411 (filed as C-525) because
+    these two fields nest differently per provider — see ``_mention_gate_scopes``
+    in ``_shared.py`` for the full grounding trail (27 bundled channel plugin
+    schemas walked programmatically against openclaw@2026.9.3) and the container
+    vocabulary (groups/rooms/guilds/guilds.channels/channels/direct.topics/
+    groups.topics) this reuses.
+
+    Two independent bypass shapes, found across different providers:
+
+    - ``requireMention: false`` — the mention gate is explicitly off, at the
+      channel root, an account, or any nested group/room/topic/guild-channel
+      scope.
+    - ``chatmode: "onmessage"`` — Mattermost-specific: replies to every channel
+      message regardless of mention, the same effective bypass under a different
+      name (its sibling values ``"oncall"``/``"onchar"`` stay mention/trigger-
+      gated). Of the 27 bundled schemas, only Mattermost declares ``chatmode`` at
+      all, and only at the channel-root/account level — never inside a nested
+      group/room scope, so this is checked there only.
+
+    Scoped to what can actually receive untrusted content: a channel that admits
+    no non-owner sender at all (``_external_input_channels``, the same gate
+    B39/B361/B362 use) has no one to bypass the gate for, so its own bypassed
+    setting is not reported. This is a coarse, channel-level reachability gate
+    (dmPolicy/groupPolicy/wildcard-group posture), not a per-group one — the same
+    granularity B361/B362 already accept.
+
+    WARN    — at least one externally-reachable channel has ``requireMention:
+              false`` or ``chatmode: "onmessage"`` at its root, an account, or a
+              nested group/room/topic/guild-channel scope.
+    PASS    — no externally-reachable channel has such a bypass anywhere
+              (including when no channel admits non-owner senders at all).
+    UNKNOWN — the config was not read, ``channels`` is present but not an object,
+              or every scope was free of an explicit bypass but at least one scope
+              set requireMention/chatmode to a value this audit does not
+              recognize (schema drift) — since that value's real effect could not
+              be determined, PASS cannot be certified either.
+    """
+    unreadable = _config_unreadable("B371", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B371",
+            UNKNOWN,
+            "No config was read, so whether any channel's mention gate is "
+            "disabled or bypassed could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    channels_raw = cfg.get("channels")
+    if channels_raw is not None and not isinstance(channels_raw, dict):
+        return _finding(
+            "B371",
+            UNKNOWN,
+            "channels is present but is not a JSON object, so no channel's "
+            "mention-gate settings could be read.",
+            "Fix the channels block in openclaw.json so it is a JSON object, "
+            "then re-run the audit.",
+            config_field_paths={"channels"},
+        )
+    reachable = set(_external_input_channels(cfg))
+    bypassed: list = []
+    drifted: list = []
+    for name, c in _channels(cfg).items():
+        if name == "defaults" or name not in reachable or not isinstance(c, dict):
+            continue
+        for node in _resolved_channel_nodes(c):
+            for label, scope in _mention_gate_scopes(node):
+                prefix = f"{name}.{label}" if label else name
+                rm = scope.get("requireMention")
+                if rm is False:
+                    bypassed.append(f"{prefix}.requireMention=false")
+                elif rm is not None and not isinstance(rm, bool):
+                    drifted.append(f"{prefix}.requireMention")
+                if not label:  # chatmode only ever appears at the root/account scope
+                    cm = scope.get("chatmode")
+                    if cm == "onmessage":
+                        bypassed.append(f"{prefix}.chatmode=onmessage")
+                    elif cm is not None and cm not in ("oncall", "onmessage", "onchar"):
+                        drifted.append(f"{prefix}.chatmode")
+    if bypassed:
+        evidence = sorted(dict.fromkeys(bypassed))
+        return _finding(
+            "B371",
+            WARN,
+            f"{len(evidence)} channel scope(s) admit non-owner senders with the "
+            "mention gate disabled or bypassed (requireMention=false, or "
+            'Mattermost chatmode="onmessage") — every message in the '
+            "conversation reaches the agent as untrusted input, not only ones "
+            "that @-mention it.",
+            "Set requireMention to true (or Mattermost chatmode to "
+            '"oncall"/"onchar") for any group/room/channel that admits '
+            "non-owner senders, unless replying to every message is a "
+            "deliberate choice.",
+            evidence=evidence[:8],
+            config_field_paths={
+                "channels.*.requireMention",
+                "channels.mattermost.chatmode",
+            },
+        )
+    if drifted:
+        evidence = sorted(dict.fromkeys(drifted))
+        return _finding(
+            "B371",
+            UNKNOWN,
+            f"{len(evidence)} channel scope(s) set requireMention or chatmode to "
+            "a value this audit does not recognize, so whether the mention gate "
+            "is bypassed there could not be determined.",
+            "Fix the listed field(s) in openclaw.json to a recognized value, "
+            "then re-run the audit.",
+            evidence=evidence[:8],
+        )
+    return _finding(
+        "B371",
+        PASS,
+        "No externally-reachable channel has its mention gate disabled or "
+        'bypassed (requireMention=false, or Mattermost chatmode="onmessage").',
+        "Nothing to do.",
+    )
+
+
+def check_channel_allow_bots(ctx: Context) -> Finding:
+    """B372 (C-525) — allowBots: whether an externally-reachable channel accepts
+    messages authored by OTHER bot accounts as agent input. Grounded against the
+    installed dist (openclaw@2026.9.3) the same way as B371 (see
+    ``_mention_gate_scopes`` in ``_shared.py`` for the full trail): of the 27
+    bundled channel plugin schemas, five declare ``allowBots`` — ClickClack,
+    Discord, Feishu, GoogleChat and Slack take a plain boolean at the channel
+    root/account level (ClickClack and Slack ALSO at their nested groups/channels
+    container); Matrix takes ``boolean | "mentions"`` at its groups/rooms
+    container only (it has no channel-root form).
+
+    Bot-authored input is machine-speed untrusted injection — named in OpenClaw's
+    own ``botLoopProtection`` (a rate limiter for accepted bot-pair traffic, not a
+    gate on whether it is accepted at all): a compromised or malicious bot account
+    on the same channel can drive the agent exactly as fast as it can generate
+    messages, with no human in the loop. Matrix's ``"mentions"`` value still
+    admits bot-authored content whenever the bot names the agent — a mention is
+    not authentication — so it is treated the same as ``true`` here.
+
+    Scoped the same way as B371: only channels that admit non-owner senders at all
+    (``_external_input_channels``, the same gate B39/B361/B362/B371 use) are
+    considered, since a fully closed channel has no bot account to admit in the
+    first place.
+
+    WARN    — at least one externally-reachable channel/scope has
+              ``allowBots: true`` or ``allowBots: "mentions"``.
+    PASS    — no externally-reachable channel/scope has allowBots enabled
+              (including when no channel admits non-owner senders at all).
+    UNKNOWN — the config was not read, ``channels`` is present but not an object,
+              or every scope was free of an enabled allowBots but at least one
+              scope set it to a value this audit does not recognize.
+    """
+    unreadable = _config_unreadable("B372", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B372",
+            UNKNOWN,
+            "No config was read, so whether any channel accepts bot-authored "
+            "messages could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    channels_raw = cfg.get("channels")
+    if channels_raw is not None and not isinstance(channels_raw, dict):
+        return _finding(
+            "B372",
+            UNKNOWN,
+            "channels is present but is not a JSON object, so no channel's "
+            "allowBots setting could be read.",
+            "Fix the channels block in openclaw.json so it is a JSON object, "
+            "then re-run the audit.",
+            config_field_paths={"channels"},
+        )
+    reachable = set(_external_input_channels(cfg))
+    enabled: list = []
+    drifted: list = []
+    for name, c in _channels(cfg).items():
+        if name == "defaults" or name not in reachable or not isinstance(c, dict):
+            continue
+        for node in _resolved_channel_nodes(c):
+            for label, scope in _mention_gate_scopes(node):
+                prefix = f"{name}.{label}" if label else name
+                ab = scope.get("allowBots")
+                if ab is True:
+                    enabled.append(f"{prefix}.allowBots=true")
+                elif ab == "mentions":
+                    enabled.append(f'{prefix}.allowBots="mentions"')
+                elif ab is not None and ab is not False:
+                    drifted.append(f"{prefix}.allowBots")
+    if enabled:
+        evidence = sorted(dict.fromkeys(enabled))
+        return _finding(
+            "B372",
+            WARN,
+            f"{len(evidence)} channel scope(s) admit non-owner senders with "
+            "allowBots enabled — messages authored by other bot accounts reach "
+            "the agent as input, at whatever rate the bot account can generate "
+            "them.",
+            "Set allowBots to false for any group/room/channel that admits "
+            "non-owner senders, unless accepting bot-authored input is a "
+            "deliberate integration.",
+            evidence=evidence[:8],
+            config_field_paths={"channels.*.allowBots"},
+        )
+    if drifted:
+        evidence = sorted(dict.fromkeys(drifted))
+        return _finding(
+            "B372",
+            UNKNOWN,
+            f"{len(evidence)} channel scope(s) set allowBots to a value this "
+            "audit does not recognize, so whether bot-authored input is "
+            "accepted there could not be determined.",
+            "Fix the listed field(s) in openclaw.json to a recognized value "
+            '(true, false, or "mentions"), then re-run the audit.',
+            evidence=evidence[:8],
+        )
+    return _finding(
+        "B372",
+        PASS,
+        "No externally-reachable channel accepts bot-authored input "
+        "(allowBots).",
+        "Nothing to do.",
     )
 
 

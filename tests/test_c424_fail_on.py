@@ -165,10 +165,17 @@ def test_fail_on_suppressed_critical_still_trips(tmp_path, monkeypatch, capsys):
 
 
 def test_fail_under_no_longer_parses(tmp_path, monkeypatch, capsys):
+    """B-769: --fail-under now fails with a targeted redirect to --fail-on, not the
+    generic argparse "unrecognized arguments" message this test used to pin (that was
+    the pre-B-769 contract: --fail-under simply wasn't registered, so argparse rejected
+    it the same way it rejects any unknown flag). See test_cli_flags.py for the message
+    contract itself (test_fail_under_names_fail_on_for_the_equals_form_too,
+    test_fail_under_message_never_says_deprecated) -- this test only needs to keep
+    proving --fail-under still refuses to parse."""
     with pytest.raises(SystemExit) as exc:
         _run(tmp_path, monkeypatch, [], ["--fail-on", "critical", "--fail-under", "100"])
     assert exc.value.code != 0
-    assert "unrecognized arguments" in capsys.readouterr().err
+    assert "was removed" in capsys.readouterr().err
 
 
 def test_fail_on_decides_in_both_directions_without_any_score(tmp_path, monkeypatch, capsys):

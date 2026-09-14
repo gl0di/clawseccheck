@@ -22,17 +22,20 @@ from ..catalog import (
 from ..collector import (
     LIMIT_DOMAIN_CONFIG,
     Context,
+    agent_roster,
     dig,
 )
 from . import _shared
 from ._shared import (
     LOOPBACK,
     OUTBOUND_TOOL_HINTS,
+    SECRET_PATTERNS,
     _channels,
     _config_unreadable,
     _custom,
     _enabled_tools,
     _openclaw_generation,
+    _pattern_hits_real_secret,
     _retired_key_note,
     _finding,
     _has_approval_gate,
@@ -1512,6 +1515,357 @@ def check_provider_baseurl(ctx: Context) -> Finding:
         "public/unrecognized host.",
         "Keep any custom models.providers.<id>.baseUrl on https:// "
         "(loopback and local-model http:// targets are not flagged).",
+    )
+
+
+def _otel_undeterminable(cid: str, path: str, value: object, expected: str) -> Finding:
+    """Shared UNKNOWN shape for B365's malformed-container branches — same reasoning as
+    B82's ``_b82_undeterminable`` (this module): ``diagnostics``/``diagnostics.otel`` are
+    declared inside ``.strict()`` zod objects (zod-schema-Q1KXOooO.mjs:1255-1281) with no
+    ``.nullable()`` anywhere, so a malformed shape means the config does not load at all
+    and the real state cannot be determined from this file — UNKNOWN, never an
+    affirmative claim in either direction.
+    """
+    return _finding(
+        cid,
+        UNKNOWN,
+        f"{path} is present but is not {expected}, so whether OpenTelemetry export is "
+        "active cannot be determined. OpenClaw declares it inside a strict schema and "
+        "rejects the whole config at load time when the shape is wrong, so the running "
+        "agent is not using what this file says.",
+        f"Set {path} to {expected}, or remove it entirely to take the built-in default, "
+        "then re-run the audit.",
+        evidence=[f"{path}={value!r} (expected {expected})"],
+    )
+
+
+def check_otel_content_capture_egress(ctx: Context) -> Finding:
+    """B365 (C-412) — diagnostics.otel content capture ships raw agent turns off-host.
+
+    Grounded against the INSTALLED dist (openclaw@2026.9.3), not the filed task's stub.
+
+    Schema (zod-schema-Q1KXOooO.mjs:1258-1279) — diagnostics.otel is a strictObject with
+    enabled/endpoint/tracesEndpoint/metricsEndpoint/logsEndpoint/protocol/headers/
+    serviceName/metricNamePrefix/traces/metrics/logs/logsExporter/sampleRate/
+    flushIntervalMs/captureContent. captureContent is ``boolean().optional()`` — NOT the
+    granular {enabled, inputMessages, outputMessages, toolInputs, toolOutputs,
+    systemPrompt, toolDefinitions} object the filed stub described. That granular shape
+    is retired: legacy-fR_P797G.mjs's migrateFinalLayoutKills collapses any old
+    object-shaped captureContent to a plain boolean on every config load ("Collapsed
+    diagnostics.otel.captureContent to a boolean."), so a check keyed on the sub-fields
+    would silently never fire on a current install.
+
+    The real runtime gate — resolveDiagnosticModelContentCapturePolicy
+    (dist/worker/worker.mjs), EXECUTED by tracing its body, not inferred from the schema
+    description — is a conjunction of FOUR keys, not just captureContent::
+
+        if (!diagnostics || diagnostics.enabled === false) -> no capture
+        if (!otel || otel.enabled !== true || otel.traces === false) -> no capture
+        else: captureContent === true -> capture ALL of {inputMessages, outputMessages,
+              toolInputs, toolOutputs, toolDefinitions, anyModelContent}; systemPrompt is
+              HARDCODED false regardless of captureContent — never captured.
+
+    So content capture requires diagnostics.enabled not-false AND otel.enabled===true
+    AND otel.traces not-false AND otel.captureContent===true. Reading only captureContent
+    (the stub's own proposed WARN condition) would false-positive on otel.enabled left
+    unset/false — a real, plausible shape (captureContent set while experimenting, otel
+    itself never turned on).
+
+    Reachability reuses B178's classify-host idiom verbatim (this module,
+    _b178_classify_host) rather than a second copy. Content capture piggybacks on the
+    TRACE signal specifically (the gate checks otel.traces, not .metrics/.logs), so the
+    destination is tracesEndpoint if set, else the shared endpoint — per-signal-overrides
+    -shared is grounded from the schema descriptions map (schema-DbKC3IUo.mjs:
+    "diagnostics.otel.tracesEndpoint": "... overrides diagnostics.otel.endpoint and
+    OTEL_EXPORTER_OTLP_ENDPOINT for trace export only."). Neither set -> the exporter
+    falls back to the standard OTEL_EXPORTER_OTLP_ENDPOINT environment variable, which
+    this config-only audit cannot observe (no on-disk dotenv witness the way
+    B82/OPENCLAW_CACHE_TRACE has) — reported as WARN with the gap disclosed, never an
+    assumed-safe PASS (Golden Rule #4) or a fabricated FAIL.
+
+    otel.headers (record<string,string>) carries the collector's own auth (e.g.
+    Authorization: Bearer ...). This is NOT already covered by the generic secret-at-rest
+    walk (checks/_shared._secret_paths): that walk keys on the DICT KEY matching
+    SECRET_KEY_RE (password/secret/token/api-key/bottoken), but an operator-chosen header
+    name like "Authorization" never matches it — a real blind spot distinct from the
+    C-412 task's own "do NOT re-file" note (which is about top-level fields literally
+    NAMED ...Secret/...Token, not an arbitrary header map). So this check scans header
+    VALUES for a real inline secret independent of key name, reusing the same
+    _pattern_hits_real_secret / SECRET_PATTERNS / _is_secret_reference machinery B1/C015
+    already use — never echoing the value itself.
+
+    WARN  — otel.enabled is True and a header value looks like a real inline secret
+            (independent of capture), OR content capture is active (see gate above) and
+            the effective destination is loopback / a private-range or bare-hostname
+            http:// target / any https:// target / unresolvable (no endpoint configured
+            at all — env-var fallback, not observable).
+    FAIL  — content capture is active AND the effective destination is a definite
+            public/unrecognized plain http:// host — raw agent turns (tool
+            inputs/outputs, full messages) travel in cleartext to a host reachable from
+            anywhere.
+    PASS  — content capture is not active (any one of the four gate keys fails) and no
+            header carries an inline secret.
+    UNKNOWN — unread config, or diagnostics/diagnostics.otel present but not an object
+              (both live inside .strict() zod objects, so a malformed shape means the
+              config does not load and the real state cannot be determined), or
+              enabled/traces/captureContent present but not booleans.
+    """
+    unreadable = _config_unreadable("B365", ctx)
+    if unreadable is not None:
+        return unreadable
+    from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
+
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+
+    # Hand-walked, not dig(): dig() collapses "key absent" and "key present but
+    # malformed" to the same None, and here those two states have OPPOSITE verdicts —
+    # same reasoning as B82's check_cachetrace_redaction (this module).
+    diagnostics = cfg.get("diagnostics")
+    if "diagnostics" in cfg and not isinstance(diagnostics, dict):
+        return _otel_undeterminable("B365", "diagnostics", diagnostics, "a JSON object")
+    otel = diagnostics.get("otel") if isinstance(diagnostics, dict) else None
+    if isinstance(diagnostics, dict) and "otel" in diagnostics and not isinstance(otel, dict):
+        return _otel_undeterminable("B365", "diagnostics.otel", otel, "a JSON object")
+
+    diag_enabled = diagnostics.get("enabled") if isinstance(diagnostics, dict) else None
+    if diag_enabled is not None and not isinstance(diag_enabled, bool):
+        return _otel_undeterminable("B365", "diagnostics.enabled", diag_enabled, "a boolean")
+    otel_enabled = otel.get("enabled") if isinstance(otel, dict) else None
+    if otel_enabled is not None and not isinstance(otel_enabled, bool):
+        return _otel_undeterminable(
+            "B365", "diagnostics.otel.enabled", otel_enabled, "a boolean"
+        )
+    otel_traces = otel.get("traces") if isinstance(otel, dict) else None
+    if otel_traces is not None and not isinstance(otel_traces, bool):
+        return _otel_undeterminable("B365", "diagnostics.otel.traces", otel_traces, "a boolean")
+    capture = otel.get("captureContent") if isinstance(otel, dict) else None
+    if capture is not None and not isinstance(capture, bool):
+        return _otel_undeterminable(
+            "B365", "diagnostics.otel.captureContent", capture, "a boolean"
+        )
+
+    capture_active = (
+        diag_enabled is not False
+        and otel_enabled is True
+        and otel_traces is not False
+        and capture is True
+    )
+
+    header_secrets: list[str] = []
+    if isinstance(otel, dict) and otel_enabled is True:
+        headers = otel.get("headers")
+        if isinstance(headers, dict):
+            for hname, hval in headers.items():
+                if isinstance(hval, str) and _pattern_hits_real_secret(SECRET_PATTERNS, hval):
+                    header_secrets.append(
+                        f"diagnostics.otel.headers.{hname} looks like an inline secret, "
+                        "not a ${ENV} reference"
+                    )
+
+    is_fail = False
+    capture_notes: list[str] = []
+    if capture_active:
+        endpoint = otel.get("tracesEndpoint") or otel.get("endpoint")
+        if isinstance(endpoint, str) and endpoint.strip():
+            try:
+                parsed = urlparse(endpoint.strip())
+            except (ValueError, AttributeError):
+                parsed = None
+            host = (parsed.hostname or "").lower() if parsed else ""
+            scheme = (parsed.scheme or "").lower() if parsed else ""
+            shown = sanitize_url_host_only(endpoint)
+            if scheme == "http" and host and host not in LOOPBACK and not host.startswith("127."):
+                classification = _b178_classify_host(host)
+                if classification == "public":
+                    is_fail = True
+                    capture_notes.append(
+                        f"the trace destination ({shown}) is plain http:// to a "
+                        "non-loopback, non-private host — full model turns (tool "
+                        "inputs/outputs, messages) travel in cleartext to a host "
+                        "reachable from anywhere"
+                    )
+                elif classification == "private":
+                    capture_notes.append(
+                        f"the trace destination ({shown}) is plain http:// to a "
+                        "private-network host — only an on-LAN observer could "
+                        "intercept the captured turns"
+                    )
+                else:
+                    capture_notes.append(
+                        f"full model turns are shipped to a local collector ({shown})"
+                    )
+            else:
+                capture_notes.append(
+                    "full model turns (tool inputs/outputs, messages) are shipped to "
+                    f"{shown}"
+                )
+        else:
+            capture_notes.append(
+                "captureContent is on but no diagnostics.otel.tracesEndpoint or "
+                ".endpoint is configured — OpenTelemetry falls back to the standard "
+                "OTEL_EXPORTER_OTLP_ENDPOINT environment variable, whose value this "
+                "audit cannot observe from the config file alone"
+            )
+
+    all_notes = capture_notes + header_secrets
+    if not all_notes:
+        return _finding(
+            "B365", PASS,
+            "OpenTelemetry content capture is not active (diagnostics.otel is not "
+            "fully enabled, traces are off, or captureContent is not set), and no "
+            "diagnostics.otel.headers value looks like an inline secret.",
+            "If you enable diagnostics.otel.captureContent, it also needs "
+            "diagnostics.enabled, diagnostics.otel.enabled and traces not disabled to "
+            "actually capture anything — an unset otel.enabled leaves captureContent "
+            "inert.",
+        )
+
+    if is_fail:
+        return _finding(
+            "B365", FAIL, "; ".join(all_notes),
+            "Point diagnostics.otel.tracesEndpoint (or .endpoint) at an https:// "
+            "collector, or turn off diagnostics.otel.captureContent — a cleartext "
+            "http:// trace sink exposes every captured model turn to network "
+            "interception.",
+            evidence=all_notes,
+        )
+
+    return _finding(
+        "B365", WARN, "; ".join(all_notes),
+        "Review whether OpenTelemetry content capture is intentional — it ships full "
+        "model turns (tool inputs/outputs, messages; never the system prompt) to the "
+        "configured collector. Prefer an https:// collector, and move any "
+        "diagnostics.otel.headers auth value to a ${ENV} reference instead of a "
+        "literal.",
+        evidence=all_notes,
+    )
+
+
+def check_memory_search_remote_egress(ctx: Context) -> Finding:
+    """B366 (C-412) — memory.search.remote sends every embedded memory chunk to a
+    configured third-party endpoint.
+
+    Grounded against the INSTALLED dist (openclaw@2026.9.3), not the filed task's stub:
+    the real config path is ``memory.search.remote.{baseUrl,apiKey,headers,
+    batch.enabled}`` (zod-schema.agent-runtime-BigQghiZ.mjs:514-558, MemorySearchSchema —
+    the sibling of MemorySchema.search at zod-schema-Q1KXOooO.mjs:517-524), NOT
+    ``agents.defaults.memorySearch.remote.*`` as filed: the leaf name is ``memorySearch``
+    nowhere in the current schema (it is ``memory.search``), and ``remote`` is not
+    reachable under ``agents.defaults`` at all — AgentDefaultsSchema
+    (zod-schema-Q1KXOooO.mjs:137ff) has no ``memory`` key (only an unrelated
+    ``memoryFlush``). ``memory.search`` exists at TWO scopes instead: the config ROOT
+    (global default, MemorySchema) and PER-AGENT (AgentEntrySchema.memory.search,
+    zod-schema.agent-runtime-BigQghiZ.mjs:628) — reached via
+    ``agents.entries.<id>.memory.search.remote.*`` in the current record-based roster
+    shape, or the legacy ``agents.list[].memory.search.remote.*`` array shape; both are
+    read through the shared ``agent_roster()`` (collector.py, B-699) rather than a
+    second per-agent-shape reader.
+
+    This check does not need the roster's merge precedence between the two scopes (the
+    "AND vs REPLACE" question that mattered for B363's crossContext, or toolgrant.py's
+    profile+alsoAllow coalesce) — it evaluates the global scope and each agent's own
+    scope INDEPENDENTLY. Whichever scope actually sets remote.baseUrl is the one that
+    fires an HTTP call from that scope at runtime, so checking both sources directly is
+    sufficient and does not depend on tracing the runtime's merge function for this
+    field.
+
+    Reachability mirrors B178's classify-host idiom exactly (this module,
+    _b178_classify_host) — reused, not re-implemented. Unlike B178, remote.apiKey is NOT
+    separately flagged here for being a literal secret: its key name matches
+    SECRET_KEY_RE (api[_-]?key) and it is already swept into B1's generic
+    _secret_paths() walk over the whole config, gated on file permissions the same way
+    every other config-embedded secret is. This check's job is narrower and additive —
+    the baseUrl's EGRESS shape (does a credentialed embedding request leave in
+    cleartext to a host off this machine) — so it discloses apiKey's mere PRESENCE as
+    context (a credential travels with the request) without re-judging the value.
+
+    FAIL  — a remote.baseUrl (global or any agent's) is plain http:// to a definite
+            public/unrecognized host — every embedded memory chunk, and any configured
+            apiKey, travels in cleartext to a host reachable from anywhere.
+    WARN  — a remote.baseUrl is plain http:// to a private-range IP or a bare hostname
+            (on-LAN-only exposure), matching B178's WARN bar for the identical shape.
+    PASS  — no remote.baseUrl is set anywhere, or every one set is https:// / loopback /
+            a recognized local-model hostname.
+    UNKNOWN — unread config.
+    """
+    unreadable = _config_unreadable("B366", ctx)
+    if unreadable is not None:
+        return unreadable
+    from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
+
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+
+    sources: list[tuple[str, dict]] = []
+    global_remote = dig(cfg, "memory.search.remote")
+    if isinstance(global_remote, dict):
+        sources.append(("memory.search.remote", global_remote))
+    for agent in agent_roster(cfg):
+        agent_remote = dig(agent.entry, "memory.search.remote")
+        if isinstance(agent_remote, dict):
+            name = agent.entry.get("name") or agent.id or agent.index
+            sources.append((f"{agent.labelled(name)}.memory.search.remote", agent_remote))
+
+    fails: list[str] = []
+    warns: list[str] = []
+    for label, remote in sources:
+        base_url = remote.get("baseUrl")
+        if not isinstance(base_url, str) or not base_url.strip():
+            continue
+        try:
+            parsed = urlparse(base_url.strip())
+        except (ValueError, AttributeError):
+            continue
+        host = (parsed.hostname or "").lower()
+        if (parsed.scheme or "").lower() != "http" or not host:
+            continue
+        if host in LOOPBACK or host.startswith("127."):
+            continue
+        classification = _b178_classify_host(host)
+        if classification == "local":
+            continue
+        shown = sanitize_url_host_only(base_url)
+        api_key = remote.get("apiKey")
+        has_key = isinstance(api_key, (str, dict)) and bool(api_key)
+        key_note = (
+            " (remote.apiKey is also configured — that credential travels with it)"
+            if has_key else ""
+        )
+        if classification == "private":
+            warns.append(
+                f"{label}.baseUrl uses plain http:// to a private-network host "
+                f"({shown}){key_note} — every embedded memory chunk is reachable to "
+                "an on-LAN observer"
+            )
+            continue
+        fails.append(
+            f"{label}.baseUrl uses plain http:// to a non-loopback, non-private host "
+            f"({shown}){key_note} — every embedded memory chunk (and any configured "
+            "credential) travels in cleartext"
+        )
+
+    if fails:
+        return _finding(
+            "B366", FAIL, "; ".join(fails),
+            "Point memory.search.remote.baseUrl (global or per-agent) at an https:// "
+            "endpoint — memory indexing embeds and sends every stored memory chunk to "
+            "this host, so a cleartext http:// target exposes user content and any "
+            "configured remote.apiKey to network interception.",
+            evidence=fails + warns,
+        )
+    if warns:
+        return _finding(
+            "B366", WARN, "; ".join(warns),
+            "If this is a local/self-hosted embedding gateway on your LAN, http:// is "
+            "standard practice — no action needed. If it carries a real credential or "
+            "leaves the LAN, prefer https:// or keep it behind a network you trust.",
+            evidence=warns,
+        )
+    return _finding(
+        "B366", PASS,
+        "No memory.search.remote.baseUrl (global or per-agent) uses a cleartext "
+        "http:// endpoint to a public/unrecognized host.",
+        "Keep any custom memory.search.remote.baseUrl on https:// (loopback and "
+        "local-model http:// targets are not flagged).",
     )
 
 

@@ -53,7 +53,14 @@ FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 RELIABILITY = FIXTURES / "reliability"
 
 # A wildcard group whose only content is the real fleet config's shape.
-_REAL_SHAPE = {"channels": {"telegram": {"groups": {"*": {"requireMention": True}}}}}
+# session.dmScope/tools.sessions.visibility pinned safe (B-796/B-797) so this shape
+# does not ALSO carry its own B39 FAIL -- unrelated to the wildcard-group signal this
+# module exists to isolate.
+_REAL_SHAPE = {
+    "channels": {"telegram": {"groups": {"*": {"requireMention": True}}}},
+    "session": {"dmScope": "per-peer"},
+    "tools": {"sessions": {"visibility": "self"}},
+}
 
 
 def _ctx(cfg: dict) -> Context:

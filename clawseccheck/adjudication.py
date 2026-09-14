@@ -638,6 +638,14 @@ def _corroboration_groups(findings) -> dict:
     (most packet items) naturally does NOT include its own id -- its corroboration
     reflects purely how much OTHER live signal exists for the same target, which is
     exactly the useful context for an otherwise-uncorroborated UNKNOWN.
+
+    B-669: a finding with no real target -- `_target_from_evidence` fell back to its
+    own SENTINEL, `f.id` -- is excluded from grouping entirely, not grouped under its
+    own id. Grouping it was the original defect: every evidence-less finding became a
+    singleton group keyed on itself, so `count` read 0 on every item measured (87 of
+    87 on a real fixture) -- structurally, never because something corroborated with
+    nothing. See `_attach_corroboration`'s `subject_determinable` for how a caller
+    tells that apart from a real, measured zero.
     """
     groups: dict[str, set] = {}
     for f in findings or []:
@@ -645,7 +653,19 @@ def _corroboration_groups(findings) -> dict:
             continue
         if getattr(f, "suppressed", False):
             continue
-        groups.setdefault(_target_from_evidence(f), set()).add(f.id)
+        target = _target_from_evidence(f)
+        if target == f.id:
+            # B-669: a SENTINEL, not a real subject (see _target_from_evidence's own
+            # docstring) -- grouping it anyway put every evidence-less finding in a
+            # singleton group keyed on its own id, so `count` read 0 on every item
+            # measured (87 of 87 on a real fixture) structurally, never because
+            # something was checked and found alone. Skipped at the source: a
+            # sentinel-only finding never becomes a group KEY, so `_attach_corroboration`
+            # can tell "this target was never grouped because it isn't one" from "this
+            # target WAS grouped and nothing else shares it" by checking group presence
+            # the same way -- see its own sentinel check just below.
+            continue
+        groups.setdefault(target, set()).add(f.id)
     return {target: sorted(ids) for target, ids in groups.items()}
 
 
@@ -657,11 +677,27 @@ def _attach_corroboration(items: list[dict], findings) -> list[dict]:
     `count >= 3 therefore DANGEROUS` policy baked into the panel would duplicate a
     decision this engine deliberately leaves to the judge, and this module's own
     escalate-only/never-lower authority model already governs what a verdict can do).
+
+    B-669: `subject_determinable` is False exactly when THIS item's own `target`
+    equals its own `finding_id` -- the same sentinel `_target_from_evidence` uses
+    internally, read back off the item dict rather than re-derived from a Finding,
+    since not every packet item corresponds to one (the vet/content-ring items build
+    `target` from a skill name directly, never through `_target_from_evidence`, and
+    for those this is always True). `count`/`check_ids` stay `0`/`[]` in that case --
+    unavoidable, since there IS no group to report -- but a consumer can no longer
+    confuse that with "a real target that measurably corroborates with nothing",
+    which is what happened before this field existed: both read as `count: 0`.
     """
     groups = _corroboration_groups(findings)
     for item in items:
-        ids = groups.get(item["target"], [])
-        item["corroboration"] = {"count": len(ids), "check_ids": ids, "scope": "target"}
+        no_subject = item.get("target") == item.get("finding_id")
+        ids = [] if no_subject else groups.get(item["target"], [])
+        item["corroboration"] = {
+            "count": len(ids),
+            "check_ids": ids,
+            "scope": "target",
+            "subject_determinable": not no_subject,
+        }
     return items
 
 
@@ -737,7 +773,20 @@ def _item_from_finding(f) -> dict:
     # would change what a user sees in their own report to fix a problem that only exists
     # on the way out to a model.
     target = _target_from_evidence(f)
-    field_paths = _config_field_paths(f)
+    # F-166 track 1: the STRUCTURED channel (Finding.config_field_paths, a check's own
+    # dig() call-site literal, set at ~9 UNKNOWN-producing checks that have nothing else
+    # to show — see catalog.py's field comment) comes first, since it is set precisely
+    # where evidence is empty and _config_field_paths(f) below would otherwise find
+    # nothing. The evidence-derived list is appended after (deduplicated) for the FAIL/
+    # WARN population that already carries a field-path-prefixed evidence line — neither
+    # channel makes the other redundant, and a finding could in principle carry both.
+    # B-386's lesson again: a frozenset's element type is a hint, not an enforcement, so
+    # stringify BEFORE sorting -- sorted() on a mixed str/int set raises TypeError, which
+    # would take the whole packet down over one malformed producer.
+    field_paths = list(dict.fromkeys((
+        *sorted(str(p) for p in (getattr(f, "config_field_paths", None) or ())),
+        *_config_field_paths(f),
+    )))[:6]
     # C-284/C-361: engine-authored facts only, never copied from prose. Always a
     # dict (empty when nothing could be safely extracted).
     safe_facts: dict = {}
@@ -882,6 +931,75 @@ def _is_borderline(f) -> bool:
     )
 
 
+# B-804: the two engine-authored, canonical strings every config-surface check already
+# emits when it cannot read openclaw.json at all -- `checks/_shared._config_unreadable`'s
+# one literal string (present-but-unparseable/unreadable, ~9 call sites) and the
+# "No openclaw.json found" prefix its ~11 sibling per-check branches share (absent
+# entirely). Both are plain string literals in OUR OWN source, never built from skill
+# text or a config value -- the same engine-authored guarantee `_ID_QUESTIONS`/
+# `_RULE_QUESTIONS` already lean on -- so anchoring on them cannot be spoofed by
+# attacker-controlled content the way matching on a keyword in `detail` in general
+# would be.
+_CONFIG_BLIND_DETAIL_PREFIXES = (
+    "No openclaw.json found",
+    "openclaw.json present but unparseable/unreadable",
+)
+
+# Collapsing a single item would only rename it (its real check id moves from
+# `finding_id` into `safe_facts.collapsed_finding_ids`) with nothing gained — the flood
+# this exists to prevent only appears once several checks share the exact same cause.
+_CONFIG_BLIND_COLLAPSE_MIN = 2
+
+_CONFIG_BLIND_REASON_TEXT = {
+    "absent": "no openclaw.json (or legacy clawdbot.json) was found in the audited home",
+    "unreadable": "openclaw.json is present but could not be parsed/read",
+}
+
+
+def _config_blind_only_cause(f) -> bool:
+    """True when *f*'s own ``detail`` says the SOLE reason it is UNKNOWN is that
+    openclaw.json could not be read this run at all -- never a status/id heuristic,
+    so an UNKNOWN with a genuinely different cause (a disk-based skill scan, a
+    trajectory read, a B62/taint item -- none of which read `detail` this way) can
+    never match by construction.
+    """
+    detail = getattr(f, "detail", None)
+    return isinstance(detail, str) and detail.startswith(_CONFIG_BLIND_DETAIL_PREFIXES)
+
+
+def _config_blind_collapsed_item(reason: str | None, finding_ids: list) -> dict:
+    """B-804: one disclosed, run-level packet item standing in for every UNKNOWN whose
+    sole cause is the same missing/unreadable config, instead of one near-identical
+    item per check flooding the packet (a real incident measured 157-174 such items,
+    nearly all of them the generic "could not be automatically resolved" question).
+
+    Nothing is silently dropped: `safe_facts.collapsed_finding_ids` names every id this
+    item stands in for. The question steers a judge toward the one thing actually worth
+    confirming -- that the host genuinely has no OpenClaw config, or that the audit was
+    pointed at the wrong home -- rather than asking it to adjudicate the same fact 150+
+    times over.
+    """
+    reason_text = _CONFIG_BLIND_REASON_TEXT.get(reason, "openclaw.json could not be read this run")
+    ids = sorted(set(finding_ids))
+    return {
+        "finding_id": "CONFIG_BLIND",
+        "target": "audit run",
+        "redacted_evidence": redact(
+            f"{len(ids)} check(s) returned UNKNOWN for this single reason: {reason_text}."
+        ),
+        "engine_disposition": UNKNOWN,
+        "question": redact(
+            f"{len(ids)} config-dependent check(s) could not be assessed because "
+            f"{reason_text} -- there is nothing to read for any of them individually. "
+            "Confirm this host genuinely has no OpenClaw config (or that the audit was "
+            "pointed at the wrong home) rather than judging each one. "
+            "[SAFE / SUSPICIOUS / DANGEROUS + reason]"
+        ),
+        "verdict_schema": _VERDICT_SCHEMA,
+        "safe_facts": {"collapsed_finding_ids": ids, "collapsed_count": len(ids)},
+    }
+
+
 def _with_documented_shape(items: list) -> list:
     """B-571: every packet item carries `safe_facts`, even when it is empty.
 
@@ -971,20 +1089,43 @@ def build_judge_packet(ctx, findings) -> list[dict]:
     results in _FN_PRONE_WARN_IDS. Does not re-run any check and never alters a
     Finding's status/severity/score. Deterministic: same inputs always sort to
     the same output order, regardless of dict-iteration order upstream.
+
+    B-804: on a config-blind run (``scoring._config_blind_signal`` -- the same
+    structural ``ctx.config_found``/``ctx.config_parse_error`` signal the score's own
+    CONFIG_BLIND_CAP reads, never a text/keyword match on its own), the UNKNOWNs whose
+    *own* ``detail`` says the sole cause is that missing/unreadable config are folded
+    into one disclosed run-level item (see :func:`_config_blind_collapsed_item`)
+    instead of flooding the packet with 150+ near-identical items. A run with config
+    found is completely unaffected -- the gate is the structural signal, not the
+    per-item text match alone.
     """
+    from .scoring import _config_blind_signal  # noqa: PLC0415 — see the module note on layering
+    config_blind, config_blind_reason = _config_blind_signal(ctx)
+
     items: list[dict] = []
+    config_blind_candidates: list[tuple[str, dict]] = []
     for f in (findings or []):
         if not _is_borderline(f):
             continue
         item = _item_from_finding(f)
         # C-361: scoped to this population only -- the B62/recovered-taint/env-auth
         # sources below always carry real evidence by construction.
-        if _is_judgeable(item, f):
-            items.append(item)
+        if not _is_judgeable(item, f):
+            continue
+        if config_blind and _config_blind_only_cause(f):
+            config_blind_candidates.append((f.id, item))
+            continue
+        items.append(item)
 
     items.extend(_b62_items(ctx))
     items.extend(_recover_dropped_taint(ctx))
     items.extend(_env_auth_kwarg_items(ctx))
+
+    if len(config_blind_candidates) >= _CONFIG_BLIND_COLLAPSE_MIN:
+        items.append(_config_blind_collapsed_item(
+            config_blind_reason, [fid for fid, _item in config_blind_candidates]))
+    else:
+        items.extend(item for _fid, item in config_blind_candidates)
 
     items = _attach_corroboration(items, findings)
     items = _with_documented_shape(items)
@@ -1059,9 +1200,27 @@ def build_bundle_template() -> dict:
                     "caps THIS run but is never written to history/trend/baseline, because "
                     "an unseeded token is not reproducible (F-155)."
                 ),
+                # F-193: optional. A canary verdict is cross-checked against this
+                # agent's own local trajectory log when one is readable — omit this
+                # entirely and the audited home's own sidecars are scanned
+                # automatically; there is nothing to fill in for the common case.
+                # Set ONLY when the run used a non-default session or an explicit
+                # trajectory file the agent wants pointed at directly (a path outside
+                # --home is ignored, not followed).
+                "trajectory": {
+                    "sessionId": "optional — narrows the scan to one session",
+                    "path": "optional — an explicit .trajectory.jsonl, must be inside --home",
+                },
                 "verdicts": [{
                     "tool": "canary",
-                    "id": "canary",
+                    # F-193: the bare tool name ("canary") is NOT a valid id — that
+                    # exact shape is what a forged submission used and is now
+                    # rejected. The real id is whatever the harness itself printed:
+                    # e.g. PI-01 (redteam), DR-07 (dryrun), MT-02 (multiturn), or the
+                    # CLAWSECCHECK-CANARY-... token canary showed you.
+                    "id": "the real scenario id/token the harness printed, e.g. PI-01"
+                          " (redteam) or CLAWSECCHECK-CANARY-... (canary) — not the"
+                          " bare tool name",
                     "verdict": " | ".join(sorted(_LIVE_TEST_VERDICTS)),
                 }],
             },

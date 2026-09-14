@@ -3,6 +3,8 @@
     "bind": "127.0.0.1:8080",
     "auth": {"mode": "token", "token": "123456789012345678901234"}
   },
+  "tools": { "sessions": { "visibility": "self" } },
+  "session": { "dmScope": "per-peer" },
   "channels": {
     "telegram": {
       "dmPolicy": "allowlist",

@@ -832,7 +832,9 @@ def test_b55_widening_alone_warns_not_pass_not_fail_on_open_channel(tmp_path):
     assert f.status == WARN, f.detail
     assert f.status != FAIL
     assert f.scored is False
-    assert any("tools.profile widening" in e or "B-409" in e for e in f.evidence)
+    # The evidence's real shape (never matched the tracker-id-only fallback this
+    # assertion used to fall back on -- see git history if the wording moves again).
+    assert any("widens beyond" in e and "tools.profile" in e for e in f.evidence)
 
 
 def test_b55_widening_stays_pass_when_no_channel_declared_and_gated(tmp_path):

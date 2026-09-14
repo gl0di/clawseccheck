@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 
 import pytest
-from _distgrounding import dist_file, require_dist
+from _distgrounding import _JS_EXTS, dist_file, require_dist
 
 from clawseccheck.checks import _shared
 from clawseccheck.checks._shared import (
@@ -253,7 +253,10 @@ def test_sessions_history_is_still_described_as_sanitized():
     pattern = re.compile(r'SESSIONS_HISTORY_TOOL_DISPLAY_SUMMARY\s*=\s*"([^"]*)"')
     dist = require_dist()
     found = []
-    for path in sorted(dist.rglob("*.js")):
+    # B-784: `*.js` alone made this read "the constant is gone" on 2026.9.3, which is the
+    # loudest wrong answer this guard has — it names a REMOVAL. The constant was there,
+    # in four `.mjs` bundles. Extensions come from _distgrounding so the two cannot drift.
+    for path in sorted(p for ext in _JS_EXTS for p in dist.rglob("*" + ext)):
         m = pattern.search(path.read_text(encoding="utf-8", errors="replace"))
         if m:
             found.append((path.name, m.group(1)))

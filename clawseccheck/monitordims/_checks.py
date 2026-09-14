@@ -15,6 +15,28 @@ from ..catalog import (  # noqa: F401
 )
 from ._shared import NOTE_INSPECTION_CAPPED, NOTE_UNDETERMINED  # noqa: F401
 
+_SEVERITY_RANK = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+
+def _capped(severity: str, ceiling: str) -> str:
+    return severity if _SEVERITY_RANK.index(severity) <= _SEVERITY_RANK.index(ceiling) else ceiling
+
+
+def _version_disclaimer(version_boundary: "tuple | None") -> str:
+    """B-765: a check transition that crosses a ClawSecCheck version boundary
+    may be the tool's own logic changing rather than the user's config. Never call this
+    "fabricated" -- the verdict genuinely differs between the two runs; nothing is
+    invented. What is wrong, absent this disclosure, is the ATTRIBUTION a reader makes."""
+    kind, prev_ver, curr_ver = version_boundary
+    if kind == "known":
+        return (f" Possibly attributable to a ClawSecCheck upgrade rather than a config "
+                f"change: your saved baseline was written by ClawSecCheck v{prev_ver}, "
+                f"this run is v{curr_ver}, and this check's own logic can change between "
+                f"versions.")
+    return (" Possibly attributable to a ClawSecCheck upgrade rather than a config change: "
+            "your saved baseline predates this build's own version-tracking, so whether "
+            "ClawSecCheck itself changed between the two runs cannot be ruled out.")
+
 
 def _diff_check_transitions(
         _check_sev,
@@ -25,6 +47,7 @@ def _diff_check_transitions(
         _newly_visible,
         _reasons_known,
         _same_scope_flags,
+        _version_boundary,
         _went_dark,
         alerts,
         cc,
@@ -98,8 +121,12 @@ def _diff_check_transitions(
             # audit renders the same A1 as `[X] CRITICAL`, so the tool was contradicting
             # itself about the same finding. "HIGH" stays the fallback for a cid absent
             # from the catalog, where there is no severity to read.
-            alerts.append((getattr(BY_ID[cid], "severity", "HIGH") if cid in BY_ID else "HIGH",
-                           f"Now FAILING: {title}."))
+            _sev = getattr(BY_ID[cid], "severity", "HIGH") if cid in BY_ID else "HIGH"
+            _msg = f"Now FAILING: {title}."
+            if _version_boundary:
+                _sev = _capped(_sev, "MEDIUM")
+                _msg += _version_disclaimer(_version_boundary)
+            alerts.append((_sev, _msg))
             # Honest labelling — what the prev_blind guard above does and does NOT fix.
             #
             # CLOSED here: no drift alert derived from a blind run's checks dict can reach
@@ -152,24 +179,29 @@ def _diff_check_transitions(
               and pc.get(cid) == PASS and status in (WARN, UNKNOWN)):
             title = BY_ID[cid].title if cid in BY_ID else cid
             if status == WARN:
-                alerts.append((
-                    "MEDIUM",
-                    f"No longer passing: {title} — was PASS, now WARN. The overall score "
-                    "may not move if it is already capped by an open FAIL, so an unchanged "
-                    "grade does not mean this did not get worse.",
-                ))
+                _sev = "MEDIUM"
+                _msg = f"No longer passing: {title} — was PASS, now WARN."
+                if _version_boundary:
+                    _sev = _capped(_sev, "LOW")
+                    _msg += _version_disclaimer(_version_boundary)
+                _msg += (" The overall score may not move if it is already capped by an "
+                         "open FAIL, so an unchanged grade does not mean this did not get "
+                         "worse.")
+                alerts.append((_sev, _msg))
             else:
                 # UNKNOWN is not merely "less information": an UNKNOWN check drops out of
                 # the score DENOMINATOR entirely (scoring.py), so making a check
                 # undeterminable can raise the displayed score. That makes it worth saying
                 # out loud rather than treating as a neutral loss of coverage.
-                alerts.append((
-                    "MEDIUM",
-                    f"No longer determinable: {title} — was PASS, now UNKNOWN. This check "
-                    "is excluded from the score while UNKNOWN, so coverage dropped without "
-                    "the grade reflecting it. Confirm the state it inspects is still "
-                    "readable.",
-                ))
+                _sev = "MEDIUM"
+                _msg = f"No longer determinable: {title} — was PASS, now UNKNOWN."
+                if _version_boundary:
+                    _sev = _capped(_sev, "LOW")
+                    _msg += _version_disclaimer(_version_boundary)
+                _msg += (" This check is excluded from the score while UNKNOWN, so coverage "
+                         "dropped without the grade reflecting it. Confirm the state it "
+                         "inspects is still readable.")
+                alerts.append((_sev, _msg))
 
         # B-500: a check that already carried a verdict and has now gone dark. Strictly
         # worse than the verdict staying put — an open FAIL that becomes UNKNOWN stops

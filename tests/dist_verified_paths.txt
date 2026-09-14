@@ -12,12 +12,14 @@
 # Regenerate ONLY on a machine with the matching OpenClaw installed, as part of the
 # upgrade protocol's re-baseline step. Hand-adding a line here defeats the guard.
 #
-# openclaw-version: 2026.9.2
+# openclaw-version: 2026.9.4
 #
+acp.runtime.installCommand
 agents.defaults.elevatedDefault
 agents.defaults.embeddedAgent.projectSettingsPolicy
 agents.defaults.heartbeat
 agents.defaults.model
+agents.defaults.models
 agents.defaults.sandbox.docker.binds
 agents.defaults.sandbox.docker.dangerouslyAllowContainerNamespaceJoin
 agents.defaults.sandbox.docker.dangerouslyAllowExternalBindSources
@@ -35,6 +37,8 @@ auth.profiles
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
 channels
 channels.defaults.contextVisibility
+cloudWorkers.preparedPool.maxTotal
+cloudWorkers.profiles
 commands.allowFrom
 commands.bash
 commands.config
@@ -55,15 +59,24 @@ gateway.auth.trustedProxy.allowUsers
 gateway.auth.trustedProxy.requiredHeaders
 gateway.auth.trustedProxy.userHeader
 gateway.bind
+gateway.controlUi
 gateway.controlUi.allowExternalEmbedUrls
 gateway.controlUi.allowedOrigins
 gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback
 gateway.controlUi.dangerouslyDisableDeviceAuth
+gateway.controlUi.embedSandbox
 gateway.customBindHost
+gateway.http.endpoints.chatCompletions
+gateway.http.endpoints.chatCompletions.enabled
+gateway.http.endpoints.chatCompletions.images
+gateway.http.endpoints.chatCompletions.images.allowUrl
+gateway.http.endpoints.chatCompletions.images.urlAllowlist
 gateway.nodes.commands.allow
 gateway.nodes.commands.deny
 gateway.nodes.pairing.autoApproveCidrs
 gateway.port
+gateway.remote
+gateway.remote.sshHostKeyPolicy
 gateway.tailscale.mode
 gateway.terminal.enabled
 gateway.terminal.shell
@@ -82,6 +95,7 @@ hooks.internal.load.extraDirs
 hooks.mappings
 hooks.token
 logging.file
+memory.search.remote
 meta.lastTouchedVersion
 models.providers
 plugins.allow
@@ -92,8 +106,11 @@ plugins.slots
 proxy
 proxy.enabled
 proxy.proxyUrl
+relative:agentRuntime.id
 relative:heartbeat
 relative:mcp.servers
+relative:memory.search.remote
+relative:models
 relative:sandbox.docker.dangerouslyAllowContainerNamespaceJoin
 relative:sandbox.docker.dangerouslyAllowExternalBindSources
 relative:sandbox.docker.dangerouslyAllowReservedContainerTargets
@@ -104,13 +121,22 @@ relative:tools.codeMode
 relative:tools.deny
 relative:tools.exec
 relative:tools.fs.workspaceOnly
+relative:tools.message.crossContext
+relative:tools.message.crossContext.allowAcrossProviders
 relative:tools.profile
 secrets.providers
 security.audit.suppressions
 security.installPolicy
 session.dmScope
-skills.workshop.allowSymlinkTargetWrites
+session.resetTriggers
+session.scope
+skills.load.allowSymlinkTargets
+skills.load.extraDirs
+skills.load.watch
 skills.workshop.approvalPolicy
+tools.agentToAgent
+tools.agentToAgent.allow
+tools.agentToAgent.enabled
 tools.allow
 tools.alsoAllow
 tools.codeMode
@@ -127,11 +153,13 @@ tools.exec.safeBins
 tools.exec.security
 tools.exec.strictInlineEval
 tools.fs.workspaceOnly
+tools.message.crossContext
+tools.message.crossContext.allowAcrossProviders
 tools.profile
-tools.sessions
 tools.web
 tools.web.fetch.enabled
 tools.web.fetch.maxRedirects
 tools.web.fetch.useTrustedEnvProxy
 update.auto
 update.auto.enabled
+update.channel

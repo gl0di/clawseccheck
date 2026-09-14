@@ -398,3 +398,24 @@ def test_meta_is_scored_supply_chain():
     assert m.scored is True
     assert m.surface == "skills"
     assert m.confidence == "HIGH"
+
+
+def test_unreadable_skill_dir_does_not_crash(tmp_path):
+    """B-767: Path.is_file() on an entry INSIDE a chmod-000 skill dir raises
+    PermissionError (not swallowed — only ENOENT/ENOTDIR/EBADF/ELOOP are). The
+    lock.json-recorded demo-skill record must still verify; the unrelated locked
+    dir is skipped, not treated as tampering or as an unlocated record."""
+    home = _copy_clean(tmp_path)
+    locked = home / "skills" / "locked"
+    (locked / ".clawhub").mkdir(parents=True)
+    (locked / ".clawhub" / "origin.json").write_text(
+        json.dumps({"slug": "locked", "skillFile": {"path": "SKILL.md", "sha256": "a" * 64}}),
+        encoding="utf-8",
+    )
+    (locked / "SKILL.md").write_text("---\nname: locked\n---\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        finding = check_skill_install_tamper(_ctx(home))
+    finally:
+        locked.chmod(0o700)
+    assert finding.status == PASS, finding.detail

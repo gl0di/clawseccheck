@@ -37,6 +37,16 @@ user's shell nor their cwd:
     python3 ./audit.py        ->  argv[0] = './audit.py'
     clawseccheck              ->  argv[0] = '<...>/bin/clawseccheck'
 
+## B-776: a second reader for `_display_path`, with the opposite need
+
+`display_path_for_delivery()` below exists because `_display_path`'s `~`-collapse — right
+for a human's shell — is wrong for a `MEDIA:<path>` line emitted from inside an OpenClaw
+sandbox: the gateway (not the sandboxed shell) expands that `~` using the HOST's real
+home, producing a path outside the sandbox root that `assertSandboxPath` then rejects.
+The caller (`cli.py`) decides *sandboxed* from `ctx.sandboxed` (collector.py); this module
+still imports nothing from the package — it stays a leaf, the sandboxed/not choice arrives
+as a plain bool.
+
 Read-only, stdlib only. A LEAF: imports nothing from the package.
 """
 
@@ -155,6 +165,31 @@ def _display_path(path: str) -> str:
         rest = resolved[len(home):].lstrip(os.sep)
         return "~/" + shlex.quote(rest) if rest else "~"
     return shlex.quote(resolved)
+
+
+def display_path_for_delivery(path: str, *, sandboxed: bool) -> str:
+    """Path rendering for a string that LEAVES the process — a ``MEDIA:<path>`` line or an
+    attach note — where the host and the sandboxed case need opposite treatment (B-776).
+
+    Host (``sandboxed=False``): byte-identical to `_display_path` — collapse to ``~/...``,
+    because a human types or pastes this string, and a bare absolute path under
+    ``/home/<name>`` leaks the OS username (B-381).
+
+    Sandboxed: the opposite is true, for two independent reasons. First, ``~`` in a
+    ``MEDIA:`` line is expanded by the OPENCLAW GATEWAY, not by the sandboxed shell — and
+    the gateway's own ``os.homedir()`` is the REAL HOST home, not the container's
+    ``/workspace``. A sandboxed run that still collapsed to ``~/...`` would have the
+    gateway re-expand it to a path OUTSIDE the sandbox root, and
+    ``assertSandboxPath`` rejects it ("Path escapes sandbox root") — confirmed in a real
+    transcript as ``attachment_error code=delivery-failed``. Second, there is no username
+    to leak here in the first place: a sandboxed path reads ``/workspace/...``, never
+    ``/home/<real-name>/...``, so returning it absolute costs nothing B-381 cared about.
+    Never switches the HOST case to absolute — that would reopen B-381/B-757 for no
+    sandboxed gain.
+    """
+    if sandboxed:
+        return _resolve(path)
+    return _display_path(path)
 
 
 def command_prefix() -> str:

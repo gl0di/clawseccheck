@@ -20,11 +20,17 @@
     }
   },
   "tools": {
-    "profile": "minimal"
+    "profile": "minimal",
+    "sessions": {
+      "visibility": "self"
+    }
   },
   "models": {
     "main": {
       "provider": "ollama/llama3"
     }
+  },
+  "session": {
+    "dmScope": "per-peer"
   }
 }

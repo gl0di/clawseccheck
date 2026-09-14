@@ -87,6 +87,35 @@ def test_tampered_chain_still_reports_broken_with_its_entry_index(tmp_path, caps
     assert "entry 1" in out
 
 
+def test_broken_chain_discloses_benign_causes_not_just_tampering(tmp_path, capsys):
+    """B-769: BROKEN stays BROKEN (exit 1, same headline) -- an explicit --verify-*
+    request gets a direct answer, per B-582's own reasoning that the passive
+    --trend/--watch-log viewer softens this and an explicit verify command does
+    not. But the bare word must not read as an unqualified accusation: a broken
+    link is also the shape a hand edit or log rotation produces (configjournal.py's
+    own doctrine for a sibling chain, measured 2 of 42 real links broken from
+    exactly those two causes)."""
+    j = _populated_events(tmp_path)
+    rows = [json.loads(x) for x in j.read_text(encoding="utf-8").splitlines() if x.strip()]
+    rows[1]["message"] = "TAMPERED"
+    j.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    rc = main(["--verify-events", "--events", str(j)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Events chain BROKEN" in out, "the headline word and exit code must not soften"
+    assert "not proof of tampering by itself" in out
+    assert "hand edit" in out and "rotation" in out
+
+
+def test_intact_chain_never_carries_the_broken_disclaimer(tmp_path, capsys):
+    j = _populated_events(tmp_path)
+    rc = main(["--verify-events", "--events", str(j)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "not proof of tampering" not in out
+
+
 def test_legacy_rows_keep_their_honest_ok(tmp_path):
     """A real chain whose rows predate chain_hash is NOT the absent case.
 

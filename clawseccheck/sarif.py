@@ -145,6 +145,17 @@ def _build_analysis_completeness(
         # docs/OUTPUT_SCHEMA.md), so unknownCount itself stays the whole count and does
         # not shrink for whatever already consumes it.
         "notApplicableCount": sum(1 for f in findings if getattr(f, "not_applicable", False)),
+        # B-767: `unknownCount` above does not say WHY a check is undetermined, and a
+        # check that CRASHED or timed out (checks/__init__.py's run_all, engine_degraded
+        # findings) reads identically in SARIF to one that simply found no surface to
+        # assess. A CI consumer gating on this file has no way to tell "3 checks are not
+        # applicable to my setup" from "3 checks failed to run". NOT routed through
+        # `undetermined_summary` (report.py): that helper filters to `scored` findings
+        # first, and `_check_error_finding`/`_check_budget_finding` deliberately set
+        # `scored=False` (a crash is not a scored verdict) -- so its own engine_degraded
+        # count is structurally always 0 for the real producer. Counted directly here,
+        # matching report.py's own `_degraded_ids` idiom (the undetermined-summary banner).
+        "engineDegradedCount": sum(1 for f in findings if getattr(f, "engine_degraded", False)),
         "passCount": sum(1 for f in findings if f.status == PASS),
         "warnCount": sum(1 for f in findings if f.status == WARN),
         # B-751: bare `== FAIL` left SKILL_ARCHIVE_PATH_TRAVERSAL (FAIL-weight, not the
@@ -170,6 +181,12 @@ def _build_analysis_completeness(
             "attestation checks require --attest",
         ] + ([self_excluded_line(sorted(self_excluded))] if self_excluded else []),
     }
+    if block["engineDegradedCount"]:
+        block["limitations"].append(
+            f"{block['engineDegradedCount']} check(s) crashed or timed out this run and "
+            "produced no verdict — not the same as a surface confirmed absent; "
+            "re-run with --debug for a traceback"
+        )
     if score is None:
         return block
 

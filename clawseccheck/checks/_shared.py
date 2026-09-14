@@ -21,6 +21,7 @@ from ..catalog import (
 )
 from ..collector import (
     Context,
+    agent_roster,
     dig,
     limit_hits_for,
 )
@@ -40,12 +41,67 @@ from ..collector import (  # noqa: F401
 from ..iocdb import known_bad_host_records as _iocdb_known_bad_host_records
 from ..safeio import walk_dir_safely
 from .. import toolpolicy as _toolpolicy
+from .. import toolgrant as _toolgrant
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist
 
 
 def _is_posix() -> bool:
     return os.name == "posix"
+
+
+def _username_safe_path(path) -> str:
+    """Render an absolute filesystem path with the OS account home collapsed to ``~``,
+    so a Finding's ``detail``/``fix`` prose never carries the operator's username (B-757).
+
+    The plain-prose sibling of ``invocation._display_path``, which does the identical
+    substitution but additionally shell-quotes the remainder — right for a command line,
+    wrong here: a quoted path mid-sentence reads as literal quote characters in a "Why:"
+    line. Not reused directly for that reason, and not imported from ``invocation.py``
+    into a check module regardless — invocation.py is a leaf `command_prefix()`/CLI-facing
+    module, and duplicating this narrow piece keeps the check layer independent of it.
+
+    Unlike ``report._credential_surface_rel`` (the other existing precedent for this
+    problem), this does NOT fall back to the bare basename for a path outside the home:
+    C5/B136 name install-tree and workspace paths that are fine to show in full once the
+    username-bearing prefix is gone, whereas the credential-surface map's stricter
+    fallback protects a narrower, different threat model (an out-of-home credential path
+    leaking through that specific channel).
+
+    Falls back to the resolved path unchanged if ``Path.home()`` cannot be determined
+    (no HOME set, e.g. a stripped-down cron environment) — never raises.
+
+    Only calls ``.resolve()`` — which walks the filesystem, ``lstat``-ing each
+    ancestor to follow symlinks — when *path* actually exists. Some callers (B136)
+    pass a path parsed out of a THIRD PARTY config file, describing a location that
+    need not exist on the machine running this audit at all (every fixture/test path
+    is a synthetic example, never present on disk). Resolving a nonexistent path is
+    still well-defined on POSIX in principle (``strict=False`` just appends whatever
+    doesn't exist, unchanged) — but on macOS, an absolute path's first component can
+    be ``/home``, which is a live *autofs* trigger (``/etc/auto_master`` -> the
+    ``auto_home`` map), not an inert missing directory the way it is on Linux.
+    Touching it via ``lstat`` — which is exactly what the ``.resolve()`` walk does —
+    invokes ``automountd``, so the very same input path can render differently (or,
+    in the worst case, block) depending on what that triggers, breaking the
+    cross-platform finding-fingerprint manifest (C-433-style). Skipping the real
+    filesystem walk for anything not already known to exist sidesteps that
+    trigger entirely while leaving the genuine local-path case — the one this
+    helper exists for — untouched.
+    """
+    try:
+        p = Path(path)
+        p = p.resolve() if p.exists() else Path(os.path.normpath(str(p)))
+    except OSError:
+        p = Path(path)
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        return str(p)
+    try:
+        rest = p.relative_to(home)
+    except ValueError:
+        return str(p)
+    return "~" if str(rest) == "." else f"~/{rest}"
 
 
 def _perms_loose(ctx: Context) -> bool:
@@ -895,6 +951,59 @@ def _retired_key_note(ctx, legacy: str) -> str:
             "newer builds reject it.")
 
 
+# B-783: the build that REMOVED skills.workshop.allowSymlinkTargetWrites from the config
+# schema entirely (not just defaulted it off -- the vendor deleted the field).
+#
+# Unlike _SCHEMA_LEGACY_MAX/_SCHEMA_MODERN_MIN there is no unmeasured window to straddle:
+# 2026.9.2 (key present) and 2026.9.3 (key absent) are CONSECUTIVE releases and both were
+# executed, so one threshold is honest where the 8.1 split needed two. A correction suffix
+# sorts below it -- (2026,9,2,1) < (2026,9,3) -- which is the conservative direction: it
+# keeps a finding we might not need rather than dropping one we do. Grounded against the
+# installed openclaw@2026.9.3 (2026-09-09): safeParse rejects the key at skills.workshop,
+# whose object holds exactly {approvalPolicy, autonomous, maxPending, maxSkillBytes}, and
+# the vendor ships a defineLegacyConfigMigration entry
+# "skills.workshop.allowSymlinkTargetWrites-retired" whose message says Skill Workshop now
+# writes only inside its own directory. HARDENING: the knob was removed, not defaulted open.
+_SYMLINK_KNOB_RETIRED_MIN = (2026, 9, 3)
+
+
+def _workshop_symlink_knob(ctx) -> str:
+    """Does the reader's OpenClaw still READ skills.workshop.allowSymlinkTargetWrites?
+
+    ``"retired"`` / ``"honoured"`` / ``"unknown"`` -- three answers for the same reason
+    ``_openclaw_generation`` has three: "we could not see the build" is not "the build
+    still reads it", and collapsing them manufactures a claim. Only ``"retired"`` may
+    silence anything; the other two both preserve today's behaviour exactly, so a wrong
+    answer in that direction costs nothing that is not already being paid.
+
+    DELIBERATELY NOT a fourth ``_openclaw_generation`` value: that predicate is compared
+    at some two dozen sites across five modules, most of them ``== "modern"``, and a new
+    member would silently flip every one of them on a 9.3 install.
+
+    Sources are ``_openclaw_generation``'s, in its order and with its asymmetry:
+    ``installed_dist_version`` decides outright, because the installed build is the one
+    that reads or ignores the key; ``meta.lastTouchedVersion`` is consulted only when it
+    lands at 2026.9.3 or later. A stamp of 2026.9.2 proves a 9.2 build once SAVED the
+    config, not that 9.2 is installed now -- reading it as "honoured" is how you keep
+    warning the very user who has already upgraded.
+
+    THE SPELLING IS NOT EVIDENCE HERE, unlike ``check_skill_workshop_autonomy``'s own
+    fallback for the .mode/.enabled split. Writing ``autonomous.mode`` proves the config
+    was authored for 2026.8.1+, which says nothing about 9.3. And the PRESENCE of
+    allowSymlinkTargetWrites is not evidence of a pre-9.3 build either: ``doctor --fix``
+    DELETES a stale line rather than erroring on it, so it survives an upgrade untouched
+    -- which is the entire premise of this bug.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        return "retired" if installed >= _SYMLINK_KNOB_RETIRED_MIN else "honoured"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _SYMLINK_KNOB_RETIRED_MIN:
+        return "retired"
+    return "unknown"
+
+
 def _meta(cid: str):
     return BY_ID[cid]
 
@@ -1146,6 +1255,7 @@ def _finding(
     sub_signals=None,
     engine_degraded=False,
     destination_hosts=None,
+    config_field_paths=None,
 ) -> Finding:
     """*scored*: per-finding override of CheckMeta.scored, same shape as *severity*.
 
@@ -1173,6 +1283,10 @@ def _finding(
 
     *destination_hosts* (B-556): per-finding, same shape — see Finding.destination_hosts.
     Defaults to an empty frozenset when omitted; every existing caller is unaffected.
+
+    *config_field_paths* (F-166 track 1): per-finding, same shape — see
+    Finding.config_field_paths. Defaults to an empty frozenset when omitted; every
+    existing caller is unaffected.
     """
     m = _meta(cid)
     return Finding(
@@ -1191,6 +1305,7 @@ def _finding(
         sub_signals=frozenset(sub_signals) if sub_signals else frozenset(),
         engine_degraded=engine_degraded,
         destination_hosts=frozenset(destination_hosts) if destination_hosts else frozenset(),
+        config_field_paths=frozenset(config_field_paths) if config_field_paths else frozenset(),
     )
 
 
@@ -1788,6 +1903,73 @@ def _external_input_channels(cfg: dict) -> list[str]:
     return out
 
 
+# B371/B372 (C-525): container-key vocabulary for per-conversation mention-gate /
+# bot-admission overrides. Grounded programmatically, not read by eye: the installed
+# dist (openclaw@2026.9.3) ships every bundled channel plugin's config JSON Schema in
+# one runtime-parsed registry (`dist/ids-*.mjs`'s `RAW_BUNDLED_CHANNEL_CONFIG_METADATA`,
+# an array of string chunks joined then `JSON.parse`d — 27 plugins: a2a, buzz,
+# clickclack, discord, feishu, googlechat, imessage, irc, line, matrix, mattermost,
+# msteams, nextcloud-talk, nostr, qa-channel, raft, reef, signal, slack, sms,
+# synology-chat, telegram, tlon, twitch, whatsapp, zalo, zalouser). Walking all 27
+# schemas' `properties` recursively for requireMention/chatmode/allowBots (script, not
+# manual reading — a blob this size cannot be eyeballed reliably) found every
+# per-conversation override lives under exactly one of the five container keys below,
+# in one of three shapes:
+#   - flat: an entry under the container carries the field directly (most providers'
+#     ``groups.*``/``rooms.*``; Discord's ``guilds.*``; Slack's ``channels.*``).
+#   - one level deeper: Discord's ``guilds.*.channels.*`` and Telegram's
+#     ``groups.*.topics.*`` / ``direct.*.topics.*``.
+# No provider needs a hardcoded branch (Golden Rule #6): the walk below just checks
+# whether each key is PRESENT with a dict-of-dicts shape and recurses if so, so an
+# unfamiliar 28th provider that reuses one of these container names is covered for
+# free, and one that doesn't simply contributes no scopes beyond its own root.
+# ``chatmode`` is deliberately checked only at the root/account level, never inside a
+# nested container — grounded fact, not an oversight: of the 27 schemas, only
+# Mattermost declares ``chatmode`` at all, and even there it never appears inside
+# ``groups.*``.
+_MENTION_GATE_CONTAINERS = ("groups", "rooms", "guilds", "channels", "direct")
+_MENTION_GATE_SUBCONTAINERS = {
+    "groups": ("topics",),
+    "guilds": ("channels",),
+    "direct": ("topics",),
+}
+
+
+def _mention_gate_scopes(node: dict) -> list:
+    """``[(label, scope_dict), ...]`` for *node* itself and every per-conversation
+    override scope nested under it, per the container vocabulary above.
+
+    *node* must already be a single RESOLVED channel node (the channel root, or one
+    merged account from ``_resolved_channel_nodes``) — this only walks conversation-
+    scoped nesting WITHIN one already-resolved node; it does not itself merge
+    accounts. ``label`` is ``""`` for *node* itself, else a dotted path like
+    ``"groups.*"`` or ``"guilds.123.channels.456"`` naming the scope for evidence
+    text. A container/entry that isn't the expected dict shape (schema drift, or a
+    provider that simply doesn't use that container) contributes nothing for that
+    branch rather than raising — the caller decides what an absent scope means.
+    """
+    if not isinstance(node, dict):
+        return []
+    scopes = [("", node)]
+    for container in _MENTION_GATE_CONTAINERS:
+        entries = node.get(container)
+        if not isinstance(entries, dict):
+            continue
+        for key, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            scopes.append((f"{container}.{key}", entry))
+            for sub in _MENTION_GATE_SUBCONTAINERS.get(container, ()):
+                sub_entries = entry.get(sub)
+                if not isinstance(sub_entries, dict):
+                    continue
+                for sub_key, sub_entry in sub_entries.items():
+                    if not isinstance(sub_entry, dict):
+                        continue
+                    scopes.append((f"{container}.{key}.{sub}.{sub_key}", sub_entry))
+    return scopes
+
+
 # B-072: cap recursion depth for config walkers so a pathologically deep (but
 # validly-parsed) structure degrades gracefully instead of raising an uncaught
 # RecursionError. High enough that it never affects any real-world config shape.
@@ -1817,6 +1999,101 @@ def _secret_paths(obj, prefix="", depth=0) -> list[str]:
     return found
 
 
+def _agent_tools_widenings(cfg: dict) -> "tuple[list, list]":
+    """Per-agent ``tools.alsoAllow`` entries and per-agent powerful ``tools.profile``
+    values, each as ``(evidence_label, value)`` pairs — the two vendor-real WIDENING
+    layers ``_enabled_tools()`` / ``_enabled_tools_sources()`` / ``_tool_hint_sources()``
+    union in on top of the global config (B-672).
+
+    A per-agent ``tools.alsoAllow`` is not a separate AND-ed policy: the real resolver
+    merges it directly into the resolved profile policy, ``??``-replacing (not adding
+    to) a global ``tools.alsoAllow`` (``resolveConfiguredToolPolicies`` — see
+    ``toolgrant.py``'s module docstring for the full resolution order and dist
+    citations, re-grounded against the installed 2026.9.4). A per-agent
+    ``tools.profile`` is the SAME kind of ``??`` coalesce and can likewise widen past a
+    weaker global profile. Neither is symmetric with a per-agent EXPLICIT
+    ``tools.allow``, which is a separate, independently AND-ed layer that can only
+    NARROW — deliberately not read here (B-672's K3 negative control: reading it would
+    manufacture a capability the real resolver never grants). Mirrors
+    ``checks/_capability.py``'s ``_agent_profile_widenings``/``_b68_fs_tools_granted``,
+    which established this exact distinction for the filesystem-tool family; this is
+    the same fix for the document-wide "what tools does this config expose" question
+    every ``_enabled_tools()`` consumer asks.
+
+    Both returns are unions across the WHOLE roster: these callers ask "could ANY
+    agent have this", not a per-agent one, so which agent contributed a token matters
+    only for the evidence string, never for the verdict.
+
+    Also reads ``agents.defaults.tools`` — the second DECLARED per-agent surface
+    ``_b68_fs_tools_granted`` already models (its own docstring's "S3" section) — and
+    for the identical reason: ``resolveEffectiveToolPolicy`` falls back to it as the
+    resolved ``agentTools`` ONLY when the config declares NO roster key at all (dist
+    lines 238-239), so it is a live, widening scope precisely when there is no roster
+    entry to read instead. Gated on the roster KEY being declared, not on the roster
+    RESOLVING non-empty — an ``agents.entries: {}`` config still has a roster property,
+    and the real resolver ignores ``agents.defaults.tools`` there (verified by
+    executing ``toolgrant.granted()``, which already carries this distinction as
+    ``_has_agent_roster``).
+
+    C-135: an ``alsoAllow`` candidate is kept only when ``toolgrant.granted()`` — the
+    already battery-tested port of the full resolver, deny included — agrees it is
+    actually granted at that scope. A first version of this fix echoed every
+    ``alsoAllow`` literal unconditionally and was caught firing on
+    ``tools.alsoAllow: ["x"], tools.deny: ["x"]`` (global scope) and its per-agent/
+    per-``agents.defaults`` equivalents: measured, each one flips `check_egress`/
+    `check_human_approval` to a false WARN over a token the runtime denies outright.
+    The pre-existing ``tools.allow`` literal echo below is NOT filtered the same way —
+    that coarseness (it has never deny-filtered, at any scope) predates this task and
+    is out of its scope; only the NEW surface this fix adds is held to the stricter
+    standard, because only new surface can create a new conviction (per this task's
+    own C-135 charge).
+    """
+    also_allow: list = []
+    powerful_profiles: list = []
+    roster = agent_roster(cfg)
+    for agent in roster:
+        entry_tools = agent.entry.get("tools") if isinstance(agent.entry, dict) else None
+        if not isinstance(entry_tools, dict):
+            continue
+        name = agent.entry.get("name") or agent.id or agent.index
+        also = entry_tools.get("alsoAllow")
+        if isinstance(also, list):
+            for t in also:
+                if _toolgrant.granted(cfg, str(t), agent.id):
+                    also_allow.append((agent.labelled(name), t))
+        profile = entry_tools.get("profile")
+        if isinstance(profile, str) and profile and _profile_is_powerful(profile):
+            powerful_profiles.append((agent.labelled(name), profile))
+    agents_block = cfg.get("agents") if isinstance(cfg, dict) else None
+    has_roster_key = isinstance(agents_block, dict) and (
+        "entries" in agents_block or "list" in agents_block
+    )
+    if not has_roster_key:
+        default_tools = dig(cfg, "agents.defaults.tools")
+        if isinstance(default_tools, dict):
+            also = default_tools.get("alsoAllow")
+            if isinstance(also, list):
+                for t in also:
+                    if _toolgrant.granted(cfg, str(t), _toolgrant.GLOBAL_SCOPE):
+                        also_allow.append(("agents.defaults.tools", t))
+            profile = default_tools.get("profile")
+            if isinstance(profile, str) and profile and _profile_is_powerful(profile):
+                powerful_profiles.append(("agents.defaults.tools", profile))
+    return also_allow, powerful_profiles
+
+
+def _global_also_allow_granted(cfg: dict) -> list:
+    """The GLOBAL ``tools.alsoAllow`` literals that ``toolgrant.granted()`` confirms are
+    actually granted (deny included) — the single source both ``_enabled_tools()`` and
+    ``_tool_hint_sources()`` read, so the two can never again drift the way a first
+    version of B-672 let them (see ``_agent_tools_widenings``'s C-135 note for the
+    measured false-WARN this closes)."""
+    return [
+        t for t in (dig(cfg, "tools.alsoAllow") or [])
+        if _toolgrant.granted(cfg, str(t), _toolgrant.GLOBAL_SCOPE)
+    ]
+
+
 def _enabled_tools(cfg: dict) -> list[str]:
     tools = []
     allow = dig(cfg, "tools.elevated.allowFrom")
@@ -1828,18 +2105,41 @@ def _enabled_tools(cfg: dict) -> list[str]:
     exec_host = dig(cfg, "tools.exec.host")
     exec_mode = dig(cfg, "tools.exec.mode")
     sandbox_mode = dig(cfg, "agents.defaults.sandbox.mode")
+    agent_also_allow, agent_powerful_profiles = _agent_tools_widenings(cfg)
     if (
         exec_security is not None
         or exec_host is not None
         or exec_mode is not None
         or _profile_is_powerful(dig(cfg, "tools.profile"))
+        or agent_powerful_profiles  # B-672: a per-agent tools.profile can widen past a weaker global one
         or (sandbox_mode is not None and sandbox_mode != "off")
     ):
         tools.append("exec")
-    # collect any explicitly listed tool names
-    listed = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
-    if isinstance(listed, list):
-        tools.extend(str(t) for t in listed)
+    # Collect any explicitly listed tool names. B-672: gateway.tools.allow is NOT a
+    # grant — the real resolver only ever uses it to remove entries from a fixed
+    # HTTP-surface tool-deny list, never to add a tool to an agent's policy (see
+    # toolgrant.py's module docstring) — so it is no longer read as a tools.allow
+    # fallback here; doing so invented capabilities a config never actually granted.
+    # tools.alsoAllow (global, and per agent via _agent_tools_widenings) IS a real
+    # grant field the previous version missed entirely. The global alsoAllow list is
+    # toolgrant-verified for the same C-135 reason _agent_tools_widenings' own
+    # per-agent/defaults reads are: a bare `tools.alsoAllow: ["x"], tools.deny: ["x"]`
+    # must not echo "x" as granted. tools.allow itself is NOT filtered this way —
+    # that coarseness is pre-existing at every scope and out of this task's charge.
+    listed: list = []
+    seen: set = set()
+    for src in (
+        dig(cfg, "tools.allow"),
+        _global_also_allow_granted(cfg),
+        [t for _, t in agent_also_allow],
+    ):
+        if isinstance(src, list):
+            for t in src:
+                s = str(t)
+                if s not in seen:
+                    seen.add(s)
+                    listed.append(s)
+    tools.extend(listed)
     return tools
 
 
@@ -1869,10 +2169,12 @@ def _enabled_tools_sources(cfg: dict) -> dict:
 
     Mirrors ``_enabled_tools()``'s own conditions exactly (same fields, same order) —
     see that function. "exec" here is the BROADER signal it uses (includes
-    ``agents.defaults.sandbox.mode`` != "off"), which is why B-064's own comment on
-    ``_trifecta_legs`` says the outbound leg's ``_hint(tools, OUTBOUND_TOOL_HINTS)`` term
-    is "intentionally left unchanged" — narrower ``_real_exec_enabled()`` (see
-    ``_exec_enabled_sources`` below) is what feeds the sensitive leg instead.
+    ``agents.defaults.sandbox.mode`` != "off" and, since B-672, a per-agent
+    ``tools.profile`` widening past a weaker global one), which is why B-064's own
+    comment on ``_trifecta_legs`` says the outbound leg's
+    ``_hint(tools, OUTBOUND_TOOL_HINTS)`` term is "intentionally left unchanged" —
+    narrower ``_real_exec_enabled()`` (see ``_exec_enabled_sources`` below) is what
+    feeds the sensitive leg instead.
     """
     out = {}
     if dig(cfg, "tools.elevated.allowFrom"):
@@ -1882,6 +2184,7 @@ def _enabled_tools_sources(cfg: dict) -> dict:
     exec_mode = dig(cfg, "tools.exec.mode")
     profile = dig(cfg, "tools.profile")
     sandbox_mode = dig(cfg, "agents.defaults.sandbox.mode")
+    _, agent_powerful_profiles = _agent_tools_widenings(cfg)
     if exec_security is not None:
         out["exec"] = f"tools.exec.security={exec_security!r}"
     elif exec_host is not None:
@@ -1890,6 +2193,12 @@ def _enabled_tools_sources(cfg: dict) -> dict:
         out["exec"] = f"tools.exec.mode={exec_mode!r}"
     elif _profile_is_powerful(profile):
         out["exec"] = f"tools.profile={profile!r} (a powerful profile)"
+    elif agent_powerful_profiles:
+        label, agent_profile = agent_powerful_profiles[0]
+        out["exec"] = (
+            f"{label}.tools.profile={agent_profile!r} "
+            "(a powerful profile, widening past the global profile)"
+        )
     elif sandbox_mode is not None and sandbox_mode != "off":
         out["exec"] = f"agents.defaults.sandbox.mode={sandbox_mode!r}"
     return out
@@ -1962,10 +2271,11 @@ def _tool_hint_sources(cfg: dict, hints) -> list:
     """``_enabled_tools(cfg)`` entries that satisfy *hints*, attributed to their actual
     config field instead of collapsed to a bool.
 
-    Mirrors ``_hint(_enabled_tools(cfg), hints)`` exactly: the same
-    ``tools.allow OR gateway.tools.allow`` precedence ``_enabled_tools()`` uses (never
-    both — an "or", not a merge), plus the synthetic "elevated"/"exec" tags it injects
-    (see ``_enabled_tools_sources``). So
+    Mirrors ``_hint(_enabled_tools(cfg), hints)`` exactly: the same union of
+    ``tools.allow`` + ``tools.alsoAllow`` (global) + per-agent ``tools.alsoAllow``
+    ``_enabled_tools()`` uses — never ``gateway.tools.allow``, which is not a grant
+    (B-672) — plus the synthetic "elevated"/"exec" tags it injects (see
+    ``_enabled_tools_sources``). So
     ``bool(_tool_hint_sources(cfg, hints)) == _hint(_enabled_tools(cfg), hints)`` always
     holds (pinned by ``test_b493_trifecta_leg_sources.py``).
     """
@@ -1973,11 +2283,16 @@ def _tool_hint_sources(cfg: dict, hints) -> list:
     for tag, source in _enabled_tools_sources(cfg).items():
         if any(h in tag for h in hints):
             out.append(source)
-    listed = dig(cfg, "tools.allow") or dig(cfg, "gateway.tools.allow") or []
-    if isinstance(listed, list):
-        field = "tools.allow" if dig(cfg, "tools.allow") else "gateway.tools.allow"
-        for name in _hint_matches([str(t) for t in listed], hints):
-            out.append(f"{field} entry {name!r}")
+    allow_listed = dig(cfg, "tools.allow")
+    if isinstance(allow_listed, list):
+        for name in _hint_matches([str(t) for t in allow_listed], hints):
+            out.append(f"tools.allow entry {name!r}")
+    for name in _hint_matches([str(t) for t in _global_also_allow_granted(cfg)], hints):
+        out.append(f"tools.alsoAllow entry {name!r}")
+    agent_also_allow, _ = _agent_tools_widenings(cfg)
+    for label, t in agent_also_allow:
+        for name in _hint_matches([str(t)], hints):
+            out.append(f"{label}.tools.alsoAllow entry {name!r}")
     return out
 
 
@@ -2609,6 +2924,134 @@ def _has_approval_gate(cfg: dict) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# B-663: B8 affirmed "Destructive actions require human approval" while a named
+# agent's own `tools.exec` override left it with no gate at all.
+#
+# `_has_approval_gate` above answers the question for the GLOBAL `tools.exec` layer
+# only. OpenClaw resolves the policy a given agent actually runs under by layering
+# `agents.list[].tools.exec` (or the 2026.8.1 `agents.entries` record shape) OVER the
+# global one — `resolveNodeExecConfigPolicy` (dist `daemon-*.mjs`, grounded against the
+# installed openclaw@2026.9.4): `applyExecPolicyLayer(applyExecPolicyLayer(defaults,
+# globalExec), agentExec)`. So an agent can be outside a gate the owner set globally,
+# and the check said the gate held regardless. B-663.
+#
+# The mode-deletion subtlety (re-grounded against 2026.9.4, `exec-policy-Dbl6pUSh.mjs`,
+# unchanged from the citation that originally filed this task against 2026.7.1-2):
+#
+#     function applyExecPolicyLayer(base, layer) {
+#         if (!layer) return base;
+#         if (layer.mode) return {...base, mode: layer.mode, ...resolveExecPolicyForMode(layer.mode)};
+#         if (layer.security !== void 0 || layer.ask !== void 0) {
+#             const { mode: _mode, ...baseWithoutMode } = base;   // <- base's mode DELETED
+#             return {...baseWithoutMode, security: layer.security ?? base.security, ask: layer.ask ?? base.ask};
+#         }
+#         return base;
+#     }
+#
+# An agent layer that sets only `security` (or only `ask`) does not merge under whatever
+# `mode` produced the base — it REPLACES security/ask wholesale and the base's `mode`
+# identity is discarded. A merge that instead let an inherited `mode` win over an agent's
+# own explicit `security` would reproduce this task's exact false PASS (global
+# `mode: "ask"` + agent `tools.exec.security: "full"` must resolve to ungated `full`, not
+# stay `ask`) — this is `_layer_exec_policy` below's whole reason for being a small,
+# self-contained port rather than a "merge the two dicts" shortcut.
+#
+# `resolveExecPolicyForMode` (`exec-approvals-core-BZ3ECkXD.mjs`) is unchanged from the
+# closed 5-row table already cited on `_has_approval_gate` above.
+_EXEC_MODE_SECURITY_ASK = {
+    "deny": ("deny", "off"),
+    "allowlist": ("allowlist", "off"),
+    "ask": ("allowlist", "on-miss"),
+    "auto": ("allowlist", "on-miss"),
+    "full": ("full", "off"),
+}
+
+# `defaultSecurity = effectiveHost === "sandbox" ? "deny" : "full"`, `ask: "off"`
+# (`exec-defaults-Bt0sKd7t.mjs`, grounded against 2026.9.4) — the non-sandboxed default,
+# i.e. the same scope `_has_approval_gate` above already covers. The sandbox/host layer
+# is a separate, already-modelled surface (`monitordims/_execpolicy.py`, a HIGHER layer
+# that consumes `checks/` and so cannot be imported from here — CLAUDE.md's dependency
+# flow is one-directional); this per-agent gate re-derives nothing about it, matching the
+# precision `_has_approval_gate` itself already has (a raw-field read, no sandbox
+# resolution either) rather than introducing a new, asymmetric gap.
+_EXEC_DEFAULT_SECURITY = "full"
+_EXEC_DEFAULT_ASK = "off"
+
+
+def _layer_exec_policy(base_security: str, base_ask: str, layer) -> "tuple[str, str]":
+    """One `tools.exec` layer applied over an already-resolved (security, ask) pair.
+
+    Port of `applyExecPolicyLayer`, restricted to the (security, ask) outputs this
+    module needs (the `mode` field is an OUTPUT label for the mode branch, never an input
+    to the security/ask branch — see the module note above). *layer* is the raw,
+    unresolved `tools.exec` dict for one scope (global or one agent); it is not itself
+    layered before being passed in.
+    """
+    if not isinstance(layer, dict):
+        return base_security, base_ask
+    mode = layer.get("mode")
+    if isinstance(mode, str) and mode in _EXEC_MODE_SECURITY_ASK:
+        return _EXEC_MODE_SECURITY_ASK[mode]
+    security, ask = layer.get("security"), layer.get("ask")
+    if security is not None or ask is not None:
+        new_security = security if isinstance(security, str) and security else base_security
+        new_ask = ask if isinstance(ask, str) and ask else base_ask
+        return new_security, new_ask
+    return base_security, base_ask
+
+
+def _exec_policy_is_gated(security: str, ask: str) -> bool:
+    """True when a resolved (security, ask) pair blocks unattended execution.
+
+    `resolveExecModeFromPolicy` (ported verbatim as
+    `monitordims/_execpolicy.py::_resolve_mode_from_policy`) is a closed table, and the
+    ONLY combination it resolves to `full` — OpenClaw's sole ungated mode — is
+    `security == "full" and ask != "always"`. Every other combination resolves to
+    `deny`/`allowlist`/`ask`, each of which either refuses a non-matching command
+    outright or routes it to a human/auto-reviewer before it runs. So "has a gate" is
+    exactly the negation of that one combination, not an independent threshold — the same
+    binary PASS/WARN granularity `_has_approval_gate` above already uses (it never
+    distinguishes among deny/allowlist/ask/auto, only whether the state is `full`).
+    """
+    return not (security == "full" and ask != "always")
+
+
+def _agents_without_exec_gate(cfg: dict) -> "list[str]":
+    """Named agents whose EFFECTIVE `tools.exec` policy has no approval gate.
+
+    Only agents that declare their own `tools.exec` override are considered — an agent
+    with no override runs the global policy, which `_has_approval_gate` above already
+    covers. Dedup is by normalised agent id, FIRST match wins
+    (`toolgrant._normalize_agent_id`, already battery-tested against the dist): a second
+    roster entry whose id normalises to one already seen is unreachable at runtime
+    (`resolveAgentConfig` never sees it) and must not be read, even if it looks more
+    dangerous than the entry that shadows it.
+    """
+    global_exec = dig(cfg, "tools.exec")
+    base_security, base_ask = _layer_exec_policy(
+        _EXEC_DEFAULT_SECURITY, _EXEC_DEFAULT_ASK,
+        global_exec if isinstance(global_exec, dict) else None,
+    )
+    seen_ids: set = set()
+    ungated: "list[str]" = []
+    for agent in agent_roster(cfg):
+        raw_id = agent.entry.get("id")
+        normalized = _toolgrant._normalize_agent_id(raw_id)
+        if normalized in seen_ids:
+            continue  # shadowed by an earlier entry with the same normalised id
+        seen_ids.add(normalized)
+        tools = agent.entry.get("tools")
+        agent_exec = tools.get("exec") if isinstance(tools, dict) else None
+        if not isinstance(agent_exec, dict):
+            continue  # no override: this agent runs the (already-checked) global policy
+        security, ask = _layer_exec_policy(base_security, base_ask, agent_exec)
+        if not _exec_policy_is_gated(security, ask):
+            label = raw_id if isinstance(raw_id, str) and raw_id else normalized
+            ungated.append(label)
+    return ungated
+
+
 def _is_public_ip(ip: str) -> bool:
     """True for a routable IPv4 — excludes private / loopback / link-local / TEST-NET doc
     ranges so example addresses in documentation don't fire."""
@@ -2698,6 +3141,7 @@ def _custom(
     engine_degraded=False,
     destination_hosts=None,
     sub_signals=None,
+    config_field_paths=None,
 ) -> Finding:
     """Build a finding with an explicit severity (for dynamic-severity checks).
 
@@ -2722,6 +3166,10 @@ def _custom(
     *destination_hosts* (B-556): same contract as ``_finding()``'s own parameter — see
     Finding.destination_hosts. Defaults to an empty frozenset when omitted; every
     existing caller is unaffected.
+
+    *config_field_paths* (F-166 track 1): same contract as ``_finding()``'s own
+    parameter — see Finding.config_field_paths. Defaults to an empty frozenset when
+    omitted; every existing caller is unaffected.
     """
     m = BY_ID[cid]
     return Finding(
@@ -2738,6 +3186,7 @@ def _custom(
         not_applicable=not_applicable,
         engine_degraded=engine_degraded,
         destination_hosts=frozenset(destination_hosts) if destination_hosts else frozenset(),
+        config_field_paths=frozenset(config_field_paths) if config_field_paths else frozenset(),
         sub_signals=frozenset(sub_signals) if sub_signals else frozenset(),
     )
 

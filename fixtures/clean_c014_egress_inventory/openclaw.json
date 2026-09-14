@@ -1,8 +1,14 @@
 {
   "tools": {
-    "allow": ["exec", "http_post"],
+    "allow": [
+      "exec",
+      "http_post"
+    ],
     "exec": {
       "mode": "ask"
+    },
+    "sessions": {
+      "visibility": "self"
     }
   },
   "channels": {
@@ -15,12 +21,21 @@
     "servers": {
       "localdocs": {
         "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "."
+        ]
       },
       "remote": {
         "url": "https://mcp.example.com/sse",
-        "allowedHosts": ["mcp.example.com"]
+        "allowedHosts": [
+          "mcp.example.com"
+        ]
       }
     }
+  },
+  "session": {
+    "dmScope": "per-peer"
   }
 }

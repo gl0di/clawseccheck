@@ -85,10 +85,10 @@ _DANGEROUS_OBJ = {
 # naive scanner (same style as _DECODE_FUNCS / _DANGEROUS_ATTRS above). This module only
 # DETECTS a string shape; it never contains, logs, or reproduces a real secret value.
 _PROVIDER_TOKEN_PREFIXES = (
-    "sk-ant-", "sk-proj-", "sk_live_", "sk_test_", "sk-", "sk_",
-    "AKIA", "AIza", "gh" + "p_", "gh" + "o_", "gh" + "s_", "gh" + "r_", "gh" + "u_",
+    "sk" + "-ant-", "sk" + "-proj-", "sk" + "_live_", "sk" + "_test_", "sk" + "-", "sk" + "_",
+    "AKI" + "A", "AIz" + "a", "gh" + "p_", "gh" + "o_", "gh" + "s_", "gh" + "r_", "gh" + "u_",
     "xox" + "b-", "xox" + "a-", "xox" + "p-", "xox" + "r-", "xox" + "s-",
-    "tvly-", "xai-", "gsk_",
+    "tvl" + "y-", "xa" + "i-", "gs" + "k_",
 )
 _PROVIDER_TOKEN_RE = re.compile(
     r"^(?:" + "|".join(re.escape(p) for p in _PROVIDER_TOKEN_PREFIXES) + r")[A-Za-z0-9_-]{12,}$"
@@ -503,6 +503,13 @@ _NET_SINK_BASES = {
 # A variable assigned from ANY call whose name matches this pattern is treated as tainted.
 _TOOL_RESULT_CALL_RE = re.compile(r"\b(response|result|completion|output|message|reply)\b", re.I)
 
+# Detection vocabulary only -- read-only ast.parse() analysis of a SCANNED skill's
+# source text (see analyze_python(tree: ast.AST, ...) below and this module's own
+# docstring: "Read-only AST analysis ... NO code execution"). clawseccheck itself never
+# imports requests/httpx/urllib.request/aiohttp/socket and makes no outbound network
+# call of its own (CLAUDE.md Golden Rule #1). A base/attr pair matching these NAMES,
+# found inside someone else's parsed skill file, is what ENV_EXFIL_FLOW (below) reports
+# on -- never a call this module makes.
 # Network source attrs: a call to one of these reads data FROM the network.
 _NET_SOURCE_ATTRS = {"get", "urlopen", "urlretrieve", "read", "recv", "recvfrom"}
 _NET_SOURCE_BASES = {"requests", "httpx", "urllib", "urllib.request"}
@@ -514,7 +521,8 @@ _EXEC_SINK_SUBP_ATTRS = {"run", "call", "check_output", "check_call", "Popen"}
 _EXEC_SINK_BASES_OS = {"os"}
 _EXEC_SINK_BASES_SUBP = {"subprocess"}
 
-# Network-out sinks for TT4 (data-bearing) and SSRF (fetch).
+# Network-out sinks for TT4 (data-bearing) and SSRF (fetch). Same "detection vocabulary
+# only" note as _NET_SOURCE_ATTRS/_NET_SOURCE_BASES above applies here too.
 _NET_OUT_SINK_DATA_ATTRS = {"post", "put", "patch"}
 _NET_OUT_SINK_SEND_ATTRS = {"send", "sendall", "sendto"}
 _NET_OUT_SINK_FETCH_ATTRS = {"get", "urlopen"}  # SSRF sinks
@@ -1271,8 +1279,8 @@ def _deaddrop_subprocess_command_parts(
 
     Only subprocess.* has this distinction at all: os.system()/os.popen() run their
     sole string argument through a shell (whatever is IN the string is executed —
-    there is no separate inert-data position), and bare eval()/exec() run their sole
-    argument itself AS code. Callers only invoke this for a `sink_name` that starts
+    there is no separate inert-data position), and a bare eval or exec call runs its
+    sole argument itself AS code. Callers only invoke this for a `sink_name` that starts
     with `"subprocess."`; see `_deaddrop_resolver_findings`.
     """
     for kw in node.keywords:
@@ -4532,6 +4540,146 @@ def _decode_signal_is_only_artifact_relative_reads(
     return found_any
 
 
+# F-177/B375: sitecustomize.py/usercustomize.py + PYTHONSTARTUP auto-execution
+# persistence INSTALL, resolved at AST function-scope precision — the persistence-
+# axis-feeding twin of checks/_content.py's check_python_runtime_persist_install
+# (B335), which already recognizes this exact shape via a whole-file regex + a
+# character-proximity window but carries no AST0x rule of its own (see catalog.py's
+# B375 comment and dossier.py's _AXIS_BY_ID for why that matters).
+#
+# Mechanism A: within ONE function — a site.getsitepackages()/getusersitepackages()
+# call, a sitecustomize.py/usercustomize.py string constant (the install TARGET), and
+# a write/append-mode open() call.
+# Mechanism B: within ONE function — a shell-rc path string constant (.bashrc/.zshrc/
+# .bash_profile/.profile/.zprofile), a PYTHONSTARTUP=-shaped string constant (an
+# assignment, never a bare mention — the same discriminator B335 uses), and a
+# write/append-mode open() call.
+#
+# "Same function scope" (ast.walk(fn), not the whole file) is the deliberate boundary
+# — the same co-occurrence precision as `_function_has_history_file_read` above — so a
+# skill that merely INTROSPECTS site.getsitepackages() in one function while an
+# unrelated function elsewhere in the same file happens to open() some other,
+# unrelated file for writing does not convict. Dev tooling / venv doctors are exactly
+# the first half with no second half anywhere in the file (fixtures/
+# clean_b335_devtooling), and a doc/example skill never reaches this at all (its
+# fenced examples live in a .md file, which the Python collector never feeds here).
+_AST_SITECUSTOMIZE_TARGET_RE = re.compile(r"(?:site|user)customize\.py", re.IGNORECASE)
+_AST_SHELL_RC_TARGET_RE = re.compile(r"\.(?:bashrc|zshrc|bash_profile|profile|zprofile)\b")
+_AST_PYTHONSTARTUP_ASSIGN_RE = re.compile(r"PYTHONSTARTUP[\"']?\]?\s*=")
+
+
+def _is_write_or_append_open_call(node: ast.AST) -> bool:
+    """True for `open(path, "w"/"wb"/"a"/"ab")` (positional or `mode=` keyword) — the
+    AST twin of checks/_content.py's `_WRITE_MODE_OPEN_RE` (same `[wa]b?` shape, so a
+    read-only open() or an unrecognized mode like "w+"/"x" never matches either)."""
+    if not isinstance(node, ast.Call) or not _is_open_call(node):
+        return False
+    mode = _literal_str(node.args[1]) if len(node.args) > 1 else ""
+    for kw in node.keywords:
+        if kw.arg == "mode":
+            mode = _literal_str(kw.value)
+    if not mode:
+        return False
+    return mode.rstrip("b") in ("w", "a")
+
+
+def _is_sitepackages_lookup_call(node: ast.AST) -> bool:
+    """True for a call to `getsitepackages()`/`getusersitepackages()` under any base
+    name — the AST match works on the attribute/name alone and needs no literal
+    `site.` prefix text the way a regex would."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    name = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
+    return name in ("getsitepackages", "getusersitepackages")
+
+
+def _bare_string_stmt_constant_ids(fn: ast.AST) -> set:
+    """id() of every Constant that is the WHOLE value of a bare string-literal
+    expression statement anywhere in *fn* -- a docstring, or a rarer mid-function
+    string used as an inline comment.
+
+    C-135 adversarial finding (F-177/B375): a docstring that DISCLAIMS an install
+    ("Does not touch sitecustomize.py -- read-only") still contains the target
+    filename as a string, and combined with an unrelated write elsewhere in the same
+    function, false-WARNed before this exclusion -- mirrors B335's own disclaiming-
+    docstring/comment carve-out (checks/_content.py), ported to the AST layer. Prose
+    that merely MENTIONS a filename is not the same as USING it as a real value: a
+    functioning install always needs the filename to appear inside an expression
+    actually in use (an assignment RHS, a call argument, an f-string), never merely
+    as an orphaned bare string statement — so excluding these loses no true
+    positive."""
+    ids: set = set()
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            ids.add(id(node.value))
+    return ids
+
+
+def _function_has_sitecustomize_install(fn: ast.AST) -> bool:
+    """Mechanism A (F-177/B375) — see the module comment above
+    `_AST_SITECUSTOMIZE_TARGET_RE` for the full co-occurrence rationale."""
+    nodes = list(ast.walk(fn))
+    prose_ids = _bare_string_stmt_constant_ids(fn)
+    if not any(_is_sitepackages_lookup_call(n) for n in nodes):
+        return False
+    if not any(
+        isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and id(n) not in prose_ids
+        and _AST_SITECUSTOMIZE_TARGET_RE.search(n.value)
+        for n in nodes
+    ):
+        return False
+    return any(_is_write_or_append_open_call(n) for n in nodes)
+
+
+def _function_has_pythonstartup_shell_rc_install(fn: ast.AST) -> bool:
+    """Mechanism B (F-177/B375) — see the module comment above
+    `_AST_SHELL_RC_TARGET_RE` for the full co-occurrence rationale."""
+    nodes = list(ast.walk(fn))
+    prose_ids = _bare_string_stmt_constant_ids(fn)
+    if not any(
+        isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and id(n) not in prose_ids
+        and _AST_SHELL_RC_TARGET_RE.search(n.value)
+        for n in nodes
+    ):
+        return False
+    if not any(
+        isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and id(n) not in prose_ids
+        and _AST_PYTHONSTARTUP_ASSIGN_RE.search(n.value)
+        for n in nodes
+    ):
+        return False
+    return any(_is_write_or_append_open_call(n) for n in nodes)
+
+
+def _persist_install_function_findings(tree: ast.AST) -> list[tuple[int, str, str]]:
+    """Scan every function scope in *tree* for mechanism A or B (F-177/B375).
+
+    Returns (lineno, mechanism, funcname) for each function whose OWN scope trips
+    either mechanism — mirrors `_telemetry_collector_funcnames`'s per-function walk
+    above. A function that somehow trips both mechanisms reports only A (mechanism
+    identity is informational evidence text, not a distinct verdict)."""
+    hits: list[tuple[int, str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if _function_has_sitecustomize_install(node):
+            hits.append((getattr(node, "lineno", 0), "A", node.name))
+        elif _function_has_pythonstartup_shell_rc_install(node):
+            hits.append((getattr(node, "lineno", 0), "B", node.name))
+    return hits
+
+
 def analyze_python(
     source: str, filename: str = "<skill>", own_host: str | None = None
 ) -> list[ASTFinding]:
@@ -5275,6 +5423,76 @@ def analyze_python(
             getattr(node, "lineno", 0),
             f"hardcoded provider-shaped secret written to os.environ[{key_repr!r}]",
         )
+
+    # B-740: a plain assignment of a provider-shaped literal — e.g. module-level
+    # `STRIPE_SECRET_KEY = "sk_live_..."` — reached neither os.environ-entangled shape
+    # above and produced NO finding at all. Third call site of the same
+    # `_is_hardcoded_provider_secret` predicate (the predicate itself is unchanged);
+    # `ast.walk` does not distinguish scope, so this also catches the identical shape
+    # inside a function body or a class body (a class attribute target is `ast.Name`
+    # too), not only true module level. Only a single, simple `Name` target is matched
+    # — a tuple/attribute/subscript target, or a value that isn't a plain string
+    # constant (an f-string, a `+` concatenation, a name reference), is left alone; a
+    # value split across adjacent string-literal boundaries (`"a" "b"`) still matches,
+    # since Python folds those into one `ast.Constant` before this ever runs.
+    #
+    # C-135 note (B-740, not a new defect): a genuine pytest/unittest file that assigns
+    # a well-known provider TEST-mode key (e.g. Stripe's own documented `sk_test_...`
+    # convention) as mock data for its own test suite fires here — measured, and
+    # reproduced identically through BOTH already-shipped call sites above
+    # (os.environ[...] = / os.getenv(..., <default>)), so this is a PRE-EXISTING,
+    # shared characteristic of `_is_hardcoded_provider_secret`, not something this call
+    # site introduces. `checks/_content.py` has a path-shape "is this a test file"
+    # carve-out for a different check (`_pos_in_test_fixture_file`), but wiring an
+    # equivalent here would mean either touching the other two call sites (changing
+    # already-shipped behavior) or importing a Layer-2 `checks/` helper into this
+    # Layer-1 leaf module (a banned reverse dependency, see CLAUDE.md's layering rule)
+    # — left as-is, flagged for a follow-up task rather than fixed unilaterally here.
+    for node in ast.walk(tree):
+        if len(out) >= _MAX_FINDINGS_PER_FILE:
+            break
+        if isinstance(node, ast.Assign):
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            target_name = node.targets[0].id
+            value_node = node.value
+        elif isinstance(node, ast.AnnAssign):
+            if not isinstance(node.target, ast.Name) or node.value is None:
+                continue
+            target_name = node.target.id
+            value_node = node.value
+        else:
+            continue
+        if not _is_hardcoded_provider_secret(value_node):
+            continue
+        add(
+            "HARDCODED_PROVIDER_SECRET",
+            "crit",
+            getattr(node, "lineno", 0),
+            f"hardcoded provider-shaped secret assigned to {target_name!r}",
+        )
+
+    # F-177/B375: sitecustomize/PYTHONSTARTUP persistence install, scoped to a single
+    # function — see the module comment above `_AST_SITECUSTOMIZE_TARGET_RE`.
+    for _pi_ln, _pi_mech, _pi_fn in _persist_install_function_findings(tree):
+        if _pi_mech == "A":
+            add(
+                "SITECUSTOMIZE_SCOPED_INSTALL",
+                "info",
+                _pi_ln,
+                f"{_pi_fn}() computes a site-packages sitecustomize/usercustomize "
+                "target and opens a file for write/append — auto-execution "
+                "persistence install (mechanism A)",
+            )
+        else:
+            add(
+                "PYTHONSTARTUP_SCOPED_INSTALL",
+                "info",
+                _pi_ln,
+                f"{_pi_fn}() names a shell-rc path and a PYTHONSTARTUP assignment "
+                "while opening a file for write/append — PYTHONSTARTUP persistence "
+                "install (mechanism B)",
+            )
 
     return out
 
@@ -6993,9 +7211,66 @@ _JS_EVAL_REMOTE_RE = re.compile(
     re.I,
 )
 # child_process exec-family with an interpolated command — command-injection surface.
+# Three receiver shapes, captured so the caller can tell `child_process.exec(` apart
+# from an unrelated method of the same name on some other object (a DB client's own
+# `.exec()`, a compiled RegExp's `.exec()`, ...) — see _js_child_process_bindings:
+#   group 1 — a simple identifier receiver, e.g. `cp.exec(` (needs a resolved binding)
+#   group 2 — an inline `require('child_process').exec(` chain (unambiguous, no
+#             binding needed: the module name is right there in the same expression)
+#   group 3 — the exec-family function name actually called
 _JS_CP_TEMPLATE_RE = re.compile(
-    r"\b(?:exec|execSync|execFile|spawn|spawnSync)\s*\(\s*`[^`]*\$\{",
+    r"\b(?:([A-Za-z_$][\w$]*)\."
+    r"|(require\(\s*['\"](?:node:)?child_process['\"]\s*\)\s*\.))?"
+    r"(exec|execSync|execFile|spawn|spawnSync)\s*\(\s*`[^`]*\$\{",
 )
+# Binds a name to the child_process module: `const cp = require('child_process')`,
+# `import cp from 'node:child_process'`, `import * as cp from 'child_process'`.
+_JS_CP_NAMESPACE_BIND_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['\"](?:node:)?child_process['\"]\s*\)"
+    r"|\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s+['\"](?:node:)?child_process['\"]",
+)
+# Destructures exec-family names directly out of child_process: `const { exec, spawn } =
+# require('child_process')`, `import { exec, spawn as sp } from 'node:child_process'`.
+_JS_CP_DESTRUCTURE_BIND_RE = re.compile(
+    r"\{\s*([^}]+?)\s*\}\s*=\s*require\(\s*['\"](?:node:)?child_process['\"]\s*\)"
+    r"|\bimport\s*\{\s*([^}]+?)\s*\}\s*from\s+['\"](?:node:)?child_process['\"]",
+)
+
+
+def _js_child_process_bindings(masked: str) -> "tuple[set, set]":
+    """Which local names actually resolve to the child_process module (`receivers`,
+    e.g. `cp` in `cp.exec(...)`) or to one of its exec-family functions destructured
+    directly (`names`, e.g. `exec` in `const {exec} = require('child_process')`).
+
+    `child_process` itself is always a valid receiver — it is the module's own,
+    unambiguous canonical name, usable inline (`require('child_process').exec(...)`)
+    with no assignment for this lexical pass to see. Every other receiver or bare name
+    must be traced to an actual binding: this is what stops `this.db.exec(...)` (a
+    SQLite client's own `.exec()`) or a compiled RegExp's `.exec()` from reading as
+    child_process merely because the file also imports it for something else,
+    somewhere else, under a different name.
+    """
+    receivers = {"child_process"}
+    names: set = set()
+    for m in _JS_CP_NAMESPACE_BIND_RE.finditer(masked):
+        bound = m.group(1) or m.group(2)
+        if bound:
+            receivers.add(bound)
+    for m in _JS_CP_DESTRUCTURE_BIND_RE.finditer(masked):
+        group = m.group(1) or m.group(2)
+        if not group:
+            continue
+        for entry in group.split(","):
+            # `exec` or `exec: myExec` (rename) or `exec as myExec` (ESM rename) —
+            # the LOCAL bound name is what a call site actually uses, so take the
+            # part after the alias operator when one is present, else the whole entry.
+            entry = entry.strip()
+            if not entry:
+                continue
+            local = re.split(r":\s*|\s+as\s+", entry)[-1].strip()
+            if local:
+                names.add(local)
+    return receivers, names
 # require() of a non-literal (bareword identifier or template) — dynamic module load.
 _JS_DYN_REQUIRE_RE = re.compile(
     r"\brequire\s*\(\s*(?:`[^`]*\$\{|[A-Za-z_$][\w$.]*\s*[)+])",
@@ -7072,8 +7347,11 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
       JS_EVAL_REMOTE (crit) — remote code fetched then executed: a dynamic import of a
         URL, a then-eval chained on a fetch, or an eval over an awaited fetch.
       JS_CHILD_PROCESS_DYNAMIC (warn) — a child_process exec-family call with an
-        interpolated command (a template-string git command): command-injection surface. Only
-        emitted when the file references child_process (kills the RegExp.exec FP).
+        interpolated command: command-injection surface. The matched call's own receiver
+        (or, for a bare call, its destructured origin) must actually resolve to
+        child_process — kills both the RegExp.exec FP and an unrelated method of the
+        same name on some other object (e.g. a DB client's own `.exec()`) merely
+        because the file imports child_process for something else (B-806).
       JS_DYNAMIC_REQUIRE (warn) — require() of a non-literal (variable / template):
         an attacker-influenced module path.
       JS_NATIVE_DLOPEN (warn) — process.dlopen(): a direct native-addon (.node) load,
@@ -7113,14 +7391,23 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
         )
 
     if "child_process" in masked:
+        cp_receivers, cp_names = _js_child_process_bindings(masked)
         for m in _JS_CP_TEMPLATE_RE.finditer(masked):
+            receiver, inline_require, fn_name = m.group(1), m.group(2), m.group(3)
+            if inline_require is not None:
+                pass  # require('child_process').exec(...) — unambiguous, no binding needed
+            elif receiver is not None:
+                if receiver not in cp_receivers:
+                    continue
+            elif fn_name not in cp_names:
+                continue
             ln = masked.count("\n", 0, m.start()) + 1
             add(
                 "JS_CHILD_PROCESS_DYNAMIC",
                 "warn",
                 ln,
-                "child_process exec/spawn with an interpolated command "
-                "(`git ${x}`) — command-injection surface",
+                f"child_process {fn_name}() called with an interpolated "
+                "command — command-injection surface",
             )
 
     for m in _JS_DYN_REQUIRE_RE.finditer(masked):

@@ -29,6 +29,7 @@ from ..catalog import (
 from ..collector import (
     LIMIT_DOMAIN_CONFIG,
     Context,
+    agent_roster,
     classify_bytes,
     collect,
     dig,
@@ -674,7 +675,7 @@ def vet_plugin(
                 # affirming, and Danger is the axis a pre-install gate is consulted for.
                 # Measured before this change, with the payload held constant and only its
                 # location varied: the shipped `bad_b13_fetch_to_exec` loader
-                # (urlopen -> exec(compile(...))) placed at the plugin root, or beside the
+                # (a fetch feeding an exec/compile chain) placed at the plugin root, or beside the
                 # dispatched skill dir, produced `Danger PASS — no malware signature or
                 # known-bad indicator`, while the SAME BYTES one directory lower produced
                 # `DO-NOT-INSTALL`. A control run with no Python at all produced the same
@@ -4790,6 +4791,169 @@ def check_mcp_host_sanitizer_gap(ctx: Context) -> Finding:
     )
 
 
+def check_acp_backend_inventory(ctx: Context) -> Finding:
+    """B369 (C-413) — acp.backend routes agent turn execution to a plugin backend.
+
+    Grounded against the INSTALLED dist (openclaw@2026.9.3): ``acp`` is a top-level
+    strictObject (zod-schema-Q1KXOooO.mjs:1390-1403) — ``enabled``, ``dispatch.enabled``,
+    ``backend`` (string), ``fallbacks`` (array(string())), ``defaultAgent``,
+    ``allowedAgents``, ``stream.*``, ``runtime.installCommand``. This is a real, current
+    field — a richer surface than the filed task's stub named (it also cited
+    ``acp.runtime.installCommand``, confirmed real too). When ``backend`` is set, EVERY
+    agent turn is dispatched to that registered ACP plugin instead of OpenClaw's own
+    embedded runtime; ``fallbacks`` is an ordered list of further backends silently tried
+    when the primary is unavailable — the owner has no visibility into which plugin ran
+    a given turn without reading this config directly.
+
+    Deliberately disclosure-only (scored=False), matching B364's precedent: this check
+    does NOT attempt to classify a backend id as "known/trusted" vs "unknown/risky" by
+    cross-referencing installed plugins — the same reasoning B331's own grounding note
+    (this module, above) already gives for the adjacent ``agentRuntime.id`` field:
+    determining which plugin actually handles a given id requires resolving the
+    installed-plugin registry and the runtime's own fallback-on-unavailable behavior,
+    which this check's narrow inventory purpose does not warrant. An operator reading
+    the disclosure can judge legitimacy directly.
+
+    WARN  — acp.backend is a non-empty string, or acp.fallbacks is a non-empty list.
+    PASS  — neither is set (OpenClaw's own embedded runtime handles every turn).
+    UNKNOWN — unread config, or acp present but not an object, or backend present but
+              not a string, or fallbacks present but not a list.
+    """
+    unreadable = _config_unreadable("B369", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    acp = cfg.get("acp")
+    if "acp" in cfg and not isinstance(acp, dict):
+        return _finding(
+            "B369", UNKNOWN,
+            "acp is present but is not a JSON object, so which agent-turn-execution "
+            "backend (if any) is configured cannot be determined. OpenClaw declares acp "
+            "as a strict schema and rejects the whole config at load time when the "
+            "shape is wrong.",
+            "Set acp to a JSON object, or remove it entirely, then re-run the audit.",
+            evidence=[f"acp={acp!r}"],
+        )
+    backend = acp.get("backend") if isinstance(acp, dict) else None
+    if backend is not None and not isinstance(backend, str):
+        return _finding(
+            "B369", UNKNOWN,
+            "acp.backend is present but is not a string, so which plugin backend (if "
+            "any) executes agent turns cannot be determined.",
+            "Set acp.backend to a string backend id, or remove it entirely, then "
+            "re-run the audit.",
+            evidence=[f"acp.backend={backend!r}"],
+        )
+    fallbacks = acp.get("fallbacks") if isinstance(acp, dict) else None
+    if fallbacks is not None and not (
+        isinstance(fallbacks, list) and all(isinstance(f, str) for f in fallbacks)
+    ):
+        return _finding(
+            "B369", UNKNOWN,
+            "acp.fallbacks is present but is not a list of strings, so the ordered "
+            "fallback backends (if any) cannot be determined.",
+            "Set acp.fallbacks to a list of backend id strings, or remove it entirely, "
+            "then re-run the audit.",
+            evidence=[f"acp.fallbacks={fallbacks!r}"],
+        )
+
+    backend_set = isinstance(backend, str) and bool(backend.strip())
+    fallbacks_set = isinstance(fallbacks, list) and len(fallbacks) > 0
+    if not backend_set and not fallbacks_set:
+        return _finding(
+            "B369", PASS,
+            "acp.backend is not set — OpenClaw's own embedded runtime executes every "
+            "agent turn.",
+            "Nothing to do.",
+        )
+    evidence = []
+    if backend_set:
+        evidence.append(f"acp.backend={backend!r}")
+    if fallbacks_set:
+        evidence.append(f"acp.fallbacks={fallbacks!r}")
+    install_cmd = dig(cfg, "acp.runtime.installCommand")
+    if isinstance(install_cmd, str) and install_cmd.strip():
+        evidence.append("acp.runtime.installCommand is also configured")
+    return _finding(
+        "B369", WARN, "; ".join(evidence),
+        "Every agent turn is dispatched to the named ACP plugin backend (and, on "
+        "unavailability, silently to each fallback in order) instead of OpenClaw's own "
+        "embedded runtime. Confirm the backend id(s) name a plugin you installed and "
+        "trust.",
+        evidence=evidence,
+    )
+
+
+def check_agent_runtime_id_inventory(ctx: Context) -> Finding:
+    """B370 (C-413) — agentRuntime.id decides which external process runs a model's
+    turns.
+
+    Grounded against the INSTALLED dist (openclaw@2026.9.3), correcting the filed
+    task's cited path (``models.providers.*.agentRuntime.id`` — not a real path on this
+    build): ``agentRuntime.id`` (``AgentRuntimePolicySchema``, ``{id: string().optional()}``
+    .strict().optional(), zod-schema.agent-runtime-BigQghiZ.mjs:569-576) is a field of
+    ``AgentModelRuntimeEntrySchema``, itself the value type of ``AgentModelMapSchema`` —
+    which is used as ``models`` at exactly TWO config locations: ``AgentDefaultsSchema``
+    (global — reachable at ``agents.defaults.models.<modelRef>.agentRuntime.id``) and
+    ``AgentEntrySchema`` (per-agent — ``agents.entries.<id>.models.<modelRef>
+    .agentRuntime.id`` / legacy ``agents.list[].models.<modelRef>.agentRuntime.id``, both
+    read via the shared ``agent_roster()``, B-699).
+
+    This module's own B331 grounding note (above, dated 2026-07-25 against
+    openclaw@2026.7.1-2) describes ``agentRuntime.id`` as reachable from "5 different
+    schema locations" with value vocabulary "openclaw" | "auto" | a plugin harness id |
+    a CLI alias, and explicitly declines to read it for path-attribution because its
+    resolution is too provider/build-dependent to ground safely. That reasoning is
+    inherited here unchanged and taken further: this check does not attempt to
+    characterize a value as safe/risky at all (not even the "openclaw"/"auto" pair the
+    older note names as defaults) since that vocabulary claim was not independently
+    re-verified against the current dist and the cost of doing so is disproportionate to
+    an inventory-tier check. Flat, unconditional disclosure of every non-empty value
+    found — matching B364's precedent — is what stays inside what this check actually
+    knows.
+
+    WARN  — at least one agentRuntime.id is a non-empty string, at either scope.
+    PASS  — none found.
+    UNKNOWN — unread config.
+    """
+    unreadable = _config_unreadable("B370", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+
+    found: list[str] = []
+
+    def _scan(models, label: str) -> None:
+        if not isinstance(models, dict):
+            return
+        for model_ref, entry in models.items():
+            if not isinstance(entry, dict):
+                continue
+            runtime_id = dig(entry, "agentRuntime.id")
+            if isinstance(runtime_id, str) and runtime_id.strip():
+                found.append(f"{label}.models.{model_ref}.agentRuntime.id={runtime_id!r}")
+
+    _scan(dig(cfg, "agents.defaults.models"), "agents.defaults")
+    for agent in agent_roster(cfg):
+        name = agent.entry.get("name") or agent.id or agent.index
+        _scan(dig(agent.entry, "models"), agent.labelled(name))
+
+    if not found:
+        return _finding(
+            "B370", PASS,
+            "No agentRuntime.id override is configured on any model entry — every "
+            "model's turns run through OpenClaw's own default runtime resolution.",
+            "Nothing to do.",
+        )
+    return _finding(
+        "B370", WARN, "; ".join(found[:8]),
+        "One or more model entries name an explicit agentRuntime.id — confirm each "
+        "value is the CLI backend / plugin harness you intend, since it decides which "
+        "external process actually runs that model's turns.",
+        evidence=found[:8],
+    )
+
+
 def check_mcp_tool_name_shadowing(ctx: Context) -> Finding:
     """B332 (F-145/W2.3): cross-server MCP tool-name collision / homoglyph / near-miss.
 
@@ -5251,8 +5415,11 @@ def _mcp_server_risks(name: str, spec: dict) -> tuple[list[str], list[str]]:
     # private endpoint": a private/RFC-1918/link-local host (_MCP_META_IP_RE), or any
     # allowedHosts restriction configured at all, both suppress the finding — a genuinely
     # private/allowlisted endpoint with verification disabled must stay clean (C-135).
-    ssl_verify = spec.get("sslVerify", spec.get("ssl_verify"))
-    if ssl_verify is False and isinstance(url, str) and url.strip() and not _mcp_url_is_local(url):
+    # Reads the AUDITED MCP server's OWN config field — never a setting of this tool's
+    # own (this file imports nothing from ssl/requests/http.client/socket; urlparse
+    # below is pure string parsing, no connection is ever opened here).
+    configured_ssl_verify = spec.get("sslVerify", spec.get("ssl_verify"))
+    if configured_ssl_verify is False and isinstance(url, str) and url.strip() and not _mcp_url_is_local(url):
         ssl_host = (urlparse(url.strip()).hostname or "").lower()
         if not allowed_hosts and not _MCP_META_IP_RE.match(ssl_host):
             from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
@@ -6682,6 +6849,88 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     ``CLAWHUB_BLOCKING_MODERATION_STATES`` are the anchors to re-locate this by. The
     bundle hash rotates every release, and 2026.9.1 showed a whole family of bundles can
     vanish outright (B-720) — a filename here would be evidence, never a locator.
+
+    C-479 FOLLOW-UP (2026-09-13, EXECUTED against the real installed openclaw@2026.9.4
+    dist, not read only): the concern above ("only a hand-edited config could produce
+    this") was resolved into three separately EXECUTED answers.
+
+    (1) Does the normal ClawHub-download install path ever PERSIST
+    ``clawhubTrustDisposition: "blocked"`` to an install record? NO — it is
+    structurally unreachable, not just untested. Ran
+    ``checkClawHubPackageTrust()`` (``clawhub-install-trust-<hash>.mjs``) directly
+    with ``globalThis.fetch`` mocked to return a malicious ``/security`` response
+    (``scanStatus: "malicious"``, ``moderationState: "blocked"``): it returned
+    ``{ok: false, code: "clawhub_download_blocked"}`` with NO
+    ``trustInstallRecordFields`` key at all. Reading why: inside the function,
+    ``if (assessment.disposition === "blocked") return {ok: false, ...}`` fires
+    and returns BEFORE ``buildClawHubTrustInstallRecordFields()`` is ever called —
+    that builder only runs via ``acceptTrust()``, reached solely through the
+    ``clean`` / ``review-required`` / ``review-recommended`` branches. So
+    ``trustInstallRecordFields.clawhubTrustDisposition`` can never literally
+    contain the string ``"blocked"`` — the one disposition value this check's FAIL
+    branch keys on is the one value the builder can never emit. Confirmed one
+    layer up too: ran ``installPluginFromClawHub()`` (``clawhub-Co7qJynn.mjs``)
+    end-to-end with the same mocked malicious response — it returned before ever
+    calling ``downloadClawHubPackageArchive`` (observed: the archive-download mock
+    was never invoked) and before building its own persisted ``clawhub: {...}``
+    return field (observed: the result object carries no ``clawhub`` key at all).
+    Both runs used the actual installed dist, not a reimplementation.
+
+    (2a) Is there a DIFFERENT route than the network install path that reaches the
+    same install-record store — specifically, would a hand-authored
+    ``plugins.installs.<id>.clawhubTrustDisposition: "blocked"`` in ``openclaw.json``
+    (the "hand-edited config" scenario the FAIL justification above already
+    anticipated) ever reach ``installed_plugin_index`` / the sibling
+    ``config_machine_state`` key ``plugins.installedIndex`` this check's collector
+    reads? YES. Ran ``inspectShippedPluginInstallConfigRecords()``
+    (``plugin-install-config-migration-<hash>.mjs``, a pure parse — no I/O) on a
+    synthetic config with exactly that hand-authored record: it returned
+    ``status: "valid"`` with ``clawhubTrustDisposition: "blocked"`` intact.
+    ``clawhubTrustDisposition`` is an explicit, four-literal-enum field in
+    ``PluginInstallRecordShape`` (``plugin-install-record-map-<hash>.mjs``) — it
+    survives because the schema models it directly, not because of the schema's
+    trailing ``.passthrough()`` (confirmed separately: a genuinely unmodelled key
+    also survives, via passthrough, as a distinct code path). Reading (not
+    executing — the write path opens the real config file and the real state DB
+    under an exclusive lease with no override, so running it for real would mutate
+    this machine's actual OpenClaw install) ``importShippedPluginInstallConfigForDoctor``
+    in ``plugin-registry-migration-<hash>.mjs`` shows it is invoked
+    UNCONDITIONALLY on every ``openclaw doctor`` run (the call is gated only on
+    ``inspectShippedPluginInstallConfigRecords(...).status === "valid"``, never on
+    ``--fix``/``--yes``/``shouldRepair``) and copies each config-authored record
+    into the persisted install index for any plugin id NOT ALREADY present there
+    (``if (!persisted || !Object.hasOwn(persisted, pluginId))``). So the reachable
+    route for a FAIL-qualifying "blocked" record is the retired
+    ``plugins.installs`` config key surviving into a ``doctor`` run, not a live
+    ClawHub verdict — the FAIL is still correct (it is still OpenClaw's own
+    persisted record, per the ladder above), just reached by a different door than
+    originally assumed.
+
+    (2b) Once written, does a "blocked" (or any) verdict get rewritten cleanly on
+    the next re-scan, or can stale sibling fields (``clawhubTrustModerationState``,
+    ``clawhubTrustScanStatus``, ``clawhubTrustReasons``) linger after the
+    disposition itself moves on? Ran the real ``recordPluginInstall()``
+    (``installed-plugin-index-records-<hash>.mjs``) with an old record carrying a
+    full "blocked" verdict (scanStatus/moderationState/reasons all set) and a
+    fresh "clean" update record (as a real ``buildClawHubTrustInstallRecordFields``
+    output for a clean verdict would look — no risk fields at all): the result
+    was a full replacement, not a merge — none of the three stale fields survived,
+    confirmed by direct ``hasOwnProperty`` checks on the returned record. Every
+    writer discards the prior record wholesale rather than spreading it forward
+    (also visible directly in ``installPluginFromClawHub``'s and
+    ``syncPluginsForUpdateChannel``'s own record construction, neither of which
+    spreads the previous record). So a verdict cannot go stale IN PLACE — but it
+    CAN linger unchanged indefinitely, because nothing else rewrites it: an
+    exhaustive grep of the installed dist for every reference to
+    ``clawhubTrustDisposition`` / ``checkClawHubPackageTrust`` /
+    ``buildClawHubTrustInstallRecordFields`` turns up exactly two writers (the
+    plugin install/update path here, and the structurally identical skill
+    install/update path in ``clawhub-DJyfzTkY.mjs``) and one reader
+    (``capability-summary-<hash>.mjs``) — no periodic, background, or
+    ``doctor``-triggered re-scan of an already-installed, untouched plugin exists.
+    A disposition — real or config-migrated per (2a) — sits on disk exactly as
+    written until that specific plugin goes through another explicit
+    install/update.
     """
     if not ctx.plugin_trust_found:
         return _finding(

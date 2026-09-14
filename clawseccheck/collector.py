@@ -163,6 +163,14 @@ _MAX_CRON_RUN_LOGS = 500
 _MAX_EXEC_APPROVALS_BYTES = _MAX_CONFIG_BYTES
 _MAX_EXEC_APPROVALS_AGENTS = 200
 
+# B-725: the shared skill-library surface in the state DB (skill_library_entries,
+# skill_uploads) -- bounded the same way as the row-scanning readers above. A hostile
+# or padded DB must not turn this into an unbounded scan; the consuming check needs
+# only enough rows to establish reachability/integrity, not a full history.
+_MAX_SKILL_LIBRARY_ENTRIES = 500
+_MAX_SKILL_LIBRARY_SAMPLE = 10
+_MAX_SKILL_UPLOADS = 500
+
 # B-240 (B177): the persisted installed_plugin_index.install_records_json column (OpenClaw's
 # own ClawHub trust verdict per plugin) is read-only and size/entry-capped the same way as
 # the cron/exec-approvals stores above — a huge/padded blob must not load whole into memory
@@ -576,8 +584,25 @@ class Context:
     config: dict = field(default_factory=dict)
     bootstrap: dict = field(default_factory=dict)   # filename -> text
     errors: list[str] = field(default_factory=list)
+    # B-769: fingerprint-form .clawseccheckignore entries that matched no finding THIS
+    # run -- populated by audit() (__init__.py) after baseline.apply(), via
+    # baseline.dead_entries(). Not filled by collect() itself: computing it needs the
+    # finding list, which does not exist yet at collection time. A bare-id entry can
+    # never appear here (it always matches its own check's Finding object regardless
+    # of status); only a fingerprint can go dead, which happens when the check's
+    # `detail` wording changed under the user's feet (a version upgrade) or the
+    # underlying issue was genuinely repaired -- either way, the suppression is now
+    # doing nothing, silently, and Golden Rule #4 says that is worth saying out loud.
+    dead_ignore_entries: set = field(default_factory=set)
     config_mode: int | None = None                  # octal perms of openclaw.json, or None
     config_found: bool = False                       # openclaw.json present (vs non-OpenClaw setup)
+    # B-776: True when THIS PROCESS's own environment (not the audited --home target)
+    # shows the OpenClaw sandbox-sync marker AND no config was found this run. Set by
+    # `_sandbox_signal()`, called from `collect()` right after `config_found` above —
+    # never derived from the audited home's own contents, since the whole point is that a
+    # sandboxed run's --home target (default or explicit) resolves nowhere real. See that
+    # function's docstring for the two conditions and why both are required.
+    sandboxed: bool = False
     config_parse_error: bool = False                 # openclaw.json present but unparseable (B-166)
     # B-306 safe-symlink split: WHY config_parse_error is (or was) considered — the raw
     # loader message for a genuine-blind config, or a note that a dotfiles-style symlink
@@ -740,6 +765,24 @@ class Context:
     capture_parse_error: bool = False        # present but could not be read
     capture_event_rows: int = 0              # captured request/response flows on disk
     capture_blob_rows: int = 0               # captured bodies on disk
+    # B-725: the shared skill-library / upload surface in the state DB. Reachable and
+    # published there is NOT reachable by the filesystem walk `_read_installed_skills`
+    # does -- `skill_library`/`skill_uploads` appear nowhere else in this package. Each
+    # table's own `_read` flag is independent: the real machine measured has
+    # skill_library_entries ABSENT while skill_uploads is PRESENT (0 rows), so one
+    # table's absence must never be inferred from the other's.
+    skill_library_entries_read: bool = False       # table present and queried
+    skill_library_entries_parse_error: bool = False  # present but could not be read
+    # An entry counts as LIVE when enabled AND NOT removed -- the two flags that decide
+    # whether THIS OpenClaw install treats it as active, regardless of `shared`.
+    skill_library_live_count: int = 0
+    skill_library_live_sample: list = field(default_factory=list)  # slugs, capped
+    skill_uploads_read: bool = False               # table present and queried
+    skill_uploads_parse_error: bool = False        # present but could not be read
+    # A COMMITTED upload whose received bytes (`actual_sha256`) disagree with its
+    # declared digest (`sha256`) -- an in-progress (uncommitted) upload legitimately
+    # has a partial/absent actual_sha256, so only committed rows are counted.
+    skill_uploads_digest_mismatch_count: int = 0
     # B-236 (B172): standing exec-approvals.json grants, one dict per agent present in
     # the store's `agents` map: {agent_id, security, ask, allow_always_count}. Populated
     # regardless of whether allow_always_count is 0 -- the consuming check filters.
@@ -4137,7 +4180,8 @@ def _cron_store_key_candidates(jobs_json: Path) -> list:
     """Return the ``cron_jobs.store_key`` spellings that denote the audited store file.
 
     The runtime's partition key is ``cronStoreKey(storePath) { return path.resolve(storePath); }``
-    (key-BBZ40bDq.js:5-7) — an identity resolve, so the key is just the absolute store path.
+    (key-BBZ40bDq.mjs:5-7, grounded against openclaw@2026.9.3) — an identity resolve, so the
+    key is just the absolute store path.
 
     Two spellings are returned because Node's ``path.resolve`` is **purely lexical**
     (normalize + absolutize, no filesystem access) while Python's ``Path.resolve`` also
@@ -4211,7 +4255,7 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
     store path only to derive a key (``cronStoreKey(path.resolve(storePath))``,
     store-ScQ9SjOe.js:710) and then reads ``loadCronRows`` from the database; writes go
     through ``replaceCronRows`` (store-ScQ9SjOe.js:647). Grepped the dist's cron modules
-    (store-ScQ9SjOe.js, run-log-DIhrTrSU.js, key-BBZ40bDq.js) for unlink/rm/writeFile: there
+    (store-ScQ9SjOe.js, run-log-DIhrTrSU.js, key-BBZ40bDq.mjs) for unlink/rm/writeFile: there
     are none, so nothing ever removes a stale jobs.json. An install that predates the SQLite
     migration therefore keeps a file that the runtime no longer reads, and differencing run
     logs against it makes live jobs look erased.
@@ -4611,6 +4655,108 @@ def _collect_capture_state(home: Path, ctx: Context) -> None:
     ctx.capture_tables_found = True
     ctx.capture_event_rows = int(events or 0)
     ctx.capture_blob_rows = int(blobs or 0)
+
+
+def _collect_skill_library_state(home: Path, ctx: Context) -> None:
+    """B-725: read-only reachability/integrity signal from the state DB's shared
+    skill-library surface (``skill_library_entries``, ``skill_uploads``) -- a skill
+    published and enabled there is NOT on the path ``_read_installed_skills`` walks, so
+    it is audited BLIND by everything else in this package. Confirmed by grep: neither
+    ``skill_library`` nor ``skill_uploads`` appears anywhere else in ``clawseccheck/``.
+
+    Two tables, read and reported INDEPENDENTLY -- the real machine measured has
+    ``skill_library_entries`` absent while ``skill_uploads`` is present (0 rows), and
+    inferring one table's state from the other would be exactly the "looked at
+    something adjacent, called it looked" shape Golden Rule #4 forbids.
+
+    ``skill_library_entries``: only ``skill_id, slug, shared, enabled, removed`` are
+    read -- never ``owner_profile_id``/``author_profile_id`` (identity) or
+    ``current_revision`` (which would need ``skill_library_revisions.files_json``,
+    CONTENT, to mean anything). A row counts as LIVE when ``enabled AND NOT removed``,
+    regardless of ``shared`` -- those two flags are what make OpenClaw itself treat it
+    as active.
+
+    ``skill_uploads``: only ``upload_id, sha256, actual_sha256`` are read, and only for
+    ``committed = 1`` rows -- an in-progress upload legitimately has a partial or absent
+    ``actual_sha256`` while chunks are still arriving, so comparing it would be a false
+    positive by construction. ``archive_blob``/``files_json`` (CONTENT, in both this
+    table and ``skill_library_uploads``/``skill_library_revisions``) are never read here
+    or anywhere in this reader -- digesting them is future work, not silently skipped
+    (see the task's own "adjacent surfaces, not in scope" note).
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same
+    pattern every other state-DB reader in this module uses.
+    """
+    state_dir = home / "state"
+    capped: list = []
+    candidates = (
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        # Both *_read stay False -> UNKNOWN downstream, never a fake PASS. A capped
+        # walk that never reached the DB is a DIFFERENT fact than an empty state dir
+        # (GR#4 -- a completeness claim over a scan that stopped early would be false).
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the skill-library surface was not read"
+            )
+        return
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        ctx.errors.append(f"could not open '{db_path}': {exc}")
+        return
+    try:
+        conn.execute("PRAGMA query_only = 1")
+
+        try:
+            rows = conn.execute(
+                # Bound columns, no SELECT * -- this query cannot return a row this
+                # tool is not allowed to see (§8; the same DB holds live OAuth tokens).
+                "SELECT skill_id, slug, shared, enabled, removed "
+                "FROM skill_library_entries LIMIT ?",
+                (_MAX_SKILL_LIBRARY_ENTRIES,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            # A DB predating the skill library is not corrupt -- same honest UNKNOWN as
+            # "no DB" (mirrors _collect_capture_state / _collect_cron_run_logs).
+            if "no such table" not in str(exc).lower():
+                ctx.errors.append(
+                    f"could not read skill_library_entries from {db_path}: {exc}")
+                ctx.skill_library_entries_parse_error = True
+        else:
+            ctx.skill_library_entries_read = True
+            for skill_id, slug, _shared, enabled, removed in rows:
+                if enabled and not removed:
+                    ctx.skill_library_live_count += 1
+                    if len(ctx.skill_library_live_sample) < _MAX_SKILL_LIBRARY_SAMPLE:
+                        name = slug if isinstance(slug, str) and slug else skill_id
+                        if isinstance(name, str) and name:
+                            ctx.skill_library_live_sample.append(name)
+
+        try:
+            rows = conn.execute(
+                "SELECT upload_id, sha256, actual_sha256 FROM skill_uploads "
+                "WHERE committed = 1 LIMIT ?",
+                (_MAX_SKILL_UPLOADS,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            if "no such table" not in str(exc).lower():
+                ctx.errors.append(f"could not read skill_uploads from {db_path}: {exc}")
+                ctx.skill_uploads_parse_error = True
+        else:
+            ctx.skill_uploads_read = True
+            for _upload_id, sha256, actual_sha256 in rows:
+                if (isinstance(sha256, str) and sha256
+                        and isinstance(actual_sha256, str) and actual_sha256
+                        and sha256 != actual_sha256):
+                    ctx.skill_uploads_digest_mismatch_count += 1
+    finally:
+        conn.close()
 
 
 def _collect_exec_approvals(home: Path, ctx: Context) -> None:
@@ -5967,7 +6113,68 @@ def audits_this_users_own_home(home: Path) -> bool:
     return audited.parent == user_home and audited.name.startswith(OPENCLAW_NEW_STATE_DIRNAME)
 
 
+#: B-776: written by the OpenClaw gateway into EVERY sandbox workspace's `skills/`
+#: directory, never into a real user's `~/.openclaw/workspace` or any other non-sandboxed
+#: skill root. Measured on a real host: 17 copies, every one under
+#: `~/.openclaw/sandboxes/*/skills/`, none under the real workspace. This is a filesystem
+#: artifact the sandboxing machinery itself writes — readable from INSIDE the sandbox even
+#: though the real `~/.openclaw` is not, which is exactly the asymmetry this signal needs.
+_SANDBOX_SYNC_MARKER = ".openclaw-sync.json"
+
+
+def sandbox_sync_marker_present() -> bool:
+    """B-776: True when the sandbox-sync marker sits beside THIS PROCESS's own HOME or
+    cwd — never the audited ``--home`` target.
+
+    Under ``sandbox_exec`` ``$HOME`` == ``/workspace`` == the process cwd, a fact
+    independent of whatever ``--home``/the default ``~/.openclaw`` resolved to (which is
+    why a genuinely-blind-but-fixable run — wrong ``--home``, config just not at the
+    default path — must never trip this: it is not read at all). Both HOME and cwd are
+    checked because the two coincide in the sandbox but are not guaranteed to in every
+    embedding this tool runs under.
+
+    Deliberately weak alone — see ``_sandbox_signal`` below, the only caller, which
+    ANDs this with "no config resolvable this run" before it means anything.
+    ``OPENCLAW_CLI=1`` and ``/.dockerenv`` are NOT used here: both fire for ordinary host
+    `exec`/cron too (measured), so neither is evidence of a *sandboxed* session on its own.
+    """
+    bases: list[Path] = []
+    try:
+        bases.append(Path.home())
+    except (OSError, RuntimeError):
+        pass
+    try:
+        bases.append(Path.cwd())
+    except OSError:
+        pass
+    for base in bases:
+        try:
+            if (base / "skills" / _SANDBOX_SYNC_MARKER).is_file():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _sandbox_signal(config_found: bool) -> bool:
+    """B-776: the compound gate for ``ctx.sandboxed`` — the sync marker ALONE is not
+    enough, since a legitimately Docker-hosted gateway with its own real config must stay
+    quiet. Combined with "no config resolvable this run" (*config_found*, from the SAME
+    `collect()` call), a host that genuinely has a config at the audited path never trips
+    this even if the marker happens to be present for some other reason.
+    """
+    return (not config_found) and sandbox_sync_marker_present()
+
+
 # ---------------------------------------------------------------------------
+# DATA-HANDLING INVARIANT (applies to this block and the EnvironmentFile= reader below):
+# every value parsed here is read only to be TESTED — truthy/falsy, string length,
+# hostname equality — never to be displayed. No consumer places a raw value into a
+# Finding.detail/evidence/fix, none of it is ever logged (this module has no
+# logger/print call anywhere), and none of it is written to ~/.clawseccheck/ or any
+# other on-disk store — it lives only in this Context for the one CLI process's
+# lifetime. Pinned by a regression test: tests/test_b290_env_supplied_gateway_auth.py.
+#
 # B-282 (ENV-2/ENV-6): the two GLOBAL runtime dotenv files.
 #
 # Grounded against dotenv-global-mWLbBl_z.js:85-111 (loadGlobalRuntimeDotEnvFiles) and
@@ -6655,6 +6862,9 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     cfg_path, cfg_found = resolve_config_in_home(home)
     ctx.config_path = cfg_path
     ctx.config_found = cfg_found
+    # B-776: computed right here, before anything below can raise — a sandboxed run must
+    # still get an honest `ctx.sandboxed` even if the rest of collection degrades.
+    ctx.sandboxed = _sandbox_signal(cfg_found)
     parsed_ok = False
     if cfg_found:
         _cfg_digest: list = []
@@ -6794,6 +7004,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)
     _collect_capture_state(home, ctx)  # B-295: debug-proxy capture row counts (metadata only)
+    _collect_skill_library_state(home, ctx)  # B-725: shared skill-library reachability/integrity
     _collect_subagent_runs(home, ctx)  # B-296: subagent-spawn registry disclosure for B18
     _collect_audit_events(home, ctx)   # F-134 (DISK-1): runtime audit_events trail, --behavioral only
     _read_installed_skills(home, ctx)

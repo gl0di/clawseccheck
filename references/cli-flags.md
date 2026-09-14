@@ -50,6 +50,15 @@ kept here so the always-loaded playbook stays lean.
   unreadable, or a `--vet-mcp` name that is neither a configured server nor a readable
   spec file — which is a usage error, not a verdict, and prints no dossier). `--advise`
   shares that contract.
+- `--exit-code-scheme {binary,graduated}` (default `binary`) — how `--fail-on`/`--exit-code`
+  map a trip to a process exit code. `binary` is unchanged from every release before this
+  flag existed: sources 1-6 above and a tool crash/`ScanBudgetExceeded`/unusable `--vet`
+  path are all exit 1, indistinguishable by exit code alone. `graduated` reuses `--monitor`'s
+  own convention: 0 clean, 1 could-not-produce-a-trustworthy-verdict (a crash, the scan's own
+  time budget, an unusable `--vet` path, sources 5-6 above, or a `--full` layer that was
+  actually attempted and errored out), 3 a real threshold-tripping FAIL (sources 1-4 above);
+  2 is never returned by this logic (argparse owns it for a usage error). Purely additive and
+  opt-in — see `docs/USAGE.md` ("CI / automation") for the full contract and a recipe.
 - `--fast` — only with `--full`: skip the plugin sweep, behavioral replay, and skill sweep,
   keeping the audit + self-test + vet-mcp + the (free) adjudication packet. For CI runs where
   the deep phases are too slow; this is the pre-F-150 `--full` shape.
@@ -99,12 +108,43 @@ kept here so the always-loaded playbook stays lean.
   and never a change to score or grade; none of it appears in `--json` / `--card` / `--sarif`.
 - `--verify-self` — print SHA-256 digest of ClawSecCheck's source files for tamper detection.
 - `--show-suppressed` — list any findings the user has silenced via `.clawseccheckignore`.
+- `--explain FINDING_ID` — run just the one check named by FINDING_ID (e.g. `--explain B2`)
+  against the current target and print its full detail — severity, status, why, evidence,
+  remediation (`fix`, which the main report never prints), and its `docs/THREAT_COVERAGE.md`
+  coverage note — without re-printing or scoring the rest of the audit. Always a fresh run
+  against the CURRENT target, never a past/saved one. `RISK-*` ids (a different, combinational
+  engine) and the `--behavioral`-only ids (`T1`/`T2`/`T3`/`B191`, never in the per-check
+  registry this reads) each get their own explanatory error rather than a bare "unknown id";
+  a genuine typo does too. Exit 2 on any of those; read-only.
+- `--retest FINDING_ID` — the same targeting and errors as `--explain`, but re-runs the one
+  check and reports only whether it still fires — e.g. confirm a fix cleared it. Never runs
+  the rest of the audit (no other check in the ~190-check registry is invoked), so it is far
+  cheaper than a full re-scan when only one thing needs re-checking. Read-only.
 - `--ask` — emit a JSON attestation template (the facts config can't show: real tool inventory,
   approval gating, host monitors). The running agent fills it from its own ground truth.
 - `--attest PATH` — enrich the audit with that self-report; enables B43 (capability blast-radius)
   and B44 (self-report ⇄ config drift) at `ATTESTED` confidence. Read-only; introspection only.
 - `--watch-log` — print the Agent Watch event journal (a local timeline of what changed across
   `--monitor` runs); `--events PATH` points it at a different journal file.
+- `--save-run` — opt-in: also persist this run's full finding list, addressable by its
+  timestamp run id (nothing is saved unless this flag is given). `--diff RUN_ID1 RUN_ID2`
+  then reports new/fixed/unchanged findings between two saved runs, read-only, no live audit.
+  See `docs/OUTPUT_SCHEMA.md` §24.
+- `--sbom --format {native,cyclonedx,spdx}` — only with `--sbom`; `native` (default,
+  backward compatible) is the existing ClawSecCheck JSON, `cyclonedx` is CycloneDX 1.5
+  JSON, `spdx` is SPDX 2.3 JSON — all built from the same collected inventory, never a
+  second scan. `--save-sbom-run` (opt-in, like `--save-run`) persists this run's
+  component inventory (always the native shape, regardless of `--format`), and
+  `--sbom-diff RUN_ID1 RUN_ID2` reports added/removed/changed components between two
+  saved SBOM runs, read-only, no live audit. See `docs/OUTPUT_SCHEMA.md` §25.
+- `--incident-open` — opt-in: persist a mutable incident record (status=open) linked to
+  this run's actionable findings, a best-effort PID/process name when one of them names
+  one, and the current `--monitor` journal position — refuses if nothing actionable was
+  found this run. `--incident-mark ID STATUS` transitions it (`open`/`investigating`/
+  `mitigated`/`closed` — forward one step at a time, backward freely). `--incident-show
+  ID` prints its current status, history, and the live timeline of `--monitor` events
+  since it opened. Separate from the stateless `--incident` evidence pack, which never
+  writes anything. See `docs/OUTPUT_SCHEMA.md` §26.
 - `--dashboard-findings` — print ONLY the Section-2 Findings block for the chat Dashboard
   (non-suppressed FAIL/WARN, high-confidence, grouped by the 7 families, already framed in the
   open 3-sided box) and exit. Agent-facing: SKILL.md Step 3 runs this and pastes the output

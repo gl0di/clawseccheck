@@ -55,6 +55,7 @@ from .trajectory import (
     read_events,
     read_proven_tools,
 )
+from .trajectorystore import corroborate as corroborate_trajectory_containers
 
 # C-170 adversarial pass found the naive "reuse A1's three hint tuples verbatim"
 # design (still used for `INPUT_TOOL_HINTS` below) has two real bugs when applied
@@ -575,7 +576,7 @@ def check_behavioral_trifecta(
             "Review the trajectory sidecar for the named thread(s) manually. This is "
             "proof-by-log that an ingress-classified action, a sensitive-data action, "
             "and an egress action ran in that temporal order, in one thread. Verb order "
-            "alone does not prove data actually flowed between them (B-416): three "
+            "alone does not prove data actually flowed between them: three "
             "causally-unrelated actions in an ordinary workflow can satisfy this shape, "
             "so treat it as a lead to review manually, not confirmed exfiltration.",
             firing[:6],
@@ -1050,6 +1051,9 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "truncated": meta["truncated"],
         "files_total": meta.get("files_total", 0),
         "files_capped": meta.get("files_capped", False),
+        # B-767: a line that looked like a target event and failed to parse -- a
+        # different reason a read is not exhaustive than the byte cap (`truncated`).
+        "unparseable_lines": meta.get("unparseable_lines", False),
         "event_count": len(events),
         "thread_count": 0,
         "findings": [],
@@ -1064,6 +1068,15 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         trajectory_compared=True,
     )
     if not meta["present"]:
+        # F-187: "zero sidecars found" is the same observation whether this agent never
+        # ran a session, or whether its trajectory history moved to a container this
+        # locator does not glob (OpenClaw's JSONL-to-SQLite migration). Only meaningful
+        # for the ordinary home-wide glob — an explicit --behavioral PATH names one file,
+        # and B-462/B-683/B-686 already own reporting why THAT path could not be read.
+        if isinstance(home, Path) and not explicit_path:
+            corro = corroborate_trajectory_containers(home)
+            result["trajectory_locator_stale"] = corro.locator_stale
+            result["trajectory_corroboration_evidence"] = corro.evidence
         result["findings"] = [b191]
         return result
 
@@ -1122,6 +1135,17 @@ def analysis_incompleteness(result: dict) -> "str | None":
     nothing classified.
     """
     if not result.get("present"):
+        # F-187: distinguish "this agent never ran" from "the locator is stale" — see
+        # trajectorystore.corroborate(). Only set when analyze() actually ran the
+        # corroborator (the ordinary home-wide glob, not an explicit --behavioral PATH).
+        if result.get("trajectory_locator_stale"):
+            evidence = result.get("trajectory_corroboration_evidence") or ()
+            return (
+                "no trajectory sidecar was found at the current locator path, but "
+                "other evidence shows this agent's trajectory history exists elsewhere "
+                f"({'; '.join(evidence)}) — the locator appears to be stale, not this "
+                "agent having never run"
+            )
         return "no trajectory sidecar was read"
     if not result.get("event_count"):
         return "no events could be parsed from the trajectory sidecar(s)"
@@ -1132,6 +1156,9 @@ def analysis_incompleteness(result: dict) -> "str | None":
                 f"{result.get('files_total')} trajectory file(s) were read")
     if result.get("truncated"):
         return "a trajectory file exceeded the per-file scan cap and was read in part"
+    if result.get("unparseable_lines"):
+        return ("a trajectory file contained a line that could not be parsed as JSON "
+                 "(a possible truncated/interrupted write)")
     scanned, total = result.get("files_scanned"), result.get("files_total")
     if total and scanned is not None and scanned != total:
         # Found by the C-135 pass on B-559: a sidecar the reader could not OPEN (mode
@@ -1270,10 +1297,23 @@ def render_behavioral_analysis(ctx, *, explicit_path: str | None = None,
         # disabled/absent while that store may still hold sessions). Only T1/T2/T3 need
         # the trajectory sidecar itself, so only their "nothing to analyze" note is
         # unconditional here.
-        lines.append(f"  {q} No trajectory sidecars found "
-                     "(agents/*/sessions/*.trajectory.jsonl). T1/T2/T3 have nothing to "
-                     "analyze — run on a host where an OpenClaw agent has produced "
-                     "session trajectories.")
+        if r.get("trajectory_locator_stale"):
+            # F-187: real evidence elsewhere (SQLite rows, a dangling pointer target, an
+            # import-archive entry) — this is a STALE LOCATOR, not an agent that never
+            # ran, and worth a warning marker rather than the neutral "nothing to see".
+            evidence = r.get("trajectory_corroboration_evidence") or ()
+            lines.append(
+                f"  {warn} No trajectory sidecars found at the current locator path "
+                "(agents/*/sessions/*.trajectory.jsonl), but this agent's trajectory "
+                "history exists elsewhere: " + "; ".join(evidence) + ". T1/T2/T3 need "
+                "the live sidecar format and cannot read these containers yet — this "
+                "tool's locator is stale, not this agent having never run."
+            )
+        else:
+            lines.append(f"  {q} No trajectory sidecars found "
+                         "(agents/*/sessions/*.trajectory.jsonl). T1/T2/T3 have nothing to "
+                         "analyze — run on a host where an OpenClaw agent has produced "
+                         "session trajectories.")
     else:
         lines.append(
             f"  scanned {r['files_scanned']} trajectory file(s), {r['event_count']} event(s) "

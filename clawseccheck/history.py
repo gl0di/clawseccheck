@@ -417,17 +417,41 @@ class HistoryRows(list):
     retention_pruned: int = 0
 
 
+#: C-448: how many of the most recent rows `render_trend` prints by default. Chosen to
+#: match the worked example the task that added this was filed with ("showing the last
+#: 30 of 4,604 runs"); not itself load-bearing, since `window=None` (the `--all` opt-out)
+#: reproduces the pre-C-448 unbounded output byte-for-byte.
+DEFAULT_TREND_WINDOW = 30
+
+
 def render_trend(rows: list[dict], ascii_only: bool = False,
-                 chain_status: "tuple[bool | None, str] | None" = None) -> str:
+                 chain_status: "tuple[bool | None, str] | None" = None,
+                 window: "int | None" = DEFAULT_TREND_WINDOW) -> str:
     """Return a compact human-readable trend string.
 
-    Every row is shown, always, in the order recorded — each GRADED line
-    carries a timestamp, GRADE, SCORE, an arrow (▲▼· or ^v=) relative to the
-    *previous GRADED* row's score, and a ``[source]`` tag (plus the audited
-    home path, when known). An UNGRADED row (the five-layer check did not
-    complete for that run — see ``graded`` below) carries no GRADE, no SCORE,
-    and no arrow; it renders its timestamp, the words "no grade", and its
-    ``[source]``/home the same way a graded row does.
+    Every row is COUNTED, always, in the order recorded, whether or not it is one of
+    the ones actually printed — see ``window`` below. Each GRADED line carries a
+    timestamp, GRADE, SCORE, an arrow (▲▼· or ^v=) relative to the *previous GRADED*
+    row's score, and a ``[source]`` tag (plus the audited home path, when known). An
+    UNGRADED row (the five-layer check did not complete for that run — see ``graded``
+    below) carries no GRADE, no SCORE, and no arrow; it renders its timestamp, the
+    words "no grade", and its ``[source]``/home the same way a graded row does.
+
+    window:
+        C-448: print only the last *window* rows (most recent), stated as a count in
+        the header so nothing is hidden SILENTLY — the same problem this fixes as
+        `render_events`' own retention-marker header. ``None`` (or a value ``>=
+        len(rows)``) prints every row, reproducing the pre-C-448 behaviour exactly;
+        this is what the CLI's ``--all`` flag passes. The window affects ONLY which
+        lines are printed: every arrow, the "N of M runs have no grade" ratio, and
+        every other statistic below is still computed by walking the FULL ``rows``
+        list in order — narrowing the denominator to the visible slice is the exact
+        defect the deleted source filter (see the design note below) already taught
+        this function not to repeat, just on a different axis (recency instead of
+        source/grade). A windowed row's arrow still compares against the true
+        previous GRADED row even when that row itself sits outside the window and is
+        never printed, because ``last_graded_score``/``last_graded_row`` are updated
+        on every row unconditionally, before the window check ever runs.
 
     Parameters
     ----------
@@ -508,6 +532,18 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     # ("🦞 ClawSecCheck" then "ClawSecCheck - Score Trend"), repeating the
     # wordmark — collapsed to the one brand header line.
     lines = [brand.header(subtitle="Score Trend", ascii_only=ascii_only), ""]
+    # C-448: the window is a DISPLAY cut only — every statistic below still walks all
+    # of `rows`, never just what gets printed. Stated up front, in the same spot
+    # render_events folds its own retention marker into, so a reader knows before the
+    # first row how much of the store they are looking at.
+    shown_from = 0 if window is None or window >= len(rows) else len(rows) - window
+    if shown_from:
+        lines.append(
+            f"Showing the last {len(rows) - shown_from} of {len(rows)} run(s) — "
+            f"{shown_from} older run(s) not shown here. The counts and arrows below "
+            "still cover the whole history; pass --all to print every row."
+        )
+        lines.append("")
     last_graded_score = None
     last_graded_row: "dict | None" = None
     # B-691: runs whose score held or rose while the uncapped pass-rate FELL, and runs
@@ -526,7 +562,7 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     # three bare --trend runs into one fresh store used to read "3 of 3 runs have no
     # grade", which is the trend viewer reporting on rows it created by being run.
     checkable = 0
-    for row in rows:
+    for _row_i, row in enumerate(rows):
         raw_clause = ""
         is_graded = row.get("graded", True) is not False and row.get("score") is not None
         is_view = row.get("source") == "view"
@@ -615,11 +651,16 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
 
         if not is_view:
             checkable += 1
-        home = row.get("home")
-        if home:
-            line += f"  {home}"
-        line += raw_clause
-        lines.append(line)
+        # C-448: the window gates ONLY this append. Every accumulator above it in the
+        # loop body (checkable, holes, pinned_falls, compounded_falls, uncorroborated,
+        # last_graded_score/last_graded_row) has already run unconditionally for this
+        # row by the time execution reaches here.
+        if _row_i >= shown_from:
+            home = row.get("home")
+            if home:
+                line += f"  {home}"
+            line += raw_clause
+            lines.append(line)
 
     # Computed before the branch: both arms need it, and it is the same quantity in
     # each -- rows on screen that the ratio does not and cannot cover.
@@ -628,24 +669,27 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
     if holes:
         lines.append("")
         lines.append(
-            f"{holes} of {checkable} runs have no grade: the five-layer check did not "
-            "complete for them, so no letter or score was recorded. They are shown "
-            "above in order; the arrows compare each graded run to the previous "
-            "GRADED run."
+            f"{holes} of {checkable} runs in this history have no grade: the "
+            "five-layer check did not complete for them, so no letter or score was "
+            "recorded. This counts the whole history, not just what is printed "
+            "above; the arrows compare each graded run to the previous GRADED run."
         )
-        # B-579: the ratio above deliberately does not cover every row on screen when a
-        # "view" row is present (see the loop above) — say so explicitly, or a reader
-        # counting the rows above gets a different total than the sentence just gave them
-        # and cannot tell whether that is a filter or a miscount. Named, not silent.
+        # B-579: the ratio above deliberately does not cover every row in the history
+        # when a "view" row is present (see the loop above) — say so explicitly, or a
+        # reader adding up the counts above gets a different total than the sentence
+        # just gave them and cannot tell whether that is a filter or a miscount. Named,
+        # not silent. C-448: worded as a fact about the file, not about what is on
+        # screen — "shown above" stopped being true the moment a default window could
+        # hide a view row entirely.
         if view_count:
             if view_count == 1:
                 noun, verb_record, verb_be = "row", "records", "is"
             else:
                 noun, verb_record, verb_be = "rows", "record", "are"
             lines.append(
-                f"{checkable} of {len(rows)} rows shown above are counted in that ratio; "
-                f"the other {view_count} {noun}, tagged [view], {verb_record} only the act "
-                f"of looking at this trend and {verb_be} excluded from it."
+                f"{checkable} of {len(rows)} rows in this history are counted in that "
+                f"ratio; the other {view_count} {noun}, tagged [view], {verb_record} "
+                f"only the act of looking at this trend and {verb_be} excluded from it."
             )
     elif view_count:
         # B-717: `holes` counts ungraded rows that are NOT view rows, so it is zero for
@@ -662,25 +706,26 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
             # means leaves the reader with an empty trend and no way out of it.
             if view_count == 1:
                 lines.append(
-                    "The only row shown above is tagged [view]: it records the act of "
-                    "looking at this trend, not a check that was run. Run an audit to "
-                    "put a graded run in this history."
+                    "The only row in this history is tagged [view]: it records the act "
+                    "of looking at this trend, not a check that was run. Run an audit "
+                    "to put a graded run in this history."
                 )
             else:
                 lines.append(
-                    f"All {view_count} rows shown above are tagged [view]: they record "
-                    "the act of looking at this trend, not checks that were run. Run an "
-                    "audit to put a graded run in this history."
+                    f"All {view_count} rows in this history are tagged [view]: they "
+                    "record the act of looking at this trend, not checks that were "
+                    "run. Run an audit to put a graded run in this history."
                 )
         elif view_count == 1:
             lines.append(
-                f"1 of the {len(rows)} rows shown above is tagged [view]: it records "
-                "the act of looking at this trend, not a check that was run."
+                f"1 of the {len(rows)} rows in this history is tagged [view]: it "
+                "records the act of looking at this trend, not a check that was run."
             )
         else:
             lines.append(
-                f"{view_count} of the {len(rows)} rows shown above are tagged [view]: "
-                "they record the act of looking at this trend, not checks that were run."
+                f"{view_count} of the {len(rows)} rows in this history are tagged "
+                "[view]: they record the act of looking at this trend, not checks "
+                "that were run."
             )
 
     # B-691: the arrow answers "did the LETTER move", which an open FAIL pins at a floor.
@@ -693,18 +738,18 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
         _runs = "run" if pinned_falls == 1 else "runs"
         _its = "its" if pinned_falls == 1 else "their"
         lines.append(
-            f"{pinned_falls} {_runs} above kept or raised {_its} score while the "
-            "underlying pass-rate fell. The score is pinned at a cap by an open FAIL, so "
-            "it cannot follow that figure down — an unchanged or improved letter is NOT "
-            "evidence that nothing got worse. Read the findings for "
+            f"{pinned_falls} {_runs} in this history kept or raised {_its} score while "
+            "the underlying pass-rate fell. The score is pinned at a cap by an open "
+            "FAIL, so it cannot follow that figure down — an unchanged or improved "
+            "letter is NOT evidence that nothing got worse. Read the findings for "
             + ("that run." if pinned_falls == 1 else "those runs.")
         )
     if compounded_falls:
         lines.append("")
         _runs = "run" if compounded_falls == 1 else "runs"
         lines.append(
-            f"{compounded_falls} {_runs} above fell on both measures: the score and the "
-            "underlying pass-rate. Read the findings for "
+            f"{compounded_falls} {_runs} in this history fell on both measures: the "
+            "score and the underlying pass-rate. Read the findings for "
             + ("that run." if compounded_falls == 1 else "those runs.")
         )
     if uncorroborated:
@@ -716,11 +761,11 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
         # and it fired verbatim on a config that had gone dark — a cause the tool has no
         # evidence for. State what could not be done, never why.
         lines.append(
-            f"{uncorroborated} {_runs} above {_was} not compared against the underlying "
-            "pass-rate of the run before it: one or both runs did not record that figure, "
-            "recorded it for a different agent home, recorded it under a different version "
-            "of this tool, or covered a different set of checks. A flat or rising score on "
-            "those lines is not evidence that nothing got worse."
+            f"{uncorroborated} {_runs} in this history {_was} not compared against the "
+            "underlying pass-rate of the run before it: one or both runs did not record "
+            "that figure, recorded it for a different agent home, recorded it under a "
+            "different version of this tool, or covered a different set of checks. A "
+            "flat or rising score on those runs is not evidence that nothing got worse."
         )
 
     # B-580: what this trend does NOT cover. Said after the rows, because it qualifies the

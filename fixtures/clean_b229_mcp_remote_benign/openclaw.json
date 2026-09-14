@@ -1,10 +1,23 @@
 {
   "channels": {
-    "telegram": { "enabled": true, "dmPolicy": "allowlist" }
+    "telegram": {
+      "enabled": true,
+      "dmPolicy": "allowlist"
+    }
   },
   "mcp": {
     "servers": {
-      "weather": { "url": "https://api.weather-example.com/mcp" }
+      "weather": {
+        "url": "https://api.weather-example.com/mcp"
+      }
+    }
+  },
+  "session": {
+    "dmScope": "per-peer"
+  },
+  "tools": {
+    "sessions": {
+      "visibility": "self"
     }
   }
 }

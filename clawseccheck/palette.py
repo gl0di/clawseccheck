@@ -111,14 +111,26 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "where you stand vs typical setups (offline)"),
         PaletteEntry("Show suppressed", "--show-suppressed",
                      "findings you've muted, by id"),
+        PaletteEntry("Explain a finding <id>", "--explain",
+                     "one finding's full detail — why, evidence, fix"),
+        PaletteEntry("Retest a finding <id>", "--retest",
+                     "re-run just that one check, skip the rest"),
         PaletteEntry("Behavioral audit", "--behavioral",
                      "mine your own logs for a proven-by-log trifecta"),
         PaletteEntry("Trajectory analysis", "--analyze-trajectory",
                      "was a skill's instruction acted on at runtime?"),
         PaletteEntry("Bill of materials", "--sbom",
                      "skills, MCP servers, hashes and pin state as JSON"),
+        PaletteEntry("SBOM diff <id1> <id2>", "--sbom-diff",
+                     "added/removed/changed components between two BOMs"),
         PaletteEntry("Incident pack", "--incident",
                      "findings + hashes + a rotation list, to preserve"),
+        PaletteEntry("Open an incident", "--incident-open",
+                     "a persisted, lifecycle-tracked record for this run"),
+        PaletteEntry("Mark incident status", "--incident-mark",
+                     "advance or reopen its status"),
+        PaletteEntry("Show incident <id>", "--incident-show",
+                     "status, history, and events since it opened"),
         PaletteEntry("Judge packet", "--judge-packet",
                      "borderline findings, for a host-agent 2nd opinion"),
         PaletteEntry("Propose ignores", "--propose-ignore",
@@ -152,6 +164,10 @@ _PALETTE: tuple[PaletteCategory, ...] = (
     PaletteCategory("Watch", READONLY, MODE_B, (
         PaletteEntry("What changed", "--monitor",
                      "diff against your last scan"),
+        PaletteEntry("Watch continuously", "--watch",
+                     "long-running — re-scans itself on a relevant change"),
+        PaletteEntry("Watch heartbeat", "--watch-status",
+                     "ALIVE / STALE / STOPPED / NOT RUNNING"),
         PaletteEntry("Is the watch alive", "--brief",
                      "last check, its age, and anything logged since"),
         PaletteEntry("Watch on a schedule", "--cron-recipe",
@@ -160,6 +176,8 @@ _PALETTE: tuple[PaletteCategory, ...] = (
                      "how your graded scans moved over time"),
         PaletteEntry("Watch log", "--watch-log",
                      "timeline of what changed (Agent Watch journal)"),
+        PaletteEntry("Diff two runs <id1> <id2>", "--diff",
+                     "new/fixed/unchanged findings between two saved runs"),
         PaletteEntry("Verify history", "--verify-history",
                      "the score history's hash-chain is untampered"),
         PaletteEntry("Verify events", "--verify-events",
@@ -239,12 +257,17 @@ _UNLISTED_FLAG_MODES: dict[str, str] = {
     "--dashboard-findings": MODE_A,
     "--compact": MODE_A,         # only with --dashboard --full
     "--exhaustive": MODE_A,      # raises this check's scan caps
+    "--format": MODE_A,          # only with --sbom: native/cyclonedx/spdx
+    "--save-sbom-run": MODE_A,   # opt-in per-run SBOM snapshot; feeds --sbom-diff
     # ── B · Watch: where the periodic state lives ────────────────────────────
     "--state": MODE_B,           # snapshot file for --monitor
     "--events": MODE_B,          # the Agent Watch event journal
     "--history": MODE_B,         # the score-history file --trend reads
     "--data-dir": MODE_B,        # all three of the above, moved together
     "--probe": MODE_B,           # report drift without writing any of the three
+    "--watch-debounce": MODE_B,  # modifier of --watch, same reach
+    "--save-run": MODE_B,        # opt-in per-run snapshot; feeds --diff
+    "--all": MODE_B,             # un-windows --trend/--watch-log's default display cap
     # ── C · Before you install: vet-only modifiers ───────────────────────────
     "--recursive": MODE_C,       # alias of --vet-all
     "--vet-judge-packet": MODE_C,
@@ -255,6 +278,7 @@ _UNLISTED_FLAG_MODES: dict[str, str] = {
     "--json": CROSS,
     "--exit-code": CROSS,
     "--fail-on": CROSS,
+    "--exit-code-scheme": CROSS,  # modifier of the two rows above, same reach
     "--ascii": CROSS,
     "--no-color": CROSS,
     "--quiet": CROSS,

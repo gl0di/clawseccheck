@@ -35,6 +35,7 @@ from ..skillast import (
 from ..textnorm import (
     _nfkc_ascii_fold_changed,
     confusable_in_ascii_context,
+    has_naked_bidi_override,
     normalize_for_scan,
     obfuscation_signals,
 )
@@ -5384,7 +5385,21 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
         # not FAILed. An actionable payload still FAILs; a bare hidden override with no such
         # heading and no defensive chrome still FAILs (the catalogue flag is False there).
         catalogue_defensive = _b58_text_is_detection_catalogue(norm)
-        for variant, signals, is_extract in variants:
+        # B-766: a bidi OVERRIDE (U+202D/U+202E, Trojan-Source-style) conceals text order
+        # from every pattern the loop below can run — that is exactly what the attack
+        # defeats, so this is checked on the RAW text before the loop, unconditionally on
+        # whether any INJECTION_PATTERNS match. `normalize_for_scan` already strips the
+        # control characters (so `norm` scans clean) without undoing the reordering they
+        # produced — the reversed spelling survives stripping and matches nothing. Same
+        # base_defensive treatment as the rest of this function: a whole-text-defensive
+        # security-education doc may legitimately demonstrate the technique.
+        if has_naked_bidi_override(text) and not base_defensive:
+            fail_ev.append(
+                f"{source_name}: bidi override (Trojan-Source-style) conceals text order "
+                "from byte-level pattern matching — cannot be verified safe"
+            )
+            hidden = True
+        for variant, signals, is_extract in ([] if hidden else variants):
             if not signals:
                 continue
             if variant == norm and base_defensive:
@@ -7971,7 +7986,7 @@ def check_conditional_sleeper_trigger(ctx: Context) -> Finding:
         return _finding(
             "B65",
             WARN,
-            "Potential conditional sleeper-trigger directive(s) detected (C-080): "
+            "Potential conditional sleeper-trigger directive(s) detected: "
             + "; ".join(evidence[:4]),
             "Remove hidden conditional actions that execute on user-trigger phrases. "
             "Keep sensitive behavior explicit, permission-gated, and impossible to "
@@ -10244,7 +10259,7 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
         return _finding(
             "B66",
             WARN,
-            "Persona / role jailbreak indicator detected (C-078): " + "; ".join(evidence[:4]),
+            "Persona / role jailbreak indicator detected: " + "; ".join(evidence[:4]),
             "Remove role-switch instructions that attempt to reset constraints "
             "or inject a low-trust persona. Enforce fixed policy boundaries: "
             "system constraints should remain the top authority.",
@@ -10558,6 +10573,82 @@ def check_python_runtime_persist_install(ctx: Context) -> Finding:
     )
 
 
+def check_sitecustomize_pythonstartup_scoped_install(ctx: Context) -> Finding:
+    """B375 (F-177) — sitecustomize/PYTHONSTARTUP persistence install, AST
+    function-scope precision.
+
+    dossier.py's Persistence axis has exactly three feeders (B86/B87/B89), all
+    AST-backed, and no AST0x category fallback reaches it. B335 just above
+    (`check_python_runtime_persist_install`) already recognizes this exact install
+    shape via a whole-file regex + a character-proximity window, but it lives in the
+    advisory block with no AST rule of its own, so it cannot genuinely feed the axis
+    the way B86/B87/B89 do (see dossier.py's `_AXIS_BY_ID` comment on the dual-axis
+    stopgap this check replaces with a real fourth feeder). This is the AST-
+    persistence-layer twin of B335, at a tighter, function-scope precision
+    (`skillast._persist_install_function_findings`):
+
+    Mechanism A — within ONE function: a site.getsitepackages()/getusersitepackages()
+    call, a sitecustomize.py/usercustomize.py string constant, and a write/append-mode
+    open() call.
+    Mechanism B — within ONE function: a shell-rc path string constant
+    (.bashrc/.zshrc/.bash_profile/.profile/.zprofile), a PYTHONSTARTUP= assignment-
+    shaped string constant (never a bare mention), and a write/append-mode open() call.
+
+    Scope-locality (same function, not merely the same file) is what keeps this from
+    firing on dev tooling that only ever *reads* site.getsitepackages() elsewhere in
+    the file, or on a helper that writes some unrelated file in a function that
+    separately, incidentally mentions a shell-rc filename.
+
+    WARN when either mechanism fires — a real install act, but the same shape can
+    appear in an unusual-but-legitimate REPL-customization tool, so this never
+    escalates past WARN (matching B335's own reasoning). Advisory (scored=False);
+    PASS when no installed skill's Python source shows either shape; UNKNOWN when
+    there are no installed skills to inspect.
+    """
+    if not getattr(ctx, "installed_skills", None):
+        return _custom(
+            "B375",
+            MEDIUM,
+            UNKNOWN,
+            "No installed skills to inspect for sitecustomize/PYTHONSTARTUP "
+            "persistence installs.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+
+    warns: list[str] = []
+    for name, files in getattr(ctx, "installed_skill_py", {}).items():
+        for relpath, src in files:
+            for af in analyze_python(src, relpath):
+                if af.rule in ("SITECUSTOMIZE_SCOPED_INSTALL", "PYTHONSTARTUP_SCOPED_INSTALL"):
+                    warns.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
+
+    if warns:
+        extra = f" (+{len(warns) - 4} more)" if len(warns) > 4 else ""
+        return _custom(
+            "B375",
+            HIGH,
+            WARN,
+            "Sitecustomize/PYTHONSTARTUP persistence install (function-scoped): "
+            + "; ".join(warns[:4])
+            + extra,
+            "Avoid computing a sitecustomize/usercustomize target path and writing to "
+            "it, and avoid assigning PYTHONSTARTUP while writing/appending to a shell "
+            "rc file, within a single function, unless the auto-execution is "
+            "genuinely required — document why if so.",
+            warns,
+        )
+    return _custom(
+        "B375",
+        MEDIUM,
+        PASS,
+        "No function-scoped sitecustomize/usercustomize install or PYTHONSTARTUP "
+        "shell-rc install pattern found.",
+        "Avoid computing a sitecustomize/usercustomize target path and writing to it, "
+        "and avoid assigning PYTHONSTARTUP while writing/appending to a shell rc "
+        "file, within a single function.",
+    )
+
+
 def check_silent_instruction(ctx: Context) -> Finding:
     """B63 — Silent-instruction detector (C-075).
 
@@ -10631,7 +10722,7 @@ def check_silent_instruction(ctx: Context) -> Finding:
             "from the user, remove it. If it is documentation describing an attack "
             "pattern, wrap it in a fenced code block AND annotate it as a non-executable "
             "example (a nearby 'do NOT do this' / 'example only' note) — a bare fence no "
-            "longer dampens the finding on its own (B-097).",
+            "longer dampens the finding on its own.",
             warn_ev,
             severity=MEDIUM,
         )
@@ -13775,6 +13866,10 @@ _EXFIL_OBJECT_WINDOW = 300  # the object may be described a workflow step earlie
 # `?access_token=` key, then actually send an unrelated, real stolen secret through it.
 # Staying at WARN (not PASS) keeps that residual visible rather than fully blind, while
 # still fixing the reported hard-FAIL false positive on the mainstream idiom.
+# Detection-pattern data, not a credential -- these are REST-API auth QUERY-PARAMETER
+# NAMES (never a secret VALUE), matched against text found in a SCANNED skill's prose
+# to recognize the "?api_key=", "?access_token=", "?client_secret=" REST-auth idiom.
+# Never sent anywhere; clawseccheck makes no network calls (CLAUDE.md Golden Rule #1).
 _URL_AUTH_QUERY_PARAM_NAME_RE = re.compile(
     r"(?:^|[?&])(?:"
     r"access[_-]?token|auth[_-]?token|bearer[_-]?token|refresh[_-]?token|"

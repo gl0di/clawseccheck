@@ -100,6 +100,11 @@ _CHANNELS = {
     ),
     "sub_signals": ("judge", "which sub-signal of a multi-signal check fired", None),
     "destination_hosts": ("judge", "the external destination a finding names", None),
+    "config_field_paths": (
+        "judge",
+        "the config field a check read but found unset/unusable, when it has one to name",
+        None,
+    ),
     # B-636: channels attached AFTER construction, not declared on the dataclass. This
     # guard used to enumerate `dataclasses.fields(Finding)` only, so its name promised more
     # than its reach: four live channels were invisible to it, and `ctx` — which carries an

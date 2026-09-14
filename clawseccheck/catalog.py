@@ -516,6 +516,35 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="mcp",
     ),
+    # B369-B370 (C-413, child of E-074): runtime-exec inventory, disclosure-only
+    # (scored=False), matching B364's precedent — neither attempts to classify a value
+    # as safe/risky, only discloses it. acp.backend/fallbacks/runtime.installCommand
+    # (openclaw@2026.9.4, zod-schema-Q1KXOooO.mjs:1390-1403) are real, current,
+    # top-level fields — a richer surface than the filed task's stub named.
+    # agentRuntime.id's real path is
+    # agents.{defaults,entries.<id>}.models.<ref>.agentRuntime.id
+    # (openclaw@2026.9.4, zod-schema.agent-runtime-Ca6cjqf9.mjs:28-32), NOT the stub's cited
+    # models.providers.*.agentRuntime.id — B331's own pre-existing grounding note
+    # (above) already declined to characterize this field's value vocabulary as
+    # safe/risky for the same reasons B370 inherits.
+    CheckMeta(
+        "B369",
+        "acp.backend routes agent turn execution to a plugin backend",
+        MEDIUM,
+        "advisory",
+        "Supply Chain",
+        scored=False,
+        surface="mcp",
+    ),
+    CheckMeta(
+        "B370",
+        "agentRuntime.id names the external process that runs a model's turns",
+        MEDIUM,
+        "advisory",
+        "Supply Chain",
+        scored=False,
+        surface="mcp",
+    ),
     CheckMeta(
         "B25", "Update / pinning hygiene", MEDIUM, "hardening", "Supply Chain", surface="skills"
     ),
@@ -702,6 +731,50 @@ CATALOG: list[CheckMeta] = [
     CheckMeta(
         "B178",
         "Cleartext http:// baseUrl on a model provider (API-key + traffic leak)",
+        HIGH,
+        "hardening",
+        "Proxy / Egress Hardening",
+        surface="tools",
+    ),
+    # B365-B366 (C-412, child of E-074): raw-content egress the filed task's own stub
+    # got wrong on two of its three items — re-grounded against openclaw@2026.9.3.
+    #
+    # B365: diagnostics.otel.captureContent is a plain boolean (zod-schema-CTg_faEc.mjs
+    # :1278), not the granular {enabled,inputMessages,outputMessages,...} object the stub
+    # described — that shape is retired (legacy-D51FqLiI.mjs's migrateFinalLayoutKills
+    # collapses it to a boolean on every load). The real content-capture gate, traced
+    # from resolveDiagnosticModelContentCapturePolicy (dist/worker/worker.mjs), is a
+    # 4-key conjunction: diagnostics.enabled not-false AND otel.enabled===true AND
+    # otel.traces not-false AND captureContent===true — reading captureContent alone
+    # (the stub's own proposed condition) would false-positive on otel.enabled unset.
+    # FAIL-capable but narrow (HIGH severity, mirrors B178's classify-host bar exactly)
+    # to hold Golden Rule #5.
+    #
+    # B366: the stub's cited path `agents.defaults.memorySearch.remote.*` does not
+    # exist — real path is `memory.search.remote.*`, at the config ROOT (global) and,
+    # separately, PER-AGENT (agents.entries.<id>.memory.search.remote.*, NOT reachable
+    # under agents.defaults at all — AgentDefaultsSchema has no memory key). Checks both
+    # scopes independently via agent_roster(). FAIL-capable, same classify-host bar as
+    # B178/B365.
+    #
+    # `memory.qmd.sessions.exportDir` (the stub's third item) is dropped entirely: the
+    # QMD memory backend is RETIRED (openclaw@2026.9.4, legacy-fR_P797G.mjs:3668 names it
+    # explicitly —
+    # "memory.qmd is retired because the QMD memory backend was removed; configured
+    # external paths migrate to memory.search.extraPaths") — there is no field left to
+    # audit.
+    CheckMeta(
+        "B365",
+        "OpenTelemetry content capture ships raw agent turns to a network collector",
+        HIGH,
+        "hardening",
+        "Data Protection",
+        surface="secrets",
+    ),
+    CheckMeta(
+        "B366",
+        "memory.search.remote sends embedded memory chunks to a third-party endpoint "
+        "over cleartext http://",
         HIGH,
         "hardening",
         "Proxy / Egress Hardening",
@@ -2250,6 +2323,30 @@ CATALOG: list[CheckMeta] = [
         "Write Integrity / Self-Modification",
         surface="skills",
     ),
+    # B367-B368 (C-413, child of E-074): skills.load's other two siblings of
+    # extraDirs (zod-schema-CTg_faEc.mjs:1502-1508, live and current — the LOAD side,
+    # distinct from skills.workshop.allowSymlinkTargetWrites, the WRITE side B175 covers
+    # and which OpenClaw 2026.9.3 removed entirely, see B175's own B-783 note).
+    # B367's FAIL classifier reuses _shared._dir_replaceable_by_others (the discriminator
+    # B186, checks/_host.py, replaced a "well-known broad root" string heuristic with
+    # after that shape was tried and retracted there) rather than inventing a new one.
+    CheckMeta(
+        "B367",
+        "skills.load.allowSymlinkTargets widens where executable skill code may load "
+        "from via a symlink",
+        HIGH,
+        "hardening",
+        "Write Integrity / Self-Modification",
+        surface="skills",
+    ),
+    CheckMeta(
+        "B368",
+        "skills.load.watch hot-reloads skill definitions with no gateway restart",
+        MEDIUM,
+        "hardening",
+        "Write Integrity / Self-Modification",
+        surface="skills",
+    ),
     # B179 (B-250): hooks.webhooks / hooks.internal(.load.extraDirs) enable-toggle
     # inventory. The originating bug report's field name "hooks.webhooks" is NOT a real
     # config path -- grounded against the dist, the native audit's own inventory line
@@ -2984,6 +3081,202 @@ CATALOG: list[CheckMeta] = [
         "Zero Trust / Gateway",
         surface="gateway",
     ),
+    # B354 (B-725): the state DB's shared skill-library/upload surface -- a skill
+    # install/enable channel our filesystem-based skill discovery never sees at all.
+    # WARN-only (can prove a live untracked skill EXISTS, never that it is malicious;
+    # never reads its content) and UNKNOWN, not PASS, when the surface could not be
+    # examined -- absence of the table on this DB is not evidence the feature is unused.
+    CheckMeta(
+        "B354",
+        "Shared skill-library / upload surface bypasses filesystem discovery",
+        HIGH,
+        "hardening",
+        "Supply Chain",
+        surface="skills",
+    ),
+    # B355 (C-408): models.providers.*.localService.command auto-spawns a binary at
+    # provider startup with config-chosen args/cwd/env. WARN-only, never FAIL -- a
+    # writable command path needs its own independent C-135 pass to escalate, per this
+    # task's own "WARN/INFO ship first" allowance (same tier B352 already set for the
+    # sibling tools.exec.pathPrepend surface).
+    CheckMeta(
+        "B355",
+        "Model-provider local-service command is writable by another account",
+        HIGH,
+        "hardening",
+        "Least Privilege",
+        surface="tools",
+    ),
+    # B356/B357 (C-409): re-scoped by measurement against openclaw@2026.9.3 — the
+    # filed "reconcile a live allowFrom/device-auth store against config" premise no
+    # longer holds (both files are now migration-only markers; see checks/_lifecycle.py's
+    # docstrings for the full grounding trail). Advisory/hygiene, never FAIL: presence
+    # means "run openclaw doctor --fix", not "you were tampered with".
+    CheckMeta(
+        "B356",
+        "Legacy pre-migration runtime-state file(s) present (allowFrom/device-auth)",
+        LOW,
+        "advisory",
+        "Patch hygiene",
+        surface="secrets",
+    ),
+    CheckMeta(
+        "B357",
+        "Supervisor restart-handoff file outlived its own expiry",
+        LOW,
+        "advisory",
+        "Monitoring",
+        surface="host",
+    ),
+    # B358/B359/B360 (C-410): gateway HTTP/remote/embed hardening, re-grounded against
+    # openclaw@2026.9.3 (the filed "hot"/"hybrid" reload.mode item was dropped — that
+    # enum is now "off"/"hybrid" and "hybrid" is the vendor's own default/recommended
+    # posture, not a hardening gap; see the task's Pulse trail). All three are
+    # WARN-only: the filed FAIL premise for B358 (SSRF to cloud metadata/internal
+    # services via images.allowUrl with no urlAllowlist) is REFUTED by the runtime's
+    # own unconditional allowPrivateNetwork=false SSRF guard — see the check's
+    # docstring (checks/_config.py) for the full grounding trail.
+    CheckMeta(
+        "B358",
+        "OpenAI-compatible chat-completions endpoint (remote ingress; open-proxy-shaped image-URL fetch)",
+        MEDIUM,
+        "hardening",
+        "Zero Trust / Gateway",
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B359",
+        "Remote-gateway SSH host-key policy delegated to OpenSSH instead of pinned",
+        HIGH,
+        "hardening",
+        "Zero Trust / Gateway",
+        surface="gateway",
+    ),
+    CheckMeta(
+        "B360",
+        "Control-UI embed sandbox set to 'trusted' (allow-same-origin)",
+        MEDIUM,
+        "hardening",
+        "Zero Trust / Control-UI Origin",
+        surface="gateway",
+    ),
+    # B361-B364 (C-411): remote-ingress / multi-user session hardening, re-grounded
+    # against openclaw@2026.9.3. sessions.visibility was DROPPED from this task's
+    # scope — already covered by the pre-existing B39 (checks/_agents.py) — and its
+    # own default was found to be "all" (the permissive end), not "tree" as the
+    # C-411 stub assumed; filed separately as a bug against B39, not fixed here.
+    # requireMention/chatmode/allowBots were DROPPED from scope: each is nested
+    # differently per channel provider (top-level for some, .groups.*/.guilds.* for
+    # others), needing its own dedicated grounding pass rather than one bullet
+    # among four in this task.
+    CheckMeta(
+        "B361",
+        "Cross-agent session-tool access unrestricted, reachable from an open channel",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Multi-Agent",
+        surface="agents",
+    ),
+    CheckMeta(
+        "B362",
+        "session.scope=global shares one session across every sender on an open channel",
+        MEDIUM,
+        "hardening",
+        "Session Isolation",
+        surface="sessions",
+    ),
+    CheckMeta(
+        "B363",
+        "Cross-provider message sends allowed (tools.message.crossContext.allowAcrossProviders)",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Cross-Context Messaging",
+        surface="tools",
+    ),
+    CheckMeta(
+        "B364",
+        "session.resetTriggers configures inbound phrases that force a session reset",
+        MEDIUM,
+        "advisory",
+        "Session Isolation",
+        scored=False,
+        surface="sessions",
+    ),
+    # B371/B372 (C-525, split out of C-411 2026-09-11 — the requireMention/chatmode/
+    # allowBots bullets needed their own grounding pass: nesting is genuinely
+    # heterogeneous per channel provider, not one config path).
+    CheckMeta(
+        "B371",
+        "Group/room mention gate disabled or bypassed on an externally-reachable channel",
+        MEDIUM,
+        "hardening",
+        "Untrusted Input Gating",
+        surface="channels",
+    ),
+    CheckMeta(
+        "B372",
+        "Bot-authored messages accepted (allowBots) on an externally-reachable channel",
+        MEDIUM,
+        "hardening",
+        "Untrusted Input Gating",
+        surface="channels",
+    ),
+    # B373 (C-527): OPENCLAW_CONFIG_READONLY / OPENCLAW_NIX_MODE — new in
+    # OpenClaw 2026.9.4, grounded against the live installed 9.4 dist. See the module
+    # comment above check_config_externally_managed (checks/_config.py) for the full
+    # resolver/isBlockedConfigEnvVar grounding. Disclosure-only by construction: an
+    # externally-managed read-only config is a deliberate hardening posture an operator
+    # opts into (Nix, a container/K8s-managed deployment); its absence is simply the
+    # default OpenClaw setup, not a gap. LOW/advisory/scored=False — there is no
+    # plausible FAIL or WARN shape for "the config is protected from being rewritten"
+    # (Golden Rule #5), so this can only ever report PASS or UNKNOWN.
+    CheckMeta(
+        "B373",
+        "Externally-managed, read-only config posture (OPENCLAW_CONFIG_READONLY / Nix mode)",
+        LOW,
+        "advisory",
+        "Config Integrity / External Management",
+        scored=False,
+        surface="monitoring",
+    ),
+    # B374 (C-526): cloudWorkers prepared-pool — new in OpenClaw 2026.9.4, grounded
+    # against the live installed 9.4 dist. See the module comment above
+    # check_cloudworkers_prepared_pool (checks/_config.py) for the full
+    # createPreparedWorkerPool/DEFAULT_READY_WORKERS/DEFAULT_MAX_TOTAL grounding.
+    # Gated on cloudWorkers.profiles actually being configured (UNKNOWN otherwise —
+    # the overwhelming majority of installs today). WARN/advisory/scored=False: a
+    # default-on warm remote-worker reserve existing is not itself a hole, so this
+    # never reaches FAIL and needed no C-135 pass.
+    CheckMeta(
+        "B374",
+        "cloudWorkers prepared-pool default-on warm reserve",
+        LOW,
+        "advisory",
+        "Off-Machine Execution",
+        scored=False,
+        surface="agents",
+    ),
+    # B375 (F-177): the AST-persistence-layer twin of B335. B335 already recognizes this
+    # exact sitecustomize/usercustomize + PYTHONSTARTUP install shape via a whole-file
+    # regex + character-proximity window, but it carries no AST0x rule of its own, and
+    # dossier.py's Persistence axis has exactly three feeders (B86/B87/B89) with no
+    # AST0x category fallback reaching it (see dossier.py's _AXIS_BY_ID comment on
+    # B335's own dual-axis stopgap). This check reruns the same two mechanisms at
+    # FUNCTION-SCOPE precision via skillast.py's AST walk (not a whole-file regex), so
+    # Persistence gets a genuine fourth feeder rather than a re-routed existing id — see
+    # this check's own docstring for the two mechanisms. Advisory (scored=False);
+    # WARN-only, never FAIL. MEDIUM confidence, same as B335 — a multi-signal
+    # co-occurrence heuristic, not an exact filename match.
+    CheckMeta(
+        "B375",
+        "Sitecustomize/PYTHONSTARTUP persistence install, function-scoped (AST)",
+        HIGH,
+        "advisory",
+        "Persistence / Supply-Chain Tamper",
+        scored=False,
+        confidence="MEDIUM",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -3079,6 +3372,11 @@ AST_MAP = {
     "B22": ("AST03", "AST06"),
     "B175": ("AST03", "AST06"),  # skill workshop auto-author + no-review install = over-privileged self-modification (cf. B22)
     "B39": ("AST06",),
+    "B362": ("AST06",),  # session.scope=global on an open channel = weak isolation (cf. B39)
+    "B361": ("AST03",),  # unrestricted agent-to-agent pivot reachable from an open channel = over-privileged reach (cf. B72)
+    "B371": ("AST05",),  # mention-gate bypass on a reachable channel = untrusted external instructions (cf. B140)
+    "B372": ("AST05",),  # bot-authored input admitted on a reachable channel = untrusted external instructions (cf. B140)
+    "B363": ("AST03",),  # cross-provider message send = over-privileged reach (cf. B76)
     "B48": ("AST06", "AST03"),
     "B70": ("AST06",),
     "B25": ("AST02", "AST07"),
@@ -3108,8 +3406,13 @@ AST_MAP = {
     "C032": ("AST06",),  # trusting spoofable forwarded headers = weak boundary (cf. B70)
     "B80": ("AST06",),  # no rate limiting on an exposed auth'd gateway = weak isolation (cf. B70)
     "B340": ("AST06",),  # effective listening-socket bind diverges from declared gateway.bind = weak isolation (cf. B2/B70)
+    "B358": ("AST06",),  # chat-completions remote ingress / SSRF via images.allowUrl = weak isolation (cf. B83)
+    "B359": ("AST06",),  # remote-gateway SSH host-key verification delegated to OpenSSH = weak isolation (cf. B340)
+    "B360": ("AST06",),  # Control-UI embed sandbox "trusted" removes origin isolation = weak isolation (cf. B330)
     "B81": ("AST03",),  # raised subagent spawn limits = over-privileged delegation (cf. B72)
     "B82": ("AST02",),  # bulk turn transcripts at rest = sensitive-data exposure (cf. C5)
+    "B365": ("AST02",),  # otel content capture ships raw turns off-host = sensitive-data exposure (cf. B82)
+    "B366": ("AST02",),  # memory.search.remote embeds/sends memory chunks off-host = sensitive-data exposure (cf. B82)
     "B83": ("AST06",),  # excessive redirect-follow on fetch = weak isolation/SSRF (cf. B38)
     "B84": (
         "AST03",
@@ -3138,6 +3441,7 @@ AST_MAP = {
     "B96": ("AST04",),  # config-driven trust widening (heuristic) = insecure metadata (cf. B62/B88)
     "B98": ("AST04",),  # missing capability declaration = insecure/absent least-privilege metadata (cf. B62/B88/B96)
     "B99": ("AST02",),  # .pth/sitecustomize auto-execution persistence = supply-chain tamper (cf. B86/B94)
+    "B375": ("AST02",),  # function-scoped sitecustomize/PYTHONSTARTUP install (AST) = supply-chain tamper (cf. B86/B99/B335)
     "B100": ("AST01", "AST02"),  # ClickFix paste-into-terminal + remote-fetch = malicious skill / supply-chain (cf. B13)
     "B135": ("AST02",),  # accepted-despite-failed-verification install = supply-chain trust bypass (cf. B103/B95)
     "B136": ("AST06",),  # codex trust_level="trusted" disables approval/sandbox gating = weak isolation (cf. B4/B48/B70)
@@ -3153,6 +3457,8 @@ AST_MAP = {
     "B184": ("AST02",),  # skills installed from a redirected registry = supply-chain compromise at the source (cf. B135/B177/B181)
     "B185": ("AST04", "AST05"),  # poisoned tool description delivered to the model = insecure metadata carrying untrusted external instructions (cf. B62/B64)
     "B186": ("AST02",),  # relocated bundled skills/hooks root = supply-chain code-load root the scanners never enumerated (cf. B184)
+    "B367": ("AST02",),  # skills.load.allowSymlinkTargets writable-by-others = supply-chain code-load root (cf. B186)
+    "B368": ("AST02",),  # skills.load.watch hot-reloads live from an extraDir = supply-chain code-load, no restart boundary (cf. B186/B367)
     "B187": ("AST02",),  # non-bundled plugin declares agentToolResultMiddleware = supply-chain interception capability disclosure (cf. B151/B152/B177)
     "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
     "B348": ("AST02",),  # plugins.load.paths entry not in plugins.entries = supply-chain visibility gap (cf. B152/B158)
@@ -3197,6 +3503,11 @@ OWASP_MAP = {
     "B32": ("LLM06",),
     "B33": ("LLM03",),
     "B39": ("LLM02",),
+    "B362": ("LLM02",),  # session.scope=global cross-sender context bleed = Sensitive Info Disclosure (cf. B39)
+    "B361": ("LLM06",),  # agent-to-agent pivot = Excessive Agency (cf. B72)
+    "B371": ("LLM01",),  # mention-gate bypass on a reachable channel = Prompt Injection surface (cf. B140)
+    "B372": ("LLM01",),  # bot-authored input admitted on a reachable channel = Prompt Injection surface (cf. B140)
+    "B363": ("LLM02",),  # cross-provider message egress = Sensitive Info Disclosure (cf. B12/C014)
     "B41": ("LLM02", "LLM06"),
     "B42": ("LLM03",),
     "B174": ("LLM03",),
@@ -3256,9 +3567,14 @@ OWASP_MAP = {
     "B80": ("LLM10",),  # no rate limiting on an exposed auth'd gateway = Unbounded Consumption
     "B81": ("LLM06",),  # raised subagent spawn limits = Excessive Agency (cf. B72)
     "B82": ("LLM02",),  # unredacted transcripts persisted at rest = Sensitive Info Disclosure
+    "B365": ("LLM02",),  # otel content capture ships raw turns off-host = Sensitive Info Disclosure
+    "B366": ("LLM02",),  # memory.search.remote embeds/sends memory chunks off-host = Sensitive Info Disclosure
     "B83": (
         "LLM02",
     ),  # excessive redirect-follow on fetch = SSRF data-disclosure surface (cf. B38)
+    "B358": ("LLM02",),  # images.allowUrl = open-proxy-shaped server-side URL fetch, data-disclosure-adjacent (cf. B83)
+    "B360": ("LLM01",),  # embedSandbox=trusted removes origin isolation = Control-UI origin/session compromise (cf. B56)
+    # B359 (SSH host-key MITM) stays unmapped — no clean LLM analog, same as B38/C3/B77/B78.
     "B84": (
         "LLM06",
     ),  # proven high-blast verb with an ungated posture = Excessive Agency (cf. B43/B44)
@@ -3276,6 +3592,8 @@ OWASP_MAP = {
     "B184": ("LLM03",),  # skills installed from a redirected registry = Supply Chain
     "B185": ("LLM01",),  # poisoned tool description already delivered to the model = Prompt Injection
     "B186": ("LLM03",),  # relocated bundled skills/hooks code-load root = Supply Chain
+    "B367": ("LLM03",),  # skills.load.allowSymlinkTargets writable-by-others = Supply Chain (cf. B186)
+    "B368": ("LLM03",),  # skills.load.watch hot-reloads live from an extraDir = Supply Chain (cf. B186/B367)
     "B187": ("LLM03", "LLM05"),  # non-bundled plugin declares agentToolResultMiddleware = Supply Chain + Improper Output Handling
     "B193": ("LLM02",),  # gateway secret inlined in the service unit = Sensitive Information Disclosure
 }
@@ -3590,6 +3908,24 @@ class Finding:
     # non-guess answer to "whose destination is this?" and the honest output is silence.
     # Every existing Finding() construction site is unaffected.
     destination_hosts: frozenset = field(default_factory=frozenset)
+    # F-166 track 1: config field path(s) a check READ to reach an UNKNOWN verdict, when
+    # the check has one to name. Engine-authored by construction — a string literal in
+    # our own source, one line above the return that sets it, never derived from a
+    # skill's or config's own content — so it needs none of destination_hosts' gating:
+    # the value IS the dig() call site, not something recovered from attacker-reachable
+    # text. adjudication.build_judge_packet publishes it in safe_facts.config_field_paths
+    # so a judge asked to adjudicate an UNKNOWN sees WHICH field was undetermined,
+    # instead of the bare finding id alone.
+    #
+    # Deliberately narrower than the field's name might suggest: this names the path the
+    # check looked at, never the VALUE found there (frequently attacker-choosable free
+    # text — see B-556's destination_hosts comment for why a value channel needs a much
+    # stronger gate than a path does) and never an EXPECTED value (no source exists for
+    # that in this tree — measured 2026-08-28, F-166's own design trail).
+    #
+    # Empty for every producer that does not opt in. Every existing Finding() construction
+    # site is unaffected.
+    config_field_paths: frozenset = field(default_factory=frozenset)
 
     def __post_init__(self):
         # Normalizes, never raises: a Finding built with not_applicable=True at a

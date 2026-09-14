@@ -19,6 +19,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import secrets
 import sys
 from dataclasses import dataclass, field
@@ -26,10 +27,11 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import (
-    audit, fingerprint, load_events, load_ignore, load_state, make_canary, record_events,
+    audit, build_context, fingerprint, load_events, load_ignore, load_state, make_canary,
+    record_events,
     render_canary, render_card, render_dashboard, render_dashboard_findings, render_events,
     render_json, render_monitor,
-    render_report, render_svg, render_vet_json, save_state, snapshot,
+    render_report, render_svg, render_vet_all_json, render_vet_json, save_state, snapshot,
     vet_mcp, vet_plugin, vet_skill, vet_source,
 )
 from . import __released__, __version__
@@ -40,16 +42,18 @@ from .brand import WORDMARK
 # carries WHY a classification may be undetermined, and `detect_vet_type` — the curated
 # public name — stays exactly as it was, wrapping it.
 from .checks import detect_vet_type_with_reason, resolve_skill_target
-from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for
-from .checks import _credential_store_state
-from .invocation import _display_path, command_prefix
+from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for, sandbox_sync_marker_present
+from .checks import CHECKS_BY_ID, _credential_store_state
+from .invocation import cmd, command_prefix, display_path_for_delivery
+from .locking import journal_lock
 # B-270: the shared baseline predicate. Imported from the submodule rather than the package
 # root so the new vocabulary does not have to widen the curated public API in __init__.py.
 from .monitor import (
     BASELINE_ABSENT, BASELINE_CORRUPT, BASELINE_CORRUPT_ALERT, BASELINE_OK,
     BASELINE_DIGEST_CHARS, baseline_reference, baseline_witness_event,
-    _coverage_signature, _diff_coverage,
-    diff_with_notes, read_baseline, snapshot_reference,
+    _coverage_signature, _diff_coverage, _home_identity,
+    diff_with_notes, home_mismatch, read_baseline, snapshot_reference,
+    witnessed_reference_for_state,
 )
 # Aliased: `args.verify_baseline` holds the user's reference string, and giving the
 # function the same bare name next to it reads as though one were the other.
@@ -71,11 +75,13 @@ from .integrity import (
 from .report import _missing_layers_sentence
 from .report import render_html
 from .report import (
+    DEFAULT_EVENTS_WINDOW,
     _evidence_bullets,
     _redact_home_paths,
     _sanitize,
     render_advise,
     render_advise_json,
+    render_explain,
     render_permission_manifest,
     render_vet_dossier,
     render_vet_plan,
@@ -93,9 +99,11 @@ from .scanbudget import (
     DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, ScanBudgetExceeded, budget_deadline,
     budget_exceeded,
 )
+from . import livetestproof as _livetestproof
 from . import pipeline as _pipeline
-from .baseline import append_entries, is_fingerprint
+from .baseline import append_entries, is_fingerprint, load_ignore_entries
 from .catalog import (
+    BY_ID,
     CRITICAL,
     FAIL_WEIGHT_STATUSES,
     HIGH,
@@ -125,20 +133,28 @@ from .sarif import render_sarif
 from .pdf import render_pdf
 from .history import (
     DEFAULT_HISTORY,
+    DEFAULT_TREND_WINDOW,
     load as history_load,
     load_with_problem as history_load_with_problem,
     record as history_record,
     render_trend,
     verify as history_verify,
 )
+from .runstore import diff_runs as _diff_runs
+from .runstore import load_run as _load_run
+from .runstore import render_diff_json as _render_diff_json
+from .runstore import save_run as _save_run_snapshot
 from .menu import compute_ages, render_menu, render_onboarding
 from .palette import render_palette
 from .percentile import render_percentile
 from .logsafe import get_logger
 from .safeio import secure_write_bytes, secure_write_text
 from .textnorm import asciify
-from .incident import render_incident
-from .layers import LAYER_ORDER
+from .incident import incident_timeline, open_incident_from_audit, render_incident, render_incident_record
+from .incidentstore import INCIDENT_STATUSES, _incident_to_dict, render_incident_json
+from .incidentstore import load_incident as _load_incident
+from .incidentstore import mark_incident as _mark_incident
+from .layers import LAYER_ORDER, STATUS_ERROR
 from .trajaudit import render_trajectory_analysis
 from .behavioral import analyze as _behavioral_analyze
 from .behavioral import analysis_incompleteness as _behavioral_incompleteness
@@ -152,7 +168,12 @@ from .skillprovenance import read_provenance as _read_provenance
 from .skillprovenance import workspace_roots as _workspace_roots
 from .monitor import NOTE_INSPECTION_CAPPED, NOTE_UNDETERMINED
 from .monitor import changed_skills as _changed_skills
-from .sbom import render_sbom
+from .sbom import build_sbom, render_sbom, render_sbom_cyclonedx, render_sbom_spdx
+from .sbom_runs import diff_sbom_runs as _diff_sbom_runs
+from .sbom_runs import load_sbom_run as _load_sbom_run
+from .sbom_runs import render_sbom_diff_json as _render_sbom_diff_json
+from .sbom_runs import save_sbom_run as _save_sbom_run_snapshot
+from . import watch as _watch
 
 
 def _unicode_ok() -> bool:
@@ -323,6 +344,35 @@ def _store_dir(args) -> Path:
 def _coverage_path(args) -> str:
     """This run's coverage/freshness ledger — beside its history, never elsewhere."""
     return str(_store_dir(args) / "coverage.json")
+
+
+def _runs_path(args) -> str:
+    """C-524: this run's --save-run/--diff store — beside its history, never elsewhere.
+    No dedicated --runs flag (same reasoning as _coverage_path: --data-dir already moves
+    the whole store directory together, so a second override flag would just be another
+    way to half-redirect it)."""
+    return str(_store_dir(args) / "runs.jsonl")
+
+
+def _sbom_runs_path(args) -> str:
+    """C-521: this run's --save-sbom-run/--sbom-diff store — same reasoning as
+    _runs_path: no dedicated override flag, --data-dir already moves it with everything
+    else. A SEPARATE file from runs.jsonl (not a shared row shape) — see sbom_runs.py's
+    own module docstring for why the two stores don't share one."""
+    return str(_store_dir(args) / "sbom_runs.jsonl")
+
+
+def _incidents_path(args) -> str:
+    """C-520: this run's --incident-open/--incident-mark/--incident-show store — same
+    reasoning as _runs_path/_sbom_runs_path: no dedicated override flag, --data-dir
+    already moves it with everything else."""
+    return str(_store_dir(args) / "incidents.jsonl")
+
+
+def _watch_heartbeat_path(args) -> Path:
+    """C-517: --watch's liveness surface — same reasoning as _runs_path/_incidents_path:
+    no dedicated override flag, --data-dir already moves it with everything else."""
+    return _store_dir(args) / "watch_heartbeat.json"
 
 
 def _record_run(capability: str, args) -> None:
@@ -1070,23 +1120,36 @@ def vet_all(
     home_dir: Path,
     ascii_only: bool = False,
     sweep_budget_s: float = DEFAULT_VET_ALL_BUDGET_S,
+    json_output: bool = False,
 ) -> int:
     """``--vet-all``: sweep every installed skill and render the result.
 
     Thin shell over :func:`sweep_installed_skills` (which owns the discovery, the
-    budget and the per-target verdicts) plus :func:`_sweep_summary_lines`. Returns
-    0 if every finding is PASS/UNKNOWN and nothing was left unscanned, else 1.
+    budget and the per-target verdicts) plus :func:`_sweep_summary_lines` /
+    :func:`render_vet_all_json` (C-516 -- --vet-all was the one vet-* mode with no
+    --json support; every other one already routes through `render_vet_json`).
+    Returns 0 if every finding is PASS/UNKNOWN and nothing was left unscanned, else 1.
     """
+    # json_output suppresses live per-skill narration during the sweep itself --
+    # interleaving prose before the JSON blob would make stdout not parse as JSON.
     sweep = sweep_installed_skills(home_dir, ascii_only=ascii_only,
-                                   sweep_budget_s=sweep_budget_s, narrate=True)
+                                   sweep_budget_s=sweep_budget_s, narrate=not json_output)
     if sweep.no_targets:
         # B-404: "no targets" is not "clean" when discovery itself could
         # not be confirmed complete (e.g. a permission-denied skill root) — that has
         # no basis for the same 0 a genuinely-empty, fully-enumerated fleet gets. The
-        # reason was already narrated above (sweep_installed_skills ran narrate=True).
+        # reason was already narrated above when narrate=True; the json_output branch
+        # still emits the envelope (empty "skills", real complete/
+        # discoveryIncompleteReasons) rather than staying silent -- a --json caller has
+        # nowhere else to read the completeness signal from.
+        if json_output:
+            _emit(render_vet_all_json(sweep, version=__version__))
         return 1 if sweep.truncated else 0
-    for line in _sweep_summary_lines(sweep, ascii_only=ascii_only):
-        _emit(line)
+    if json_output:
+        _emit(render_vet_all_json(sweep, version=__version__))
+    else:
+        for line in _sweep_summary_lines(sweep, ascii_only=ascii_only):
+            _emit(line)
 
     # F-148 return-code decision: a truncated sweep must NOT return the same 0 a
     # fully-clean sweep would. 0 asserts "checked everything, found nothing" — but
@@ -1117,13 +1180,19 @@ def vet_all(
 def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
                         attestation: dict | None = None, live_test_bucket=None,
                         behavioral_ran: bool = False, behavioral_analysis: dict | None = None,
-                        commit_full_phases: bool = False):
+                        commit_full_phases: bool = False, ctx=None, live_test_proof=None):
     """C-425/C-426: the ONE producer of the five-layer ledger (``layers.py`` via
     ``pipeline.PipelineResult.to_ledger``) — extracted from ``_resolve_runtime_caps``
     (C-425) so the bare (non-`--full`) audit path (C-426) can call the SAME code
     instead of a second, competing builder. Every call site funnels through here;
     the mapping itself still lives in ``PipelineResult.to_ledger`` and is never
     re-derived by hand anywhere else.
+
+    ``ctx`` — B-799: threaded straight through to ``to_ledger``, unchanged. Optional
+    and additive like every other kwarg here: a caller that omits it (none did before
+    this) sees byte-identical behaviour, since ``to_ledger(ctx=None)`` keeps the
+    static layer unconditionally ``ran``. Every real call site in this module has a
+    ``ctx`` in scope by the time it calls this helper, so all of them now pass it.
 
     ``commit_full_phases`` — deliberately NOT just ``bool(args.full)`` read
     internally — is True only from a call site that has actually committed to
@@ -1166,6 +1235,11 @@ def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
     straight through to ``to_ledger`` unchanged; this function does not interpret it
     itself — see that method's own docstring for the coverage rule it drives.
 
+    ``live_test_proof`` — F-193, additive: a ``livetestproof.LiveTestProof`` from
+    cross-checking ``live_test_bucket`` against the agent's own trajectory, when the
+    caller already computed one (both real call sites below do). Threaded straight
+    through to ``to_ledger`` unchanged.
+
     Returns a ``layers.LayerLedger`` — never ``None``. A bare/incomplete ledger is
     exactly what a bare run's own ``to_ledger()`` mapping already produces; there is
     no "no ledger" state left to represent once this is the shared entry point.
@@ -1193,9 +1267,15 @@ def _build_layer_ledger(args, findings, *, degraded_count: int = 0,
                 status=_pipeline.STATUS_RAN if behavioral_ran else _pipeline.STATUS_ERROR,
                 detail=("behavioral replay completed." if behavioral_ran
                         else "behavioral replay raised — see run_behavioral's own section.")))
+    # F-193: derived from `args` directly (already in scope here) rather than threaded
+    # as a fresh kwarg through every call site — see `live_test_cap_signal`'s own inline
+    # comment at its call sites for why this reads False on every live invocation today.
+    _mt_fresh = bool(getattr(args, "multiturn", False) or getattr(args, "self_test", False))
     return prelim.to_ledger(findings, degraded_count=degraded_count,
                             attestation=attestation, live_test_bucket=live_test_bucket,
-                            behavioral_analysis=behavioral_analysis)
+                            behavioral_analysis=behavioral_analysis, ctx=ctx,
+                            multiturn_freshly_issued=_mt_fresh,
+                            live_test_proof=live_test_proof)
 
 
 def _last_complete_history_row(path=None):
@@ -1325,12 +1405,15 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     behaviour is unchanged for that call site.
 
     Returns `(score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids,
-    ledger, live_test_bucket, behavioral_analysis)`. The last two (B-723) are this
-    function's own internal inputs to `_build_layer_ledger`, threaded OUT rather than
-    left as locals: a caller that later re-projects the ledger from a real
-    `pipeline.PipelineResult` (once the sweep this function only promised has actually
-    run) needs the SAME `live_test_bucket`/`behavioral_analysis` this function's own
-    `to_ledger` call used, not a second, independently re-derived copy of either.
+    ledger, live_test_bucket, behavioral_analysis, live_test_proof)`. The last three
+    (B-723, F-193) are this function's own internal inputs to `_build_layer_ledger`,
+    threaded OUT rather than left as locals: a caller that later re-projects the
+    ledger from a real `pipeline.PipelineResult` (once the sweep this function only
+    promised has actually run) needs the SAME `live_test_bucket`/`behavioral_analysis`/
+    `live_test_proof` this function's own `to_ledger` call used, not a second,
+    independently re-derived copy of any of them — a re-projection that recomputed
+    `live_test_proof` fresh would still work (it is a pure function of the same
+    bucket/home), but would scan the trajectory log a second time for nothing.
     `score` is the SAME object passed in when neither cap fires, a freshly recomputed
     one otherwise (mirrors `scoring.compute`'s own "never mutate, always return"
     contract). `live_signal` is returned (not just consumed here) because the caller
@@ -1402,7 +1485,23 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     # exception: it calls this helper too, so its card shows the identical capped grade
     # `--full`'s own report/--json would for the same run.
     live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
-    live_signal = _pipeline.live_test_cap_signal(live_test_bucket)
+    # F-193: True only when THIS SAME invocation also just generated a fresh multiturn
+    # plant — see pipeline._valid_live_test_entries's own docstring for why that makes
+    # any multiturn verdict in live_test_bucket definitionally forged. `_PRIMARY_MODES`
+    # already makes `--multiturn`/`--self-test` exclusive, early-returning modes that
+    # never reach this function in the same invocation, so this reads False on every
+    # live call today — kept anyway as the real, load-bearing guard rather than a
+    # comment, so a future dispatch change cannot silently reopen the gap.
+    _mt_fresh = bool(getattr(args, "multiturn", False) or getattr(args, "self_test", False))
+    # F-193: cross-check the bucket's canary entries against this home's own
+    # trajectory before either the cap or the ledger trusts them. `ctx.home` is
+    # already required by this function's own contract (every real call site has a
+    # ctx by now — see _build_layer_ledger's docstring); an absent ctx (test-only
+    # direct calls) makes prove() a no-op via its own defensive isinstance checks.
+    _live_test_proof = _livetestproof.prove(
+        live_test_bucket, getattr(ctx, "home", None))
+    live_signal = _pipeline.live_test_cap_signal(
+        live_test_bucket, multiturn_freshly_issued=_mt_fresh, proof=_live_test_proof)
     # F-154: the behavioral cap-only signal (T1/T2/T3/B191), gated on THIS invocation
     # having ACTUALLY run `behavioral.analyze(ctx)` — mirrors --fast's own skip of P8
     # (`_pipeline.run_pipeline`'s `run_behavioral`), so a --full --fast run (or any
@@ -1446,7 +1545,8 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     ledger = _build_layer_ledger(
         args, findings, degraded_count=score.degraded_count, attestation=attestation,
         live_test_bucket=live_test_bucket, behavioral_ran=_behavioral_ran,
-        behavioral_analysis=_behavioral_analysis, commit_full_phases=args.full,
+        behavioral_analysis=_behavioral_analysis, commit_full_phases=args.full, ctx=ctx,
+        live_test_proof=_live_test_proof,
     )
 
     if args.full:
@@ -1465,7 +1565,7 @@ def _resolve_runtime_caps(ctx, findings, score, args, *, attestation=None):
     # very number the top-level `score` key was withholding -- one key apart in the
     # same document. Caught by test_full_json_projection_current_matches_top_level_score.
     return (score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids, ledger,
-            live_test_bucket, _behavioral_analysis)
+            live_test_bucket, _behavioral_analysis, _live_test_proof)
 
 
 def _apply_live_test_cap(ctx, findings, score, args):
@@ -1506,7 +1606,12 @@ def _apply_live_test_cap(ctx, findings, score, args):
         if args.judged_bundle is not None else None
     )
     live_test_bucket = judged_bundle.get("liveTest") if judged_bundle else None
-    live_signal = _pipeline.live_test_cap_signal(live_test_bucket)
+    # F-193: see the matching comment at `_resolve_runtime_caps`'s own call site.
+    _mt_fresh = bool(getattr(args, "multiturn", False) or getattr(args, "self_test", False))
+    _live_test_proof = _livetestproof.prove(
+        live_test_bucket, getattr(ctx, "home", None))
+    live_signal = _pipeline.live_test_cap_signal(
+        live_test_bucket, multiturn_freshly_issued=_mt_fresh, proof=_live_test_proof)
     if live_signal.hit:
         # C-426: the ledger MUST be threaded through this recompute. `_main` already
         # built a bare one and computed `score` against it, so the run reaching here
@@ -1520,7 +1625,8 @@ def _apply_live_test_cap(ctx, findings, score, args):
         ledger = _build_layer_ledger(
             args, findings, degraded_count=score.degraded_count,
             attestation=getattr(ctx, "attestation", None),
-            live_test_bucket=live_test_bucket,
+            live_test_bucket=live_test_bucket, ctx=ctx,
+            live_test_proof=_live_test_proof,
         )
         score = compute(findings, ctx, live_test_vulnerable=True,
                         live_test_reason=live_signal.reason, ledger=ledger)
@@ -1618,11 +1724,19 @@ _REVET_SEVERITY = {"FAIL": HIGH, "WARN": MEDIUM, UNKNOWN: "INFO"}
 # always been decided by _main()'s cascade and is untouched.
 _PRIMARY_MODES = [
     ("purge", "--purge", "bool"),
+    ("watch", "--watch", "bool"),
+    ("watch_status", "--watch-status", "bool"),
     ("apply_ignore_proposals", "--apply-ignore-proposals", "opt"),
     ("verify_self", "--verify-self", "bool"),
     ("verify_history", "--verify-history", "bool"),
     ("verify_events", "--verify-events", "bool"),
     ("verify_baseline", "--verify-baseline", "opt"),
+    ("diff", "--diff", "opt"),
+    ("sbom_diff", "--sbom-diff", "opt"),
+    ("incident_mark", "--incident-mark", "opt"),
+    ("incident_show", "--incident-show", "opt"),
+    ("explain", "--explain", "opt"),
+    ("retest", "--retest", "opt"),
     ("vet_plan", "--vet-plan", "opt"),
     ("menu", "--menu", "bool"),
     ("brief", "--brief", "bool"),
@@ -1655,6 +1769,7 @@ _PRIMARY_MODES = [
     ("dashboard_findings", "--dashboard-findings", "bool"),
     ("sbom", "--sbom", "bool"),
     ("incident", "--incident", "bool"),
+    ("incident_open", "--incident-open", "bool"),
     ("judge_packet", "--judge-packet", "bool"),
     ("judged", "--judged", "opt"),
     ("propose_ignore", "--propose-ignore", "opt"),
@@ -1679,6 +1794,12 @@ _MODE_HONORS = {
     "vet_plugin": frozenset({"json"}),
     "vet_mcp": frozenset({"json"}),
     "vet_source": frozenset({"json"}),
+    # C-516: was the one vet-* mode left without --json support -- see vet_all()'s
+    # own docstring and render_vet_all_json (report.py).
+    "vet_all": frozenset({"json"}),
+    # C-516: was the one vet-* mode left without --json support -- see vet_all()'s
+    # own docstring and render_vet_all_json (report.py).
+
     "advise": frozenset({"json"}),
     # F-153: --dashboard --full renders the whole combined pipeline report (the
     # phases --full itself runs); --compact only ever modifies THAT combined render.
@@ -1721,6 +1842,17 @@ _MODE_HONORS = {
     # --trend/--monitor already did (see _apply_live_test_cap's call sites below).
     "percentile": frozenset({"judged_bundle"}),
     "next": frozenset({"judged_bundle"}),
+    # C-524: --diff's own machine-readable payload, same shape as the vet-* family above.
+    "diff": frozenset({"json"}),
+    # C-521: --format/--save-sbom-run are meaningful only alongside --sbom; --sbom-diff
+    # gets its own machine-readable payload, same shape as --diff's.
+    "sbom": frozenset({"format", "save_sbom_run"}),
+    "sbom_diff": frozenset({"json"}),
+    # C-520: each of the three new incident-lifecycle modes gets its own machine-readable
+    # payload, same shape as --diff's/--sbom-diff's.
+    "incident_open": frozenset({"json"}),
+    "incident_mark": frozenset({"json"}),
+    "incident_show": frozenset({"json"}),
 }
 
 # Primary modes that run AFTER the --attest block in main()'s cascade: their ctx and
@@ -1736,7 +1868,7 @@ _MODE_HONORS = {
 # "judged" and "analyze_trajectory" were missing for the same reason.
 _ATTEST_CONSUMERS = frozenset({
     "risk_paths", "badge", "html", "sarif", "pdf", "trend", "percentile",
-    "next", "dashboard", "dashboard_findings", "sbom", "incident",
+    "next", "dashboard", "dashboard_findings", "sbom", "incident", "incident_open",
     "judge_packet", "judged", "propose_ignore", "analyze_trajectory",
     "behavioral", "monitor",
 })
@@ -1757,9 +1889,22 @@ def _mode_active(args, attr: str, kind: str) -> bool:
 # two disagreed for every opt mode given "" — 182 argv shapes, of which `--badge ""`
 # printing a full default report at rc=0 was the visible one. Rejecting the empty value
 # up front removes the disagreement instead of encoding it twice.
+#
+# C-524: "diff" is excluded for a different reason than the other three — its value is a
+# 2-element LIST (nargs=2), not a single string, so `str(v).strip()` below would test
+# "['a', 'b']" and never catch a genuinely blank run id either side gave. The diff
+# branch validates both values itself instead (empty/whitespace-only run id -> its own
+# clear error, exit 2), the same outcome this list exists to produce for the others.
+# C-521: "sbom_diff" is excluded for the identical reason — also nargs=2, also
+# self-validated in its own dispatch block.
+# C-520: "incident_mark" is excluded for the identical reason — also nargs=2 (ID,
+# STATUS), also self-validated in its own dispatch block. "incident_show" is a plain
+# single-value "opt" mode (like --explain/--retest) and stays subject to this list's
+# blank-value rejection.
 _VALUE_REQUIRED_MODES = tuple(
     (flag, attr) for attr, flag, kind in _PRIMARY_MODES
-    if kind == "opt" and attr not in ("vet_mcp", "analyze_trajectory", "behavioral")
+    if kind == "opt" and attr not in ("vet_mcp", "analyze_trajectory", "behavioral", "diff",
+                                      "sbom_diff", "incident_mark")
 )
 
 
@@ -2158,6 +2303,11 @@ def _flag_coherence_notes(args) -> list[str]:
     _winner = _resolve_mode(args)
     active.sort(key=lambda af: af[0] != _winner)
     notes: list[str] = []
+    # C-448: --all only un-windows --trend/--watch-log's default display cap. Checked
+    # once here, before the active/not-active split below, so both paths (no primary
+    # mode at all, and a primary mode that is neither of these two) get the note.
+    if bool(getattr(args, "all", False)) and _winner not in ("trend", "watch_log"):
+        notes.append("note: --all has no effect without --trend or --watch-log")
     # C-426: the "--fail-under is deprecated and ignored" note lived here. The flag is
     # gone now, so argparse itself reports it (`unrecognized arguments`) and a note
     # about a flag that cannot be parsed would be unreachable code.
@@ -2231,6 +2381,18 @@ def _flag_coherence_notes(args) -> list[str]:
         no_effect.append("--json")
     if getattr(args, "save", None) is not None and "save" not in honored:
         no_effect.append("--save")
+    # C-524: --save-run writes at the SAME tail site as --save (right beside it), so it
+    # is unreachable from exactly the same set of primary modes -- no mode honors it,
+    # matching --save's own entry above rather than inventing a separate allowlist.
+    if bool(getattr(args, "save_run", False)) and "save_run" not in honored:
+        no_effect.append("--save-run")
+    # C-521: --format defaults to "native", so only an EXPLICIT non-default choice can
+    # mean anything was actually asked for — checking truthiness the way the boolean
+    # flags above do would misfire on the default value alone.
+    if getattr(args, "format", "native") != "native" and "format" not in honored:
+        no_effect.append("--format")
+    if bool(getattr(args, "save_sbom_run", False)) and "save_sbom_run" not in honored:
+        no_effect.append("--save-sbom-run")
     if bool(getattr(args, "exit_code", False)) and "exit_code" not in honored:
         no_effect.append("--exit-code")
     if getattr(args, "fail_on", None) is not None and "fail_on" not in honored:
@@ -2337,7 +2499,54 @@ _PURGE_FILENAMES = (
     "history.jsonl", "events.jsonl", "state.json", "coverage.json",
     "openclaw-security-badge.svg", "openclaw-security-report.html",
     "openclaw-security-report.sarif", "openclaw-security-report.pdf",
+    # C-524: --save-run's opt-in per-run findings store. Whitelisted the same way as
+    # the badge/html/sarif/pdf defaults above — inert until --save-run actually writes
+    # one, and the file lives alongside history.jsonl/events.jsonl under the same
+    # store directory.
+    "runs.jsonl",
+    # C-521: --save-sbom-run's opt-in per-run SBOM component store. Same reasoning.
+    "sbom_runs.jsonl",
+    # C-520: --incident-open's opt-in incident-lifecycle store. Same reasoning.
+    "incidents.jsonl",
 )
+
+
+def _run_watch_cli(args) -> int:
+    """Continuous file-system watch (C-517): re-run `--monitor` on a debounced
+    relevant change instead of waiting for the next scheduled invocation.
+
+    Standalone, like --purge/--brief above: it needs no audit() pass of its own —
+    every actual scan is a `--monitor` subprocess (see watch.run_watch), so this
+    function only resolves paths and hands off to the loop. Never returns until the
+    loop does (SIGTERM/SIGINT), which is the one deliberate way this command differs
+    from every other mode in this file.
+    """
+    home = Path(args.home).expanduser()
+    if not home.is_dir():
+        print(f"{cmd('--watch')}: '{home}' is not a directory — nothing to watch.",
+              file=sys.stderr)
+        return 1
+    _emit(f"Watching {home} for changes (Ctrl-C to stop) — a change triggers "
+          f"`--monitor --verbose` after a {args.watch_debounce:g}s debounce window.\n"
+          f"Heartbeat: {_watch_heartbeat_path(args)}")
+    return _watch.run_watch(
+        home,
+        state_path=args.state,
+        events_path=args.events,
+        history_path=args.history,
+        heartbeat_path=_watch_heartbeat_path(args),
+        debounce_s=args.watch_debounce,
+        stream=sys.stdout,
+    )
+
+
+def _run_watch_status(args) -> int:
+    """--watch-status: read the heartbeat --watch writes and say whether it is
+    still alive — read-only, writes nothing (same contract as --brief)."""
+    hb = _watch.read_heartbeat(_watch_heartbeat_path(args))
+    word, sentence = _watch.describe_liveness(hb)
+    _emit(f"{word}: {sentence}")
+    return 0 if word == "ALIVE" else 1
 
 
 def _confirm_purge(paths: "list[Path]") -> "tuple[bool, bool]":
@@ -2549,7 +2758,25 @@ def _chain_verdict(label: str, path: str, ok: "bool | None", msg: str,
     if ok is True:
         return f"{label} chain OK ({path}): {msg}", 0
     if ok is False:
-        return f"{label} chain BROKEN ({path}): {msg}", 1
+        # B-769: still BROKEN, still exit 1 -- an explicit --verify-* request gets a
+        # direct answer, per B-582's own reasoning above chain_provenance_note (the
+        # PASSIVE --trend/--watch-log viewer softens this; an explicit verify command
+        # does not). But "BROKEN" alone reads as an accusation, and configjournal.py's
+        # own doctrine (a SIBLING hash chain, OpenClaw's config-write journal) already
+        # measured that a broken link is not proof of tampering by itself: 2 of 42 real
+        # links were already broken from a hand edit outside the writer and two writes
+        # racing from a common base, and log rotation produces the identical shape.
+        # This chain's OWN writes are locked against that exact race now (B-108,
+        # locking.journal_lock) -- but that lock did not always exist, and cannot
+        # protect against a hand edit either. One added clause, not a softer verdict.
+        return (
+            f"{label} chain BROKEN ({path}): {msg}. A broken link is not proof of "
+            "tampering by itself -- a hand edit outside this tool's own writer, log "
+            "rotation, or two writes racing from the same point can all produce the "
+            "identical shape. Investigate (who else writes here, was this rotated or "
+            "edited) before concluding an attack.",
+            1,
+        )
     lines = [f"{label} chain NOT VERIFIED ({path}): {msg}"]
     # WHICH sentence follows is decided by whether anything is actually there, not by
     # whether the user typed the flag. An independent pass caught the first version doing
@@ -2592,6 +2819,144 @@ def _chain_verdict(label: str, path: str, ok: "bool | None", msg: str,
     return "\n".join(lines), 1
 
 
+# C-523: docs/THREAT_COVERAGE.md's own [CHECK: ...] ledger, read for --explain's coverage
+# note. No production code parses this file today (tests/test_threat_coverage_ledger.py's
+# helpers enforce the file's closure invariants and are private/test-only, a different job
+# from fetching one row's text) so this is a small, standalone reader, not a shared import.
+_THREAT_COVERAGE_TAG_RE = re.compile(r"`?\[CHECK:\s*([^\]]+)\]`?")
+
+
+def _split_table_row(line: str) -> "list[str]":
+    """Split one markdown table row on UNESCAPED ``|`` only, unescaping ``\\|`` back to a
+    literal pipe in the result. A naive ``str.split("|")`` cuts a cell mid-sentence when
+    its prose contains a real pipe written the standard markdown-escaped way — the
+    Installed-skill-malware row's own ``curl\\|sh`` is exactly that case.
+    """
+    cells: "list[str]" = []
+    current: "list[str]" = []
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line) and line[i + 1] == "|":
+            current.append("|")
+            i += 2
+            continue
+        if ch == "|":
+            cells.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    cells.append("".join(current))
+    return cells
+
+
+def _threat_coverage_note(finding_id: str, path: "Path | None" = None) -> "str | None":
+    """The Covered-table row that names *finding_id* in a ``[CHECK: ...]`` tag, as
+    ``"<category>: <notes>"``, or None when docs/THREAT_COVERAGE.md can't be found/read
+    or no row tags this id. Never raises: the doc ships with the source repo but a
+    packaged install is not guaranteed to carry it, and an unavailable coverage note is
+    a smaller problem than a crashed --explain.
+
+    A row's Notes cell (column 3) is sometimes JUST the tag — e.g. "Local-first & model
+    hygiene | B12 | `[CHECK: B12]`" carries all its meaning in the category name, column
+    1, not column 3. Stripping the tag from an already-terse cell then leaves an empty
+    string, which earlier read as "no note found" and fell through to reporting B10/B12/
+    B48/B9/C074/C3 (all real, ledgered ids) as uncovered — wrong, since they ARE covered,
+    just tersely. The category always leads the result now, so an empty Notes cell still
+    surfaces something instead of nothing.
+
+    *path* overrides the default docs/THREAT_COVERAGE.md location — test-only; every
+    real caller leaves it at None.
+    """
+    if path is None:
+        path = Path(__file__).resolve().parent.parent / "docs" / "THREAT_COVERAGE.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not (line.startswith("|") and line.endswith("|")):
+            continue
+        # C-135: every row today carries at most one [CHECK: ...] tag (comma-joined ids,
+        # never two separate tags), but .search() only ever tests the FIRST match — a
+        # future row with two tags on one line would silently skip an id tagged only in
+        # the second. finditer + a union of every tag's ids costs nothing today and
+        # can't be defeated by a future doc edit the way a single .search() could.
+        ids = {tok.strip() for m in _THREAT_COVERAGE_TAG_RE.finditer(line)
+               for tok in m.group(1).split(",")}
+        if finding_id not in ids:
+            continue
+        cells = [c.strip() for c in _split_table_row(line.strip("|"))]
+        if len(cells) < 3:
+            continue
+        category = re.sub(r"\*\*(.+?)\*\*", r"\1", cells[0]).strip()
+        note = _THREAT_COVERAGE_TAG_RE.sub("", cells[2]).strip()
+        return f"{category}: {note}" if note else category
+    return None
+
+
+# C-523: why a finding id could not be resolved to a single check to run, for --explain/
+# --retest's error text. Kept as data (not inlined at each call site) so the two modes'
+# wording only differs by verb ("explain"/"retest"), never by which reason applies.
+def _single_check_lookup(finding_id: str):
+    """Returns (check_fn, error_message) — exactly one is None.
+
+    Three distinct "can't do it" reasons get three distinct sentences, the same
+    "never collapse different causes into one vague error" rule this file already
+    applies to chain verification and baseline checks: a plain typo, a real id this
+    mechanism structurally cannot retest (RISK-*, the behavioral-only T1/T2/T3/B191
+    detectors — see checks/__init__.py's CHECKS_BY_ID docstring for why those four
+    are never in CHECKS), and a real id this mechanism SHOULD cover but doesn't
+    (an internal registry gap — never silently treated as "unknown").
+    """
+    fid = finding_id.strip()
+    if fid.upper().startswith("RISK-"):
+        return None, (
+            f"{fid} is a combinational finding computed from multiple checks together "
+            f"(risk.py), not a single check — --explain/--retest support individual "
+            f"check ids (B###/C###/A1) only. See --risk-paths for the full audit's "
+            f"combinational findings.")
+    if fid not in BY_ID:
+        return None, (
+            f"unknown finding id '{fid}' — not in the check catalog. Run a full audit "
+            f"(or --functions) to see valid ids.")
+    chk = CHECKS_BY_ID.get(fid)
+    if chk is None:
+        return None, (
+            f"{fid} is a real catalog id, but it is produced outside the per-check "
+            f"registry --explain/--retest use (e.g. a --behavioral-only detector) — "
+            f"not retestable this way. Run the relevant mode directly instead.")
+    return chk, None
+
+
+def _run_single_check(finding_id: str, args):
+    """Look up *finding_id* and, only if it resolves, run exactly that one check.
+
+    Returns ``(finding, error_message)`` — exactly one is None. Shared by --explain and
+    --retest's dispatch blocks so the lookup/context-build/invoke sequence exists once;
+    the two modes differ only in what they print with the result.
+
+    Builds the SAME Context a full audit would (`build_context`, honoring --no-host/
+    --no-sockets/--no-deptree/--no-dist/--exhaustive exactly as the default report path
+    does) — Context-building has no per-check shortcut, so this pays that cost — then
+    calls the ONE resolved check function directly. Never calls `audit()`/`run_all()`,
+    which is what makes --retest's "does not run the full audit" DoD requirement true:
+    every OTHER check in CHECKS is never invoked.
+    """
+    chk, err = _single_check_lookup(finding_id)
+    if chk is None:
+        return None, err
+    ctx = build_context(args.home, include_host=not args.no_host,
+                        include_sockets=not args.no_sockets,
+                        include_deptree=not args.no_deptree,
+                        include_dist=not args.no_dist,
+                        exhaustive=args.exhaustive)
+    return chk(ctx), None
+
+
 def main(argv=None) -> int:
     """Thin top-level guard (B-101): never dump a raw traceback at users.
 
@@ -2614,6 +2979,19 @@ def main(argv=None) -> int:
     function — including the try/except below — because an unpacked (non-pip)
     install on Python <3.9 parses cleanly (no clean ImportError) but can fail later
     with a confusing runtime error; see docs/TROUBLESHOOTING.md.
+
+    I-038: all three ``except`` arms below already return exactly the exit code
+    ``--exit-code-scheme graduated`` reserves for "could not produce a trustworthy
+    verdict" (1), which is also what they have always returned under the (default)
+    ``binary`` scheme — so none of them needed to change, or to learn which scheme
+    was requested, for that flag to exist. `--exit-code-scheme` only changes what
+    `_findings_exit_gate` (several frames below `_main`, never reached from here)
+    returns for a REAL threshold-tripping FAIL, from 1 to 3. Left as a note rather
+    than left implicit: it would be easy for a future reader adding a fourth arm
+    here to assume it needs threading a scheme lookup through `sys.argv` (as the
+    existing `"--debug" in raw` checks do) to pick the "right" code — it does not;
+    1 is already the right code for "the tool itself did not finish" under both
+    schemes.
     """
     if sys.version_info < (3, 9):
         print(
@@ -2696,7 +3074,7 @@ def _judged_bundle(path: str) -> dict:
     return _JUDGED_BUNDLE_CACHE[path]
 
 
-def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int:
+def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False, score=None) -> int:
     """The `--fail-on` / `--exit-code` gate: 1 when it trips, 0 otherwise.
 
     B-584: extracted so the artifact-rendering modes can reach it. It used to live inline
@@ -2711,7 +3089,30 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
     no severity attached, and a severity-gated flag cannot rank what carries no severity.
     A caller that ran no sweep passes nothing — an ABSENT verdict is not a FAIL, which is
     the doctrine the disjunction's own comments already state.
+
+    I-038: *score* is optional and used ONLY by `--exit-code-scheme graduated` (see that
+    flag's own `--help`), to look for a layer that genuinely blew up
+    (`layers.STATUS_ERROR` inside `score.missing_layers`) rather than one that simply was
+    never in scope for this run. It is deliberately NOT "any non-empty `missing_layers`":
+    `_bare_ledger` (see the pre-dispatch block in `_main`) attaches a five-layer ledger to
+    `score` on EVERY invocation, bare or `--full`, and a bare run's own `to_ledger()`
+    leaves four of the five layers `not_reached`/`unavailable` by design — that is the
+    documented, supported "ungraded run" shape `--fail-on`/`--exit-code` already promise
+    to work on without a score (docs/USAGE.md, "Needs no score"). Treating that routine
+    shape as "could not produce a trustworthy verdict" would make the graduated scheme
+    return 1 on nearly every invocation that omits `--full`, which is the opposite of
+    what it exists to do. `STATUS_ERROR` is the one status in `layers.py` reserved for
+    "the layer tried and blew up" (plugin sweep / behavioral replay / adjudication can
+    all set it — see `pipeline.py`), so it is the only member of `missing_layers` that
+    means what "could not complete" means everywhere else in this gate. A caller that
+    never resolved a ledger (a duck-typed `score`, or simply omitting the kwarg) passes
+    `score=None`, which reads as "nothing errored" — the same permissive default every
+    other `getattr(score, ...)` read in this module already uses.
     """
+    _graduated = getattr(args, "exit_code_scheme", "binary") == "graduated"
+    _errored_layer = any(
+        status == STATUS_ERROR for _, status in (getattr(score, "missing_layers", ()) or ())
+    )
     # I3/C-426: --fail-on gates on FINDINGS (like --exit-code), never on a score. It
     # replaced `--fail-under N`, which thresholded the audit score and was removed once
     # the five-layer rule meant an ordinary run does not produce one — see the argparse
@@ -2729,7 +3130,7 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
     # disjunction; it reads `findings` only, same as --exit-code's own `has_fail` term.
     if args.fail_on is not None:
         _fail_on_rank = _SEVERITY_RANK[args.fail_on.upper()]
-        if any(
+        _fail_on_tripped = any(
             # B-751 follow-up: the shared vocabulary, not the bare literal. A confirmed
             # zip-slip carries `SKILL_ARCHIVE_PATH_TRAVERSAL`, and this gate is what a CI
             # pipeline reads -- comparing to "FAIL" made it blind to the one finding the
@@ -2741,8 +3142,7 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
                 or surfaced_despite_suppression(f)
             )
             for f in findings
-        ):
-            return 1
+        )
         # C-426/B-166/B-363: a config the tool could not read produces only UNKNOWN and
         # WARN, never a FAIL — so a purely FAIL-driven gate stays GREEN on a run that
         # audited nothing. `--exit-code` has tripped on this explicitly since B-166
@@ -2756,9 +3156,24 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
         # Deliberately NOT severity-ranked: "I could not read your config" has no
         # severity, and gating it on the operator's chosen floor would let
         # `--fail-on critical` pass a run that read nothing at all.
-        if (getattr(ctx, "config_parse_error", False)
-                or not getattr(ctx, "config_found", True)):
-            return 1
+        _fail_on_blind = (
+            getattr(ctx, "config_parse_error", False)
+            or not getattr(ctx, "config_found", True)
+        )
+        if _graduated:
+            # I-038: "could not produce a trustworthy verdict" (1) outranks a real FAIL
+            # (3) — a blind or errored run's own findings are, per the comment above,
+            # only ever UNKNOWN/WARN, so the two do not actually race in practice; this
+            # ordering just states that explicitly instead of relying on it holding.
+            if _fail_on_blind or _errored_layer:
+                return 1
+            if _fail_on_tripped:
+                return 3
+        else:
+            if _fail_on_tripped:
+                return 1
+            if _fail_on_blind:
+                return 1
 
     if args.exit_code:
         has_fail = any(
@@ -2799,10 +3214,24 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False) -> int
         # never read anything. `config_found` defaults True via getattr so a duck-typed
         # ScoreResult/ctx stand-in some tests build (which predates this field) stays
         # inert, same tolerance as the config_parse_error term above.
-        if (has_fail or extra_fail
-                or getattr(ctx, "config_parse_error", False)
-                or not getattr(ctx, "config_found", True)):
-            return 1
+        _exit_code_blind = (
+            getattr(ctx, "config_parse_error", False)
+            or not getattr(ctx, "config_found", True)
+        )
+        if _graduated:
+            # I-038: same split and same priority as the --fail-on block above — a
+            # blind/errored run outranks a real FAIL, because it is a fact about
+            # whether this run could be trusted at all, not about how bad the subject
+            # is. `extra_fail` (vm/sweep/pipeline) joins the FAIL side only, exactly as
+            # it does in the binary scheme below — those sources carry no config-blind
+            # signal of their own.
+            if _exit_code_blind or _errored_layer:
+                return 1
+            if has_fail or extra_fail:
+                return 3
+        else:
+            if (has_fail or extra_fail or _exit_code_blind):
+                return 1
 
     return 0
 
@@ -2887,6 +3316,13 @@ def _main(argv=None) -> int:
                         "(C4 corroborates it against meta.lastTouchedVersion to "
                         "surface a version rollback). Read-only PATH lookup, no subprocess")
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")
+    p.add_argument("--save-run", action="store_true", dest="save_run",
+                   help="also persist this run's full finding list, addressable by its "
+                        "timestamp, so a later --diff RUN_ID1 RUN_ID2 can compare it "
+                        "against another saved run. Opt-in: nothing is written here unless "
+                        "this flag is given (unlike --history, which records a bare score "
+                        "line by default) — a full finding list is far heavier per run. "
+                        "Writes to <store dir>/runs.jsonl, same directory as --history")
     p.add_argument("--monitor", action="store_true",
                    help="monitor mode: alert on what changed since the last check")
     p.add_argument("--probe", action="store_true",
@@ -2900,6 +3336,23 @@ def _main(argv=None) -> int:
                         f"written by --monitor (default: {DEFAULT_EVENTS})")
     p.add_argument("--watch-log", action="store_true",
                    help="print the Agent Watch event journal (timeline of what changed)")
+    p.add_argument("--watch", action="store_true",
+                   help="continuous watch mode (C-517): stay running, and re-run "
+                        "--monitor --verbose automatically on a relevant filesystem "
+                        "change under --home (debounced) — real-time inotify on Linux, "
+                        "a bounded stat-poll fallback elsewhere; see "
+                        "docs/design/watch-mechanism.md. Never returns until stopped "
+                        "(Ctrl-C / SIGTERM); writes only under --data-dir, same as "
+                        "--monitor")
+    p.add_argument("--watch-debounce", type=float, default=_watch.DEFAULT_DEBOUNCE_S,
+                   metavar="SECONDS",
+                   help=f"with --watch: quiet window after the last detected change "
+                        f"before the re-scan runs, so one burst of writes triggers one "
+                        f"re-scan, not several (default: {_watch.DEFAULT_DEBOUNCE_S:g})")
+    p.add_argument("--watch-status", action="store_true",
+                   help="is a --watch process still alive? Reads its heartbeat file "
+                        "under --data-dir and reports ALIVE / STALE / STOPPED / NOT "
+                        "RUNNING — read-only, writes nothing, does not start a watch")
     p.add_argument("--vet", metavar="TARGET",
                    help="vet a skill / plugin / MCP target BEFORE installing it — the type is "
                         "autodetected by content (explicit flags below force an engine)")
@@ -2930,6 +3383,19 @@ def _main(argv=None) -> int:
                         "credential rotation list, and monitor event history from --events "
                         "(recorded in the pack as monitor_events_source) — never rotates "
                         "or deletes anything itself")
+    p.add_argument("--incident-open", action="store_true", dest="incident_open",
+                   help="C-520: open a PERSISTED incident record (status=open) linked to "
+                        "this run's actionable findings, a best-effort PID when one of them "
+                        "names one, and the current --events journal position — stored under "
+                        "--data-dir, never in the audited home. Refuses if nothing actionable "
+                        "was found this run")
+    p.add_argument("--incident-mark", nargs=2, metavar=("ID", "STATUS"), dest="incident_mark",
+                   help="C-520: transition a --incident-open record's status. STATUS is one "
+                        "of open/investigating/mitigated/closed — forward moves one step at "
+                        "a time, backward moves freely (mirrors Pulse's own task lifecycle)")
+    p.add_argument("--incident-show", metavar="ID", dest="incident_show",
+                   help="C-520: print one incident record's current status, transition "
+                        "history, and the live --monitor timeline since it opened")
     p.add_argument("--analyze-trajectory", nargs="?", const="", default=None, metavar="PATH",
                    dest="analyze_trajectory",
                    help="post-hoc incident analysis: correlate installed skills' credential / "
@@ -3065,8 +3531,32 @@ def _main(argv=None) -> int:
                         "chosen severity floor instead of any FAIL")
     p.add_argument("--exit-code", action="store_true",
                    help="exit 1 if any unsuppressed FAIL finding exists")
+    # I-038: purely additive and opt-in. `binary` (the default) is BYTE-FOR-BYTE what
+    # `--fail-on`/`--exit-code` have always done, on every path that calls
+    # `_findings_exit_gate` — a real threshold-tripping FAIL and a run that could not
+    # produce a trustworthy verdict at all (a crash, `ScanBudgetExceeded`, an unusable
+    # `--vet` path, or an unreadable/absent config) are both exit 1, indistinguishable
+    # to a CI/cron consumer reading only `$?`. `graduated` reuses `--monitor`'s own
+    # 0/1/3 convention (never 2 — argparse itself owns that code for a usage error,
+    # the identical reservation `--monitor` already makes and documents) so the two
+    # can be told apart: 1 stays "could not complete", 3 is the real FAIL.
+    p.add_argument("--exit-code-scheme", choices=["binary", "graduated"], default="binary",
+                   help="how --fail-on/--exit-code map a trip to a process exit code. "
+                        "'binary' (default, unchanged from every release before this flag "
+                        "existed): 1 on either a real FAIL or a run that could not produce "
+                        "a trustworthy verdict (crash, a scan cut short by its own time "
+                        "budget, an unusable --vet path, or an unreadable/absent config) — "
+                        "the two are not distinguishable by exit code alone. 'graduated': "
+                        "reuses --monitor's own convention instead — 0 clean, 1 "
+                        "could-not-produce-a-trustworthy-verdict, 3 a real threshold-"
+                        "tripping FAIL; 2 is never returned by this logic (argparse owns "
+                        "it for a usage error). Opt-in: omitting this flag, or passing "
+                        "'binary', changes nothing about an existing invocation")
     p.add_argument("--trend", action="store_true",
                    help="record this run to history, print trend + percentile, and exit")
+    p.add_argument("--all", action="store_true",
+                   help="with --trend or --watch-log, print every row/event instead of "
+                        "the default windowed view")
     p.add_argument("--percentile", action="store_true",
                    # B-536 sibling: "the current score" presupposed every run has one.
                    # `_percentile_line` has withheld the rank on an ungraded run since
@@ -3108,6 +3598,22 @@ def _main(argv=None) -> int:
     p.add_argument("--verify-baseline", metavar="REFERENCE", dest="verify_baseline",
                    help="check the drift baseline (--state) against a reference value a "
                         "previous --monitor run printed, and exit; read-only")
+    p.add_argument("--diff", nargs=2, metavar=("RUN_ID1", "RUN_ID2"),
+                   help="compare two runs saved with --save-run (by their timestamp run id) "
+                        "and report new/fixed/unchanged findings between them; read-only, "
+                        "exits without running a live audit. --json prints a machine-readable "
+                        "payload (see docs/OUTPUT_SCHEMA.md)")
+    p.add_argument("--explain", metavar="FINDING_ID", dest="explain",
+                   help="run just the one check named by FINDING_ID (e.g. B2) against the "
+                        "current target and print its full detail — severity, status, why, "
+                        "evidence, remediation, and its docs/THREAT_COVERAGE.md coverage "
+                        "note — without re-printing or scoring the rest of the audit. "
+                        "Always reflects a fresh run against the CURRENT target, never a "
+                        "past/saved one; errors clearly on an unknown id")
+    p.add_argument("--retest", metavar="FINDING_ID", dest="retest",
+                   help="re-run just the one check named by FINDING_ID against the current "
+                        "target and report whether it still fires, without running the rest "
+                        "of the audit; read-only, same targeting as --explain")
     p.add_argument("--purge", action="store_true",
                    help="delete ClawSecCheck's local store (history/events/state/coverage "
                         "files, plus the default-named badge/html/sarif/pdf report files if "
@@ -3136,14 +3642,14 @@ def _main(argv=None) -> int:
                         "and exit; add --full to render the WHOLE combined pipeline report "
                         "(Skills/Plugins/MCP vet, RISK chains, behavioural replay, "
                         "adjudication, coverage, worth-a-glance) in one fixed-order card "
-                        "instead of --full's own separate appended sections (F-153)")
+                        "instead of --full's own separate appended sections")
     p.add_argument("--compact", action="store_true",
                    help="only with --dashboard --full: a condensed, ~4096-char "
                         "Telegram-safe layout of the combined pipeline report — headline "
                         "counts only for Plugins/MCP/RISK chains, trimmed why-text/no "
                         "evidence bullets for Findings and Worth-a-glance (nothing "
                         "dropped, just condensed), plus a pointer to --save/--html for "
-                        "the full detail (F-153; named --compact rather than the spec's "
+                        "the full detail (named --compact rather than the spec's "
                         "suggested --card, which already means the shareable "
                         "grade+score+trifecta badge above)")
     p.add_argument("--dashboard-findings", action="store_true",
@@ -3154,6 +3660,20 @@ def _main(argv=None) -> int:
     p.add_argument("--sbom", action="store_true",
                    help="export a local bill-of-materials (skills, MCP servers, hashes, "
                         "declared/unpinned deps) as deterministic JSON to stdout and exit")
+    p.add_argument("--format", choices=("native", "cyclonedx", "spdx"), default="native",
+                   help="only with --sbom: the export format — native ClawSecCheck JSON "
+                        "(default, backward compatible), CycloneDX 1.5 JSON, or SPDX 2.3 "
+                        "JSON, all built from the same collected inventory")
+    p.add_argument("--save-sbom-run", action="store_true", dest="save_sbom_run",
+                   help="only with --sbom: also persist this run's component inventory "
+                        "(the native shape, regardless of --format), addressable by its "
+                        "timestamp run id. --sbom-diff RUN_ID1 RUN_ID2 then reports "
+                        "added/removed/changed components between two saved runs")
+    p.add_argument("--sbom-diff", nargs=2, metavar=("RUN_ID1", "RUN_ID2"),
+                   help="compare two SBOM runs saved with --save-sbom-run and report "
+                        "added/removed/changed components; read-only, exits without "
+                        "running a live audit. --json prints a machine-readable payload "
+                        "(see docs/OUTPUT_SCHEMA.md)")
     p.add_argument("--judge-packet", action="store_true", dest="judge_packet",
                    help="export the borderline finding band (UNKNOWN, FN-prone WARN, "
                         "B62, dropped taint) as JSON for a host-agent judge to review "
@@ -3181,6 +3701,25 @@ def _main(argv=None) -> int:
                    help="also write INFO-level log output to PATH (only when given; "
                         "raises the FILE's level to INFO, never the console's — pass "
                         "--verbose/--debug for that)")
+    # B-769: --fail-under was REMOVED (C-426), not deprecated-in-place -- it
+    # thresholded the audit SCORE, which the five-layer rule may withhold entirely,
+    # so there was no honest way to keep it parseable (see --fail-on's own comment
+    # above). argparse's generic "unrecognized arguments: --fail-under N" names
+    # nothing a CI owner debugging a failed pipeline at 3am can act on. Intercepted
+    # here, before argparse ever sees it, so the message names the replacement.
+    # Routed through p.error() (usage block + message, sys.exit(2)) rather than a
+    # bare print+return -- the same convention argparse already uses for every other
+    # malformed invocation, so this stays a SystemExit like its neighbours instead
+    # of introducing a second "bad usage" calling convention. Exit code 2 is already
+    # distinct from the 1 a real --fail-on/--exit-code security trip returns.
+    _raw_argv = argv if argv is not None else sys.argv[1:]
+    if any(a == "--fail-under" or a.startswith("--fail-under=") for a in _raw_argv):
+        p.error(
+            "--fail-under was removed -- use --fail-on SEVERITY instead "
+            "(critical/high/medium/low; it gates on findings directly, which a run can "
+            "always report, rather than the score, which the five-layer rule may "
+            "withhold entirely). See CHANGELOG.md."
+        )
     args = p.parse_args(argv)
     # C-419: --monitor writes THREE files and --history defaulted independently of the
     # other two, so redirecting only --state/--events silently kept writing into the real
@@ -3265,6 +3804,16 @@ def _main(argv=None) -> int:
               "Pass a path, slug, or URL.", file=sys.stderr)
         return 2
 
+    # B-789: --vet-judged is a MODIFIER (used alongside --vet/--vet-skill/--vet-plugin),
+    # not a primary mode, so _empty_mode_target/_VALUE_REQUIRED_MODES above never sees
+    # it — an empty value fell through to `if args.vet_judged:` being falsy and was
+    # silently treated as omitted, unlike every primary vet-* flag's own empty-string
+    # rejection just above. Same wording, same rc, checked here for the same reason.
+    if args.vet_judged is not None and not args.vet_judged.strip():
+        print("--vet-judged needs a target — got an empty value. "
+              "Pass a path, slug, or URL.", file=sys.stderr)
+        return 2
+
     # C-426 part B: _PRIMARY_MODES decides which mode runs. Every branch below asks this
     # one value rather than re-testing its own flag, so the table's order IS the dispatch
     # order instead of a hand-maintained mirror of it (see _resolve_mode).
@@ -3275,6 +3824,15 @@ def _main(argv=None) -> int:
         # Dispatched FIRST, before any audit()/history-record call-site below, so
         # purge can never race its own uninstall by writing a fresh history point.
         return _run_purge(args)
+
+    if _mode == "watch":
+        # C-517: standalone, like --purge above — every actual scan it triggers is a
+        # `--monitor` subprocess (watch.run_watch), so this needs no audit() of its own.
+        return _run_watch_cli(args)
+
+    if _mode == "watch_status":
+        # Read-only liveness check for a --watch process; needs no audit() either.
+        return _run_watch_status(args)
 
     if _mode == "apply_ignore_proposals":
         # C-253: like --purge, this only touches its own known file (.clawseccheckignore
@@ -3465,12 +4023,42 @@ def _main(argv=None) -> int:
         _b_scope = (read_baseline(args.state)[1] or {}).get("scope")
         _shape = (", ".join(_b_scope) if isinstance(_b_scope, list) and _b_scope
                   else "config only" if isinstance(_b_scope, list) else "not recorded")
+        # C-518: a second, independent check — does the CURRENT state file's reference
+        # agree with the last one THIS TOOL itself witnessed (events.jsonl) for this exact
+        # state path? Computed regardless of the primary verdict above and reported as its
+        # own paragraph rather than folded in: the two can disagree independently of each
+        # other (a witness write can fail silently — see the comment at the --monitor
+        # call site that journals it — and "no witness on record" is the ordinary state
+        # for anyone who has not moved their baseline since adopting this feature, never
+        # evidence of anything). Neither check ever accuses on its own; see
+        # baseline_witness_event's docstring and SECURITY_MODEL.md's "Audit trail"
+        # section for why a naive version of this comparison (no state-path tag)
+        # produced a false positive on a real, healthy machine.
+        _witnessed, _witness_why = witnessed_reference_for_state(args.state, args.events)
+        _journal_mismatch = bool(_witnessed) and not _actual.startswith(_witnessed)
+        if _witness_why == "ok" and not _journal_mismatch:
+            _cross_check = (
+                "\n\nLocal journal cross-check: the last reference this tool recorded for "
+                "this exact state file agrees with what is on disk now — an additional, "
+                "automatic confirmation (not proof; see --watch-log for what changed).")
+        elif _journal_mismatch:
+            _cross_check = (
+                f"\n\nLocal journal cross-check: the last reference this tool recorded for "
+                f"this exact state file was {_witnessed}, but the file now fingerprints to "
+                f"{_actual[:BASELINE_DIGEST_CHARS]}. This is not proof of tampering — a "
+                f"witness write can fail silently on its own — but if you did not expect "
+                f"the baseline to move, it is reason to look closer with --watch-log.")
+        elif _witness_why == "unreadable":
+            _cross_check = (f"\n\nLocal journal cross-check: {args.events} is there but "
+                            f"could not be read, so this second check could not run.")
+        else:  # "no_witness" — the ordinary, uninformative case; not worth a paragraph.
+            _cross_check = ""
         if _ok:
             _emit(f"Baseline still matches your reference "
                   f"({_actual[:BASELINE_DIGEST_CHARS]}). Nothing it records has changed "
                   f"since the run that gave you that value.\n"
-                  f"  covering: {_shape}")
-            return 0
+                  f"  covering: {_shape}" + _cross_check)
+            return 1 if _journal_mismatch else 0
         _emit(f"Baseline does NOT match your reference.\n"
               f"  you gave: {args.verify_baseline.strip().lower()}\n"
               f"  currently: {_actual[:BASELINE_DIGEST_CHARS]}\n"
@@ -3481,8 +4069,197 @@ def _main(argv=None) -> int:
               f"nothing on the machine changed; so do a settings edit, a skill update, a "
               f"changed check result, and a ClawSecCheck upgrade that adds checks. Compare "
               f"the covering line above against how you took your reference first, then run "
-              f"--watch-log to see what was recorded in between.")
+              f"--watch-log to see what was recorded in between." + _cross_check)
         return 1
+
+    if _mode == "diff":
+        # C-524: pure local-store comparison — no live audit, same class of early-return
+        # as --purge/--verify-*/--verify-baseline above (all sit before the audit() call
+        # this cascade makes further down).
+        _run_id1, _run_id2 = args.diff
+        _blank = [rid for rid in (_run_id1, _run_id2) if not rid.strip()]
+        if _blank:
+            print(f"--diff: run id cannot be blank ({len(_blank)} of 2 given blank). "
+                  f"Run ids are the 'ts' a --save-run invocation printed, or one of "
+                  f"--trend's own timestamps.", file=sys.stderr)
+            return 2
+        _runs_file = _runs_path(args)
+        _run1 = _load_run(_run_id1, _runs_file)
+        _run2 = _load_run(_run_id2, _runs_file)
+        _missing = [rid for rid, row in ((_run_id1, _run1), (_run_id2, _run2)) if row is None]
+        if _missing:
+            print(f"--diff: no saved run found for {', '.join(_missing)} in {_runs_file}. "
+                  f"Runs are only saved with --save-run — nothing is recorded there by "
+                  f"default.", file=sys.stderr)
+            return 1
+        _diff = _diff_runs(_run1, _run2)
+        if args.json:
+            _emit(_render_diff_json(_diff, version=__version__))
+            return 0
+        _emit(f"Comparing {_diff['run1_ts']} -> {_diff['run2_ts']}")
+        _emit("")
+        if _diff["new"]:
+            _emit(f"{len(_diff['new'])} new finding(s):")
+            for f in _diff["new"]:
+                _emit(f"  {f['id']}  {f['severity']}  {f['status']}  ({f['title']})")
+                _emit(f"    {f['detail']}")
+        else:
+            _emit("No new findings.")
+        _emit("")
+        if _diff["fixed"]:
+            _emit(f"{len(_diff['fixed'])} fixed finding(s):")
+            for f in _diff["fixed"]:
+                _emit(f"  {f['id']}  {f['severity']}  {f['status']}  ({f['title']})")
+                _emit(f"    {f['detail']}")
+        else:
+            _emit("No fixed findings.")
+        _emit("")
+        _emit(f"{_diff['unchanged_count']} finding(s) unchanged.")
+        if _diff["scope_note"]:
+            _emit("")
+            _emit(f"note: {_diff['scope_note']}")
+        return 0
+
+    if _mode == "sbom_diff":
+        # C-521: pure local-store comparison — no live audit, same class of early-return
+        # as --diff above (deliberately mirrors it; see sbom_runs.py's own module
+        # docstring for why this is a separate store/diff rather than a --diff branch).
+        _sbom_run_id1, _sbom_run_id2 = args.sbom_diff
+        _sbom_blank = [rid for rid in (_sbom_run_id1, _sbom_run_id2) if not rid.strip()]
+        if _sbom_blank:
+            print(f"--sbom-diff: run id cannot be blank ({len(_sbom_blank)} of 2 given "
+                  f"blank). Run ids are the 'ts' a --save-sbom-run invocation printed.",
+                  file=sys.stderr)
+            return 2
+        _sbom_runs_file = _sbom_runs_path(args)
+        _sbom_run1 = _load_sbom_run(_sbom_run_id1, _sbom_runs_file)
+        _sbom_run2 = _load_sbom_run(_sbom_run_id2, _sbom_runs_file)
+        _sbom_missing = [rid for rid, row in ((_sbom_run_id1, _sbom_run1),
+                                              (_sbom_run_id2, _sbom_run2)) if row is None]
+        if _sbom_missing:
+            print(f"--sbom-diff: no saved SBOM run found for {', '.join(_sbom_missing)} "
+                  f"in {_sbom_runs_file}. Runs are only saved with --save-sbom-run — "
+                  f"nothing is recorded there by default.", file=sys.stderr)
+            return 1
+        _sbom_diff = _diff_sbom_runs(_sbom_run1, _sbom_run2)
+        if args.json:
+            _emit(_render_sbom_diff_json(_sbom_diff, version=__version__))
+            return 0
+        _emit(f"Comparing {_sbom_diff['run1_ts']} -> {_sbom_diff['run2_ts']}")
+        _emit("")
+        if _sbom_diff["added"]:
+            _emit(f"{len(_sbom_diff['added'])} added component(s):")
+            for c in _sbom_diff["added"]:
+                _emit(f"  [{c['kind']}] {c.get('name', '<unnamed>')}  "
+                      f"version={c.get('version')}  hash={c.get('hash')}")
+        else:
+            _emit("No added components.")
+        _emit("")
+        if _sbom_diff["removed"]:
+            _emit(f"{len(_sbom_diff['removed'])} removed component(s):")
+            for c in _sbom_diff["removed"]:
+                _emit(f"  [{c['kind']}] {c.get('name', '<unnamed>')}  "
+                      f"version={c.get('version')}  hash={c.get('hash')}")
+        else:
+            _emit("No removed components.")
+        _emit("")
+        if _sbom_diff["changed"]:
+            _emit(f"{len(_sbom_diff['changed'])} changed component(s):")
+            for c in _sbom_diff["changed"]:
+                _fields = ", ".join(
+                    f"{field} {mv['from']!r} -> {mv['to']!r}"
+                    for field, mv in c["changed"].items()
+                )
+                _emit(f"  [{c['kind']}] {c.get('name', '<unnamed>')}: {_fields}")
+        else:
+            _emit("No changed components.")
+        _emit("")
+        _emit(f"{_sbom_diff['unchanged_count']} component(s) unchanged.")
+        return 0
+
+    if _mode == "incident_mark":
+        # C-520: pure local-store operation — no live audit, same class of early-return
+        # as --diff/--sbom-diff above.
+        _inc_id, _inc_status = args.incident_mark
+        if not _inc_id.strip():
+            print("--incident-mark: incident id cannot be blank. Ids are printed by "
+                  "--incident-open.", file=sys.stderr)
+            return 2
+        _inc_store = _incidents_path(args)
+        _inc_updated, _inc_err = _mark_incident(_inc_id, _inc_status, path=_inc_store)
+        if _inc_err == "invalid_status":
+            print(f"--incident-mark: {_inc_status!r} is not a recognized status (one of "
+                  f"{', '.join(INCIDENT_STATUSES)}).", file=sys.stderr)
+            return 2
+        if _inc_err == "not_found":
+            print(f"--incident-mark: no incident {_inc_id!r} found in {_inc_store}. "
+                  f"Incidents are only recorded by --incident-open.", file=sys.stderr)
+            return 1
+        if _inc_err == "invalid_transition":
+            _inc_current = _load_incident(_inc_id, path=_inc_store)
+            print(f"--incident-mark: {_inc_current.status} -> {_inc_status} is not a "
+                  f"valid transition (forward moves one step at a time, backward moves "
+                  f"freely).", file=sys.stderr)
+            return 1
+        if _inc_err == "write_failed":
+            print(f"--incident-mark: could not write to {_inc_store} — see --data-dir's "
+                  f"directory for write access.", file=sys.stderr)
+            return 1
+        _inc_dict = _incident_to_dict(_inc_updated)
+        if args.json:
+            _emit(render_incident_json(_inc_dict, version=__version__))
+            return 0
+        _emit(render_incident_record(_inc_dict))
+        return 0
+
+    if _mode == "incident_show":
+        # C-520: pure local-store operation — no live audit, same class of early-return
+        # as --diff/--sbom-diff above.
+        _inc_store = _incidents_path(args)
+        _inc_id = args.incident_show
+        _inc = _load_incident(_inc_id, path=_inc_store)
+        if _inc is None:
+            print(f"--incident-show: no incident {_inc_id!r} found in {_inc_store}. "
+                  f"Incidents are only recorded by --incident-open.", file=sys.stderr)
+            return 1
+        _inc_dict = _incident_to_dict(_inc)
+        _inc_timeline, _inc_tl_complete = incident_timeline(
+            _inc.monitor_watermark, events=args.events)
+        if args.json:
+            _inc_dict["monitor_timeline"] = _inc_timeline
+            _inc_dict["monitor_timeline_complete"] = _inc_tl_complete
+            _emit(render_incident_json(_inc_dict, version=__version__))
+            return 0
+        _emit(render_incident_record(_inc_dict, timeline=_inc_timeline,
+                                     timeline_complete=_inc_tl_complete))
+        return 0
+
+    if _mode == "explain":
+        # C-523: read-only, targeted single-check dispatch — same class of early-return
+        # as --diff/--verify-baseline above (before the main audit() call further down).
+        # Deliberately always a FRESH run against the CURRENT target, never a saved/past
+        # one — see --explain's --help text for why. See _run_single_check for why this
+        # costs the same as a full audit's Context-building but skips the OTHER checks.
+        _f, _lookup_err = _run_single_check(args.explain, args)
+        if _f is None:
+            print(f"--explain: {_lookup_err}", file=sys.stderr)
+            return 2
+        _emit(render_explain(_f, coverage_note=_threat_coverage_note(_f.id),
+                             ascii_only=ascii_only))
+        return 0
+
+    if _mode == "retest":
+        # C-523: same targeting as --explain; the DoD-load-bearing property is that this
+        # never runs audit() (which calls run_all() over every OTHER check) — see
+        # _run_single_check.
+        _f, _lookup_err = _run_single_check(args.retest, args)
+        if _f is None:
+            print(f"--retest: {_lookup_err}", file=sys.stderr)
+            return 2
+        _emit(f"Retested {_f.id} against {_sanitize(str(args.home))}:")
+        _emit("")
+        _emit(render_explain(_f, ascii_only=ascii_only))
+        return 0
 
     if _mode == "vet_plan":
         # F-065: zero-network plan emitter — prints commands, touches nothing itself.
@@ -3678,7 +4455,7 @@ def _main(argv=None) -> int:
 
     if _mode == "vet_all":
         home_dir = Path(args.home).expanduser()
-        return vet_all(home_dir, ascii_only=ascii_only)
+        return vet_all(home_dir, ascii_only=ascii_only, json_output=bool(args.json))
 
     if _mode == "vet_mcp":
         return _run_vet_mcp(args.vet_mcp if args.vet_mcp else None, args, ascii_only)
@@ -3777,11 +4554,16 @@ def _main(argv=None) -> int:
         return 0
 
     if _mode == "show_suppressed":
-        ignore = load_ignore(Path(args.home).expanduser())
-        if not ignore:
+        # C-519: load the FULL parsed list first (active + expired) -- an ignore file
+        # holding only already-expired entries must still be reported on (which ones,
+        # and that they no longer apply), not folded into "No entries found" just
+        # because the ACTIVE set (`ignore` below) happens to be empty.
+        _ignore_entries = load_ignore_entries(Path(args.home).expanduser())
+        ignore = {e.entry for e in _ignore_entries if not e.expired}
+        if not _ignore_entries:
             _emit("No .clawseccheckignore entries found.")
         else:
-            _emit(f"{len(ignore)} entry/entries in .clawseccheckignore.")
+            _emit(f"{len(_ignore_entries)} entry/entries in .clawseccheckignore.")
             # B-379: match the real audit path's include_sockets, or B340's finding
             # detail differs here from a normal run (ctx.sockets is None => a
             # different "socket scan was not run" UNKNOWN text) — since
@@ -3825,12 +4607,34 @@ def _main(argv=None) -> int:
             for p in suppressed_risk:
                 matched_entries.update({p.id} & ignore)
             dead = sorted(ignore - matched_entries)
+            # C-519: attribution lookup over the SAME `_ignore_entries` loaded above
+            # (including EXPIRED entries, which the active `ignore` set no longer
+            # carries -- load_ignore()/the filter above already excluded them so
+            # apply()/risk_paths() stop suppressing them). Keyed by the more specific
+            # match first (fingerprint over bare id), same precedence `matched_entries`
+            # above already uses.
+            _entry_meta = {e.entry: e for e in _ignore_entries}
+
+            def _attribution(*candidates: str) -> str:
+                meta = next((_entry_meta[c] for c in candidates if c in _entry_meta), None)
+                if meta is None:
+                    return ""
+                if meta.author or meta.date:
+                    bits = []
+                    if meta.author:
+                        bits.append(f"author={meta.author}")
+                    if meta.date:
+                        bits.append(f"date={meta.date}")
+                    return "  [" + " ".join(bits) + "]"
+                return "  [unattributed]"
+
             if suppressed or suppressed_risk:
                 _emit(f"{len(suppressed) + len(suppressed_risk)} suppressed in this run:")
                 for f in suppressed:
-                    _emit(f"  {f.id}  {fingerprint(f)}  ({f.title})")
+                    _emit(f"  {f.id}  {fingerprint(f)}  ({f.title})"
+                          f"{_attribution(fingerprint(f), f.id)}")
                 for p in suppressed_risk:
-                    _emit(f"  {p.id}  ({p.title})")
+                    _emit(f"  {p.id}  ({p.title}){_attribution(p.id)}")
             if dead:
                 _emit("")
                 _emit(f"{len(dead)} entry/entries match nothing in this run — the finding "
@@ -3838,6 +4642,18 @@ def _main(argv=None) -> int:
                       "no longer in effect:")
                 for entry in dead:
                     _emit(f"  {entry}")
+            # C-519: never silently keep honoring a stale exception forever — an entry
+            # whose expires= date has passed already stopped suppressing (load_ignore()
+            # excludes it), so say so here rather than letting it vanish from both the
+            # "suppressed" and "dead" lists with no explanation for where it went.
+            _expired = [e for e in _ignore_entries if e.expired]
+            if _expired:
+                _emit("")
+                _emit(f"{len(_expired)} expired ignore(s) no longer applied — the "
+                      "expires= date has passed, so these findings report normally "
+                      "again:")
+                for e in _expired:
+                    _emit(f"  {e.entry}  (expired {e.expires})")
         return 0
 
     if _mode == "watch_log":
@@ -3871,7 +4687,8 @@ def _main(argv=None) -> int:
                 _state = load_state(args.state) if args.state else load_state()
                 _events_since = (_state or {}).get("ts")
         _emit(render_events(_events_rows, ascii_only,
-                            journal_exists=_journal_exists, since=_events_since))
+                            journal_exists=_journal_exists, since=_events_since,
+                            window=None if args.all else DEFAULT_EVENTS_WINDOW))
         # B-582: same tamper-evident check --verify-events already has, run here too
         # — this viewer used to present the journal without ever consulting it. A
         # broken chain is disclosed, never withheld or called tampering (see
@@ -3954,8 +4771,12 @@ def _main(argv=None) -> int:
         first_run = _onboarding_reason(Path(args.home).expanduser())
         if first_run:
             from .checks import CHECKS  # noqa: PLC0415
+            # B-776: "nothing at --home" already holds by construction here (that's what
+            # `first_run` means) — the compound gate's other half — so the sandbox marker
+            # alone decides whether the advice below can name a fixable --home.
             _emit(render_onboarding(reason=first_run, home=_sanitize(args.home),
-                                    n_checks=len(CHECKS), ascii_only=ascii_only))
+                                    n_checks=len(CHECKS), ascii_only=ascii_only,
+                                    sandboxed=sandbox_sync_marker_present()))
             return 0
 
     logger.info("auditing home=%s", args.home)
@@ -4003,6 +4824,7 @@ def _main(argv=None) -> int:
     # resolved one.
     _bare_ledger = _build_layer_ledger(
         args, findings, degraded_count=score.degraded_count, attestation=attestation,
+        ctx=ctx,
     )
     score = compute(findings, ctx, ledger=_bare_ledger)
     logger.debug("ran %d checks", len(findings))
@@ -4072,7 +4894,7 @@ def _main(argv=None) -> int:
             # not be written is one the user will repeat, and two lines for one intended
             # audit is a worse timeline than none.
             _record_history_point(score, args, _live_signal, findings)
-            return _findings_exit_gate(args, findings, ctx)
+            return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
             _emit(f"(could not write badge: {exc})")
             return 1
@@ -4086,7 +4908,7 @@ def _main(argv=None) -> int:
             )
             _emit(f"(HTML report written to {args.html})")
             _record_history_point(score, args, _live_signal, findings)
-            return _findings_exit_gate(args, findings, ctx)
+            return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
             _emit(f"(could not write HTML report: {exc})")
             return 1
@@ -4097,7 +4919,7 @@ def _main(argv=None) -> int:
             secure_write_text(_report_dest(args.sarif), render_sarif(findings, score, __version__, ctx=ctx))
             _emit(f"(SARIF written to {args.sarif})")
             _record_history_point(score, args, _live_signal, findings)
-            return _findings_exit_gate(args, findings, ctx)
+            return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
             return 1
@@ -4169,7 +4991,11 @@ def _main(argv=None) -> int:
         """
         if not path:
             return
-        _media_path = _display_path(path)
+        # B-776: a sandboxed run must never collapse this to `~/...` — the gateway
+        # re-expands that against the HOST's real home, not the sandbox's, and the
+        # resulting path lands outside the sandbox root and gets rejected on delivery.
+        # See `display_path_for_delivery`'s docstring for the full mechanism.
+        _media_path = display_path_for_delivery(path, sandboxed=getattr(ctx, "sandboxed", False))
         _fallback_line = (
             "      This run could not confirm OpenClaw's managed attachment directory "
             "(it did not exist, or was not writable), so the report fell back to a "
@@ -4358,7 +5184,7 @@ def _main(argv=None) -> int:
                 "opens a PDF inline where an HTML attachment would just be a download)"
             )
             _record_history_point(score, args, _live_signal, findings)          # B-601
-            return _findings_exit_gate(args, findings, ctx)
+            return _findings_exit_gate(args, findings, ctx, score=score)
         if _mode != "dashboard" and pdf_written:
             # B-459: `and pdf_written` — everything in this block SPEAKS ABOUT A FILE. With
             # the fall-through above, a failed write now reaches here with pdf_written
@@ -4445,7 +5271,8 @@ def _main(argv=None) -> int:
         # (measured: 0.6% of a --trend run's own cost) — and never withholds a row
         # on a broken chain, only discloses it (see chain_provenance_note).
         _chain_status = history_verify(args.history)
-        _emit(render_trend(rows, ascii_only, chain_status=_chain_status))
+        _emit(render_trend(rows, ascii_only, chain_status=_chain_status,
+                          window=None if args.all else DEFAULT_TREND_WINDOW))
         _emit(_percentile_line(score, ascii_only, args.history))
         return 0
 
@@ -4503,7 +5330,7 @@ def _main(argv=None) -> int:
             _emit(_card)
             _emit_attach_instruction(pdf_written)
             _record_history_point(score, args, _live_signal, findings)
-            return _findings_exit_gate(args, findings, ctx)
+            return _findings_exit_gate(args, findings, ctx, score=score)
         # F-153: Dave settled 2026-07-30 that --dashboard must fully render
         # everything --full does, in the fixed order (Skills · Plugins · MCP · RISK
         # chains · Behavioural · "Second opinion (advisory)" · Coverage · "Worth a
@@ -4528,7 +5355,7 @@ def _main(argv=None) -> int:
         # capped grade a plain --full run of the same config would — and, C-425, the
         # IDENTICAL five-layer ledger / graded state too.
         (score, full_deadline, judged_bundle, _live_signal, _behavioral_fired_ids, _ledger,
-         _live_test_bucket, _behavioral_analysis) = (
+         _live_test_bucket, _behavioral_analysis, _live_test_proof) = (
             _resolve_runtime_caps(ctx, findings, score, args, attestation=attestation)
         )
         # B-586: AFTER the recompute, never before. `score` above is the phase-aware,
@@ -4629,7 +5456,8 @@ def _main(argv=None) -> int:
             _dashboard_phases.add(behavioral_phase)
         _ledger = _dashboard_phases.to_ledger(
             findings, degraded_count=score.degraded_count, attestation=attestation,
-            live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis)
+            live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis,
+            ctx=ctx, live_test_proof=_live_test_proof)
         score = compute(findings, ctx, live_test_vulnerable=_live_signal.hit,
                         live_test_reason=_live_signal.reason,
                         behavioral_fired_ids=_behavioral_fired_ids, ledger=_ledger)
@@ -4686,6 +5514,7 @@ def _main(argv=None) -> int:
             args, findings, ctx,
             extra_fail=bool(getattr(plugin_sweep, "has_fail", False))
             or bool(getattr(skill_sweep, "has_fail", False)),
+            score=score,
         )
 
     if _mode == "dashboard_findings":
@@ -4697,7 +5526,27 @@ def _main(argv=None) -> int:
         return 0
 
     if _mode == "sbom":
-        _emit(render_sbom(ctx))
+        # C-521: --format only selects OUTPUT rendering — every format is built from the
+        # exact same build_sbom(ctx) inventory (sbom.py's own module docstring), never a
+        # second scan. --save-sbom-run always persists the NATIVE shape regardless of
+        # --format, since that is what --sbom-diff compares (a format-specific rendering
+        # would fold in e.g. SPDX's own wall-clock creationInfo.created and manufacture a
+        # diff on every run of an unchanged setup).
+        _sbom_renderer = {
+            "native": render_sbom,
+            "cyclonedx": render_sbom_cyclonedx,
+            "spdx": render_sbom_spdx,
+        }[args.format]
+        _emit(_sbom_renderer(ctx))
+        if getattr(args, "save_sbom_run", False):
+            _saved_sbom_id = _save_sbom_run_snapshot(build_sbom(ctx), _sbom_runs_path(args),
+                                                      version=__version__)
+            if _saved_sbom_id is None:
+                _emit("\n(could not save SBOM run — see --data-dir's directory for "
+                      "write access)")
+            else:
+                _emit(f"\n(SBOM run saved as {_saved_sbom_id} — diff it later with "
+                      f"--sbom-diff {_saved_sbom_id} <OTHER_RUN_ID>)")
         return 0
 
     if _mode == "incident":
@@ -4705,6 +5554,27 @@ def _main(argv=None) -> int:
         # harvested the DEFAULT journal no matter what the operator named. Threaded
         # like --watch-log (:~915) and --monitor (:~1078) already do.
         _emit(render_incident(ctx, findings, score, events=args.events))
+        return 0
+
+    if _mode == "incident_open":
+        # C-520: unlike --incident-mark/--incident-show above, this one genuinely needs
+        # this run's own findings — it's what the new record gets linked to — so it
+        # dispatches here, alongside --incident, rather than in the pure-local-store
+        # section before audit() ran.
+        _inc_record, _inc_err = open_incident_from_audit(
+            ctx, findings, path=_incidents_path(args), events=args.events)
+        if _inc_err == "no_actionable_findings":
+            print("--incident-open: no actionable (WARN/FAIL-weight) findings this run — "
+                  "nothing to open an incident about.", file=sys.stderr)
+            return 1
+        if _inc_err == "write_failed":
+            print(f"--incident-open: could not write to {_incidents_path(args)} — see "
+                  f"--data-dir's directory for write access.", file=sys.stderr)
+            return 1
+        if args.json:
+            _emit(render_incident_json(_inc_record, version=__version__))
+            return 0
+        _emit(render_incident_record(_inc_record))
         return 0
 
     if _mode == "judge_packet":
@@ -4772,11 +5642,57 @@ def _main(argv=None) -> int:
         # below, so a random token can never manufacture drift on the next run.
         score, _live_signal = _apply_live_test_cap(ctx, findings, score, args)
         _skip_live_test_persist = _live_signal.hit and not _live_signal.reproducible
+        # F-180: read here (rather than where it is USED below, near the journal/state
+        # writes) so the B-781 home-mismatch early-return just below can also gate its
+        # own history_record call on it -- a probe must never record anything, on any
+        # exit path.
+        _probe = bool(getattr(args, "probe", False))
         # B-270: ONE predicate decides what "no usable baseline" means, and it tells
         # *absent* (a real first run) apart from *corrupt* (a prior baseline existed and is
         # gone). Both used to collapse into `prev is None`, so a destroyed baseline
         # rendered the same reassuring "Baseline saved." line as a healthy first run.
         base_status, prev = read_baseline(args.state)
+        # B-781: the monitor's snapshot/journal/baseline are keyed by --data-dir alone,
+        # and --home was never part of that identity -- so a run pointed at a DIFFERENT
+        # home used to write its findings into the same baseline as the real machine:
+        # the journal filled with alerts about a machine that did not change, and worse,
+        # the baseline silently REBASED to the other home's values, so a later genuine
+        # regression on the real machine could read as "no change". Checked here, before
+        # the monitor-specific scans below (behavioural/install/provenance/host-persist/
+        # credentials), the diff, and the journal/state writes -- the audit itself
+        # already ran earlier in this same invocation, but none of ITS output is
+        # comparable against `prev` once the two homes disagree.
+        #
+        # Narrow race, deliberately not closed here: two --monitor processes racing on
+        # the same --data-dir, BOTH a genuine first run (prev is None for both) but
+        # pointed at DIFFERENT homes, both pass this check (nothing to mismatch against
+        # yet). The B-769 `_baseline_moved` re-check inside journal_lock below still
+        # stops the loser from writing -- it just reports the ordinary "someone else
+        # already advanced the baseline" outcome rather than a home-specific one. No
+        # wrong data is ever written (the actual B-781 danger), only a less specific
+        # message in an already-rare window.
+        if home_mismatch(prev, ctx.home):
+            _prev_home_display = prev.get("home_display") or "(not recorded)"
+            _this_home_display = _home_identity(ctx.home)[1]
+            print(
+                f"MONITORING NOT ESTABLISHED — {args.state} holds a baseline recorded "
+                f"for a different OpenClaw home ({_prev_home_display}) than the one "
+                f"just scanned ({_this_home_display}).\n"
+                "Refusing to compare against it or overwrite it: doing either would "
+                "flood the journal with alerts about a machine that did not change, "
+                "and silently rebase the real baseline to this run's values. Point "
+                "--data-dir at a location dedicated to this home, or re-run with the "
+                "--home this baseline was recorded for.", file=sys.stderr)
+            # The audit already ran and genuinely measured THIS home's score -- recorded
+            # for the same reason the failure paths below are (cli.py's own note there:
+            # "this run's score was really measured, and the trend should not gain a
+            # hole"). history.jsonl is additive and each row already names its own
+            # `home` (B-691), so a foreign row here is inert, never a corrupted baseline
+            # the way state.json would be.
+            if not _skip_live_test_persist and not _probe:
+                history_record(score, args.history, home=args.home,
+                               findings=findings, version=__version__)
+            return 1
         # F-173: run the behavioural layer HERE, in the shell, and hand `snapshot()` only
         # the reduced verdict. Two deliberate choices:
         #
@@ -5050,55 +5966,92 @@ def _main(argv=None) -> int:
         # it again. That re-detection is the point, not a duplicate: B-278's note a few
         # lines up already established that leaving a baseline un-advanced is how drift
         # survives a failed write, and this is the same shape chosen deliberately.
-        _probe = bool(getattr(args, "probe", False))
-        journal_err = (record_events(alerts, args.events)
-                       if not (_skip_live_test_persist or _probe) else None)
-        state_err = None
-        # F-155: an unseeded VULNERABLE verdict must never be recorded, so the baseline
-        # advance is skipped exactly like a write failure would skip it — except this is
-        # not a failure (state_err stays None; no stderr, no non-zero exit below).
-        if journal_err is None and not _skip_live_test_persist and not _probe:
-            try:
-                save_state(args.state, snap)
-            except OSError as exc:
-                state_err = str(exc)
-        persisted = (journal_err is None and state_err is None
-                     and not _skip_live_test_persist and not _probe)
-        # F-173 Part B: an off-machine anchor for the baseline — on screen always, in the
-        # event chain only when it MOVED.
-        #
-        # Read back from disk after the save (not fingerprinted from `snap` in memory), so
-        # a short write that left the file truncated fails here instead of matching.
-        #
-        # Journaled AFTER save_state, which is the reverse of the B-278 order above —
-        # deliberately, and without conflicting with it. B-278 journals first so a failed
-        # journal cannot let the baseline advance past unrecorded drift. This entry makes a
-        # claim ABOUT the file on disk, so writing it before the save would assert
-        # something not yet true, and a failed save would leave a record of a baseline that
-        # never existed.
-        #
-        # Gated on the value having CHANGED, and that gate is load-bearing. An earlier
-        # version journaled unconditionally and broke three things at once: two tests that
-        # pin "a first monitor run journals nothing", `--brief`'s event count (a daily cron
-        # would report "365 event(s) recorded" over a timeline of nothing), and the
-        # journal's own 5,000-line retention, which would start evicting the genuine drift
-        # alerts a quiet machine had kept.
-        #
-        # A failure here is NOT `MONITORING NOT ESTABLISHED`: the baseline is saved and
-        # drift detection works. What is lost is one local record of the anchor, which is
-        # worth a line on stderr and nothing more.
-        _reference = baseline_reference(args.state)[0] if persisted else ""
-        _prev_reference = snapshot_reference(prev)
-        # `_prev_reference` empty means there was no prior baseline to move FROM — a first
-        # run, or one whose baseline was corrupt. Treating that as "the value changed" is
-        # what a first version did, and it journaled on a first run, which two existing
-        # tests pin as writing nothing. The reference still reaches the user: the screen is
-        # where they get it, and the journal is where its LATER movements are recorded.
-        if _reference and _prev_reference and _reference != _prev_reference:
-            _witness_err = record_events(baseline_witness_event(_reference), args.events)
-            if _witness_err is not None:
-                print(f"Note: the baseline was saved, but its reference value could not be "
-                      f"recorded in {args.events}: {_witness_err}", file=sys.stderr)
+        # (`_probe` itself is read earlier now — see the B-781 home-mismatch check above.)
+        # B-769: two concurrent --monitor runs racing on the same stale on-disk
+        # baseline independently compute the identical `alerts` (diffed against
+        # `prev`, read above, before either process reaches here) and, without
+        # this, each would append its own copy to the journal and each write its
+        # own copy of `snap` as the new baseline -- duplicating a real event.
+        # record_events' OWN lock (B-108) protects only the events file's hash
+        # chain and releases before save_state ever runs, so a "has the baseline
+        # moved" check placed INSIDE it still races the LATER save_state call --
+        # tried first, and disproven directly against two real racing processes.
+        # The lock has to span the whole check-then-commit-then-witness
+        # sequence, on the ONE resource both processes actually contend over:
+        # the state file itself.
+        with journal_lock(args.state):
+            # True only when someone ELSE already advanced the baseline since
+            # THIS run read `prev`, above -- i.e. we lost the race. A first
+            # writer (the overwhelmingly common case) always sees this False:
+            # read_baseline() here reads the exact same file `prev` came from,
+            # untouched since. Deliberately read_baseline(), not load_state():
+            # both resolve identically on disk (load_state() is defined as
+            # read_baseline()[1]), but load_state is imported into this module
+            # from the package root while read_baseline is imported from
+            # .monitor -- two distinct names, so a test that patches only one
+            # of them (as tests/test_f176_monitor_machine_channel.py's _mock()
+            # does, patching cli.read_baseline to force a scenario) must not
+            # have this re-check silently read through the unpatched twin.
+            _baseline_moved = read_baseline(args.state)[1] != prev
+            if _baseline_moved:
+                # The writer that moved it already recorded both this
+                # transition and (below) its baseline witness -- this run
+                # has nothing new to add. Same no-op contract record_events
+                # already uses for "nothing to record".
+                journal_err = None
+                state_err = None
+            else:
+                journal_err = (record_events(alerts, args.events)
+                               if not (_skip_live_test_persist or _probe) else None)
+                state_err = None
+                # F-155: an unseeded VULNERABLE verdict must never be recorded, so the
+                # baseline advance is skipped exactly like a write failure would skip it —
+                # except this is not a failure (state_err stays None; no stderr, no
+                # non-zero exit below).
+                if journal_err is None and not _skip_live_test_persist and not _probe:
+                    try:
+                        save_state(args.state, snap)
+                    except OSError as exc:
+                        state_err = str(exc)
+            persisted = (journal_err is None and state_err is None
+                         and not _skip_live_test_persist and not _probe
+                         and not _baseline_moved)
+            # F-173 Part B: an off-machine anchor for the baseline — on screen always, in the
+            # event chain only when it MOVED.
+            #
+            # Read back from disk after the save (not fingerprinted from `snap` in memory), so
+            # a short write that left the file truncated fails here instead of matching.
+            #
+            # Journaled AFTER save_state, which is the reverse of the B-278 order above —
+            # deliberately, and without conflicting with it. B-278 journals first so a failed
+            # journal cannot let the baseline advance past unrecorded drift. This entry makes a
+            # claim ABOUT the file on disk, so writing it before the save would assert
+            # something not yet true, and a failed save would leave a record of a baseline that
+            # never existed.
+            #
+            # Gated on the value having CHANGED, and that gate is load-bearing. An earlier
+            # version journaled unconditionally and broke three things at once: two tests that
+            # pin "a first monitor run journals nothing", `--brief`'s event count (a daily cron
+            # would report "365 event(s) recorded" over a timeline of nothing), and the
+            # journal's own 5,000-line retention, which would start evicting the genuine drift
+            # alerts a quiet machine had kept.
+            #
+            # A failure here is NOT `MONITORING NOT ESTABLISHED`: the baseline is saved and
+            # drift detection works. What is lost is one local record of the anchor, which is
+            # worth a line on stderr and nothing more.
+            _reference = baseline_reference(args.state)[0] if persisted else ""
+            _prev_reference = snapshot_reference(prev)
+            # `_prev_reference` empty means there was no prior baseline to move FROM — a first
+            # run, or one whose baseline was corrupt. Treating that as "the value changed" is
+            # what a first version did, and it journaled on a first run, which two existing
+            # tests pin as writing nothing. The reference still reaches the user: the screen is
+            # where they get it, and the journal is where its LATER movements are recorded.
+            if _reference and _prev_reference and _reference != _prev_reference:
+                _witness_err = record_events(
+                    baseline_witness_event(_reference, args.state), args.events)
+                if _witness_err is not None:
+                    print(f"Note: the baseline was saved, but its reference value could not be "
+                          f"recorded in {args.events}: {_witness_err}", file=sys.stderr)
         # F-176: one boolean saying whether THIS run made every comparison this build knows
         # how to make — the machine-channel analogue of the scoped ✅ C-418 gave the human
         # report. Named `fully_compared`, never `complete`: a first run legitimately has
@@ -5267,7 +6220,7 @@ def _main(argv=None) -> int:
     # (see the `render_json` call below) so `payload["projection"]["current"]` can
     # never disagree with `payload["score"]`/`payload["grade"]` for the same run.
     (score, full_deadline, judged_bundle, live_signal, behavioral_fired_ids, layer_ledger,
-     _live_test_bucket, _behavioral_analysis) = (
+     _live_test_bucket, _behavioral_analysis, _live_test_proof) = (
         _resolve_runtime_caps(ctx, findings, score, args, attestation=attestation)
     )
     if args.json:
@@ -5324,11 +6277,19 @@ def _main(argv=None) -> int:
             # same local this function already threads into every ledger build.
             layer_ledger = full_pipeline.to_ledger(
                 findings, degraded_count=score.degraded_count, attestation=attestation,
-                live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis)
+                live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis,
+                ctx=ctx, live_test_proof=_live_test_proof)
             score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
                             live_test_reason=live_signal.reason,
                             behavioral_fired_ids=behavioral_fired_ids, ledger=layer_ledger)
         body = render_json(findings, score, risk=paths, ctx=ctx, skill_sweep=full_sweep_json,
+                           # B-792: without this, inventory.plugins.scanned stayed False
+                           # even on a run whose own pluginSweep (merged in below) showed
+                           # complete=True with real rows -- render_json's build_inventory
+                           # call never saw the live sweep object, only its serialized
+                           # summary reached the payload, through a different path.
+                           plugin_sweep=(full_pipeline.plugin_sweep_obj
+                                        if full_pipeline is not None else None),
                            live_test_vulnerable=live_signal.hit,
                            live_test_reason=live_signal.reason,
                            behavioral_fired_ids=behavioral_fired_ids,
@@ -5338,8 +6299,17 @@ def _main(argv=None) -> int:
             # these keys belong to the pipeline, not to the audit payload, and every
             # existing key keeps its meaning and its value. Re-serialized with the same
             # dumps() settings render_json uses, so the base document is unchanged.
+            #
+            # B-758 (item #4): `score=score` passes the FINAL, post-reprojection score
+            # (recomputed above at line 6261 from the re-projected `layer_ledger`) —
+            # the same score `render_json` just used to build `body`'s top-level
+            # `graded`/`missing_layers`. Without it, `to_json()` falls back to the
+            # adjudication phase's own `runState` snapshot, built from the score as it
+            # stood when the pipeline ran (before this re-projection), so the merged
+            # document could state the run was graded in one field and ungraded in the
+            # other. See PipelineResult.to_json()'s docstring.
             _doc = json.loads(body)
-            _doc.update(full_pipeline.to_json())
+            _doc.update(full_pipeline.to_json(score=score))
             body = json.dumps(_doc, ensure_ascii=True, indent=2)
     elif args.card:
         body = render_card(score, findings, ascii_only)
@@ -5416,7 +6386,8 @@ def _main(argv=None) -> int:
             layer_ledger = _hoisted_pipeline.to_ledger(
                 findings, degraded_count=score.degraded_count, attestation=attestation,
                 live_test_bucket=_live_test_bucket,
-                behavioral_analysis=_behavioral_analysis)
+                behavioral_analysis=_behavioral_analysis, ctx=ctx,
+                live_test_proof=_live_test_proof)
             score = compute(findings, ctx, live_test_vulnerable=live_signal.hit,
                             live_test_reason=live_signal.reason,
                             behavioral_fired_ids=behavioral_fired_ids, ledger=layer_ledger)
@@ -5637,6 +6608,20 @@ def _main(argv=None) -> int:
             _emit(f"\n(could not save report: {exc})")
             _save_failed = True
 
+    # C-524: same tail slot as --save above, deliberately -- --save-run is reachable
+    # from exactly the same set of primary modes (see the "save_run" no-effect note in
+    # _flag_coherence_notes, which mirrors "save"'s own entry rather than a separate
+    # allowlist).
+    if getattr(args, "save_run", False):
+        _saved_run_id = _save_run_snapshot(findings, _runs_path(args), home=args.home,
+                                            version=__version__)
+        if _saved_run_id is None:
+            _emit("\n(could not save run — see --data-dir/--history's directory "
+                  "for write access)")
+        else:
+            _emit(f"\n(run saved as {_saved_run_id} — diff it later with "
+                  f"--diff {_saved_run_id} <OTHER_RUN_ID>)")
+
     # B-598: the guard this used to spell out inline now lives in
     # `_record_history_point`, which the --dashboard branch calls too. Its docstring
     # carries the F-155 seed-gate reasoning that was written here.
@@ -5648,6 +6633,7 @@ def _main(argv=None) -> int:
     return _findings_exit_gate(
         args, findings, ctx,
         extra_fail=vm_has_fail or sweep_has_fail or pipeline_has_fail,
+        score=score,
     )
 
 

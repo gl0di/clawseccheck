@@ -29,8 +29,8 @@ regex-matched) and also marks ``truncated``; a cooperative per-file wall-clock d
 for its outer per-audit cap) marks ``timed_out`` and stops early.
 
 C-327: a base64 blob whose decoded bytes are themselves a gzip/zlib stream (the HF
-agent-intrusion precedent — ``exec(gzip.decompress(base64.b64decode(...)))`` packed
-payloads, chosen specifically to defeat a naive text scan) is decompressed ONE layer
+agent-intrusion precedent — an exec call wrapping ``gzip.decompress(base64.b64decode(...))``
+packed payloads, chosen specifically to defeat a naive text scan) is decompressed ONE layer
 deeper and the recovered text is re-scanned with the SAME indicator regexes every
 ordinary line already goes through. This is a decompression-bomb sink risk by
 construction (a few compressed KB can claim to be gigabytes), so it is bounded the same
@@ -501,7 +501,7 @@ def _scan_blob_for_compressed_indicators(
 ) -> None:
     """C-327: one layer deeper than ``_decodes_to_printable_blob`` — if *token* is a
     base64 blob whose decoded bytes are themselves a gzip/zlib stream (the HF
-    agent-intrusion ``exec(gzip.decompress(base64.b64decode(...)))`` packing shape),
+    agent-intrusion exec call wrapping ``gzip.decompress(base64.b64decode(...))`` packing shape),
     bounded-decompress it and re-scan the recovered text with the SAME already-vetted
     indicator regexes every ordinary line goes through (``_scan_line_content`` — never a
     new pattern, per this module's own docstring). Silent (does nothing) when *token*

@@ -132,6 +132,45 @@ _INVISIBLE_RE = re.compile(
     "[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + _BIDI_MARK_SRC + "]"
 )
 
+# B-766: stripping a bidi control (above) removes the CHARACTER, not the character-order
+# manipulation it produced -- a Trojan-Source payload is authored in reversed LOGICAL
+# order, so `_INVISIBLE_RE.sub("", ...)` leaves the reversed spelling in place and no
+# contiguous-substring pattern can find it. Recovering the true logical/visual mapping
+# needs the Unicode Bidirectional Algorithm (UAX #9), which is "neither in the stdlib nor
+# sound to hand-roll" (checks/_mcp.py's own C-038 comment) -- so this is a categorical
+# refuse-on-presence primitive, not a normalize-then-scan one.
+#
+# U+202D LRO / U+202E RLO ONLY -- the two controls that FORCE a direction onto characters
+# that already have a strong one of their own, which is what makes rendered text diverge
+# from the bytes a scanner reads. Deliberately excludes U+202A-202C (embedding) and
+# U+2066-2069 (isolate): those set the ordering of a run but cannot flip a strong
+# character against its own direction, and are the Unicode-recommended way to place an
+# LTR identifier inside RTL prose -- escalating them here would FAIL ordinary Hebrew and
+# Arabic content, the same punish-the-non-English-writer class the confusables signal
+# already guards against.
+#
+# Ported from checks/_mcp.py's `_C038_BIDI_OVERRIDE_RE`, the C-135/libfribidi-adversarially
+# -tested reference (2026-07-25, four unflagged Trojan-Source constructions found against
+# the real Bidirectional Algorithm). NOT reused by import: that predicate is proven over a
+# specific corpus and this project's own precedent (toolpolicy.py/toolgrant.py) is to keep
+# a second, guarded copy rather than risk a reuse refactor on a differentially-validated
+# one. Kept identical on purpose -- do not widen to the ordering/isolate class here; that
+# is a WARN-tier, RTL-gated signal (`_C038_BIDI_ORDERING_RE` + `_c038_has_rtl_script`) this
+# leaf does not need, because unlike the MCP-vet surface, B58 already has its own softer
+# `obfuscation_signals()` "bidi-override / embedding controls found" path for that case.
+_NAKED_BIDI_OVERRIDE_RE = re.compile("[\u202d\u202e]")
+
+
+def has_naked_bidi_override(text: str) -> bool:
+    """True when *text* contains a bidi OVERRIDE control (U+202D/U+202E) — a
+    Trojan-Source-shaped concealment channel, categorically, independent of whether a
+    keyword pattern also matches the (still-reversed) normalized text; that match is
+    exactly what the attack defeats. See `_NAKED_BIDI_OVERRIDE_RE` above for why this is
+    override-only and not gated on RTL-script presence — unlike the weaker ordering
+    signal, a genuine override is flagged whether or not the surrounding text is RTL.
+    """
+    return _NAKED_BIDI_OVERRIDE_RE.search(text) is not None
+
 # The NARROWER class the two token-level signals below keep using, deliberately.
 #
 # `confusable_in_ascii_context` and `_nfkc_ascii_fold_changed` strip invisibles

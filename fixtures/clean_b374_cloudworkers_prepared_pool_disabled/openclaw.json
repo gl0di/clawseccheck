@@ -1,0 +1,13 @@
+{
+  "cloudWorkers": {
+    "profiles": {
+      "default": {
+        "provider": "acme-cloud-workers",
+        "readyWorkers": 1
+      }
+    },
+    "preparedPool": {
+      "maxTotal": 0
+    }
+  }
+}

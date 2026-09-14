@@ -230,3 +230,41 @@ def test_b25_legacy_structural_keys_not_treated_as_entries():
         "allow": ["some-plugin"],
     }}
     assert check_update_pinning(_ctx(cfg)).status == "UNKNOWN"
+
+
+# ---- C-413: update.channel signal ----
+# Grounded (openclaw@2026.9.3): update.channel is
+# union(["stable","extended-stable","beta","dev"]).optional() — four literals, not the
+# originating task stub's assumed two ("dev"/"beta"). "extended-stable" must NOT be
+# swept in as a pre-release tier.
+
+def test_b25_channel_dev_warns_alone():
+    cfg = {"update": {"channel": "dev"}}
+    f = check_update_pinning(_ctx(cfg))
+    assert f.status == "WARN"
+    assert "update.channel" in f.detail
+
+
+def test_b25_channel_beta_warns_alone():
+    cfg = {"update": {"channel": "beta"}}
+    f = check_update_pinning(_ctx(cfg))
+    assert f.status == "WARN"
+    assert "update.channel" in f.detail
+
+
+def test_b25_channel_stable_does_not_warn():
+    cfg = {"update": {"channel": "stable"}}
+    assert check_update_pinning(_ctx(cfg)).status == "UNKNOWN"  # no entries, no pinning signal either
+
+
+def test_b25_channel_extended_stable_not_swept_in_as_prerelease():
+    cfg = {"update": {"channel": "extended-stable"}}
+    assert check_update_pinning(_ctx(cfg)).status == "UNKNOWN"  # not WARN — extended-stable is a safe tier
+
+
+def test_b25_channel_dev_and_pinned_entries_still_warns():
+    cfg = {"update": {"channel": "dev"}}
+    cfg.update(_plugins_entries({"myplugin": {"source": "https://example.com/x", "version": "v1.2.3"}}))
+    f = check_update_pinning(_ctx(cfg))
+    assert f.status == "WARN"
+    assert "update.channel" in f.detail

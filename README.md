@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner-readme.png" alt="ClawSecCheck — local, read-only security audit for your OpenClaw agent" width="820">
+  <img src="docs/assets/banner-readme.png" alt="ClawSecCheck — local security audit for your OpenClaw agent, read-only against your config" width="820">
 </p>
 
 <p align="center">
@@ -18,12 +18,12 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="188 security checks · 26 attack-chain detectors · 22,361 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.9.2 verified" width="900">
+    <img src="docs/assets/stats-light.svg" alt="210 security checks · 26 attack-chain detectors · 23,228 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.9.4 verified" width="900">
   </picture>
 </p>
 
 <p align="center">
-  <sub>Verified against <b>OpenClaw 2026.9.2</b> on <b>Linux</b> · also reads the pre-2026.8.1 config shapes · Python 3.9+ · <a href="#-compatibility">details</a></sub>
+  <sub>Verified against <b>OpenClaw 2026.9.4</b> on <b>Linux</b> · also reads the pre-2026.8.1 config shapes · Python 3.9+ · <a href="#-compatibility">details</a></sub>
 </p>
 
 ---
@@ -214,7 +214,7 @@ These are the areas a full check covers across its five layers:
 | 🔐 **Secrets & data at rest** | Are your tokens, keys, and conversations lying around readable? |
 | 📡 **Monitoring & readiness** | Would you even notice a compromise — and could you investigate it? |
 
-On top of the 188 individual checks, a **risk engine** hunts for deadly
+On top of the 210 individual checks, a **risk engine** hunts for deadly
 *combinations* — chains like "untrusted input → reachable secrets → outbound
 tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)**.
 
@@ -247,7 +247,7 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
   capabilities — plus a documented zero-false-positive-FAIL release
   discipline: an alarm reaching you is a specific, reproducible, test-pinned
   condition in your own config, not a keyword match dressed up as a scan.
-- **Built like it matters.** 22,361 automated tests run on every change, a
+- **Built like it matters.** 23,228 automated tests run on every change, a
   false alarm is treated as a release-blocking bug, and every release is
   cryptographically signed.
 - **Free and readable.** MIT-licensed, pure Python standard library, zero
@@ -382,6 +382,26 @@ false FAIL here is a hard blocker and not a tuning preference. See the
 [security model](SECURITY_MODEL.md) for the complete capability surface, and
 [`docs/IOC_DATA.md`](docs/IOC_DATA.md) for the IOC dataset's provenance policy.
 
+**A second worked example, from ClawHub's own listing scan (v4.0.1, 2026-09-08).**
+Its "hardcoded secret" and "disabled TLS verification" findings are the same
+point-3-adjacent shape as above, aimed at different lines: the flagged
+"secret" is `checks/_content.py`'s `_URL_AUTH_QUERY_PARAM_NAME_RE` — a regex
+of REST auth *query-parameter names* (`access_token`, `api_key`...), no value,
+used to recognize the `?api_key=` idiom in a scanned skill's prose; the
+flagged "disabled TLS verification" is `checks/_mcp.py` reading `sslVerify`
+out of **the audited MCP server's own config** and FAILing when it is
+`false` — this tool makes no TLS connection of its own to have a verification
+setting for. Its "env var access + network transmission" finding is
+`skillast.py`'s `ENV_EXFIL_FLOW` taint rule: plain `set`/`tuple` literals of
+library and attribute *names* (`requests`, `urlopen`, `getenv`...) that the
+AST walker compares a **scanned skill's** parsed nodes against — never
+imported, never called here. And its "in-memory retention of sensitive
+environment values" finding is real in the narrow sense that `collector.py`
+does read the two dotenv files' raw `KEY=VALUE` pairs into memory for the
+run — see [security model](SECURITY_MODEL.md#secrets-and-data-handling) for
+exactly what that's for (truthy/strength/hostname checks only) and where a
+regression test pins that the value never reaches a finding, a log, or disk.
+
 <details>
 <summary><b>⚙️ For terminal users: CLI, JSON, SARIF, CI gates</b></summary>
 
@@ -428,7 +448,7 @@ not the same claim as "we ran it".
 
 | | |
 |---|---|
-| **Verified against a running install** | **OpenClaw 2026.9.2.** The schema snapshots this repo ships — `tests/dist_verified_paths.txt`, `tests/state_schema_snapshot.sql`, `tests/vendor_state_tables.txt` — are generated from an installed 2026.9.2 and each carries that version in its header. The state-schema snapshot's stamp is enforced: on a machine with OpenClaw installed, the suite re-derives the schema and fails if the stamp does not match the running build. `tests/dist_citation_baseline.txt` is deliberately NOT in that set and still stamps 2026.9.1: it is a frozen ledger of pre-existing citation debt, re-recorded as a separate deliberate act rather than on every upgrade, so a lagging stamp there is its design and not drift. |
+| **Verified against a running install** | **OpenClaw 2026.9.4.** The schema snapshots this repo ships — `tests/dist_verified_paths.txt`, `tests/state_schema_snapshot.sql`, `tests/vendor_state_tables.txt` — are generated from an installed 2026.9.4 and each carries that version in its header. The state-schema snapshot's stamp is enforced: on a machine with OpenClaw installed, the suite re-derives the schema and fails if the stamp does not match the running build. `tests/dist_citation_baseline.txt` is deliberately NOT in that set and still stamps 2026.9.1: it is a frozen ledger of pre-existing citation debt, re-recorded as a separate deliberate act rather than on every upgrade, so a lagging stamp there is its design and not drift. |
 | **Read by the code, each measured against a running install while it was written** | **2026.7.1-2, 2026.8.1, 2026.8.2** — the three builds that moved settings the audit reads. Every moved key is read in *both* spellings: the agent roster as `agents.list` *and* `agents.entries`, the gateway command lists under their old and new parents, and the three settings 2026.8.1 moved out of `openclaw.json` into OpenClaw's machine-owned store. An older or not-yet-migrated config is read, not silently skipped. |
 | **On anything else** | The audit still runs. This is deliberately *not* a claim of a contiguous supported range: the builds between the measured points (2026.7.2 – 2026.8.0) were never run against, so the tool treats a config it cannot date as undated — it names **both** key spellings in its fix advice rather than guessing which one your build accepts, and a key whose home this build does not have is reported as retired or `UNKNOWN`, never resolved to nothing and given a verdict anyway. |
 
@@ -444,7 +464,7 @@ as unprotected on Windows — see the [User guide](docs/USAGE.md) for the detail
 | Document | What it covers |
 |---|---|
 | [User guide](docs/USAGE.md) | Recipes, monitoring modes, and trust details |
-| [Check catalog](docs/CHECKS.md) | All 188 checks: what they verify and how to remediate |
+| [Check catalog](docs/CHECKS.md) | All 210 checks: what they verify and how to remediate |
 | [Threat coverage](docs/THREAT_COVERAGE.md) | OWASP LLM Top 10 / Agentic threat mapping |
 | [Bundled IOC dataset](docs/IOC_DATA.md) | Provenance policy, refresh cadence, and freshness discipline for the known-bad catalog |
 | [Output schema](docs/OUTPUT_SCHEMA.md) | The frozen `--json` / SARIF contract |

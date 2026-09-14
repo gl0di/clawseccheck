@@ -146,6 +146,7 @@ from ._content import (
     check_self_modification_directive,
     check_self_privesc_directive,
     check_silent_instruction,
+    check_sitecustomize_pythonstartup_scoped_install,
     check_social_engineering_phishing,
     check_symlink_escape,
     check_tool_output_trust_inversion,
@@ -3523,6 +3524,185 @@ def _has_cred_exfil_outside_fence(blob: str, fence_ranges: list[tuple[int, int]]
     return False
 
 
+# B-748: a skill that reads a config/identity file to learn its OWN legitimate
+# destination, then talks to exactly that destination, is not exfiltration —
+# _EXFIL_RE has no taint, so on its own it cannot see that distinction (a
+# `.npmrc` read followed by a `fetch()` to the npm registry, or a K8s
+# in-cluster service-account token read followed by a request to the cluster's
+# own API server, both FAILed here with zero connection between the two
+# halves). Two narrow, well-known, non-arbitrary destinations are exempted,
+# mirroring skillast.py's B-415 in-cluster-auth exemption (a specific
+# credential SOURCE paired with its own specific DESTINATION) — but checked
+# against what an exfil-shaped match's OWN forward call-argument text actually
+# names, never whether the destination string merely appears somewhere in the
+# blob. That distinction is deliberate: the RETRACTED attempts recorded above
+# this check (case_04843, case_04193) share exactly one root cause — a
+# document-wide "some exempt signal exists anywhere" test that a single decoy
+# string anywhere in the skill silently defeats for the WHOLE finding. Binding
+# the check to each exfil match's own forward window means one genuinely
+# unexplained call (an arbitrary/attacker host, or the cross-file split-stage
+# shape this check exists to catch) is never masked by an unrelated exempt
+# call elsewhere in the same skill. Host-anchored (`://host` + a path/quote/
+# whitespace/end boundary) so `registry.npmjs.org.evil.com` cannot pass by
+# substring containment. The paired credential-source regex is checked only
+# for PRESENCE anywhere in the blob (not windowed) — it exists to keep the
+# exemption SCOPED to its own pairing (an npm-registry destination exempts only
+# when an `.npmrc` read is also present; it does not blanket-exempt every
+# exfil call whose target happens to be that host when the skill's actual
+# payload is a different credential type entirely, e.g. AWS keys smuggled
+# toward the npm registry as a covert channel) — the forward-window
+# destination check above is what does the anti-bypass work.
+_CRED_EXFIL_OWN_DEST_WINDOW = 200  # chars after the exfil verb — matches _PERSIST_WINDOW's scale
+_CRED_EXFIL_OWN_DEST_PAIRS = (
+    (re.compile(r"\.npmrc"), re.compile(r'://registry\.npmjs\.org(?=[/"\'\s]|$)', re.I)),
+    (
+        re.compile(r"/var/run/secrets/kubernetes\.io/serviceaccount/token"),
+        re.compile(r'://kubernetes\.default\.svc(?=[/"\'\s]|$)', re.I),
+    ),
+)
+
+
+def _exfil_hits_all_target_own_known_destination(blob: str) -> bool:
+    """True when EVERY ``_EXFIL_RE`` match in *blob* has one of the narrow
+    "credential source's own destination" hosts above (B-748) in its own
+    forward call-argument window, with that pairing's credential-source
+    pattern present and NON-NEGATED somewhere in the blob. False when there
+    are no exfil matches at all, or when even one exfil match cannot be
+    explained this way — so a caller can use this to SUPPRESS a co-occurrence
+    finding only when every exfil-shaped hit is accounted for, never merely
+    one of several.
+
+    Self-driven C-135: an EARLIER version checked only bare presence of the
+    credential-source pattern, which a denial-framed decoy defeats — "We do
+    not read your .npmrc file" + a REAL ``.aws/credentials`` read + a send to
+    ``registry.npmjs.org`` PASSed, because the npmrc text was present even
+    though negated and the real credential leaked was a different one
+    entirely. ``_negation_governs_trigger`` closes that the same way
+    ``_has_non_negated_cred_match`` already does for the base check.
+    """
+    matches = list(_EXFIL_RE.finditer(blob))
+    if not matches:
+        return False
+    for m in matches:
+        forward = blob[m.end() : m.end() + _CRED_EXFIL_OWN_DEST_WINDOW]
+        if not any(
+            dest_rx.search(forward)
+            and any(
+                not _negation_governs_trigger(blob, cm.start())
+                for cm in cred_rx.finditer(blob)
+            )
+            for cred_rx, dest_rx in _CRED_EXFIL_OWN_DEST_PAIRS
+        ):
+            return False
+    return True
+
+
+# B-744: OpenClaw's own credential store (~/.openclaw/credentials) is not in _CRED_RE's
+# vocabulary (checks/_shared.py's _CRED_RE covers AWS/K8s/Docker/npm/PyPI/gcloud/Solana/
+# Ethereum/browser-cookie paths — grounded there, never this one), so the FAIL-capable
+# cross-skill cred+exfil check above (_has_non_negated_cred_match / _has_cross) never
+# sees a skill that reads and exfiltrates it — the single most valuable credential on
+# the machine this tool exists to protect.
+#
+# TWO FIXES for this gap were built and RETRACTED before this one, both worth recording
+# so neither is "helpfully" re-attempted without redoing the measurement that killed it:
+#   (1) wiring _SECRET_PATH_RE (checks/_shared.py) into the co-occurrence vocabulary —
+#       too broad: took the check's qualifying-file surface from 22 to 77 across the
+#       fixture/installed-skill corpus, the 55 additions dominated by files this repo
+#       maintains as clean (negative) fixtures.
+#   (2) a tight, `.openclaw/credentials`-specific pattern wired directly into
+#       _has_non_negated_cred_match / _has_cross (the FAIL bucket) — 0 measured false
+#       positives against the corpus, but an adversarial (C-135) pass found it hard-FAILs
+#       the single most ordinary OpenClaw skill shape there is: reading the store for its
+#       OWN configured notification destination (a Discord/Telegram webhook, a channel
+#       URL) and posting a hardcoded, unrelated status string to it — a "notify me when
+#       done" skill. That FAIL bucket is document-wide (any credential-path token + any
+#       exfil token anywhere in the blob, zero connection between them) — tolerable for
+#       AWS/SSH keys, which a benign skill rarely names at all, but not for OpenClaw's own
+#       store, reading which for exactly this purpose is ordinary, documented behavior for
+#       a large fraction of real skills.
+#
+# Dave's decision (2026-09-13): WARN, via a NEW, NARROW, SEPARATE rule — never routed
+# through _CRED_RE / _has_non_negated_cred_match / _has_cross, so this can never become
+# the retracted hard-FAIL.
+#
+# Path anchor: NOT a bare `\b` word boundary — an earlier draft matched
+# "credentials-backup-policy.md" / "credentials.md" / "my.openclaw/credentials", which
+# share the substring "credentials" (or, for the third, "openclaw") but say nothing
+# about the real home-relative OpenClaw path. The left lookbehind rejects a directory
+# that merely ENDS in "...openclaw" (the "y" in "my.openclaw" is a word character
+# immediately before the leading "."); the right lookahead rejects a same-prefixed but
+# unrelated identifier continuing past "credentials" as one token.
+_OPENCLAW_CRED_STORE_PATH_RE = re.compile(
+    r"(?<![\w.])\.openclaw/credentials(?![A-Za-z0-9_])",
+    re.I,
+)
+
+# Even with that narrow anchor, bare document-wide co-occurrence with _EXFIL_RE repeats
+# exactly the shape retracted attempt (2) was killed for: the notify-on-complete shape
+# reads the store for its own destination and sends UNRELATED content, so the mere
+# presence of "a network call happens somewhere in this document" proves nothing. This
+# rule additionally requires evidence that something CREDENTIAL-SHAPED — not just "the
+# store was opened somewhere" — actually reaches the sink, checked against each exfil
+# match's OWN forward call-argument window (same discipline as B-748's
+# _CRED_EXFIL_OWN_DEST_WINDOW), never "does this appear anywhere in the blob":
+#   (a) the sink serializes a bare identifier — `JSON.stringify(<name>)`, never a literal
+#       object (`JSON.stringify({content: "done"})`, the notify-on-complete shape, must
+#       not count — the leading `{`/`[` is excluded on purpose);
+#   (b) the sink references a field that is itself named like a raw secret (token /
+#       apiKey / secret / password / ... — never a destination-shaped field such as
+#       webhookUrl / channel / endpoint, which is exactly the acceptance shape); or
+#   (c) the variable that was assigned an expression naming the store
+#       (_OPENCLAW_CRED_READ_VAR_RE) is used BARE in the window — not narrowed to a
+#       `.field` / `[key]` access, which is what "send the raw file/object contents"
+#       looks like as opposed to "read one field to use as a destination".
+# Deliberately NOT full taint tracking (that complexity is what the retracted attempts'
+# lesson warns against repeating) — three narrow, windowed, textual signals, each
+# independently cheap to check and each aimed at one concrete shape measured above.
+_OPENCLAW_CRED_EXFIL_WINDOW = 200  # chars after the exfil verb/call; same scale as B-748
+_OPENCLAW_CRED_READ_VAR_RE = re.compile(
+    r"(?:const|let|var)\s+(\w+)\s*=\s*[^;\n]{0,160}?\.openclaw/credentials",
+    re.I,
+)
+_OPENCLAW_CRED_RAW_STRINGIFY_RE = re.compile(
+    r"JSON\.stringify\(\s*[A-Za-z_$][\w.\[\]'\"]*\s*\)",
+)
+_OPENCLAW_CRED_SECRET_FIELD_RE = re.compile(
+    r"\.(?:token|api[_-]?key|secret|passwd|password|access[_-]?token|"
+    r"auth[_-]?token|private[_-]?key|refresh[_-]?token|bearer)\b",
+    re.I,
+)
+
+
+def _openclaw_cred_store_exfil_hit(blob: str) -> bool:
+    """B-744: True when *blob* (fence-blanked, same as _has_cross's own input) names
+    OpenClaw's own credential store, non-negated, AND at least one _EXFIL_RE match's own
+    forward window carries evidence that credential-shaped CONTENT — not merely a
+    destination field derived from the store — reaches the sink. See the three
+    module-level regexes above for what "evidence" means and why; see the comment block
+    above _OPENCLAW_CRED_STORE_PATH_RE for why this is a separate WARN-only rule rather
+    than an addition to _CRED_RE / _has_cross.
+    """
+    if not any(
+        not _negation_governs_trigger(blob, m.start())
+        for m in _OPENCLAW_CRED_STORE_PATH_RE.finditer(blob)
+    ):
+        return False
+    read_vars = {m.group(1) for m in _OPENCLAW_CRED_READ_VAR_RE.finditer(blob)}
+    bare_var_res = [
+        re.compile(rf"\b{re.escape(v)}\b(?!\s*[.\[])") for v in read_vars if v
+    ]
+    for m in _EXFIL_RE.finditer(blob):
+        forward = blob[m.end() : m.end() + _OPENCLAW_CRED_EXFIL_WINDOW]
+        if _OPENCLAW_CRED_RAW_STRINGIFY_RE.search(forward):
+            return True
+        if _OPENCLAW_CRED_SECRET_FIELD_RE.search(forward):
+            return True
+        if any(rx.search(forward) for rx in bare_var_res):
+            return True
+    return False
+
+
 def _local_sink_exfil_hits(name: str, blob: str, fence_ranges: list[tuple[int, int]]) -> list[str]:
     """F-023: same-line credential-source AND local-sink (log/tempfile/report), fence-aware.
 
@@ -3696,6 +3876,7 @@ _B13_WINNER_SUBSIGNAL = {
     "warns_named_exfil_host": "paste/transfer host named, with nothing reaching it",
     "persist_warn": "possible persistence/daemonize pattern",
     "warns_local_exfil": "possible local-sink secret exposure",
+    "warns_openclaw_cred": "possible OpenClaw credential-store exfiltration reference",
     "warns_unpinned": "unpinned dependencies",
     "warns_squat": "possible typosquat name(s)",
     "skill_limit_hits": "skill scanning truncated by oversized low-entropy padding",
@@ -4016,6 +4197,11 @@ def check_installed_skills(ctx: Context) -> Finding:
     warns_insecure_tempfile: list[str] = []  # C-199: hardcoded predictable /tmp write (CWE-377)
     warns_chunked_file_exec: list[str] = []  # B336: chunked multi-file-read helper -> exec/eval
     warns_install_curl: list[str] = []  # F-097: down-ranked install-doc curl|bash / fetch
+    # B-744: OpenClaw's own credential store named alongside credential-shaped content
+    # reaching an exfil sink — WARN-only, never routed through the FAIL-capable
+    # cred+exfil co-occurrence bucket above. See _openclaw_cred_store_exfil_hit's own
+    # comment for why.
+    warns_openclaw_cred: list[str] = []
     # F-064: the soft JS/TS signals — every analyze_javascript rule that is not crit.
     # B-743: NOT enumerated here. This comment used to name two of them and went stale
     # the moment a third arrived, which is the drift that let the bucket's advice go
@@ -4425,9 +4611,23 @@ def check_installed_skills(ctx: Context) -> Finding:
         _has_cross = bool(
             _has_non_negated_cred_match(_blob_nofence) and _EXFIL_RE.search(_blob_nofence)
         )
+        # B-748: every exfil-shaped hit resolves to its own credential source's
+        # known-legitimate destination (npm registry / in-cluster K8s API) — not
+        # exfiltration, so this specific co-occurrence is explained away.
+        if _has_cross and _exfil_hits_all_target_own_known_destination(_blob_nofence):
+            _has_cross = False
         if not _has_same_line and _has_cross:
             high.append(
                 f"{name}: credential path and exfil sink both present in skill (split-stage risk)"
+            )
+
+        # B-744: OpenClaw's own credential store — WARN-only, and deliberately NOT
+        # folded into `_has_cross` above. See _openclaw_cred_store_exfil_hit's own
+        # comment for the trigger and why this stays a separate rule.
+        if _openclaw_cred_store_exfil_hit(_blob_nofence):
+            warns_openclaw_cred.append(
+                f"{name}: OpenClaw credential-store path referenced, with "
+                "credential-shaped content reaching a network sink"
             )
 
         # C-039/B-193: destructive + autonomy pattern — HIGH when a destructive shell command
@@ -4712,7 +4912,7 @@ def check_installed_skills(ctx: Context) -> Finding:
                 if af.rule == "SHELL_INJECTION_RISK":
                     warns_shell_injection.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
                     continue
-                # B336: chunked/part-file read+join composed into exec()/eval() — the
+                # B336: chunked/part-file read+join composed into an exec/eval call — the
                 # split-by-file scanner-evasion loader shape. WARN-grade only — routed
                 # here, BEFORE the generic crit/cred-exfil fallthrough below, so this
                 # rule can never become FAIL-capable regardless of its own "info"
@@ -4853,6 +5053,7 @@ def check_installed_skills(ctx: Context) -> Finding:
         "warns_named_exfil_host": warns_named_exfil_host,
         "persist_warn": _persist_warn,
         "warns_local_exfil": warns_local_exfil,
+        "warns_openclaw_cred": warns_openclaw_cred,
         "warns_unpinned": warns_unpinned,
         # Reserved (leading underscore): carried to _b13_verdict as EVIDENCE, never
         # counted as a corroborating signal. See the declaration above.
@@ -5240,8 +5441,8 @@ def check_installed_skills(ctx: Context) -> Finding:
         )
 
     # B336: a locally-defined helper reads and joins multiple chunked/part files at
-    # runtime, and the assembled result is exec()'d/eval()'d — the split-by-file
-    # scanner-evasion loader shape (the payload never exists whole in any single
+    # runtime, and the assembled result is run through an exec/eval call — the
+    # split-by-file scanner-evasion loader shape (the payload never exists whole in any single
     # shipped .py file). WARN-first, ranked just below the staged-dropper WARN — a
     # confirmed chunked-loader shape is a comparably strong signal to a staged dropper.
     if warns_chunked_file_exec:
@@ -5257,7 +5458,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             + "; ".join(warns_chunked_file_exec[:6])
             + extra,
             "A helper reads and joins multiple chunked/part files at runtime and executes "
-            "the assembled result via exec()/eval() — the documented split-by-file "
+            "the assembled result through an exec/eval call — the documented split-by-file "
             "scanner-evasion loader shape. Read the reassembled content; if it is not "
             "something you deliberately embedded, treat the skill as malicious.",
             warns_chunked_file_exec,
@@ -5452,6 +5653,33 @@ def check_installed_skills(ctx: Context) -> Finding:
             warns_local_exfil,
             _signal_buckets,
             "warns_local_exfil",
+        )
+
+    # B-744: OpenClaw's own credential store — WARN-only (never FAIL). Ranked directly
+    # below its F-023 local-sink sibling: both are "credential source + sink" signals
+    # that stop short of a FAIL because neither can prove exfiltration on its own. See
+    # _openclaw_cred_store_exfil_hit's own comment for the retracted FAIL-bucket
+    # attempts this rule exists instead of, and for what "credential-shaped content"
+    # means here (a destination-only read, e.g. a skill's own configured Discord/
+    # Telegram webhook, does not trigger this rule).
+    if warns_openclaw_cred:
+        extra = (
+            f" (+{len(warns_openclaw_cred) - 6} more)" if len(warns_openclaw_cred) > 6 else ""
+        )
+        return _b13_verdict(
+            HIGH,
+            WARN,
+            "Possible OpenClaw credential-store exfiltration reference in installed "
+            "skill(s): " + "; ".join(warns_openclaw_cred[:6]) + extra,
+            "A skill references OpenClaw's own credential store (~/.openclaw/credentials) "
+            "and appears to send credential-shaped content — not just a configured "
+            "destination read from it — to a network sink. Confirm the skill only reads "
+            "the store for a destination it then contacts, and never forwards the store's "
+            "own contents (raw file text, a serialized copy, or a token/secret field) "
+            "anywhere.",
+            warns_openclaw_cred,
+            _signal_buckets,
+            "warns_openclaw_cred",
         )
 
     # Mismatch/polyglot/binary warnings
@@ -6290,6 +6518,18 @@ def _vet_resolved_skill(p: Path) -> Finding:
     ctx = Context(home=p)
     if p.is_dir():
         if _is_own_source(p):
+            # B-786: record the same way collector.py's sweep-level self-exclusion does
+            # (ctx.self_excluded_skills, B-265/B-507/B-521) — this is a FRESH per-call
+            # ctx (see above), not the sweep's shared one, so appending here cannot
+            # cross-contaminate anything. render_permission_manifest (report.py) reads
+            # this so --emit-manifest can tell "deliberately not scanned, own source"
+            # apart from "genuinely opaque/unparseable/no code" instead of collapsing
+            # both into the same misleading text — ctx.installed_skill_py/
+            # effect_profiles are never populated on this early-return path (the
+            # assignments live further down, only reached on the non-self-source
+            # branch), so without this a manifest request sees empty maps with no clue
+            # why.
+            ctx.self_excluded_skills.append(p.name)
             finding = _custom(
                 "B13",
                 LOW,
@@ -7091,6 +7331,7 @@ SKILL_CONTENT_RING = (
     check_manifest_absent,  # B98 — undeclared privilege: risky effects, no tools manifest
     check_pth_persistence,  # B99 — .pth/sitecustomize auto-execution persistence (F-088)
     check_python_runtime_persist_install,  # B335 — runtime-computed sitecustomize/PYTHONSTARTUP install (T06/B-343)
+    check_sitecustomize_pythonstartup_scoped_install,  # B375 — AST function-scoped sitecustomize/PYTHONSTARTUP install (F-177)
     check_clickfix_setup_section,  # B100 — ClickFix paste-into-terminal + remote-fetch (F-090)
     check_config_trust_widening,  # B96 — config-driven trust widening, heuristic-only (F-100)
     check_install_directive_supply_chain,  # B103 — install[] supply-chain provenance (B-099)

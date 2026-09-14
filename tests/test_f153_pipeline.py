@@ -95,7 +95,8 @@ def test_phase_result_to_json_sanitizes_and_rounds_elapsed():
 
 class _FakeSweep:
     def __init__(self, *, no_roots=False, no_targets=False, complete=True,
-                has_fail=False, counts=None, not_scanned=None):
+                has_fail=False, counts=None, not_scanned=None,
+                discovery_incomplete_reasons=None):
         self.no_roots = no_roots
         self.no_targets = no_targets
         self.complete = complete
@@ -103,6 +104,7 @@ class _FakeSweep:
         self._counts = counts or {"total": 0, "fails": 0, "warns": 0, "safe": 0,
                                   "truncated": 0, "skipped": 0}
         self._not_scanned = not_scanned or []
+        self.discovery_incomplete_reasons = discovery_incomplete_reasons or []
 
     def counts(self):
         return self._counts
@@ -133,6 +135,56 @@ def test_record_skill_sweep_carries_has_fail_and_not_scanned():
     assert p.elapsed_s == 2.5
     assert "1 dangerous" in p.detail
     assert p.section is False  # the caller already printed this section
+
+
+def test_record_skill_sweep_discloses_discovery_gap_with_no_row_level_issues():
+    """B-787: `complete` can be False purely from `discovery_incomplete_reasons` --
+    the WALK that finds targets didn't finish -- with every discovered row scanning
+    cleanly (truncated=0, skipped=0, notScanned=[]). Before the fix, `detail` named
+    no reason at all here, so a --full --json reader saw complete: false next to a
+    detail sentence that read as fully clean."""
+    sweep = _FakeSweep(
+        complete=False,
+        counts={"total": 40, "fails": 1, "warns": 2, "safe": 37,
+                "truncated": 0, "skipped": 0},
+        discovery_incomplete_reasons=["skill discovery under '/x' stopped early"],
+    )
+    p = pl.record_skill_sweep(sweep)
+    assert p.complete is False
+    assert p.not_scanned == []
+    assert "stopped early" in p.detail
+    # Still one sentence (docs/OUTPUT_SCHEMA.md's documented shape): exactly one
+    # trailing period, not a second sentence appended after it.
+    assert p.detail.count(".") == 1
+    assert p.detail.endswith(".")
+
+
+def test_record_skill_sweep_discovery_gap_note_capped_and_counted():
+    reasons = [f"reason {i}" for i in range(5)]
+    sweep = _FakeSweep(complete=False, discovery_incomplete_reasons=reasons)
+    p = pl.record_skill_sweep(sweep)
+    assert "reason 0" in p.detail
+    assert "reason 2" in p.detail
+    assert "reason 3" not in p.detail
+    assert "+2 more" in p.detail
+
+
+def test_record_skill_sweep_no_roots_still_discloses_discovery_gap():
+    """The gap can fire even with checked_dirs empty (a config-declared root that
+    could not be walked at all) -- covered separately from the counts branch since
+    no_roots/no_targets build `detail` differently."""
+    sweep = _FakeSweep(no_roots=True, complete=False,
+                       discovery_incomplete_reasons=["synthetic gap"])
+    p = pl.record_skill_sweep(sweep)
+    assert "no skills directory" in p.detail
+    assert "synthetic gap" in p.detail
+
+
+def test_record_skill_sweep_silent_about_discovery_gap_when_absent():
+    sweep = _FakeSweep(counts={"total": 2, "fails": 0, "warns": 0, "safe": 2,
+                               "truncated": 0, "skipped": 0})
+    p = pl.record_skill_sweep(sweep)
+    assert "could not enumerate" not in p.detail
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +393,35 @@ def test_run_behavioral_no_incident_signal_detail_and_quiet_line_stay_generic():
     assert "INCIDENT SIGNAL" not in p.quiet_line
 
 
+# ---------------------------------------------------------------------------
+# B-800 — "replay complete" must not be claimed when nothing was replayed
+# ---------------------------------------------------------------------------
+
+def test_run_behavioral_zero_sidecars_does_not_claim_replay_is_complete():
+    """No trajectory sidecar was read (an empty home / traj_no_sidecar) — the
+    detail/quiet_line text must say so, matching `behavioral.analysis_incompleteness`,
+    and must never say "complete" while the header's own `not_checked` says the same
+    thing in the same document. Status stays `ran` (B-715) — only the wording changes.
+    """
+    ctx = collect(FIXTURES / "traj_no_sidecar")
+    p = pl.run_behavioral(ctx)
+    assert p.status == pl.STATUS_RAN
+    assert "complete" not in p.detail
+    assert "no trajectory sidecar was read" in p.detail
+    assert "complete" not in p.quiet_line
+    assert "no trajectory sidecar was read" in p.quiet_line
+
+
+def test_run_behavioral_real_sidecar_keeps_the_replay_complete_wording():
+    """A fixture that actually has a `.trajectory.jsonl` sidecar (records were read,
+    `analysis_incompleteness` is None) must keep today's F-154 wording unchanged."""
+    ctx = collect(FIXTURES / "traj_present_not_acted")
+    p = pl.run_behavioral(ctx)
+    assert p.status == pl.STATUS_RAN
+    assert "trajectory replay complete" in p.detail
+    assert "behavioural replay complete" in p.quiet_line
+
+
 def test_run_behavioral_preserves_the_existing_behavioral_block():
     """The pre-existing render_behavioral_analysis section must still render in full —
     this is an ADDITIONAL block, never a replacement."""
@@ -401,16 +482,17 @@ def test_run_adjudication_no_bundle_is_pending_not_a_verdict():
     assert "secondOpinion" not in p.data
 
 
-def test_run_adjudication_with_empty_judged_bundle_emits_second_opinion():
+def test_run_adjudication_with_empty_judged_bundle_is_not_submitted():
+    """B-804: a "judged" bucket present but with no "verdicts" array at all (e.g. {})
+    parses to zero usable entries, same as an explicit {"verdicts": []} -- must read as
+    "nothing submitted", not as a submitted-but-empty panel. See
+    tests/test_b804_verdicts_submitted_and_blind_collapse.py for the full family."""
     ctx = collect(FIXTURES / "home_vuln")
     from clawseccheck.checks import run_all
     findings = run_all(ctx)
     p = pl.run_adjudication(ctx, findings, bundle={"judged": {}})
-    assert p.data["verdictsSubmitted"] is True
-    assert isinstance(p.data["secondOpinion"], list)
-    # unreviewed items still appear, per adjudication._second_opinion's own contract
-    if p.data["secondOpinion"]:
-        assert all(row["judge_verdict"] is None for row in p.data["secondOpinion"])
+    assert p.data["verdictsSubmitted"] is False
+    assert "secondOpinion" not in p.data
 
 
 def test_run_adjudication_vet_packets_are_scoped_per_target():
@@ -488,17 +570,36 @@ def test_run_adjudication_own_config_safe_verdict_only_annotates(monkeypatch):
     """Regression: a SAFE verdict in the `judged` (own-config) bucket must still only
     annotate — vet_targets/escalation must never even be consulted for it."""
     ctx = collect(FIXTURES / "home_vuln")
+    from clawseccheck.adjudication import build_judge_packet
     from clawseccheck.checks import run_all
     findings = run_all(ctx)
+    packet = build_judge_packet(ctx, findings)
+    assert packet, "fixture must offer at least one borderline item for this test to mean anything"
+    item = packet[0]
     called = []
     monkeypatch.setattr(pl, "_vet_second_opinion",
                         lambda *a, **k: called.append(1) or [])
-    p = pl.run_adjudication(ctx, findings, bundle={"judged": {"verdicts": []}})
+    bundle = {"judged": {"verdicts": [
+        {"finding_id": item["finding_id"], "target": item["target"], "verdict": "SAFE"},
+    ]}}
+    p = pl.run_adjudication(ctx, findings, bundle=bundle)
     assert p.data["verdictsSubmitted"] is True
     assert "vetSecondOpinion" not in p.data
     assert called == []  # vetJudged path never even runs for an own-config-only bundle
     # Hard invariant (docs/OUTPUT_SCHEMA.md §13): findings/score are never touched here.
     assert findings == run_all(collect(FIXTURES / "home_vuln"))
+
+
+def test_run_adjudication_empty_judged_verdicts_is_not_submitted():
+    """B-804: an explicitly empty judged.verdicts must NOT be reported as submitted —
+    this used to be the exact bug this test's sibling above once pinned as correct.
+    See tests/test_b804_verdicts_submitted_and_blind_collapse.py for the full family."""
+    ctx = collect(FIXTURES / "home_vuln")
+    from clawseccheck.checks import run_all
+    findings = run_all(ctx)
+    p = pl.run_adjudication(ctx, findings, bundle={"judged": {"verdicts": []}})
+    assert p.data["verdictsSubmitted"] is False
+    assert "secondOpinion" not in p.data
 
 
 def test_vetjudged_safe_verdict_never_downgrades_a_vet_target_finding():

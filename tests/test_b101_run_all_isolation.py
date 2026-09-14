@@ -9,6 +9,7 @@ surfaced (it may carry a path / config value) — only its type name.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import clawseccheck.checks as checks
@@ -54,6 +55,48 @@ def test_clean_run_has_no_error_findings():
     # a normal run over an empty config must never synthesize an ERR finding
     findings = checks.run_all(_ctx())
     assert not [f for f in findings if f.id.startswith("ERR:")]
+
+
+# ── B-767: the traceback the finding promises must actually reach --debug ─────
+
+
+def test_crash_traceback_reaches_the_debug_log(monkeypatch, caplog):
+    """The ERR finding tells the user to re-run with --debug for the traceback --
+    something has to actually write one for that to be true."""
+    original = list(checks.CHECKS)
+    monkeypatch.setattr(checks, "CHECKS", original + [_boom])
+    # logsafe.get_logger() sets propagate=False on this SAME process-global logger --
+    # deliberately, in production, so records never double up on the root logger. But
+    # caplog's handler is attached to the root logger and relies on propagation, so any
+    # earlier test in this pytest session that ran the real CLI (cli.main(), which calls
+    # get_logger()) leaves this logger unable to be captured for the rest of the run.
+    # Not a source bug -- restore propagation for the duration of this test only.
+    monkeypatch.setattr(logging.getLogger("clawseccheck"), "propagate", True)
+
+    with caplog.at_level("DEBUG", logger="clawseccheck"):
+        checks.run_all(_ctx())
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "_boom" in text
+    assert "KeyError" in text
+    assert "Traceback (most recent call last)" in text, "format_exc() must have rendered a real traceback"
+    # exc_info must NOT be set: logsafe._RedactingFilter redacts getMessage(), but a
+    # Formatter renders exc_info separately, after the filter runs — exc_info=True
+    # would ship a traceback the redaction filter never saw.
+    assert all(r.exc_info is None for r in caplog.records)
+
+
+def test_crash_traceback_is_silent_below_debug_level(monkeypatch, caplog):
+    """No --debug -> the logger stays at its default (WARNING+) level -> silent,
+    same as every real CLI invocation that does not pass --debug."""
+    original = list(checks.CHECKS)
+    monkeypatch.setattr(checks, "CHECKS", original + [_boom])
+    monkeypatch.setattr(logging.getLogger("clawseccheck"), "propagate", True)
+
+    with caplog.at_level("WARNING", logger="clawseccheck"):
+        checks.run_all(_ctx())
+
+    assert not caplog.records
 
 
 # ── Part 2: main() top-level guard ────────────────────────────────────────────

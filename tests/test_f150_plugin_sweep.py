@@ -297,3 +297,37 @@ def test_full_json_plugin_sweep_phase_runs_not_unavailable(tmp_path):
     phases = {p["name"]: p for p in payload["phases"]}
     assert phases["plugin_sweep"]["status"] == "ran"
     assert phases["plugin_sweep"]["detail"].startswith("1 installed plugin(s) vetted")
+
+
+def test_full_json_inventory_plugins_agrees_with_pluginsweep(tmp_path):
+    """B-792: `inventory.plugins.scanned` used to read `False` on a run whose OWN
+    `pluginSweep.complete` was `True` with real rows swept -- render_json's
+    build_inventory() call never received the live sweep object P7 actually ran,
+    only pipeline.py's separate `to_json()` merge populated `pluginSweep`. Same
+    fixture shape as the sibling test above, asserted the other direction."""
+    from clawseccheck.cli import main
+    import io
+    import contextlib
+
+    plugin_dir = _mk_plugin_dir(tmp_path / "plug2")
+    home = _make_home(tmp_path, "home2", [_plugin_rec("demo2", str(plugin_dir))])
+    (home / "openclaw.json").write_text(json.dumps({
+        "gateway": {"bind": "127.0.0.1:8080",
+                   "auth": {"mode": "token", "token": "a" * 32}},
+        "channels": {"telegram": {"dmPolicy": "allowlist", "groupPolicy": "allowlist"}},
+        "tools": {"profile": "minimal"},
+        "logging": {"redactSensitive": "tools"},
+        "models": {"main": {"provider": "ollama/llama3"}},
+    }))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = main(["--home", str(home), "--full", "--json", "--no-history"])
+    assert rc in (0, 1)
+    payload = json.loads(buf.getvalue())
+    assert payload["pluginSweep"]["complete"] is True
+    assert payload["pluginSweep"]["counts"]["total"] == 1
+    assert payload["inventory"]["plugins"]["scanned"] is True, (
+        "inventory.plugins.scanned disagrees with pluginSweep.complete=True "
+        f"in the same document: {payload['inventory']['plugins']!r}"
+    )
+    assert payload["inventory"]["plugins"]["rows"] == [{"name": "demo2", "status": "PASS"}]

@@ -261,6 +261,18 @@ def _memory_becomes_unreadable(home, store):
     os.chmod(home / "workspace-home" / "memory" / "notes.md", 0o000)
 
 
+def _memory_off_extension_planted(home, store):
+    """CLAWSECCHECK-B-794: a file under memory/ whose extension is outside the small
+    text-only whitelist (.md/.txt/.json/.yaml/.yml/.toml/.ini/.cfg) used to be a bare
+    `continue` in the collection walk — absent from BOTH the memory dict and the
+    disclosed `capped` frontier, unlike every other collection-time exclusion (oversized,
+    unreadable, cap-evicted) already caught above. No baseline seed needed: the scenario
+    IS the plant, same shape as `config-unreadable`/`baseline-corrupted` above."""
+    d = home / "workspace-home" / "memory"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "dropped.bin").write_bytes(b"MALICIOUS_PAYLOAD_TEST_MARKER")
+
+
 def _seed_skills_under_the_cap(home, store):
     _make_skills(home, 0, 250)
 
@@ -295,6 +307,32 @@ def _corrupt_the_baseline(home, store):
     this; nothing exercised the disclosure end to end.
     """
     (store / "state.json").write_text("{ not a snapshot", encoding="utf-8")
+
+
+def _version_boundary_crossed(home, store):
+    """B-765, known-boundary case: the stored baseline was written by a DIFFERENT
+    ClawSecCheck build than the one producing the judged run. The harness cannot swap the
+    installed package between two subprocess invocations, so it rewrites the baseline's
+    own recorded producer version directly — the identical shape a real upgrade leaves on
+    disk — and flips one config-derived check (gateway auth) so there is a genuine
+    transition to disclose. The judged run must down-rank the resulting alert and name the
+    version boundary crossed — never read as an ordinary, unqualified regression.
+    """
+    snap = json.loads((store / "state.json").read_text(encoding="utf-8"))
+    snap["clawseccheck_version"] = "0.0.0-fixture-prior-build"
+    (store / "state.json").write_text(json.dumps(snap), encoding="utf-8")
+    _gateway_auth_off(home)
+
+
+def _version_field_absent_from_baseline(home, store):
+    """B-765, unknown-boundary case — the LITERAL repro: a baseline written before this
+    build's own version-tracking existed at all (any pre-B-765 upgrade). Nothing to name,
+    so the disclosure must hedge rather than claim a match or a mismatch it cannot prove.
+    """
+    snap = json.loads((store / "state.json").read_text(encoding="utf-8"))
+    snap.pop("clawseccheck_version", None)
+    (store / "state.json").write_text(json.dumps(snap), encoding="utf-8")
+    _gateway_auth_off(home)
 
 
 def _seed_a_versioned_skill(home, store):
@@ -379,6 +417,8 @@ INCOMPLETENESS = {
         (None, _config_unreadable, 0, "Could not read openclaw.json"),
     "memory-unreadable":
         (_seed_a_memory_file, _memory_becomes_unreadable, 0, "present but NOT monitored"),
+    "memory-off-extension":
+        (None, _memory_off_extension_planted, 0, "present but NOT monitored"),
     "skills-past-the-cap":
         (_seed_skills_under_the_cap, _skills_pushed_past_the_cap, 0, "were NOT collected"),
     "baseline-corrupted":
@@ -386,6 +426,14 @@ INCOMPLETENESS = {
     "coverage-lost-skill-version":
         (_seed_a_versioned_skill, _add_an_unversioned_skill, 1,
          "could not make a comparison it made at the last check"),
+    # CLAWSECCHECK-B-765: an existing check id's verdict moving across a ClawSecCheck
+    # upgrade must not read as an ordinary, unqualified config regression.
+    "check-verdict-crossed-a-known-version-boundary":
+        (None, _version_boundary_crossed, 0,
+         "Possibly attributable to a ClawSecCheck upgrade"),
+    "check-verdict-crossed-an-unrecorded-version-boundary":
+        (None, _version_field_absent_from_baseline, 0,
+         "cannot be ruled out"),
 }
 
 

@@ -119,6 +119,13 @@ def test_b30_all_channels_disabled_is_not_applicable():
 
 # ---------------------------------------------------------------------------
 # B39 -- EITHER `session` OR `tools.sessions` is enough of a surface.
+#
+# B39 was retracted from test_f140_not_applicable_degrades.py's _CONFIG_LOCUS_CHECKS /
+# _MIGRATED (B-796/B-797, 2026-09-11): OpenClaw defaults BOTH fields to an unsafe value
+# when absent, so "neither key is set" is no longer a genuine not_applicable surface for
+# this check at all -- it is the single most exposed state B39 can observe. This test
+# still holds (an EXPLICIT session/tools.sessions value must never read as absent), it
+# just no longer has a not_applicable=True sibling to contrast against.
 # ---------------------------------------------------------------------------
 _SESSION_FORMS = {
     "session_only": {"session": {"dmScope": "per-peer"}},

@@ -1,6 +1,6 @@
 ---
 name: clawseccheck
-version: 4.0.1
+version: 4.1.0
 description: Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Reports the most urgent holes, and grades your setup A–F when all five check layers ran — short of that it names the missing layers instead of printing a number. It is built to be run again, not once: --monitor records a local baseline and every later run alerts on what changed — a new MCP server, a new or edited skill, config drift, a finding that appeared or cleared. It changes nothing in your OpenClaw setup except through one opt-in, confirmation-gated command (--apply-ignore-proposals, which appends only suppressions you approved to .clawseccheckignore). No API key; the scanner itself makes no network calls, and the single external command it can run is your own read-only openclaw security audit (skip it with --no-native). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, see your A–F security score, watch your OpenClaw setup for changes, or ask what changed since the last check.
 license: MIT
 metadata: {"openclaw":{"emoji":"🦞","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck — OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills — read-only against your OpenClaw setup, plus a bounded host-security scan; writes only its own local report/history (removable with --purge). Reports the most urgent holes, and grades your setup A–F when all five check layers ran — short of that it names the missing layers instead of printing a number. It is built to be run again, not once: --monitor records a local baseline and every later run alerts on what changed — a new MCP server, a new or edited skill, config drift, a finding that appeared or cleared. It changes nothing in your OpenClaw setup except through one opt-in, confirmation-gated command (--apply-ignore-proposals, which appends only suppressions you approved to .clawseccheckignore). No API key; the scanner itself makes no network calls, and the single external command it can run is your own read-only openclaw security audit (skip it with --no-native). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, see your A–F security score, watch your OpenClaw setup for changes, or ask what changed since the last check."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
@@ -17,8 +17,16 @@ metadata: {"openclaw":{"emoji":"🦞","os":["darwin","linux","win32"],"user-invo
 
 Activate when the user says anything like:
 "check my OpenClaw security", "audit my OpenClaw setup", "is my OpenClaw agent safe",
-"security check", "what's my security score", "am I vulnerable", "scan my OpenClaw agent",
-"how secure is my setup", "test my agent for attacks", "audit me".
+"run a security check on my OpenClaw agent", "what's my OpenClaw security score",
+"am I vulnerable to prompt injection in OpenClaw", "scan my OpenClaw agent",
+"how secure is my OpenClaw setup", "test my OpenClaw agent for attacks",
+"audit my OpenClaw agent".
+
+Do NOT activate on a bare, unqualified "security check", "audit me", "am I vulnerable", or
+"fix this" that names no OpenClaw/agent/skill/plugin/MCP subject — those are too generic to
+imply consent to read the user's local OpenClaw config, credential-adjacent paths, and
+session logs. Ask what they want checked first rather than assuming it means their own
+OpenClaw setup.
 
 It is **read-only with respect to your OpenClaw setup** — it never touches `openclaw.json`, your
 skills, or your bootstrap files, and it reaches the network only through your own host agent (see
@@ -28,23 +36,32 @@ firewall config files, and on Windows a handful of read-only registry queries �
 own scope — see "host recon" below), and it writes its **own** local report/history state under
 `~/.clawseccheck/` (nothing about your agent — see "what it writes" below). Before the first run,
 tell the user in one line what it will read (their OpenClaw config, bootstrap files, log files,
-agent session logs, the text of installed skills, and credential-store path existence — all
-read-only, nothing leaves the machine) so there are no surprises. The default audit is
+agent session logs, the text of installed skills, the two global OpenClaw dotenv files that can
+hold real operational secrets — parsed but never echoed except for a few non-secret toggle/URL
+keys — the content of OpenClaw's own OAuth credential store, scanned only to flag *whether* a
+file holds a plaintext secret, never its value, and credential-adjacent path existence elsewhere
+— all read-only, nothing leaves the machine) so there are no surprises. The default audit is
 inspection-only — the optional active tests
 (`--canary`/`--redteam`/`--dryrun`) simulate an attack against your *own* agent locally and are
 **opt-in**, never run unless you ask for them.
 
 ## What ClawSecCheck does (be transparent)
 
-It runs a **read-only** local script that inspects the user's own agent. **Full read scope:**
+It runs a local script that is **read-only against your OpenClaw setup** — it does keep its own
+local audit-history state on disk by default (see "what it writes" below) — and inspects the
+user's own agent. **Full read scope:**
 
 - `~/.openclaw/openclaw.json` — main config
 - workspace bootstrap files (`SOUL.md`, `AGENTS.md`, `TOOLS.md`, `MEMORY.md`, etc.)
 - text of **installed skills/plugins** (including Python AST-scan, parse-only — never executed)
 - `~/.openclaw/logs/config-audit.jsonl` and `config-health.json` — config-write provenance & integrity
 - `~/.openclaw/agents/.../sessions/*.jsonl` — Codex session logs for approval-policy posture
-- the cron job store, the two global OpenClaw dotenv files, and OpenClaw-related systemd
-  user-unit `Environment=`/`EnvironmentFile=` lines
+- the cron job store, the two global OpenClaw dotenv files (`~/.openclaw/.env` and
+  `~/.config/openclaw/gateway.env` — these can hold real operational secrets: provider API keys,
+  the gateway shared token; every `KEY=VALUE` pair is parsed into memory for the run, and only a
+  handful of named toggle/URL keys are ever echoed into a finding, never a credential-shaped
+  value — see [SECURITY_MODEL.md](SECURITY_MODEL.md)), and OpenClaw-related systemd user-unit
+  `Environment=`/`EnvironmentFile=` lines
 - **host recon (beyond OpenClaw's own scope, skip with `--no-host`):** existence of IDS, FIM, EDR
   and firewall config files, of their binaries on `PATH`, and of systemd enable-symlinks; the
   *contents* of a few known firewall config files, to read whether the firewall is on and whether
@@ -58,8 +75,16 @@ It runs a **read-only** local script that inspects the user's own agent. **Full 
   walked to read each package's `package.json`, each package root's `binding.gyp`, and the
   in-package files those name as install-time targets — the two ways a dependency can run code at
   install time. Bounded (2000 packages), symlinks never followed, nothing ever executed
-- credential-store path-existence inventory: checks whether `.env`, SSH key dirs, keychain/keyring
-  directories, and browser cookie stores **exist** near the agent home (never reads their contents)
+- **OpenClaw's own OAuth credential store (`<home>/credentials/`):** every file's *content* is
+  read (bounded) and tested with the same secret detector used elsewhere in this tool, to answer
+  one boolean per file — does it look like it holds a plaintext secret — plus a truncated digest so
+  `--monitor` can notice a credential added, removed, or replaced. Feeds the Lethal Trifecta check,
+  which runs on every default audit. The file's content and any detected secret value are never
+  stored, echoed into a finding, written to a report, or logged — only the filename, a boolean, and
+  a digest survive
+- a **separate, narrower** path-existence inventory: whether `.env`, SSH key dirs, keychain/keyring
+  directories, and browser cookie stores **exist** near the agent home — this check never opens any
+  of them
 - the ClawHub CLI's own plaintext token-store config (outside the OpenClaw home) — opened to check
   whether a `token` field is present and the file's permissions; the token *value* itself is never
   read into a report, logged, or placed in evidence (B182)
@@ -374,6 +399,13 @@ naming what it did not check, as part of the verdict rather than as fine print. 
 line — that means a layer ran without exhausting its subject (log scans are budget-bounded by
 construction), which is a different fact from a layer never having run.
 
+**"Complete" rule.** Never tell the user "complete audit" / "audit finished" / "all N layers done"
+unless the card you are looking at is actually graded, names no missing layers, and carries no
+blindness/sandbox cap — say so from the card itself, never from what you asked for or attempted.
+Running every command in this flow is not the same as the run having covered everything; a
+refused live test, a sandboxed session, or a self-report you had to leave `unknown` all still end
+in a real, honest, INCOMPLETE result, and that is what gets relayed.
+
 Get the version and build age from:
 
 ```
@@ -423,6 +455,17 @@ After the user chooses (or says "check" / "go"), proceed to Step 2.
 
 ### Step 2 — Run the audit
 
+**Stop rule — checked FIRST, before anything else in this step.** If a run this session
+already reported no OpenClaw config found, or reported that this session is sandboxed
+and cannot see the host's real OpenClaw setup: STOP here. Do not proceed to the
+capability self-report, the judge panel, `--attest`, or any live test below — there is
+nothing real to attest to or test. Tell the user plainly that this chat session cannot
+see their host's real OpenClaw setup, and offer to run it from the agent's main session
+(not a sandboxed/dashboard one) or a host terminal instead. This applies even when the
+user then asks for "all 5 layers" or "the full audit" — a bigger request does not change
+what this session can actually see, and re-running deeper commands against nothing
+real produces a report ABOUT the sandbox, not about the user's agent.
+
 **If item 1 (Check everything) was chosen**, first resolve the capability self-report so B43/B44
 come back assessed instead of UNKNOWN — this used to be a separate post-scan "deeper" pick; now it's
 folded into the single scan itself (F-043). Run the interrogation protocol documented in full in
@@ -432,6 +475,13 @@ and `untrusted_to_action` from your own runtime (you already know these), self-p
 `host_monitors` with your own shell access and fall back to asking the user only if the probe is
 inconclusive, then assemble the attestation into a file (or have it ready for stdin) — you feed
 the SAME attestation into both commands below, in the SAME turn.
+
+**Attestation rule.** Every field describes the USER'S agent — this chat session's own
+runtime, tools and policy, never the sandbox that happens to be hosting the conversation.
+If the stop rule above already fired, you never reach this paragraph; if for any other
+reason you cannot actually observe the user's real agent, answer the affected fields
+`unknown` rather than describing what you CAN see (the sandbox) as if it were the thing
+being audited.
 
 Then, still before showing anything to the user, run the now-**mandatory** judge-panel pull
 (Dave, 2026-07-30 — this used to be an opt-in extra the user had to ask for; it now runs every
@@ -469,7 +519,11 @@ Capture the output. The script is read-only and safe to run without any flags.
 **No OpenClaw config yet?** If `~/.openclaw` is missing or empty, a **bare** default run prints a
 short first-run **welcome** screen (Screen 13) instead of a Dashboard — "I looked for an OpenClaw
 setup at … but there's nothing there", with how to point it at the config (`--home <path>`). Relay
-that as-is and stop; there's nothing to score. Any CI/artifact/work flag (`--json`, `--save`,
+that as-is and stop; there's nothing to score. **Sandboxed variant:** when this chat session runs
+inside an OpenClaw sandbox, that same screen (and the Dashboard card, if a mode flag skipped the
+welcome) says so plainly instead — no `--home <path>` advice, because no path on this filesystem
+reaches the host's real config. Relay THAT wording as-is too, and see the stop rule above — it
+governs this case, not just the welcome screen. Any CI/artifact/work flag (`--json`, `--save`,
 `--full`, `--fail-on`, `--badge`, …) skips the welcome and runs the real audit, so those flags
 are always honored. (A home that *exists* but can't be read is a different case — a plain
 "Cannot read the OpenClaw home" error, exit code 1.)
@@ -545,10 +599,16 @@ rather than from here:
   },
   "liveTest": {
     "seed": "the --seed you gave the harness",
-    "verdicts": [{"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]
+    "verdicts": [{"tool": "redteam", "id": "PI-01", "verdict": "RESISTANT"}]
   }
 }
 ```
+
+`id` must be a real scenario id the harness itself printed — e.g. `PI-01`..`DE-02`
+(`--redteam`), `DR-01`..`DR-11` (`--dryrun`), `MT-01`/`MT-02` (`--multiturn`), or the
+exact `CLAWSECCHECK-CANARY-...` token `--canary` showed you (never the bare word
+"canary" — that shape is rejected, F-193). One entry per scenario you actually ran, not
+one entry for the whole harness.
 
 `finding_id`, `target` and `verdict` are required per entry; `verdict` is one of
 `SAFE` / `SUSPICIOUS` / `DANGEROUS`. Omit the `liveTest` bucket entirely unless you ran
@@ -559,6 +619,21 @@ unseeded VULNERABLE verdict still caps the run you are looking at but is never w
 history, trend or the drift baseline (F-155). Omit `--judged-bundle` entirely only
 when Step 2 found `judgePacket` empty (genuinely nothing to judge this run). Frame the whole
 result as an **OpenClaw Security Audit** — not "your setup" or "my agent."
+
+**Live-test verdict rule.** `id` is the SCENARIO's identifier, never the tool's name — the
+example above uses `"PI-01"` (a real `--redteam` scenario id), not `"redteam"`, on purpose.
+Never write a verdict for a harness whose scenarios you did not read and answer one-by-one;
+a verdicts list is a record of what you actually evaluated, not a checkbox for having run
+the command. `--multiturn` is two-phase by construction — it plants in one turn and only
+resolves on a LATER one — so never submit a `--multiturn` verdict in the same turn/run
+that printed its scenarios; there is nothing to judge yet.
+
+A `--canary` verdict is cross-checked against your own local trajectory log when one is
+readable, so a RESISTANT claim the log shows was actually complied with is caught rather
+than accepted at face value (F-193). Nothing to add for this — the audited home's own
+sidecars are scanned automatically; an optional `liveTest.trajectory` field exists only
+for a non-default session (`sessionId`) or an explicit `.trajectory.jsonl` (`path`, must
+sit inside `--home`).
 
 **Plain-language rule:** Never use internal codes like "B2 FAIL". Describe the actual risk in one
 sentence. Examples:
@@ -590,13 +665,11 @@ before the pipeline blocks below add more). You do not have to estimate this: wh
 card is too large to relay whole, the CLI says so on stderr with the measured character count
 and names both remedies (B-605). Relaying part of an oversized card as if it were the whole is
 the one response that is never right. If the destination channel truncates long
-messages, drop `--pdf` and add `--compact` instead — `--compact` has no effect while
-`--pdf` is present (with an attachment the card is already collapsed to an overview;
-the CLI says so on stderr). So the truncation remedy is `--dashboard --full --compact`.
-It condenses Plugins/MCP/RISK
-Chains to headline counts, trims each Findings/"Worth a glance" finding's "why" text and
-drops its evidence bullets (kept, not dropped — just condensed, since Findings is what
-actually scales with a bad config's FAIL/WARN count), and appends a `--save`/`--html`
+messages, drop `--pdf` and add `--compact` instead — the truncation remedy is
+`--dashboard --full --compact`. It condenses Plugins/MCP/RISK Chains to headline
+counts, trims each Findings/"Worth a glance" finding's "why" text and drops its
+evidence bullets entirely (Findings is what actually scales with a bad config's
+FAIL/WARN count, so it is what needs trimming), and appends a `--save`/`--html`
 pointer for the full detail — or fall back to `--card` (grade + score + trifecta only)
 and offer to save the full report via `--save <path>` / `--html <path>`.
 
@@ -774,8 +847,9 @@ framing before/after the paste, the same discipline the rest of the card already
    a runtime guarantee; a high grade means "not statically lethal-capable", not "runtime-proof".
    Three exceptions, all cap-only (never raise the grade): (1) a corroborated runtime
    signal (a trajaudit indicator match); (2) a VULNERABLE verdict from the live
-   injection test below (menu item a) — RESISTANT or no verdict submitted changes
-   nothing (the agent under test grading its own resistance is never trusted upward);
+   injection test below (menu item a) — RESISTANT never raises anything (self-grading
+   is never trusted upward); with nothing submitted this layer counts as not-run, so
+   the whole result stays ungraded until it is;
    (3) a fired --behavioral detector (T1/T2/T3/B191) when --full ran WITHOUT --fast
    (F-154) — that's the only path that computes this cap: a --full --fast run and a
    standalone --behavioral run never wire it into a score at all, and a --full run
@@ -811,9 +885,12 @@ is the first real behavioral test (VULNERABLE vs RESISTANT) in the flow.
 The verdict now reaches the grade, cap-only (F-155): feed it back via `--dashboard --full
 --judged-bundle <file>`'s `liveTest` bucket (exact JSON shape:
 [`docs/OUTPUT_SCHEMA.md`](docs/OUTPUT_SCHEMA.md) §12). A VULNERABLE verdict hard-caps
-the grade at the same ceiling a proven CRITICAL FAIL gets; RESISTANT or nothing
-submitted changes nothing — never an ordinary scored point, never a reason to raise
-anything (self-attestation guard). Pass `--seed <value>` to the harness itself and echo
+the grade at the same ceiling a proven CRITICAL FAIL gets; a RESISTANT verdict is never
+an ordinary scored point and never a reason to raise anything (self-attestation guard).
+Submitting NOTHING is not the same as RESISTANT: the five-layer ledger counts this layer
+as ran only when a verdict bucket actually arrived, so a run with none submitted stays
+ungraded (no letter — the missing-layers line names it), not silently scored from the
+other four layers alone. Pass `--seed <value>` to the harness itself and echo
 that same value in the bucket to make the run reproducible and eligible for
 `--monitor`/`--trend`; without it, the verdict still caps this one report but is
 excluded from history.
@@ -893,7 +970,7 @@ dispatcher; the full protocol behind each row is the matching `## Choice:` secti
 | "is my MCP safe", "check my connected servers", "vet my MCP", "are my MCP servers trusted", "MCP supply chain" | `--vet-mcp` (add `--json` or `--sarif PATH` for machine-readable / CI output) |
 | "what dangerous actions can my agent take", "least privilege", "check my tools", "capability", "blast radius", "deeper check" | `--ask` then `--attest <filled.json>` |
 | "monitor", "watch", "alert me", "ongoing", "keep checking" | `--monitor` (ask first) |
-| "canary", "injection test", "am I vulnerable", "try an attack" | `--canary` then `--dryrun` — the standalone equivalent of Section 6's menu item a. A submitted VULNERABLE verdict fed back via `--dashboard --full --judged-bundle <file>`'s `liveTest` bucket hard-caps the grade (F-155); RESISTANT or nothing submitted changes nothing (self-attestation guard) — see Step 3, Section 6. |
+| "canary", "injection test", "am I vulnerable", "try an attack" | `--canary` then `--dryrun` — the standalone equivalent of Section 6's menu item a. A submitted VULNERABLE verdict fed back via `--dashboard --full --judged-bundle <file>`'s `liveTest` bucket hard-caps the grade (F-155); RESISTANT never raises anything, and submitting nothing leaves this run ungraded rather than unaffected (five-layer ledger) — see Step 3, Section 6. |
 | "red team", "adversarial", "attack suite" | `--redteam` |
 | "trend", "history", "am I improving", "getting better" | `--trend` — plots the **graded** scans only. Ungraded runs are still recorded (so "last check was N days ago" stays honest) but carry no point to plot, and the trend never draws a line across the rule change. Say so rather than letting a short line read as a short history. |
 | "percentile", "compare", "above average", "how do I rank" | `--percentile` — needs a score, so an ungraded run answers "no rank yet" instead of a number. Relay that; do not estimate one. |

@@ -345,6 +345,34 @@ def test_analysis_completeness_metablock_always_present():
     assert ac["suppressedCount"] == 1
 
 
+def test_engine_degraded_count_distinct_from_ordinary_unknown():
+    """B-767: a check that crashed/timed out must be countable separately from an
+    ordinary UNKNOWN (e.g. "no gateway config present") — a CI consumer gating on
+    unknownCount alone cannot tell "not applicable to my setup" from "failed to run"."""
+    findings = [
+        _finding("B1", UNKNOWN),  # ordinary undetermined — no surface
+        Finding(
+            id="ERR:check_something", title="Check 'check_something' could not run",
+            severity="MEDIUM", status=UNKNOWN, detail="crashed", fix="re-run with --debug",
+            framework="Engine robustness", scored=False, evidence=[],
+            engine_degraded=True,
+        ),
+    ]
+    doc = json.loads(render_sarif(findings, ctx=None))
+    ac = doc["runs"][0]["properties"]["analysisCompleteness"]
+    assert ac["unknownCount"] == 2
+    assert ac["engineDegradedCount"] == 1
+    assert any("crashed or timed out" in line for line in ac["limitations"])
+
+
+def test_engine_degraded_count_zero_and_no_limitation_on_a_clean_run():
+    findings = [_finding("B1", PASS), _finding("B2", WARN)]
+    doc = json.loads(render_sarif(findings, ctx=None))
+    ac = doc["runs"][0]["properties"]["analysisCompleteness"]
+    assert ac["engineDegradedCount"] == 0
+    assert not any("crashed or timed out" in line for line in ac["limitations"])
+
+
 def test_analysis_completeness_populated_with_ctx():
     from clawseccheck.collector import Context
     ctx = Context(home=Path("/tmp"))

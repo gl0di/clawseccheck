@@ -58,7 +58,8 @@ _EXEMPT = {
                   "`assessment_coverage()`. Over budget by 17 lines since B-558 added "
                   "`layer_coverage`. Split candidate named above; tracked debt, not a "
                   "design statement.",
-    "checks/_config.py": "~4,410 lines — the config-hardening topic (15 checks + helpers); "
+    "checks/_config.py": "~5,191 lines (restated 2026-09-11, C-410 — was ~4,410, +18% "
+                         "stale) — the config-hardening topic (29 checks + helpers); "
                          "topic-faithful and over budget by design. A finer split is a "
                          "later cycle (I-022 secondary target).",
     # Restated 2026-09-04 (B-727): 5,662 -> 6,172. The tolerance is min(25%, 500 LINES),
@@ -69,9 +70,10 @@ _EXEMPT = {
     # says it is not alone — `checks/_mcp.py` sits at 97% of its own tolerance, and five
     # more modules are past 70%. That whole table needs a restate-and-reconsider pass, not
     # one entry at a time as each next commit trips it.
-    "checks/_lifecycle.py": "~6,172 lines — the approval / update-pinning / self-modification "
-                            "/ supply-chain topic (17 checks + helpers); topic-faithful and "
-                            "over budget by design. A finer split is a later cycle.",
+    "checks/_lifecycle.py": "~6,779 lines (restated 2026-09-12, C-413 — was ~6,172) — the "
+                            "approval / update-pinning / self-modification / supply-chain "
+                            "topic (17 checks + helpers); topic-faithful and over budget "
+                            "by design. A finer split is a later cycle.",
     "checks/_content.py": "~14,623 lines — the content-security ring: 51 check functions, 178 "
                           "private helpers and 241 module regexes. Restated 2026-09-06 "
                           "(C-432), and the previous reason is RETRACTED rather than "
@@ -165,14 +167,16 @@ _EXEMPT = {
                       "_content.py first, learn what the shared-machinery module wants to "
                       "look like, then decide here. That is a sequencing decision, not a "
                       "deferral for its own sake.",
-    "checks/_egress.py": "~4,077 lines — the egress-hardening topic (proxy/TLS/SSRF/"
-                         "data-at-rest + web-fetch/log checks). Crossed the budget with "
-                         "B178's check_provider_baseurl (models.providers.<id>.baseUrl "
+    "checks/_egress.py": "~4,736 lines (restated 2026-09-12, C-412 — was ~4,077) — the "
+                         "egress-hardening topic (proxy/TLS/SSRF/data-at-rest + "
+                         "web-fetch/log checks). Crossed the budget with B178's "
+                         "check_provider_baseurl (models.providers.<id>.baseUrl "
                          "cleartext http:// leak) — kept adjacent to B155's "
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "
                          "posture across two topic files. A finer split is a later cycle.",
-    "checks/_shared.py": "~3,932 lines — the leaf every checks/_<topic> module (and "
+    "checks/_shared.py": "~4,458 lines (restated 2026-09-13, B-672/B-663 — was ~3,932) — "
+                         "the leaf every checks/_<topic> module (and "
                          "risk.py) imports from: tool-hint constants, MCP-server helpers, "
                          "and _trifecta_legs, the single shared leg definition A1 and B46 "
                          "both read. Crossed the exact 1,200-line ceiling with B-247's MCP "
@@ -212,7 +216,8 @@ _EXEMPT = {
                              "why it's WARN-only and correcting a prior false "
                              "\"per-agent layers can only narrow\" claim in two docstrings. "
                              "A finer split is a later cycle.",
-    "checks/_agents.py": "~1,358 lines — the multi-agent / subagent-exposure topic "
+    "checks/_agents.py": "~1,798 lines (restated 2026-09-11, C-411 — was ~1,358) — "
+                        "the multi-agent / subagent-exposure topic "
                         "(check_agent_separation, check_untrusted_context, "
                         "check_subagents_allow_agents, etc.). Crossed the budget with "
                         "E-060's check_embedded_agent_project_settings_policy (B327) — "
@@ -290,22 +295,21 @@ _EXEMPT = {
     # means — the table needs one restate-and-reconsider pass, not an entry bumped each
     # time the next commit trips it — and this bump is exactly the pattern it warned about.
     # Recorded rather than quietly corrected: the split below is now owed twice over.
-    "report.py": "~6,178 lines — the output renderers; grew further with F-131's "
+    "report.py": "~6,699 lines — the output renderers; grew further with F-131's "
                  "Inventory-by-subject block (its own additive presentation layer, not "
                  "branching check logic), then with the B-617 inert-disclosure channel "
-                 "and the B-547 scope-note rewiring. The +10% that tripped the staleness "
-                 "guard is mostly explanatory comment, not new branching — but the "
-                 "pattern is worth naming: this file now hosts the scope note, the "
-                 "disclosure block, the inventory, the coverage page's text half and "
-                 "every renderer, and each honesty fix lands here because it is where "
-                 "claims are phrased. The split (renderers vs the disclosure/scope "
-                 "layer they share) is still deferred, but it is no longer only an "
-                 "I-022 secondary target — it is the second-largest structural debt "
-                 "after checks/_content.py.",
-    "catalog.py": "~3,404 lines — the CheckMeta CATALOG (one entry per check) + BY_ID + "
+                 "and the B-547 scope-note rewiring, then with B-758's three report "
+                 "self-contradiction fixes (_urgent_headline gained risk-chain awareness; "
+                 "the skills/MCP inventory rows were reordered) — each landed here because "
+                 "each is a claim this file phrases. The split (renderers vs the "
+                 "disclosure/scope layer they share) is still deferred, but it is no "
+                 "longer only an I-022 secondary target — it is the second-largest "
+                 "structural debt after checks/_content.py.",
+    "catalog.py": "~3,916 lines (restated 2026-09-12, C-526/C-527 — was ~3,404) — the "
+                  "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~6,420 lines — the read-only collection layer (config / bootstrap / skill "
+    "collector.py": "~6,951 lines — the read-only collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
                     "+ .pyc/.wasm sniffing), grew again with B-610 (deriving the workspace "
@@ -331,7 +335,7 @@ _EXEMPT = {
                     "growth to whoever crosses the line, not to whoever accumulated it, so "
                     "the commit a staleness guard fires on is rarely the commit that caused "
                     "most of the drift.",
-    "cli.py": "~5,433 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
+    "cli.py": "~6,489 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "
               "the dispatch cascade: each `_mode` branch that returns early has to repeat "
@@ -342,13 +346,24 @@ _EXEMPT = {
               "Both are the early-return cascade failing to carry what the shared tail knows. "
               "That is the argument for the split (flag registration -> its own module, and "
               "the mode branches -> a dispatch table) rather than a reason to defer it again; "
-              "the entry has now been restated twice for the same cause.",
-    "pipeline.py": "~1,550 lines — the --full P7-P10 orchestration. Crossed the budget with "
+              "the entry has now been restated twice for the same cause. Restated a third "
+              "time after a batch of small dispatch-cascade additions (C-448's --all window "
+              "opt-out, C-519's --show-suppressed attribution/expiry, C-524's --save-run/"
+              "--diff) — each individually a few lines by design, same as every other primary "
+              "mode this entry already names; not a new argument, the same one landing again. "
+              "Restated a fourth time after C-517's --watch/--watch-status: two new primary "
+              "modes plus their argparse registration and CLI-side helpers (the loop itself "
+              "lives in the new watch.py, not here) — same shape, same cause.",
+    "pipeline.py": "~1,961 lines — the --full P7-P10 orchestration. Crossed the budget with "
                    "C-425's PipelineResult.to_ledger(), which projects the run's phases onto "
                    "the five-layer ledger (layers.py). It belongs here and nowhere else: it "
                    "reads PhaseResult state, and layers.py must stay a leaf that scoring.py "
-                   "can import, so the projection cannot live down there. A finer split "
-                   "(phase runners vs. roll-up) is a later cycle.",
+                   "can import, so the projection cannot live down there. Restated after an "
+                   "E-087 incident-response batch (B-799's ctx-aware to_ledger honesty and "
+                   "F-193's live-test scenario-id validation, B-800's behavioral-incompleteness "
+                   "wording, B-804's verdictsSubmitted gating, B-758's runState reprojection) — "
+                   "five fixes landing in the same module in one pass, not scope creep in any "
+                   "one of them. A finer split (phase runners vs. roll-up) is a later cycle.",
     "behavioral.py": "~1,263 lines — the --behavioral replay ring: the trajectory reader's "
                      "consumers, the four detectors (T1/T2/T3/B191), the F-154 cap reducer "
                      "and the renderer. Sat three lines under the budget until B-559, which "

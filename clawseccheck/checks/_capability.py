@@ -58,6 +58,18 @@ _AUTO_GATE_BLAST = {
 }
 
 
+# Inverse of _AUTO_GATE_BLAST: which approval_gates class (if any) covers a given
+# held high-blast class. COMMERCE has no entry — the attestation schema's
+# approval_gates only covers exec/send/write (see attest.GATE_CLASSES), so a held
+# COMMERCE verb never has a confirmable gate either way.
+_GATE_CLASS_FOR_BLAST = {
+    "EXEC": ("exec",),
+    "EGRESS": ("send",),
+    "DESTRUCTIVE": ("write",),
+    "MAILBOX_CONFIG": ("write",),
+}
+
+
 _B31_BYPASS_CANDIDATES = ("apply_patch", "exec", "process")
 
 
@@ -264,7 +276,10 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
 
     PASS    — every held verb is reversible / non-egress: forward-exfil and
               delete-evidence are physically impossible (the verb isn't in hand).
-    WARN    — a high-blast verb is held but a human-approval gate is reported.
+    WARN    — a high-blast verb is held. The wording distinguishes, per the
+              specific held class's own reported gate (never any other class'
+              gate — B-805), whether that class is confirmed gated, confirmed
+              running without approval ('auto'), or unreported.
     FAIL    — a high-blast verb is held AND a side-effect can fire without approval.
     UNKNOWN — no tool inventory attested (run --ask, then --attest).
     """
@@ -319,6 +334,37 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
             "Drop the dangerous verbs the agent does not need (least privilege at "
             "the capability level), or require human approval before send/exec/write "
             "and for any mailbox-config change.",
+            evidence=evidence,
+        )
+    # B-805: this used to say "An approval gate is reported" whenever ANY class
+    # anywhere in approval_gates was 'required' — including a class the agent does
+    # NOT hold (e.g. 'send: required' while only 'exec' is held, with 'exec:
+    # auto'). Judge the HELD class(es) by their OWN mapped gate only: if any held
+    # class's own gate is confirmed 'auto', say plainly that it runs ungated,
+    # regardless of what an unheld class's gate says. Every other case (a genuine
+    # 'required' gate on the held class, or no approval_gates reported at all)
+    # keeps the original wording unchanged.
+    gates_map = att.get("approval_gates")
+    gates_map = gates_map if isinstance(gates_map, dict) else {}
+    applicable_gates = set()
+    for cls in high:
+        applicable_gates.update(_GATE_CLASS_FOR_BLAST.get(cls, ()))
+    auto_confirmed = sorted(
+        gc for gc in applicable_gates
+        if str(gates_map.get(gc, "")).strip().lower() == "auto"
+    )
+    if auto_confirmed:
+        auto_label = ", ".join(auto_confirmed)
+        return _finding(
+            "B43",
+            WARN,
+            f"The agent holds high-blast-radius verbs ({label}). {auto_label} "
+            f"run{'s' if len(auto_confirmed) == 1 else ''} without approval per "
+            "the agent's self-report — there is no gate to bypass for that verb "
+            "in the first place, and holding it at all widens the blast radius.",
+            "Remove any dangerous verb the agent does not strictly need; "
+            "require human approval (not 'auto') before exec/send/write and "
+            "for any mailbox-config change.",
             evidence=evidence,
         )
     return _finding(
@@ -1024,7 +1070,7 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
                 else "is the only declared tools.profile (no global tools.profile is set)"
             )
             evidence.append(
-                f"grant includes a per-agent tools.profile that {widen_desc} (B-409): "
+                f"grant includes a per-agent tools.profile that {widen_desc}: "
                 + ", ".join(f'{path}="{profile}"' for path, profile in widenings)
             )
         return _finding(
@@ -1071,6 +1117,7 @@ def check_exec_strict_inline_eval(ctx: Context) -> Finding:
             "interpreter tools are allowlisted alongside exec.",
             "If interpreter tools are allowlisted with exec enabled, set "
             "tools.exec.strictInlineEval to true.",
+            config_field_paths={"tools.exec.strictInlineEval"},
         )
     exec_mode = dig(cfg, "tools.exec.mode")
     exec_active = (
@@ -1499,8 +1546,7 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                     else "is the only declared tools.profile (no global tools.profile is set)"
                 )
                 ev.append(
-                    f"grant traces to a per-agent tools.profile that {widen_desc} "
-                    "(B-409): "
+                    f"grant traces to a per-agent tools.profile that {widen_desc}: "
                     + ", ".join(f'{path}="{profile}"' for path, profile in widenings)
                     + " -- not an explicit global write/edit/apply_patch grant, and "
                     "the seven still-unread narrowing layers (per-agent allow/deny, "
@@ -1819,6 +1865,7 @@ def check_elevated_default_full(ctx: Context) -> Finding:
             "Avoid interpolating agents.defaults.elevatedDefault from an environment "
             "variable; set it to a literal \"ask\" (or leave it unset) so its effective "
             "value is auditable from config alone.",
+            config_field_paths={"agents.defaults.elevatedDefault"},
         )
 
     if level != "full":
@@ -2045,7 +2092,7 @@ def check_path_safety(ctx: Context) -> Finding:
             return "group-writable", st
         return None
 
-    def _flag(d: Path, prefix: str, suffix: str = "", *, replace_verb: str = "replace") -> None:
+    def _flag(d: Path, label: str, suffix: str = "", *, after: str = "") -> None:
         try:
             rd = d.resolve()
         except OSError:
@@ -2056,6 +2103,11 @@ def check_path_safety(ctx: Context) -> Finding:
         result = _writable_kind(rd)
         if not result:
             return
+        # B-757: build the display prefix from the RESOLVED path so the username-
+        # collapsing (_username_safe_path) always sees the canonical form, regardless
+        # of whether the caller's own path variable was already resolved (bin_dir/cur
+        # are; the raw PATH-dir / attested-install entries below are not until here).
+        prefix = f"{label} {_shared._username_safe_path(rd)}{after}"
         kind, st = result
         # B-127: a purely group-writable dir whose group currently has no members
         # besides the file's owner has no live "other member" to exploit it — note
@@ -2077,14 +2129,14 @@ def check_path_safety(ctx: Context) -> Finding:
         # member replace the whole subtree even when the immediate bin dir is tight.
         cur = start
         for _ in range(levels):
-            _flag(cur, f"{label} {cur}", " — a group member could replace the openclaw install")
+            _flag(cur, label, " — a group member could replace the openclaw install")
             if cur.parent == cur:  # filesystem root
                 break
             cur = cur.parent
 
     if exe:
         bin_dir = Path(exe).resolve().parent
-        _flag(bin_dir, f"openclaw binary dir {bin_dir}")
+        _flag(bin_dir, "openclaw binary dir")
         # NEW: ancestor install dirs above the resolved binary.
         _walk_ancestors(bin_dir.parent, "openclaw install ancestor dir")
 
@@ -2103,15 +2155,16 @@ def check_path_safety(ctx: Context) -> Finding:
             for d in path_dirs[:openclaw_index]:
                 _flag(
                     d,
-                    f"PATH dir {d} (before openclaw dir)",
+                    "PATH dir",
                     " — a fake openclaw could be planted there",
+                    after=" (before openclaw dir)",
                 )
 
     # Discovery-assisted: the agent may point at an install dir that `which` can't
     # resolve (non-PATH install). The engine still stat()s it itself.
     if attested_install:
         inst = Path(attested_install).expanduser()
-        _flag(inst, f"openclaw install dir {inst} [attested]")
+        _flag(inst, "openclaw install dir", after=" [attested]")
         _walk_ancestors(inst.parent, "openclaw install ancestor dir [attested]")
 
     if writable:
@@ -2130,7 +2183,8 @@ def check_path_safety(ctx: Context) -> Finding:
             writable[:6],
         )
 
-    where = exe or f"{attested_install} (attested)"
+    where = (_shared._username_safe_path(exe) if exe
+             else f"{_shared._username_safe_path(attested_install)} (attested)")
     return _custom(
         "C5",
         BY_ID["C5"].severity,
@@ -2439,9 +2493,13 @@ def check_exec_path_prepend(ctx: Context) -> Finding:
     setting the engine discards would be a finding about nothing, so that scope is
     skipped and the skip is named in the detail.
 
-    Windows - `wrapPosixCommandWithPathPrepend` returns the command unchanged on win32.
-    This is a self-audit, so the auditing platform IS the target platform; the detail
-    says so rather than silently assuming POSIX.
+    Windows - `wrapPosixCommandWithPathPrepend` returns the command unchanged on win32,
+    so a prepend entry never actually reaches the shell there. This function itself has
+    no `_is_posix()` branch or win32-specific wording, though: this is a self-audit, so
+    the auditing platform IS the target platform, and the writability legs it calls
+    (`_dir_replaceable_by_others`/group-membership resolution) already degrade to "could
+    not determine" rather than a false PASS/WARN on a platform where st_mode isn't
+    meaningful — see those helpers' own docstrings, not this one, for the actual guard.
 
     TILDE ENTRIES ARE NOT RELATIVE. `normalize-paths` puts `pathPrepend` in
     `PATH_LIST_KEYS` and resolves `~` through `resolveUserPath` (io-By0s-a_s.js), so

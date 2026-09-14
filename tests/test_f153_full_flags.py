@@ -65,8 +65,21 @@ def test_judged_bundle_shadowed_by_a_winning_primary_mode_notes_no_effect(tmp_pa
 
 
 def test_judged_bundle_with_full_emits_no_note_and_is_consumed(tmp_path, capsys):
+    """B-804: an EMPTY judged bucket ({"judged": {}}) no longer produces a
+    `secondOpinion` -- that is now "nothing submitted", not "consumed". Prove
+    consumption with a real, usable verdict instead, exactly as a host agent's
+    round trip would supply one."""
+    from clawseccheck.adjudication import build_judge_packet
+    from clawseccheck.checks import run_all
+    from clawseccheck.collector import collect
+    ctx = collect(VULN)
+    packet = build_judge_packet(ctx, run_all(ctx))
+    assert packet, "fixture must offer at least one borderline item for this test to mean anything"
+    item = packet[0]
     bundle = tmp_path / "b.json"
-    bundle.write_text(json.dumps({"judged": {}}), encoding="utf-8")
+    bundle.write_text(json.dumps({"judged": {"verdicts": [
+        {"finding_id": item["finding_id"], "target": item["target"], "verdict": "SAFE"},
+    ]}}), encoding="utf-8")
     rc = main(["--home", VULN] + BASE + ["--full", "--json",
                                          "--judged-bundle", str(bundle)])
     err = capsys.readouterr()
@@ -74,6 +87,7 @@ def test_judged_bundle_with_full_emits_no_note_and_is_consumed(tmp_path, capsys)
     assert "--judged-bundle" not in err.err
     payload = json.loads(err.out)
     assert "secondOpinion" in payload
+    assert payload["verdictsSubmitted"] is True
 
 
 def test_full_fast_and_judged_bundle_together_emit_no_spurious_note(tmp_path, capsys):

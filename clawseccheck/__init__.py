@@ -25,7 +25,8 @@ from .native import run_native_audit
 from .prescan import read_last_mode, record_mode
 from .report import (
     render_card, render_dashboard, render_dashboard_findings, render_events, render_json,
-    render_monitor, render_report, render_subject_inventory, render_svg, render_vet_json,
+    render_monitor, render_report, render_subject_inventory, render_svg, render_vet_all_json,
+    render_vet_json,
 )
 from .risk import risk_paths, render_risk_paths
 from .scanbudget import limits_for
@@ -35,6 +36,7 @@ from .pdf import render_pdf
 from .history import load as history_load, record as history_record, render_trend, DEFAULT_HISTORY
 from .guide import suggest_actions, render_next_actions
 from .update import update_notice, read_latest_hint, DEFAULT_LATEST
+from .watch import describe_liveness, probe_inotify, read_heartbeat, run_watch
 
 
 def _deptree_scan(root=None):
@@ -72,9 +74,56 @@ def _installed_dist_version(binary_name="openclaw"):
     return _openclawdist._read_version(root) or None
 
 
-__version__ = "4.0.1"
+__version__ = "4.1.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
-__released__ = "2026-09-09"
+__released__ = "2026-09-14"
+
+
+def build_context(home: Path | str = "~/.openclaw",
+                  include_host: bool = False, host_root: str = "/",
+                  attestation: dict | None = None,
+                  include_sockets: bool = False, proc_root: str = "/proc",
+                  include_deptree: bool = False, openclaw_pkg_root=None,
+                  include_dist: bool = False,
+                  exhaustive: bool = False):
+    """C-523: the Context-building half of `audit()`, on its own. Returns a Context.
+
+    Extracted so a caller that wants to run ONE check (`--explain`/`--retest`) can build
+    the exact same Context a full audit would, without paying for `run_all()`'s loop over
+    every OTHER check. Context-building itself has no such shortcut — collect() reads the
+    config, all bootstrap files and all installed skills regardless of which checks will
+    run, and the include_* scans below are each a single whole-host pass, not something
+    scoped per check — so this saves the OTHER checks' CPU time, not the I/O, and callers
+    should not expect it to be cheap.
+
+    Deliberately excludes `include_native`/`native_bin`/`native_timeout`: `audit()` below
+    populates `ctx.native` only AFTER `run_all()` returns, so no `check_*` function ever
+    reads it — it exists purely for the report renderer to show native findings
+    alongside this engine's own. A single-check caller has no use for it either, and
+    skipping it also skips its subprocess call.
+
+    Same parameters as `audit()`, same meaning — see its docstring for the reasoning
+    behind each `include_*` default.
+    """
+    ctx = collect(home)
+    ctx.include_host = include_host
+    if include_host:
+        ctx.host = _host_detect(root=host_root)
+    ctx.include_sockets = include_sockets
+    ctx.proc_root = proc_root
+    if include_sockets:
+        ctx.sockets = _scan_listening_sockets(proc_root=proc_root)
+    ctx.include_deptree = include_deptree
+    ctx.openclaw_pkg_root = openclaw_pkg_root
+    if include_deptree:
+        ctx.dep_tree = _deptree_scan(openclaw_pkg_root)
+    ctx.include_dist = include_dist
+    if include_dist:
+        ctx.installed_dist_version = _installed_dist_version()
+    if attestation:
+        ctx.attestation = attestation
+    ctx.exhaustive = exhaustive
+    return ctx
 
 
 def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
@@ -136,28 +185,19 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     indicator match; see scoring._runtime_cap_signal). Every runtime-consuming check
     (B83, B84, B85, B164, B180, T1/T2/T3) stays unable to move the grade any other way.
     """
-    ctx = collect(home)
-    ctx.include_host = include_host
-    if include_host:
-        ctx.host = _host_detect(root=host_root)
-    ctx.include_sockets = include_sockets
-    ctx.proc_root = proc_root
-    if include_sockets:
-        ctx.sockets = _scan_listening_sockets(proc_root=proc_root)
-    ctx.include_deptree = include_deptree
-    ctx.openclaw_pkg_root = openclaw_pkg_root
-    if include_deptree:
-        ctx.dep_tree = _deptree_scan(openclaw_pkg_root)
-    ctx.include_dist = include_dist
-    if include_dist:
-        ctx.installed_dist_version = _installed_dist_version()
-    if attestation:
-        ctx.attestation = attestation
-    ctx.exhaustive = exhaustive
+    ctx = build_context(home, include_host=include_host, host_root=host_root,
+                       attestation=attestation, include_sockets=include_sockets,
+                       proc_root=proc_root, include_deptree=include_deptree,
+                       openclaw_pkg_root=openclaw_pkg_root, include_dist=include_dist,
+                       exhaustive=exhaustive)
     lim = limits_for(ctx)
     findings = run_all(ctx, check_budget_s=lim.check_budget_s, audit_budget_s=lim.audit_budget_s)
     ignore = _baseline.load_ignore(home)
     _baseline.apply(findings, ignore)
+    # B-769: a fingerprint entry that matched nothing this run is either a repaired
+    # issue (fine) or a suppression silently going dark under an upgrade (not fine,
+    # and previously visible only via the opt-in --show-suppressed).
+    ctx.dead_ignore_entries = _baseline.dead_entries(findings, ignore)
     # I-025/B-309: pass ctx so scoring.compute can also see a trajaudit-style indicator
     # match (needs ctx.installed_skills/bootstrap/home) alongside the B164 exfil_evidence
     # signal it already reads off `findings` alone — see scoring.py's cap-only runtime
@@ -169,10 +209,10 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
 
 
 __all__ = [
-    "audit", "brand", "collect", "run_all", "compute", "ScoreResult", "run_native_audit",
+    "audit", "build_context", "brand", "collect", "run_all", "compute", "ScoreResult", "run_native_audit",
     "render_report", "render_dashboard", "render_dashboard_findings", "render_card", "render_json", "render_monitor",
     "render_subject_inventory",
-    "render_svg", "render_vet_json", "vet_skill", "vet_mcp", "vet_plugin", "vet_source", "detect_vet_type",
+    "render_svg", "render_vet_json", "render_vet_all_json", "vet_skill", "vet_mcp", "vet_plugin", "vet_source", "detect_vet_type",
     "make_canary", "evaluate", "render_canary",
     "snapshot", "diff", "load_state", "save_state", "__version__", "__released__",
     "update_notice", "read_latest_hint", "DEFAULT_LATEST",
@@ -184,4 +224,5 @@ __all__ = [
     "suggest_actions", "render_next_actions",
     "risk_paths", "render_risk_paths",
     "read_last_mode", "record_mode",
+    "run_watch", "probe_inotify", "read_heartbeat", "describe_liveness",
 ]

@@ -271,20 +271,31 @@ class TestRegressionRealShapedFixturesUnaffected:
 class TestReproC_TotalZeroBypass:
     """C-135 follow-up #2 (2026-07-21): the reviewer's own real end-to-end repro — a
     minimal/fresh OpenClaw home (no skills, no MCP servers) with openclaw.json truncated
-    AND a `.clawseccheckignore` that happens to suppress the only two checks (B9, B16)
-    that still score off a blind ``ctx.config == {}`` (every other config-derived check
-    was already guarded to UNKNOWN by this task's first half). The assertion below is a
-    deliberate guard on that setup — when it fires, some check has started scoring off an
-    unreadable config and the repro shape has drifted.
+    AND a `.clawseccheckignore` that happens to suppress the checks that still score off a
+    blind ``ctx.config == {}`` (every CONFIG-DERIVED check was already guarded to UNKNOWN
+    by this task's first half). The assertion below is a deliberate guard on that setup —
+    when it fires, some check has started scoring off an unreadable config and the repro
+    shape has drifted.
 
-    B10 was briefly a third entry here. B-514 taught it to read `audit.enabled` and answer
-    the field's documented default when absent, which scores — and on a config that never
-    parsed, "absent" meant "nothing read", so it scored a PASS off a blind config and this
-    guard fired. Adding B10 to the ignore list silenced the guard without changing what
-    B10 said to the user; B-524 fixed the check instead (`_config_unreadable` at the top of
-    `check_audit_log`), so B10 is UNKNOWN here again and the seed is back to two entries.
-    Suppressing a check to quiet this assertion is the wrong repair: the assertion is
-    reporting a real lying PASS, not a stale fixture. Pre-fix this reached
+    B10 was briefly a third entry here (originally B9, B16). B-514 taught it to read
+    `audit.enabled` and answer the field's documented default when absent, which scores —
+    and on a config that never parsed, "absent" meant "nothing read", so it scored a PASS
+    off a blind config and this guard fired. Adding B10 to the ignore list silenced the
+    guard without changing what B10 said to the user; B-524 fixed the check instead
+    (`_config_unreadable` at the top of `check_audit_log`), so B10 is UNKNOWN here again.
+
+    B356/B357 (C-409) are a DIFFERENT shape from the B10 case, not a repeat of it: neither
+    reads `ctx.config` at all — B356 enumerates `credentials/`/`identity/` state files,
+    B357 reads `gateway-supervisor-restart-handoff.json` — so both correctly still PASS on
+    an empty scratch home regardless of whether `openclaw.json` parsed. That is not a
+    lying PASS derived from a blind config (the B10 shape this class exists to catch); it
+    is a check whose subject was never config in the first place, scoring an empty-but-
+    genuine finding about a subject config-parseability has no bearing on. Registered here
+    for the same reason B9/B16 are (both are also config-independent by subject).
+
+    Suppressing a check to quiet this assertion is the wrong repair ONLY when the check is
+    actually deriving its verdict from the blind config (the B10 shape) — the assertion is
+    reporting a real lying PASS in that case, not a stale fixture. Pre-fix this reached
     `scored == []`, `total == 0`, and fell through to `assessable=False`/grade="N/A" —
     a neutral grey badge, not the CRITICAL-ceiling F this project's own doctrine assigns
     everywhere else a config goes dark. Runs through the real `audit()` entry point
@@ -293,7 +304,7 @@ class TestReproC_TotalZeroBypass:
     def test_blind_run_with_nothing_else_scored_does_not_fall_back_to_na(self, tmp_path):
         (tmp_path / "openclaw.json").write_text('{"mcp": {"servers": ')  # truncated JSON
         os.chmod(tmp_path / "openclaw.json", 0o600)
-        (tmp_path / ".clawseccheckignore").write_text("B9\nB16\n")
+        (tmp_path / ".clawseccheckignore").write_text("B9\nB16\nB356\nB357\n")
 
         ctx, findings, score = audit(tmp_path)
 

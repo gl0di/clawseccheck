@@ -8,8 +8,10 @@
   "tools": {
     "profile": "minimal",
     "exec": { "mode": "ask" },
-    "elevated": { "allowFrom": ["owner-123"] }
+    "elevated": { "allowFrom": ["owner-123"] },
+    "sessions": { "visibility": "self" }
   },
+  "session": { "dmScope": "per-peer" },
   "agents": { "defaults": { "sandbox": { "mode": "non-main", "docker": { "network": "bridge" } } } },
   "plugins": {
     "allow": ["trentclaw"],

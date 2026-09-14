@@ -113,7 +113,9 @@ def test_b68_agent_profile_widening_warns_with_evidence():
         )
     )
     assert f.status == WARN, f.detail
-    assert any("tools.profile widening" in e or "B-409" in e for e in f.evidence)
+    # The evidence's real shape (never matched the tracker-id-only fallback this
+    # assertion used to fall back on -- see git history if the wording moves again).
+    assert any("widens beyond" in e and "tools.profile" in e for e in f.evidence)
 
 
 def test_b68_agent_profile_narrowing_does_not_falsely_warn_via_widening_path():
@@ -129,7 +131,9 @@ def test_b68_agent_profile_narrowing_does_not_falsely_warn_via_widening_path():
         )
     )
     assert f.status == WARN, f.detail
-    assert not any("B-409" in e for e in f.evidence)
+    # Vacuous after the widening evidence's tracker-id suffix was dropped -- assert the
+    # actual phrase is absent, not a marker that no longer appears either way.
+    assert not any("widens beyond" in e for e in f.evidence)
 
 
 # ---------------------------------------------------------------------------

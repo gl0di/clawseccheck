@@ -61,6 +61,7 @@ _agent_config_write_hits
 _agent_is_powerful
 _agent_legs
 _agent_profile_widenings
+_agents_without_exec_gate
 _allow_from_is_present
 _ancestors_allow_other_access
 _attested_tool_id_sources
@@ -97,6 +98,7 @@ _defensive_section
 _dep_names_in_skill
 _effective_group_allow_from
 _enabled_tools
+_exec_policy_is_gated
 _external_input_channels
 _fence_ranges
 _finding
@@ -119,6 +121,7 @@ _is_owner_wildcard_allow_from
 _is_posix
 _is_wildcard_allow_entry
 _key_advice
+_layer_exec_policy
 _levenshtein
 _local_sink_exfil_hits
 _loopback_ip
@@ -159,6 +162,7 @@ _trifecta_leg_sources
 _unclassified_leg_verbs
 _unpinned_deps_in_skill
 _untrusted_input_channels
+_username_safe_path
 _vet_mcp_least_privilege
 _vet_mcp_tool_poisoning
 _web_fetch_enabled
@@ -191,6 +195,7 @@ check_codex_project_trust
 check_compiled_tool_poisoning
 check_conditional_sleeper_trigger
 check_config_audit_log
+check_config_externally_managed
 check_config_health_integrity
 check_config_trust_widening
 check_control_plane_mutation
@@ -298,6 +303,7 @@ check_sender_identity
 check_session_approval_policy
 check_session_visibility
 check_silent_instruction
+check_sitecustomize_pythonstartup_scoped_install
 check_skill_install_tamper
 check_skill_workshop_autonomy
 check_social_engineering_phishing

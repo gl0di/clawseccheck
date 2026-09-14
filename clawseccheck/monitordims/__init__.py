@@ -68,8 +68,11 @@ from ._channels import (  # noqa: F401
 )
 
 from ._checks import (  # noqa: F401
+    _SEVERITY_RANK,
+    _capped,
     _diff_check_transitions,
     _diff_vanished_checks,
+    _version_disclaimer,
 )
 
 from ._configfile import (  # noqa: F401

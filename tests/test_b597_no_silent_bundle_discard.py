@@ -41,7 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 VULN = str(REPO_ROOT / "fixtures" / "home_vuln")
 
 _ENTRY = {"finding_id": "B101", "target": "B101", "verdict": "SAFE", "reason": "x"}
-_LIVE = {"seed": "s", "verdicts": [{"tool": "canary", "id": "canary", "verdict": "RESISTANT"}]}
+_LIVE = {"seed": "s", "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}
 
 
 def _split(obj, capsys) -> tuple[dict, str]:

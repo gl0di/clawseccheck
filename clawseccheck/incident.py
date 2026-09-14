@@ -23,16 +23,145 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
 from . import trajectory as _trajectory
+from .catalog import ACTIONABLE_STATUSES
 from .checks import SECRET_PATTERNS, _pattern_hits_real_secret, _secret_paths
+from .incidentstore import DEFAULT_INCIDENTS, _incident_to_dict, create_incident
 from .monitor import DEFAULT_EVENTS, load_events
+from .monitorstore import _last_chain_hash
 from .sbom import build_sbom
 from .scanbudget import limits_for
 
 INCIDENT_VERSION = 1
+
+#: C-520: the only place a PID is ever resolved anywhere in this codebase today is
+#: checks/_config.py's check_effective_bind (B340), via sockets.identify_listener_process
+#: -- and even there it is never a structured Finding field, only free text baked into
+#: evidence. hostpersist.py has no PID correlation at all (measured: zero "pid" hits).
+#: These two exact phrasings are B340's only producers of that text -- see
+#: checks/_config.py around "held by pid"/"confirmed via pid".
+_PID_EVIDENCE_RE = re.compile(r"\b(?:held by pid|confirmed via pid) (\d+) \(([^)]*)\)")
+
+#: C-135: _pid_from_findings must scan ONLY this id's evidence, never every linked
+#: finding's. checks/_content.py's content-security ring echoes a SKILL's own text
+#: verbatim into evidence (e.g. `evidence.append(f'{skill_name}: "{snippet}"')`) --
+#: reproduced: a malicious skill whose own markdown contains the literal substring
+#: "confirmed via pid 1 (systemd)" trips some unrelated prompt-injection check, and
+#: that check's evidence carries the attacker's text straight through. Scanning every
+#: actionable finding's evidence -- as an earlier version of this function did -- let
+#: attacker-controlled skill CONTENT fabricate a PID/process link Golden Rule #4
+#: forbids: this was never a real sockets.py resolution.
+_PID_EVIDENCE_FINDING_ID = "B340"
+
+
+def _pid_from_findings(findings) -> "tuple[str | None, str | None]":
+    """Best-effort (pid, process_name) extracted from B340's own evidence text --
+    deliberately never an independent fresh /proc re-scan (a fresh scan could resolve a
+    DIFFERENT, now-stale PID than the one B340 actually reported: the process could have
+    exited and the PID been reused, which would link the incident to a process it never
+    observed) and deliberately never any OTHER finding's evidence (see
+    _PID_EVIDENCE_FINDING_ID's comment -- that text can be attacker-controlled skill
+    content). (None, None) when B340 isn't linked or doesn't match."""
+    for f in findings:
+        if f.id != _PID_EVIDENCE_FINDING_ID:
+            continue
+        for line in getattr(f, "evidence", None) or ():
+            m = _PID_EVIDENCE_RE.search(line)
+            if m:
+                return m.group(1), m.group(2)
+    return None, None
+
+
+def open_incident_from_audit(ctx, findings, *, path: "str | Path | None" = None,
+                             events: "str | Path | None" = None,
+                             when: "str | None" = None) -> "tuple[dict | None, str | None]":
+    """--incident-open's entry point: derive a new persisted Incident from findings this
+    audit run actually produced. Filters to catalog.ACTIONABLE_STATUSES -- the same
+    shared FAIL-weight/WARN vocabulary B-751/B-755 exist to keep every consumer using,
+    rather than re-spelling "FAIL" as a literal here and risking the exact drift those
+    fixed. *ctx* is accepted (mirroring build_incident's signature) but not read; it is
+    there for callers that already have it and a possible future PID-independent link.
+
+    Returns (record_dict, None) on success, or (None, reason) where reason is
+    "no_actionable_findings" (refused -- an incident needs a real basis, never a
+    fabricated one) or "write_failed".
+    """
+    actionable = [f for f in findings if f.status in ACTIONABLE_STATUSES]
+    if not actionable:
+        return None, "no_actionable_findings"
+
+    finding_ids = [f.id for f in actionable]
+    pid, process_name = _pid_from_findings(actionable)
+    events_path = DEFAULT_EVENTS if events is None else events
+    monitor_watermark = _last_chain_hash(Path(events_path).expanduser()) or None
+    store_path = DEFAULT_INCIDENTS if path is None else path
+
+    inc = create_incident(finding_ids, pid=pid, process_name=process_name,
+                          monitor_watermark=monitor_watermark, path=store_path, when=when)
+    if inc is None:
+        return None, "write_failed"
+    return _incident_to_dict(inc), None
+
+
+def incident_timeline(monitor_watermark: "str | None",
+                      events: "str | Path | None" = None) -> "tuple[list, bool]":
+    """The --monitor events appended after *monitor_watermark* on the SAME hash-chained
+    journal --incident-open pointed at -- a live read of the existing store, never a
+    second copy (per the task's own instruction). Returns (events, watermark_found).
+
+    watermark_found is False when *monitor_watermark* is truthy but no longer present in
+    the current journal (almost always: it rotated away since the incident opened) -- in
+    that case every currently-available event is still returned rather than none, but the
+    caller must disclose the gap: some of them may predate the incident, and this
+    function cannot tell which."""
+    events_path = DEFAULT_EVENTS if events is None else events
+    all_events = load_events(events_path)
+    if not monitor_watermark:
+        return all_events, True
+    idx = next((i for i, e in enumerate(all_events)
+               if e.get("chain_hash") == monitor_watermark), None)
+    if idx is None:
+        return all_events, False
+    return all_events[idx + 1:], True
+
+
+def render_incident_record(record: dict, *, timeline: "list | None" = None,
+                           timeline_complete: bool = True) -> str:
+    """Human-readable text for --incident-open/--incident-mark/--incident-show. *timeline*
+    is only ever passed by --incident-show (the create/mark responses don't compute one)."""
+    lines = [
+        f"Incident {record['id']} — status: {record['status']}",
+        f"created: {record['created_at']}",
+    ]
+    if record["finding_ids"]:
+        lines.append(f"linked findings: {', '.join(record['finding_ids'])}")
+    if record["pid"]:
+        lines.append(f"linked process: pid {record['pid']} ({record['process_name']})")
+    lines.append("history:")
+    for h in record["history"]:
+        lines.append(f"  {h['ts']}  -> {h['status']}")
+    if timeline is not None:
+        if not timeline_complete:
+            lines.append(
+                "monitor timeline: watermark not found in the current journal (it likely "
+                "rotated away) — showing all currently-available events; some may predate "
+                "this incident.")
+        if timeline:
+            header = ("monitor timeline (all currently-available events, completeness "
+                      "not guaranteed):" if not timeline_complete else
+                      "monitor timeline (events since this incident opened):")
+            lines.append(header)
+            for e in timeline:
+                lines.append(f"  {e.get('ts')}  {e.get('severity', '')}  {e.get('message', '')}")
+        elif timeline_complete:
+            lines.append("monitor timeline: no events recorded since this incident opened.")
+        else:
+            lines.append("monitor timeline: no events in the current journal.")
+    return "\n".join(lines)
 
 _MAX_TRAJECTORY_BYTES = 8_000_000  # mirrors trajectory.py's own per-file scan cap
 

@@ -13,7 +13,8 @@
       }
     }
   },
-  "tools": { "profile": "minimal" },
+  "session": { "dmScope": "per-peer" },
+  "tools": { "profile": "minimal", "sessions": { "visibility": "self" } },
   "logging": { "redactSensitive": "tools" },
   "models": { "main": { "provider": "ollama/llama3" } }
 }

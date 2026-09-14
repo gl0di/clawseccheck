@@ -78,6 +78,7 @@ from pathlib import Path
 
 import pytest
 
+from _distgrounding import _JS_EXTS, _spellings
 from _realhome import REAL_HOME
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -163,8 +164,14 @@ def _find_state_schema_defining_js(dist_dir: Path) -> Path:
     declares a `capture_events` table. The marker names the constant, so that file cannot
     match it at all.
     """
+    # B-784: the SELECTION is by constant, but the CANDIDATE SET was `*.js` — a filename
+    # anchor after all, and the half that 2026.9.3 broke by recompiling every chunk as
+    # `.mjs`. It reported "found 0", which this guard's own message reads as the vendor
+    # having changed how it declares the schema; the constant was there the whole time, in
+    # exactly one file. `_JS_EXTS` is imported rather than restated so the two locators
+    # cannot drift apart on the next rename.
     matches = sorted(
-        p for p in dist_dir.rglob("*.js")
+        p for ext in _JS_EXTS for p in dist_dir.rglob("*" + ext)
         if SCHEMA_SQL_CONST_MARKER in p.read_text(encoding="utf-8", errors="replace")
     )
     if len(matches) != 1:
@@ -258,12 +265,13 @@ def _installed_openclaw_version() -> str:
 
 
 def _installed_state_schema_version() -> int:
-    for path in sorted(OPENCLAW_DIST.glob(STATE_DB_CONTRACT_GLOB)):
+    spellings = _spellings(STATE_DB_CONTRACT_GLOB)   # B-784 — see _find_state_schema_defining_js
+    for path in sorted({p for s in spellings for p in OPENCLAW_DIST.glob(s)}):
         m = SCHEMA_VERSION_RE.search(path.read_text(encoding="utf-8"))
         if m:
             return int(m.group(1))
     raise AssertionError(
-        f"OPENCLAW_STATE_SCHEMA_VERSION not found in any {STATE_DB_CONTRACT_GLOB!r} file"
+        f"OPENCLAW_STATE_SCHEMA_VERSION not found in any {spellings!r} file"
     )
 
 
@@ -631,6 +639,16 @@ _CONFIG_MACHINE_STATE_LOOSE_LEGACY = (
     "constraint on the vendor table; not a subset since every real column is nullable "
     "here, not merely a fewer-columns slice."
 )
+_AUTH_PROFILE_TABLES_DIFFERENT_DB = (
+    "auth_profile_store/auth_profile_state (F-187) live in the PER-AGENT database "
+    "(agents/<agent>/agent/openclaw-agent.sqlite), never in the state database "
+    "(state/openclaw.sqlite) this snapshot/registry classifies -- a different SQLite "
+    "file, with its own separate schema this module does not model at all. Absent from "
+    "the vendor snapshot for that reason, not because the shape is wrong; the fixture "
+    "models the real per-agent shape closely enough to prove trajectorystore.corroborate() "
+    "never reaches it (see that test file's own module docstring), but there is no vendor "
+    "comparison possible for it within this file's scope."
+)
 
 _REGISTRY: "dict[str, _Entry]" = {
     # ---- fixtures/clean_b188_state_db/state/openclaw.sqlite -- the binary fixture no
@@ -709,9 +727,17 @@ _REGISTRY: "dict[str, _Entry]" = {
 
     # ---- task_runs (B709) ----
     "tests/test_b709_cron_run_logs_shapes.py:52": _Entry(LEGACY_COLS, _TASK_RUNS_NO_NOTNULL_LEGACY),
+
+    # ---- skill_library_entries / skill_uploads (B354 / CLAWSECCHECK-B-725) ----
+    "tests/test_b354_b725_skill_library_reachability.py:31": _Entry(MODERN),
+    "tests/test_b354_b725_skill_library_reachability.py:46": _Entry(MODERN),
+
+    # ---- auth_profile_store / auth_profile_state (F-187, per-agent DB, different file) ----
+    "tests/test_f187_trajectory_sqlite_corroborator.py:94": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:101": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
 }
 
-assert len(_REGISTRY) == 36, f"registry has {len(_REGISTRY)} entries, expected 36"
+assert len(_REGISTRY) == 40, f"registry has {len(_REGISTRY)} entries, expected 40"
 
 
 # ========================================================================================

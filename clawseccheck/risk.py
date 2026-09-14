@@ -2186,12 +2186,13 @@ _B97_SIGNAL_MARKER = "fires every turn and"
 # regexes (_HOOK_NET_SINK_RE/_HOOK_ENV_READ_RE/_HOOK_MUTATE_RE, checks/_content.py) do
 # not cover a hook that shells out via node:child_process -- exactly the shape a
 # self-reinstalling persistence hook would use to re-run the very commands that plant
-# the OTHER anchors (e.g. `execSync("systemctl --user enable --now ...")` +
-# `execSync("tailscale up ...")` on every turn). B97's Finding text alone cannot see
-# this -- it falls in the "no sink/mutation seen" bucket -- so `_b97_anchor_signal`
-# below independently re-scans the same hook source for this ONE narrow pattern.
-# Deliberately excludes a bare `exec(` alternative: unqualified `exec(` collides with
-# JS's own `RegExp.prototype.exec()`, an extremely common, unrelated call shape that
+# the OTHER anchors (e.g. an `execSync` call on "systemctl --user enable --now ..." +
+# an `execSync` call on "tailscale up ..." on every turn). B97's Finding text alone
+# cannot see this -- it falls in the "no sink/mutation seen" bucket -- so
+# `_b97_anchor_signal` below independently re-scans the same hook source for this ONE
+# narrow pattern. Deliberately excludes a bare exec-name alternative: an unqualified
+# JS `exec` call collides with JS's own `RegExp.prototype.exec()`, an extremely common,
+# unrelated call shape that
 # would turn this into a false-signal generator. Named child_process functions
 # (execSync/execFileSync/spawnSync/execFile) are unambiguous and never legitimately
 # used for anything else; a bare `require`/`import` of the module is also treated as
@@ -2586,9 +2587,13 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
        pipeline is configured but the tool is currently unreachable (dormant, not live
        — chaining on it here would claim a message can reach a tool the config itself
        blocks); the other WARN branch means only a PARTIAL gap (e.g. just
-       allowSymlinkTargetWrites, with approvalPolicy still at its safe "pending"
-       default) — a real widening, but not the "no review at all" shape this chain
-       describes. Only FAIL proves every ingredient the title claims.
+       allowSymlinkTargetWrites, with autonomous authoring off and approvalPolicy
+       "pending") — a real widening, but not the "no review at all" shape this chain
+       describes. Only FAIL proves every ingredient the title claims. (B-783: that
+       example is now version-dependent — OpenClaw 2026.9.3 removed the key from its
+       schema, so the identical config reads B175 == PASS there, with a disclosure that
+       the stale line grants nothing; it is a live partial gap only on 2026.9.2 and
+       earlier, or where the installed version could not be determined.)
     2. at least one of B26 / B171 / B179 holds — a live ingress path for a message from
        someone other than the owner (see `_R26_INGRESS_ARMS`). B26 accepts its plain
        WARN|FAIL status; B171/B179 are narrowed to their genuinely ingress-shaped

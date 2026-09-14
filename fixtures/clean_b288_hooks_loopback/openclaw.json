@@ -19,6 +19,9 @@
     "profile": "minimal",
     "exec": {
       "mode": "ask"
+    },
+    "sessions": {
+      "visibility": "self"
     }
   },
   "agents": {
@@ -46,5 +49,8 @@
     "main": {
       "provider": "local-llama"
     }
+  },
+  "session": {
+    "dmScope": "per-peer"
   }
 }

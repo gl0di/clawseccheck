@@ -99,6 +99,82 @@ def test_unassessed_is_additive_and_status_is_unchanged():
     assert isinstance(inv["openclaw"]["findings"], list)
 
 
+# ---- B-791: the SAME contradiction on a different row, through a path B-472's own fix
+# did not close -- a subject whose ONLY UNKNOWN members are not_applicable had
+# `unassessed == 0` (correctly excluded) and `findings == []`, so `_subject_count_text`
+# could not tell it apart from a genuinely clean subject and returned "clear" next to the
+# UNKNOWN marker `_worst_status` correctly still produces (F-140: not_applicable must
+# never roll up as PASS -- see test_f140_not_applicable_adversarial.py, which a first,
+# retracted draft of this fix broke by excluding not_applicable from `_worst_status`
+# itself). The real fix is a new `not_applicable_count` on each bucket, read by
+# `_subject_count_text`'s new third parameter, so the TEXT can say "not applicable"
+# without touching the MARKER.
+
+def test_bucket_not_applicable_count_and_subject_count_text_agree():
+    """Unit-level: a bucket whose only member is not_applicable+UNKNOWN must roll
+    `status` to UNKNOWN (F-140, unchanged) while `not_applicable_count` counts it
+    separately from `unassessed`, and `_subject_count_text` reads that third count to
+    say "not applicable" rather than "clear"."""
+    from clawseccheck.catalog import Finding
+    from clawseccheck.report import _subject_count_text, _worst_status
+
+    na = Finding(id="B26", title="t", severity="MEDIUM", status=UNKNOWN, detail="d",
+                 fix="f", framework="fr", not_applicable=True)
+    assert _worst_status([na]) == UNKNOWN, "F-140: not_applicable must still roll to UNKNOWN"
+    assert _subject_count_text(0, 0, 1) == "not applicable"
+    # A genuine (non-not_applicable) UNKNOWN member still reads "not assessed" -- the
+    # stronger claim -- even alongside a not_applicable one.
+    assert _subject_count_text(0, 1, 1) == "not assessed"
+    # No not_applicable members at all: unchanged "clear" default.
+    assert _subject_count_text(0, 0, 0) == "clear"
+
+
+def test_channels_row_no_longer_pairs_clear_with_an_unknown_marker(tmp_path, capsys):
+    """The live repro: zero channels configured makes B26 (channels.contextVisibility)
+    fire not_applicable+UNKNOWN. The marker legitimately STAYS UNKNOWN (F-140), but the
+    text used to read "clear" -- "Channels (none configured) -- [?] clear" -- the exact
+    contradiction this function exists to prevent, reached through a path B-472's
+    original fix did not cover. Now it reads "not applicable": marker and text agree,
+    and neither one claims a positive PASS verdict for a surface that was never
+    assessable in the first place."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "openclaw.json").write_text("{}", encoding="utf-8")
+    _, out, _ = _run(capsys, "--full", "--home", str(home),
+                     "--data-dir", str(tmp_path / "dd"),
+                     "--no-color", "--ascii", "--no-history")
+    channels = [ln for ln in out.splitlines() if ln.strip().startswith("Channels (")]
+    assert channels, "inventory block did not render the Channels subject"
+    assert "[?]" in channels[0], channels[0]
+    assert "not applicable" in channels[0], channels[0]
+    assert "clear" not in channels[0], channels[0]
+
+
+def test_no_subject_row_pairs_an_unknown_marker_with_the_bare_word_clear(capsys):
+    """General sweep (not just Channels): every INVENTORY BY SUBJECT row, across both
+    stock fixtures, must honour the invariant _subject_count_text's own docstring states
+    -- an UNKNOWN marker must never sit next to the bare word "clear" (it may sit next
+    to "not applicable" or "not assessed", both of which contain neither "clear" as a
+    standalone word nor mislead about a positive verdict)."""
+    for home in (SAFE, VULN):
+        _, out, _ = _run(capsys, "--full", "--home", home, "--no-color", "--ascii",
+                         "--no-history")
+        in_block = False
+        rows = []
+        for ln in out.splitlines():
+            if ln.startswith("== INVENTORY BY SUBJECT"):
+                in_block = True
+                continue
+            if in_block and ln.startswith("="):
+                break
+            if in_block and ln.startswith(" ") and not ln.startswith("  "):
+                rows.append(ln)
+        assert rows, f"no inventory rows captured for {home}"
+        for ln in rows:
+            if "[?]" in ln:
+                assert "clear" not in ln, f"UNKNOWN marker next to 'clear' ({home}): {ln!r}"
+
+
 # ---- B-473: the plugin line must describe THIS run ----
 
 def test_full_run_does_not_tell_the_operator_to_run_full(capsys):
@@ -290,7 +366,10 @@ def test_stdin_bundle_still_delivers_every_bucket(tmp_path, capsys, monkeypatch)
     payload = json.dumps({
         "attestation": _attestation(),
         "liveTest": {"seed": "b476", "verdicts": [
-            {"tool": "canary", "id": "C1", "verdict": "VULNERABLE"}]},
+            # F-193: a real canary-token-shaped id, not "C1" (never a shape
+            # canary.make_canary() can produce, so it is now rejected).
+            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",
+             "verdict": "VULNERABLE"}]},
     })
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     _, out, _ = _run(capsys, "--home", SAFE, "--full", "--judged-bundle", "-", "--json",

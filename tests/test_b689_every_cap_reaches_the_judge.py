@@ -31,6 +31,7 @@ import itertools
 import pytest
 
 from clawseccheck.adjudication import _CAP_LADDER, run_state
+from clawseccheck.canary import TOKEN_PREFIX as _CANARY_TOKEN_PREFIX
 from clawseccheck.catalog import Finding
 from clawseccheck.pipeline import live_test_cap_signal
 from clawseccheck.report import _CAP_SIGNAL_TABLE
@@ -216,13 +217,19 @@ def test_the_widest_real_reason_stays_one_bounded_line():
     property of the fixtures.
 
     The widest value any of the six can carry is the live one, so it is built HERE by the
-    real producer at its own limit: six `multiturn:<32 chars>` labels plus the "(+N more)"
-    suffix, which `pipeline.live_test_cap_signal` caps at 272 characters. That is what the
+    real producer at its own limit. F-193 now validates a submitted id against each tool's
+    own real scenario-id set, so a synthetic id no longer reaches this function at all --
+    the widest id shape a real submission can carry is an unseeded canary TOKEN
+    (`canary.TOKEN_PREFIX` + 16 uppercase hex chars, 36 chars total; multiturn/redteam/dryrun
+    ids are all 5 chars, `"MT-01"`-shaped). Six `canary:<36 chars>` labels plus the "(+N more)"
+    suffix is what `pipeline.live_test_cap_signal` caps at 272 characters -- the same number
+    an earlier, now-invalid, synthetic-multiturn-id fixture also landed on. That is what the
     320 bound below is measured against, rather than guessed -- an earlier version of this
     test pinned 120 and passed only because "canary:canary" is 13.
     """
+    tokens = [_CANARY_TOKEN_PREFIX + format(i, "016X") for i in range(8)]
     widest = live_test_cap_signal({"verdicts": [
-        {"tool": "multiturn", "id": "i" * 32, "verdict": "VULNERABLE"} for _ in range(8)]})
+        {"tool": "canary", "id": t, "verdict": "VULNERABLE"} for t in tokens]})
     assert widest.hit and len(widest.reason) > 250, len(widest.reason)
 
     score = _score({"live"})

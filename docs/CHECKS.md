@@ -381,6 +381,34 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B369 - acp.backend routes agent turn execution to a plugin backend
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Supply Chain
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: acp.backend routes agent turn execution to a plugin backend
+- Remediation:
+  - none
+
+### B370 - agentRuntime.id names the external process that runs a model's turns
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Supply Chain
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: agentRuntime.id names the external process that runs a model's turns
+- Remediation:
+  - none
+
+## Hardening checks
+
 ### B25 - Update / pinning hygiene
 
 - Severity: MEDIUM
@@ -586,6 +614,30 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: none
 - What it checks: Cleartext http:// baseUrl on a model provider (API-key + traffic leak)
+- Remediation:
+  - none
+
+### B365 - OpenTelemetry content capture ships raw agent turns to a network collector
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Data Protection
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: OpenTelemetry content capture ships raw agent turns to a network collector
+- Remediation:
+  - none
+
+### B366 - memory.search.remote sends embedded memory chunks to a third-party endpoint over cleartext http://
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Proxy / Egress Hardening
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: memory.search.remote sends embedded memory chunks to a third-party endpoint over cleartext http://
 - Remediation:
   - none
 
@@ -1993,6 +2045,30 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B367 - skills.load.allowSymlinkTargets widens where executable skill code may load from via a symlink
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Write Integrity / Self-Modification
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: skills.load.allowSymlinkTargets widens where executable skill code may load from via a symlink
+- Remediation:
+  - none
+
+### B368 - skills.load.watch hot-reloads skill definitions with no gateway restart
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Write Integrity / Self-Modification
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: skills.load.watch hot-reloads skill definitions with no gateway restart
+- Remediation:
+  - none
+
 ## Advisory checks
 
 ### B179 - Hooks enable-toggle attack-surface inventory (hooks.enabled / hooks.internal.load.extraDirs)
@@ -2402,6 +2478,208 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: none
 - What it checks: Gateway operator terminal (browser/mobile shell) enabled
+- Remediation:
+  - none
+
+### B354 - Shared skill-library / upload surface bypasses filesystem discovery
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Supply Chain
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Shared skill-library / upload surface bypasses filesystem discovery
+- Remediation:
+  - none
+
+### B355 - Model-provider local-service command is writable by another account
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Least Privilege
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Model-provider local-service command is writable by another account
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B356 - Legacy pre-migration runtime-state file(s) present (allowFrom/device-auth)
+
+- Severity: LOW
+- Block: advisory
+- Framework: Patch hygiene
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Legacy pre-migration runtime-state file(s) present (allowFrom/device-auth)
+- Remediation:
+  - none
+
+### B357 - Supervisor restart-handoff file outlived its own expiry
+
+- Severity: LOW
+- Block: advisory
+- Framework: Monitoring
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Supervisor restart-handoff file outlived its own expiry
+- Remediation:
+  - none
+
+## Hardening checks
+
+### B358 - OpenAI-compatible chat-completions endpoint (remote ingress; open-proxy-shaped image-URL fetch)
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Zero Trust / Gateway
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: OpenAI-compatible chat-completions endpoint (remote ingress; open-proxy-shaped image-URL fetch)
+- Remediation:
+  - none
+
+### B359 - Remote-gateway SSH host-key policy delegated to OpenSSH instead of pinned
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Zero Trust / Gateway
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Remote-gateway SSH host-key policy delegated to OpenSSH instead of pinned
+- Remediation:
+  - none
+
+### B360 - Control-UI embed sandbox set to 'trusted' (allow-same-origin)
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Zero Trust / Control-UI Origin
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM01 Prompt Injection
+- What it checks: Control-UI embed sandbox set to 'trusted' (allow-same-origin)
+- Remediation:
+  - none
+
+### B361 - Cross-agent session-tool access unrestricted, reachable from an open channel
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Multi-Agent
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM06 Excessive Agency
+- What it checks: Cross-agent session-tool access unrestricted, reachable from an open channel
+- Remediation:
+  - none
+
+### B362 - session.scope=global shares one session across every sender on an open channel
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Session Isolation
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: session.scope=global shares one session across every sender on an open channel
+- Remediation:
+  - none
+
+### B363 - Cross-provider message sends allowed (tools.message.crossContext.allowAcrossProviders)
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Cross-Context Messaging
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM02 Sensitive Information Disclosure
+- What it checks: Cross-provider message sends allowed (tools.message.crossContext.allowAcrossProviders)
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B364 - session.resetTriggers configures inbound phrases that force a session reset
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Session Isolation
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: session.resetTriggers configures inbound phrases that force a session reset
+- Remediation:
+  - none
+
+## Hardening checks
+
+### B371 - Group/room mention gate disabled or bypassed on an externally-reachable channel
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Untrusted Input Gating
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM01 Prompt Injection
+- What it checks: Group/room mention gate disabled or bypassed on an externally-reachable channel
+- Remediation:
+  - none
+
+### B372 - Bot-authored messages accepted (allowBots) on an externally-reachable channel
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Untrusted Input Gating
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM01 Prompt Injection
+- What it checks: Bot-authored messages accepted (allowBots) on an externally-reachable channel
+- Remediation:
+  - none
+
+## Advisory checks
+
+### B373 - Externally-managed, read-only config posture (OPENCLAW_CONFIG_READONLY / Nix mode)
+
+- Severity: LOW
+- Block: advisory
+- Framework: Config Integrity / External Management
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Externally-managed, read-only config posture (OPENCLAW_CONFIG_READONLY / Nix mode)
+- Remediation:
+  - none
+
+### B374 - cloudWorkers prepared-pool default-on warm reserve
+
+- Severity: LOW
+- Block: advisory
+- Framework: Off-Machine Execution
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: cloudWorkers prepared-pool default-on warm reserve
+- Remediation:
+  - none
+
+### B375 - Sitecustomize/PYTHONSTARTUP persistence install, function-scoped (AST)
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Persistence / Supply-Chain Tamper
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Sitecustomize/PYTHONSTARTUP persistence install, function-scoped (AST)
 - Remediation:
   - none
 

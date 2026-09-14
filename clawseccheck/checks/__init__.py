@@ -8,14 +8,19 @@ UNKNOWN when the config cannot tell us (excluded from score — honesty).
 
 from __future__ import annotations
 
+import ast
 import base64
 import binascii
 import html
+import inspect
 import ipaddress
 import json
+import logging
 import os
 import re
 import shutil
+import textwrap
+import traceback
 import unicodedata
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -81,6 +86,8 @@ from ._shared import (
     _active_channels,
     _agent_is_powerful,
     _agent_legs,
+    _agent_tools_widenings,
+    _agents_without_exec_gate,
     _bind_mode_is_ro,
     _canon_tool,
     _canonical_ipv4,
@@ -95,9 +102,11 @@ from ._shared import (
     EXPOSED_BINDS,
     _external_input_channels,
     _finding,
+    _exec_policy_is_gated,
     _gateway_remote_exposure_reason,
     _has_approval_gate,
     _hint,
+    _layer_exec_policy,
     _hooks_agent_ids_unrestricted,
     _hooks_allowed_session_key_prefixes,
     _hooks_session_key_exposures,
@@ -137,6 +146,7 @@ from ._shared import (
     _unclassified_leg_verbs,
     _untrusted_input_channels,
     _UNTRUSTED_INPUT_POLICIES,
+    _username_safe_path,
     _web_fetch_enabled,
 )
 
@@ -190,6 +200,8 @@ from ._egress import (
     _whatwg_url,
     check_outbound_proxy,
     check_provider_baseurl,
+    check_otel_content_capture_egress,
+    check_memory_search_remote_egress,
     check_cachetrace_redaction,
     check_config_audit_log,
     check_config_health_integrity,
@@ -236,9 +248,15 @@ from ._agents import (
     _reassembly,
     check_embedded_agent_project_settings_policy,
     check_agent_separation,
+    check_agent_to_agent_pivot,
+    check_channel_allow_bots,
+    check_channel_mention_gate_bypass,
+    check_cross_context_send,
     check_delegation_reassembly,
     check_multiagent_exposure,
     check_sender_identity,
+    check_session_reset_triggers,
+    check_session_scope_global,
     check_session_visibility,
     check_subagent_spawn_limits,
     check_subagents,
@@ -315,20 +333,26 @@ from ._config import (
     check_env_vars_path_override,
     check_audit_target_divergence,
     check_audit_suppressions,
+    check_cloudworkers_prepared_pool,
     check_control_plane_mutation,
     check_env_breakglass_toggles,
     check_shell_env_fallback,
+    check_chat_completions_endpoint,
+    check_control_ui_embed_sandbox,
     check_controlui_origins,
     check_credential_blast_radius,
+    check_config_externally_managed,
     check_dangerous_overrides,
     check_effective_bind,
     check_gateway,
     check_gateway_operator_terminal,
     check_gateway_rate_limit,
+    check_gateway_remote_ssh_host_key_policy,
     check_hook_template_content,
     check_hooks_enable_toggles,
     check_least_privilege,
     check_local_first,
+    check_local_model_service_command,
     check_privileged_commands_exposure,
     check_proxy_header_forging,
     check_sandbox,
@@ -341,6 +365,7 @@ from ._config import (
 
 from ._shared import (INJECTION_PATTERNS, LOG_SCAN_INJECTION_PATTERNS, _FM_BLOCK_BARE_RE, _FM_BLOCK_HEADERED_RE, _HOOK_EXEC_RE, _skill_frontmatter_block,)
 from ._shared import (_B323_ENV_VAR_NAME_RE, _b323_parse_env_token_at, _b323_contains_env_var_reference,)  # B-397: relocated from _config (reused by B326 too)
+from ._shared import (_SYMLINK_KNOB_RETIRED_MIN, _workshop_symlink_knob,)  # B-783
 from ._lifecycle import (
     _APPROVAL_BYPASS_RE,
     _B182_ENV_OVERRIDES,
@@ -393,16 +418,21 @@ from ._lifecycle import (
     check_install_policy_gate,
     check_secrets_provider_exec,
     check_known_vulns,
+    check_legacy_state_migration_pending,
     check_memory_poisoning,
     check_memory_reconsumption_injection,
     check_offboarding_hygiene,
     check_paired_device_operator_authority,
     check_pending_device_pairing_scope,
+    check_restart_handoff_stale,
     check_self_modification,
     check_clawhub_token_store,
     check_session_approval_policy,
     check_skill_install_tamper,
+    check_skill_library_reachability,
     check_skill_workshop_autonomy,
+    check_skill_symlink_target_writability,
+    check_skill_load_hot_reload,
     check_supply_chain,
     check_update_pinning,
     check_version,
@@ -667,6 +697,7 @@ from ._content import (
     check_self_modification_directive,
     check_self_privesc_directive,
     check_silent_instruction,
+    check_sitecustomize_pythonstartup_scoped_install,
     check_social_engineering_phishing,
     check_symlink_escape,
     check_tool_output_trust_inversion,
@@ -844,6 +875,8 @@ from ._mcp import (
     _vet_mcp_scope_is_broad,
     _vet_mcp_server,
     _vet_mcp_tool_poisoning,
+    check_acp_backend_inventory,
+    check_agent_runtime_id_inventory,
     check_mcp,
     check_mcp_bypass_highblast,
     check_mcp_external_endpoint,
@@ -1315,6 +1348,12 @@ CHECKS = [
     check_mcp_codex_preapproved_tools,  # B353 — MCP server pre-approves every tool (F-185)
     check_mcp_host_sanitizer_gap,  # B331 — MCP tool-description injection past the host sanitizer (F-144/W2.2)
     check_mcp_tool_name_shadowing,  # B332 — cross-server tool-name collision/homoglyph/near-miss (F-145/W2.3)
+    # B369-B370 (C-413) — runtime-exec inventory: acp.backend routes agent turns to a
+    # plugin backend; agentRuntime.id names the external process that runs a model's
+    # turns (real path corrected from the filed task's models.providers.*.agentRuntime.id
+    # to agents.{defaults,entries.<id>}.models.<ref>.agentRuntime.id).
+    check_acp_backend_inventory,
+    check_agent_runtime_id_inventory,
     check_proxy_header_forging,
     check_monitoring,
     check_autonomy,
@@ -1325,6 +1364,11 @@ CHECKS = [
     check_bootstrap_write_protection,
     check_self_modification,
     check_skill_workshop_autonomy,  # B175 — skills.workshop autonomous authoring + approvalPolicy=auto
+    # B367-B368 (C-413) — skills.load.allowSymlinkTargets widens where executable skill
+    # code loads from via a symlink; skills.load.watch hot-reloads skill definitions with
+    # no gateway restart to interrupt a planted/mutated file.
+    check_skill_symlink_target_writability,
+    check_skill_load_hot_reload,
     check_backups,
     check_version,
     check_tool_output_trust,
@@ -1336,11 +1380,34 @@ CHECKS = [
     check_browser_ssrf,
     check_outbound_proxy,
     check_provider_baseurl,  # B178 — models.providers.<id>.baseUrl cleartext http:// leak
+    # B365-B366 (C-412) — raw-content egress: diagnostics.otel content capture ships full
+    # model turns to a network collector (gated on a 4-key conjunction traced from the
+    # runtime, not the schema description); memory.search.remote sends every embedded
+    # memory chunk to a configured third-party endpoint (global + per-agent scope).
+    check_otel_content_capture_egress,
+    check_memory_search_remote_egress,
     check_session_visibility,
+    # B361-B364 (C-411) — remote-ingress / multi-user session hardening: unrestricted
+    # cross-agent session-tool access reachable from an open channel; session.scope
+    # sharing one session across senders; cross-provider message egress (global +
+    # per-agent, since an agent can widen past a safe global default); disclosure of
+    # any inbound-phrase session-reset trigger.
+    check_agent_to_agent_pivot,
+    check_session_scope_global,
+    check_cross_context_send,
+    check_session_reset_triggers,
+    # B371/B372 (C-525, split out of C-411) — requireMention/chatmode mention-gate
+    # bypass and allowBots bot-authored-input admission, both scoped to channels
+    # that admit non-owner senders; nesting is genuinely heterogeneous per
+    # provider (root/account/groups/rooms/guilds.channels/groups.topics/channels),
+    # see _mention_gate_scopes in checks/_shared.py for the grounding trail.
+    check_channel_mention_gate_bypass,
+    check_channel_allow_bots,
     check_untrusted_context,
     check_wildcard_group_ingress,
     check_known_vulns,
     check_credential_blast_radius,
+    check_config_externally_managed,  # B373 — OPENCLAW_CONFIG_READONLY / Nix mode (C-527)
     check_effective_tools,
     check_host_network_ids,
     check_host_audit,
@@ -1404,6 +1471,22 @@ CHECKS = [
     # B352 — tools.exec.pathPrepend: what OpenClaw exports ahead of $PATH for every
     # exec run. Skips scopes where host=node, which the runtime ignores.
     check_exec_path_prepend,
+    # B355 (C-408) — models.providers.*.localService.command: a binary OpenClaw spawns
+    # at provider startup. WARN when writable by another account; the relative-path
+    # case the original stub worried about is refuted (the runtime refuses to spawn
+    # a relative command at all) and is not reported here.
+    check_local_model_service_command,
+    # B358 (C-410) — gateway.http.endpoints.chatCompletions: WARN on the OpenAI-shaped
+    # remote ingress; WARN (never FAIL) when images.allowUrl is also on — the vendor's
+    # own SSRF guard unconditionally blocks private/internal/metadata targets, so an
+    # absent urlAllowlist is open-proxy-shaped (any public host), not SSRF.
+    check_chat_completions_endpoint,
+    # B359 (C-410) — gateway.remote.sshHostKeyPolicy: WARN when host-key verification
+    # for the remote-gateway SSH tunnel is delegated to OpenSSH instead of pinned.
+    check_gateway_remote_ssh_host_key_policy,
+    # B360 (C-410) — gateway.controlUi.embedSandbox="trusted": WARN when a hosted
+    # Control UI embed gets allow-same-origin (XSS in the embed reaches the operator).
+    check_control_ui_embed_sandbox,
     check_subagent_spawn_limits,
     check_cachetrace_redaction,
     # B-281/B-282 (ENV-1/ENV-6): is the audited file the one the agent loads, and is a
@@ -1427,8 +1510,11 @@ CHECKS = [
     check_clawhub_lock_verification,  # B135 — accepted-despite-failed-verification install
     check_skill_install_tamper,  # B181 — installed skill modified since its recorded install hash (B-257)
     check_clawhub_token_store,  # B182 — ClawHub CLI plaintext token store perms, outside the OpenClaw home (B-259)
+    check_legacy_state_migration_pending,  # B356 — unmigrated allowFrom/device-auth legacy state files (C-409)
+    check_restart_handoff_stale,  # B357 — supervisor restart-handoff file outlived its own expiry (C-409)
     check_clawhub_registry_provenance,  # B184 — WHICH ClawHub issued the B135/B177/B181 verdicts (B-291, ENV-5)
     check_declared_skill_reconciliation,  # B158 — declared-but-unresolved skill-load source (F-119)
+    check_skill_library_reachability,  # B354 — shared skill-library/upload surface bypasses filesystem discovery (B-725)
     check_audit_suppressions,  # B173 — security.audit.suppressions self-blinds native audit (B-237)
     check_install_policy_gate,  # B174 — security.installPolicy.* gate + exec-hook escape flags (B-238)
     check_dependency_tree_hooks,  # B349 — obfuscated install-lifecycle hook target in the dependency tree (F-167)
@@ -1461,7 +1547,86 @@ CHECKS = [
     # vetted skill — a category error that adds no signal to a pre-install verdict. It
     # belongs to the full audit only, the same reasoning B105 records for itself.
     check_compiled_tool_poisoning,  # B185 — poisoned tool description already delivered to the model (F-133, RT-1)
+    check_cloudworkers_prepared_pool,  # B374 — cloudWorkers 9.4 prepared-pool default-on warm reserve (C-526)
 ]
+
+
+# C-523: static (never executed) finding-id -> check-function map, for --explain/--retest.
+#
+# catalog.BY_ID maps an id to its CheckMeta (metadata only) — nothing anywhere maps an id
+# to the CALLABLE that produces it. Building that by running every check to see what id it
+# emits would cost exactly what --retest exists to avoid paying. Instead this reads each
+# check's own SOURCE for the literal id it constructs a Finding with — the same technique
+# scripts/gen_checks_docs.py already uses (AST over source, never exec) for risk.py's
+# RiskPath extraction.
+#
+# Verified against all 190 functions in CHECKS (2026-09, C-523), and cross-checked by hand
+# against catalog.BY_ID (not just trusted from a read): every one passes its id as a plain
+# string literal to _finding(...)/_custom(...)/_config_unreadable(...)/_host_finding(...) —
+# the four _shared.py/_host.py helpers that construct or forward a Finding's id — with the
+# SAME id on every branch. A couple (check_markdown_image_exfil, check_unicode_obfuscation,
+# check_subagents' _disk_subagent_disclosure helper) delegate to a same-module helper
+# function instead of calling one of those four directly; _finding_ids_for recurses into a
+# same-module callee (bounded by _seen) exactly for that shape.
+#
+# CHECKS_BY_ID's key set is a PROPER SUBSET of catalog.BY_ID's, not equal to it: B191 and
+# T1-T3 are real catalog ids (behavioral.py's detectors) that, per that module's own
+# docstring, are "never in CHECKS" by design — they run only under --behavioral, and a
+# fired one is folded into the score as a cap-only signal rather than appearing in CHECKS'
+# per-run findings list. --explain/--retest give those ids a distinct, accurate error
+# rather than a bare "unknown id" (cli.py). tests/test_c523_checks_by_id_completeness.py
+# pins the exact expected gap set — if a future check doesn't fit any of the four shapes
+# above, or the gap set grows for an undocumented reason, it fails loudly there.
+_ID_CARRYING_CALLS = frozenset({"_finding", "_custom", "_config_unreadable", "_host_finding"})
+
+
+def _literal_ids_in_tree(tree) -> "set[str]":
+    ids: "set[str]" = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in _ID_CARRYING_CALLS and node.args):
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                ids.add(first.value)
+    return ids
+
+
+def _finding_ids_for(fn, module, _seen=None) -> "set[str]":
+    """The finding id(s) *fn*'s own source shows it can produce. Never calls *fn*."""
+    _seen = _seen if _seen is not None else set()
+    if fn in _seen:
+        return set()
+    _seen.add(fn)
+    try:
+        source = textwrap.dedent(inspect.getsource(fn))
+        tree = ast.parse(source)
+    except (OSError, TypeError, SyntaxError):
+        return set()
+    ids = _literal_ids_in_tree(tree)
+    if ids:
+        return ids
+    # No direct _finding/_custom/_config_unreadable call in *fn*'s own body -- it may
+    # DELEGATE its whole verdict to a same-module helper. Recurse into any locally-defined
+    # function it calls (bounded by _seen so a cycle or a large fan-out can't loop/explode).
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            callee = getattr(module, node.func.id, None)
+            if callable(callee) and inspect.getmodule(callee) is module:
+                found = _finding_ids_for(callee, module, _seen)
+                if found:
+                    return found
+    return set()
+
+
+def _build_checks_by_id() -> "dict[str, object]":
+    mapping: "dict[str, object]" = {}
+    for chk in CHECKS:
+        for fid in _finding_ids_for(chk, inspect.getmodule(chk)):
+            mapping[fid] = chk
+    return mapping
+
+
+CHECKS_BY_ID = _build_checks_by_id()
 
 
 def _check_error_finding(chk, exc: BaseException) -> Finding:
@@ -1551,5 +1716,22 @@ def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
         except ScanBudgetExceeded:
             findings.append(_check_budget_finding(chk, "check", check_budget_s))
         except Exception as exc:  # noqa: BLE001 — a bad check must not sink the audit
+            # B-767: the finding tells the user to "re-run with --debug for the
+            # traceback", but nothing ever wrote one -- the exception is caught right
+            # here and never reaches main()'s top-level `--debug: raise`. logger.debug
+            # is a no-op unless --debug set the logger to DEBUG (logsafe.get_logger),
+            # so this costs nothing on a normal run.
+            #
+            # traceback.format_exc() is rendered to a plain string and passed as a %s
+            # ARG, never via exc_info=True: logsafe._RedactingFilter redacts
+            # record.getMessage() (the formatted message, args included), but a
+            # Formatter renders exc_info SEPARATELY via formatException() and appends
+            # it after the filter has already run -- exc_info=True would ship an
+            # unredacted traceback straight past the one thing that exists to stop it.
+            logging.getLogger("clawseccheck").debug(
+                "check %s crashed:\n%s",
+                getattr(chk, "__name__", "unknown_check"),
+                traceback.format_exc(),
+            )
             findings.append(_check_error_finding(chk, exc))
     return findings

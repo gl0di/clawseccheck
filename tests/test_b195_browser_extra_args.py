@@ -79,7 +79,13 @@ _BASE_CONFIG = {
         "auth": {"mode": "token", "token": "a-very-long-token-of-32-characters"},
     },
     "channels": {"telegram": {"dmPolicy": "allowlist", "groupPolicy": "allowlist"}},
-    "tools": {"profile": "minimal"},
+    # session.dmScope/tools.sessions.visibility pinned safe (B-796/B-797): both
+    # default to their riskiest value when unset, so a base config with an allowlist
+    # channel and no explicit session isolation would otherwise carry its own B39 FAIL
+    # -- capping the score identically in every comparison this module makes and
+    # masking the B195/B196 signal these tests exist to isolate.
+    "session": {"dmScope": "per-peer"},
+    "tools": {"profile": "minimal", "sessions": {"visibility": "self"}},
     "logging": {"redactSensitive": "tools"},
     "models": {"main": {"provider": "ollama/llama3"}},
 }

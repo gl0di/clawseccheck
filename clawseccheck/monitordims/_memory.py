@@ -206,13 +206,25 @@ def _snapshot_memory_files(ctx, capped: "list | None" = None) -> dict:
         for p in sorted(mem_dir.rglob("*")):
             if p.is_symlink() or not p.is_file():
                 continue
-            if p.suffix.lower() not in _MEMORY_TEXT_EXTS and p.suffix:
-                continue
             try:
                 rel = p.relative_to(ctx.home)
             except OSError:
                 rel = p
             if rel in seen:
+                continue
+            if p.suffix.lower() not in _MEMORY_TEXT_EXTS and p.suffix:
+                # B-794: an off-whitelist extension used to be a bare `continue` here —
+                # absent from `out` AND absent from `capped`, unlike every other skip
+                # reason below (cap eviction, unreadable, oversized/binary). A file
+                # planted under memory/ with almost any real-world extension (.py/.sh/
+                # .js/.bin/...) was therefore invisible with zero trace, not merely
+                # under-reported: `--monitor --verbose`'s own "could not be compared"
+                # disclosure never named it either. Routed through `capped` now so it
+                # is at least disclosed, matching the disclosed-frontier idiom this
+                # function already uses for every other collection-time exclusion.
+                seen.add(rel)
+                if capped is not None:
+                    capped.append(str(rel))
                 continue
             seen.add(rel)
             if len(out) >= _MEMORY_MAX_FILES:
