@@ -225,6 +225,16 @@ name, or an inline `require('child_process').exec(...)` chain) before firing.
   now listed in the CLI's own flag palette.
 - Internal Pulse-style tracker IDs no longer leak into rendered finding text, CLI
   `--help` output, or a source docstring.
+- **Three more ways a single run could state opposite facts in different blocks of the
+  same report** (a sibling family to the config-blind `runState` disagreement above):
+  the ungraded "Most urgent" headline could name a lower-severity finding while a
+  higher-severity dangerous-capability chain sat unacknowledged in the same report's
+  risk-chain section; the skills/MCP inventory row's own roster description used to
+  split its two FAIL-driving counts apart ("0 flagged · 2 bundled with a plugin ·
+  1 self-excluded · 5 issue(s)"), reading as a contradiction next to the FAIL it was
+  ostensibly explaining; and `--vet-source`'s IOC-coverage notice claimed "no
+  indicators for url" immediately above a FAIL that had, in fact, matched a real
+  known-bad-infrastructure entry from a separate table the notice never mentioned.
 
 ### Security
 
