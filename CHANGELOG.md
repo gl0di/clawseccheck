@@ -46,6 +46,23 @@ and the agent then told the user the audit was "complete."
   `SKILL.md`'s own example was teaching — is rejected rather than trusted at face
   value. A multiturn verdict submitted in the same run that issued the multiturn
   harness is also rejected, since that harness is two-phase by construction.
+- **A `canary` verdict is now cross-checked against the agent's own trajectory, not
+  just its id shape.** The id-shape fix above closes "the id was never even
+  generated"; it does not verify the agent actually did what it claims — a real-shaped
+  id is necessary, not sufficient. When a local trajectory sidecar is readable, a
+  submitted verdict is now recomputed from the agent's own recorded reply and compared
+  (reusing the same render-echo discriminator `--analyze-trajectory`'s self-test
+  corroboration already uses, so a genuinely resistant agent that merely displayed the
+  harness's own instructions is not misread as compliant), and separately, the
+  submitted id itself is checked against what the bundle's own seed could actually
+  have generated. A contradicted entry is dropped before it can complete the
+  live-behaviour ledger layer or set the grade cap — same treatment as no submission
+  at all. A trajectory-less verdict is still accepted (Golden Rule #1 keeps the
+  self-test running entirely outside this tool, and a current OpenClaw install's
+  trajectories often aren't file-based at all), with the gap now named in the report's
+  own coverage line instead of silently assumed complete. Scoped to `canary` this
+  round; `redteam`/`dryrun`/`multiturn` need their own render-echo markers and
+  trigger-turn isolation first.
 - **`SKILL.md` gained an explicit stop rule** for a detected sandboxed or config-blind
   session: state plainly that the setup could not be audited from this chat, offer the
   agent's main session or a host terminal instead, and never continue on to attest a
