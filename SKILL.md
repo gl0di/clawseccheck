@@ -17,8 +17,16 @@ metadata: {"openclaw":{"emoji":"🦞","os":["darwin","linux","win32"],"user-invo
 
 Activate when the user says anything like:
 "check my OpenClaw security", "audit my OpenClaw setup", "is my OpenClaw agent safe",
-"security check", "what's my security score", "am I vulnerable", "scan my OpenClaw agent",
-"how secure is my setup", "test my agent for attacks", "audit me".
+"run a security check on my OpenClaw agent", "what's my OpenClaw security score",
+"am I vulnerable to prompt injection in OpenClaw", "scan my OpenClaw agent",
+"how secure is my OpenClaw setup", "test my OpenClaw agent for attacks",
+"audit my OpenClaw agent".
+
+Do NOT activate on a bare, unqualified "security check", "audit me", "am I vulnerable", or
+"fix this" that names no OpenClaw/agent/skill/plugin/MCP subject — those are too generic to
+imply consent to read the user's local OpenClaw config, credential-adjacent paths, and
+session logs. Ask what they want checked first rather than assuming it means their own
+OpenClaw setup.
 
 It is **read-only with respect to your OpenClaw setup** — it never touches `openclaw.json`, your
 skills, or your bootstrap files, and it reaches the network only through your own host agent (see
@@ -28,23 +36,32 @@ firewall config files, and on Windows a handful of read-only registry queries �
 own scope — see "host recon" below), and it writes its **own** local report/history state under
 `~/.clawseccheck/` (nothing about your agent — see "what it writes" below). Before the first run,
 tell the user in one line what it will read (their OpenClaw config, bootstrap files, log files,
-agent session logs, the text of installed skills, and credential-store path existence — all
-read-only, nothing leaves the machine) so there are no surprises. The default audit is
+agent session logs, the text of installed skills, the two global OpenClaw dotenv files that can
+hold real operational secrets — parsed but never echoed except for a few non-secret toggle/URL
+keys — the content of OpenClaw's own OAuth credential store, scanned only to flag *whether* a
+file holds a plaintext secret, never its value, and credential-adjacent path existence elsewhere
+— all read-only, nothing leaves the machine) so there are no surprises. The default audit is
 inspection-only — the optional active tests
 (`--canary`/`--redteam`/`--dryrun`) simulate an attack against your *own* agent locally and are
 **opt-in**, never run unless you ask for them.
 
 ## What ClawSecCheck does (be transparent)
 
-It runs a **read-only** local script that inspects the user's own agent. **Full read scope:**
+It runs a local script that is **read-only against your OpenClaw setup** — it does keep its own
+local audit-history state on disk by default (see "what it writes" below) — and inspects the
+user's own agent. **Full read scope:**
 
 - `~/.openclaw/openclaw.json` — main config
 - workspace bootstrap files (`SOUL.md`, `AGENTS.md`, `TOOLS.md`, `MEMORY.md`, etc.)
 - text of **installed skills/plugins** (including Python AST-scan, parse-only — never executed)
 - `~/.openclaw/logs/config-audit.jsonl` and `config-health.json` — config-write provenance & integrity
 - `~/.openclaw/agents/.../sessions/*.jsonl` — Codex session logs for approval-policy posture
-- the cron job store, the two global OpenClaw dotenv files, and OpenClaw-related systemd
-  user-unit `Environment=`/`EnvironmentFile=` lines
+- the cron job store, the two global OpenClaw dotenv files (`~/.openclaw/.env` and
+  `~/.config/openclaw/gateway.env` — these can hold real operational secrets: provider API keys,
+  the gateway shared token; every `KEY=VALUE` pair is parsed into memory for the run, and only a
+  handful of named toggle/URL keys are ever echoed into a finding, never a credential-shaped
+  value — see [SECURITY_MODEL.md](SECURITY_MODEL.md)), and OpenClaw-related systemd user-unit
+  `Environment=`/`EnvironmentFile=` lines
 - **host recon (beyond OpenClaw's own scope, skip with `--no-host`):** existence of IDS, FIM, EDR
   and firewall config files, of their binaries on `PATH`, and of systemd enable-symlinks; the
   *contents* of a few known firewall config files, to read whether the firewall is on and whether
@@ -58,8 +75,16 @@ It runs a **read-only** local script that inspects the user's own agent. **Full 
   walked to read each package's `package.json`, each package root's `binding.gyp`, and the
   in-package files those name as install-time targets — the two ways a dependency can run code at
   install time. Bounded (2000 packages), symlinks never followed, nothing ever executed
-- credential-store path-existence inventory: checks whether `.env`, SSH key dirs, keychain/keyring
-  directories, and browser cookie stores **exist** near the agent home (never reads their contents)
+- **OpenClaw's own OAuth credential store (`<home>/credentials/`):** every file's *content* is
+  read (bounded) and tested with the same secret detector used elsewhere in this tool, to answer
+  one boolean per file — does it look like it holds a plaintext secret — plus a truncated digest so
+  `--monitor` can notice a credential added, removed, or replaced. Feeds the Lethal Trifecta check,
+  which runs on every default audit. The file's content and any detected secret value are never
+  stored, echoed into a finding, written to a report, or logged — only the filename, a boolean, and
+  a digest survive
+- a **separate, narrower** path-existence inventory: whether `.env`, SSH key dirs, keychain/keyring
+  directories, and browser cookie stores **exist** near the agent home — this check never opens any
+  of them
 - the ClawHub CLI's own plaintext token-store config (outside the OpenClaw home) — opened to check
   whether a `token` field is present and the file's permissions; the token *value* itself is never
   read into a report, logged, or placed in evidence (B182)

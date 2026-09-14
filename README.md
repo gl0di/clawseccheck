@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner-readme.png" alt="ClawSecCheck — local, read-only security audit for your OpenClaw agent" width="820">
+  <img src="docs/assets/banner-readme.png" alt="ClawSecCheck — local security audit for your OpenClaw agent, read-only against your config" width="820">
 </p>
 
 <p align="center">
@@ -381,6 +381,26 @@ project treats as a release-blocking bug in its own output**, which is why a
 false FAIL here is a hard blocker and not a tuning preference. See the
 [security model](SECURITY_MODEL.md) for the complete capability surface, and
 [`docs/IOC_DATA.md`](docs/IOC_DATA.md) for the IOC dataset's provenance policy.
+
+**A second worked example, from ClawHub's own listing scan (v4.0.1, 2026-09-08).**
+Its "hardcoded secret" and "disabled TLS verification" findings are the same
+point-3-adjacent shape as above, aimed at different lines: the flagged
+"secret" is `checks/_content.py`'s `_URL_AUTH_QUERY_PARAM_NAME_RE` — a regex
+of REST auth *query-parameter names* (`access_token`, `api_key`...), no value,
+used to recognize the `?api_key=` idiom in a scanned skill's prose; the
+flagged "disabled TLS verification" is `checks/_mcp.py` reading `sslVerify`
+out of **the audited MCP server's own config** and FAILing when it is
+`false` — this tool makes no TLS connection of its own to have a verification
+setting for. Its "env var access + network transmission" finding is
+`skillast.py`'s `ENV_EXFIL_FLOW` taint rule: plain `set`/`tuple` literals of
+library and attribute *names* (`requests`, `urlopen`, `getenv`...) that the
+AST walker compares a **scanned skill's** parsed nodes against — never
+imported, never called here. And its "in-memory retention of sensitive
+environment values" finding is real in the narrow sense that `collector.py`
+does read the two dotenv files' raw `KEY=VALUE` pairs into memory for the
+run — see [security model](SECURITY_MODEL.md#secrets-and-data-handling) for
+exactly what that's for (truthy/strength/hostname checks only) and where a
+regression test pins that the value never reaches a finding, a log, or disk.
 
 <details>
 <summary><b>⚙️ For terminal users: CLI, JSON, SARIF, CI gates</b></summary>

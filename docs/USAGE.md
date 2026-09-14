@@ -351,8 +351,10 @@ config. **The scanner itself makes no network calls.** Full read scope:
 - text of installed skills/plugins (Python files are AST-parsed, never executed)
 - `~/.openclaw/logs/config-audit.jsonl` and `config-health.json` (config-log checks)
 - `~/.openclaw/agents/.../sessions/*.jsonl` (approval-policy posture)
-- the cron job store, the two global OpenClaw dotenv files, and OpenClaw-related systemd
-  user-unit environment lines
+- the cron job store, the two global OpenClaw dotenv files (`.env`/`gateway.env` — these can hold
+  real operational secrets; parsed in full, but only a handful of named toggle/URL keys are ever
+  echoed into a finding, never a credential-shaped value), and OpenClaw-related systemd user-unit
+  environment lines
 - the ClawHub CLI's own token-store path — outside the OpenClaw home — for the B182
   credential-hygiene check
 - host OS recon for IDS/FIM/EDR/firewall: existence of their config files and binaries on
@@ -370,8 +372,14 @@ config. **The scanner itself makes no network calls.** Full read scope:
   package's `package.json`, each package root's `binding.gyp`, and the in-package files those
   name as install-time targets (B349). Bounded to 2,000 packages, symlinks are never followed,
   and nothing found there is ever executed; skip it with `--no-deptree`
-- credential-store path-existence inventory: whether `.env`, SSH key dirs, keychain/keyring
-  directories, and browser cookie stores **exist** near the agent home — contents never read.
+- OpenClaw's own OAuth credential store (`<home>/credentials/`): every file's *content* is read
+  (bounded) and tested for a plaintext-secret shape — one boolean plus a truncated digest per file,
+  feeding the Lethal Trifecta check (runs by default) and the `--monitor` credential dimension.
+  The content and any detected value are discarded in the same function call; only the filename,
+  boolean, and digest ever reach a finding
+- a separate, narrower credential-store path-existence inventory: whether `.env`, SSH key dirs,
+  keychain/keyring directories, and browser cookie stores **exist** near the agent home — this one
+  never opens any of them.
 
 (`collector.py`'s `LIMIT_DOMAIN_*` constants name the collector's own read domains: config,
 bootstrap, skill, plugin, cron, approvals, env, agents, audit. The socket scan and the
