@@ -3,6 +3,240 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.1.0] — 2026-09-14
+
+**The tool could hand out a letter grade for a setup it had never actually read the
+OpenClaw config for.** This release closes that whole incident (E-087), adds roughly
+twenty new checks covering gateway remote-exposure, multi-agent session isolation, and
+raw-content egress paths that had no coverage at all, and ships a handful of new
+capabilities (`--watch`, `--explain`/`--retest`, structured `.clawseccheckignore`
+entries, SBOM diffing, `--incident` lifecycle tracking).
+
+### Fixed — a run could be graded without ever reading your OpenClaw config (E-087)
+
+**`openclaw.json` was never found or read, and the tool still printed `Grade F · 49/100`
+— not a missing-data disclaimer, a letter grade, on the same 0-100 scale as a run that
+actually scanned a real config.** This is the most common real-world way to trigger it:
+a user running the tool from an OpenClaw Control UI dashboard chat — the normal case
+under `agents.defaults.sandbox.mode: non-main`, which sandboxes every session except the
+agent's own main key — asked for a full check. The chat runs inside a Docker container
+with no network and no access to the real `~/.openclaw`. The audit correctly reported
+no config found. The agent did not stop there: it wrote its own attestation describing
+the *sandbox* instead of the real setup, ran the live self-tests but only read two of
+the four, then wrote a live-test verdict file shaped like
+`{"tool": "canary", "id": "canary", "verdict": "RESISTANT"}` — copying an example
+straight out of this tool's own `SKILL.md`. That one self-authored entry, layered on
+top of a run that had read zero bytes of any config, was enough to produce the grade —
+and the agent then told the user the audit was "complete."
+
+- **A run that never read a config can no longer be graded, period** — not capped, not
+  downgraded, no letter of any kind — once an attestation and a live-test verdict are
+  layered on top of it. The five-layer ledger now derives the static (config) layer's
+  own status from whether `openclaw.json` was actually found and readable; previously
+  it reported that layer as having run unconditionally, so nothing tied "the tool never
+  saw your config" to "there is no grade." An absent or unreadable config now withholds
+  the letter entirely instead of capping it at F/49. **Machine consumers of `--json`**:
+  a config-blind run that previously returned `grade: "F"` now returns
+  `grade: null, graded: false` — `docs/FAQ.md`, `docs/USAGE.md` and
+  `docs/OUTPUT_SCHEMA.md` are re-grounded to match.
+- **A self-reported live-test verdict is now checked against what its own tool could
+  actually have generated.** `canary`/`dryrun`/`redteam`/`multiturn` each produce a
+  fixed, deterministic set of real scenario ids (or, for canary, a specific token
+  shape); a submitted id that isn't one of those — including the tool-name-as-id shape
+  `SKILL.md`'s own example was teaching — is rejected rather than trusted at face
+  value. A multiturn verdict submitted in the same run that issued the multiturn
+  harness is also rejected, since that harness is two-phase by construction.
+- **`SKILL.md` gained an explicit stop rule** for a detected sandboxed or config-blind
+  session: state plainly that the setup could not be audited from this chat, offer the
+  agent's main session or a host terminal instead, and never continue on to attest a
+  sandbox or fabricate live-test evidence. Corrected wording that had claimed a
+  RESISTANT self-report "changes nothing" — it decides whether the run is graded at
+  all.
+- **The MEDIA path for a sandboxed run's PDF now actually delivers.** The report was
+  written to the sandbox workspace but announced with a `~/...` path; the OpenClaw
+  gateway expands `~` against the real host's home, which the sandbox boundary then
+  correctly refused. Delivery now uses the sandbox-relative path that resolves inside
+  the container.
+- **On a real host, trajectory evidence is no longer invisible on OpenClaw 9.x.** The
+  runtime moved from JSONL sidecar files to a SQLite store; this tool's glob still only
+  looked for the old files, so every 9.x run reported zero trajectory evidence — the
+  same observation an agent that has genuinely never run once would also produce. A new
+  runtime corroborator reconciles pointer files, an archive of migrated sidecars and
+  each agent's own SQLite trajectory table, and distinguishes "never ran" from "the
+  locator went stale" instead of reporting neither.
+- Related wording/consistency fixes: the behavioral-replay section no longer claims
+  "replay complete" when zero trajectory records were read; `--full --json`'s
+  `runState` object no longer disagrees with the document's own top-level
+  `graded`/`missing_layers` fields about which layers ran; an empty judge-bundle
+  submission (`"verdicts": []`) is no longer recorded as `verdictsSubmitted: true`, and
+  a config-blind run's judge packet no longer floods the second-opinion panel with 150+
+  near-identical items sharing one cause; B43 no longer claims an approval gate exists
+  for a verb the attestation reports as running `auto`.
+
+### Added — roughly twenty new checks
+
+Three coverage gaps closed almost entirely: **gateway remote-exposure** (B358-B360:
+the OpenAI-compatible HTTP ingress, unpinned SSH host-key verification on the remote
+gateway, the hosted Control UI embed sandbox), **multi-agent/session isolation**
+(B361-B364: unrestricted cross-agent session-tool access, a globally-shared session
+across all channel senders, a per-agent override that can widen cross-context message
+access past a safe default, session-reset trigger disclosure — plus B39, a fix below,
+which found the audit's own 120+ fixture corpus was passing by relying on an unsafe
+default it never flagged), and **raw-content egress** (B365-B366: OpenTelemetry
+diagnostics capturing full conversation content to a network collector, memory
+embeddings sent to a third-party search endpoint).
+
+- **B354** — surfaces skills installed through OpenClaw's shared skill-library/upload
+  channel, which every prior content-security check was blind to (WARN/UNKNOWN only —
+  it can confirm reachability, not judge content).
+- **B355** — flags a model-provider `localService.command` path another local account
+  could overwrite; OpenClaw auto-spawns this binary at provider startup.
+- **B356/B357** — leftover legacy OpenClaw state blocking a clean gateway startup until
+  migrated; a stale supervisor restart-handoff file left behind by a crash.
+- **B358/B359/B360** — gateway HTTP ingress, remote SSH host-key pinning, Control UI
+  embed sandbox mode.
+- **B361-B364** — cross-agent session-tool access, globally-shared sessions,
+  per-agent message-scope widening, session-reset trigger disclosure.
+- **B365/B366** — OTel raw-content capture (also catches an inline secret in a trace
+  header the generic secret scanner would miss), memory-embedding egress.
+- **B367-B370** (+ B25 extension) — a writable symlink target for skill code, skill
+  hot-reload from outside the managed tree, agent runtime/backend disclosure; the
+  update-pinning check now also flags opting into dev/beta OpenClaw release channels.
+- **B371/B372** — missing @-mention gate and open bot-input acceptance, across all 27
+  supported channel providers.
+- **B373/B374** — externally-managed read-only config disclosure; `cloudWorkers`
+  keeping warm remote workers running (an easy-to-miss ongoing cost), both for
+  OpenClaw 2026.9.4.
+- **B375** — precise, function-scoped detection of `sitecustomize`/`usercustomize`/
+  `PYTHONSTARTUP` persistence installs, replacing the looser whole-file regex B335 used
+  and properly feeding the "Persistence" risk category.
+- A WARN (not FAIL) when a skill reads OpenClaw's own credential store and shows real
+  evidence of sending credential-shaped content to an external sink — two stricter
+  approaches were tried and rejected for false-positiving on ordinary skills that
+  legitimately read the store (e.g. to post a webhook status message).
+
+**Caught during this release's own real-install verification pass, against an actual
+installed OpenClaw plugin:** the new JS `child_process` command-injection check fired on
+a SQLite `.exec()` call that had nothing to do with `child_process` — it matched any
+`.exec()`/`.spawn()`-named method call anywhere in a file that also happened to import
+`child_process` for something else, and its evidence text asserted a fixed, fabricated
+example instead of the code it actually matched. It now resolves the matched call's own
+receiver back to an actual `child_process` binding (a namespace import, a destructured
+name, or an inline `require('child_process').exec(...)` chain) before firing.
+
+### Added — new capabilities
+
+- **`--watch`** — a continuous background mode that reacts to a relevant file change in
+  near-real-time (inotify, with a polling fallback) instead of only checking when
+  `--monitor` is run manually or on a cron schedule. `--watch-status` reports whether
+  it's alive; alerts reuse the exact same detection logic as `--monitor`, so they never
+  drift apart.
+- **`--explain FINDING_ID`** prints a single finding's full detail and remediation text
+  (more than the normal report shows); **`--retest FINDING_ID`** re-runs just that one
+  check against the current target. Both always reflect a fresh, read-only run.
+- **Structured `.clawseccheckignore` entries** — optional `author=`/`date=`/`expires=`
+  fields with auto-expiry, and `--show-suppressed` now distinguishes an expired entry
+  from a dead one. Also fixes a real bug: the ignore-file example shipped in
+  `docs/USAGE.md` silently suppressed nothing, so anyone who copy-pasted it got zero
+  suppression with no warning.
+- **`--save-run` / `--diff RUN_ID1 RUN_ID2`** — optionally persist a run's full finding
+  list and compare two saved runs as new/fixed findings, without re-scanning. History
+  previously kept only score/grade, with no way to see which specific findings moved.
+- **`--sbom --format cyclonedx|spdx`** alongside the existing native format, plus
+  **`--save-sbom-run`/`--sbom-diff`** to compare component inventories across runs.
+- **`--incident-open` / `--incident-mark ID STATUS` / `--incident-show ID`** — a
+  persisted open → investigating → mitigated → closed lifecycle, alongside the existing
+  one-shot `--incident` evidence pack. Forward transitions are one step at a time,
+  backward is always free, and opening with no actionable finding as the basis is
+  refused. Two security bugs were caught and fixed before release: a malicious skill
+  could have forged a fabricated process-link in evidence text, and a race condition
+  could have let two concurrent status updates double-commit a transition.
+- **`--exit-code-scheme graduated`** (opt-in) — distinguishes a genuine security FAIL
+  (exit 3) from a run that simply couldn't finish or produce a trustworthy result (exit
+  1), for a CI/cron job that currently can't tell those apart from the exit code alone.
+  The default (`binary`) scheme is unchanged.
+- **`--vet-all` now supports `--json`**, matching every other `--vet-*` mode, and
+  discloses whether the sweep actually completed.
+
+### Fixed
+
+- **Three checks (`_enabled_tools()`, the capability graph, B8) now resolve per agent,
+  not just the global default.** An agent whose own settings genuinely widened its tool
+  access, workspace read/write reach, or exec-approval requirement past the global
+  default was invisible to a dozen checks and the capability graph — real elevated
+  capability was going completely unreported. A config field that only ever narrows an
+  HTTP tool-deny list is also no longer mistakenly counted as a grant.
+- **B39 (session isolation) had both absent-case defaults backwards.** OpenClaw itself
+  silently defaults an unset session-visibility or DM-scope setting to its LEAST safe
+  value; the check only flagged an *explicit* misconfiguration. Every install that
+  never touched these two settings — including this project's own 120+-file fixture
+  corpus, which was relying on this exact bug to read clean — was actually running with
+  full cross-session, cross-agent, cross-user transcript access.
+- **The credential+exfiltration co-occurrence check no longer FAILs two benign,
+  ordinary patterns**: reading `~/.npmrc` to hit your own npm registry, and reading a
+  Kubernetes in-cluster token to call your own cluster API (B-748).
+- **A hardcoded provider secret in the simplest possible shape** — a plain
+  `KEY = "sk_live_..."` assignment with no surrounding `os.environ` code — is now
+  detected; it previously produced no finding at all (B-740).
+- **The unicode bidi-override concealment check no longer needs a keyword match to
+  fire** — a reversed/concealed injection using bidi-override control characters is now
+  flagged on its own.
+- **`--monitor` reliability**: refuses to compare or overwrite a saved baseline
+  recorded against a different OpenClaw home (previously silently rebased the baseline
+  and could flood the journal with false alerts); still records a run's real measured
+  score to history when a home mismatch is caught, instead of discarding it; flags a
+  status change that may be caused by a ClawSecCheck version upgrade itself rather than
+  reporting it as an ordinary config regression; a memory file with an unrecognized
+  extension is now flagged (MEDIUM) instead of silently ignored with zero trace, even
+  under `--verbose`; baseline-witness journal entries are now tagged with the specific
+  state file they describe.
+- **`--trend`/`--watch-log` no longer dump thousands of unbounded rows** (measured:
+  4,600+ rows, 180+ KB on a real machine) — both print the most recent 30/50 by default
+  with a line stating how many older rows were hidden; `--all` restores the old
+  behavior. Underlying summary statistics still cover full history either way.
+- **Several disclosure/wording fixes**: a truncated trajectory line, a crash on a
+  chmod-000 skill directory, or an engine crash mid-scan now surface as UNKNOWN/degraded
+  instead of a silently dropped or falsely confident result; `--full --json`'s
+  `inventory.plugins.scanned` no longer disagrees with the `pluginSweep` section in the
+  same document; an inventory row for a genuinely-not-applicable surface now says "not
+  applicable" instead of the self-contradictory "UNKNOWN ... clear"; a
+  `--judge-packet` item with no real target no longer reports a fabricated
+  `corroboration.count: 0` (a new `subject_determinable` field distinguishes "measured
+  zero" from "could not be determined" — this fixed 97 of 98 items on a real fixture);
+  172 of 175 real judge-packet items previously carried zero evidence because a check
+  that finds a field unset and stops had nowhere to record what it looked at — borderline
+  findings now carry the specific config field path that was checked.
+- **Four `--monitor`/CLI reliability gaps** (B-769): a clear migration message for the
+  removed `--fail-under` flag instead of a generic argparse error; duplicate drift
+  events under concurrent `--monitor` runs; honest wording that a broken verification
+  chain isn't proof of tampering; visibility into `.clawseccheckignore` entries that no
+  longer match anything.
+- `--vet-judged ''` (an empty value) is now rejected like every other vet flag, instead
+  of silently no-op'ing as if the flag were never passed.
+- `--emit-manifest` against this tool's own installed copy now says it was deliberately
+  excluded from scanning, instead of the misleading generic "opaque/unparseable code"
+  text.
+- A config key OpenClaw 2026.9.3 removed from its schema no longer produces a stale
+  workshop-autonomy warning on a fully-hardened install.
+- `--watch`'s own printed guidance (a bad-path error, a re-scan-failure error, the
+  per-cycle re-scan banner) now names the correct command for however the tool was
+  actually launched, instead of hardcoding a console-script form that doesn't exist on
+  a ClawHub install; the new `--watch`/`--watch-status`/`--watch-debounce` flags are
+  now listed in the CLI's own flag palette.
+- Internal Pulse-style tracker IDs no longer leak into rendered finding text, CLI
+  `--help` output, or a source docstring.
+
+### Security
+
+- **Absolute paths under the OS account's home directory are collapsed to `~/...`** in
+  every render surface (finding text, JSON, HTML, SARIF, PDF) — five leak sites,
+  including one JSON field left absolute, previously exposed the operator's OS username
+  whenever a report was pasted into a chat channel or attached to a bug report (B-757).
+- **A memory file with an extension outside a small text-only allowlist is no longer
+  silently dropped by `--monitor`.** Planting a payload under `memory/` using almost
+  any other extension previously produced a clean "No new threats" with zero trace,
+  even under `--verbose` — verified closed against 25 monitor-detection-gate scenarios.
+
 ## [4.0.1] — 2026-09-09
 
 **4.0.0 is 4.0.1.** Nothing in the tool changed between them. 4.0.0 was tagged and never
