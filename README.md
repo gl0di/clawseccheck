@@ -153,6 +153,21 @@ history all live under `~/.clawseccheck/` and are removable at any time
 (`--purge`). Points elsewhere with `--state` / `--events` if you want to keep
 several watches apart.
 
+**Prefer it running continuously instead of on a schedule?** `--watch` is the
+same mode, run a different way: instead of you or a cron job invoking
+`--monitor` again, it stays running and re-scans automatically the moment
+something relevant changes under `--home` (debounced — real-time on Linux via
+inotify, a bounded poll elsewhere). It never returns until stopped (`Ctrl-C`),
+and writes only under `--data-dir`, exactly like `--monitor`:
+
+```bash
+clawseccheck --watch
+```
+
+Check whether one is already running with `--watch-status` — read-only, and
+it never starts a watch itself. Full mechanism and liveness details:
+[User guide](docs/USAGE.md#--watch--continuous-real-time-monitoring).
+
 ### C · Before you install — *is this thing safe to add?*
 
 Run it on the event. Gives you INSTALL / CAUTION / DO-NOT-INSTALL — not a
@@ -422,7 +437,21 @@ clawseccheck --html report.html      # standalone HTML report (private)
 clawseccheck --pdf report.pdf        # complete audit as a paginated PDF (attach into chat)
 clawseccheck --exhaustive            # raise the scan caps: slower, maximum coverage
 clawseccheck --fail-on high          # CI gate: exit 1 if an unsuppressed FAIL at/above HIGH exists
+clawseccheck --explain B2            # full detail on one check, no full re-scan
+clawseccheck --retest B2             # re-check just that one after a fix
+clawseccheck --save-run              # snapshot this run so a later --diff can compare it
+clawseccheck --diff RUN1 RUN2        # new/fixed findings between two saved runs
+clawseccheck --incident-open         # open a tracked incident record from this run's findings
+clawseccheck --incident-mark ID investigating   # move it through open/investigating/mitigated/closed
+clawseccheck --incident-show ID      # its status, history, and the --monitor timeline since it opened
+clawseccheck --judge-packet          # export borderline findings for a host-agent second opinion
 ```
+
+Two more nuances the User guide covers in full: `--save-sbom-run` / `--sbom-diff` do for
+the bill-of-materials what `--save-run` / `--diff` do for findings — added/removed/changed
+components between two points in time — and `--exit-code-scheme graduated` reuses
+`--monitor`'s 0/1/3 convention for `--fail-on`/`--exit-code` instead of the default binary
+0/1, for a CI consumer that wants "could not produce a verdict" told apart from a real FAIL.
 
 The **[User guide](docs/USAGE.md)** covers the modes and recipes — vetting engines,
 drift monitoring, attestation, red-team self-tests. `clawseccheck --help` is the

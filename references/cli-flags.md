@@ -96,6 +96,9 @@ kept here so the always-loaded playbook stays lean.
   by that budget is reported as UNKNOWN, never as a clean tree). Use it on a very large installed
   tree, or to keep the scan inside the OpenClaw home. Note the asymmetry with the library API:
   `audit()` takes `include_deptree=False` by default, so only the CLI walks unless asked.
+- `--no-dist` — skip reading the installed OpenClaw package's own version (C4 corroborates it
+  against `meta.lastTouchedVersion` to surface a version rollback). Read-only `PATH` lookup, no
+  subprocess.
 - `--no-update-notice` — suppress the offline "your build may be stale" reminder
   (also via `CLAWSECCHECK_NO_UPDATE_NOTICE=1`). The reminder is offline-only — never a network call.
 - `--no-freshness-notice` — suppress the report's advisory freshness lines (also via
@@ -107,6 +110,9 @@ kept here so the always-loaded playbook stays lean.
   two print to stderr. All of it is offline and advisory — never a network call, never a finding,
   and never a change to score or grade; none of it appears in `--json` / `--card` / `--sarif`.
 - `--verify-self` — print SHA-256 digest of ClawSecCheck's source files for tamper detection.
+- `--recursive` — alias for `--vet-all` (vet every installed skill across all discovered skill
+  roots — one verdict per skill plus an aggregate). Same flag, same behavior; both spellings
+  are accepted.
 - `--show-suppressed` — list any findings the user has silenced via `.clawseccheckignore`.
 - `--explain FINDING_ID` — run just the one check named by FINDING_ID (e.g. `--explain B2`)
   against the current target and print its full detail — severity, status, why, evidence,

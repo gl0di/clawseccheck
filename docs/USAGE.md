@@ -841,6 +841,29 @@ a "fixed" entry among those checks may only mean the check did not run the secon
 that the issue was resolved. `--diff --json` prints a machine-readable payload — see
 `docs/OUTPUT_SCHEMA.md`.
 
+### Comparing two SBOM snapshots — `--save-sbom-run` / `--sbom-diff`
+
+The same idea as `--save-run`/`--diff` above, for the bill-of-materials instead of findings:
+"what components were added, removed, or changed between two points in time" needs its own
+snapshot, since `--sbom`'s own output is never retained.
+
+```bash
+clawseccheck --sbom --save-sbom-run                    # prints: (SBOM run saved as 2026-09-10T09:15:23 — ...)
+# ... time passes, a skill is added or updated ...
+clawseccheck --sbom --save-sbom-run                    # prints: (SBOM run saved as 2026-09-12T11:02:07 — ...)
+clawseccheck --sbom-diff 2026-09-10T09:15:23 2026-09-12T11:02:07
+```
+
+`--save-sbom-run` only works alongside `--sbom`, is **opt-in** the same way `--save-run` is, and
+persists the native-shape component inventory regardless of which `--format` you asked for —
+CycloneDX/SPDX are rendering choices, not what gets stored. Same retention window as
+`--save-run` (the last 50 saved runs), same run id (its timestamp), separate store file
+(`sbom_runs.jsonl`, alongside `runs.jsonl`).
+
+`--sbom-diff RUN_ID1 RUN_ID2` reads two saved SBOM runs (it runs no live audit itself) and
+reports added, removed, and changed components between them. `--sbom-diff --json` prints a
+machine-readable payload — see `docs/OUTPUT_SCHEMA.md`.
+
 ### Known limits of `--monitor` (read before relying on it)
 
 These are inherent boundaries of a **local, file-based, scheduled** drift detector — not bugs to
@@ -1509,6 +1532,7 @@ exists and still works, and the CI/power surface is unchanged. The grouping just
 | Need | Command |
 |---|---|
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
+| Run the same check continuously instead of on a schedule | `clawseccheck --watch` (stays running, re-scans on a relevant filesystem change) · `clawseccheck --watch-status` (is one already alive?) |
 | Score trend across past scans | `clawseccheck --trend` (plots the **graded** runs only; ungraded ones are recorded but carry no point) |
 | Compare two specific past runs — new/fixed findings | `clawseccheck --save-run` (opt-in per-run snapshot; prints the run id) · `clawseccheck --diff RUN_ID1 RUN_ID2` |
 | Verify the local stores weren't tampered with | `clawseccheck --verify-history` · `clawseccheck --verify-events` |
@@ -1521,14 +1545,14 @@ exists and still works, and the CI/power surface is unchanged. The grouping just
 | Vet a skill / a plugin explicitly | `clawseccheck --vet-skill ./skill` · `clawseccheck --vet-plugin ./plugin` |
 | Vet connected MCP servers | `clawseccheck --vet-mcp` |
 | Reputation gate before download | `clawseccheck --vet-source clawhub:some-skill` |
-| Vet every installed skill at once | `clawseccheck --vet-all` |
+| Vet every installed skill at once | `clawseccheck --vet-all` (alias: `--recursive`) |
 | Plan a zero-network vet / get an install call | `clawseccheck --vet-plan clawhub:some-skill` · `clawseccheck --advise ./quarantined` |
 
 **Works with any mode**
 
 | Need | Command |
 |---|---|
-| Skip native audit / host posture / socket scan / dependency-tree walk | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` · `clawseccheck --no-deptree` |
+| Skip native audit / host posture / socket scan / dependency-tree walk / installed-version check | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` · `clawseccheck --no-deptree` · `clawseccheck --no-dist` |
 | Disable local history / age notice | `clawseccheck --no-history` · `clawseccheck --no-update-notice` |
 | CI gate (needs no score) | `clawseccheck --fail-on high` · `clawseccheck --exit-code` |
 | Verify the engine itself | `clawseccheck --verify-self` |
@@ -1922,6 +1946,9 @@ python3 audit.py --log audit.log            # also write log to a local file
   (see "Full read scope" above), so this is the escape hatch on a very large tree or when you
   want the run confined. `--no-host` and `--no-sockets` skip host-monitor detection and the
   listening-socket scan the same way, and `--no-native` skips the built-in native audit.
+  `--no-dist` skips reading the installed OpenClaw package's own version (which C4 corroborates
+  against `meta.lastTouchedVersion` to surface a version rollback) — also a read-only `PATH`
+  lookup, no subprocess.
 
 ## Uninstall / cleanup
 
