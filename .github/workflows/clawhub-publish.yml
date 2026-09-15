@@ -66,21 +66,23 @@ jobs:
 
       - name: Resolve & verify version
         id: ver
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           FM="$(grep -m1 '^version:' SKILL.md | awk '{print $2}')"
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            VER="${{ github.event.inputs.version }}"
+          if [ -n "${INPUT_VERSION}" ]; then
+            VER="${INPUT_VERSION}"
           elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             VER="${GITHUB_REF_NAME#v}"
           else
             VER="$FM"
           fi
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "resolved version=$VER  (SKILL.md frontmatter=$FM)"
           if [ "$VER" != "$FM" ]; then
             echo "::error::Version '$VER' does not match SKILL.md frontmatter '$FM' — bump SKILL.md first."
             exit 1
           fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -165,6 +167,7 @@ jobs:
         # --new-bundle-format's default to true, which silently ignores the
         # --output-signature/--output-certificate flags (C-189). --bundle is the
         # supported single-file path and round-trips on both cosign v2 and v3.
+        id: sign
         run: |
           cosign sign-blob --yes \
             --bundle SHA256SUMS.txt.bundle \
@@ -426,6 +429,13 @@ jobs:
         # landed later with a backdated createdAt. Failing the build on that would be a false
         # alarm, and this repo does not ship false alarms. A version that never surfaces is
         # caught for real by the previous-release gate at the top of the NEXT release.
+        #
+        # `if: ${{ !cancelled() }}` (A1): without it this step inherits the default implicit
+        # success() condition, so it is skipped exactly when the Publish step above fails —
+        # the one scenario this reality-probe exists for. !cancelled() runs it after any
+        # earlier failure short of the job being cancelled, so a failed publish still gets
+        # checked instead of leaving the run silent about what actually happened.
+        if: ${{ !cancelled() }}
         env:
           VER: ${{ steps.ver.outputs.version }}
         run: |
@@ -460,7 +470,14 @@ jobs:
         # SHA256SUMS.txt alone, while README/FAQ tell users to verify the install with
         # `cosign verify-blob --bundle`. The signed digest is a property of the TAGGED
         # TREE, not of the registry, so it must land whatever the registry replied.
-        if: ${{ !cancelled() && github.ref_type == 'tag' }}
+        #
+        # `steps.sign.outcome == 'success'` (A2): !cancelled() alone means "after ANY earlier
+        # failure short of cancellation" — including a red smoke gate (tests/ruff), which skips
+        # signing entirely and leaves SHA256SUMS.txt / .bundle missing, yet this step would still
+        # fire on a tag push and `gh release create` would publish a public, assetless Release
+        # for a broken tag. Gating on the Sign step's own outcome narrows this to "we got as far
+        # as producing a valid signed digest" — the actual precondition this step needs.
+        if: ${{ !cancelled() && github.ref_type == 'tag' && steps.sign.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
