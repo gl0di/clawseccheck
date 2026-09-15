@@ -25,6 +25,7 @@ from ..collector import (
     agent_roster,
     dig,
 )
+from .. import trajectorystore as _trajectorystore
 from . import _shared
 from ._shared import (
     LOOPBACK,
@@ -3538,13 +3539,35 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     from ..scanbudget import audit_deadline, limits_for  # noqa: PLC0415
 
     sinks = discover_log_sinks(ctx)
+
+    # B-817: this discovery has no notion of the SQLite-backed trajectory store
+    # (trajectorystore.py) — a `kind="trajectory"` sink here is a JSONL sidecar only.
+    # When no such sidecar was found among the sinks, corroborate against the SQLite
+    # container so a clean PASS/UNKNOWN never stays silent about evidence this content
+    # scan structurally cannot read (event_json is never opened — see
+    # trajectorystore.py's own §8 paragraph). Locator-stale is the only status worth
+    # disclosing here: STATUS_LIVE never reaches this branch (a live sidecar would
+    # already be a `kind="trajectory"` sink) and STATUS_NO_RESIDUE has nothing to
+    # disclose.
+    sqlite_trajectory_disclosure = ""
+    if not any(sink.kind == "trajectory" for sink in sinks):
+        home = getattr(ctx, "home", None)
+        corro = _trajectorystore.corroborate(home) if isinstance(home, Path) else None
+        if corro is not None and corro.status == _trajectorystore.STATUS_LOCATOR_STALE:
+            sqlite_trajectory_disclosure = (
+                " trajectory evidence exists in a SQLite-backed store this content "
+                "scan cannot read (agents/*/agent/openclaw-agent.sqlite; event_json "
+                f"is never opened, by design) — {corro.sqlite_rows} row(s) across "
+                f"{corro.sqlite_sessions} session(s) unexamined."
+            )
+
     if not sinks:
         return _finding(
             "B164",
             UNKNOWN,
             "No agent log/transcript sinks found (no logging.file, cacheTrace, trajectory "
             "sidecar, session transcript, config-audit log, memory file, or install backup) "
-            "— nothing to content-scan.",
+            f"— nothing to content-scan.{sqlite_trajectory_disclosure}",
             "Enable OpenClaw's default trajectory sidecar (on by default) and/or "
             "logging.file so a future run has a log corpus to threat-hunt.",
         )
@@ -3680,6 +3703,11 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     # logscan.summarize_truncation's docstring for why this replaced the old generic
     # "results may be incomplete" wording.
     note = summarize_truncation(all_results)
+    # B-817: same disclosure the "no sinks at all" branch carries above, folded in here
+    # so it reaches the WARN and PASS paths too (both build their detail off `note`) —
+    # a sink list that HAS entries but no JSONL trajectory sidecar among them must not
+    # go quiet about SQLite-only evidence either.
+    note += sqlite_trajectory_disclosure
     # B-314: same honesty discipline for a sink skipped by the cumulative check-level
     # deadline (_LOG_HUNT_CHECK_BUDGET_S) — never silently omitted from the count.
     if skipped_for_time:

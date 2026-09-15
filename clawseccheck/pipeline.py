@@ -1412,13 +1412,31 @@ def _worse_status(a: str, b: str) -> str:
 # can never disagree.
 _B164_NOT_SCANNED_RE = re.compile(r"(\d+) log/transcript sinks? not scanned")
 
+# B-817: B164's SQLite-trajectory disclosure (checks/_egress.py's
+# check_log_threat_hunt) names unscanned SQLite trajectory evidence with different
+# wording from the JSONL "not scanned" sentence above — parsed separately so it does
+# not have to match the same regex; purely additive, the JSONL regex/behavior above is
+# unchanged.
+_B164_SQLITE_UNSCANNED_RE = re.compile(
+    r"(\d+) row\(s\) across (\d+) session\(s\) unexamined"
+)
+
 
 def _b164_not_reached(findings) -> tuple:
     b164 = next((f for f in findings if getattr(f, "id", None) == "B164"), None)
     if b164 is None or not getattr(b164, "detail", None):
         return ()
+    out: tuple = ()
     m = _B164_NOT_SCANNED_RE.search(b164.detail)
-    return (f"{m.group(1)} log/transcript sink(s) not scanned",) if m else ()
+    if m:
+        out += (f"{m.group(1)} log/transcript sink(s) not scanned",)
+    m2 = _B164_SQLITE_UNSCANNED_RE.search(b164.detail)
+    if m2:
+        out += (
+            f"{m2.group(1)} SQLite trajectory row(s) across {m2.group(2)} "
+            "session(s) unexamined (agents/*/agent/openclaw-agent.sqlite)",
+        )
+    return out
 
 
 # ── the pipeline roll-up (P10) ───────────────────────────────────────────────
