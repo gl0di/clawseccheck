@@ -6623,7 +6623,11 @@ def render_brief(state: "dict | None", events: "list | None",
                  history: "list | None" = None, *, now=None,
                  state_mtime_iso: "str | None" = None,
                  ascii_only: bool = False) -> str:
-    """One to five lines: is the watch alive, and what did it say while you were away.
+    """Zero to five lines: is the watch alive, and what did it say while you were away.
+
+    Empty ("") means healthy and quiet — a fresh baseline, nothing notable in the
+    journal, no history concern — and is itself the report (Option A): nothing earns a
+    line unless it is informative.
 
     Pure: every input is passed in, nothing is read or written here. *state* is the parsed
     drift baseline (or None when there is none), *events* the journal entries, *history*
@@ -6652,8 +6656,9 @@ def render_brief(state: "dict | None", events: "list | None",
                 lines.append(
                     f"Last drift baseline was written {_brief_age_words(age)} (file time — "
                     "this baseline predates run timestamps, so the exact run is unknown).")
-        elif age is not None:
-            lines.append(f"Last drift check: {_brief_age_words(age)}.")
+        # Option A (Dave): a fresh, healthy check earns no line here — restating "Last
+        # drift check: Xh ago" carried zero signal and every session paid its cost. `age`
+        # is already set above; the staleness ladder right below still fires unchanged.
         if age is None:
             lines.append("A drift baseline exists but carries no timestamp, so how long "
                          "ago it was taken cannot be determined.")
@@ -6693,7 +6698,10 @@ def render_brief(state: "dict | None", events: "list | None",
         lines.append("The score history holds no rows from a real check — only test runs. "
                      "Nothing here reflects this machine.")
 
-    if not lines:
-        lines.append("No baseline, no events, no history — nothing to report yet.")
-    out = "\n".join(lines).rstrip() + "\n"
+    # No catch-all "nothing to report yet" line here on purpose: `lines` can now be
+    # genuinely empty (a healthy, recently-checked baseline, no events, no history
+    # concern) and that IS the report — a manufactured line would contradict Option A's
+    # "stay silent when healthy". `state is None` never reaches here empty: section 1
+    # above always appends "Nothing is watching..." unconditionally in that case.
+    out = "\n".join(lines).rstrip() + "\n" if lines else ""
     return _asciify(out) if ascii_only else out

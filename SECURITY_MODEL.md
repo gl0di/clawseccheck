@@ -521,6 +521,37 @@ field. There is nothing to add to `SKILL.md`'s frontmatter today that would make
 machine-checkable; this document is the closest artifact available until, and unless,
 OpenClaw's skill schema ships such a field, at which point `SKILL.md` should gain it.
 
+## Unprompted host-agent behavior
+
+Everything above describes what the **Python engine** does. `SKILL.md` — the
+conversational manifest a host agent reads to decide when and how to run this tool —
+also carries one instruction that fires with no user utterance at all, and it belongs in
+this document for the same reason every other capability does: a reviewer should not
+have to find it by reading the conversational manifest separately.
+
+- **`--brief --exit-code` at session start, with no consent prompt.** `SKILL.md`'s Mode
+  map instructs the host agent to run it once, unprompted, before the pre-scan menu that
+  gates every other mode on an explicit user request (see "When to use this skill" /
+  Step 1 there). This is the one exception, and it is scoped narrowly enough to earn it:
+  `--brief` reads only ClawSecCheck's own local store under `~/.clawseccheck/` (the last
+  drift baseline, the event journal, the score history) — never the OpenClaw config,
+  bootstrap files, or session logs the consent gate above is about — and it **writes
+  nothing** (`tests/test_f171_brief.py::test_brief_writes_nothing_at_all` pins this: every
+  file's size and mtime must be unchanged, and no new file may appear).
+- **What it can cause the agent to say, unprompted.** A healthy, recently-checked setup
+  produces no output at all — `--exit-code` returns 0, and the agent says nothing and
+  moves on. A stale or dead monitoring schedule, or a HIGH/CRITICAL journal event
+  recorded since anyone last looked, produces one to five lines that the agent relays
+  verbatim, and `--exit-code` returns non-zero. Nothing here reaches an LLM, a network
+  call, or a write; the only "action" is text appearing in the conversation before the
+  user asked for anything.
+- **Why this does not collide with the consent gate above.** "When to use this skill"
+  protects against implying consent to read *OpenClaw's own* sensitive surface (config,
+  credential-adjacent paths, session logs) from a bare, unqualified request. `--brief`
+  reads none of that — only reports this same tool already produced and already
+  disclosed. Nothing new is being read without asking; a summary of prior,
+  already-consented-to output is being surfaced proactively.
+
 ## Out of scope
 
 - **ClawSecCheck does not prove your agent is safe.** It is a heuristic configuration

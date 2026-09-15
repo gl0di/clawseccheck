@@ -12,6 +12,14 @@ is what lets SKILL.md have the agent run this at session start with no consent p
 consent rule covers `--monitor`, which writes. If this mode ever gains a write, that
 instruction becomes wrong and the user is being surprised.
 
+**Option A (Dave): a healthy, quiet setup earns zero lines, not a reassuring one.** The old
+unconditional "Last drift check: Xh ago." restated recency with no signal and every session
+paid for it. Empty output IS the report when nothing is notable — detection is unaffected,
+since the staleness ladder and the journal-event branches never depended on that line. With
+`--exit-code`, the exit status carries the same fact for a host agent that would rather
+check `rc != 0` than parse prose; a bare `--brief` still always returns 0, matching every
+other mode's opt-in exit-code convention.
+
 **The thresholds are measured, not chosen.** On the maintainer's real history the gap
 between consecutive real runs has a median near zero, a p90 of 0.07 days and a maximum of
 1.90 days — so 3 days sits above every gap actually observed, and crossing it means
@@ -43,7 +51,9 @@ def _event(level: str, days_ago: float) -> dict:
 
 def test_brief_writes_nothing_at_all(tmp_path, capsys):
     """THE test. Every file's size and mtime must be unchanged and no file may appear —
-    because SKILL.md tells the agent to run this without asking the user first."""
+    because SKILL.md tells the agent to run this at session start before asking anything,
+    on the strength of that guarantee: it never touches the OpenClaw config the consent
+    rule is about, only this tool's own local store."""
     store = tmp_path / "store"
     store.mkdir()
     (store / "state.json").write_text(json.dumps({"ts": _iso(1), "checks": {}}),
@@ -77,6 +87,48 @@ def test_brief_creates_no_store_when_none_exists(tmp_path, capsys):
     assert not store.exists()
 
 
+# ---------------------------------------------------------------- exit-code contract
+
+def _write_state(store, age_days):
+    store.mkdir(exist_ok=True)
+    (store / "state.json").write_text(
+        json.dumps({"ts": (datetime.now() - timedelta(days=age_days))
+                    .isoformat(timespec="seconds"), "checks": {}}),
+        encoding="utf-8")
+    os.chmod(store / "state.json", 0o600)
+
+
+def test_bare_brief_always_returns_zero_even_when_notable(tmp_path, capsys):
+    """Same opt-in convention as --monitor's exit_code/fail_on (cli.py's _MODE_HONORS):
+    a bare invocation must never start returning non-zero, or a published session-start
+    recipe breaks under `set -e` the day this tool upgrades."""
+    store = tmp_path / "store"
+    _write_state(store, age_days=20)
+    rc = main(["--brief", "--data-dir", str(store), "--home", str(tmp_path / "nohome")])
+    out, _ = capsys.readouterr()
+    assert "not running" in out
+    assert rc == 0
+
+
+def test_exit_code_flag_is_zero_when_silent_and_nonzero_when_notable(tmp_path, capsys):
+    """The new machine contract `--brief --exit-code` gives a host agent: check `rc`, not
+    the text. Healthy and quiet -> empty output, rc 0. Something to relay -> rc 1."""
+    store = tmp_path / "store"
+    _write_state(store, age_days=0)
+    rc = main(["--brief", "--exit-code", "--data-dir", str(store),
+              "--home", str(tmp_path / "nohome")])
+    out, _ = capsys.readouterr()
+    assert out.strip() == ""
+    assert rc == 0
+
+    _write_state(store, age_days=20)
+    rc = main(["--brief", "--exit-code", "--data-dir", str(store),
+              "--home", str(tmp_path / "nohome")])
+    out, _ = capsys.readouterr()
+    assert "not running" in out
+    assert rc == 1
+
+
 # ---------------------------------------------------------------- liveness
 
 def test_no_baseline_says_nothing_is_watching():
@@ -85,11 +137,11 @@ def test_no_baseline_says_nothing_is_watching():
     assert "--monitor" in out
 
 
-def test_a_fresh_check_reads_as_fresh():
+def test_a_fresh_check_is_completely_silent():
+    """Option A: a healthy, recently-checked setup with nothing else notable earns zero
+    lines — not a reassuring "Last drift check: Xh ago" that every session paid for."""
     out = render_brief({"ts": _iso(0.02)}, [], [], now=_NOW)
-    assert "Last drift check" in out
-    assert "longer than" not in out
-    assert "not running" not in out
+    assert out == ""
 
 
 def test_silence_past_the_measured_gap_asks_about_the_schedule():
@@ -189,11 +241,13 @@ def test_a_history_with_real_rows_says_nothing_about_provenance():
 # ---------------------------------------------------------------- shape
 
 def test_it_stays_within_five_lines():
-    """A session-start line the agent prints before every conversation earns its length."""
+    """A session-start line the agent prints before every conversation earns its length.
+    The lower bound is 0, not 1 (Option A): a healthy, quiet run is allowed to say
+    nothing at all — see test_a_fresh_check_is_completely_silent for that case."""
     out = render_brief({"ts": _iso(20)},
                        [_event("CRITICAL", 9), _event("HIGH", 3)],
                        [{"ts": _iso(1), "source": "test"}], now=_NOW)
-    assert 1 <= len(out.strip().splitlines()) <= 5
+    assert 0 <= len(out.strip().splitlines()) <= 5
 
 
 def test_ascii_mode_leaves_no_unicode():

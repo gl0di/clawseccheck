@@ -979,15 +979,23 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   outside the target file itself, with no message printed, from a tool that otherwise promises
   read-only.
 
-**Is the watch still running?** `--brief` answers that in one to five lines, and it is the one
+**Is the watch still running?** `--brief` answers that in zero to five lines, and it is the one
 mode safe to run unprompted at the start of a session:
 
 ```bash
-clawseccheck --brief
+clawseccheck --brief --exit-code
 ```
 
 It reads the drift baseline, the event journal and the score history — and **writes nothing**.
 No audit, no snapshot, no journal append. That is what makes it safe to run without asking.
+
+**A healthy, recently-checked setup with nothing notable in the journal prints nothing at
+all.** The old unconditional "Last drift check: Xh ago." restated recency with no signal and
+every session paid its cost; it is gone. With `--exit-code`, the exit status carries the same
+fact for a host agent that would rather check `rc != 0` than parse prose: 0 means silent and
+healthy, non-zero means there is something to relay. A bare `--brief` (no `--exit-code`) always
+returns 0 regardless of content, the same opt-in convention as `--monitor`'s own
+`--exit-code`/`--fail-on`.
 
 It exists because of two gaps nothing else covers. The cheapest attack on a scheduled monitor is
 to **stop it running**: the attacker never touches `state.json` or the journal, so no file it
@@ -999,7 +1007,7 @@ The staleness ladder, and where the numbers come from:
 
 | Silence since the last check | What it says |
 | --- | --- |
-| under 3 days | the age, plainly |
+| under 3 days | nothing — healthy and quiet |
 | 3–14 days | longer than this setup's usual gap — confirm the schedule is still in place |
 | over 14 days | monitoring is effectively not running |
 

@@ -1853,6 +1853,11 @@ _MODE_HONORS = {
     "incident_open": frozenset({"json"}),
     "incident_mark": frozenset({"json"}),
     "incident_show": frozenset({"json"}),
+    # F-171 follow-up: bare `--brief` always returned 0 regardless of content, forcing a
+    # host agent to parse prose to learn whether there was anything to relay. Same
+    # opt-in convention as --monitor's own exit_code/fail_on (a bare invocation must stay
+    # 0 forever, or a published session-start recipe breaks under `set -e` on upgrade).
+    "brief": frozenset({"exit_code"}),
 }
 
 # Primary modes that run AFTER the --attest block in main()'s cascade: their ctx and
@@ -4301,8 +4306,16 @@ def _main(argv=None) -> int:
             _hist = history_load(args.history)
         except OSError:
             _hist = []
-        _emit(render_brief(_state if isinstance(_state, dict) else None, _events, _hist,
-                           state_mtime_iso=_mtime, ascii_only=ascii_only))
+        _brief_out = render_brief(_state if isinstance(_state, dict) else None, _events, _hist,
+                                  state_mtime_iso=_mtime, ascii_only=ascii_only)
+        _emit(_brief_out)
+        # Opt-in machine contract, same convention as --monitor's exit_code/fail_on: a
+        # bare `--brief` always returns 0 (a published session-start recipe must not
+        # start failing under `set -e` the day this gained a meaningful exit code).
+        # With --exit-code, "say nothing unless rc != 0" replaces "relay these lines
+        # verbatim" as the host agent's contract — a healthy, silent run is rc 0.
+        if bool(getattr(args, "exit_code", False)) and _brief_out.strip():
+            return 1
         return 0
 
     if _mode == "cron_recipe":
