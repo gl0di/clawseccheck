@@ -40,6 +40,24 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
+    # B-816 (2026-09-15): 1,158 -> 1,208 lines (net +50: +58/-8, git diff --stat).
+    # SQLite-trajectory-container corroboration (trajectorystore.corroborate()) wired
+    # into self_test_corroboration()/render_self_test_corroboration()/
+    # render_trajectory_analysis() so --analyze-trajectory and the self-test-corroboration
+    # lines stop asserting "no trajectory sidecar was found" on a SQLite-era install with
+    # real evidence elsewhere — same disclosure pattern B85/B189/B164 already carry.
+    # 8 lines over budget, recorded rather than trimmed for the same reason scoring.py's
+    # entry below gives: shortening the new guard clauses' own documentation to slip back
+    # under would measure the comment, not the module. Split candidate, not attempted
+    # here: the canary/multi-turn self-test
+    # machinery (_SELFTEST_SOURCES, self_test_corroboration,
+    # render_self_test_corroboration, ~180 lines) is B-300's own concern and reads/writes
+    # nothing the rest of this file's trajectory-analysis code touches — a `selftest.py`
+    # leaf this module imports would leave ~1,030 here with no cycle.
+    "trajaudit.py": "~1,208 lines — the --analyze-trajectory engine (analyze/render_trajectory_"
+                    "analysis) plus B-300's canary/multi-turn self-test corroboration. Over "
+                    "budget by 8 lines since B-816. Split candidate named above; tracked "
+                    "debt, not a design statement.",
     # The first NON-checks/ entry, and the only one that is not a topic module. It is here
     # because the module was already at 1,194 of 1,200 before B-558's fifth ledger-derived
     # field — six lines of headroom is not a stable state, and the next field of any kind
