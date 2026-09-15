@@ -9,6 +9,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from .. import trajectory as _trajectory
+from .. import trajectorystore as _trajectorystore
 from ..catalog import (
     ATTESTED,
     FAIL,
@@ -613,6 +614,126 @@ def check_host_egress_posture(ctx: Context) -> Finding:
     )
 
 
+def _classify_tamper_mode(mode: int, st) -> "str | None":
+    """B85's single tamper-classification rule, shared by every container it sweeps.
+
+    *mode* is a ``stat()`` result's permission bits (already masked to ``0o777``); *st*
+    is the full ``stat()`` result, needed for the owning-group lookup. Returns ``None``
+    when *mode* is not group/world-writable (clean), ``"tamper"`` for an active-threat
+    write bit (world-writable, or group-writable with other current group members), or
+    ``"tamper_singleton"`` for the B-127 downgrade (group-writable but the owning group
+    currently has no other members -- no live "other group member" threat subject
+    exists). Factored out so the JSONL sidecar sweep and the SQLite database sweep
+    below can never encode this rule differently from one another.
+    """
+    if not mode & 0o022:
+        return None
+    if mode & 0o002:  # world-writable -> always an active threat, never downgrade
+        return "tamper"
+    other_members = _shared._group_has_other_members(st.st_gid, st.st_uid)
+    if other_members is False:
+        return "tamper_singleton"
+    return "tamper"
+
+
+def _check_incident_readiness_sqlite(ctx: Context, corr) -> Finding:
+    """B85, SQLite branch (B-810): the classic JSONL locator is stale (F-187's
+    ``STATUS_LOCATOR_STALE``) but real trajectory evidence exists in the per-agent
+    SQLite store. Answers B85's same two questions -- presence, tamper -- against that
+    container instead: presence is already established by *corr*.status itself; tamper
+    is a ``stat()`` sweep of every SQLite database path (and its parent ``agent/``
+    directory) via :func:`_classify_tamper_mode`, the same rule the JSONL sweep uses.
+    """
+    tamper: list[str] = []
+    tamper_singleton: list[str] = []
+    seen_dirs: set = set()
+
+    def _record(entry: str, mode: int, st) -> None:
+        bucket = _classify_tamper_mode(mode, st)
+        if bucket == "tamper":
+            tamper.append(entry)
+        elif bucket == "tamper_singleton":
+            tamper_singleton.append(entry)
+
+    for db_path in _trajectorystore.sqlite_db_paths(ctx.home):
+        try:
+            fst = db_path.stat()
+        except OSError:
+            continue
+        fmode = fst.st_mode & 0o777
+        if fmode & 0o022:
+            _record(f"{db_path.name} (mode {oct(fmode)[-3:]})", fmode, fst)
+        parent = db_path.parent
+        try:
+            real = parent.resolve()
+        except OSError:
+            real = parent
+        if real in seen_dirs:
+            continue
+        seen_dirs.add(real)
+        try:
+            dst = parent.stat()
+        except OSError:
+            continue
+        dmode = dst.st_mode & 0o777
+        if dmode & 0o022:
+            _record(f"{parent.name}/ (dir, mode {oct(dmode)[-3:]})", dmode, dst)
+
+    # The classic JSONL locator does not see this container at all -- one honest
+    # sentence saying so, without repeating trajectorystore.py's own migration history.
+    container_note = (
+        "This evidence lives in the SQLite trajectory store, a container the classic "
+        "JSONL sidecar locator does not see."
+    )
+
+    if tamper:
+        joined = "; ".join(tamper[:8])
+        extra = f" (+{len(tamper) - 8} more)" if len(tamper) > 8 else ""
+        return _finding(
+            "B85",
+            WARN,
+            "The agent's trajectory record exists (SQLite trajectory database(s)) but is "
+            "group/world-writable — a local user (or the agent itself) could rewrite or "
+            "delete the tool-use trail, destroying the evidence needed to reconstruct an "
+            f"incident: {joined}{extra} {container_note}",
+            "Tighten permissions so only the owner can write the record: `chmod 600` the "
+            "openclaw-agent.sqlite file(s) and `chmod 700` their agent/ directory.",
+            evidence=tamper,
+            confidence="HIGH",
+        )
+
+    if tamper_singleton:
+        joined = "; ".join(tamper_singleton[:8])
+        extra = f" (+{len(tamper_singleton) - 8} more)" if len(tamper_singleton) > 8 else ""
+        return _custom(
+            "B85", LOW, WARN,
+            "The agent's trajectory record exists (SQLite trajectory database(s)) but is "
+            "group-writable — tighten to 0600/0700; no other group members currently: "
+            f"{joined}{extra} {container_note}",
+            "Tighten permissions so only the owner can write the record: `chmod 600` the "
+            "openclaw-agent.sqlite file(s) and `chmod 700` their agent/ directory (defense "
+            "in depth — group membership can change later).",
+            tamper_singleton,
+        )
+
+    return _finding(
+        "B85",
+        PASS,
+        "An attributable trajectory record of the agent's tool use is present "
+        f"({corr.sqlite_rows} SQLite trajectory row(s) across {corr.sqlite_sessions} "
+        f"session(s) in {corr.sqlite_dbs_read} agent database(s) checked) and neither the "
+        "database file(s) nor their agent/ directory are group/world-writable — an "
+        f"incident could be reconstructed from a tamper-resistant trail. {container_note}",
+        "Keep trajectory tracing on and its SQLite database file(s) owner-only so the "
+        "incident trail stays trustworthy.",
+        evidence=[
+            f"SQLite trajectory rows: {corr.sqlite_rows} across {corr.sqlite_sessions} "
+            f"session(s) in {corr.sqlite_dbs_read} database(s)"
+        ],
+        confidence="HIGH",
+    )
+
+
 def check_incident_readiness(ctx: Context) -> Finding:
     """B85 — incident readiness: is the agent's tool-use trail present AND tamper-resistant?
 
@@ -652,11 +773,26 @@ def check_incident_readiness(ctx: Context) -> Finding:
     from ..scanbudget import limits_for  # noqa: PLC0415 (F-164, leaf import, no cycle)
     files = _trajectory.find_trajectory_files(ctx.home, max_files=limits_for(ctx).traj_max_files) if isinstance(ctx.home, Path) else []
     if not files:
+        corr = (
+            _trajectorystore.corroborate(ctx.home)
+            if isinstance(ctx.home, Path)
+            else _trajectorystore.TrajectoryCorroboration(status=_trajectorystore.STATUS_NO_RESIDUE)
+        )
+        if corr.status == _trajectorystore.STATUS_LOCATOR_STALE:
+            return _check_incident_readiness_sqlite(ctx, corr)
+
+        # B-810/B-555: this wording is tightened from a flat "there is no on-disk record"
+        # to name the containers actually checked -- a deliberate detail change, and its
+        # baseline.fingerprint()/.clawseccheckignore implication was considered.
+        # ClawSecCheck is pre-wide-release, so there is no real user base with ignore
+        # entries pinned to the old wording yet -- the acknowledgment is still written
+        # down here rather than silently skipped, per house style.
         return _finding(
             "B85",
             UNKNOWN,
-            "No OpenClaw trajectory sidecar was found under agents/<agent>/sessions/, so "
-            "there is no on-disk record of the agent's tool calls to reconstruct an "
+            "No trajectory evidence was found in any known container (JSONL sidecar, "
+            "SQLite trajectory database, or archived sidecar) under agents/<agent>/..., "
+            "so there is no on-disk record of the agent's tool calls to reconstruct an "
             "incident from. This is UNKNOWN, not a failure: the record may be disabled "
             "(OPENCLAW_TRAJECTORY=0), relocated (OPENCLAW_TRAJECTORY_DIR), or the agent "
             "may simply not have run yet.",
@@ -674,14 +810,11 @@ def check_incident_readiness(ctx: Context) -> Finding:
     seen_dirs: set = set()
 
     def _record(entry: str, mode: int, st) -> None:
-        if mode & 0o002:  # world-writable -> always an active threat, never downgrade
+        bucket = _classify_tamper_mode(mode, st)
+        if bucket == "tamper":
             tamper.append(entry)
-            return
-        other_members = _shared._group_has_other_members(st.st_gid, st.st_uid)
-        if other_members is False:
+        elif bucket == "tamper_singleton":
             tamper_singleton.append(entry)
-        else:
-            tamper.append(entry)
 
     for path in files:
         try:
