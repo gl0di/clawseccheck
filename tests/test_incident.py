@@ -40,7 +40,8 @@ def test_build_incident_has_expected_top_level_keys(tmp_path):
     payload = build_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
     assert set(payload.keys()) == {
         "tool", "version", "purpose", "generated_at", "score", "findings",
-        "sbom", "trajectory_hashes", "credential_rotation_list", "monitor_events",
+        "sbom", "trajectory_hashes", "trajectory_corroboration",  # B-815
+        "credential_rotation_list", "monitor_events",
         "monitor_events_source",  # B-277 provenance
     }
     assert payload["tool"] == "clawseccheck"
@@ -214,6 +215,9 @@ def test_trajectory_hashes_present_when_sidecar_files_exist(tmp_path):
     # C-172 regression: a small file's digest is a plain, full-file sha256 — not
     # flagged as truncated.
     assert entry["truncated"] is False
+    # B-815: a JSONL sidecar entry is tagged "jsonl" so it's distinguishable from a
+    # SQLite-database entry in the same list.
+    assert entry["kind"] == "jsonl"
 
 
 def test_trajectory_hash_labeled_truncated_when_file_exceeds_cap(tmp_path, monkeypatch):
@@ -263,6 +267,134 @@ def test_trajectory_hashing_never_reads_call_arguments_into_the_pack(tmp_path):
     ctx = _ctx(tmp_path)
     out = render_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
     assert "/etc/shadow" not in out
+
+
+# --------------------------------------------------------------------------- B-815
+# SQLite-era trajectory evidence: the JSONL-only sweep above returns [] on a
+# SQLite-only install even though real trajectory evidence exists elsewhere. These
+# extend the trajectory-hash coverage to that container, and add the always-present
+# "trajectory_corroboration" pack key that names the container / status so a
+# responder is never left thinking there is simply nothing to preserve.
+
+def _add_agent_sqlite_db(home: Path, agent: str, *, trajectory_rows=()) -> Path:
+    """Same real vendor shape as tests/test_f187_trajectory_sqlite_corroborator.py's
+    own `_add_agent_db` (session_id/seq/run_id/event_json/created_at columns) —
+    reused by name rather than re-derived, per the task brief."""
+    import sqlite3
+
+    from clawseccheck.trajectorystore import TRAJECTORY_TABLE_NAME
+
+    agent_dir = home / "agents" / agent / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    db_path = agent_dir / "openclaw-agent.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            f"CREATE TABLE {TRAJECTORY_TABLE_NAME} (session_id TEXT NOT NULL, "
+            "seq INTEGER NOT NULL, run_id TEXT, event_json TEXT NOT NULL, "
+            "created_at INTEGER NOT NULL, PRIMARY KEY (session_id, seq))"
+        )
+        for session_id, seq in trajectory_rows:
+            conn.execute(
+                f"INSERT INTO {TRAJECTORY_TABLE_NAME} VALUES (?,?,?,?,?)",
+                (session_id, seq, "run-1", json.dumps({"type": "tool.call",
+                 "data": {"path": "/etc/shadow"}}), 0),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+def test_trajectory_hashes_cover_sqlite_db_on_a_sqlite_only_install(tmp_path):
+    """The reproduced defect: a SQLite-only install (real trajectory events, no
+    JSONL sidecar) must not report an empty trajectory_hashes list."""
+    import hashlib
+
+    db_path = _add_agent_sqlite_db(tmp_path, "main", trajectory_rows=[("s1", 0), ("s1", 1)])
+    raw = db_path.read_bytes()
+
+    ctx = _ctx(tmp_path)
+    payload = build_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
+
+    entries = payload["trajectory_hashes"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["kind"] == "sqlite_db"
+    assert entry["path"] == str(Path("agents") / "main" / "agent" / "openclaw-agent.sqlite")
+    assert entry["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert entry["truncated"] is False
+
+
+def test_trajectory_corroboration_names_sqlite_status_when_jsonl_is_stale(tmp_path):
+    """trajectory_corroboration must say WHY trajectory_hashes has SQLite evidence
+    (or, on a genuinely JSONL-stale install, would have been empty without it)."""
+    _add_agent_sqlite_db(tmp_path, "main", trajectory_rows=[("s1", 0)])
+
+    ctx = _ctx(tmp_path)
+    payload = build_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
+
+    corro = payload["trajectory_corroboration"]
+    assert corro is not None
+    assert corro["status"] == "locator_stale"
+    assert any("SQLite" in line for line in corro["evidence"])
+
+
+def test_trajectory_hashing_of_sqlite_db_never_reads_event_json(tmp_path):
+    """The SQLite hash is a whole-file digest of the .sqlite bytes -- it must never
+    go through sqlite3/event_json, so a row's call-argument content (which the hash
+    reads as opaque bytes, same as it would read a secret) never appears as
+    reconstructable plaintext this function chose to surface."""
+    _add_agent_sqlite_db(tmp_path, "main", trajectory_rows=[("s1", 0)])
+
+    ctx = _ctx(tmp_path)
+    out = render_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
+    # The raw call-argument content is present in the .sqlite file's bytes (it is
+    # hashed, not read), but the JSON pack itself must never surface it as text --
+    # only a path/sha256/bytes/truncated/kind entry.
+    assert "/etc/shadow" not in out
+
+
+def test_trajectory_hashes_empty_and_corroboration_reports_no_residue_on_empty_home(tmp_path):
+    """A genuinely empty home: trajectory_hashes stays [] (nothing to hash), but the
+    trajectory_corroboration key is still always present and honestly reports
+    no_residue -- never absent, never a fake PASS-shaped null."""
+    ctx = _ctx(tmp_path)
+    payload = build_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
+
+    assert payload["trajectory_hashes"] == []
+    assert "trajectory_corroboration" in payload
+    corro = payload["trajectory_corroboration"]
+    assert corro is not None
+    assert corro["status"] == "no_residue"
+    assert corro["evidence"] == []
+
+
+def test_trajectory_corroboration_reports_live_when_jsonl_sidecar_present(tmp_path):
+    """JSONL-only home: the classic locator finds it, so status is 'live'."""
+    sessions = tmp_path / "agents" / "main" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "abc.trajectory.jsonl").write_text(
+        '{"traceSchema":"openclaw-trajectory","schemaVersion":1,"type":"tool.call"}\n',
+        encoding="utf-8",
+    )
+    ctx = _ctx(tmp_path)
+    payload = build_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
+
+    corro = payload["trajectory_corroboration"]
+    assert corro is not None
+    assert corro["status"] == "live"
+
+
+def test_trajectory_corroboration_null_when_home_is_not_a_path(tmp_path):
+    """Matches build_incident's other Path-gated fields (trajectory_hashes returns []
+    for a non-Path home) -- corroboration is None rather than raising or fabricating
+    a status for a home this pack cannot actually inspect."""
+    ctx = _ctx(tmp_path)
+    ctx.home = "not-a-path"  # type: ignore[assignment]
+    payload = build_incident(ctx, [], _score(), when="2026-07-04T00:00:00")
+    assert payload["trajectory_hashes"] == []
+    assert payload["trajectory_corroboration"] is None
 
 
 # --------------------------------------------------------------------------- sbom reuse
