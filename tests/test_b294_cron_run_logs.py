@@ -54,11 +54,26 @@ _CRON_RUN_LOGS_DDL = (
     "entry_json TEXT NOT NULL, created_at INTEGER NOT NULL, "
     "PRIMARY KEY (store_key, job_id, seq))"
 )
+# B-813: the per-agent SQLite trajectory store's own DDL, copied verbatim from
+# tests/test_f187_trajectory_sqlite_corroborator.py's `_add_agent_db` (which itself
+# matches trajectorystore.TRAJECTORY_TABLE_NAME / trajectorystore._SELECT_TRAJECTORY_ROWS)
+# rather than re-derived here, so the fixture cannot drift from the real reader's schema.
+_TRAJECTORY_RUNTIME_EVENTS_DDL = (
+    "CREATE TABLE trajectory_runtime_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, "
+    "run_id TEXT, event_json TEXT NOT NULL, created_at INTEGER NOT NULL, "
+    "PRIMARY KEY (session_id, seq))"
+)
 
 
 def _build_home(tmp_path, *, jobs=(), runs=(), tables=("cron_jobs", "cron_run_logs"),
-                sessions=(), db=True):
-    """Materialise a fake ~/.openclaw with a state DB. Writes only under tmp_path."""
+                sessions=(), sqlite_sessions=(), db=True):
+    """Materialise a fake ~/.openclaw with a state DB. Writes only under tmp_path.
+
+    ``sessions`` writes classic JSONL sidecars under ``agents/main/sessions/`` (unchanged).
+    ``sqlite_sessions`` (B-813) additionally populates a per-agent
+    ``agents/main/agent/openclaw-agent.sqlite`` with a ``trajectory_runtime_events`` row for
+    each session id, matching the real container `trajectorystore.sqlite_session_ids` reads.
+    """
     home = tmp_path / "openclaw"
     home.mkdir(exist_ok=True)
     if db:
@@ -87,6 +102,20 @@ def _build_home(tmp_path, *, jobs=(), runs=(), tables=("cron_jobs", "cron_run_lo
         sess = home / "agents" / "main" / "sessions"
         sess.mkdir(parents=True, exist_ok=True)
         (sess / f"{sid}.trajectory.jsonl").write_text("{}\n", encoding="utf-8")
+    if sqlite_sessions:
+        agent_dir = home / "agents" / "main" / "agent"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(agent_dir / "openclaw-agent.sqlite")
+        try:
+            conn.execute(_TRAJECTORY_RUNTIME_EVENTS_DDL)
+            for sid in sqlite_sessions:
+                conn.execute(
+                    "INSERT INTO trajectory_runtime_events VALUES (?,?,?,?,?)",
+                    (sid, 0, "run-1", "{}", 0),
+                )
+            conn.commit()
+        finally:
+            conn.close()
     ctx = Context(home=home)
     _collect_cron(home, ctx)
     return ctx
@@ -241,6 +270,56 @@ def test_b189_pivot_distinguishes_a_session_with_no_transcript(tmp_path):
     ctx = _build_home(tmp_path, jobs=(), runs=(("ghost", "sess-gone"),))
     f = check_cron_run_log_orphans(ctx)
     assert any("sess-gone" in e and "no transcript on disk" in e for e in f.evidence)
+
+
+# --------------------------------------------------------------------------------------
+# B-813: a third pivot bucket for sessions whose only evidence is the SQLite trajectory
+# store (the post-migration container find_trajectory_files() is blind to).
+# --------------------------------------------------------------------------------------
+
+def test_b189_pivot_surfaces_a_session_only_in_the_sqlite_store(tmp_path):
+    """An orphaned run whose session exists ONLY in SQLite (no JSONL sidecar) must fire the
+    new sqlite_only pivot line, name the SQLite container, and must NOT claim the session
+    is 'still on disk' — that wording is reserved for the JSONL bucket."""
+    ctx = _build_home(tmp_path, jobs=(), runs=(("ghost", "sess-sqlite"),),
+                      sqlite_sessions=("sess-sqlite",))
+    f = check_cron_run_log_orphans(ctx)
+    assert f.status == WARN
+    matches = [e for e in f.evidence if "sess-sqlite" in e]
+    assert len(matches) == 1
+    line = matches[0]
+    assert "SQLite" in line
+    assert "openclaw-agent.sqlite" in line
+    assert "still on disk" not in line
+    assert "no transcript on disk" not in line
+    # The pivot_note in `detail` must also name the SQLite store honestly, distinct from
+    # the "transcript on disk" JSONL wording.
+    assert "SQLite trajectory store" in f.detail
+    assert "still have a transcript on disk" not in f.detail
+
+
+def test_b189_pivot_jsonl_takes_priority_over_sqlite_when_both_have_the_session(tmp_path):
+    """A session present in BOTH containers is counted once, as the JSONL ('still on
+    disk') bucket — never double-reported, and never demoted to the SQLite wording."""
+    ctx = _build_home(tmp_path, jobs=(), runs=(("ghost", "sess-both"),),
+                      sessions=("sess-both",), sqlite_sessions=("sess-both",))
+    f = check_cron_run_log_orphans(ctx)
+    matches = [e for e in f.evidence if "sess-both" in e]
+    assert len(matches) == 1
+    assert "still on disk" in matches[0]
+    assert "SQLite" not in matches[0]
+
+
+def test_b189_pivot_note_mentions_both_counts_when_both_buckets_are_nonempty(tmp_path):
+    ctx = _build_home(
+        tmp_path, jobs=(),
+        runs=(("ghost", "sess-disk"), ("ghost", "sess-db")),
+        sessions=("sess-disk",),
+        sqlite_sessions=("sess-db",),
+    )
+    f = check_cron_run_log_orphans(ctx)
+    assert "1 of these session(s) still have a transcript on disk" in f.detail
+    assert "1 more have evidence in the SQLite trajectory store" in f.detail
 
 
 def test_b189_does_not_claim_the_erased_payload_is_recoverable(tmp_path):
