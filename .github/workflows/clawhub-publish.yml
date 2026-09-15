@@ -388,6 +388,26 @@ jobs:
           [ "$MISSING" -eq 0 ] || exit 1
           echo "Preflight OK — SKILL.md present and every relative link resolves."
 
+      - name: Preflight — confirm the CURRENT version is not already published
+        # A5: this workflow already curls this same endpoint twice for OTHER versions
+        # (the previous-release check above, and the warn-only post-publish check below)
+        # but never once for the version this run is about to publish. `clawhub publish`
+        # rejects a duplicate with its own error ("Version X already exists") only after
+        # the approval gate has already been spent and the dry-run has already run — so a
+        # re-run against an already-published version (e.g. re-triggering this workflow by
+        # hand on a tag that already shipped) wastes a click and ~10 minutes for a result
+        # this one curl call can rule out up front, before the dry-run even starts.
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -uo pipefail
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+            "https://clawhub.ai/api/v1/skills/clawseccheck/versions/${VER}")"
+          if [ "$CODE" = "200" ]; then
+            echo "::error::Version ${VER} is already published on ClawHub — nothing to do."
+            exit 1
+          fi
+
       # NB: this step runs `clawhub publish` too, so it is the SECOND invocation in this
       # file. tests/test_publish_workflow.py is step-aware (it attributes each invocation
       # to its own step and tells the two apart by --dry-run) precisely so that this
