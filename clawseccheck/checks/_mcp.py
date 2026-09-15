@@ -8118,8 +8118,21 @@ def _b185_scan_description(text: str) -> tuple[list[str], list[str]]:
         proven.append("hidden HTML/markdown comment block")
     if _B185_DATA_URI_PAYLOAD_RE.search(text):
         proven.append("base64 data-URI carrying an embedded payload body")
-    for hit in _decoded_payloads(text)[:2]:
-        proven.append(f"base64 blob decoding to a shell/download payload: {hit[:60]}")
+    decoded_hits = _decoded_payloads(text)[:2]
+    if decoded_hits:
+        # B-811 (round 2 adversarial review, 2026-09-15): the decoded blob is
+        # ATTACKER-CONTROLLED content from the delivered description — a poisoned
+        # description can decode to a live secret (the exact shape the review
+        # demonstrated end-to-end), so this preview is redacted before it becomes
+        # part of a reason string a caller may render verbatim into Finding.evidence.
+        # Redaction, not omission: the preview stays useful for triage, just with any
+        # secret-shaped substring masked (§8 — never echo raw secrets).
+        from ..logsafe import redact as _redact_hit  # noqa: PLC0415
+        for hit in decoded_hits:
+            proven.append(
+                "base64 blob decoding to a shell/download payload: "
+                f"{_redact_hit(hit[:60])}"
+            )
 
     norm = normalize_for_scan(text)
 
@@ -8192,6 +8205,67 @@ def _b185_scan_description(text: str) -> tuple[list[str], list[str]]:
     return proven, ambiguous
 
 
+# B-811 (round 4, following round 3's adversarial review, 2026-09-15): a render-time
+# control that does NOT depend on trajectorystore.py's schema verdict at all. Three
+# rounds of review found FOUR structurally different ways to make a per-agent SQLite
+# file's OWN schema lie about what reading `trajectory_runtime_events` will actually
+# execute (a VIEW, an external-content virtual table, rootpage aliasing, and a
+# GENERATED ALWAYS AS column on an honestly-real table) — round 3's own conclusion was
+# that enumerating schema-object shapes is not obviously exhaustible, so this control
+# is independent of that enumeration: it bounds what a delivered tool's OWN NAME may
+# ever look like before it is rendered into `Finding.evidence`/`.detail`, regardless of
+# which container it was read from or how any future bypass got it there.
+#
+# Real MCP tool names are short, conventional identifiers — every name observed in
+# this repo's own fixtures (BENIGN_TOOLS and the wider test corpus) is under 20
+# characters, snake_case or kebab-case, sometimes namespaced with a double-underscore
+# (`mcp__server__tool`). 64 characters is generous headroom against every real name
+# this project has ever seen — a CHOSEN bound grounded in that observation, not a
+# limit stated by the MCP spec itself (no fabricated authority: this is a rendering
+# heuristic, not a config-schema field).
+#
+# What this control DOES: a name that is not a short, plain identifier is NEVER
+# rendered verbatim, unconditionally — not "unless a pattern happens to match it" the
+# way `logsafe.redact()` works. It catches every LONG secret regardless of shape (a
+# JWT, a fine-grained GitHub PAT, an OpenAI project key -- anything past 64 chars).
+#
+# What this control does NOT do (retracted an earlier, false version of this
+# paragraph, round 4's own adversarial review, 2026-09-15 -- measured, not assumed):
+# it does NOT catch every possible secret, and the gap is not merely theoretical. A
+# GitHub CLASSIC PAT (`gh[opsur]_` + 36 chars = 40 total) is well UNDER 64 characters
+# and passes this gate on length alone -- measured directly, not assumed from the
+# pattern's own minimum. So do a generic 32-64 char opaque hex/base64/UUID-shaped
+# token, and this repo has no grounded measurement of OpenClaw's own `rt.1.…`
+# refresh-token length to know which side of 64 it falls on (see trajectorystore.py's
+# own docstring for why that shape is never fabricated as a fact here). For every
+# secret shape in that gap, this gate does nothing and `logsafe.redact()` (below) is
+# the ONLY thing standing between it and rendered output -- a real, load-bearing
+# second layer, not a redundant one, and `tests/test_b185_compiled_tool_poisoning.py`
+# pins a short, `redact()`-recognised secret specifically so removing that call (not
+# just weakening this gate) fails the suite.
+_B185_TOOL_LABEL_SHAPE_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.\-]{0,63})$")
+
+
+def _b185_render_label(raw_name, index: int, redact, *, kind: str = "tool") -> str:
+    """A tool or parameter name as it may safely appear in ``Finding.evidence``/
+    ``.detail``. ``kind`` is ``"tool"`` or ``"parameter"`` — only used to word the
+    placeholder, never to change the gating logic.
+
+    ``redact`` is ``logsafe.redact`` (the caller's already-imported reference — passed
+    in rather than imported here, so this stays a plain, testable function). Applied
+    to every name that passes the shape gate, as the second, independent layer the
+    module comment above describes; a name that fails the gate is never handed to
+    ``redact`` at all, since ``redact`` is a pattern-matcher and this path exists
+    specifically for the case where the pattern is unknown.
+    """
+    if isinstance(raw_name, str) and _B185_TOOL_LABEL_SHAPE_RE.match(raw_name):
+        return redact(raw_name)
+    return (
+        f"<{kind} #{index}: name not rendered — not shaped like an ordinary "
+        "short identifier>"
+    )
+
+
 def check_compiled_tool_poisoning(ctx: Context) -> Finding:
     """B185: poisoned tool descriptions in what OpenClaw ACTUALLY SENT to the model.
 
@@ -8233,29 +8307,96 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
     tool_defs, meta = _trajectory.read_compiled_tool_descriptions(
         home, max_files=lim.traj_max_files, max_bytes_per_file=lim.traj_max_bytes_per_file)
 
+    # B-811 (Option A, Dave's explicit ruling 2026-09-15): when the classic JSONL
+    # locator found NOTHING AT ALL (not merely "no compiled record" -- genuinely no
+    # sidecar files), real evidence may still live in the per-agent SQLite store --
+    # read it too, restoring detection instead of staying permanently blind on a
+    # SQLite-era install.
+    #
+    # Gated on `not meta.get("present")`, not on a bare `corr.status` check: whenever
+    # JSONL sidecars exist at all (`present` True), trajectorystore.corroborate() can
+    # only ever report STATUS_LIVE -- its own decision rule puts "a live sidecar
+    # exists" first, unconditionally (trajectorystore.py's corroborate() docstring) --
+    # so this SQLite read is structurally UNREACHABLE while JSONL already answered.
+    # Narrowing the gate to this exact case also means corroborate() -- which opens
+    # every per-agent SQLite file -- is only called on hosts where JSONL genuinely
+    # found zero sidecars, not on every audit run (adversarial review, B-811,
+    # 2026-09-15: the unconditional call this gate replaces widened every SQLite-
+    # adjacent read to every host, not just SQLite-era ones).
+    #
+    # The merge below is therefore defensive, not exercised in practice today: `seen`
+    # is always empty when this branch runs, because `tool_defs` is always empty here
+    # (see above). Kept rather than replaced with a bare assignment because it stays
+    # CORRECT if that invariant is ever loosened by a future change, at zero cost when
+    # it holds. See trajectorystore.py's module docstring §8 paragraph for the full
+    # column/row-scoping review of what read_compiled_tool_descriptions() there is and
+    # is not allowed to touch -- this call site does not re-litigate it.
+    corr = None
+    sqlite_meta = None
+    if not meta.get("present"):
+        corr = _trajectorystore.corroborate(home)
+        if corr.status == _trajectorystore.STATUS_LOCATOR_STALE:
+            sqlite_defs, sqlite_meta = _trajectorystore.read_compiled_tool_descriptions(home)
+            if sqlite_defs:
+                seen = {
+                    (e["name"], e["description"], tuple(e["params"]), e["field"])
+                    for e in tool_defs
+                }
+                for entry in sqlite_defs:
+                    key = (
+                        entry["name"], entry["description"],
+                        tuple(entry["params"]), entry["field"],
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    tool_defs.append(entry)
+
     if not tool_defs:
-        why = (
-            "no trajectory sidecar was found"
-            if not meta.get("present")
-            else "the trajectory sidecars carry no 'context.compiled' record"
-        )
+        # `corr` is guaranteed set (non-None) in every branch below: reaching them
+        # requires `not meta.get("present")`, which is exactly this block's own gate.
+        if meta.get("present"):
+            # JSONL sidecars exist but carry no compiled record -- independent of
+            # SQLite entirely; unchanged from before B-811.
+            why = "the trajectory sidecars carry no 'context.compiled' record"
+        elif corr.status == _trajectorystore.STATUS_LOCATOR_STALE:
+            dbs_found = sqlite_meta.get("dbs_found", 0) if sqlite_meta else 0
+            dbs_read = sqlite_meta.get("dbs_read", 0) if sqlite_meta else 0
+            if dbs_found == 0:
+                # B-811 (adversarial review, 2026-09-15): real evidence exists --
+                # trajectorystore.corroborate() would not have reported
+                # STATUS_LOCATOR_STALE otherwise -- but it is a dangling POINTER or an
+                # ARCHIVE entry, not an actual SQLite database, so there is nothing for
+                # read_compiled_tool_descriptions() to open. Must not fall through to
+                # the flat "no trajectory sidecar was found" claim below, which is
+                # false here: it reads as nothing having run at all, when corr.evidence
+                # says otherwise.
+                why = (
+                    "OpenClaw recorded trajectory evidence that could not be resolved "
+                    f"to a readable SQLite database ({'; '.join(corr.evidence)})"
+                )
+            elif dbs_read == 0:
+                why = (
+                    f"OpenClaw recorded trajectory evidence in {dbs_found} SQLite "
+                    "database(s), but none were readable"
+                )
+            else:
+                # B-811: we DID read the SQLite store this time (the whole point of
+                # Option A) and it genuinely had nothing recoverable -- a materially
+                # different claim from "cannot currently be recovered" (Option B's old
+                # wording), which asserted a limit that no longer exists.
+                why = (
+                    f"OpenClaw's SQLite trajectory store was read ({dbs_read} "
+                    "database(s)) but carried no recoverable 'context.compiled' record"
+                )
+        else:
+            why = "no trajectory sidecar was found"
         # B-555 note: this Finding is scored=False (advisory) except the FAIL branch
         # far below, which this leg never reaches — so the practical blast radius of a
         # detail-text change here is narrow. Still, baseline.fingerprint() hashes
-        # Finding.detail, so an existing .clawseccheckignore keyed on the old
-        # "no trajectory sidecar was found" wording will miss once this leg's wording
-        # changes below (that is intended: the SQLite-era case is a materially
-        # different, less-confident claim than the JSONL-empty case it used to share).
-        if not meta.get("present"):
-            corr = _trajectorystore.corroborate(home) if isinstance(home, Path) else None
-            if corr is not None and corr.status == _trajectorystore.STATUS_LOCATOR_STALE:
-                why = (
-                    f"OpenClaw recorded trajectory evidence for {corr.sqlite_sessions} "
-                    "session(s) in a SQLite database this check does not read the "
-                    "content of (its trajectory sink moved off JSONL sidecars in a "
-                    "runtime update) — the tool definitions those sessions received "
-                    "cannot currently be recovered"
-                )
+        # Finding.detail, so an existing .clawseccheckignore keyed on any of these
+        # exact sentences will miss once the underlying cause changes (intended: each
+        # sentence above is a materially different claim about what was tried).
         extra = ""
         # Grounded: OpenClaw records unless OPENCLAW_TRAJECTORY parses false
         # (selection-JInn13lc.js:765 — `?? true`, i.e. on by default). This reads the
@@ -8268,21 +8409,53 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 " OPENCLAW_TRAJECTORY is disabled in this environment, which would "
                 "explain the absence of records."
             )
+        # B-811 (adversarial review, 2026-09-15): disclose SQLite-side incompleteness
+        # here too, not only in the has-tool_defs branch further below -- a truncated-
+        # but-empty SQLite read must not read as a confidently complete "nothing found"
+        # (the UNKNOWN-must-not-be-vacuous doctrine this check's own docstring already
+        # states for the JSONL side).
+        sqlite_incomplete = ""
+        if sqlite_meta and (
+            sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
+        ):
+            sqlite_incomplete = (
+                " Note: SQLite scan bounds (a byte/row/length cap, a non-text row, or "
+                "an unrecognised schema version) meant some records were not examined "
+                "there either, so this is incomplete even for what was checked."
+            )
         return _finding(
             "B185",
             UNKNOWN,
             f"Could not recover the tool definitions OpenClaw sent to the model — {why}."
-            f"{extra} This check is post-hoc: with no recorded session it has nothing to "
-            "examine, which is NOT evidence that delivered tool descriptions were clean.",
+            f"{extra}{sqlite_incomplete} This check is post-hoc: with no recorded "
+            "session it has nothing to examine, which is NOT evidence that delivered "
+            "tool descriptions were clean.",
             "Run the audit on the host where the agent runs, after at least one session "
             "has been recorded. OpenClaw writes trajectory sidecars by default; keep "
             "OPENCLAW_TRAJECTORY enabled so this evidence exists.",
         )
 
+    # B-811: two INDEPENDENT layers guard `label`/`param_name` below, which come
+    # straight from the delivered tool definition — exactly what a poisoning attack
+    # controls. Layer 1 (round 4, `_b185_render_label`, above): the name is never
+    # rendered verbatim unless it is shaped like an ordinary short tool identifier —
+    # unconditional, not pattern-dependent. Layer 2 (round 2 recommendation #5,
+    # `logsafe.redact()`): whatever DOES pass layer 1 is still redacted, in case it is
+    # a short secret-shaped string layer 1's length/shape gate would not catch on its
+    # own. Neither layer alone is a guarantee — layer 1 does not cover every short
+    # secret, layer 2 does not cover every secret SHAPE (see `_b185_render_label`'s own
+    # comment for what has been measured) — but they fail in different ways, so a
+    # value has to slip both to leak. Applied at THIS sink, not the source:
+    # `_trajectory`/`_trajectorystore` keep returning full-fidelity text so THIS
+    # check's own detection logic (above) can still see real injected-instruction
+    # content; only what gets FORMATTED into `fails`/`warns` (-> Finding.evidence/
+    # .detail) is ever constrained.
+    from ..logsafe import redact as _redact  # noqa: PLC0415
+
     fails: list[str] = []
     warns: list[str] = []
-    for entry in tool_defs:
-        label = entry["name"]
+    for tool_index, entry in enumerate(tool_defs):
+        label = _b185_render_label(entry["name"], tool_index, _redact)
         proven, ambiguous = _b185_scan_description(entry["description"])
         for reason in proven:
             fails.append(f"{label}: delivered tool description contains {reason}")
@@ -8290,7 +8463,10 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             warns.append(f"{label}: delivered tool description contains {reason}")
         # TP3, split per the C-135 note above: a proven directive FAILs; a bare
         # URL-with-query is ordinary API documentation and only WARNs.
-        for param_name, param_desc, param_default in entry["params"]:
+        for param_index, (param_name, param_desc, param_default) in enumerate(entry["params"]):
+            param_name = _b185_render_label(
+                param_name, param_index, _redact, kind="parameter"
+            )
             for text, kind in ((param_desc, "description"), (param_default, "default")):
                 if not text:
                     continue
@@ -8321,18 +8497,39 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                     )
                     break
 
-    scope = (
-        f"{len(tool_defs)} distinct tool definition(s) recovered from "
-        f"{meta.get('events', 0)} 'context.compiled' record(s) across "
-        f"{meta.get('files_scanned', 0)} session log(s)"
-    )
-    incomplete = ""
-    if meta.get("truncated") or meta.get("files_capped") or meta.get("unknown_version"):
-        incomplete = (
-            " Note: scan bounds (per-file byte cap, per-file count cap, an oversized "
-            "line, or an unrecognised schema version) meant some records were not "
-            "examined, so this verdict is incomplete."
+    # B-811 (rewritten after adversarial review, 2026-09-15): `tool_defs` here comes
+    # from EXACTLY ONE container, never both -- the gate above only ever consults
+    # SQLite when `not meta.get("present")`, so a JSONL-and-SQLite "union" can never
+    # actually happen today (the earlier version of this code implied it could; that
+    # implication was false and is retracted, not just reworded). Two plain branches,
+    # matching the two states that are actually reachable, rather than a generalized
+    # "join whichever sources contributed" that only ever has one member.
+    if sqlite_meta and sqlite_meta.get("dbs_read", 0):
+        scope = (
+            f"{len(tool_defs)} distinct tool definition(s) recovered from "
+            f"{sqlite_meta.get('events', 0)} 'context.compiled' record(s) across "
+            f"{sqlite_meta['dbs_read']} SQLite trajectory database(s)"
         )
+        incomplete = ""
+        if sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version"):
+            incomplete = (
+                " Note: SQLite scan bounds (a byte/row/length cap, a non-text row, or "
+                "an unrecognised schema version) meant some records were not examined, "
+                "so this verdict is incomplete."
+            )
+    else:
+        scope = (
+            f"{len(tool_defs)} distinct tool definition(s) recovered from "
+            f"{meta.get('events', 0)} 'context.compiled' record(s) across "
+            f"{meta.get('files_scanned', 0)} session log(s)"
+        )
+        incomplete = ""
+        if meta.get("truncated") or meta.get("files_capped") or meta.get("unknown_version"):
+            incomplete = (
+                " Note: scan bounds (per-file byte cap, per-file count cap, an "
+                "oversized line, or an unrecognised schema version) meant some records "
+                "were not examined, so this verdict is incomplete."
+            )
 
     posthoc = (
         "This is post-hoc evidence of what was ALREADY delivered to the model; it does "

@@ -218,6 +218,17 @@ _NOT_DRIVEN = {
     "livetestproof.prove": "reads/produces EntryProof.status (corroboration outcome), not a Finding status",
     "livetestproof.contradicted_ids": "reads EntryProof.status (corroboration outcome), not a Finding status",
     "livetestproof.not_reached_lines": "reads EntryProof.status (corroboration outcome), not a Finding status",
+    # F-187/B-811: the SAME C-520/F-193 shape once more — a different vocabulary wearing
+    # the same attribute name. All four read/compare
+    # trajectorystore.TrajectoryCorroboration.status (live/locator_stale/no_residue, an
+    # agent's trajectory-evidence LOCATION, not a Finding's FAIL-weight verdict), never a
+    # Finding's own `.status`. `_touches_status` is grammatical, so it cannot tell the two
+    # apart. Pinned directly by tests/test_f187_trajectory_sqlite_corroborator.py, not
+    # through this pool.
+    "checks._egress.check_log_threat_hunt": "reads TrajectoryCorroboration.status (live/locator_stale/no_residue), not a Finding status",
+    "checks._host.check_incident_readiness": "reads TrajectoryCorroboration.status (live/locator_stale/no_residue), not a Finding status",
+    "checks._mcp.check_compiled_tool_poisoning": "reads TrajectoryCorroboration.status (live/locator_stale/no_residue), not a Finding status",
+    "trajaudit.render_trajectory_analysis": "reads TrajectoryCorroboration.status (live/locator_stale/no_residue), not a Finding status",
 }
 
 #: Consumers whose output differs from itself between two identical runs, so an equivalence
