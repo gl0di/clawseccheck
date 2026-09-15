@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sqlite3
 
 import pytest
 
@@ -69,6 +70,37 @@ def _write_trajectory(home, records, agent="main", session="s"):
         "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8"
     )
     return path
+
+
+def _write_agent_sqlite_db(home, agent, session_row_pairs):
+    """B-811: a fake per-agent `openclaw-agent.sqlite` carrying real
+    `trajectory_runtime_events` rows and NOTHING else — no JSONL sidecar, no pointer
+    file, no archive entry. This is the SQLite-era shape B185's UNKNOWN leg must stop
+    misreporting as "no trajectory sidecar was found". Schema matches
+    `trajectorystore._SELECT_TRAJECTORY_ROWS` / the module docstring's DDL exactly
+    (session_id TEXT, seq INTEGER, plus the run_id/event_json/created_at columns the
+    real table carries — event_json is never read by this check or by
+    trajectorystore.py, so its value here is a harmless placeholder, never a secret).
+    """
+    agent_dir = home / "agents" / agent / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    db_path = agent_dir / "openclaw-agent.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE trajectory_runtime_events (session_id TEXT NOT NULL, "
+            "seq INTEGER NOT NULL, run_id TEXT, event_json TEXT NOT NULL, "
+            "created_at INTEGER NOT NULL, PRIMARY KEY (session_id, seq))"
+        )
+        for session_id, seq in session_row_pairs:
+            conn.execute(
+                "INSERT INTO trajectory_runtime_events VALUES (?,?,?,?,?)",
+                (session_id, seq, "run-1", json.dumps({"type": "tool.call"}), 0),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
 
 
 def _compiled(tools, *, extra=None, codex=False):
@@ -283,6 +315,25 @@ def test_unknown_when_no_trajectory_present(tmp_path):
     f = _run(tmp_path)
     assert f.status == "UNKNOWN", f.detail
     assert "no trajectory sidecar was found" in f.detail
+    assert "NOT evidence that delivered tool descriptions were clean" in f.detail
+
+
+def test_unknown_wording_when_sqlite_evidence_exists_but_no_jsonl(tmp_path):
+    """B-811: a SQLite-era install (no JSONL sidecar, no pointer, no archive entry —
+    only per-agent SQLite rows) must NOT be reported with the "no trajectory sidecar
+    was found" wording, which reads as nothing having run at all. It genuinely cannot
+    recover the tool descriptions from SQLite (out of scope — see B-811),
+    so the verdict stays UNKNOWN, but the wording must name what WAS found."""
+    _write_agent_sqlite_db(
+        tmp_path, "main",
+        [("s1", 0), ("s1", 1), ("s2", 0)],
+    )
+    f = _run(tmp_path)
+    assert f.status == "UNKNOWN", f.detail
+    assert "no trajectory sidecar was found" not in f.detail
+    assert "2 session(s)" in f.detail
+    assert "SQLite" in f.detail
+    assert "cannot currently be recovered" in f.detail
     assert "NOT evidence that delivered tool descriptions were clean" in f.detail
 
 

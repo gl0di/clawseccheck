@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from .. import attest as _attest
 from .. import mcpsurface as _mcpsurface
 from .. import trajectory as _trajectory
+from .. import trajectorystore as _trajectorystore
 from ..catalog import (
     FAIL_WEIGHT_STATUSES,
     display_status,
@@ -8238,6 +8239,23 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             if not meta.get("present")
             else "the trajectory sidecars carry no 'context.compiled' record"
         )
+        # B-555 note: this Finding is scored=False (advisory) except the FAIL branch
+        # far below, which this leg never reaches — so the practical blast radius of a
+        # detail-text change here is narrow. Still, baseline.fingerprint() hashes
+        # Finding.detail, so an existing .clawseccheckignore keyed on the old
+        # "no trajectory sidecar was found" wording will miss once this leg's wording
+        # changes below (that is intended: the SQLite-era case is a materially
+        # different, less-confident claim than the JSONL-empty case it used to share).
+        if not meta.get("present"):
+            corr = _trajectorystore.corroborate(home) if isinstance(home, Path) else None
+            if corr is not None and corr.status == _trajectorystore.STATUS_LOCATOR_STALE:
+                why = (
+                    f"OpenClaw recorded trajectory evidence for {corr.sqlite_sessions} "
+                    "session(s) in a SQLite database this check does not read the "
+                    "content of (its trajectory sink moved off JSONL sidecars in a "
+                    "runtime update) — the tool definitions those sessions received "
+                    "cannot currently be recovered"
+                )
         extra = ""
         # Grounded: OpenClaw records unless OPENCLAW_TRAJECTORY parses false
         # (selection-JInn13lc.js:765 — `?? true`, i.e. on by default). This reads the
