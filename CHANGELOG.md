@@ -3,6 +3,64 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.1.1] — 2026-09-15
+
+**The v4.1.0 release day surfaced a real defect in the publish pipeline itself: CI
+reported a red job for a publish that had actually succeeded, because the one step that
+exists to catch that outcome sat downstream of the very failure it was meant to detect.**
+This release closes that pipeline gap, makes `--brief` stay silent on a healthy setup
+instead of printing an unconditional line every session, and brings the shipped docs
+back up to date with what the tool actually does.
+
+### Fixed
+
+- **Publish-pipeline defects (A1-A5).** `.github/workflows/clawhub-publish.yml`'s
+  post-publish surfaced-check inherited the default `success()` condition, so it was
+  skipped exactly when the `Publish skill` step failed — the one scenario it exists to
+  detect (this project already lost cosign bundles to the same failure class once,
+  2026-08-06). It now runs with `if: ${{ !cancelled() }}`. The `Create GitHub Release`
+  step's `!cancelled()` gate was too permissive: a red smoke gate (tests/ruff) skipped
+  cosign signing entirely, yet the step still fired on a tag push and would have
+  published a public, assetless GitHub Release for a broken build — it now also
+  requires the signing step's own `outcome == 'success'`. The `workflow_dispatch`
+  version input was interpolated directly into a shell body twice, in a job holding the
+  release token — now passed through `env:` like the workflow's other input.
+  `$GITHUB_OUTPUT` was written before the version was validated against `SKILL.md`'s
+  frontmatter — validation now runs first. A new preflight guard confirms the version
+  about to be published isn't already live on ClawHub before spending the approval
+  click and running the dry-run, since `clawhub publish` only rejects a duplicate after
+  both have already happened.
+- **`--brief` stopped restating "Last drift check: Xh ago." on a healthy setup.** That
+  line carried zero signal — every session paid its cost even when nothing was wrong.
+  A healthy, recently-checked setup with nothing notable in the journal now prints
+  nothing at all; detection (the staleness ladder, journal-event carry-forward) is
+  unaffected. `--brief` also gained an opt-in `--exit-code` contract, the same
+  convention `--monitor` already uses: a bare invocation still always returns 0, but
+  `--brief --exit-code` returns non-zero exactly when there is something to relay — so
+  a host agent can check `rc` instead of parsing prose. `SKILL.md`'s session-start row
+  previously said "run this without asking" with nothing in the document connecting
+  that to the pre-scan menu's "Do NOT auto-run the scan" two sections above; both now
+  name the exception explicitly and tie it to `--brief`'s narrower read scope (its own
+  local store, never the OpenClaw config the consent gate is about).
+  `SECURITY_MODEL.md` gained a section describing this instructed, unprompted
+  host-agent behavior, which the document previously omitted entirely.
+
+### Changed
+
+- **Shipped docs brought up to v4.1.0 (§6.2/C-125).** `README.md`'s "B · Watch" section
+  documented only `--monitor` under the name the real, continuous `--watch` flag (C-517)
+  now owns; both are now named and distinguished. README's CLI/CI section was a release
+  behind the features its own CHANGELOG headline already advertised — `--explain`/
+  `--retest`, `--save-run`/`--diff`, the `--incident-*` lifecycle, `--judge-packet`,
+  `--save-sbom-run`/`--sbom-diff`, and `--exit-code-scheme` are now illustrated there.
+  `--sbom-diff` had no documentation anywhere outside `references/cli-flags.md` —
+  `docs/USAGE.md` explained how to write the SBOM-run store but never named the flag
+  that reads it back; it now has a section parallel to `--save-run`/`--diff`'s.
+  `docs/OUTPUT_SCHEMA.md` carried 9 stale illustrative version stamps across its JSON
+  skeletons — brought current with this release. `--no-dist` and `--recursive` (an
+  undocumented alias for `--vet-all`) existed in the CLI with no mention in any shipped
+  doc — added to `references/cli-flags.md` and `docs/USAGE.md`.
+
 ## [4.1.0] — 2026-09-14
 
 **The tool could hand out a letter grade for a setup it had never actually read the
