@@ -9,7 +9,8 @@ import re
 from pathlib import Path
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist  # B-502: C4 single-run version-rollback signal
-from .. import trajectory as _trajectory  # B-294/B189: session pivot for erased cron jobs
+from .. import trajectory as _trajectory  # B-294/B189: session pivot for erased cron jobs (JSONL sidecar)
+from .. import trajectorystore as _trajectorystore  # B-813: session pivot for erased cron jobs (SQLite store)
 from ..catalog import (
     BY_ID,
     FAIL,
@@ -1687,7 +1688,27 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         }
     except (OSError, ValueError):
         on_disk = set()
+    # B-813: on a SQLite-era install (~9.x+) find_trajectory_files() always returns [] --
+    # the runtime's own trajectory recorder now defaults to trajectory_runtime_events in
+    # each agent's openclaw-agent.sqlite, and the classic JSONL glob it feeds `on_disk` is
+    # silently empty. Without a second lookup here, every such session fell into the
+    # "no transcript on disk" bucket below -- which is FALSE: there is real evidence, just
+    # not in the container that bucket's wording describes. `sqlite_session_ids` only ever
+    # proves a session id EXISTS in that store (never opens `event_json` -- see
+    # trajectorystore.py's module docstring, §8), so a third bucket is added rather than
+    # folding this into either existing one.
+    sqlite_sessions = (
+        _trajectorystore.sqlite_session_ids(ctx.home)
+        if isinstance(ctx.home, Path)
+        else frozenset()
+    )
     readable = [s for s in sessions if s in on_disk]
+    # JSONL takes priority when a session id happens to show up in both containers (the
+    # vendor's own migration doctor can leave a live sidecar behind alongside imported
+    # SQLite rows) -- it is the one `--analyze-trajectory` can actually read today, so a
+    # session already counted as "still on disk" is never also counted as sqlite-only.
+    sqlite_only = [s for s in sessions if s not in on_disk and s in sqlite_sessions]
+    unreadable = [s for s in sessions if s not in on_disk and s not in sqlite_sessions]
 
     ev = [
         f"cron job '{jid}': {sum(1 for r in orphan_runs if r['job_id'] == jid)} run(s) "
@@ -1698,13 +1719,39 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         ev.append(f"(+{len(orphan_ids) - 10} more erased job id(s))")
     for s in readable[:10]:
         ev.append(f"pivot: session transcript '{s}' is still on disk — review it directly")
-    for s in [s for s in sessions if s not in on_disk][:10]:
+    for s in sqlite_only[:10]:
+        ev.append(
+            f"pivot: session '{s}' has trajectory evidence in the SQLite store "
+            "(agents/*/agent/openclaw-agent.sqlite), not the classic JSONL sidecar — direct "
+            "review tooling for this container is not yet available"
+        )
+    for s in unreadable[:10]:
         ev.append(f"pivot: session '{s}' referenced by an erased job's run log (no transcript on disk)")
 
-    pivot_note = (
-        f" {len(readable)} of these session(s) still have a transcript on disk."
-        if readable else ""
-    )
+    # B-813/B-555: `pivot_note` folds session counts into `detail`, which baseline.fingerprint()
+    # hashes -- that coupling already existed for the JSONL `readable` count before this change,
+    # so extending it to the new, honestly-distinct SQLite count does not newly orphan any
+    # `.clawseccheckignore` entry; it keeps the same field carrying the same KIND of fact
+    # (a count derived from the machine's own disk state, already true of `readable`) rather
+    # than moving anything new into a hashed field. The wording keeps the two counts textually
+    # separate so "on disk" (JSONL) is never conflated with "in the SQLite store".
+    if readable and sqlite_only:
+        pivot_note = (
+            f" {len(readable)} of these session(s) still have a transcript on disk, and "
+            f"{len(sqlite_only)} more have evidence in the SQLite trajectory store (not a "
+            "JSONL transcript)."
+        )
+    elif readable:
+        pivot_note = (
+            f" {len(readable)} of these session(s) still have a transcript on disk."
+        )
+    elif sqlite_only:
+        pivot_note = (
+            f" {len(sqlite_only)} of these session(s) have evidence in the SQLite "
+            "trajectory store (not a JSONL transcript)."
+        )
+    else:
+        pivot_note = ""
     return _finding(
         "B189",
         WARN,

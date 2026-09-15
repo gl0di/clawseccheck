@@ -649,6 +649,18 @@ _AUTH_PROFILE_TABLES_DIFFERENT_DB = (
     "never reaches it (see that test file's own module docstring), but there is no vendor "
     "comparison possible for it within this file's scope."
 )
+_TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB = (
+    "trajectory_runtime_events (F-187) lives in the PER-AGENT database "
+    "(agents/<agent>/agent/openclaw-agent.sqlite), never in the state database "
+    "(state/openclaw.sqlite) this snapshot/registry classifies -- same reasoning as "
+    "_AUTH_PROFILE_TABLES_DIFFERENT_DB, for the table that database actually holds "
+    "trajectory evidence in. The original declaration "
+    "(tests/test_f187_trajectory_sqlite_corroborator.py:83) is an f-string "
+    "(f\"CREATE TABLE {table} (...)\"), so the AST-constant extractor above does not see "
+    "it -- these two are plain string-literal copies (B-810/B-811/B-813), each pinned to "
+    "the exact column shape trajectorystore.TRAJECTORY_TABLE_NAME / "
+    "_SELECT_TRAJECTORY_ROWS actually reads, matching test_f187's own DDL verbatim."
+)
 
 _REGISTRY: "dict[str, _Entry]" = {
     # ---- fixtures/clean_b188_state_db/state/openclaw.sqlite -- the binary fixture no
@@ -661,7 +673,9 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_b168_cron_job_content.py:279": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b168_cron_job_content.py:301": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b294_cron_run_logs.py:45": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
-    "tests/test_b294_cron_run_logs.py:585": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
+    # B-813 shifted this site's line (585 -> 664) by inserting the trajectory_runtime_events
+    # fixture above it -- same DDL, same classification, key renamed to match.
+    "tests/test_b294_cron_run_logs.py:664": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b709_cron_state_db_shapes.py:43": _Entry(
         LEGACY_COLS,
         "an intermediate cron_jobs shape (store_key/job_id/declaration_key/owner_agent_id/"
@@ -735,9 +749,15 @@ _REGISTRY: "dict[str, _Entry]" = {
     # ---- auth_profile_store / auth_profile_state (F-187, per-agent DB, different file) ----
     "tests/test_f187_trajectory_sqlite_corroborator.py:94": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     "tests/test_f187_trajectory_sqlite_corroborator.py:101": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+
+    # ---- trajectory_runtime_events (F-187, per-agent DB, different file) ----
+    # B-813/B-811: plain-string-literal copies of test_f187's own f-string DDL (invisible
+    # to the AST extractor -- see _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB's own comment).
+    "tests/test_b294_cron_run_logs.py:62": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_b185_compiled_tool_poisoning.py:91": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
 }
 
-assert len(_REGISTRY) == 40, f"registry has {len(_REGISTRY)} entries, expected 40"
+assert len(_REGISTRY) == 42, f"registry has {len(_REGISTRY)} entries, expected 42"
 
 
 # ========================================================================================

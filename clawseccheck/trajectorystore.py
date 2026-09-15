@@ -214,6 +214,46 @@ def _sqlite_dbs(home: Path) -> "list[Path]":
     return dbs[:_MAX_SQLITE_DBS]
 
 
+def sqlite_db_paths(home) -> "list[Path]":
+    """Public wrapper for :func:`_sqlite_dbs` — the per-agent trajectory database PATHS
+    only, never opened here. Exists for callers that need to ``stat()`` these files
+    (tamper/permission checks) without reading a single row: B85 (``checks/_host.py``)
+    is the first consumer, extending its existing JSONL sidecar tamper sweep to the
+    container that actually holds the evidence on a SQLite-era install. Bounded and
+    capped exactly like :func:`corroborate` (``_MAX_SQLITE_DBS``); returns ``[]`` for a
+    non-``Path`` *home* or any glob error, same contract as every reader in this module.
+    """
+    if not isinstance(home, Path):
+        return []
+    return _sqlite_dbs(home)
+
+
+def sqlite_session_ids(home) -> "frozenset[str]":
+    """The set of ``session_id`` values present in every readable per-agent trajectory
+    database under *home*. Reuses :func:`_read_sqlite_db` verbatim — no new SQL, no
+    ``event_json`` read (see the module docstring's §8 paragraph) — so this carries
+    exactly the same guarantee ``corroborate()`` already has: it can only ever learn
+    that a session id EXISTS, never what it did.
+
+    Exists for callers that need session-level PRESENCE, not the full reconciliation
+    ``corroborate()`` returns — B189's cron-erasure pivot (``checks/_lifecycle.py``) is
+    the first consumer: it already cross-references orphaned run-log session ids against
+    on-disk evidence so its advisory can point at a transcript the user can actually
+    still read, and today that cross-reference only checks JSONL sidecars. Bounded the
+    same way :func:`corroborate` is; returns ``frozenset()`` for a non-``Path`` *home*,
+    never raises.
+    """
+    if not isinstance(home, Path):
+        return frozenset()
+    ids: set = set()
+    for db_path in _sqlite_dbs(home):
+        pairs, _capped, unreadable = _read_sqlite_db(db_path)
+        if unreadable:
+            continue
+        ids.update(sid for sid, _seq in pairs)
+    return frozenset(ids)
+
+
 def _read_sqlite_db(db_path: Path) -> "tuple[list, bool, bool]":
     """``(pairs, capped, unreadable)`` for one per-agent trajectory database.
 
