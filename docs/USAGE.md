@@ -556,15 +556,23 @@ for a monitoring skill/plugin (ClawSec, `openclaw-security-monitor`, …) or mon
 config; if none is found it warns you and tells you how to add one.
 
 **`--monitor` — Agent Watch.** One way to *get* monitoring: re-audit on a schedule and alert,
-**by severity**, on what **changed** — a new or modified installed skill, `SOUL.md` drift, **any
-file appearing, changing or disappearing under `<workspace>/memory/`** (a new file there is
-reported even when nothing in it looks hostile — that subtree is where OpenClaw's own
-pre-compaction flush writes, so its appearance is INFO, not an accusation), a dropped
+**by severity**, on what **changed** — a new or modified installed skill, an installed skill's
+own provenance moving (updated, or drifted from what ClawHub recorded, without the user doing
+it), `SOUL.md` drift, **any file appearing, changing or disappearing under
+`<workspace>/memory/`** (a new file there is reported even when nothing in it looks hostile —
+that subtree is where OpenClaw's own pre-compaction flush writes, so its appearance is INFO, not
+an accusation), a plugin newly allowed to load (including `bundledDiscovery` flipping to
+allowlist bypass on upgrade), the resolved `tools.exec` shell-command policy widening, a new or
+replaced entry in the credential store, a dropped
 score (on the pair of runs being compared, when both carry a grade — see
 [Scoring](#scoring); the file/config/MCP/channel signals here don't depend on either
 run having one), **a check leaving PASS (for FAIL,
 WARN or UNKNOWN)**, **a newly connected MCP server, a new channel, the gateway becoming
-network-exposed, or a host monitor disappearing**. Each run appends the changes to a private local
+network-exposed, or a host monitor disappearing**, the installed OpenClaw package's own digests
+moving (supply-chain), the built-in native `openclaw security audit`'s own issue count moving,
+this machine's own startup/scheduling surface moving (systemd units/timers, shell rc, cron —
+best-effort), and — the watch reporting its own blind spots — anything it could not compare
+this run. Each run appends the changes to a private local
 journal (`~/.clawseccheck/events.jsonl`, owner-only, never uploaded); view the timeline with
 `--watch-log`.
 

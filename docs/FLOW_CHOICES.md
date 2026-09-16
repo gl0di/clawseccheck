@@ -240,13 +240,34 @@ Wait for the user to confirm. Only then run:
 python3 {baseDir}/audit.py --monitor
 ```
 
-First run saves a baseline; later runs report only what changed — a new/modified skill, a drifted
-`SOUL.md`, a dropped score, **a newly connected MCP server, a new channel, the gateway becoming
-network-exposed, or a host monitor disappearing** — each tagged by severity. Every run also appends
-the changes to a private local journal (`~/.clawseccheck/events.jsonl`, owner-only, never uploaded);
-show the timeline with `--watch-log`. If the user wants it to run automatically, suggest scheduling
-it via the OpenClaw heartbeat or an hourly cron — but do NOT set up any schedule yourself without
-explicit confirmation.
+First run saves a baseline; later runs report only what changed, each tagged by severity. Group
+the families this way rather than reciting all of them flatly — lead with what a user would most
+want to know before agreeing to a baseline:
+
+- **Your skills** — a new or modified installed skill, and a skill's own install provenance
+  moving (updated, or drifted from what ClawHub recorded) without the user doing it themselves.
+- **What your agent is allowed to do** — a plugin newly allowed to load (including an allowlist
+  quietly bypassed on an OpenClaw upgrade), the resolved shell-command policy widening, and a
+  new or replaced entry in the credential store.
+- **Your agent's identity and config** — drift in `SOUL.md`/`AGENTS.md`/bootstrap files, the
+  resolved config file, and any file appearing, changing or disappearing under
+  `<workspace>/memory/` (INFO by default — OpenClaw's own pre-compaction flush writes there too).
+- **Where your agent talks to the world** — a newly connected MCP server or one whose config or
+  observed tool description changed, a new channel, and the gateway becoming network-exposed.
+- **The machine underneath it** — a host monitor disappearing, and (best-effort) this
+  machine's own startup/scheduling surface — systemd units/timers, shell rc files, cron —
+  moving.
+- **The scan itself** — the installed OpenClaw package's own digests moving (supply-chain), the
+  built-in native `openclaw security audit`'s own issue count moving, a dropped security score,
+  an individual check's verdict changing (e.g. leaving PASS), a newly appeared pattern from
+  replaying the agent's own recorded activity, and — this is the watch reporting its own blind
+  spots — anything it could not compare this run (an unread credential store, an unscanned
+  host-persistence surface, a truncated skill scan).
+
+Every run also appends the changes to a private local journal (`~/.clawseccheck/events.jsonl`,
+owner-only, never uploaded); show the timeline with `--watch-log`. If the user wants it to run
+automatically, suggest scheduling it via the OpenClaw heartbeat or an hourly cron — but do NOT
+set up any schedule yourself without explicit confirmation.
 
 ## Choice: live test / "test it" / "try an attack" / "see if I'm vulnerable to injection"
 
