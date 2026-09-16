@@ -22,10 +22,13 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    LIMIT_DOMAIN_APPROVALS,
+    LIMIT_DOMAIN_BOOTSTRAP,
     LIMIT_DOMAIN_CONFIG,
     Context,
     agent_roster,
     dig,
+    limit_hits_for,
 )
 from ..safeio import walk_dir_safely
 from .. import deptree as _deptree  # B349: bounded, read-only dependency-tree enumeration
@@ -1076,6 +1079,33 @@ def check_bootstrap_injection(ctx: Context) -> Finding:
             "channels/web/email as untrusted data, never as instructions.",
             ev,
         )
+    # B-657: a claim of "no directive found" is a claim about a COMPLETED read of every
+    # bootstrap file. `ctx.bootstrap` can be non-empty (so the UNKNOWN branch above
+    # never fires) while still missing content -- a workspace dir this process could not
+    # even stat, a specific file it could not open, or a file that exceeded the
+    # collector's byte cap (the bootstrap-scanning loop inline in collector.collect(),
+    # LIMIT_DOMAIN_BOOTSTRAP) all leave SOME bootstrap text scanned and SOME silently
+    # absent. A FAIL above is a positive observation about text that really was read and
+    # really does carry a directive -- it stands regardless (same ordering B168 already
+    # established for the identical shape). Only the verdict-by-ABSENCE is unsound, so
+    # only PASS degrades.
+    if limit_hits_for(ctx, LIMIT_DOMAIN_BOOTSTRAP):
+        return _finding(
+            "B6",
+            UNKNOWN,
+            "No injection-prone directive found in the bootstrap text that WAS read, "
+            "but at least one bootstrap file or workspace directory could not be fully "
+            "read (unreadable, or exceeded the size cap) — a clean bill of health "
+            "cannot be given over content that was never scanned.",
+            "Ensure every SOUL.md/AGENTS.md/TOOLS.md and its containing workspace "
+            "directory is owner-readable and under the collector's size cap, then "
+            "re-run the audit.",
+            # C-135: present-but-unread content (a real file the collector's own cap
+            # cut short), not genuinely absent -- catalog.py's Finding.engine_degraded
+            # doc names this exact contrast and this exact consequence (the
+            # DEGRADED_CHECK_CAP "cannot rule out a CRITICAL" treatment).
+            engine_degraded=True,
+        )
     return _finding(
         "B6",
         PASS,
@@ -1884,7 +1914,12 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
     PASS    — the store was read and no agent has an "allow-always" entry (the common
               case -- e.g. freshly-provisioned defaults/agents are both empty `{}`).
     UNKNOWN — exec-approvals.json is absent (or a symlink, never followed), or was
-              found but could not be parsed/read.
+              found but could not be parsed/read; OR (B-657) the store parsed fine but
+              exceeded the collector's byte cap or its agent-count cap
+              (``_MAX_EXEC_APPROVALS_AGENTS``) -- some agents/content were never
+              scanned, so "no agent has a grant" cannot be said of the whole store. A
+              WARN found among the agents that WERE scanned still stands (checked
+              first, same ordering as B6/B168).
 
     C-430: an "allow-always" entry with no `argPattern` is not the same standing grant
     as one that carries one. Grounded against the installed dist: on every non-Windows
@@ -1933,6 +1968,28 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
 
     grants = [g for g in ctx.exec_approvals_grants if g.get("allow_always_count")]
     if not grants:
+        # B-657: "no agent has a standing grant" is a claim about every agent the store
+        # holds. exec_approvals_parse_error only catches a store that failed to parse at
+        # all -- it does not catch a store that parsed FINE but exceeded the
+        # collector's byte cap or agent-count cap (collector._collect_exec_approvals,
+        # LIMIT_DOMAIN_APPROVALS), where the agents/content past the cap were never
+        # scanned. Same ordering as B6/B168: a WARN above (a grant found in what WAS
+        # scanned) stands regardless; only this verdict-by-absence degrades.
+        if limit_hits_for(ctx, LIMIT_DOMAIN_APPROVALS):
+            return _finding(
+                "B172",
+                UNKNOWN,
+                "No standing 'allow-always' exec grant found among the agents that WERE "
+                "scanned, but exec-approvals.json exceeded a collector size/count cap — "
+                "some agents or content were never read, so a clean bill of health "
+                "cannot be given.",
+                "Keep exec-approvals.json under the collector's size cap, or prune "
+                "stale agent entries, then re-run the audit.",
+                # C-135: present-but-unread agents (a real store the collector's own
+                # cap cut short), not a genuinely empty/absent store -- same
+                # Finding.engine_degraded contract as B6's identical branch above.
+                engine_degraded=True,
+            )
         return _finding(
             "B172",
             PASS,

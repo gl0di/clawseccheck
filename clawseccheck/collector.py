@@ -4885,6 +4885,16 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
         if not isinstance(agents, dict):
             agents = {}
         ctx.exec_approvals_found = True
+        # B-657: this cap had NO disclosure at all -- unlike the byte-size cap seven
+        # lines up, a store under the byte cap but with more than
+        # _MAX_EXEC_APPROVALS_AGENTS agents parsed fine, and every agent past the cap
+        # was silently never scanned for a standing "allow-always" grant.
+        if len(agents) > _MAX_EXEC_APPROVALS_AGENTS:
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_APPROVALS,
+                f"exec-approvals store '{target}' has {len(agents)} agent(s) — only the "
+                f"first {_MAX_EXEC_APPROVALS_AGENTS} were scanned for standing grants",
+            )
         for agent_id, agent in list(agents.items())[:_MAX_EXEC_APPROVALS_AGENTS]:
             if not isinstance(agent, dict):
                 continue
