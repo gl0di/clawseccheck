@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Callable
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist  # B-502: C4 single-run version-rollback signal
 from .. import trajectory as _trajectory  # B-294/B189: session pivot for erased cron jobs (JSONL sidecar)
@@ -172,7 +173,31 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal — the single file that defines the
 #       (2026, 7, 0) instead PASSes the vulnerable "2026.7.1-2" (false negative).
 # Neither direction is expressible here: a correction-release boundary needs a comparator
 # change (e.g. a (base_tuple, correction_int) pair), not a new table row.
-_KNOWN_ADVISORIES: list[tuple[str, tuple[int, ...], str, str]] = [
+#
+# C-414: a row is 4 elements (id, max_vulnerable_version_tuple, fixed_version_str, title) —
+# version-only, matching on `parsed <= max_vuln` alone, exactly as every row below already
+# does — OR 5 elements, with a `condition: Callable[[dict], bool]` appended that takes
+# `ctx.config` and returns whether THIS host's config shape can actually reach the
+# defect. `check_known_vulns` treats a 4-tuple as `condition=None` (version-only,
+# unchanged), so EVERY EXISTING ROW BELOW IS LEFT AS A PLAIN 4-TUPLE — a config-
+# conditioned advisory only ever adds a 5th element to its OWN row, never pads the rest
+# of the table. A condition that raises is treated as unproven (the row does not match) —
+# never let a broken predicate manufacture a FAIL (Golden Rule #5).
+#
+# ⚠️ HARD SEQUENCING GATE — do not add a row (4- or 5-element) for an UNFIXED defect.
+# This repo is PUBLIC (GitHub + ClawHub). A row fingerprints a specific, already-PATCHED
+# version boundary; shipping one for a defect OpenClaw has not fixed yet publishes a
+# 0-day with a config-level PoC attached, and breaks the coordinated-disclosure process
+# this project committed to (epic E-073). Golden Rule #4 also forbids inventing an
+# advisory id — an undisclosed defect has none to cite. Order is mandatory every time:
+# privately disclose -> maintainer ships a fix -> a real version boundary + advisory id
+# exists -> THEN a row (with or without a condition) may be added. A config-conditioned
+# row is not exempt from this gate merely because it is more precise than a version-only
+# one — precision does not change what it discloses.
+_KNOWN_ADVISORIES: list[
+    tuple[str, tuple[int, ...], str, str]
+    | tuple[str, tuple[int, ...], str, str, Callable[[dict], bool]]
+] = [
     (
         "GHSA-g8p2-7wf7-98mq",
         (2026, 1, 28),
@@ -2708,7 +2733,10 @@ _B33_EVIDENCE_CAP = 20
 def check_known_vulns(ctx: Context) -> Finding:
     """B33 — Known-vulnerable OpenClaw version gate.
 
-    FAIL    — installed version <= one or more known advisories' max_vulnerable_version_tuple.
+    FAIL    — installed version <= one or more known advisories' max_vulnerable_version_tuple,
+              AND — for a config-conditioned row (C-414) — that row's `condition(ctx.config)`
+              also holds. A version-only row (still the vast majority of the table) has no
+              condition to satisfy, matching on version alone exactly as before this task.
               Reports EVERY matching advisory (B-332) — not just the first row in table
               order — and the `fix` targets the HIGHEST fixed_version across all matches,
               since that is the only version that actually clears the finding. Returning on
@@ -2716,7 +2744,11 @@ def check_known_vulns(ctx: Context) -> Finding:
               as remediation: a version still vulnerable to every later advisory in the
               table, turning the fix into a multi-step upgrade treadmill instead of a single
               correct jump.
-    PASS    — installed version is past all known advisory fixes.
+    PASS    — installed version is past all known advisory fixes, OR every version-matched
+              config-conditioned row's condition came back False (this host's config shape
+              cannot reach that particular defect) or raised (C-414: an unproven condition
+              never manufactures a FAIL — Golden Rule #5 — so it is treated the same as
+              "condition did not hold", not surfaced as its own UNKNOWN).
     UNKNOWN — meta.lastTouchedVersion is missing or cannot be parsed.
     """
     raw_ver = dig(ctx.config, "meta.lastTouchedVersion") or dig(ctx.config, "lastTouchedVersion")
@@ -2743,7 +2775,23 @@ def check_known_vulns(ctx: Context) -> Finding:
 
     # Collect EVERY matching row (table order is oldest-first, so this is already a
     # deterministic, stable ordering across runs) rather than returning on the first.
-    matched = [row for row in _KNOWN_ADVISORIES if parsed <= row[1]]
+    #
+    # C-414: version match alone is not enough for a config-conditioned (5-element) row —
+    # its condition(ctx.config) must also hold. `row[4]` is only ever present on a 5-tuple
+    # (a plain 4-tuple version-only row indexes nothing past row[3]), so `len(row) < 5` is
+    # checked first and short-circuits `row[4]` for every existing row untouched by this
+    # task. A condition that raises is caught and treated as "did not hold" — never let a
+    # broken predicate manufacture a FAIL (Golden Rule #5); it degrades to silently not
+    # matching this one row, not to a crash or a finding of its own.
+    def _condition_holds(row: tuple) -> bool:
+        if len(row) < 5:
+            return True
+        try:
+            return bool(row[4](ctx.config))
+        except Exception:
+            return False
+
+    matched = [row for row in _KNOWN_ADVISORIES if parsed <= row[1] and _condition_holds(row)]
     if not matched:
         return _finding(
             "B33",
@@ -2752,11 +2800,11 @@ def check_known_vulns(ctx: Context) -> Finding:
             "Keep OpenClaw updated and re-check after new advisories are published.",
         )
 
-    matched_ids = [ghsa_id for ghsa_id, _max_vuln, _fixed_ver, _desc in matched]
+    matched_ids = [row[0] for row in matched]
     # The only version that actually clears the finding is the HIGHEST fixed_version
     # across every matched advisory — a lower fixed_version leaves later advisories open.
     highest_fixed_ver = max(
-        (fixed_ver for _ghsa_id, _max_vuln, fixed_ver, _desc in matched),
+        (row[2] for row in matched),
         key=lambda v: _parse_version(v) or (),
     )
 
