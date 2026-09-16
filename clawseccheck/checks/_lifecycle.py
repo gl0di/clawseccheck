@@ -1413,20 +1413,31 @@ def check_cron_job_content(ctx: Context) -> Finding:
               trail shows jobs did run — the definitions that ran are gone, so there is
               nothing left to scan and a PASS would be a lie; or (W-DB2 round-3) the
               definitions came from a legacy jobs.json that the live SQLite cron_jobs table
-              SHADOWS, so the scanned set is provably not the set that executes. All three
-              suppress only a clean verdict — a FAIL/WARN found in what WAS read still
-              stands, so none of them can hide a payload the scan actually caught.
-    PASS    — a cron store was read and no job triggers any signal. B-294: when the store
-              was read but held zero jobs and there is no execution trail either, the PASS
-              carries pass_confidence="no_signal" rather than "verified" — nothing was
-              actually inspected, so the clean verdict is by absence, not by evidence.
+              SHADOWS, so the scanned set is provably not the set that executes; or the
+              job-definition read hit the collector's row cap (``ctx.cron_jobs_truncated``)
+              — unlike B189's identical-looking flag, this has no subset argument to lean
+              on: an unread job past the cap can only ADD a directive this scan would have
+              caught, never remove one, so a clean verdict over a truncated read is unsound
+              regardless of whether anything suspicious turned up among the jobs that WERE
+              read. All causes above suppress only a clean verdict — a FAIL/WARN found in
+              what WAS read still stands, so none of them can hide a payload the scan
+              actually caught.
+    PASS    — a cron store was read and no job triggers any signal, with the row cap not
+              hit and no legacy-store shadowing. B-294: when the store was read but held
+              zero jobs and there is no execution trail either, the PASS carries
+              pass_confidence="no_signal" rather than "verified" — nothing was actually
+              inspected, so the clean verdict is by absence, not by evidence. (This PASS
+              does not cover a separate, narrower gap: a per-job ``job_json`` blob in the
+              modern SQLite schema that fails to parse enters ``ctx.cron_jobs`` with empty
+              content and is counted as "scanned" without content-scanning it — that hole
+              predates this gate and is not something ``ctx.cron_jobs_truncated`` catches.)
 
-    C-135 follow-up (B-657 review): of the four UNKNOWN causes above,
-    ``Finding.engine_degraded`` is True only for "found but could not be parsed/read"
-    and the SHADOWED-store case — both are a real, present store this process
-    deliberately or accidentally never fully read. It stays False for "no cron store
-    found at all" and the "read and EMPTY" case: both are read to completion with
-    genuinely nothing there, not present-but-unread.
+    C-135 follow-up (B-657 review; row-cap gate added in a later pass):
+    ``Finding.engine_degraded`` is True for "found but could not be parsed/read", the
+    SHADOWED-store case, and the row-cap-truncation case — all three are a real, present
+    store this process deliberately or accidentally never fully read. It stays False for
+    "no cron store found at all" and the "read and EMPTY" case: both are read to
+    completion with genuinely nothing there, not present-but-unread.
     """
     if not ctx.cron_found:
         return _finding(
@@ -1645,6 +1656,31 @@ def check_cron_job_content(ctx: Context) -> Finding:
             # definitions this check deliberately never opened because the (stale)
             # JSON store took priority -- present-but-unread, not absent, same
             # Finding.engine_degraded contract as a byte-cap truncation.
+            engine_degraded=True,
+        )
+    # Row-cap truncation gate. Deliberately AFTER the FAIL/WARN returns above (same
+    # ordering discipline as cron_store_shadowed immediately above it) and deliberately
+    # UNCONDITIONAL, unlike B189's identical-looking ctx.cron_jobs_truncated branch: B189
+    # can stay a sound PASS under truncation because "no orphan" is a claim about a
+    # SUBSET relationship (more definitions read can only shrink the orphan set, never
+    # grow it), but this check's PASS is "no directive found ANYWHERE in the store", and
+    # an unread job past the cap can only ADD to fail_ev/warn_ev, never remove from it --
+    # so there is no subset argument here to make a truncated PASS sound. Same "lying
+    # PASS over unread content" shape f748869 closed for B6/B172.
+    if ctx.cron_jobs_truncated:
+        return _finding(
+            "B168",
+            UNKNOWN,
+            f"Scanned {len(ctx.cron_jobs)} cron job(s) and found no embedded "
+            "instruction-override or install directive — but the job-definition read hit "
+            "its row cap, so definitions past the cap were never seen. A clean bill of "
+            "health cannot be given over job payloads that were never scanned.",
+            "Reduce the number of scheduled jobs so the whole store can be read, or "
+            "review the unscanned jobs directly.",
+            # C-135 follow-up: the job definitions past the row cap are present in the
+            # store, just never read -- present-but-unread, same Finding.engine_degraded
+            # contract as this check's cron_store_shadowed branch and B189's identical
+            # truncation shape.
             engine_degraded=True,
         )
     return _finding(
