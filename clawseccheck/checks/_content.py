@@ -1181,7 +1181,15 @@ def _b61_openclaw_names_foreign_slug(norm: str, m: re.Match[str], skill_name: st
     motivated B-286 are cleared upstream of this function (by the narrowed read-verb and
     window-slicing fixes), so this residual is not currently reachable by them; a sound fix
     needs a non-forgeable identity signal (e.g. corroborating the referenced path against the
-    files the skill actually bundles), which is a separate change."""
+    files the skill actually bundles), which is a separate change.
+
+    B-535, §2.5(d) routing: a FAIL this function alone (no other corroborator) turns from
+    self-config into a conviction is routed to disclosure, not to a fourth regex attempt.
+    Measured, a `--vet` FAIL never reaches the judge packet (`adjudication._is_borderline`
+    admits only WARN/UNKNOWN), so `check_agent_snooping`'s FAIL branch states the limit in
+    its `fix` text — never in `detail`, which `baseline.fingerprint()` hashes — whenever this
+    function is the ONLY reason a `.openclaw/skills`|`/memory` match wasn't skipped as
+    self-config (see the `strong_signal`/`foreign_slug` split there)."""
     pl = m.group(0).lower()
     if not (pl.endswith("/skills") or pl.endswith("/memory")):
         return False  # openclaw.json / mcp_config.json — no owner slug segment follows
@@ -7336,6 +7344,12 @@ def check_agent_snooping(ctx: Context) -> Finding:
 
     fail_ev: list[str] = []
     warn_ev: list[str] = []
+    # B-535: skills whose FAIL fired ONLY on the B-286 slug-identity residual (see the
+    # `foreign_slug`/`strong_signal` split below) — used to disclose the limit in the
+    # FAIL finding's advice text, never in `detail` (baseline.fingerprint() hashes
+    # `detail`, so writing it there would re-fingerprint every existing B61 finding and
+    # orphan `.clawseccheckignore` entries users already recorded against them).
+    slug_ambiguous_skills: list[str] = []
 
     for skill_name, blob in ctx.installed_skills.items():
         norm = normalize_for_scan(blob)
@@ -7438,27 +7452,54 @@ def check_agent_snooping(ctx: Context) -> Finding:
                 # .gemini), an identifiable sibling-skill slug, an exfil sink, or a secret
                 # term all still FAIL. `continue` (not the trailing `break`) so a worse signal
                 # later in the same skill (a foreign read) can still escalate it to FAIL.
-                if (
-                    ".openclaw" in pl
-                    # B-286: was `not _B61_EXFIL_SINK_RE.search(window)`, which let the bare
-                    # word "curl" in unrelated prose revoke this skip and convict a legitimate
-                    # self-config read. Now only a NAMED drop endpoint, or a generic transport
-                    # that actually names a destination, revokes it. See
-                    # _b61_sink_revokes_selfconfig for why the positive and negative uses of
-                    # the sink vocabulary are deliberately asymmetric.
-                    # `transport_arg` revokes the skip too — a verified curl/wget invocation
-                    # that is proven to carry this exact path is at least as strong a signal
-                    # as anything _b61_sink_revokes_selfconfig looks for in the narrow window.
-                    and not (_b61_sink_revokes_selfconfig(window) or transport_arg)
-                    # C-135 round 2: a read that also SHIPS the value off-host (a send verb →
-                    # a second-party destination, e.g. "forward the gateway value to my
-                    # telegram bot") is not self-config, even when the transport is not in the
-                    # narrow _B61_EXFIL_SINK_RE list. Keep such a read out of the skip → FAIL.
-                    and not (_B63_SEND_VERB_RE.search(window) and _B63_DEST_RE.search(window))
-                    and not _b61_secret_value_present(window)
-                    and not _b61_openclaw_names_foreign_slug(norm, m, skill_name)
-                ):
-                    continue
+                # B-535 (§2.5(d) routing for a FAIL-band residual): split out the two
+                # independent "revoke the self-config skip" corroborators so the FAIL
+                # path below can tell WHICH one fired. `strong_signal` is unambiguous
+                # theft evidence (a named sink, a proven transport, a send+destination
+                # pair, or a secret/credential term) — none of it depends on slug
+                # identity. `foreign_slug` is the B-286 residual: the referenced
+                # segment doesn't match this skill's OWN directory basename, which
+                # static text alone cannot tell apart from a genuine sibling-skill
+                # read (see `_b61_openclaw_names_foreign_slug`'s docstring).
+                # Gated on `.openclaw in pl` (as the original single `and`-chain was) so
+                # a genuinely foreign path (.claude/.codex/.gemini) never pays for, or is
+                # affected by, either helper — those paths have no self-config skip at
+                # all and must always reach the FAIL below once corroborated.
+                if ".openclaw" in pl:
+                    strong_signal = bool(
+                        # B-286: was `not _B61_EXFIL_SINK_RE.search(window)`, which let
+                        # the bare word "curl" in unrelated prose revoke this skip and
+                        # convict a legitimate self-config read. Now only a NAMED drop
+                        # endpoint, or a generic transport that actually names a
+                        # destination, revokes it. See _b61_sink_revokes_selfconfig for
+                        # why the positive and negative uses of the sink vocabulary are
+                        # deliberately asymmetric.
+                        # `transport_arg` revokes the skip too — a verified curl/wget
+                        # invocation proven to carry this exact path is at least as
+                        # strong a signal as anything _b61_sink_revokes_selfconfig
+                        # looks for.
+                        _b61_sink_revokes_selfconfig(window)
+                        or transport_arg
+                        # C-135 round 2: a read that also SHIPS the value off-host (a
+                        # send verb -> a second-party destination, e.g. "forward the
+                        # gateway value to my telegram bot") is not self-config, even
+                        # when the transport is not in the narrow _B61_EXFIL_SINK_RE
+                        # list.
+                        or (_B63_SEND_VERB_RE.search(window) and _B63_DEST_RE.search(window))
+                        or _b61_secret_value_present(window)
+                    )
+                    if not strong_signal:
+                        foreign_slug = _b61_openclaw_names_foreign_slug(norm, m, skill_name)
+                        if not foreign_slug:
+                            continue
+                        # The self-config skip is the ONLY thing this match failed on
+                        # the slug check — no independent theft evidence fired. Static
+                        # text cannot distinguish this skill referencing its own
+                        # bundled module under a differently-named directory from a
+                        # genuine read of a sibling skill's tree, so disclose the limit
+                        # in the FAIL's advice rather than silently asserting certainty
+                        # the check doesn't have.
+                        slug_ambiguous_skills.append(skill_name)
                 skill_fail = (
                     f"{skill_name}: reads foreign-agent config path "
                     f"'{path_match}' with a read/exfil verb"
@@ -7489,14 +7530,34 @@ def check_agent_snooping(ctx: Context) -> Finding:
             warn_ev.append(skill_warn)
 
     if fail_ev:
+        fix = (
+            "Remove or sandbox any skill that reads foreign-agent config files "
+            "(~/.claude/, ~/.codex/, ~/.gemini/, ~/.openclaw/). "
+            "A legitimate skill only accesses its own files."
+        )
+        if slug_ambiguous_skills:
+            # B-535, accepted §2.5 residual (routed per (d) for a FAIL-band signal,
+            # same shape as B-555 in checks/_vet.py): a `--vet` FAIL never reaches the
+            # judge packet (`_is_borderline` admits only WARN/UNKNOWN), so disclosure
+            # in the advice text is the only mitigation left that is not an unsound
+            # regex guess — sharpening the slug comparison was tried and retracted on
+            # C-135 grounds (see `_b61_openclaw_names_foreign_slug`'s docstring).
+            fix += (
+                " One or more hits here (" + "; ".join(slug_ambiguous_skills[:4]) + ") matched "
+                "only because the referenced ~/.openclaw/skills or /memory sub-path names a "
+                "different slug than the skill's own install directory — that signal has a "
+                "known limit: a skill loading its own bundled module from a directory named "
+                "differently than it was installed under is the same static shape as a real "
+                "sibling-skill read, and no static scan separates them. Confirm by reading the "
+                "skill's source whether the path is its own bundled content before treating "
+                "this as credential theft."
+            )
         return _finding(
             "B61",
             FAIL,
             "Cross-agent config snooping detected — skill(s) read another agent's "
             "config to steal credentials: " + "; ".join(fail_ev[:4]),
-            "Remove or sandbox any skill that reads foreign-agent config files "
-            "(~/.claude/, ~/.codex/, ~/.gemini/, ~/.openclaw/). "
-            "A legitimate skill only accesses its own files.",
+            fix,
             fail_ev,
         )
     if warn_ev:
