@@ -2340,7 +2340,7 @@ _ML_OVERRIDE_TABLE: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
         ("reveal_prompt", ("скажи", "свой систем", "промпт")),
         ("reveal_prompt", ("отправь", "систем", "промпт")),
     ),
-    # CLAWSECCHECK-C-437: ja/ko additions. Both languages are, like zh/ru, pro-drop --
+    # C-437: ja/ko additions. Both languages are, like zh/ru, pro-drop --
     # an imperative routinely has no explicit subject at all ("これまでの指示を無視して" /
     # "지금까지의 지시를 무시해라" need no お前/너 any more than "忽略之前收到的所有指令" needs
     # 你 -- B-360 R2's lesson applies identically here), so "override" again needs no
