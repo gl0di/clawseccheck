@@ -104,6 +104,39 @@ def _username_safe_path(path) -> str:
     return "~" if str(rest) == "." else f"~/{rest}"
 
 
+def _detail_path(value, home) -> str:
+    """Render *value* for a ``Finding.detail``: relative to the audited home when it lies
+    inside it, with a single ``..`` segment when it lies under the home's parent (the
+    ``~`` slot of a real OpenClaw home, where ``.config/...`` lives). Anything else is
+    returned unchanged. A composite string that merely *starts* with such a path is
+    rewritten the same way, so a source label like ``<unit> (Environment=)`` still works.
+
+    ``baseline.fingerprint()`` hashes ``Finding.detail``, and a user's
+    ``.clawseccheckignore`` keys a per-finding suppression on that hash — so an absolute
+    scan-root path baked into a detail silently orphans that suppression the moment the
+    workspace or the scanned skill moves, and it leaks the reporter's directory layout
+    into any report they share. The audited root is printed once in the report header
+    instead. A path the CONFIG itself declares in absolute form is deliberately left
+    verbatim: that string is a function of the audited subject, so it belongs in the
+    finding's identity (and in the text, since it is what the owner has to go fix).
+
+    C-456 FU (CLAWSECCHECK-B-819): consolidated here from three byte-identical copies
+    that had drifted apart independently in checks/_host.py, checks/_config.py and
+    checks/_lifecycle.py, per this project's own §3.1 rule (a helper reused by 2+ topics
+    belongs in checks/_shared.py). Unlike ``_username_safe_path`` above, this takes an
+    explicit *home* rather than reading ``Path.home()`` -- the right choice for a value
+    that is a function of ``ctx.home`` specifically (an install/attestation path inside
+    the audited tree), not of the operator's real OS account home. A symlink TARGET that
+    can point anywhere on the host (B87) needs ``_username_safe_path`` instead; see its
+    call site in checks/_content.py for why.
+    """
+    text = str(value)
+    for base, prefix in ((str(home), ""), (str(Path(home).parent), ".." + os.sep)):
+        if base and base != os.sep and text.startswith(base + os.sep):
+            return prefix + text[len(base) + 1:]
+    return text
+
+
 def _perms_loose(ctx: Context) -> bool:
     """True only on POSIX when the config file is group/world-readable.
 
