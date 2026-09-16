@@ -1707,7 +1707,7 @@ def _check_budget_finding(chk, kind: str, seconds: float | None = None) -> Findi
 def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
             audit_budget_s: float = DEFAULT_AUDIT_BUDGET_S,
             on_check_done=None) -> list[Finding]:
-    # CLAWSECCHECK-C-510 item 2: a plain audit gives no progress feedback while it can
+    # C-510 item 2: a plain audit gives no progress feedback while it can
     # spend up to ~3 minutes on hostile content (a slow check, or several, chewing
     # through their own check_budget_s) -- a silent terminal for that long is
     # indistinguishable from a hang, and a user who kills what they believe is a stuck

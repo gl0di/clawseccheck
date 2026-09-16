@@ -188,7 +188,7 @@ def _unicode_ok() -> bool:
         return False
 
 
-# CLAWSECCHECK-C-510 item 2: a plain audit can spend up to ~3 minutes on hostile
+# C-510 item 2: a plain audit can spend up to ~3 minutes on hostile
 # content (checks/__init__.py's own per-check budget allows several slow checks in a
 # row) with nothing printed the whole time -- indistinguishable from a hang to a user
 # watching the terminal, and killing what looks like a stuck process mid-write is
@@ -3017,9 +3017,15 @@ def main(argv=None) -> int:
 
     Any unexpected error inside the audit/render pipeline becomes a clean one-line
     stderr message (stdout stays clean for --json/--sarif). The full traceback is
-    shown only under --debug. KeyboardInterrupt / SystemExit propagate untouched —
-    they derive from BaseException, not Exception. Only the exception *type* is
-    named, never its message, so a path or config value can't leak (§8, B-076).
+    shown only under --debug. Only the exception *type* is named, never its message,
+    so a path or config value can't leak (§8, B-076).
+
+    KeyboardInterrupt gets its own arm (C-509) rather than falling
+    through to the generic one below: it derives from BaseException, not Exception,
+    so it was never caught by that arm at all, and a raw traceback on an ordinary
+    Ctrl+C mid-`--full` broke this very docstring's promise. SystemExit still
+    propagates untouched -- it is argparse's own well-formed exit, not a crash to
+    report on.
 
     ``ScanBudgetExceeded`` also derives from BaseException (B-352), so it needs its
     own arm to stay inside that no-raw-traceback contract. Reaching here at all means
@@ -3058,6 +3064,25 @@ def main(argv=None) -> int:
         return 1
     try:
         return _main(argv)
+    except KeyboardInterrupt:
+        # C-509: Ctrl+C mid-scan is a normal, expected user action on a
+        # `--full` run that can take minutes -- not a bug -- but this docstring's own
+        # promise is "never dump a raw traceback at users", and KeyboardInterrupt
+        # deriving from BaseException (so it is not caught by the generic `Exception`
+        # arm below) meant it did exactly that until now. Same one-line-message,
+        # --debug-reraises, exit-1 contract as every other arm here (1 is already the
+        # right code for "the tool itself did not finish" under both exit-code
+        # schemes -- see this function's own docstring), just without the "unexpected
+        # internal error" framing, which would be actively wrong for a user-initiated
+        # interrupt.
+        raw = list(sys.argv[1:] if argv is None else argv)
+        if "--debug" in raw:
+            raise
+        print(
+            "clawseccheck: interrupted; no verdict from this run is reliable.",
+            file=sys.stderr,
+        )
+        return 1
     except ScanBudgetExceeded:
         raw = list(sys.argv[1:] if argv is None else argv)
         if "--debug" in raw:

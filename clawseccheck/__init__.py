@@ -186,7 +186,7 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     indicator match; see scoring._runtime_cap_signal). Every runtime-consuming check
     (B83, B84, B85, B164, B180, T1/T2/T3) stays unable to move the grade any other way.
 
-    `progress_cb` (CLAWSECCHECK-C-510 item 2, default None) is passed straight through
+    `progress_cb` (C-510 item 2, default None) is passed straight through
     to `run_all` as `on_check_done` -- see its docstring. A no-op for every existing
     caller; only the CLI's interactive default-audit path supplies one.
     """
