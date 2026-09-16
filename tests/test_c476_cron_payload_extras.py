@@ -153,6 +153,42 @@ def test_agent_turn_extracts_unsafe_external_content_fields(tmp_path):
     assert job["payload_external_content_source"] == "email"
 
 
+# --------------------------------------------------------------------------- payload_message
+# kind-branching (JSON-file store). B168 (checks/_lifecycle.py) reads
+# job["payload_message"] uniformly regardless of which store produced it; before this
+# fix the JSON-file-store call site unconditionally read payload.get("message"),
+# unlike the modern-SQLite call site a few lines below in _collect_cron, which was
+# already kind-branched (.message for agentTurn, .text for systemEvent). A
+# systemEvent-kind job's real content therefore never reached payload_message and was
+# never content-scanned by B168.
+
+
+def test_json_store_agent_turn_payload_message_from_message(tmp_path):
+    payload = {"kind": "agentTurn", "message": "Summarize yesterday's tasks."}
+    job = _json_home(tmp_path, payload).cron_jobs[0]
+    assert job["payload_message"] == "Summarize yesterday's tasks."
+
+
+def test_json_store_system_event_payload_message_from_text(tmp_path):
+    payload = {"kind": "systemEvent", "text": "agent booted"}
+    job = _json_home(tmp_path, payload).cron_jobs[0]
+    assert job["payload_message"] == "agent booted"
+
+
+def test_json_store_system_event_message_key_is_not_read(tmp_path):
+    """A stray `.message` on a systemEvent payload (the wrong kind for that key) must
+    not leak through -- only `.text` is the genuine declaration for this kind."""
+    payload = {"kind": "systemEvent", "text": "agent booted", "message": "should not leak"}
+    job = _json_home(tmp_path, payload).cron_jobs[0]
+    assert job["payload_message"] == "agent booted"
+
+
+def test_json_store_command_kind_payload_message_is_none(tmp_path):
+    payload = {"kind": "command", "argv": ["echo", "hi"]}
+    job = _json_home(tmp_path, payload).cron_jobs[0]
+    assert job["payload_message"] is None
+
+
 # --------------------------------------------------------------------------- toolsAllow
 
 
@@ -199,6 +235,7 @@ def test_allow_unsafe_external_content_on_non_agent_turn_is_not_extracted(tmp_pa
 def test_missing_fields_are_none_not_absent_keys(tmp_path):
     payload = {"kind": "systemEvent", "text": "hi"}
     job = _json_home(tmp_path, payload).cron_jobs[0]
+    assert job["payload_message"] == "hi"
     for key in _ALL_EXTRA_KEYS:
         assert key in job
         assert job[key] is None

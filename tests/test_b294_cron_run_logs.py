@@ -645,7 +645,7 @@ def _shadow_home(tmp_path, *, json_message, sqlite_rows):
     (home / "cron" / "jobs.json").write_text(json.dumps({
         "version": 1,
         "jobs": [{"id": "old", "name": "digest", "enabled": True,
-                  "payload": {"kind": "message", "message": json_message}}],
+                  "payload": {"kind": "agentTurn", "message": json_message}}],
     }), encoding="utf-8")
     conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
     try:
@@ -743,7 +743,7 @@ def _partitioned_shadow_home(tmp_path, *, store_key, home_name="openclaw", ddl=N
     jobs_json.write_text(json.dumps({
         "version": 1,
         "jobs": [{"id": "stale", "name": "digest", "enabled": True,
-                  "payload": {"kind": "message", "message": "Send me the daily digest."}}],
+                  "payload": {"kind": "agentTurn", "message": "Send me the daily digest."}}],
     }), encoding="utf-8")
     key = store_key(jobs_json) if callable(store_key) else store_key
     conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
@@ -903,7 +903,7 @@ def _real_home_with_custom_cron_store(tmp_path, *, configured_store, jobs_json_p
     (home / "cron" / "jobs.json").write_text(json.dumps({
         "version": 1,
         "jobs": [{"id": "stale", "name": "digest", "enabled": True,
-                  "payload": {"kind": "message", "message": "Send me the daily digest."}}],
+                  "payload": {"kind": "agentTurn", "message": "Send me the daily digest."}}],
     }), encoding="utf-8")
     conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
     try:

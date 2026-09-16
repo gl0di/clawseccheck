@@ -1555,6 +1555,19 @@ def check_cron_job_content(ctx: Context) -> Finding:
     for job in ctx.cron_jobs:
         job_label = f"cron job '{job.get('id') or job.get('name') or '?'}'"
         _scan_field(f"{job_label}.payload.message", job.get("payload_message"))
+        # B-819: a dormant/legacy-shaped payload in the JSON-file cron store -- wrong-
+        # case kind, a systemEvent's content parked in `.message` instead of `.text`,
+        # or a missing `payload.kind`/`payload` object entirely. Nothing today reads
+        # this file to execute jobs, but a future `openclaw doctor` run silently
+        # reactivates it with content intact (collector._dormant_cron_payload_text).
+        # The label discloses that explicitly, same disclosure idiom as B-555's
+        # advice-text carve-out -- this is a positive observation about a file that
+        # really is on disk (B189/shadow-store precedent), not a live-execution claim.
+        _scan_field(
+            f"{job_label}.payload (dormant legacy shape — would be reactivated by "
+            "`openclaw doctor`)",
+            job.get("payload_message_dormant"),
+        )
         _scan_field(f"{job_label}.trigger.script", job.get("trigger_script"))
         # C-476: a `command`-kind payload's argv vector and a `script`-kind payload's
         # body were collected (collector._cron_payload_extras) but never content-scanned

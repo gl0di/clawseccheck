@@ -702,7 +702,11 @@ class Context:
     # dict: id, name, enabled, delete_after_run, trigger_script, payload_kind,
     # payload_message — the same shape regardless of which backing store it came from,
     # and (B-709) regardless of which of the two observed cron_jobs COLUMN shapes the
-    # SQLite table itself has (see _collect_cron's docstring).
+    # SQLite table itself has (see _collect_cron's docstring). B-819:
+    # payload_message_dormant is a SEPARATE, scan-only field -- non-None only from the
+    # JSON-file-store branch, when a lenient/case-insensitive reading of a dormant
+    # payload finds content the strict payload_message extraction does not (see
+    # _dormant_cron_payload_text's docstring). Always present, always None elsewhere.
     cron_jobs: list = field(default_factory=list)
     cron_found: bool = False        # a cron store (JSON or SQLite) was found and read
     cron_parse_error: bool = False  # a cron store was found but could not be parsed/read
@@ -3961,14 +3965,89 @@ def _cron_payload_extras(payload_obj, payload_kind) -> dict:
     }
 
 
+def _dormant_cron_payload_text(job: dict) -> "str | None":
+    """B-819: scan-only companion to the JSON-file store's canonical ``payload_message``
+    extraction. ``~/.openclaw/cron/jobs.json`` is not read by the live execution path
+    (``loadCronJobsStoreWithConfigJobs`` -> ``loadMutableCronStore`` ->
+    ``loadCronStoreFromDatabase`` reads only the SQLite ``cron_jobs`` table,
+    store-D_NHWaCW.mjs:266-269) -- but it is NOT inert forever. The installed dist ships
+    a doctor/repair import path (``store-migration-DyyVNWF7.mjs``, openclaw@2026.9.4)
+    that migrates a legacy-shaped job into a live SQLite row, preserving its content:
+
+    * ``normalizePayloadKind`` (:594) matches ``payload.kind`` case-INSENSITIVELY
+      (``"systemevent"``/``"agentturn"`` -> canonical casing) -- the canonical
+      extraction above is deliberately strict/exact-case (it must mirror the CURRENT
+      runtime, which this is not), so a wrong-case kind here reads as "no kind" to it.
+    * a kind-inference step (:1185-1194) fills a genuinely MISSING ``payload.kind`` from
+      the payload's own content: ``.message`` present -> ``agentTurn``, else ``.text``
+      present -> ``systemEvent``.
+    * a systemEvent migration (:1197-1204) copies ``.message`` into ``.text`` when
+      ``.text`` is absent -- the exact shape the canonical extraction's kind-branch
+      cannot see (a systemEvent-kind payload's real content sitting in the wrong key).
+    * ``inferPayloadIfMissing`` (:612), reached only when ``payload`` itself is absent/
+      not an object at all (not merely kind-less), reads legacy TOP-LEVEL job fields
+      instead: ``.message`` -> agentTurn, else ``.text`` -> systemEvent, else
+      ``.command`` -> systemEvent(text=command). These three keys are exactly the ones
+      the same file's ``hadLegacyTopLevelPayloadFields`` probe (:1207) treats as
+      legacy-only migration debris -- a current, schema-valid job never carries them,
+      so their presence is itself the dormant-legacy signal.
+
+    So a hostile job shaped like ``{"kind": "systemevent", "message": "<payload>"}`` (or
+    ``{"message": "<payload>"}`` with no ``payload`` object at all) draws zero signal from
+    the canonical extraction today, yet would be silently reactivated -- content intact --
+    by a future ``openclaw doctor`` run. Returns the lenient/reactivation-candidate text,
+    or ``None`` when there is nothing beyond what the canonical extraction already covers.
+    Deliberately mirrors the vendor's own leniency rather than widening it: e.g. when a
+    systemEvent's ``.text`` IS present, its ``.message`` is left unread here exactly as
+    the doctor leaves it unread (the migration only fires when ``.text`` is absent) --
+    that stray key is genuinely inert, never migrated in, so scanning it would be a
+    fact this scan-only path does not have license to invent.
+
+    Never conflate this with the canonical fields: ``payload_kind``/``trigger_script``/
+    ``payload_message`` etc. must keep reporting the DECLARED (strict) shape -- this is
+    a second, clearly-separated signal for a check to scan, not a replacement value.
+    """
+    payload = job.get("payload")
+    if isinstance(payload, dict):
+        raw_kind = payload.get("kind")
+        lc_kind = raw_kind.strip().lower() if isinstance(raw_kind, str) else ""
+        if lc_kind == "agentturn":
+            candidate = payload.get("message")
+        elif lc_kind == "systemevent":
+            candidate = payload.get("text")
+            if not (isinstance(candidate, str) and candidate.strip()):
+                candidate = payload.get("message")
+        elif not raw_kind:
+            msg = payload.get("message")
+            txt = payload.get("text")
+            candidate = msg if isinstance(msg, str) and msg.strip() else txt
+        else:
+            candidate = None  # a real, differently-kinded payload (command/script/...)
+    else:
+        # No payload object at all -- inferPayloadIfMissing's own top-level fallback.
+        msg = job.get("message")
+        txt = job.get("text")
+        cmd = job.get("command")
+        if isinstance(msg, str) and msg.strip():
+            candidate = msg
+        elif isinstance(txt, str) and txt.strip():
+            candidate = txt
+        else:
+            candidate = cmd
+    return candidate if isinstance(candidate, str) and candidate.strip() else None
+
+
 def _collect_cron(home: Path, ctx: Context) -> None:
     """B-231 sub-item 1: read-only, symlink-safe, size/entry-capped collection of the
     OpenClaw cron job store into ``ctx.cron_jobs``.
 
     Two backing stores exist (grounded against the openclaw dist): the legacy JSON file
     ``~/.openclaw/cron/jobs.json`` (``{"version": 1, "jobs": [CronJobSchema, ...]}``,
-    each job's ``payload``/``trigger`` sub-objects carrying ``message``/``script``), and
-    the SQLite-backed ``cron_jobs`` table in ``~/.openclaw/state/openclaw.sqlite``. The
+    each job's ``trigger`` sub-object carrying ``script``, and its ``payload`` sub-object
+    carrying ``message`` when ``payload.kind == "agentTurn"`` or ``text`` when
+    ``payload.kind == "systemEvent"`` -- kind-branched the same way as the modern-SQLite
+    ``job_json`` shape below), and the SQLite-backed ``cron_jobs`` table in
+    ``~/.openclaw/state/openclaw.sqlite``. The
     JSON file is preferred when present; the SQLite table is a read-only fallback. Neither
     present leaves ``ctx.cron_found`` False, so a consuming check reports UNKNOWN, never a
     fake PASS.
@@ -4032,15 +4111,38 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     continue
                 payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
                 trigger = job.get("trigger") if isinstance(job.get("trigger"), dict) else {}
+                payload_kind = payload.get("kind")
+                # Kind-branched the same way the modern-SQLite branch below already is
+                # (job_json.payload.message for agentTurn, .text for systemEvent) --
+                # before this fix every JSON-file-store job unconditionally read
+                # `.message`, so a systemEvent job's real content (`.text`, per the
+                # dist's CronPayload union) was never captured and never content-scanned
+                # by B168. The SQLite branch was correct; this one was not kind-branched
+                # at all.
+                if payload_kind == "agentTurn":
+                    payload_message = payload.get("message")
+                elif payload_kind == "systemEvent":
+                    payload_message = payload.get("text")
+                else:
+                    payload_message = None
+                # B-819: scan-only fallback, JSON-file store ONLY -- this file is not
+                # the live execution path (see _dormant_cron_payload_text's docstring),
+                # so content shaped for it is dormant, not declared. Kept as a SEPARATE
+                # key: payload_kind/payload_message above must stay the strict, declared
+                # shape, never blended with a lenient reactivation-candidate guess.
+                dormant = _dormant_cron_payload_text(job)
                 ctx.cron_jobs.append({
                     "id": job.get("id"),
                     "name": job.get("name"),
                     "enabled": job.get("enabled"),
                     "delete_after_run": job.get("deleteAfterRun"),
                     "trigger_script": trigger.get("script"),
-                    "payload_kind": payload.get("kind"),
-                    "payload_message": payload.get("message"),
-                    **_cron_payload_extras(payload, payload.get("kind")),
+                    "payload_kind": payload_kind,
+                    "payload_message": payload_message,
+                    "payload_message_dormant": (
+                        dormant if dormant and dormant != payload_message else None
+                    ),
+                    **_cron_payload_extras(payload, payload_kind),
                 })
             if len(jobs) > _MAX_CRON_JOBS:
                 ctx.cron_jobs_truncated = True
@@ -4209,6 +4311,11 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     "trigger_script": trigger_script,
                     "payload_kind": payload_kind,
                     "payload_message": payload_message,
+                    # B-819: the dormant/reactivation-candidate heuristic is meaningful
+                    # only for the JSON-file store (see _dormant_cron_payload_text) --
+                    # this IS the live-executing store, so there is nothing "dormant"
+                    # about a row already here. Explicit None for the uniform job shape.
+                    "payload_message_dormant": None,
                     **_cron_payload_extras(payload_obj, payload_kind),
                 })
         else:
@@ -4221,6 +4328,9 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     "trigger_script": trigger_script,
                     "payload_kind": payload_kind,
                     "payload_message": payload_message,
+                    # B-819: same reasoning as the modern-SQLite branch above -- this IS
+                    # the live store, so no dormant/reactivation-candidate signal applies.
+                    "payload_message_dormant": None,
                     # C-476: this LEGACY flat-column shape has no payload sub-object at
                     # all -- these fields are structurally unavailable here, not merely
                     # absent on this job. Explicit None (never omitted) so a consuming
