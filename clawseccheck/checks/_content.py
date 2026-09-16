@@ -615,6 +615,39 @@ _B61_WINDOW = 120
 _B61_ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_]")
 
 
+def _trim_partial_token(text: str, start: int, end: int, anchor_start: int, anchor_end: int) -> tuple[int, int]:
+    """Return *(start, end)* with any ASCII token a fixed-width slice cut in half
+    dropped from either edge — the reusable form of _b61_window's B-286 fix (see its
+    docstring for why a manufactured mid-token boundary is the problem, not merely
+    untidy display). *anchor_start*/*anchor_end* are the underlying regex match's own
+    span: trimming is bounded by it exactly as _b61_window's is, so it can only ever
+    narrow the window toward the match that produced it, never past it. B-762: pulled
+    out of _b61_window (which keeps its own copy of this shape, unchanged, since it is
+    already reviewed and pinned) so every OTHER context-window builder in this module
+    that renders its slice as evidence text can call one audited implementation
+    instead of re-deriving the loop."""
+    w = _B61_ASCII_WORD_RE.match
+    if start > 0 and w(text[start - 1]) and w(text[start]):
+        while start < anchor_start and w(text[start]):
+            start += 1
+    if end < len(text) and w(text[end - 1]) and w(text[end]):
+        while end > anchor_end and w(text[end - 1]):
+            end -= 1
+    return start, end
+
+
+def _mark_truncated(snippet: str, truncated_head: bool, truncated_tail: bool) -> str:
+    """Prefix/suffix *snippet* with "..." wherever it was actually cut, without ever
+    doubling up on a marker a caller's own length-cap already added (a caller that
+    appends its own tail "..." must pass truncated_tail=False for that side, since the
+    "..." it produced already discloses the cut)."""
+    if truncated_tail:
+        snippet = snippet + "..."
+    if truncated_head:
+        snippet = "..." + snippet
+    return snippet
+
+
 # B-550: a TOOL-PERMISSION DECLARATION is not an action, and its value must not be read
 # as one.
 #
@@ -3047,6 +3080,10 @@ def _b170_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
             continue
         start = max(0, m.start() - _B170_WINDOW)
         end = min(len(text), m.end() + _B170_WINDOW)
+        # B-762: trim before window is built/searched -- see _trim_partial_token.
+        truncated_head = start > 0
+        truncated_tail = end < len(text)
+        start, end = _trim_partial_token(text, start, end, m.start(), m.end())
         window = text[start:end]
         if not _B170_SOURCE_RE.search(window):
             continue
@@ -3055,8 +3092,10 @@ def _b170_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
             continue
         seen.add(key)
         snippet = window.strip().replace("\n", " ")
-        if len(snippet) > 120:
+        capped = len(snippet) > 120
+        if capped:
             snippet = snippet[:117] + "..."
+        snippet = _mark_truncated(snippet, truncated_head, truncated_tail and not capped)
         if snippet not in hits:
             hits.append(snippet)
     for m in _B170_FOLLOW_SOURCE_RE.finditer(text):
@@ -4874,6 +4913,19 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
             continue
         start = max(0, m.start() - _B65_WINDOW)
         end = min(len(text), m.end() + _B65_WINDOW)
+        # B-762: drop any ASCII token the fixed-width slice cut in half, mirroring
+        # _b61_window's B-286 fix (see its docstring) via the shared
+        # _trim_partial_token -- without it a shown snippet can start or end mid-word
+        # ("ders." for the tail of a cut "triggers"), which reads as garbled and,
+        # unlike B61's pattern-matching window, is purely a display defect here since
+        # `window` below only ever reaches evidence text, never a regex search corpus
+        # of its own construction. `truncated_head`/`truncated_tail` are recorded from
+        # the PRE-trim bounds (trimming only ever narrows further inward, so the
+        # boundary question they answer -- "is there more text past this edge" -- is
+        # unchanged by it) so the marker added below is accurate either way.
+        truncated_head = start > 0
+        truncated_tail = end < len(text)
+        start, end = _trim_partial_token(text, start, end, m.start(), m.end())
         window = text[start:end]
         # B-186: an absolute-count trigger in the window IS persistence framing, so it
         # satisfies the query-or-delay gate on its own (no "user says" query phrase needed).
@@ -4978,8 +5030,12 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         ):
             continue
         snippet = window.strip().replace("\n", " ")
-        if len(snippet) > 120:
+        capped = len(snippet) > 120
+        if capped:
             snippet = snippet[:117] + "..."
+        # B-762: the 120-cap's own "..." already discloses the tail cut when it fires;
+        # _mark_truncated only adds its OWN tail marker when that cap did not.
+        snippet = _mark_truncated(snippet, truncated_head, truncated_tail and not capped)
         if snippet not in hits:
             hits.append(snippet)
     return hits
@@ -5056,9 +5112,18 @@ def _b156_scan(
             text[max(0, m.start() - _B156_WINDOW) : m.end() + dest_m.end()]
         ):
             continue
-        snippet = text[max(0, m.start() - 10) : m.end() + dest_m.end()].strip().replace("\n", " ")
+        # B-762: only the HEAD lookback (10 chars, arbitrary) gets the word-boundary
+        # trim -- the tail bound is dest_m.end(), an actual destination-match boundary
+        # rather than a window artefact, and _trim_partial_token would risk eating
+        # into the destination text itself if it immediately follows the send verb
+        # with no space, so it is deliberately left alone.
+        snip_start = max(0, m.start() - 10)
+        truncated_head = snip_start > 0
+        snip_start, _ = _trim_partial_token(text, snip_start, m.start(), m.start(), m.start())
+        snippet = text[snip_start : m.end() + dest_m.end()].strip().replace("\n", " ")
         if len(snippet) > 120:
             snippet = snippet[:117] + "..."
+        snippet = _mark_truncated(snippet, truncated_head, False)
         if snippet in seen:
             continue
         seen.add(snippet)
@@ -5115,6 +5180,12 @@ def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
             continue
         start = max(0, m.start() - _B66_WINDOW)
         end = min(len(text), m.end() + _B66_WINDOW)
+        # B-762: trim before window is built (not after) -- trigger.start() below is
+        # measured against `window`'s own coordinates and start+trigger.start() maps it
+        # back to `text`, so the trim must land before either the search or that math.
+        truncated_head = start > 0
+        truncated_tail = end < len(text)
+        start, end = _trim_partial_token(text, start, end, m.start(), m.end())
         window = text[start:end]
         # A high-signal jailbreak CORE token OR a persona-RESET verb fires on its own
         # (B-120); an ambiguous weakening phrase alone (_B66_WEAK_RE) does not (B-117).
@@ -5139,8 +5210,10 @@ def _b66_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         if _under_defensive_heading(text, m.start()):
             continue
         snippet = window.strip().replace("\n", " ")
-        if len(snippet) > 120:
+        capped = len(snippet) > 120
+        if capped:
             snippet = snippet[:117] + "..."
+        snippet = _mark_truncated(snippet, truncated_head, truncated_tail and not capped)
         hits.append(snippet)
     return hits
 
@@ -5155,6 +5228,11 @@ def _b66_authority_override_scan(text: str, fr: list[tuple[int, int]]) -> list[s
             continue
         start = max(0, m.start() - _B66_WINDOW)
         end = min(len(text), m.end() + _B66_WINDOW)
+        # B-762: trim before window is built -- trigger.start() below is measured
+        # against `window`'s own coordinates, same reasoning as _b66_scan above.
+        truncated_head = start > 0
+        truncated_tail = end < len(text)
+        start, end = _trim_partial_token(text, start, end, m.start(), m.end())
         window = text[start:end]
         trigger = _B66_AUTHORITY_NEUTRALIZE_RE.search(window)
         if not trigger:
@@ -5182,8 +5260,10 @@ def _b66_authority_override_scan(text: str, fr: list[tuple[int, int]]) -> list[s
         if _under_defensive_heading(text, m.start()):
             continue
         snippet = window.strip().replace("\n", " ")
-        if len(snippet) > 120:
+        capped = len(snippet) > 120
+        if capped:
             snippet = snippet[:117] + "..."
+        snippet = _mark_truncated(snippet, truncated_head, truncated_tail and not capped)
         hits.append(snippet)
     return hits
 
@@ -9931,11 +10011,18 @@ def _identity_injection_scan(text: str, fence_ranges: list[tuple[int, int]]) -> 
             continue
         para_start, para_end = _identity_paragraph_span(text, m.start())
         has_fake_auth_code = _identity_has_live_auth_code(text, para_start, para_end)
-        snippet_end = min(len(text), m.end() + 140)
-        last_end = max(para_end, snippet_end)
+        raw_snippet_end = min(len(text), m.end() + 140)
+        last_end = max(para_end, raw_snippet_end)  # overlap-skip bound: untrimmed, unchanged
+        # B-762: the DISPLAYED snippet's own tail gets the word-boundary trim; the
+        # head is already `m.start()` (the real match start, not a window artefact),
+        # so only the tail can land mid-word here.
+        truncated_tail = raw_snippet_end < len(text)
+        _, snippet_end = _trim_partial_token(text, m.start(), raw_snippet_end, m.start(), m.end())
         snippet = " ".join(text[m.start():snippet_end].split())
-        if len(snippet) > 140:
+        capped = len(snippet) > 140
+        if capped:
             snippet = snippet[:137] + "..."
+        snippet = _mark_truncated(snippet, False, truncated_tail and not capped)
         hits.append((snippet, has_fake_auth_code))
     return hits
 
@@ -11106,8 +11193,18 @@ def _b337_dotfile_exfil_hits(text: str) -> list[str]:
             continue
         if _b337_under_defensive_heading(text, cm.start(), blocks):
             continue
+        # B-762: word-boundary trim before _obf_clip -- _obf_clip only caps the tail
+        # (and does not itself know whether ITS input was already a window artefact),
+        # so the head lookback and any tail cut BELOW its own 120-char cap otherwise
+        # showed no marker at all.
         snip_lo = max(0, cm.start() - 20)
-        hits.append(_obf_clip(text[snip_lo:cm.end() + 20], 120))
+        snip_hi = min(len(text), cm.end() + 20)
+        truncated_head = snip_lo > 0
+        truncated_tail = snip_hi < len(text)
+        snip_lo, snip_hi = _trim_partial_token(text, snip_lo, snip_hi, cm.start(), cm.end())
+        window_slice = text[snip_lo:snip_hi]
+        capped = len(window_slice.strip()) > 120
+        hits.append(_mark_truncated(_obf_clip(window_slice, 120), truncated_head, truncated_tail and not capped))
     return hits
 
 
@@ -11330,8 +11427,15 @@ def check_tunnel_enrollment(ctx: Context) -> Finding:
         for m in _B338_LAUNCH_RE.finditer(norm):
             if _b338_defensive_context(norm, m.start(), fr):
                 continue
+            # B-762: word-boundary trim before _obf_clip -- see the B337 site above.
             lo = max(0, m.start() - 20)
-            snippet = _obf_clip(norm[lo : m.end() + 40], 100)
+            hi = min(len(norm), m.end() + 40)
+            truncated_head = lo > 0
+            truncated_tail = hi < len(norm)
+            lo, hi = _trim_partial_token(norm, lo, hi, m.start(), m.end())
+            window_slice = norm[lo:hi]
+            capped = len(window_slice.strip()) > 100
+            snippet = _mark_truncated(_obf_clip(window_slice, 100), truncated_head, truncated_tail and not capped)
             evidence.append(f'{skill_name}: "{snippet}"')
 
     # Defect 1: the argv-list form -- see the module comment above.
@@ -11917,7 +12021,15 @@ def check_cloud_metadata_credential_fetch(ctx: Context) -> Finding:
         for m in _B339_CRED_URL_RE.finditer(norm):
             if _b339_defensive_context(norm, m.start(), fr):
                 continue
-            snippet = _obf_clip(norm[max(0, m.start() - 10) : m.end() + 10], 100)
+            # B-762: word-boundary trim before _obf_clip -- see the B337 site above.
+            snip_lo = max(0, m.start() - 10)
+            snip_hi = min(len(norm), m.end() + 10)
+            truncated_head = snip_lo > 0
+            truncated_tail = snip_hi < len(norm)
+            snip_lo, snip_hi = _trim_partial_token(norm, snip_lo, snip_hi, m.start(), m.end())
+            window_slice = norm[snip_lo:snip_hi]
+            capped = len(window_slice.strip()) > 100
+            snippet = _mark_truncated(_obf_clip(window_slice, 100), truncated_head, truncated_tail and not capped)
             reason = _b339_corroborated(norm, m.start(), m.end(), own_host)
             if reason is not None:
                 fail_ev.append(f'{skill_name}: "{snippet}" ({reason})')
@@ -13250,10 +13362,20 @@ def _privesc_scan(text: str, fence_ranges: list[tuple[int, int]]) -> list[tuple[
         c_start = max(0, m.start() - _PRIVESC_CONSENT_WINDOW)
         c_end = min(len(text), m.end() + _PRIVESC_CONSENT_WINDOW)
         has_consent_claim = bool(_PRIVESC_FABRICATED_CONSENT_RE.search(text[c_start:c_end]))
-        snippet_raw = text[max(0, m.start() - 40) : min(len(text), m.end() + 40)]
+        # B-762: word-boundary trim on the DISPLAYED snippet's own slice only -- the
+        # verb-gating `window`/`end` and `last_end` above are untouched, so this
+        # cannot change which matches fire or overlap-skip each other.
+        snip_lo = max(0, m.start() - 40)
+        snip_hi = min(len(text), m.end() + 40)
+        truncated_head = snip_lo > 0
+        truncated_tail = snip_hi < len(text)
+        snip_lo, snip_hi = _trim_partial_token(text, snip_lo, snip_hi, m.start(), m.end())
+        snippet_raw = text[snip_lo:snip_hi]
         snippet = " ".join(snippet_raw.split())  # collapse whitespace/newlines to one line
-        if len(snippet) > 100:
+        capped = len(snippet) > 100
+        if capped:
             snippet = snippet[:97] + "..."
+        snippet = _mark_truncated(snippet, truncated_head, truncated_tail and not capped)
         hits.append((snippet, has_consent_claim))
     return hits
 
