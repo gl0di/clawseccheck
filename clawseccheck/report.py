@@ -4594,27 +4594,50 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     # legs named in full ("untrusted input", "sensitive data", "outbound").
     l2_gloss = "  (untrusted input, data, egress)"
     l3 = "  audited by ClawSecCheck" + ("" if ascii_only else f" {brand.MASCOT}")
+    # B-625: --card accepted --full/--behavioral and rendered NOTHING for the result --
+    # every other surface that carries a grade (render_report, render_html,
+    # render_dashboard) discloses a capped score through this exact shared
+    # `_cap_cascade`; this was the one shareable badge that stayed silent about WHY its
+    # own number is lower than the raw audit found. Same Golden Rule #4 shape B-465/
+    # B-467 already fixed on render_dashboard's card -- reusing the identical shared
+    # cascade rather than a fourth hand-rolled copy of the six-signal priority ladder.
+    # `None` on an uncapped run (the overwhelmingly common case), so a graded card with
+    # nothing capping it renders byte-identically to before this change.
+    _cap_primary, _cap_extras = _cap_cascade(score)
+    _mark = "!" if ascii_only else "⚠️"
+    cap_line = None
+    if getattr(score, "graded", True) and _cap_primary is not None:
+        cap_line = (
+            f"  {_mark} capped from {score.raw_score}/100 — "
+            f"{_cap_primary_reason_text(_cap_primary, score)}{_cap_also_clause(_cap_extras)}"
+        )
+    elif _cap_primary is not None:
+        # Same reasoning as render_dashboard's ungraded branch: "capped from N/100" has
+        # no number to attach to on a run with no grade, so `_UNGRADED_CAP_TAIL` states
+        # the fact without presupposing one.
+        cap_line = (
+            f"  {_mark} {_cap_primary_reason_text(_cap_primary, score)}"
+            f"{_cap_also_clause(_cap_extras)} — {_UNGRADED_CAP_TAIL}"
+        )
+    lines = [l1, l2, l2_gloss] + ([cap_line] if cap_line else [])
     # C-428: the width was a hardcoded 39, sized for "A ( 95/100)". The ungraded line is
     # longer than that, and `:<39` pads but never truncates — so the box art broke open
     # on exactly the runs the ungraded work introduced. Grow to fit; never shrink below
-    # the established 39 so a graded card renders byte-identically to before.
-    width = max(39, len(l1), len(l2), len(l2_gloss))
+    # the established 39 so a graded, uncapped card renders byte-identically to before.
+    width = max([39] + [len(ln) for ln in lines])
     # Mascot header line, once (design-system Foundations); --ascii drops it to
     # stay pure-ASCII, matching render_dashboard's convention.
     header = "" if ascii_only else f"{brand.header()}\n"
     if ascii_only:
         top = bot = "+" + "-" * width + "+"
-        body = "\n".join(f"|{ln:<{width}}|" for ln in (l1, l2, l2_gloss, l3))
+        body = "\n".join(f"|{ln:<{width}}|" for ln in (*lines, l3))
         return _asciify(f"{top}\n{body}\n{bot}")
     top = "┌" + "─" * width + "┐"
     bot = "└" + "─" * width + "┘"
     # the mascot emoji is double-width in many terminals; pad l3 one less
-    body = "\n".join([
-        f"│{l1:<{width}}│",
-        f"│{l2:<{width}}│",
-        f"│{l2_gloss:<{width}}│",
-        f"│{l3:<{width - 1}}│",
-    ])
+    body = "\n".join(
+        [f"│{ln:<{width}}│" for ln in lines] + [f"│{l3:<{width - 1}}│"]
+    )
     return f"{header}{top}\n{body}\n{bot}"
 
 
