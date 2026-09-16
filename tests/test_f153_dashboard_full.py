@@ -448,6 +448,35 @@ class TestCliDashboardFull:
         assert rc == 0
         assert "Coverage of OpenClaw surfaces" in out
 
+    def test_dashboard_full_coverage_page_reaches_the_card(self, capsys):
+        """F-165: `--dashboard --full` is the ONE path that hand-rolls its own phases
+        instead of calling `pipeline.run_pipeline()` (see the comment above
+        `_dashboard_phases` in cli.py), so it is the specific call site that needed
+        its own `coverage.build_coverage_page()` call — this pins that it actually
+        reaches render_dashboard's inline card, not just the underlying function
+        when called directly with a hand-built page."""
+        rc = main(["--home", VULN, *BASE, "--dashboard", "--full"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Coverage page" in out
+
+    def test_dashboard_full_coverage_page_reaches_html_and_pdf_riders(self, tmp_path, capsys):
+        """Same CLI wiring, the other two renderers the DoD names. `--pdf`/`--html`
+        riding `--dashboard --full` collapses the printed card to an overview (the
+        full tail block, including this one, moves into the PDF — same as every
+        other tail-block section, e.g. RISK chains), so this checks the FILES
+        rather than `out`."""
+        html_path = tmp_path / "r.html"
+        pdf_path = tmp_path / "r.pdf"
+        rc = main(["--home", VULN, *BASE, "--dashboard", "--full",
+                  "--html", str(html_path), "--pdf", str(pdf_path)])
+        assert rc == 0
+        html = html_path.read_text(encoding="utf-8")
+        assert "Coverage page" in html
+        from _pdftext import content_text  # noqa: PLC0415
+        pdf_text = content_text(pdf_path.read_bytes())
+        assert "Coverage page" in pdf_text
+
 
 class TestCapParity:
     def _bundle(self, tmp_path: Path) -> str:

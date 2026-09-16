@@ -1496,10 +1496,12 @@ One entry per subject in the 8-subject taxonomy (§18):
   not the file/byte-level detail ("N of M trajectory files, X of Y MB scanned") a
   future revision may add — that data exists today only as prose inside
   `B164`/trajectory-audit/behavioral findings, not as structured counts.
-- **V1 scope**: also rendered as a text section (`--full`, banner `CLAWSECCHECK
-  COVERAGE`) built from the same `build_coverage_page` function. `--dashboard --full`,
-  `--html`, and `--pdf` do not carry this page yet — they render through a separate
-  code path that does not call `pipeline.run_pipeline`.
+- Also rendered as a text section (`--full`, banner `CLAWSECCHECK COVERAGE`), and —
+  as a "Coverage page" block, same underlying `build_coverage_page`/`coverage_page_lines`
+  functions — by `--dashboard --full` (the chat card), `--html`, and `--pdf`. The
+  `--dashboard --full` path builds its own page inline rather than through
+  `pipeline.run_pipeline` (that one code path hand-rolls its phases; see cli.py's
+  `_dashboard_phases` comment), so it is wired at that specific call site.
 
 ---
 

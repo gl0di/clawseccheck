@@ -2220,7 +2220,8 @@ _MODE_ORDER = [attr for attr, _flag, _kind in _PRIMARY_MODES]
 _MODE_FLAG = {attr: flag for attr, flag, _kind in _PRIMARY_MODES}
 
 
-def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit) -> None:
+def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit, *,
+                                  coverage_page: dict | None = None) -> None:
     """B-586: write `--badge`/`--html`/`--sarif` as side outputs of a `--dashboard` run.
 
     These three used to WIN the mode race against `--dashboard`, run their own bare
@@ -2246,7 +2247,8 @@ def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit)
     for value, label, render in (
         (getattr(args, "badge", None), "badge", lambda: render_svg(score, findings)),
         (getattr(args, "html", None), "HTML report",
-         lambda: render_html(findings, score, native=ctx.native, ctx=ctx)),
+         lambda: render_html(findings, score, native=ctx.native, ctx=ctx,
+                             coverage_page=coverage_page)),
         (getattr(args, "sarif", None), "SARIF",
          lambda: render_sarif(findings, score, __version__, ctx=ctx)),
     ):
@@ -5557,8 +5559,23 @@ def _main(argv=None) -> int:
         score = compute(findings, ctx, live_test_vulnerable=_live_signal.hit,
                         live_test_reason=_live_signal.reason,
                         behavioral_fired_ids=_behavioral_fired_ids, ledger=_ledger)
+        # F-165: the per-subject "was everything looked at" page. `_dashboard_phases`
+        # is this branch's own hand-rolled `PipelineResult` (see the comment above it
+        # for why there is no `run_pipeline()` call to inherit one from) — same shape
+        # `run_pipeline` builds its own `coverage_page` from (pipeline.py's
+        # `off_check_findings`), so it is derived the identical way here.
+        from .coverage import build_coverage_page as _build_coverage_page  # noqa: PLC0415
+        _dashboard_off_check_findings = [
+            f for phase in _dashboard_phases.phases for f in phase.evaluated_findings
+        ]
+        _dashboard_coverage_page = _build_coverage_page(
+            ctx, findings, skill_sweep=skill_sweep, plugin_sweep=plugin_sweep,
+            extra_findings=_dashboard_off_check_findings,
+            sweep_skip_reason=("not scanned this run (--fast drops the sweep phases)"
+                               if args.fast else None))
         # B-586 + B-723: written only now, against the score the completed phases earned.
-        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit)
+        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit,
+                                      coverage_page=_dashboard_coverage_page)
         # P9 (adjudication) is deliberately NOT gated on --fast or the budget, same as
         # --full's own P9: it re-runs no check, so there is no expense to skip.
         _dashboard_vet_targets = (
@@ -5576,7 +5593,8 @@ def _main(argv=None) -> int:
                 secure_write_bytes(_pdf_dest, render_pdf(
                     findings, score, native=ctx.native, ctx=ctx,
                     plugin_sweep=plugin_sweep, risk=paths,
-                    behavioral=behavioral_phase, adjudication=adjudication_phase))
+                    behavioral=behavioral_phase, adjudication=adjudication_phase,
+                    coverage_page=_dashboard_coverage_page))
                 pdf_written = str(_pdf_dest)
             except OSError as exc:
                 # B-459: the PDF is the DELIVERY of this audit, not the audit. Failing to
@@ -5589,7 +5607,7 @@ def _main(argv=None) -> int:
                 findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
                 risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
                 adjudication=adjudication_phase, compact=args.compact,
-                pdf_path=pdf_written,
+                pdf_path=pdf_written, coverage_page=_dashboard_coverage_page,
                 # Reserve what _with_next_actions is about to append, so the card's own
                 # severity-ordered ladder absorbs it rather than the cap being exceeded.
                 compact_reserve=len(_COMPACT_NEXT_POINTER) if args.compact else 0),

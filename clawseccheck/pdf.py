@@ -651,7 +651,7 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
 
 def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
                *, ctx=None, plugin_sweep=None, risk=None, behavioral=None,
-               adjudication=None) -> bytes:
+               adjudication=None, coverage_page: dict | None = None) -> bytes:
     """Render the complete audit (all FAIL/WARN findings, grouped BY SUBJECT the same way
     `render_html` groups them, under a branded header band + a per-subject summary table)
     as a paginated, base-14-only PDF. Returns bytes — this
@@ -863,6 +863,13 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
                     + _second_opinion_item_lines(adjudication))
     _pipeline_block(flow, "Coverage of OpenClaw surfaces",
                     _coverage_lines(findings, ascii_only=True))
+    # F-165: TARGET coverage ("were all N plugins vetted, all M trajectory files
+    # read") — a different question from the surface-coverage block just above.
+    # Optional and additive: `coverage_page=None` (every pre-existing caller) draws
+    # nothing, via `_pipeline_block`'s own empty-lines no-op.
+    from .coverage import coverage_page_lines as _coverage_page_lines  # noqa: PLC0415
+    _pipeline_block(flow, "Coverage page",
+                    _coverage_page_lines(coverage_page or {}, ascii_only=True))
     _pipeline_block(flow, "Worth a glance", _worth_a_glance_lines(findings, ascii_only=True))
 
     flow.finish()

@@ -1669,7 +1669,7 @@ python3 audit.py --log audit.log            # also write log to a local file
   `secondOpinion`/`vetSecondOpinion` when a `--judged-bundle` supplied verdicts, and
   `coveragePage` (§20 — scanned-vs-total per subject, every gap named) —
   see `docs/OUTPUT_SCHEMA.md` §1, which is the authoritative list. The same coverage data prints as a `CLAWSECCHECK COVERAGE`
-  text section under plain `--full`.
+  text section under plain `--full`, and as a "Coverage page" block in `--dashboard --full`, `--html`, and `--pdf`.
   - **`--fast`** (only with `--full`) drops the plugin sweep, behavioral replay, and skill
     sweep — keeping just the audit, self-test, vet-mcp, and the (free) adjudication packet —
     for CI runs where the deep phases are too slow. This is today's pre-F-150 `--full` shape.

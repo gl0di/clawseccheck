@@ -288,6 +288,7 @@ _CARD_TO_PDF_BLOCK = {
     "RISK Chains": "RISK chains",
     "Behavioural": "Behavioural",
     "Second opinion (advisory)": "Second opinion (advisory)",
+    "Coverage page": "Coverage page",
     "Worth a glance": "Worth a glance",
 }
 # Card-only sections: the chat card's own furniture, never PDF pipeline blocks.

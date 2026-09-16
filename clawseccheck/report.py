@@ -4247,7 +4247,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
                      ascii_only: bool = False, ctx=None, full: bool = False,
                      risk=None, plugin_sweep=None, behavioral=None,
                      adjudication=None, compact: bool = False, pdf_path=None,
-                     compact_reserve: int = 0) -> str:
+                     compact_reserve: int = 0, coverage_page: dict | None = None) -> str:
     """Deterministic chat Dashboard card — Sections 1-2 of SKILL.md Step 3, pasted verbatim,
     plus an optional Section 3 (B-356) with per-skill vet verdicts, plus (F-153) the rest
     of --full's pipeline when `full=True`.
@@ -4516,6 +4516,18 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     coverage_lines = _coverage_lines(findings, ascii_only=ascii_only)
     if coverage_lines:
         tail_block += "\n" + "\n".join(coverage_lines) + "\n"
+
+    # F-165: the per-subject "was everything looked at" page (coverage.build_coverage_page)
+    # — a different question from `_coverage_lines` just above (config-SURFACE coverage,
+    # "which checks ran") — this is TARGET coverage ("were all N plugins vetted, all M
+    # trajectory files read"). `coverage_page` is optional and additive: every pre-existing
+    # caller passes nothing and reproduces the exact prior card, byte-identical.
+    if coverage_page:
+        from .coverage import coverage_page_lines as _coverage_page_lines  # noqa: PLC0415
+        cov_page_lines = _coverage_page_lines(coverage_page, ascii_only=ascii_only)
+        if cov_page_lines:
+            tail_block += ("\n" + f"{sep} Coverage page {sep}" + "\n"
+                          + "\n".join(cov_page_lines) + "\n")
 
     glance_marker = "" if ascii_only else "👀 "
     footer_block = "\nFull pipeline detail: --save <path> or --html <path>.\n" if compact else ""
@@ -6078,7 +6090,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
 
 
 def render_html(findings: list[Finding], score: ScoreResult, native=None,
-                *, ctx=None, plugin_sweep=None) -> str:
+                *, ctx=None, plugin_sweep=None, coverage_page: dict | None = None) -> str:
     """Standalone self-contained HTML report (inline CSS, no external assets).
 
     Includes the brand mark + wordmark, a grade badge (colored via
@@ -6263,6 +6275,27 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             f'{_excluded_html}</section>')
     else:
         subject_inventory_html = ""
+
+    # F-165: the per-subject "was everything looked at" page (coverage.
+    # build_coverage_page) — TARGET coverage ("were all N plugins vetted, all M
+    # trajectory files read"), a different question from the "Inventory by subject"
+    # table above (what did we FIND) and from the config-surface coverage the text
+    # report's own "Coverage of OpenClaw surfaces" block answers (which checks ran).
+    # `coverage_page` is optional and additive: every pre-existing caller passes
+    # nothing and reproduces the exact prior page, byte-identical. `<pre>` because
+    # `coverage_page_lines` already formats nested "not scanned" sub-items via leading
+    # spaces — a list would have to re-derive that structure to preserve it.
+    if coverage_page:
+        from .coverage import coverage_page_lines as _coverage_page_lines  # noqa: PLC0415
+        _cov_lines = _coverage_page_lines(coverage_page, ascii_only=False)
+        coverage_page_html = (
+            '<section class="cov-page" aria-label="Coverage page">'
+            '<h2 class="section-title">Coverage page</h2>'
+            f'<pre class="cov-page-body">{esc(chr(10).join(_cov_lines))}</pre>'
+            '</section>'
+        ) if _cov_lines else ""
+    else:
+        coverage_page_html = ""
 
     # B-306 (C-135 follow-up #3, 2026-07-21): gate on the granular cap signals, not
     # `score.capped` alone — see the matching comment in render_report for why
@@ -6613,6 +6646,11 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             background: var(--dot); margin-right: 0.4rem; vertical-align: middle; }}
         .inv-note {{ margin: 0.6rem 0 0; color: var(--muted); font-size: 0.85rem;
             line-height: 1.45; }}
+        .cov-page {{ margin: 1.75rem 0 0; }}
+        .cov-page-body {{ margin: 0.5rem 0 0; padding: 0.9rem 1rem; border-radius: 0.5rem;
+            background: var(--card); border: 1px solid var(--line); color: var(--ink);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.82rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }}
         .footer {{ margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
             text-align: center; color: var(--muted); font-size: 0.8rem; }}
         @media (max-width: 560px) {{ .container {{ padding: 1.4rem; }} .header h1 {{ font-size: 1.3rem; }} }}
@@ -6669,6 +6707,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         </div>
 
         {subject_inventory_html}
+
+        {coverage_page_html}
 
         <h2 class="section-title">{esc(section_findings)}</h2>
         {nav_html}

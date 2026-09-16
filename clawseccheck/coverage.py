@@ -314,10 +314,16 @@ def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
     text, not as structured counts. `logs` here is CHECK-granularity, same as the
     other bucket subjects, honest but coarser than the epic's target shape. Tracked as
     a separate follow-up rather than blocking this page on a new cross-module
-    structured-stats channel. Consumed today by ``--full`` (text, via
-    ``pipeline.render_sections``) and ``--full --json`` (``coveragePage``); dashboard/
-    HTML/PDF reuse is also a follow-up (those render paths don't run through
-    ``pipeline.run_pipeline`` today).
+    structured-stats channel.
+
+    Consumed by ``--full`` (text, via ``pipeline.render_sections``), ``--full --json``
+    (``coveragePage``), and — since the renderer-wiring gap three separate reviews
+    rejected this task for — ``report.render_dashboard``/``report.render_html``/
+    ``pdf.render_pdf`` too, each behind an optional ``coverage_page`` parameter a
+    caller must build and pass explicitly (this function does not run itself; the
+    ``--dashboard --full`` CLI path builds its own page the same way ``run_pipeline``
+    does, since that one code path hand-rolls its phases rather than calling
+    ``run_pipeline`` — see cli.py's own comment on ``_dashboard_phases`` for why).
     """
     if ctx is None:
         return {}
