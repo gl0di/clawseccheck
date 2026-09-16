@@ -51,7 +51,7 @@ _EXTRA_SECRET_PATTERNS = [
         re.DOTALL),
 ]
 
-# CLAWSECCHECK-C-405: Authorization/bearer/bare-key key names are NOT in
+# C-405: Authorization/bearer/bare-key key names are NOT in
 # SECRET_KEY_RE and so are invisible to `_KV_RE` above. Widening SECRET_KEY_RE
 # itself was considered and rejected: it also feeds `checks._secret_paths`, B1's
 # SCORED, FAIL-capable config-secret detector, and a bare "key" alternative there
