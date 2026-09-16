@@ -364,7 +364,7 @@ def resolve_plugin_sweep():
 
 def _sweep_flagged_names(sweep) -> "tuple[list[str], list[str]]":
     """``(dangerous names, suspicious names)`` from *sweep*'s own ``rows``
-    (CLAWSECCHECK-B-764).
+    (B-764).
 
     ``rows`` (a list of ``(sanitized target id, status, evidence count)`` — see
     ``PluginSweep``/``cli.SkillSweep``) is deliberately NOT part of the published
@@ -388,7 +388,7 @@ def _named_sweep_line(label: str, names: "list[str]", *, cap: int = 3) -> str:
     """``"Dangerous: a, b, +2 more."`` — same cap/format as the SKILL SWEEP quiet
     line's own ``dangerous`` naming (``cli.py::_sweep_quiet_line``), reused here so the
     plugin sweep's default reporting path stops being the one place a flagged target's
-    identity never reaches the reader (CLAWSECCHECK-B-764)."""
+    identity never reaches the reader (B-764)."""
     shown = ", ".join(names[:cap])
     if len(names) > cap:
         shown += f", +{len(names) - cap} more"
@@ -414,7 +414,7 @@ def _sweep_phase_from(name: str, sweep, *, unit: str, elapsed_s: float,
             detail += f", {c['skipped']} not scanned (budget exceeded)"
         detail += "."
         lines = [detail]
-        # CLAWSECCHECK-B-764: name what was flagged, not just how many -- "a plugin is
+        # B-764: name what was flagged, not just how many -- "a plugin is
         # a problem" is not actionable without which one, and plugin roots come from
         # OpenClaw's own sqlite index (a user cannot easily enumerate candidates by
         # hand to go find it themselves).
@@ -446,7 +446,7 @@ def _sweep_data(sweep) -> dict:
         "complete": bool(sweep.complete),
         "counts": dict(sweep.counts()),
         "not_scanned": [_sanitize(str(t)) for t in sweep.not_scanned()],
-        # CLAWSECCHECK-B-764: the FULL (uncapped, unlike the text line above) name
+        # B-764: the FULL (uncapped, unlike the text line above) name
         # lists behind counts.fails/counts.warns -- so a JSON consumer can act on a
         # flagged plugin/skill without re-deriving identity from `not_scanned` (which
         # names only what was SKIPPED/TRUNCATED, never what was vetted and flagged).
