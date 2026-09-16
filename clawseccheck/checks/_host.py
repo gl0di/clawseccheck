@@ -1358,6 +1358,26 @@ def _fmt_epoch_ms(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date().isoformat()
 
 
+def _b191_audit_enabled(cfg) -> "bool | None":
+    """Resolve the audit kill switch the same way B10 (check_audit_log) does:
+    canonical ``logging.audit.enabled`` wins when present, else the legacy
+    ``audit.enabled`` falls back (B-700 migration precedence — ``logging`` is
+    ``.strict()`` on OpenClaw 2026.8.1+, so an un-migrated config still carries
+    only the legacy key while a migrated one carries only the canonical one).
+    Returns ``None`` when neither key is set, config is unread, or the value found
+    is not the container shape expected — callers must treat ``None`` as "cannot
+    say", never as "enabled". Read-only; never used to change a verdict, only to
+    attribute one (C-431).
+    """
+    if not isinstance(cfg, dict):
+        return None
+    logging_node = cfg.get("logging")
+    audit_node = logging_node.get("audit") if isinstance(logging_node, dict) else None
+    if isinstance(audit_node, dict) and "enabled" in audit_node:
+        return audit_node["enabled"]
+    return dig(cfg, "audit.enabled")
+
+
 def check_audit_trail_signals(
     ctx: Context,
     *,
@@ -1423,7 +1443,13 @@ def check_audit_trail_signals(
               (``checks/_lifecycle.py``).
     UNKNOWN — no state DB, no ``audit_events`` table, the table present but unreadable, or
               present but currently empty (pruning can empty it, so "no rows" is not
-              evidence nothing ran — same reasoning as B189's ``cron_run_logs``).
+              evidence nothing ran — same reasoning as B189's ``cron_run_logs``). C-431:
+              when the table is present-but-empty AND config says recording is switched
+              off (``audit.enabled``/``logging.audit.enabled`` since 2026.8.1 — see B10)
+              is explicitly ``False``, the detail NAMES that cause instead of the
+              generic pruning sentence — still UNKNOWN, attribution only, never a
+              verdict change. The generic wording is unchanged (byte-for-byte) when the
+              switch is not explicitly off, since ``ctx.config`` may itself be unread.
 
     C-135 ROUND-2 FIX (F-134/B191, DISK-1) — ABSENCE-IMPLIES-CLEAN ASYMMETRY. The row
     SAMPLE (``ctx.audit_events``) is capped at ``_MAX_AUDIT_EVENTS``, most-recent-first
@@ -1461,6 +1487,25 @@ def check_audit_trail_signals(
             "a running agent, then re-run the audit.",
         )
     if ctx.audit_events_total_rows == 0:
+        # C-431: an empty ledger next to an explicit kill switch is a materially
+        # different fact from an empty ledger on a fresh install — name the cause
+        # when config actually says so, rather than the same generic pruning
+        # sentence for both. `_b191_audit_enabled` mirrors B10's own canonical-
+        # then-legacy resolution (B-700) exactly, read-only, no verdict change: an
+        # unread/absent/non-boolean config still falls through to the unchanged
+        # arm below, byte-identical to before this fix (fingerprint manifest pin).
+        if _b191_audit_enabled(ctx.config) is False:
+            return _finding(
+                "B191",
+                UNKNOWN,
+                "The audit_events table is present but currently empty, and "
+                "audit.enabled (logging.audit.enabled since OpenClaw 2026.8.1) is set "
+                "to false — the ledger is empty because recording is switched off, "
+                "not merely because nothing has happened yet. See B10.",
+                "If a runtime audit trail is wanted, set logging.audit.enabled (or "
+                "audit.enabled before OpenClaw 2026.8.1) to true, then re-run once "
+                "the agent has been active.",
+            )
         return _finding(
             "B191",
             UNKNOWN,

@@ -181,6 +181,95 @@ def test_check_unknown_when_table_present_but_empty(tmp_path):
     assert "currently empty" in f.detail
 
 
+# --------------------------------------------------------------------------------------
+# C-431: attribute an empty ledger to the audit.enabled kill switch when config says so.
+# Still UNKNOWN throughout — attribution only, never a verdict change.
+# --------------------------------------------------------------------------------------
+
+_C431_GENERIC_DETAIL = (
+    "The audit_events table is present but currently empty. This table is pruned "
+    "on every insert (a documented 30-day / 100,000-row retention), so an empty "
+    "table is not evidence that no tool ever ran — it may simply have nothing "
+    "left in the retention window."
+)
+
+
+def test_empty_ledger_wording_unchanged_when_switch_absent(tmp_path):
+    """Fingerprint-manifest pin: the no-attribution arm must stay byte-identical."""
+    ctx = _build_home(tmp_path, rows=())
+    ctx.config = {}
+    f = check_audit_trail_signals(ctx)
+    assert f.status == UNKNOWN
+    assert f.detail == _C431_GENERIC_DETAIL
+
+
+def test_empty_ledger_wording_unchanged_when_config_unread(tmp_path):
+    ctx = _build_home(tmp_path, rows=())
+    # ctx.config is whatever the bare Context() default is (unread) — no override.
+    f = check_audit_trail_signals(ctx)
+    assert f.status == UNKNOWN
+    assert f.detail == _C431_GENERIC_DETAIL
+
+
+def test_empty_ledger_names_kill_switch_legacy_spelling(tmp_path):
+    ctx = _build_home(tmp_path, rows=())
+    ctx.config = {"audit": {"enabled": False}}
+    f = check_audit_trail_signals(ctx)
+    assert f.status == UNKNOWN
+    assert "switched off" in f.detail
+    assert "B10" in f.detail
+    assert f.detail != _C431_GENERIC_DETAIL
+
+
+def test_empty_ledger_names_kill_switch_canonical_spelling(tmp_path):
+    """logging.audit.enabled — the 2026.8.1+ path (B-700), same precedence B10 uses."""
+    ctx = _build_home(tmp_path, rows=())
+    ctx.config = {"logging": {"audit": {"enabled": False}}}
+    f = check_audit_trail_signals(ctx)
+    assert f.status == UNKNOWN
+    assert "switched off" in f.detail
+
+
+def test_empty_ledger_canonical_wins_over_legacy_when_both_present(tmp_path):
+    """Same B-700 precedence B10 already established: canonical logging.audit.enabled
+    wins outright when present, the legacy key is never consulted."""
+    ctx = _build_home(tmp_path, rows=())
+    ctx.config = {"logging": {"audit": {"enabled": True}}, "audit": {"enabled": False}}
+    f = check_audit_trail_signals(ctx)
+    assert f.status == UNKNOWN
+    assert f.detail == _C431_GENERIC_DETAIL  # canonical True means the switch is ON
+
+
+def test_empty_ledger_switch_explicitly_true_uses_generic_wording(tmp_path):
+    ctx = _build_home(tmp_path, rows=())
+    ctx.config = {"audit": {"enabled": True}}
+    f = check_audit_trail_signals(ctx)
+    assert f.status == UNKNOWN
+    assert f.detail == _C431_GENERIC_DETAIL
+
+
+def test_empty_ledger_non_boolean_switch_uses_generic_wording(tmp_path):
+    """A malformed/non-boolean value is "cannot say", never "enabled" -- generic wording,
+    matching _b191_audit_enabled's own None-on-ambiguity contract."""
+    ctx = _build_home(tmp_path, rows=())
+    ctx.config = {"audit": {"enabled": "yes"}}
+    f = check_audit_trail_signals(ctx)
+    assert f.status == UNKNOWN
+    assert f.detail == _C431_GENERIC_DETAIL
+
+
+def test_empty_ledger_with_divergent_sessions_supplied_stays_unknown_not_warn(tmp_path):
+    """An empty ledger must never reach the divergence WARN wording, however the
+    caller's divergence computation was fed -- the empty-table branch returns before
+    any divergent_sessions/blocked/evasive evidence is even considered."""
+    ctx = _build_home(tmp_path, rows=())
+    f = check_audit_trail_signals(
+        ctx, divergent_sessions=frozenset({"phantom"}), trajectory_compared=True
+    )
+    assert f.status == UNKNOWN
+    assert "phantom" not in (f.detail + " ".join(f.evidence))
+
+
 def test_check_unknown_on_parse_error(tmp_path):
     ctx = _build_home(tmp_path, rows=())
     ctx.audit_events_parse_error = True
