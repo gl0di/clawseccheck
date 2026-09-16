@@ -151,6 +151,34 @@ def test_vetprofile_axis_reason_redacts_the_c5_shaped_home_path():
     assert "~/.npm-global" in reason, reason
 
 
+def test_rule_name_and_short_description_redact_a_home_path_if_one_reaches_it():
+    """B-650 sweep result: `rules[].name` / `rules[].shortDescription` (built from a
+    non-catalog finding's `.title` -- e.g. MCP-VET's `title=sname`) used only
+    `_sanitize` here while every other finding-derived string in this file already
+    folds a home path via `_sarif_text` -- an asymmetry B-620's own sweep flagged as
+    unswept. No live producer interpolates a path into `.title` today (checked:
+    MCP-VET's `title=sname` is a server/skill name, never a resolved `Path`), so this
+    pins the renderer-level guarantee directly -- the same "wrap anyway" precedent as
+    the `fixes[]` test above.
+    """
+    non_catalog_id = "NOT-IN-CATALOG"
+    assert non_catalog_id not in {meta.id for meta in CATALOG}  # non-vacuity control
+
+    f = Finding(
+        id=non_catalog_id, title=f"vet target {_LEAKY_PATH}", severity=HIGH,
+        status=WARN, detail="d", fix="f", framework="",
+    )
+    doc = render_sarif([f])
+    assert _FAKE_HOME_PREFIX not in doc, doc
+    parsed = json.loads(doc)
+    rule = next(r for r in parsed["runs"][0]["tool"]["driver"]["rules"]
+                if r["id"] == non_catalog_id)
+    assert _FAKE_HOME_PREFIX not in rule["name"], rule["name"]
+    assert _FAKE_HOME_PREFIX not in rule["shortDescription"]["text"], rule["shortDescription"]
+    assert "~/.npm-global" in rule["name"], rule["name"]
+    assert "~/.npm-global" in rule["shortDescription"]["text"], rule["shortDescription"]
+
+
 def test_clean_findings_are_not_mangled_by_the_redaction():
     """Negative control: a finding with no path in it renders unchanged (modulo the
     ANSI/secret sanitization `_sanitize` already did), so the fix does not corrupt

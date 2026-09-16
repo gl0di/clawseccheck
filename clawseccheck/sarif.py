@@ -354,8 +354,14 @@ def render_sarif(
             _catalog_ids.add(f.id)
             rules.append({
                 "id": f.id,
-                "name": _sanitize(f.title),
-                "shortDescription": {"text": _sanitize(f.title)},
+                # B-650: `_sarif_text` (sanitize + home-path fold), not bare `_sanitize`,
+                # matching every other finding-derived string in this file. No live
+                # producer was found interpolating a path into a non-catalog `.title`
+                # (e.g. MCP-VET's `title=sname`) at the time of writing, but the same
+                # "wrap anyway" precedent this function's own docstring already applies
+                # to `fixes[].description.text` holds here too.
+                "name": _sarif_text(f.title),
+                "shortDescription": {"text": _sarif_text(f.title)},
                 "defaultConfiguration": {"level": _SEV_LEVEL.get(f.severity, "note")},
             })
 
