@@ -6,11 +6,13 @@ All tests are offline and deterministic. Uses real audit() on fixtures
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from clawseccheck import audit
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN, Finding
 from clawseccheck.guide import Action, render_next_actions, suggest_actions
+from clawseccheck.layers import LAYER_LIVE_BEHAVIOUR, STATUS_NOT_SUBMITTED
 from clawseccheck.scoring import ScoreResult
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -205,6 +207,36 @@ class TestConditionalTriggers:
                      evidence=["e1"])
         ids = [a.id for a in suggest_actions([a1], score)]
         assert "live_test" not in ids
+
+    def test_live_test_suppressed_when_ledger_shows_live_behaviour_ran(self):
+        """B-779: a run whose ledger already carries `live_behaviour: ran` (e.g. a
+        `--judged-bundle` `liveTest` verdict was submitted) must not be told to go
+        run the live test again."""
+        score = replace(_make_score(), ledger_present=True, missing_layers=())
+        findings = self._findings_with(B17=WARN)
+        ids = [a.id for a in suggest_actions(findings, score)]
+        assert "live_test" not in ids
+
+    def test_live_test_still_offered_when_ledger_shows_live_behaviour_not_submitted(self):
+        """B-779, other direction: a tracked ledger that positively shows the layer
+        did NOT run must still offer the live test."""
+        score = replace(
+            _make_score(), ledger_present=True,
+            missing_layers=((LAYER_LIVE_BEHAVIOUR, STATUS_NOT_SUBMITTED),),
+        )
+        findings = self._findings_with(B17=WARN)
+        ids = [a.id for a in suggest_actions(findings, score)]
+        assert "live_test" in ids
+
+    def test_live_test_still_offered_when_no_ledger_was_built(self):
+        """B-779: the overwhelming majority of call sites never build a ledger at
+        all (`ledger_present=False` by default) — that must read as "unknown", not
+        as "already ran", or every non-`--full` run would lose this suggestion."""
+        score = _make_score()
+        assert score.ledger_present is False
+        findings = self._findings_with(B17=WARN)
+        ids = [a.id for a in suggest_actions(findings, score)]
+        assert "live_test" in ids
 
     def test_review_mcp_triggered_by_b15_not_unknown(self):
         score = _make_score()

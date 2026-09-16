@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from .catalog import ACTIONABLE_STATUSES, BY_ID, FAIL, FAIL_WEIGHT_STATUSES, WARN, Finding
 from .invocation import cmd, machine_command_prefix
+from .layers import LAYER_LIVE_BEHAVIOUR
 from .scoring import ScoreResult
 from .textnorm import asciify
 
@@ -29,6 +30,26 @@ class Action:
 
 def _by_id(findings: list[Finding]) -> dict[str, Finding]:
     return {f.id: f for f in findings}
+
+
+def _layer_already_ran(score: ScoreResult, layer: str) -> bool:
+    """True only when *layer* is POSITIVELY known, via a ledger this run actually
+    built, to have completed.
+
+    B-779: ``score.missing_layers`` reads identically empty both when every ledger
+    layer ran AND when no ledger was ever built at all (``ledger=None`` — the
+    default the overwhelming majority of call sites still use; see
+    ``ScoreResult.ledger_present``'s own docstring). Reading ``missing_layers``
+    alone would make every one of those non-ledger call sites agree that
+    live-behaviour "ran", which would silently suppress advice to run it on a
+    run that never attempted it. ``ledger_present`` is the field that tells the
+    two apart, so an absent ledger returns False here — "we don't know" must
+    never read as "it ran".
+    """
+    if not getattr(score, "ledger_present", False):
+        return False
+    missing = {name for name, _status in getattr(score, "missing_layers", ())}
+    return layer not in missing
 
 
 def _surface_failed(findings: list[Finding], surface: str) -> bool:
@@ -69,9 +90,8 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
     idx = _by_id(findings)
     actions: list[Action] = []
     # Reports-only doctrine (F-074): every suggestion below is a further CHECK
-    # (vet, monitor, live test, trend) — never remediation. `score` stays in the
-    # signature for API stability even though no current rule reads it.
-    _ = score
+    # (vet, monitor, live test, trend) — never remediation. `score` is read below
+    # (the `graded`/ledger-derived branches; B-779 added the live-test gate).
 
     # vet_skills: ANY skills-surface check is FAIL or WARN.
     #
@@ -126,7 +146,13 @@ def suggest_actions(findings: list[Finding], score: ScoreResult) -> list[Action]
     a1_trifecta = a1 is not None and len(getattr(a1, "evidence", [])) >= 2
     b17_hit = b17 is not None and b17.status in (FAIL, WARN)
     b21_hit = b21 is not None and b21.status in (FAIL, WARN)
-    if a1_trifecta or b17_hit or b21_hit:
+    # B-779: don't offer a live-behaviour test this run's own ledger already shows
+    # as `ran` — the graded card used to print this unconditionally, so a run that
+    # had just submitted a `--judged-bundle` `liveTest` verdict (layer 5 complete,
+    # `missing_layers` empty) still told the user to go run one, implying the
+    # layer the grade already depends on was still missing.
+    if (a1_trifecta or b17_hit or b21_hit) and not _layer_already_ran(
+            score, LAYER_LIVE_BEHAVIOUR):
         actions.append(Action(
             id="live_test",
             title="Run a live prompt-injection test to see if your agent actually resists",
