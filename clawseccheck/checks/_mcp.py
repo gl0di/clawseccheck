@@ -6686,7 +6686,7 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
     orphaned = sorted(pid for pid in on_disk if pid not in declared)
 
     if orphaned:
-        # C-456 FU (CLAWSECCHECK-B-819): on_disk[pid] is always ctx.home-relative (built
+        # C-456 FU (B-819): on_disk[pid] is always ctx.home-relative (built
         # from ctx.home / "npm"/"agents"/..., this check only fires in full-audit mode),
         # so _detail_path is the right frame here -- unlike B87's symlink target, which
         # can point anywhere on the host and needs _username_safe_path instead.
@@ -6792,7 +6792,7 @@ def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
             continue
         checked_any = True
         if pid not in declared:
-            # C-456 FU (CLAWSECCHECK-B-819): load_path is config_plugin_load_paths'
+            # C-456 FU (B-819): load_path is config_plugin_load_paths'
             # RESOLVED form -- a relative plugins.load.paths entry is expanded against
             # ctx.home (skilldiscovery.config_plugin_load_paths), so this is always a
             # ClawSecCheck computation, never a raw echo of the config's own string (the
