@@ -36,8 +36,10 @@ from clawseccheck.checks import (
     _shared,
     _username_safe_path,
     check_codex_project_trust,
+    check_orphaned_plugin_caches,
     check_path_safety,
     check_symlink_escape,
+    check_undeclared_plugin_load_path,
 )
 from clawseccheck.collector import Context
 from clawseccheck.report import render_html
@@ -274,6 +276,65 @@ def test_b87_unknown_dangling_link_never_carries_the_home_prefix(monkeypatch, tm
     assert f.status == "UNKNOWN"
     assert str(home) not in f.detail, f.detail
     assert "~/scratch/gone.txt" in f.detail, f.detail
+
+
+# ---------------------------------------------------------------------------
+# B152 -- orphaned plugin cache (C-456 follow-up, CLAWSECCHECK-B-819)
+# ---------------------------------------------------------------------------
+
+def test_b152_warn_detail_never_carries_the_home_prefix(monkeypatch, tmp_path):
+    """B152 only fires in full-audit mode, where ctx.home really IS the audited OpenClaw
+    home -- unlike B87's symlink target (which can point anywhere on the host and needed
+    _username_safe_path), the leaked value here is always ctx.home-relative by
+    construction, so _detail_path is the right helper."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    openclaw_home = home / ".openclaw"
+    (openclaw_home / "agents" / "main" / "agent" / "plugins" / "nvidia").mkdir(parents=True)
+    ctx = Context(home=openclaw_home)
+    ctx.config = {"plugins": {"entries": {}}}
+
+    f = check_orphaned_plugin_caches(ctx)
+
+    assert f.status == "WARN"
+    assert str(home) not in f.detail, f.detail
+    assert all(str(home) not in e for e in f.evidence), f.evidence
+    assert any("agents/main/agent/plugins/nvidia" in e for e in f.evidence), f.evidence
+
+
+# ---------------------------------------------------------------------------
+# B348 -- undeclared plugins.load.paths entry (C-456 follow-up, CLAWSECCHECK-B-819)
+# ---------------------------------------------------------------------------
+
+def test_b348_warn_detail_never_carries_the_home_prefix(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    openclaw_home = home / ".openclaw"
+    openclaw_home.mkdir(parents=True)
+    plugin_dir = openclaw_home / "dev-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "openclaw.plugin.json").write_text(
+        '{"id": "dev-plugin"}', encoding="utf-8"
+    )
+
+    ctx = Context(home=openclaw_home)
+    ctx.config_found = True
+    ctx.config = {
+        "plugins": {"load": {"paths": [str(plugin_dir)]}, "entries": {}},
+    }
+
+    f = check_undeclared_plugin_load_path(ctx)
+
+    assert f.status == "WARN"
+    assert str(home) not in f.detail, f.detail
+    assert all(str(home) not in e for e in f.evidence), f.evidence
+    assert "dev-plugin" in f.detail, f.detail
 
 
 # ---------------------------------------------------------------------------

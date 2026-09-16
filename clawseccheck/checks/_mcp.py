@@ -58,6 +58,7 @@ from ..textnorm import (
 
 from ._shared import (
     _config_unreadable,
+    _detail_path,
     _finding,
     _is_secret_reference,
     _KNOWN_EXFIL_HOST_RE,
@@ -6685,7 +6686,11 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
     orphaned = sorted(pid for pid in on_disk if pid not in declared)
 
     if orphaned:
-        ev = [f"{pid} ({on_disk[pid]})" for pid in orphaned[:6]]
+        # C-456 FU (CLAWSECCHECK-B-819): on_disk[pid] is always ctx.home-relative (built
+        # from ctx.home / "npm"/"agents"/..., this check only fires in full-audit mode),
+        # so _detail_path is the right frame here -- unlike B87's symlink target, which
+        # can point anywhere on the host and needs _username_safe_path instead.
+        ev = [f"{pid} ({_detail_path(on_disk[pid], ctx.home)})" for pid in orphaned[:6]]
         extra = f" (+{len(orphaned) - 6} more)" if len(orphaned) > 6 else ""
         return _finding(
             "B152",
@@ -6787,7 +6792,13 @@ def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
             continue
         checked_any = True
         if pid not in declared:
-            undeclared.append(f"{pid} ({load_path})")
+            # C-456 FU (CLAWSECCHECK-B-819): load_path is config_plugin_load_paths'
+            # RESOLVED form -- a relative plugins.load.paths entry is expanded against
+            # ctx.home (skilldiscovery.config_plugin_load_paths), so this is always a
+            # ClawSecCheck computation, never a raw echo of the config's own string (the
+            # `_detail_path` carve-out for config-declared absolute values doesn't apply
+            # here). An absolute entry outside ctx.home's tree passes through unchanged.
+            undeclared.append(f"{pid} ({_detail_path(load_path, ctx.home)})")
 
     if not checked_any:
         return _finding(
