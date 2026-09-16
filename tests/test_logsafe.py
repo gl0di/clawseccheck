@@ -66,6 +66,62 @@ class TestRedact:
         text = "hello world, nothing secret here"
         assert redact(text) == text
 
+    # -----------------------------------------------------------------
+    # CLAWSECCHECK-C-405: Authorization/bearer/bare-key — not in SECRET_KEY_RE,
+    # so invisible to _KV_RE; widened here (redaction-only, see _EXTRA_KV_RE's
+    # own comment for why this is safe here but not in the shared, scored
+    # detector).
+    # -----------------------------------------------------------------
+
+    def test_masks_authorization_bearer_header_colon(self):
+        text = "Authorization: Bearer " + "abc123def456ghi789"
+        result = redact(text)
+        assert "abc123def456ghi789" not in result
+        assert "Bearer" not in result  # the scheme word itself must not leak either
+        assert "<redacted>" in result
+
+    def test_masks_authorization_bearer_header_equals(self):
+        text = "Authorization=Bearer " + "abc123def456ghi789"
+        result = redact(text)
+        assert "abc123def456ghi789" not in result
+        assert "<redacted>" in result
+
+    def test_masks_authorization_basic_header(self):
+        text = "Authorization: Basic " + "dXNlcjpwYXNzd29yZA=="
+        result = redact(text)
+        assert "dXNlcjpwYXNzd29yZA==" not in result
+        assert "<redacted>" in result
+
+    def test_masks_bare_bearer_key(self):
+        text = "bearer=" + "sometoken1234567890abcdefgh"
+        result = redact(text)
+        assert "sometoken1234567890abcdefgh" not in result
+        assert "<redacted>" in result
+
+    def test_masks_bare_key_field(self):
+        text = "key: " + "sometoken1234567890abcdefgh"
+        result = redact(text)
+        assert "sometoken1234567890abcdefgh" not in result
+        assert "<redacted>" in result
+
+    def test_over_redacts_primary_key_harmlessly(self):
+        """Accepted over-redaction (documented in _EXTRA_KV_RE's own comment): the
+        key match is an unanchored substring, same as _KV_RE's own SECRET_KEY_RE
+        group, so "primaryKey" also matches. Masking a non-secret value is a
+        usability nit, never a false verdict — unlike the DETECTION check
+        (check_redactor_blind_secret_paths), which uses an anchored whole-segment
+        match specifically to avoid this for a scored/reported finding."""
+        text = "primaryKey: " + "not-actually-a-secret-value"
+        result = redact(text)
+        assert "not-actually-a-secret-value" not in result
+        assert "<redacted>" in result
+
+    def test_redact_is_idempotent_for_authorization_header(self):
+        text = "Authorization: Bearer " + "abc123def456ghi789"
+        once = redact(text)
+        twice = redact(once)
+        assert once == twice
+
     def test_leaves_short_values_unchanged(self):
         # Values shorter than the pattern thresholds should not be redacted
         text = "user=bob"
