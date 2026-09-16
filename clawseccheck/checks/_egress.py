@@ -394,15 +394,34 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         )
 
     if fail_ev:
-        return _finding(
-            "B38",
-            FAIL,
-            "; ".join(fail_ev),
+        fix = (
             "Set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false to block "
             "cloud-metadata IP access; set browser.noSandbox to false (or omit it) to "
             "keep the OS sandbox active. Also add browser.ssrfPolicy.allowedHostnames "
             "(or the legacy browser.ssrfPolicy.hostnameAllowlist) to restrict which "
-            "hosts the browser may reach.",
+            "hosts the browser may reach."
+        )
+        # B-722: only add the blockedHostnames lever when dangerouslyAllowPrivateNetwork
+        # is the (or one of the) actual triggers -- B38 can also FAIL on noSandbox alone,
+        # with the flag never set, and advice about "if the flag cannot be turned off"
+        # would be confusing noise pointed at a flag this config never enabled. C-135
+        # (independent adversarial pass) found this unconditional in the first draft.
+        if allow_private is True:
+            fix += (
+                " If dangerouslyAllowPrivateNetwork cannot be turned off, an "
+                "allowedHostnames/hostnameAllowlist entry alone does not close this: on "
+                "OpenClaw 2026.9.1 and later, also add browser.ssrfPolicy.blockedHostnames "
+                "naming at least the cloud-metadata addresses — 169.254.169.254, "
+                "metadata.google.internal, 100.100.100.200 — OpenClaw checks that deny "
+                "list before DNS and allow rules, even with private-network access "
+                "enabled, so it is the one lever that still blocks them while the flag "
+                "stays on."
+            )
+        return _finding(
+            "B38",
+            FAIL,
+            "; ".join(fail_ev),
+            fix,
             evidence=fail_ev,
         )
 

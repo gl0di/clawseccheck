@@ -1444,6 +1444,12 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
         return None
     if not _browser_ssrf(findings, cfg):
         return None
+    # B-722: _browser_ssrf() is true on "B38 FAILs" OR "the flag is set" -- and B38 can
+    # FAIL on browser.noSandbox alone, with dangerouslyAllowPrivateNetwork never set. The
+    # blockedHostnames caveat below is about that flag specifically; gate it on the real
+    # config value so it never appears pointed at a flag this config never enabled (C-135,
+    # independent adversarial pass, found this unconditional in the first draft).
+    allow_private = dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
     return RiskPath(
         id="RISK-15",
         severity=HIGH,
@@ -1479,7 +1485,25 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
             # fires it is itself rejected by the schema.
             + _key_advice(ctx, "browser.ssrfPolicy.hostnameAllowlist",
                           "browser.ssrfPolicy.allowedHostnames")
-            + ". Breaking either leg breaks the chain."
+            + (
+                # B-722: an allowedHostnames/hostnameAllowlist entry does not close this
+                # leg while dangerouslyAllowPrivateNetwork stays true -- the allowlist
+                # restricts which EXTRA hosts are reachable, it does not re-block the
+                # private-network addresses the flag already opened. blockedHostnames
+                # (2026.9.1+) is checked before DNS and allow rules even with
+                # private-network access enabled (grounded: dist ssrf-policy-helpers/ssrf
+                # modules, resolveHostnamePolicyChecks), so it is the one lever that
+                # still holds for an operator who cannot turn the flag off. Only shown
+                # when the flag is the config's actual trigger (see allow_private above)
+                # -- B38/RISK-15 can also fire on browser.noSandbox alone.
+                ". If dangerouslyAllowPrivateNetwork must stay on, also add "
+                "browser.ssrfPolicy.blockedHostnames (OpenClaw 2026.9.1 and later) naming "
+                "at least the cloud-metadata addresses — 169.254.169.254, "
+                "metadata.google.internal, 100.100.100.200 — which still blocks them "
+                "even with the flag enabled."
+                if allow_private else "."
+            )
+            + " Breaking either leg breaks the chain."
         ),
     )
 
