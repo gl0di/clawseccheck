@@ -1005,14 +1005,16 @@ def _size_guard_threshold_bytes() -> int:
 
 
 def test_size_guard_step_runs_right_after_staging_and_before_any_publish() -> None:
-    """The bundle-size guard must fail BEFORE the release tag's approval gets spent.
+    """The bundle-size guard must fail BEFORE any of the job's publish work runs.
 
-    v3.59.0 discovered its 413 only at real-upload time — after the tag was already
-    pushed and the `environment: release` manual approval already spent on a bundle that
-    was always going to fail (CLAWSECCHECK-B-440, folded from CLAWSECCHECK-B-443).
-    Anchored to running immediately after the 'Stage publishable files' step (so it sees
-    the CHANGELOG.md trim) and strictly before the first 'clawhub publish' invocation
-    (including the --dry-run preflight).
+    v3.59.0 discovered its 413 only at real-upload time — after the `environment:
+    release` manual approval (one job-level gate, checked once before checkout — not a
+    per-step resource that each later step individually "spends") had already let the
+    whole job proceed on a bundle that was always going to fail (CLAWSECCHECK-B-440,
+    folded from CLAWSECCHECK-B-443). Anchored to running immediately after the 'Stage
+    publishable files' step (so it sees the CHANGELOG.md trim) and strictly before the
+    first 'clawhub publish' invocation (including the --dry-run preflight), so an
+    obviously bad bundle is caught before any of that later work runs on it.
     """
     steps = _steps()
     names = [_step_name(s) for s in steps]

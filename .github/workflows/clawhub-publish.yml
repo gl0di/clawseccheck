@@ -26,6 +26,14 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A8: without this the job's default is 360 minutes while it holds CLAWHUB_TOKEN +
+    # contents:write + id-token:write — and the Publish step has already demonstrated a
+    # real ~10.5-minute hang (see that step's own comment, 2026-08-06 incident). 45
+    # minutes covers the normal worst case — smoke-gate test suite, both preflight
+    # curl checks with their retries, the actual publish, and the post-publish
+    # surfaced-check loop's own up-to-10-minute wait — with headroom for a slow
+    # runner, while still catching a genuine hang well short of the 360-minute default.
+    timeout-minutes: 45
     # contents:write is needed to create the GitHub Release (the repo default token is
     # read-only). id-token:write is needed for cosign's keyless/OIDC signing below (it
     # exchanges the job's short-lived GitHub Actions OIDC token for a Fulcio cert — no
@@ -69,6 +77,7 @@ jobs:
         env:
           INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
+          set -euo pipefail
           FM="$(grep -m1 '^version:' SKILL.md | awk '{print $2}')"
           if [ -n "${INPUT_VERSION}" ]; then
             VER="${INPUT_VERSION}"
@@ -95,6 +104,7 @@ jobs:
           # compromised or typosquatted pytest/ruff release must not be able to execute
           # here (C-183 — same supply-chain discipline as the pinned clawhub@0.23.3
           # install above). Bump these deliberately, like clawhub@ / markdownlint-cli@.
+          set -euo pipefail
           python -m pip install pytest==7.4.4 ruff==0.15.20
           python -m pytest -q
           ruff check .
@@ -118,6 +128,7 @@ jobs:
         # quietly lying. An unreadable path raises out of package_digest() and fails the
         # job, which is correct: never sign a digest over a tree we could not fully read.
         run: |
+          set -euo pipefail
           python3 - <<'PYEOF'
           from clawseccheck import __version__
           from clawseccheck.integrity import (
@@ -169,6 +180,7 @@ jobs:
         # supported single-file path and round-trips on both cosign v2 and v3.
         id: sign
         run: |
+          set -euo pipefail
           cosign sign-blob --yes \
             --bundle SHA256SUMS.txt.bundle \
             SHA256SUMS.txt
@@ -203,7 +215,7 @@ jobs:
         env:
           SKIP_CHECK: ${{ inputs.skip_previous_release_check }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           if [ "${SKIP_CHECK:-false}" = "true" ]; then
             echo "::notice::Previous-release check skipped by explicit workflow input."
             exit 0
@@ -215,7 +227,14 @@ jobs:
             exit 0
           fi
           API="https://clawhub.ai/api/v1/skills/clawseccheck/versions/${PREV}"
-          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$API" || echo 000)"
+          # A6: `-w` already prints '000' itself on a transport failure (curl also
+          # exits non-zero in that case), so `|| echo 000` used to run TOO, appending a
+          # second '000' inside the same command substitution and garbling CODE. The
+          # fallback now lives outside the substitution, where it *replaces* CODE
+          # instead of being concatenated onto whatever curl already wrote out.
+          # --retry gives a transient blip (not a real outage) a chance to resolve
+          # before this becomes a hard release-blocking failure.
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-delay 2 "$API")" || CODE="000"
           if [ "$CODE" = "200" ]; then
             echo "Previous release ${PREV} is live on ClawHub."
             exit 0
@@ -301,10 +320,13 @@ jobs:
           echo "Staged size: $(du -sh dist/clawseccheck | cut -f1)"
 
       - name: Guard — fail fast if the staged bundle is unexpectedly large
-        # The `environment: release` approval is a human-spent resource, and every step
-        # after this one consumes it. This guard exists so an obviously-wrong bundle — a
-        # stray binary, a re-added docs/assets tree — is caught before that click rather
-        # than after. `clawhub publish` uploads every staged file as a raw, uncompressed
+        # A10: `environment: release` is ONE job-level approval gate, checked once
+        # before the job's steps even start (including checkout) — it is not a
+        # per-step budget that each later step individually "spends". This guard still
+        # runs as early as possible after staging so an obviously-wrong bundle — a
+        # stray binary, a re-added docs/assets tree — is caught before the rest of the
+        # job's (already-approved) work runs on it, rather than surfacing only at real
+        # upload time. `clawhub publish` uploads every staged file as a raw, uncompressed
         # multipart form part (no tar/gzip on this path — confirmed by reading the
         # installed CLI), so the staged tree size on disk IS the upload size.
         #
@@ -400,7 +422,7 @@ jobs:
         env:
           VER: ${{ steps.ver.outputs.version }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
             "https://clawhub.ai/api/v1/skills/clawseccheck/versions/${VER}")"
           if [ "$CODE" = "200" ]; then
@@ -459,15 +481,21 @@ jobs:
         env:
           VER: ${{ steps.ver.outputs.version }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           API="https://clawhub.ai/api/v1/skills/clawseccheck/versions/${VER}"
           for i in $(seq 1 10); do
-            CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$API" || echo 000)"
+            # A6: see the previous-release preflight above for why the fallback lives
+            # outside the command substitution instead of `|| echo 000` inside it.
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-delay 2 "$API")" || CODE="000"
             if [ "$CODE" = "200" ]; then
               echo "Version ${VER} is live on ClawHub (visible after ~${i} min)."
               exit 0
             fi
-            sleep 60
+            # A7: don't burn the trailing sleep after the last attempt — nothing
+            # reads it, it only stretches every failing run to the full 10 minutes.
+            if [ "$i" -lt 10 ]; then
+              sleep 60
+            fi
           done
           echo "::warning::Version ${VER} was accepted but is not visible after 10 minutes" \
                "(HTTP ${CODE}). This is usually just indexing lag. If it never appears, the" \
@@ -501,6 +529,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           VER="${GITHUB_REF_NAME#v}"
           NOTES="$(awk -v v="## [$VER]" 'index($0,v){f=1;next} /^## \[/{f=0} f' CHANGELOG.md)"
           [ -z "$NOTES" ] && NOTES="Release ${GITHUB_REF_NAME} — see CHANGELOG.md."
