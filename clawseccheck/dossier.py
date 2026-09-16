@@ -100,7 +100,7 @@ def verdict_for(overall_status: str, *, not_applicable: bool = False) -> str:
         PASS    -> INSTALL         (nothing found across every assessable axis)
         UNKNOWN -> CAUTION         (not assessable -- never presented as a green light)
 
-    *not_applicable* (CLAWSECCHECK-B-764) overrides all of the above to `NA` ("N/A"),
+    *not_applicable* (B-764) overrides all of the above to `NA` ("N/A"),
     reusing the exact word already used for an inapplicable AXIS (see `NA` above) rather
     than inventing a second "nothing here" vocabulary. This is for a target that
     genuinely has NOTHING to assess -- `--vet-mcp` over zero configured servers being
@@ -315,7 +315,7 @@ def _worst(findings: list):
 
 
 def _pool_wholly_not_applicable(pool: list) -> bool:
-    """True when EVERY finding in a non-empty pool is `not_applicable` (CLAWSECCHECK-B-764).
+    """True when EVERY finding in a non-empty pool is `not_applicable` (B-764).
 
     The one caller, `build_profile`, feeds this into `verdict_for`'s `not_applicable=`
     to tell a genuinely empty target (`--vet-mcp` with zero configured servers, whose
