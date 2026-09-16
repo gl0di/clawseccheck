@@ -72,6 +72,7 @@ from ._shared import (
     _norm_group_policy,
     _numeric_version,
     _open_channels,
+    _bind_mentions_docker_sock,
     _openclaw_generation,
     OUTBOUND_TOOL_HINTS,
     parse_bind_host,
@@ -83,6 +84,7 @@ from ._shared import (
     _resolve_sandbox_scope,
     _resolved_channel_nodes,
     _resolved_default_input_channels,
+    _sandbox_docker_binds,
     _secret_paths,
     SECRET_PATTERNS,
     SENSITIVE_TOOL_HINTS,
@@ -957,11 +959,18 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
         #    Importing a RISK-12-shaped helper into a general sandbox check was a category
         #    error. tests/test_b673_peragent_bind_scope.py pins the read-only case as
         #    REPORTED so nobody re-adds the narrowing.
-        binds = docker.get("binds")
+        # C-454: normalization via the shared `_sandbox_docker_binds` (checks/_shared.py)
+        # rather than this function's own dict-lookup-plus-isinstance chain -- same
+        # divergence class B-673 already fixed for `_resolve_sandbox_scope` above, one
+        # field over. `sb` (not `docker`, which was already coerced to `{}` above) is
+        # passed so a malformed `sandbox.docker` shape normalizes to `None` here exactly
+        # as it did before this extraction (falsy, so `if binds` still skips it silently
+        # -- this per-agent branch never fail-closed on that shape, unlike
+        # `_sandbox_has_writable_bind`, and this refactor does not change that).
+        binds = _sandbox_docker_binds(sb)
         if binds and _scope != "shared":
             out.append(f"agent '{name}': sandbox.docker.binds exposes host paths")
-            binds_str = " ".join(str(b) for b in binds) if isinstance(binds, list) else str(binds)
-            if "docker.sock" in binds_str:
+            if _bind_mentions_docker_sock(binds):
                 out.append(
                     f"agent '{name}': sandbox.docker.binds mounts docker.sock "
                     "(grants host control to the sandbox — container escape)"
@@ -3174,16 +3183,21 @@ def check_sandbox(ctx: Context) -> Finding:
     docker_network = dig(cfg, "agents.defaults.sandbox.docker.network")
     if docker_network == "host":
         ev.append("agents.defaults.sandbox.docker.network=host (no network isolation)")
-    # Real path: agents.defaults.sandbox.docker.binds (not sandbox.bind_mount)
-    binds = dig(cfg, "agents.defaults.sandbox.docker.binds")
+    # Real path: agents.defaults.sandbox.docker.binds (not sandbox.bind_mount). C-454:
+    # extraction via the shared `_sandbox_docker_binds` (checks/_shared.py) rather than
+    # this function's own isinstance chain. NOT `dig(cfg, "agents.defaults.sandbox")`:
+    # that is a bare NON-LEAF object read, which test_schema_grounding.py's manifest
+    # guard cannot verify by construction (same reasoning `_peragent_sandbox_evidence`
+    # already documents for the identical problem) — plain dict traversal instead.
+    _agents_node = cfg.get("agents") if isinstance(cfg, dict) else None
+    _defaults_node = _agents_node.get("defaults") if isinstance(_agents_node, dict) else None
+    default_sandbox = _defaults_node.get("sandbox") if isinstance(_defaults_node, dict) else None
+    default_sandbox = default_sandbox if isinstance(default_sandbox, dict) else {}
+    binds = _sandbox_docker_binds(default_sandbox)
     if binds:
         ev.append("agents.defaults.sandbox.docker.binds exposes host paths")
         # docker.sock bind hands full host control to the sandbox (container escape vector)
-        if isinstance(binds, list):
-            binds_str = " ".join(str(b) for b in binds)
-        else:
-            binds_str = str(binds)
-        if "docker.sock" in binds_str:
+        if _bind_mentions_docker_sock(binds):
             ev.append(
                 "agents.defaults.sandbox.docker.binds mounts docker.sock — "
                 "grants host control to the sandbox (container escape)"
@@ -3252,11 +3266,7 @@ def check_sandbox(ctx: Context) -> Finding:
         if docker_network == "host":
             fixes.append("Set agents.defaults.sandbox.docker.network to 'bridge' (not 'host')")
         if binds:
-            if isinstance(binds, list):
-                binds_str = " ".join(str(b) for b in binds)
-            else:
-                binds_str = str(binds)
-            if "docker.sock" in binds_str:
+            if _bind_mentions_docker_sock(binds):
                 fixes.append(
                     "Remove the docker.sock bind from docker.binds (it grants host control to the sandbox)"
                 )

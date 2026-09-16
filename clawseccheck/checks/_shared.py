@@ -1076,7 +1076,70 @@ def _meta(cid: str):
 # Moved rather than copied, deliberately: a fourth independently-drifting copy is the disease,
 # not the cure. `risk.py` now imports these from here, so there is one implementation and one
 # place a future C-135 round has to land.
+#
+# CLAWSECCHECK-C-454: even after that move, the raw `sandbox.docker.binds` NORMALIZATION
+# step (dict->get->str/list-coercion, fail-closed on a malformed shape) was still
+# duplicated FOUR times: `_sandbox_has_writable_bind` below, `_peragent_sandbox_evidence`
+# and `check_sandbox`'s defaults-level block (both `checks/_config.py`), and RISK-16's
+# `_host_reaching_bind` (`risk.py`) -- exactly the divergence class B-673 already fixed
+# for `_bind_mode_is_ro`/`_resolve_sandbox_scope`, recurring one field over. Extracted as
+# `_sandbox_docker_binds` (below) and `_bind_mentions_docker_sock` -- NORMALIZATION and the
+# docker.sock label only, never the mode-aware "does this defeat containment" JUDGMENT,
+# which B4 and RISK-12 correctly answer differently and must go on answering differently:
+# B4 reports ANY declared bind (its own remediation says "drop host and docker.sock binds"
+# with no mode qualifier, and `test_b673_peragent_bind_scope.py::
+# test_the_ro_helper_is_not_wired_into_this_check` pins that `_bind_mode_is_ro` must never
+# reach it), while RISK-12 (a write/tamper chain) only counts a bind that is NOT verifiably
+# `:ro`. A first attempt at sharing `_bind_mode_is_ro` itself into B4 was tried and
+# RETRACTED for exactly this reason (see `_peragent_sandbox_evidence`'s own C-135 note) --
+# merging the JUDGMENT would repeat that mistake one field over; only the PARSING is safe
+# to share.
 # ---------------------------------------------------------------------------------------
+
+
+def _sandbox_docker_binds(sandbox: dict) -> "list | None":
+    """Normalize `sandbox.docker.binds` (real schema: a bind-spec string, or a list of
+    them) to a plain `list[str]`. The SINGLE reader of this field's raw shape — every
+    check/risk-path consumer below calls this instead of its own `.get("docker")` /
+    `.get("binds")` / isinstance chain, so a future consumer cannot re-diverge on the
+    normalization step the way B-673 already found four independent copies of.
+
+    Returns:
+      * `[]` — no `docker` key, or `docker` is a dict with no (or a falsy) `binds` key.
+        The ordinary "nothing declared" case.
+      * `list[str]` — `binds` is a string (wrapped as a 1-element list) or a list
+        (each entry coerced with `str()`, matching every caller's own prior handling).
+      * `None` — the shape is malformed/unparseable: `docker` is present but not a
+        dict, or `binds` is present but neither a string nor a list. Distinct from
+        `[]` so a caller that must fail closed on ambiguity (`_sandbox_has_writable_bind`)
+        can do so, while a caller that only wants evidence text (B4) can choose its own
+        policy for "present but unparseable" instead of losing the distinction entirely.
+    """
+    docker = sandbox.get("docker") if isinstance(sandbox, dict) else None
+    if docker is None:
+        return []
+    if not isinstance(docker, dict):
+        return None
+    binds = docker.get("binds")
+    if not binds:
+        return []
+    if isinstance(binds, str):
+        return [binds]
+    if isinstance(binds, list):
+        return [str(b) for b in binds]
+    return None
+
+
+def _bind_mentions_docker_sock(binds: "list | None") -> bool:
+    """True if any bind spec in *binds* (as returned by `_sandbox_docker_binds`)
+    references `docker.sock` — full host control / container-escape signal. The one
+    definition; every caller previously ran its own `"docker.sock" in " ".join(...)`.
+    `None` (a malformed `binds` shape) is not iterable content, so this returns False
+    for it — each caller already decides separately how to treat a malformed shape via
+    `_sandbox_docker_binds`'s own return value, before ever reaching this helper."""
+    if not binds:
+        return False
+    return any("docker.sock" in b for b in binds)
 
 
 def _bind_mode_is_ro(bind: object) -> bool:
@@ -1157,19 +1220,17 @@ def _sandbox_has_writable_bind(sandbox: dict) -> bool:
     round): ``sandbox.browser.binds`` (``resolveSandboxBrowserConfig``) is a
     SECOND, distinct bind surface this function never examines -- an unexamined
     false-negative candidate independent of the ``docker.binds`` leg above.
+
+    C-454: normalization delegated to ``_sandbox_docker_binds`` -- its ``None``
+    return (malformed ``docker``/``binds`` shape) maps to this function's own
+    fail-closed ``True``, preserving the exact behaviour this docstring already
+    documented before the extraction.
     """
-    docker = sandbox.get("docker") if isinstance(sandbox, dict) else None
-    if docker is None:
-        return False
-    if not isinstance(docker, dict):
+    binds = _sandbox_docker_binds(sandbox)
+    if binds is None:
         return True  # present but malformed -- fail closed, cannot verify safety
-    binds = docker.get("binds")
     if not binds:
         return False
-    if isinstance(binds, str):
-        binds = [binds]
-    if not isinstance(binds, list):
-        return True  # unparseable binds shape -- fail closed
     return any(not _bind_mode_is_ro(b) for b in binds)
 
 
