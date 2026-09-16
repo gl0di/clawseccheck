@@ -2140,6 +2140,15 @@ hard false positives on real configs.
   above — not as independent proof.
 - **May produce false positives and false negatives.** Evidence-gating keeps noise low,
   but heuristics can miss novel attack patterns and can misread edge-case configurations.
+- **A config setting and the runtime's *effective* behaviour can differ — the audit
+  reports the former.** B25 warns when `update.auto.enabled` is set, because that is
+  what the config file says. OpenClaw's own runtime also gates auto-update on
+  `OPENCLAW_NO_AUTO_UPDATE`, an environment variable in the *gateway's* own process —
+  invisible to this offline, config-only audit, which runs as a different process with
+  its own environment. Reading *this* process's `os.environ` instead would answer a
+  different, wrong question (whichever shell happened to run the audit, not the
+  gateway), so B25's wording states what the config requests, not a claim about
+  whether auto-update is actually running on your host.
 - **Read scope is bounded:** config, bootstrap markdown, installed-skill text, OpenClaw log
   files, agent session logs, the cron job store, the two global OpenClaw dotenv files,
   OpenClaw-related systemd user-unit environment lines, host OS recon (security-tool paths,

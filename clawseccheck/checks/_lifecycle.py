@@ -6089,12 +6089,20 @@ def check_update_pinning(ctx: Context) -> Finding:
 
     A malicious skill UPDATE is a supply-chain risk (runs with agent permissions).
 
-    WARN  — auto-update for skills/plugins is enabled (blind trust in upstream);
+    WARN  — the config REQUESTS auto-update for skills/plugins (update.auto.enabled /
+            update.auto / autoUpdate / auto_update) — worded as configured intent, not
+            effective behaviour (C-376): OpenClaw's own
+            runtime also gates auto-update on OPENCLAW_NO_AUTO_UPDATE in the gateway's
+            own environment, which this config-only, offline audit cannot observe, so a
+            host with that variable set gets this WARN even though auto-update will not
+            actually run there — a disclosed, sound limitation (reading THIS process's
+            own environment instead would answer a different question and was rejected,
+            see the code comment at the call site);
             OR update.channel is "dev"/"beta" (C-413 — the same blind-trust risk
             applied to OpenClaw's own build, not just skills/plugins);
             OR a plugin/skill entry records a floating ref (branch name / 'latest').
     PASS  — at least one entry is present and all have a pinned tag/commit or an
-            integrity hash; no auto-update enabled; update.channel is unset,
+            integrity hash; no auto-update requested; update.channel is unset,
             "stable", or "extended-stable".
     UNKNOWN — no plugin/skill config from which pinning can be determined.
     """
@@ -6115,8 +6123,23 @@ def check_update_pinning(ctx: Context) -> Finding:
     if auto_update is True or (
         isinstance(auto_update, str) and auto_update.lower() in ("true", "yes", "1", "on")
     ):
+        # C-376: worded as configured INTENT, not effective behaviour. Grounded against
+        # the installed dist (update-startup*.js): OpenClaw's own runtime ANDs
+        # `update.auto.enabled` with `!isTruthyEnvValue(process.env.OPENCLAW_NO_AUTO_
+        # UPDATE)` before auto-update actually runs — a variable set in the GATEWAY's
+        # own environment, which this config-only, offline audit has no way to observe
+        # (reading THIS process's os.environ would answer a different, wrong question —
+        # whichever shell happened to run the audit — not the gateway's; C-303 exists to
+        # stop exactly that kind of unsound-but-plausible move). The old wording asserted
+        # "is enabled" (effective behaviour) over a config-only observation; this states
+        # only what was actually read.
         warn_ev.append(
-            "auto-update for skills/plugins is enabled — blind trust in upstream is a supply-chain risk"
+            "the config requests auto-update for skills/plugins (update.auto.enabled / "
+            "update.auto / autoUpdate / auto_update) — blind trust in upstream is a "
+            "supply-chain risk if it actually runs. OpenClaw's own runtime also gates "
+            "this on the OPENCLAW_NO_AUTO_UPDATE environment variable in the gateway's "
+            "own environment, which this config-only audit cannot observe — this "
+            "reports what the config requests, not necessarily what is running."
         )
 
     # ---- signal 1b (C-413): update.channel on a pre-release tier ----
