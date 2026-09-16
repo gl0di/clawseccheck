@@ -19,7 +19,12 @@ Offline, stdlib only, writes nothing outside pytest's own machinery.
 """
 from __future__ import annotations
 
+import json
+import shutil
+from pathlib import Path
+
 from clawseccheck.catalog import CRITICAL, LOW, FAIL, PASS, Finding
+from clawseccheck.cli import main
 from clawseccheck.layers import (
     LAYER_LIVE_BEHAVIOUR,
     LAYER_ORDER,
@@ -31,6 +36,11 @@ from clawseccheck.layers import (
 )
 from clawseccheck.report import render_card
 from clawseccheck.scoring import compute
+
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
+SAFE = FIXTURES / "home_safe"
+TRIFECTA = FIXTURES / "traj_behavioral_trifecta"  # fires T1, per test_f154_behavioral_cap.py
+BASE = ["--no-native", "--no-host", "--no-sockets", "--no-history"]
 
 
 def _f(fid: str, title: str, severity: str, status: str) -> Finding:
@@ -137,3 +147,61 @@ def test_an_uncapped_ungraded_card_carries_no_cap_line_either():
     card = render_card(score, findings, ascii_only=True)
     assert "capped" not in card
     assert "no grade to cap" not in card
+
+
+# --------------------------------------------------------- CLI end-to-end: a REAL
+# fired behavioral detector reaching --html and --sarif through --dashboard --full.
+# The remaining gap the parent signal->surface map task named after the CLI flag
+# matrix and this card fix: earlier commits (976f9d8, ecce717) wired the CHANNEL, but
+# nothing proved a genuine T1/T2/T3/B191 firing (not a hand-built ScoreResult) reaches
+# the actual written file. Uses the same real fixture and helper shape
+# `test_f154_behavioral_cap.py::TestCliEndToEnd` already established for `--json`.
+
+def _combined_home(tmp_path: Path, traj_fixture: Path) -> Path:
+    home = tmp_path / "home"
+    shutil.copytree(SAFE, home)
+    for p in traj_fixture.rglob("*"):
+        if p.is_file():
+            rel = p.relative_to(traj_fixture)
+            dst = home / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(p, dst)
+    return home
+
+
+def test_a_real_fired_detector_reaches_the_written_html_file(tmp_path):
+    home = _combined_home(tmp_path, TRIFECTA)
+    out = tmp_path / "out.html"
+    main(["--home", str(home)] + BASE + ["--dashboard", "--full", "--html", str(out)])
+    html = out.read_text(encoding="utf-8")
+    assert "behavioral detector fired" in html
+    assert "T1" in html
+
+
+def test_a_real_fired_detector_reaches_the_written_sarif_file(tmp_path):
+    home = _combined_home(tmp_path, TRIFECTA)
+    out = tmp_path / "out.sarif"
+    main(["--home", str(home)] + BASE + ["--dashboard", "--full", "--sarif", str(out)])
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    run = payload["runs"][0]
+    caps = run["properties"]["analysisCompleteness"]["capsFired"]
+    assert any(c["cap"] == "behavioral_capped" for c in caps), caps
+    behavioral = next(c for c in caps if c["cap"] == "behavioral_capped")
+    assert "T1" in behavioral.get("reason", "")
+
+
+def test_a_real_fired_detector_is_visible_without_dashboard_riding(tmp_path):
+    """Control: the SAME fixture through the plain --full --json path (no --dashboard,
+    no --html/--sarif) already proves T1 fires on this trajectory -- confirming the two
+    tests above are exercising a real signal, not a fixture that never fires at all."""
+    home = _combined_home(tmp_path, TRIFECTA)
+    import subprocess
+    import sys
+    proc = subprocess.run(
+        [sys.executable, "-m", "clawseccheck", "--home", str(home), *BASE,
+         "--full", "--json"],
+        cwd=Path(__file__).resolve().parent.parent, capture_output=True, text=True,
+    )
+    payload = json.loads(proc.stdout)
+    assert payload["behavioral_capped"] is True
+    assert payload["behavioral_cap_reason"] == "T1 behavioral trifecta"
