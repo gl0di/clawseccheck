@@ -1376,14 +1376,23 @@ def compute_scan_receipt(findings) -> str:
     silently hashing an empty string the way the B-756 bug did). Hashes are sorted
     then combined. Returns a 64-char hex string. Empty/None findings → sha256 of empty
     bytes. Pure stdlib, local-only. Never raises.
+
+    `status` is hashed through `catalog.display_status`, NOT the raw field (B-756
+    follow-up, tests/test_b755_status_substitution_oracle.py): every FAIL-weight
+    status (`FAIL_WEIGHT_STATUSES` — today `FAIL` and `SKILL_ARCHIVE_PATH_TRAVERSAL`)
+    must produce the SAME receipt, because B-755's oracle requires every consumer to
+    treat them identically — a receipt that moved between two literal spellings of the
+    same verdict would itself be exactly the "discriminates between FAIL-weight
+    statuses" defect that oracle exists to catch. Canonicalising still moves the
+    receipt on any REAL verdict change (FAIL/SKILL_ARCHIVE_PATH_TRAVERSAL -> PASS,
+    -> WARN, -> UNKNOWN, ...), which is the whole point B-756 fixed.
     """
     try:
         def finding_digest(f):
-            canonical = json.dumps(
-                {name: str(getattr(f, name) or "")[:_SCAN_RECEIPT_TRUNCATE]
-                 for name in _SCAN_RECEIPT_FIELDS},
-                sort_keys=True, ensure_ascii=True,
-            )
+            fields = {name: str(getattr(f, name) or "")[:_SCAN_RECEIPT_TRUNCATE]
+                      for name in _SCAN_RECEIPT_FIELDS}
+            fields["status"] = display_status(fields["status"])
+            canonical = json.dumps(fields, sort_keys=True, ensure_ascii=True)
             return hashlib.sha256(canonical.encode()).hexdigest()
 
         if not findings:

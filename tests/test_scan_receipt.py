@@ -119,3 +119,19 @@ def test_status_pass_vs_fail_single_finding():
     f_fail = _make_finding(id="B1", status="FAIL")
     f_pass = dataclasses.replace(f_fail, status="PASS")
     assert compute_scan_receipt([f_fail]) != compute_scan_receipt([f_pass])
+
+
+def test_fail_weight_statuses_produce_the_same_receipt():
+    """B-756 follow-up (tests/test_b755_status_substitution_oracle.py): the digest
+    must NOT distinguish between two FAIL-weight statuses (e.g. "FAIL" vs
+    "SKILL_ARCHIVE_PATH_TRAVERSAL") — every consumer must treat them identically, per
+    B-755's oracle. Binding the receipt to the raw status literal instead of the
+    canonicalised one (catalog.display_status) broke this the first time it was
+    tried: it made `compute_scan_receipt`/`render_json`/`render_report` newly
+    "discriminate between FAIL-weight statuses" in that oracle's own sense, which is
+    exactly the defect class B-755 exists to catch. A real status change (FAIL/
+    SKILL_ARCHIVE_PATH_TRAVERSAL -> PASS/WARN/UNKNOWN) must still move the receipt —
+    covered by test_status_pass_vs_fail_single_finding above."""
+    f_fail = _make_finding(id="B1", status="FAIL")
+    f_traversal = dataclasses.replace(f_fail, status="SKILL_ARCHIVE_PATH_TRAVERSAL")
+    assert compute_scan_receipt([f_fail]) == compute_scan_receipt([f_traversal])
