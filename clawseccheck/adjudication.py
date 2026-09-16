@@ -140,6 +140,23 @@ _FN_PRONE_WARN_IDS = frozenset({
     # (case_01331 via B334, case_03214 via B62) stay unrouted, deliberately, pending a
     # decision on whether that volume is acceptable.
     "B63",
+    # B-760: vet_plugin's own primary Finding carries id "PLUGIN-VET" (checks/_mcp.py),
+    # the container/aggregate verdict for the whole plugin -- not one of the individual
+    # content-ring ids above. `_vet_pool`'s own docstring already states the architecture
+    # this omission broke: "for a single-signal vet the ENTIRE result often rides on the
+    # primary alone (.ring_findings empty)". Reproduced live: a plugin whose only signal
+    # is an obfuscated `eval(atob(...))` js_signal (no ring_findings entry of its own)
+    # rolls up to a bare WARN "PLUGIN-VET" primary with no matching id here, so
+    # `_is_borderline` excluded it from both `build_vet_judge_packet` (the plugin's real
+    # finding never reached the judge -- only the 3 always-offered generic prose
+    # questions did) and `_escalate_finding` (a DANGEROUS verdict submitted back for it
+    # was silently dropped, no disclosure). `vet_skill`'s equivalent primary Finding uses
+    # id "B13" -- already in this set -- which is why the identical architecture already
+    # worked for skills and not for plugins: a missing entry, not a deeper gap. Same
+    # "bounded by construction" reasoning as B63's own note above: this can only ADD a
+    # question to the judge packet, never raise a FAIL/change a grade/create a
+    # false-positive FAIL.
+    "PLUGIN-VET",
 })
 
 # ASTFinding rules that check_installed_skills (checks/_vet.py) computes via
@@ -189,6 +206,18 @@ _ID_QUESTIONS = {
             "external or second-party destination with no secrecy, override, "
             "or trigger framing. Is that destination one you trust with this "
             "secret? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
+    # B-760: the plugin's own rolled-up verdict — see _FN_PRONE_WARN_IDS's own comment
+    # for why this container id needed a question at all (a single-signal vet often
+    # rides on this primary alone, with no ring_findings entry to carry a more specific
+    # question). Deliberately generic and does NOT claim the judge can see which of the
+    # several signals this container aggregates (manifest sanity, npm lifecycle scripts,
+    # floating deps, a skills-entry escape, native stowaways, a bundled skill's own
+    # content-ring hit, ...) fired: `_evidence_locations` strips prose to a bare
+    # location, same redaction discipline as every other item, so the packet item
+    # itself — not this question's wording — is whatever it is for that finding.
+    "PLUGIN-VET": "The installed-plugin scan rolled this plugin's bundled content up "
+                  "to a WARN-level verdict. Did you review the flagged content, and "
+                  "do you trust it? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
 }
 
 # B-556: the same ids, asked when `safe_facts.destination_host` is present.
