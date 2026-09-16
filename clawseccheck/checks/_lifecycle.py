@@ -32,6 +32,7 @@ from .. import deptree as _deptree  # B349: bounded, read-only dependency-tree e
 from ..skillast import analyze_javascript as _analyze_javascript
 from ..textnorm import (
     confusable_in_ascii_context,  # B349: benign i18n vs homoglyph substitution
+    has_naked_bidi_override,  # C-515/B-766: Trojan-Source-style override, B58's sibling signal
     normalize_for_scan,
     obfuscation_signals,
 )
@@ -1042,6 +1043,24 @@ def check_bootstrap_injection(ctx: Context) -> Finding:
         )
     ev = []
     for fname, text in ctx.bootstrap.items():
+        # C-515/B-766: a bidi OVERRIDE (U+202D/U+202E, Trojan-Source-style) conceals
+        # text order from every pattern the loop below can run — that is exactly what
+        # the attack defeats, so it is checked on the RAW text, unconditionally on
+        # whether any INJECTION_PATTERNS match the (still-reversed) normalized text.
+        # Mirrors B58's identical B-766 wiring in checks/_content.py exactly, MINUS
+        # that check's `_whole_text_is_defensive` dampening — B6 has no such concept
+        # for its existing INJECTION_PATTERNS signal either (a plain, undampened FAIL
+        # on any match, by design), so adding dampening only for this new signal would
+        # make B6 MORE lenient here than it already is everywhere else. Do not widen
+        # `has_naked_bidi_override` to the embedding/isolate/mark class — see its own
+        # docstring in textnorm.py for why that would re-punish genuine Hebrew/Arabic
+        # bootstrap prose.
+        if has_naked_bidi_override(text):
+            ev.append(
+                f"{fname}: bidi override (Trojan-Source-style) conceals text order "
+                "from byte-level pattern matching — cannot be verified safe"
+            )
+            continue
         norm = normalize_for_scan(text)
         for pat in INJECTION_PATTERNS:
             if pat.search(norm):
