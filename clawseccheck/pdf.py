@@ -64,7 +64,8 @@ from .layers import LAYER_ORDER, describe_layer
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
     _coverage_lines, _degraded_incomplete_clause, _group_issues_by_subject, _mcp_inventory_lines,
-    _plugins_inventory_lines, _risk_chain_lines, _sanitize, _second_opinion_item_lines,
+    _plugins_inventory_lines, _redact_home_paths, _risk_chain_lines, _sanitize,
+    _second_opinion_item_lines,
     _second_opinion_lines,
     _SEV_ORDER, _UNGRADED_CAP_TAIL, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
     display_status,
@@ -611,7 +612,15 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
     flow.line(f"[{status_word}] {f.id}: {_sanitize(f.title)}", size=11, bold=True, gap_after=1.0)
     flow.line(f"Severity: {f.severity}", size=9, color=sev_hex, gap_after=2.0)
     if f.detail:
-        flow.wrapped(f"Why: {_sanitize(f.detail)}", size=9.5, color="#444444", indent=8.0)
+        # C-456: the PDF is a share/attach surface (docs/USAGE.md — the no-PATH
+        # `--pdf` is how OpenClaw attaches a report to a chat message), the same
+        # sharing risk `_redact_home_paths` already closes for the dashboard card
+        # and SARIF. `_sanitize` alone only masks secret-shaped VALUES
+        # (logsafe.redact), never a username-bearing home path.
+        flow.wrapped(
+            f"Why: {_redact_home_paths(_sanitize(f.detail))}",
+            size=9.5, color="#444444", indent=8.0,
+        )
     # A block that straddled a page break has `bar_y_top` and the current `flow.y` in two
     # different pages' coordinate spaces — combining them into one rect height would be
     # meaningless (and the rect would land on the wrong page entirely). Skip the purely

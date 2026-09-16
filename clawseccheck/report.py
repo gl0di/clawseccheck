@@ -115,11 +115,26 @@ def _redact_home_paths(text: str) -> str:
       read and `--watch-log`'s events read all share -- a path a user types on the
       command line routinely embeds their own username, and this text reaches stderr
       unconditionally, not just inside `--dashboard`.
+    * `_sanitize_tree` (C-456) wraps every string in the JSON-tree output family --
+      unlike the two callers above, this genuinely IS a single choke point, because
+      render_json/render_vet_json/render_vet_all_json/render_advise_json, sarif.py's
+      whole-log pass, adjudication.py's judge packet, and pipeline.py's C8 tree all
+      already call it for the (previously secret-only) `_sanitize` pass. `--json` and
+      SARIF are named together in docs/USAGE.md as the CI-gating / machine-consumed
+      surface, and the no-PATH `--pdf` (fixed separately, at its own render call in
+      pdf.py, since PDF has no tree to route through this function) is how OpenClaw
+      attaches a report to a chat message -- both routinely leave the machine the same
+      way the dashboard card and SARIF already did. `incident.py`'s evidence-pack
+      builder deliberately does NOT go through `_sanitize_tree` (it calls
+      `_finding_to_dict` directly and `json.dumps`s its own payload) and is therefore
+      NOT redacted here, matching that module's own "verbatim... never mutates"
+      doctrine for a forensic-preservation artifact.
 
     Each caller applies this function itself, at its own render boundary, rather than
-    this module reaching out to redact on their behalf -- there is no single choke
-    point all of report/sarif/cli output passes through, so the alternative would be
-    re-deciding the redaction (and the regex) per call site instead of sharing it.
+    this module reaching out to redact on their behalf -- for everything except the
+    JSON-tree family above, there is still no single choke point all of report/sarif/
+    cli output passes through, so re-deciding the redaction (and the regex) per call
+    site remains the alternative there.
     """
     if not text:
         return text
@@ -171,9 +186,19 @@ def _evidence_bullets(
 
 
 def _sanitize_tree(value):
-    """Recursively sanitize untrusted strings in machine-readable output trees."""
+    """Recursively sanitize untrusted strings in machine-readable output trees.
+
+    C-456: also folds a leading user-home path segment to '~' (`_redact_home_paths`),
+    mirroring `sarif.py`'s per-field `_sarif_text` wrapping (B-620) -- extended here so
+    every OTHER JSON tree that already funnels through this one function gets the same
+    protection with no per-call-site duplication: render_json, render_vet_json,
+    render_vet_all_json, render_advise_json (all in this module), sarif.py's own
+    whole-log pass, adjudication.py's judge packet, and pipeline.py's C8 tree.
+    `incident.py` deliberately does NOT call this function (see its own module
+    docstring's "verbatim... never mutates" doctrine) and is unaffected.
+    """
     if isinstance(value, str):
-        return _sanitize(value)
+        return _redact_home_paths(_sanitize(value))
     if isinstance(value, list):
         return [_sanitize_tree(item) for item in value]
     if isinstance(value, tuple):
@@ -4864,7 +4889,18 @@ _VET_VERDICT = {FAIL: "DANGEROUS", WARN: "SUSPICIOUS", PASS: "NO KNOWN ISSUE", U
 
 
 def _finding_to_dict(f: Finding) -> dict:
-    """Serialize one Finding to the frozen public JSON shape (shared by every renderer)."""
+    """Serialize one Finding to the frozen public JSON shape (shared by every renderer).
+
+    C-456: deliberately does NOT redact home paths here (only `_sanitize`'s secret-value
+    masking) -- unlike every OTHER caller of this dict, `incident.py`'s evidence-pack
+    builder calls this directly and never routes its payload through `_sanitize_tree`
+    (see that module's own "verbatim... never mutates" doctrine), so redacting HERE would
+    silently change that forensic artifact's content. The redaction lives one level up,
+    in `_sanitize_tree` itself, which every SHARING-shaped JSON renderer (render_json,
+    render_vet_json, render_vet_all_json, render_advise_json, sarif.py's tree pass,
+    adjudication.py's judge packet, pipeline.py's C8 tree) already funnels through --
+    see `_sanitize_tree`'s own docstring.
+    """
     _meta = BY_ID.get(f.id)
     return {"id": f.id, "title": _sanitize(f.title), "severity": f.severity,
             "status": f.status, "detail": _sanitize(f.detail),
