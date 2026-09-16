@@ -3535,7 +3535,14 @@ def _main(argv=None) -> int:
                         "finding still counts). Gates on findings the way --exit-code does, at a "
                         "chosen severity floor instead of any FAIL")
     p.add_argument("--exit-code", action="store_true",
-                   help="exit 1 if any unsuppressed FAIL finding exists")
+                   help="exit 1 if any unsuppressed FAIL finding exists. DIFFERENT "
+                        "contract with --monitor: exit 3 if any alert at HIGH severity "
+                        "or above was persisted this run (--fail-on moves that floor), "
+                        "exit 1 only if the monitor's local store could not be written, "
+                        "exit 0 otherwise -- 0 by default, opt-in, off unless this flag "
+                        "or --fail-on is also given. Exit 2 is argparse's own reserved "
+                        "code for a usage error on either path, never emitted by this "
+                        "flag itself.")
     # I-038: purely additive and opt-in. `binary` (the default) is BYTE-FOR-BYTE what
     # `--fail-on`/`--exit-code` have always done, on every path that calls
     # `_findings_exit_gate` — a real threshold-tripping FAIL and a run that could not

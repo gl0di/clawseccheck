@@ -143,12 +143,14 @@ class TestRenderCardHeader:
     def test_box_stays_the_pinned_width_after_the_seal_swap(self):
         # The mascot swap (🔍 -> brand.MASCOT) must not shift the box's right edge.
         # By design the seal line (l3) is padded ONE character narrower than the
-        # other two content lines, because the mascot/magnifier is double-width in
+        # other content lines, because the mascot/magnifier is double-width in
         # many terminals — that was true before this migration (see the inline
         # comment) and stays true after it; only the *character* changed.
+        # B-763 added a fourth body row (the trifecta gloss) between l2 and l3 —
+        # unpacking widened accordingly; the width invariant itself is unchanged.
         out = render_card(_score(), _findings())
-        _header, top, l1, l2, l3, bot = out.splitlines()
-        assert len(top) == len(bot) == len(l1) == len(l2)
+        _header, top, l1, l2, l2_gloss, l3, bot = out.splitlines()
+        assert len(top) == len(bot) == len(l1) == len(l2) == len(l2_gloss)
         assert len(l3) == len(l1) - 1
 
 

@@ -697,8 +697,14 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         pct = max(0, min(100, int(score.score)))
         if pct:
             flow.rect(tx, bar_y - 7.0, 210.0 * pct / 100.0, 7.0, grade_color)
-        flow.text_abs(tx, badge_top - 46.0, f"Lethal Trifecta {_trifecta_ratio(findings)}",
-                      9.5, rgb=(0.40, 0.40, 0.40))
+        # B-763: named a threat model and a fraction with no explanation anywhere on
+        # this artifact — the one that gets attached and shared. Same short gloss as
+        # report.py's render_card, so the two shareable surfaces agree on the wording.
+        flow.text_abs(
+            tx, badge_top - 46.0,
+            f"Lethal Trifecta {_trifecta_ratio(findings)} "
+            "(untrusted input, data, egress)",
+            9.5, rgb=(0.40, 0.40, 0.40))
         flow.y = badge_top - badge_s - 12.0
     else:
         # C-423: `graded is False` means no consumer of this ScoreResult may ever print a

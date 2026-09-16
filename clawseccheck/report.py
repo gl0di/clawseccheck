@@ -4497,18 +4497,25 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     # columns and grew the graded card's box past the 39 C-428 fixed it at, which is an
     # invariant a test pins deliberately — a word is not worth breaking byte-identity for.
     l2 = f"  Lethal Trifecta: {_tri}" + (" (unverified)" if _tri == "?/3" else "")
+    # B-763: "Lethal Trifecta: 2/3" named a threat model and a fraction with no
+    # explanation anywhere on this artifact — the one a user posts publicly. A reader
+    # who does not already know the term learns only a number out of 3. One short row
+    # naming the three legs (kept under the established 39-column floor below, so it
+    # never grows the box on its own) — see catalog.py's own A1 title for the same three
+    # legs named in full ("untrusted input", "sensitive data", "outbound").
+    l2_gloss = "  (untrusted input, data, egress)"
     l3 = "  audited by ClawSecCheck" + ("" if ascii_only else f" {brand.MASCOT}")
     # C-428: the width was a hardcoded 39, sized for "A ( 95/100)". The ungraded line is
     # longer than that, and `:<39` pads but never truncates — so the box art broke open
     # on exactly the runs the ungraded work introduced. Grow to fit; never shrink below
     # the established 39 so a graded card renders byte-identically to before.
-    width = max(39, len(l1), len(l2))
+    width = max(39, len(l1), len(l2), len(l2_gloss))
     # Mascot header line, once (design-system Foundations); --ascii drops it to
     # stay pure-ASCII, matching render_dashboard's convention.
     header = "" if ascii_only else f"{brand.header()}\n"
     if ascii_only:
         top = bot = "+" + "-" * width + "+"
-        body = "\n".join(f"|{ln:<{width}}|" for ln in (l1, l2, l3))
+        body = "\n".join(f"|{ln:<{width}}|" for ln in (l1, l2, l2_gloss, l3))
         return _asciify(f"{top}\n{body}\n{bot}")
     top = "┌" + "─" * width + "┐"
     bot = "└" + "─" * width + "┘"
@@ -4516,6 +4523,7 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     body = "\n".join([
         f"│{l1:<{width}}│",
         f"│{l2:<{width}}│",
+        f"│{l2_gloss:<{width}}│",
         f"│{l3:<{width - 1}}│",
     ])
     return f"{header}{top}\n{body}\n{bot}"
