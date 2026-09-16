@@ -943,7 +943,7 @@ def _env_auth_kwarg_items(ctx) -> list[dict]:
 # sentence.
 #
 # That anchoring is the structural fix for the defect that sank both prior attempts at
-# this shape (CLAWSECCHECK-B-452, retracted 2026-08-25 and again 2026-09-05 grounds
+# this shape (B-452, retracted 2026-08-25 and again 2026-09-05 grounds
 # recorded on the task): a "closed quotation near a conditional verb" test, searched
 # across the whole sentence, is satisfied just as well by the run directive's OWN script
 # path — `` `scripts/fetch_job_log.sh` `` is a closed backtick span too — as by a real
@@ -1108,7 +1108,7 @@ def _keyword_gated_trigger_items(ctx) -> list[dict]:
     <word>, you MUST run <script>" — as judge-packet evidence.
 
     Two static-detector attempts at this shape were built and RETRACTED on C-135
-    grounds (see CLAWSECCHECK-B-452's task history): widening checks/_content.py's B334
+    grounds (see B-452's task history): widening checks/_content.py's B334
     modifier set to catch it produced eleven realistic false positives across two
     independent adversarial rounds, the decisive one a `bug` — a closed backtick/quote
     span is the Markdown idiom for ANY inline literal, so a proximity-window "is there a
