@@ -336,9 +336,12 @@ class _PageFlow:
               gap_after: float = 2.0) -> None:
         """Draw one already-wrapped line, breaking to a new page first if it does not fit.
 
-        This is the single place text ever reaches the content stream, so every caller
-        (title, detail, labels, family headers) funnels through the same
-        sanitize -> ascii-safe -> pdf-literal-escape pipeline — nothing skips it."""
+        B-771: this used to be documented as "the single place text ever reaches the
+        content stream" -- true when written, false since `text_abs` (below) was added
+        for absolute-positioned cells (header/badge/summary-table). There are TWO text
+        paths into the content stream now, and both funnel through the identical
+        sanitize -> ascii-safe -> pdf-literal-escape pipeline — nothing skips it in
+        either one (see `text_abs`'s own docstring)."""
         line_h = size * 1.35
         self.ensure_space(gap_before + line_h)
         self.y -= gap_before
