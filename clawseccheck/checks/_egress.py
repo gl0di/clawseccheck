@@ -6,6 +6,7 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import ipaddress
 import os
+import re
 import socket
 import time
 from pathlib import Path
@@ -3880,10 +3881,47 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
 #   reconfigured to a locally-launching driver later, and the check never claims the
 #   binary WILL launch -- only that it is configured and, if it does launch, is not
 #   tamper-proof.
-def check_browser_executable_path(ctx: Context) -> Finding:
-    """B321 — browser.executablePath / browser.profiles.*.{executablePath,mcpCommand}.
+#
+#   B-653: mcpArgs is mcpCommand's sibling and was completely unread (grep found zero
+#   hits before this fix). Grounded against the INSTALLED dist (openclaw@2026.9.4, not
+#   the task's own now-dead 2026.7.1-2 bundle citations): `browser.profiles.*.mcpArgs`
+#   is `string[]` (zod-schema-*.js: `mcpArgs: array(string()).optional()`; schema
+#   description "Extra per-profile Chrome DevTools MCP arguments for existing-session
+#   attachment, such as --no-usage-statistics"), read only for `driver:
+#   "existing-session"` profiles -- same gate as mcpCommand. `normalizeChromeMcpOptions`
+#   (chrome-mcp-options-*.mjs) hands `options.mcpArgs` to a yargs parser with
+#   `alias: {browserUrl: "u", wsEndpoint: "w"}` and `boolean: ["autoConnect"]` -- so
+#   mcpArgs is not just inert extra flags: `--browserUrl`/`-u`, `--wsEndpoint`/`-w`, or
+#   bare `--autoConnect` OVERRIDE which endpoint the Chrome DevTools MCP session
+#   connects to, taking precedence over `cdpUrl` entirely (`overridesConnection` short-
+#   circuits the normal cdpUrl-derived connection args). That is the SAME underlying
+#   risk B322 already grades for the `cdpUrl` field (an off-host CDP endpoint handing a
+#   remote party the browser session) reachable through a field B322 never reads.
+#   Deliberately NOT implemented here: resolving/classifying the actual endpoint value
+#   the way B322's `_cdp_url_classify` does (loopback vs remote vs unresolvable) -- that
+#   needs the same care B322's own extensive normalization comments show it took, and
+#   folding a second URL classifier into B321 under this task's narrower scope ("read
+#   mcpArgs") risks exactly the under-grounded-detector failure mode this project's own
+#   C-135 process exists to catch. So this only DISCLOSES that a connection-overriding
+#   flag is present in mcpArgs, at the same WARN/scored=False tier as mcpCommand, and
+#   names the gap in the finding's own fix text (B322 follow-up filed separately). A
+#   textual flag match only -- never resolves, validates, or classifies the URL itself.
+_B321_MCP_ENDPOINT_FLAG_RE = re.compile(
+    r"^--(browserUrl|wsEndpoint|autoConnect)(=.*)?$|^-[uw](=.*)?$"
+)
 
-    Two distinct sub-signals share this one check ID:
+# DEFAULT_CHROME_MCP_FEATURE_ARGS, chrome-mcp-options-*.mjs — the vendor appends these
+# unconditionally unless the config already carries an equivalent, so an mcpArgs entry
+# that merely restates one is not an override (see the WARN-evidence comment below).
+_B321_DEFAULT_MCP_FEATURE_ARGS = frozenset(
+    {"--no-usage-statistics", "--experimentalStructuredContent"}
+)
+
+
+def check_browser_executable_path(ctx: Context) -> Finding:
+    """B321 — browser.executablePath / browser.profiles.*.{executablePath,mcpCommand,mcpArgs}.
+
+    Three sub-signals share this one check ID:
 
     (A) executablePath (top-level and per-profile) — see the module comment above for
         the grounding. FAIL-capable: a configured, existing path that is writable by
@@ -3902,6 +3940,12 @@ def check_browser_executable_path(ctx: Context) -> Finding:
         WARN-only, and `scored=False` on that specific branch (this check's CheckMeta
         otherwise stays scored — see the FAIL branch above), mirroring B192/B324's
         precedent for a legitimate, commonly-wanted customization a FAIL would punish.
+    (C) profiles.<name>.mcpArgs (existing-session driver only, B-653) — mcpCommand's
+        sibling, previously unread entirely. Same WARN/scored=False tier as (B) — see
+        the module comment above for the grounding, including why a
+        browserUrl/wsEndpoint/autoConnect endpoint-override flag inside it is only
+        DISCLOSED here, never classified/escalated (that is B322's domain, filed
+        separately).
 
     FAIL    — a configured executablePath (top-level or any profile's) exists on disk
               and either the file itself or its containing directory is group/world-
@@ -3912,25 +3956,26 @@ def check_browser_executable_path(ctx: Context) -> Finding:
               directory entry, e.g. via rename/symlink, even if the file's own mode is
               tight). Requires host-filesystem scanning; see UNKNOWN below when it is
               off.
-    WARN    — an existing-session profile's mcpCommand is set to a non-default value
-              (scored=False on this branch — see (B) above).
+    WARN    — an existing-session profile's mcpCommand is a non-default value and/or
+              its mcpArgs is a non-empty list (scored=False on this branch — see (B)/(C)
+              above).
     PASS    — at least one executablePath was configured, host-scanned, and none is
-              writable by another account; no mcpCommand override found.
-    UNKNOWN — no browser config at all; OR browser is configured but neither an
-              executablePath (top-level or per-profile) nor an existing-session
-              mcpCommand override is set anywhere — nothing to assess (B-362: sets
-              ``not_applicable`` here — the config locus was read COMPLETELY and
-              neither sub-signal exists anywhere in the browser block, so there is
-              genuinely nothing for this check to assess, not merely an unassessed
-              risk); OR an executablePath is configured but host-filesystem scanning
-              is disabled (ctx.include_host is False / --no-host) — mirrors C5's own
-              --no-host gate (checks/_capability.py check_path_safety): writability
-              cannot be assessed without stat()-ing the real path, and this check does
-              not fall back to reporting the independent mcpCommand signal alone in
-              that specific run to keep the "assessment incomplete" verdict
-              unambiguous — a subsequent run without --no-host (the CLI default)
-              evaluates both signals normally. This THIRD branch stays a real UNKNOWN
-              (not not_applicable) — candidates were found, the scan is merely
+              writable by another account; no mcpCommand override and no mcpArgs found.
+    UNKNOWN — no browser config at all; OR browser is configured but none of
+              executablePath (top-level or per-profile), an existing-session mcpCommand
+              override, or an existing-session mcpArgs entry is set anywhere — nothing
+              to assess (B-362: sets ``not_applicable`` here — the config locus was read
+              COMPLETELY and no sub-signal exists anywhere in the browser block, so
+              there is genuinely nothing for this check to assess, not merely an
+              unassessed risk); OR an executablePath is configured but host-filesystem
+              scanning is disabled (ctx.include_host is False / --no-host) — mirrors
+              C5's own --no-host gate (checks/_capability.py check_path_safety):
+              writability cannot be assessed without stat()-ing the real path, and this
+              check does not fall back to reporting the independent mcpCommand/mcpArgs
+              signal alone in that specific run to keep the "assessment incomplete"
+              verdict unambiguous — a subsequent run without --no-host (the CLI
+              default) evaluates every signal normally. This THIRD branch stays a real
+              UNKNOWN (not not_applicable) — candidates were found, the scan is merely
               incomplete right now.
     """
     browser = ctx.config.get("browser")
@@ -3938,7 +3983,7 @@ def check_browser_executable_path(ctx: Context) -> Finding:
         return _finding(
             "B321",
             UNKNOWN,
-            "No browser config — executablePath / mcpCommand not applicable.",
+            "No browser config — executablePath / mcpCommand / mcpArgs not applicable.",
             "—",
             not_applicable=_browser_surface_absent(ctx),
         )
@@ -3964,13 +4009,44 @@ def check_browser_executable_path(ctx: Context) -> Finding:
                     "the vendor default (npx -y chrome-devtools-mcp@latest) — OpenClaw "
                     "does not validate this command/path before spawning it"
                 )
+            # B-653: mcpArgs, mcpCommand's sibling — see the module comment above for
+            # the grounding (including the browserUrl/wsEndpoint/autoConnect
+            # connection-override flags, disclosed but not classified/resolved here).
+            # C-135: an entry that is exactly one of the vendor's OWN
+            # DEFAULT_CHROME_MCP_FEATURE_ARGS (chrome-mcp-options-*.mjs) is dropped
+            # before flagging — the vendor appends both of those unconditionally
+            # regardless of config (only suppressing --no-usage-statistics from its own
+            # defaults when the user's mcpArgs already carries a usage-statistics
+            # flag, never the reverse), so a config that merely RESTATES a default is
+            # not an override in any sense the mcpCommand=="npx" precedent above
+            # would flag either.
+            mcp_args = spec.get("mcpArgs")
+            if isinstance(mcp_args, list):
+                clean_args = [
+                    a.strip() for a in mcp_args
+                    if isinstance(a, str) and a.strip()
+                    and a.strip() not in _B321_DEFAULT_MCP_FEATURE_ARGS
+                ]
+                if clean_args:
+                    endpoint_note = (
+                        " — includes a browserUrl/wsEndpoint/autoConnect flag, which "
+                        "overrides which endpoint the MCP session connects to"
+                        if any(_B321_MCP_ENDPOINT_FLAG_RE.match(a) for a in clean_args)
+                        else ""
+                    )
+                    mcp_warn_ev.append(
+                        f"browser.profiles.{name}.mcpArgs={clean_args!r} passes extra "
+                        "arguments to the spawned Chrome DevTools MCP process — "
+                        f"OpenClaw does not validate them before use{endpoint_note}"
+                    )
 
     if not candidates and not mcp_warn_ev:
         return _finding(
             "B321",
             UNKNOWN,
             "browser is configured but no executablePath (top-level or per-profile) "
-            "and no existing-session mcpCommand override is set — nothing to assess.",
+            "and no existing-session mcpCommand/mcpArgs override is set — nothing to "
+            "assess.",
             "—",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
@@ -4054,9 +4130,12 @@ def check_browser_executable_path(ctx: Context) -> Finding:
             "B321",
             WARN,
             f"{len(mcp_warn_ev)} existing-session browser profile(s) override the "
-            "Chrome DevTools MCP command from the vendor default — see evidence.",
-            "Confirm the configured mcpCommand points to a binary you trust; OpenClaw "
-            "does not validate it before spawning.",
+            "Chrome DevTools MCP command and/or pass it extra arguments — see "
+            "evidence.",
+            "Confirm the configured mcpCommand points to a binary you trust and that "
+            "mcpArgs contains only arguments you intend, especially any "
+            "browserUrl/wsEndpoint/autoConnect entry (it redirects the MCP session's "
+            "browser connection); OpenClaw does not validate either before use.",
             evidence=mcp_warn_ev[:6],
             scored=False,
         )

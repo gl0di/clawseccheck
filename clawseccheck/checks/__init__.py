@@ -1535,7 +1535,7 @@ CHECKS = [
     check_secrets_provider_exec,  # B194 — secrets.providers.* exec-source escape flags (E-060 item 1)
     check_browser_extra_args,  # B195 — browser.extraArgs dangerous Chrome launch flags (E-060 item 2)
     check_browser_evaluate_enabled,  # B196 — browser.evaluateEnabled arbitrary-JS sink (E-060 item 3)
-    check_browser_executable_path,  # B321 — browser.executablePath / profiles.*.executablePath / mcpCommand (E-060 item 4)
+    check_browser_executable_path,  # B321 — browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs (E-060 item 4, B-653)
     check_browser_existing_session_profile,  # B322 — browser.profiles.*.userDataDir / cdpUrl / driver:"existing-session" (E-060 item 5)
     check_browser_cdp_control_port,  # B330 — unauthenticated CDP control port: off-host cdpUrl / --remote-allow-origins (C-298)
     check_marketplace_feed_provenance,  # B325 — marketplaces.feeds non-canonical registry (E-060 item 8)

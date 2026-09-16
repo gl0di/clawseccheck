@@ -631,7 +631,7 @@ CATALOG: list[CheckMeta] = [
     # trigger surface never independently verified this session.
     CheckMeta(
         "B321",
-        "browser.executablePath / profiles.*.executablePath / mcpCommand",
+        "browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs",
         HIGH,
         "hardening",
         "Browser / SSRF",
