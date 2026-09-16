@@ -5918,159 +5918,184 @@ def _run_content_ring(
     # this exists and the two prior attempts (retracted, then landed by a different
     # route) it follows.
     crashed: list[str] = []
+    # B-724: the last ring index this loop has FULLY accounted for — appended to
+    # `skipped`/`crashed`, folded into `ring_coverage`, or added to `out` — never an
+    # index that is merely "in flight" inside a check. `last_done_idx = idx` is placed
+    # as the LAST statement on every path through the loop body, immediately before
+    # that path's `continue` (or, on the final normal-completion path, immediately
+    # before falling through to the next iteration). See the outer `except
+    # ScanBudgetExceeded` below for why this is what makes that handler's accounting
+    # correct on every CPython version, not just the one it was measured on.
+    last_done_idx = -1
     with check_deadline(target_budget_s) as own_frame:
-        for idx, check in enumerate(SKILL_CONTENT_RING):
-            try:
-                # B-394: `name = getattr(...)` and `cpu_exceeded(deadline)` used to sit
-                # OUTSIDE this try, guarded by nothing — a SIGALRM landing on either
-                # line (the signal can fire on any bytecode boundary, not just inside
-                # `check(ctx)`; see memory reference_python_signal_mask_not_atomic) threw
-                # ScanBudgetExceeded straight out of this function. Since B-352 made
-                # that type a BaseException specifically so nothing swallows it by
-                # accident, nothing up the stack caught it either — it escaped
-                # `_run_content_ring` entirely instead of being handled by the
-                # `owned_by(...)` logic below. Moving both lines inside the try changes
-                # nothing about their normal-path behavior (no exception, same skip/
-                # continue as before) and closes the window that produced the OBSERVED
-                # 10/30 CI failure rate under load (B-394's own measurement).
-                #
-                # NOT fully closed (C-135 round 2, confirmed by disassembling this
-                # function and reading co_exceptiontable): the `continue` right after
-                # `skipped.append(name)` compiles, in CPython 3.11+'s zero-cost
-                # exception model, to a jump instruction covered by the enclosing
-                # `with check_deadline(...)` block's OWN exception-table entry, not this
-                # try's — a signal landing on exactly that jump still bypasses
-                # `owned_by(...)` and escapes uncaught. This is a residual, not a
-                # regression: it is a narrower version of the SAME landing-spot class
-                # this fix closes, reachable only by a signal arriving during one
-                # specific ~1-instruction transition rather than across two whole
-                # unguarded lines.
-                #
-                # B-688: it HAS now been seen for real, and this paragraph used to say it
-                # had not. Until 2026-08-29 it had only ever been produced by
-                # `sys.settrace`-timed signal injection forcing the landing spot, and it
-                # was described here as "not observed under real load". On that date a
-                # full-suite run (17,710 tests, ~39 minutes) failed once with
-                # ScanBudgetExceeded escaping this function, and the traceback named the
-                # `continue` below — this exact jump. Attribution was checked before the
-                # claim was changed: the failing test touches nothing the same day's
-                # commits altered, it passed 8/8 in isolation (3 clean, 5 under eight CPU
-                # burners), the immediate re-run of the whole suite was green, and the
-                # competing hypothesis (a DeadlineFrame leaked onto scanbudget._STACK by
-                # an earlier test) is covered by _Deadline.__del__, whose own docstring
-                # names that window.
-                #
-                # So: real, and rare enough that a synthetic 8-way CPU load over five runs
-                # did not reproduce it while one long suite did. The residual STAYS
-                # accepted and the analysis above is unchanged — eliminating it would mean
-                # never using `continue`/`break` inside a try guarding a signal-based
-                # exception anywhere a loop needs to skip an iteration, which is not
-                # achievable by restructuring THIS loop alone (the loop-back jump has to
-                # land somewhere). What changed is only the frequency claim, because the
-                # next person to hit this needs to recognise it rather than conclude their
-                # own change broke something. Do NOT widen the `except` below to swallow an
-                # exception this frame does not own: `owned_by` exists so an outer
-                # deadline's expiry is not stolen by an inner frame, and scanbudget's own
-                # note records that raising an unattributed exception there would turn a
-                # healthy check into a spurious UNKNOWN.
-                name = getattr(check, "__name__", "ring check")
-                if cpu_exceeded(deadline):
-                    skipped.append(name)
+        try:
+            for idx, check in enumerate(SKILL_CONTENT_RING):
+                try:
+                    # B-394: `name = getattr(...)` and `cpu_exceeded(deadline)` used to sit
+                    # OUTSIDE this try, guarded by nothing — a SIGALRM landing on either
+                    # line (the signal can fire on any bytecode boundary, not just inside
+                    # `check(ctx)`; see memory reference_python_signal_mask_not_atomic) threw
+                    # ScanBudgetExceeded straight out of this function. Since B-352 made
+                    # that type a BaseException specifically so nothing swallows it by
+                    # accident, nothing up the stack caught it either — it escaped
+                    # `_run_content_ring` entirely instead of being handled by the
+                    # `owned_by(...)` logic below. Moving both lines inside the try changes
+                    # nothing about their normal-path behavior (no exception, same skip/
+                    # continue as before) and closes the window that produced the OBSERVED
+                    # 10/30 CI failure rate under load (B-394's own measurement).
+                    #
+                    # B-688 / B-724: the `continue` right after `skipped.append(name)` (and,
+                    # equally, the loop's own normal iteration advance) used to be able to
+                    # escape uncaught: in CPython 3.11+'s zero-cost exception model, the jump
+                    # instruction implementing `continue` inside a `try` is covered by the
+                    # ENCLOSING block's exception-table entry, not this inner `try`'s, so a
+                    # SIGALRM landing on exactly that jump bypassed `owned_by(...)` below and
+                    # escaped the function entirely. Confirmed for real on 2026-08-29 (a
+                    # full-suite run, 17,710 tests, ~39 minutes, failed once with the
+                    # traceback naming this exact `continue`) after being reproducible only
+                    # via `sys.settrace`-timed signal injection before that.
+                    #
+                    # B-724 closes it with a SECOND, identically-gated `except
+                    # ScanBudgetExceeded` wrapping the whole `for` loop below (still inside
+                    # this same `with check_deadline(...) as own_frame:`, so `owned_by(exc,
+                    # own_frame)` is exactly as strict there as it is here — an outer
+                    # caller's own deadline still re-raises untouched). The outer handler
+                    # only had one real risk: knowing which checks it must still report as
+                    # `skipped` without either double-counting a check the inner handler (or
+                    # the loop body) already accounted for, or dropping one that never ran.
+                    # That could have meant reasoning about exactly which bytecode offset a
+                    # signal lands on — the CPython 3.11+ zero-cost model and 3.9's older
+                    # SETUP_FINALLY/POP_BLOCK model draw the covered ranges differently, so a
+                    # conclusion measured on one is not evidence for the other. `last_done_idx`
+                    # (declared above the `with`) sidesteps that entirely: it is source-level
+                    # bookkeeping, set as the LAST statement of every path through this body,
+                    # so by the time ANY loop-back instruction executes for iteration `idx` —
+                    # on any CPython version, whatever the exception table looks like — Python
+                    # has already finished running every statement lexically before it,
+                    # `last_done_idx = idx` included. The outer handler's correctness follows
+                    # from ordinary statement-execution order, not from where a signal can
+                    # land, so no version-specific bytecode audit is needed to trust it.
+                    name = getattr(check, "__name__", "ring check")
+                    if cpu_exceeded(deadline):
+                        skipped.append(name)
+                        last_done_idx = idx
+                        continue
+                    fx = check(ctx)
+                except ScanBudgetExceeded as exc:
+                    if not owned_by(exc, own_frame):
+                        raise
+                    # Our OWN hard deadline fired mid-check: this check and everything
+                    # after it never got a verdict this call, so all of them count as
+                    # skipped for the coverage-gap message below. (No `last_done_idx`
+                    # update here: `break` ends the loop, so the outer handler below can
+                    # never fire again in this call — there is nothing left for it to
+                    # double-count against.)
+                    own_deadline_hit = True
+                    skipped.extend(
+                        getattr(c, "__name__", "ring check") for c in SKILL_CONTENT_RING[idx:]
+                    )
+                    break
+                except Exception:  # noqa: BLE001 — a ring check must never break --vet
+                    # B-485 (R1, closed): this used to `continue` with no `note_limit`, no
+                    # `skipped` entry and no finding at all — an EMPTY bucket, not an UNKNOWN
+                    # one, so no predicate over the bucket (however it was keyed) could ever
+                    # see that anything had gone wrong. `dossier._danger_coverage_gap` only
+                    # inspects the *danger* bucket, and this loop's ring checks span every
+                    # axis, so a crashed `check_persona_jailbreak` (behavior) or
+                    # `check_overt_secret_exfil` (behavior/connections) left no trace for it
+                    # to read regardless of which leg it used. The one NATURAL trigger this
+                    # project has (`skillast.ScriptProseCoverageIncomplete` on an unparseable
+                    # `.py` file) happened to be safe in practice — `check_installed_skills`
+                    # parses the same source via `analyze_python`, whose `except` clause is a
+                    # strict superset of this exception's, so B13 (danger) independently
+                    # floors the same target — but that was luck, not a guarantee: any check
+                    # added to this ring that raises something `analyze_python` does not also
+                    # catch reopens the exact "--vet said INSTALL over a crash" bug B-485 was
+                    # filed for, and a hand-built minimal ring check (`RuntimeError` — no
+                    # parse involved at all) proves the pool is empty and the verdict reads
+                    # INSTALL/PASS today even where the flag never has a chance to fire.
+                    #
+                    # Fixed by reusing the SAME kind of disclosure the two handlers above
+                    # already use — not a second predicate, not a second `note_limit` idiom —
+                    # but a DISTINCT finding id from `coverage_gap_finding()`'s `VET-COVERAGE`
+                    # (see the `if crashed:` block after the loop). That distinction matters
+                    # and is not decoration: `dossier.build_profile`'s `scan_truncated` flag
+                    # (guarding "no dormant/staged code" on persistence/connections) keys
+                    # SPECIFICALLY on the `VET-COVERAGE` id, on purpose — C-135 already found
+                    # that keying it on `engine_degraded` alone was "too WIDE" (B13's own
+                    # per-file parse error, on a scan that otherwise COMPLETED, wrongly read
+                    # "the scan was cut short"). A single ring check crashing on one file is
+                    # the exact same shape: OTHER checks and OTHER files still got read, so it
+                    # must floor *danger* (this check answered nothing) without also claiming
+                    # persistence/connections were "cut short" — they were never fed by this
+                    # check to begin with. `tests/test_b628_plugin_code_measurable.py::
+                    # test_i_a_single_unparseable_file_does_not_read_as_a_truncated_scan` is
+                    # the existing pin for exactly this distinction; reusing `VET-COVERAGE`
+                    # broke it (measured while building this fix). `crashed` is recorded
+                    # separately from `skipped` for that reason, not merely for the message
+                    # wording.
+                    #
+                    # First attempted 2026-08-08 (`f3c7025`) as a five-line `note_limit()` call
+                    # and RETRACTED: at the time, `_danger_coverage_gap` had only two legs —
+                    # `ctx.limit_hits` and a literal `"coverage is incomplete"` string match —
+                    # so ANY disclosure here tripped the cap unconditionally, and a benign
+                    # skill using a `match` statement (3.10+) read INSTALL on 3.12 but CAUTION
+                    # on the 3.9 CI floor: "no narrow variant exists" (that commit's own words)
+                    # because there was no way to tell "unparseable because hostile" apart from
+                    # "unparseable because newer than the scanner" from inside the handler.
+                    # That objection is about the CONSEQUENCE (any gap here forces CAUTION),
+                    # not about routing through `note_limit()` itself — and the consequence
+                    # changed under it, not because of this fix: `3fe2554` (2026-08-14) closed
+                    # B13's own parse-error instance of the identical version-skew shape the
+                    # same way, and it did NOT try to avoid the skew — it accepted it as
+                    # BOUNDED (`tests/test_b485_vet_coverage_gap.py::
+                    # test_version_skew_on_a_modern_syntax_skill_is_bounded`): the gap can only
+                    # withhold a clean verdict (CAUTION), never manufacture DO-NOT-INSTALL, so
+                    # a benign modern-syntax skill on the 3.9 floor gets an honest "we could
+                    # not read this on this interpreter", never a false accusation. This fix
+                    # produces exactly that same bounded shape for a ring-check crash —
+                    # UNKNOWN-only severity, same bound — so the 2026-08-08 objection is
+                    # superseded by the precedent the project has since accepted for the
+                    # identical underlying phenomenon, not re-litigated.
+                    crashed.append(name)
+                    last_done_idx = idx
                     continue
-                fx = check(ctx)
-            except ScanBudgetExceeded as exc:
-                if not owned_by(exc, own_frame):
-                    raise
-                # Our OWN hard deadline fired mid-check: this check and everything
-                # after it never got a verdict this call, so all of them count as
-                # skipped for the coverage-gap message below.
-                own_deadline_hit = True
-                skipped.extend(
-                    getattr(c, "__name__", "ring check") for c in SKILL_CONTENT_RING[idx:]
-                )
-                break
-            except Exception:  # noqa: BLE001 — a ring check must never break --vet
-                # B-485 (R1, closed): this used to `continue` with no `note_limit`, no
-                # `skipped` entry and no finding at all — an EMPTY bucket, not an UNKNOWN
-                # one, so no predicate over the bucket (however it was keyed) could ever
-                # see that anything had gone wrong. `dossier._danger_coverage_gap` only
-                # inspects the *danger* bucket, and this loop's ring checks span every
-                # axis, so a crashed `check_persona_jailbreak` (behavior) or
-                # `check_overt_secret_exfil` (behavior/connections) left no trace for it
-                # to read regardless of which leg it used. The one NATURAL trigger this
-                # project has (`skillast.ScriptProseCoverageIncomplete` on an unparseable
-                # `.py` file) happened to be safe in practice — `check_installed_skills`
-                # parses the same source via `analyze_python`, whose `except` clause is a
-                # strict superset of this exception's, so B13 (danger) independently
-                # floors the same target — but that was luck, not a guarantee: any check
-                # added to this ring that raises something `analyze_python` does not also
-                # catch reopens the exact "--vet said INSTALL over a crash" bug B-485 was
-                # filed for, and a hand-built minimal ring check (`RuntimeError` — no
-                # parse involved at all) proves the pool is empty and the verdict reads
-                # INSTALL/PASS today even where the flag never has a chance to fire.
-                #
-                # Fixed by reusing the SAME kind of disclosure the two handlers above
-                # already use — not a second predicate, not a second `note_limit` idiom —
-                # but a DISTINCT finding id from `coverage_gap_finding()`'s `VET-COVERAGE`
-                # (see the `if crashed:` block after the loop). That distinction matters
-                # and is not decoration: `dossier.build_profile`'s `scan_truncated` flag
-                # (guarding "no dormant/staged code" on persistence/connections) keys
-                # SPECIFICALLY on the `VET-COVERAGE` id, on purpose — C-135 already found
-                # that keying it on `engine_degraded` alone was "too WIDE" (B13's own
-                # per-file parse error, on a scan that otherwise COMPLETED, wrongly read
-                # "the scan was cut short"). A single ring check crashing on one file is
-                # the exact same shape: OTHER checks and OTHER files still got read, so it
-                # must floor *danger* (this check answered nothing) without also claiming
-                # persistence/connections were "cut short" — they were never fed by this
-                # check to begin with. `tests/test_b628_plugin_code_measurable.py::
-                # test_i_a_single_unparseable_file_does_not_read_as_a_truncated_scan` is
-                # the existing pin for exactly this distinction; reusing `VET-COVERAGE`
-                # broke it (measured while building this fix). `crashed` is recorded
-                # separately from `skipped` for that reason, not merely for the message
-                # wording.
-                #
-                # First attempted 2026-08-08 (`f3c7025`) as a five-line `note_limit()` call
-                # and RETRACTED: at the time, `_danger_coverage_gap` had only two legs —
-                # `ctx.limit_hits` and a literal `"coverage is incomplete"` string match —
-                # so ANY disclosure here tripped the cap unconditionally, and a benign
-                # skill using a `match` statement (3.10+) read INSTALL on 3.12 but CAUTION
-                # on the 3.9 CI floor: "no narrow variant exists" (that commit's own words)
-                # because there was no way to tell "unparseable because hostile" apart from
-                # "unparseable because newer than the scanner" from inside the handler.
-                # That objection is about the CONSEQUENCE (any gap here forces CAUTION),
-                # not about routing through `note_limit()` itself — and the consequence
-                # changed under it, not because of this fix: `3fe2554` (2026-08-14) closed
-                # B13's own parse-error instance of the identical version-skew shape the
-                # same way, and it did NOT try to avoid the skew — it accepted it as
-                # BOUNDED (`tests/test_b485_vet_coverage_gap.py::
-                # test_version_skew_on_a_modern_syntax_skill_is_bounded`): the gap can only
-                # withhold a clean verdict (CAUTION), never manufacture DO-NOT-INSTALL, so
-                # a benign modern-syntax skill on the 3.9 floor gets an honest "we could
-                # not read this on this interpreter", never a false accusation. This fix
-                # produces exactly that same bounded shape for a ring-check crash —
-                # UNKNOWN-only severity, same bound — so the 2026-08-08 objection is
-                # superseded by the precedent the project has since accepted for the
-                # identical underlying phenomenon, not re-litigated.
-                crashed.append(name)
-                continue
-            if fx.status not in (FAIL, WARN):
-                # B-526: the finding is dropped, its COVERAGE is not. The drop rule
-                # exists because "an UNKNOWN would wrongly outrank a clean PASS" (see
-                # this function's docstring) — that is about the finding's STATUS, and a
-                # coverage note has none. B343 is the case that made this visible: a
-                # model reference reachable only inside a bare fence leaves B343 UNKNOWN,
-                # so without this the disclosure died here and --vet reported a clean
-                # skill with nothing said about the part it never read. The notes are
-                # collected and handed to the surviving primary by vet_skill.
-                ring_coverage.extend(
-                    e for e in (fx.evidence or []) if e.startswith("coverage: ")
-                )
-                continue
-            key = (fx.id, fx.detail)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(fx)
+                if fx.status not in (FAIL, WARN):
+                    # B-526: the finding is dropped, its COVERAGE is not. The drop rule
+                    # exists because "an UNKNOWN would wrongly outrank a clean PASS" (see
+                    # this function's docstring) — that is about the finding's STATUS, and a
+                    # coverage note has none. B343 is the case that made this visible: a
+                    # model reference reachable only inside a bare fence leaves B343 UNKNOWN,
+                    # so without this the disclosure died here and --vet reported a clean
+                    # skill with nothing said about the part it never read. The notes are
+                    # collected and handed to the surviving primary by vet_skill.
+                    ring_coverage.extend(
+                        e for e in (fx.evidence or []) if e.startswith("coverage: ")
+                    )
+                    last_done_idx = idx
+                    continue
+                key = (fx.id, fx.detail)
+                if key in seen:
+                    last_done_idx = idx
+                    continue
+                seen.add(key)
+                out.append(fx)
+                last_done_idx = idx
+        except ScanBudgetExceeded as exc:
+            if not owned_by(exc, own_frame):
+                raise
+            # B-724: the residual landing spot the comment above describes — a signal
+            # attributed to OUR OWN deadline, arriving somewhere the inner `try` does not
+            # cover (a `continue`'s loop-back jump, the loop's own normal iteration
+            # advance, or the `for` header itself). `last_done_idx` names exactly which
+            # checks are already accounted for regardless of which of those it was, so the
+            # slice below can never double-count (an accounted check is never re-listed)
+            # or under-count (an unaccounted one is never skipped over).
+            own_deadline_hit = True
+            skipped.extend(
+                getattr(c, "__name__", "ring check")
+                for c in SKILL_CONTENT_RING[last_done_idx + 1:]
+            )
     if skipped:
         reason = (
             f"the ring's own {target_budget_s:g}s hard scan deadline fired mid-check"
