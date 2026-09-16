@@ -12630,12 +12630,46 @@ _B334_CONSENT_NOUN = (
     r"(?:consent|approval|confirmation|permission|sign[-\s]?off|authori[sz]ation|"
     r"go[-\s]?ahead|ok(?:ay)?|blessing)"
 )
-# What the USER does when consent is preserved.
-_B334_CONSENT_ACT = (
+# What the USER does when consent is UNCONDITIONALLY preserved -- these verbs mean
+# "granted permission" regardless of what follows them.
+_B334_CONSENT_ACT_GRANT = (
     r"(?:confirms?|confirmed|confirming|approves?|approved|approving|agrees?|agreed|"
-    r"agreeing|asks?|asked|asking|requests?|requested|requesting|consents?|consented|"
-    r"authori[sz]es?|authori[sz]ed|permits?|permitted|allows?|allowed|opts?\s+in|"
-    r"opted\s+in|says?\s+yes|said\s+yes)"
+    r"agreeing|consents?|consented|consenting|authori[sz]es?|authori[sz]ed|"
+    r"authori[sz]ing|permits?|permitted|permitting|allows?|allowed|allowing|"
+    r"opts?\s+in|opted\s+in|opting\s+in|says?\s+yes|said\s+yes|saying\s+yes)"
+)
+# B-739: "asks"/"requests" are NOT unconditional grant verbs -- "if the user requests
+# \"cron\", run X" is a keyword-gated trigger the user never consented to (their own
+# WORDING is the activation condition), not permission, while "if the user requests it,
+# run X" / "if the user asks, run X" IS genuine consent. The `\b` on every alternative
+# matters: without it, a lookahead failure on the longer "requests" backtracks to the
+# shorter "request" and the trailing "s" is left unconsumed but the veto still applies,
+# silently defeating the guard below via partial-word matching.
+_B334_CONSENT_ACT_ASK = (
+    r"(?:asks|ask|asked|asking|requests|request|requested|requesting)\b"
+)
+# The tell that "asks"/"requests" is gating on WORDING rather than granting permission:
+# the verb is immediately followed by a quoted literal -- the attacker's trigger keyword
+# sitting right where a consent object ("it"/"permission"/a clause boundary) would
+# otherwise be. Straight and curly quote marks only -- B-452 measured that a closed
+# BACKTICK span is not a usable "quoted literal" signal (a run directive's own
+# `` `scripts/x.sh` `` satisfies it), so a backtick is deliberately excluded here.
+_B334_QUOTED_LITERAL_LOOKAHEAD = r"(?!\s*[\"'‘’“”])"
+# What the USER does when consent is preserved -- the grant verbs unconditionally, the
+# ask/request verbs only when NOT immediately followed by a quoted literal.
+#
+# Wrapped in its OWN (?:...) group -- not just each half individually -- because this
+# string is spliced into Frame 1 by plain concatenation (`TARGET + ... + _B334_CONSENT_ACT`
+# below). An earlier version left the top-level `|` between the two halves unwrapped, which
+# does not stay scoped to "what the ACT verb can be": it splits FRAME 1 ITSELF in two,
+# turning the ask/request half into a bare, unanchored alternative that matches "asked"
+# ANYWHERE in the text with no leading "if/when the user" and no TARGET at all. Measured:
+# "regardless of what the user asked" (a CONSENT_BYPASS_WORDING fixture, must stay
+# unvetoed) started matching via the stray "asked" alone once. `(?:...)` around the whole
+# thing keeps the alternation local to the ACT verb, exactly like every other frame here.
+_B334_CONSENT_ACT = (
+    r"(?:" + _B334_CONSENT_ACT_GRANT
+    + r"|" + _B334_CONSENT_ACT_ASK + _B334_QUOTED_LITERAL_LOOKAHEAD + r")"
 )
 # What the AGENT does when consent is preserved.
 _B334_CONSULT_VERB = (
