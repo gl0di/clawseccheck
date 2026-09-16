@@ -63,7 +63,9 @@ from .catalog import (
 from .layers import LAYER_ORDER, describe_layer
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
-    _coverage_lines, _degraded_incomplete_clause, _group_issues_by_subject, _mcp_inventory_lines,
+    _coverage_lines, _degraded_incomplete_clause, _EXPORT_FINDINGS_ONLY_NOTE,
+    _EXPORT_RISK_INCLUDED_NOTE,
+    _group_issues_by_subject, _mcp_inventory_lines,
     _plugins_inventory_lines, _redact_home_paths, _risk_chain_lines, _sanitize,
     _second_opinion_item_lines,
     _second_opinion_lines,
@@ -782,6 +784,19 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         else:
             text = f"{reason}{also} - {_UNGRADED_CAP_TAIL}"
         flow.wrapped(text, size=9.5, color="#b94a48")
+
+    # B-761: this document's own scope, stated on its first page — the text report
+    # additionally carries the "Highest-risk paths" attack-chain synthesis, the
+    # capability graph, and "What you can do next" recommendations, and this PDF used
+    # to say nothing about omitting them. `risk` is the one of the three this renderer
+    # CAN carry (the "--full pipeline" RISK-chains block further down, when the caller
+    # supplied it) — the capability graph and next actions are absent from every PDF
+    # this function produces, so the note always names those, and names the
+    # attack-chain synthesis too only when this run's PDF will not otherwise show it.
+    flow.wrapped(
+        _EXPORT_RISK_INCLUDED_NOTE if risk else _EXPORT_FINDINGS_ONLY_NOTE,
+        size=8.5, color="#666666",
+    )
 
     # ── Severity chips ───────────────────────────────────────────────────────────
     flow.spacer(6.0)

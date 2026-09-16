@@ -352,3 +352,41 @@ def test_coverage_block_header_is_not_drawn_twice():
     findings = [_finding("B1", FAIL)]
     text = _content_text(render_pdf(findings, compute(findings)))
     assert text.count("Coverage of OpenClaw surfaces") == 1
+
+
+# ---------------------------------------------------------------------------
+# B-761: the PDF discloses what it omits, rather than silently dropping it
+# ---------------------------------------------------------------------------
+
+def test_standalone_pdf_discloses_it_omits_risk_chains_and_next_actions():
+    """A bare `--pdf` (no `risk=` supplied) renders no RISK-chains/next-actions/
+    capability-graph section at all — proven by today's code before this fix: the
+    document said nothing about the gap. It must now say so on its own first page."""
+    findings = [_finding("B1", FAIL)]
+    text = _content_text(render_pdf(findings, compute(findings)))
+    assert "findings-only view" in text
+    assert "Highest-risk paths" in text
+    assert "capability graph" in text
+    # Word-wrapped across two Tj text-showing ops at this string's fixed length — a
+    # contiguous "What you can do next" substring would not survive the wrap, so
+    # assert on the half either side of the break instead.
+    assert '"What you' in text
+    assert 'can do next" recommendations' in text
+
+
+def test_full_pdf_with_risk_still_discloses_the_still_missing_sections():
+    """The richer `--dashboard --full --pdf` document (RISK chains included via
+    `risk=`) never renders a capability graph or next-actions section — it must
+    still disclose THOSE, but must not call itself a bare findings-only view once
+    RISK chains are actually present (that would be a false claim about a document
+    that carries them)."""
+    class _RiskPath:
+        id, severity = "RISK-01", CRITICAL
+        title, why = "chain title", "chain why"
+        chain = ["untrusted input", "exec"]
+
+    findings = [_finding("B1", FAIL)]
+    text = _content_text(render_pdf(findings, compute(findings), risk=[_RiskPath()]))
+    assert "capability graph" in text
+    assert "What you can do next" in text
+    assert "findings-only view" not in text

@@ -526,6 +526,30 @@ def _cap_also_clause(extras: list[str]) -> str:
 _UNGRADED_CAP_TAIL = "it would have capped the grade, but this run has no grade to cap."
 _UNGRADED_CAP_TAIL_SENTENCE = _UNGRADED_CAP_TAIL[0].upper() + _UNGRADED_CAP_TAIL[1:]
 
+# B-761: the text report renders the "Highest-risk paths" attack-chain synthesis, the
+# capability graph, and the "What you can do next" recommendations — `render_html`
+# and `pdf.render_pdf` do not, and used to say nothing about the gap. Both exports
+# stayed "findings-only view, honestly disclosed" (option 2 of the task's two
+# acceptable outcomes) rather than growing renderers for a graph and a chain synthesis
+# in HTML/PDF markup, so this one sentence is the single source of that disclosure —
+# shared verbatim so it cannot drift into two different claims about what a shared
+# report contains, the same discipline `_UNGRADED_CAP_TAIL` above already follows.
+_EXPORT_FINDINGS_ONLY_NOTE = (
+    'This is a findings-only view. It does not include the "Highest-risk paths" '
+    'attack-chain synthesis, the capability graph, or the "What you can do next" '
+    "recommendations — see the full text report (the default output, or --save) for those."
+)
+
+# B-761 follow-up: the richer `--dashboard --full --pdf` document DOES carry a "RISK
+# chains" section (render_pdf's own `risk` parameter, wired at that call site) —
+# printing the 3-item note above on THAT document would itself be the false claim
+# this task exists to stop. This is the 2-item remainder for exactly that path: what
+# is still missing when the attack-chain synthesis is not.
+_EXPORT_RISK_INCLUDED_NOTE = (
+    'This PDF does not include the capability graph or the "What you can do next" '
+    "recommendations — see the full text report (the default output, or --save) for those."
+)
+
 
 def _cap_primary_reason_text(primary: str, score: ScoreResult, *,
                              audited_path=None) -> str:
@@ -6650,7 +6674,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         {nav_html}
         {findings_html}
 
-        <footer class="footer">Generated locally by ClawSecCheck · read-only against your OpenClaw config · this report never leaves your machine</footer>
+        <footer class="footer">Generated locally by ClawSecCheck · read-only against your OpenClaw config · this report never leaves your machine
+            <br>{esc(_EXPORT_FINDINGS_ONLY_NOTE)}</footer>
     </main>
 </body>
 </html>'''
