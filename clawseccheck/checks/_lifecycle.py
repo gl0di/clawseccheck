@@ -1366,6 +1366,13 @@ def check_cron_scheduler(ctx: Context) -> Finding:
 def check_cron_job_content(ctx: Context) -> Finding:
     """B168 (B-231 sub-item 1) — cron JOB STORE content scan.
 
+    C-476: also scans a `command`-kind payload's `argv` vector (joined space-separated,
+    the way a shell would see the words) and a `script`-kind payload's `script` body —
+    the collector already read these (`_cron_payload_extras`) but this check never
+    looked at their content, only at whether the job WAS a command/script (the
+    `is_exec` self-erasure heuristic below). Same detectors, same evidence shape as
+    payload.message/trigger.script.
+
     C048 (above) only sees the top-level `cron` config *key*; the actual scheduled job
     payloads live in a separate store the collector now reads read-only (B-231):
     ~/.openclaw/cron/jobs.json, or the SQLite-backed cron_jobs table when the JSON file
@@ -1497,11 +1504,35 @@ def check_cron_job_content(ctx: Context) -> Finding:
         job_label = f"cron job '{job.get('id') or job.get('name') or '?'}'"
         _scan_field(f"{job_label}.payload.message", job.get("payload_message"))
         _scan_field(f"{job_label}.trigger.script", job.get("trigger_script"))
+        # C-476: a `command`-kind payload's argv vector and a `script`-kind payload's
+        # body were collected (collector._cron_payload_extras) but never content-scanned
+        # -- `is_exec` below already treated `payload_kind == "command"` as an execution
+        # surface for the self-erasing-job heuristic, but the actual argv/script TEXT
+        # itself was invisible to every detector this function already runs against
+        # payload.message/trigger.script. argv is a list, joined the same way a shell
+        # would see the words (space-separated) so the content-ring regexes (a
+        # curl|bash pipe-to-shell pattern, a base64 instruction-override) can match
+        # across argv element boundaries the way they already match across a sentence.
+        argv = job.get("payload_argv")
+        if isinstance(argv, list):
+            _scan_field(f"{job_label}.payload.argv", " ".join(str(a) for a in argv))
+        _scan_field(f"{job_label}.payload.script", job.get("payload_script"))
+        # C-135 (adversarial pass): argv alone can look innocuous (["bash"],
+        # ["python3", "-"]) while the actual payload rides in `input` — the spawned
+        # process's stdin. Same content-injection risk as argv/script; scanned the
+        # same way.
+        _scan_field(f"{job_label}.payload.input", job.get("payload_input"))
 
-        is_exec = bool(job.get("trigger_script")) or job.get("payload_kind") == "command"
+        # C-476: `script`-kind is an execution surface exactly like `command`-kind (an
+        # arbitrary script body vs. an argv vector) and was missing from this flag —
+        # widened alongside the new content-scanning above, not left half-covered.
+        is_exec = (
+            bool(job.get("trigger_script"))
+            or job.get("payload_kind") in ("command", "script")
+        )
         if job.get("delete_after_run") and is_exec:
             warn_ev.append(
-                f"{job_label}: deleteAfterRun + exec trigger/command payload "
+                f"{job_label}: deleteAfterRun + exec trigger/command/script payload "
                 "(self-erasing job)"
             )
 

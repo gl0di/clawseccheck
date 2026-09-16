@@ -3904,6 +3904,63 @@ def skill_load_roots(
     return out
 
 
+def _cron_payload_extras(payload_obj, payload_kind) -> dict:
+    """C-476: the payload-kind-specific field groups the legacy ``trigger_script``/
+    ``payload_message`` parity model (B-709) does not carry -- grounded against the
+    installed dist's ``CronPayload`` union (``plugin-entry-*.d.ts``, ``CronJobBase``
+    region): ``command``'s ``argv``/``cwd``/``env``/``input``, ``script``'s
+    ``toolBudget``, ``agentTurn``'s ``allowUnsafeExternalContent``/
+    ``externalContentSource``, and
+    ``toolsAllow`` -- present on EVERY payload kind via the ``CronPayloadToolAllow``
+    intersection type, not agentTurn-only, so it is the one field below never gated on
+    ``payload_kind``.
+
+    Kind-gated like the sibling ``trigger_script``/``payload_message`` extraction in the
+    two call sites below -- a same-named key on the WRONG kind is never read as a genuine
+    declaration (B-378 idiom): the vendor's own type is a tagged union, so a `.script` on
+    an ``agentTurn`` payload is not something any real client writes, and reading it
+    anyway would invent a fact the schema does not tie to that variant.
+
+    Returns every key regardless of kind (unmatched ones are ``None``), so a consuming
+    check gets one uniform shape whichever store/branch produced ``payload_obj``.
+    """
+    if not isinstance(payload_obj, dict):
+        payload_obj = {}
+    argv = payload_obj.get("argv") if payload_kind == "command" else None
+    cwd = payload_obj.get("cwd") if payload_kind == "command" else None
+    env = payload_obj.get("env") if payload_kind == "command" else None
+    # C-135: the argv vector alone can look innocuous (e.g. ["bash"], ["python3", "-"])
+    # while the actual payload rides in `input` -- the process's stdin, per the real
+    # execution path (runCronCommandJob -> runCommandWithTimeout(argv, {input, ...})).
+    # Same content-injection risk as argv/script and must be captured/scanned alongside
+    # them, not treated as a lesser field.
+    cmd_input = payload_obj.get("input") if payload_kind == "command" else None
+    script = payload_obj.get("script") if payload_kind == "script" else None
+    tool_budget = payload_obj.get("toolBudget") if payload_kind == "script" else None
+    allow_unsafe = (
+        payload_obj.get("allowUnsafeExternalContent") if payload_kind == "agentTurn" else None
+    )
+    ext_source = (
+        payload_obj.get("externalContentSource") if payload_kind == "agentTurn" else None
+    )
+    tools_allow = payload_obj.get("toolsAllow")
+    return {
+        "payload_argv": argv if isinstance(argv, list) else None,
+        "payload_cwd": cwd if isinstance(cwd, str) else None,
+        "payload_env": env if isinstance(env, dict) else None,
+        "payload_input": cmd_input if isinstance(cmd_input, str) else None,
+        "payload_script": script if isinstance(script, str) else None,
+        "payload_tool_budget": tool_budget if isinstance(tool_budget, (int, float)) else None,
+        "payload_allow_unsafe_external_content": (
+            allow_unsafe if isinstance(allow_unsafe, bool) else None
+        ),
+        "payload_external_content_source": (
+            ext_source if isinstance(ext_source, str) else None
+        ),
+        "payload_tools_allow": tools_allow if isinstance(tools_allow, list) else None,
+    }
+
+
 def _collect_cron(home: Path, ctx: Context) -> None:
     """B-231 sub-item 1: read-only, symlink-safe, size/entry-capped collection of the
     OpenClaw cron job store into ``ctx.cron_jobs``.
@@ -3983,6 +4040,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     "trigger_script": trigger.get("script"),
                     "payload_kind": payload.get("kind"),
                     "payload_message": payload.get("message"),
+                    **_cron_payload_extras(payload, payload.get("kind")),
                 })
             if len(jobs) > _MAX_CRON_JOBS:
                 ctx.cron_jobs_truncated = True
@@ -4151,6 +4209,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     "trigger_script": trigger_script,
                     "payload_kind": payload_kind,
                     "payload_message": payload_message,
+                    **_cron_payload_extras(payload_obj, payload_kind),
                 })
         else:
             for job_id, name, enabled, delete_after_run, trigger_script, payload_kind, payload_message in rows:
@@ -4162,6 +4221,12 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     "trigger_script": trigger_script,
                     "payload_kind": payload_kind,
                     "payload_message": payload_message,
+                    # C-476: this LEGACY flat-column shape has no payload sub-object at
+                    # all -- these fields are structurally unavailable here, not merely
+                    # absent on this job. Explicit None (never omitted) so a consuming
+                    # check reads one uniform dict shape regardless of which store
+                    # branch produced it, matching the JSON/modern-SQLite branches above.
+                    **_cron_payload_extras({}, None),
                 })
         ctx.cron_store_empty = not ctx.cron_jobs  # B-294: read, but nothing to scan
     except sqlite3.Error as exc:
