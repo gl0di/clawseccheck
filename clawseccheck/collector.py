@@ -4825,11 +4825,29 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
                 continue
             allowlist = agent.get("allowlist")
             allow_always_count = 0
+            # C-430: split the count by entry SHAPE, not just tallied. Grounded against
+            # the installed dist (exec-approvals-allowlist*.js's buildArgPatternFromArgv/
+            # buildScriptArgPatternFromArgv): both return `undefined` on every non-Windows
+            # platform BY DESIGN, so a POSIX "always allow" click persists an entry with no
+            # `argPattern` key at all — and the matcher (exec-command-resolution*.js) reads
+            # a missing `argPattern` as a wildcard over argv. That is a materially different
+            # standing grant from one WITH an `argPattern` (Windows, or a future OpenClaw
+            # release) — "any arguments to this binary, forever" vs "this exact argv only" —
+            # and the old single tally could not tell a reader which they were looking at.
+            # A present-but-falsy `argPattern` (`""`/`null`) is treated the same as absent:
+            # the matcher's own check is `if (!entry.argPattern)`, so JS falsy is the real
+            # boundary, not merely "is the key present".
+            binary_wide_count = 0
+            arg_restricted_count = 0
             if isinstance(allowlist, list):
-                allow_always_count = sum(
-                    1 for e in allowlist
-                    if isinstance(e, dict) and e.get("source") == "allow-always"
-                )
+                for e in allowlist:
+                    if not (isinstance(e, dict) and e.get("source") == "allow-always"):
+                        continue
+                    allow_always_count += 1
+                    if e.get("argPattern"):
+                        arg_restricted_count += 1
+                    else:
+                        binary_wide_count += 1
             security = agent.get("security")
             ask = agent.get("ask")
             ctx.exec_approvals_grants.append({
@@ -4837,6 +4855,8 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
                 "security": security if isinstance(security, str) else None,
                 "ask": ask if isinstance(ask, str) else None,
                 "allow_always_count": allow_always_count,
+                "binary_wide_count": binary_wide_count,
+                "arg_restricted_count": arg_restricted_count,
             })
     except (OSError, ValueError) as exc:
         ctx.errors.append(f"could not parse {target}: {exc}")

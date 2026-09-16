@@ -1797,6 +1797,31 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
               case -- e.g. freshly-provisioned defaults/agents are both empty `{}`).
     UNKNOWN — exec-approvals.json is absent (or a symlink, never followed), or was
               found but could not be parsed/read.
+
+    C-430: an "allow-always" entry with no `argPattern` is not the same standing grant
+    as one that carries one. Grounded against the installed dist: on every non-Windows
+    platform, OpenClaw's own argPattern builders return `undefined` BY DESIGN, so a
+    POSIX "always allow" click persists a path-only entry -- and the runtime's own
+    matcher (exec-command-resolution*.js) treats a missing `argPattern` as a wildcard
+    over argv. One click on a POSIX host therefore grants the binary with ANY
+    arguments, durably -- for an argument-weaponizable binary (`git`, `tar`, `ssh`,
+    `find`, `awk`, ...) that is a standing arbitrary-execution grant, not merely "this
+    binary is trusted". `collector._collect_exec_approvals` now splits each agent's
+    tally into `binary_wide_count` (no `argPattern`) and `arg_restricted_count` (a real
+    `argPattern`) so this check's evidence can say which kind a reader is looking at,
+    instead of a bare number that reads the same either way. This is a pure disclosure
+    change on already-collected data: still WARN-only, `scored=False`, no FAIL and no
+    new tuning surface -- the OpenClaw-side defect itself (the matcher's own
+    interpretation of a missing argPattern) is out of scope for this project.
+
+    Disclosed limitation (found on the adversarial pass): "argument-restricted" means
+    only that SOME `argPattern` string is present -- this check does not, and per its
+    own scope is not meant to, evaluate whether that pattern is actually narrow (an
+    OpenClaw-persisted `argPattern` of e.g. `.*` would match any argv and count as
+    "restricted" here while granting exactly as much as a path-only entry). Evaluating a
+    persisted regex's own permissiveness is a materially different, much larger check
+    than "does this entry structurally carry the field the runtime keys on" -- the
+    question this one answers, matching the task's own two-shape framing.
     """
     if not ctx.exec_approvals_found:
         return _finding(
@@ -1831,12 +1856,27 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
             pass_confidence="verified",
         )
 
-    evidence = [
-        f"agent '{g['agent_id']}': {g['allow_always_count']} allow-always pattern(s)"
-        + (f", security={g['security']}" if g.get("security") else "")
-        + (f", ask={g['ask']}" if g.get("ask") else "")
-        for g in grants
-    ]
+    evidence = []
+    for g in grants:
+        line = f"agent '{g['agent_id']}': {g['allow_always_count']} allow-always pattern(s)"
+        # C-430: name which SHAPE each grant is, not just how many. `.get(..., 0)`
+        # defensively -- these two keys exist on every grant `collector.py` builds, but
+        # a hand-built ctx in a test must not KeyError rather than degrade to "unknown
+        # shape" (which then simply adds no parenthetical, same as before this change).
+        binary_wide = g.get("binary_wide_count", 0)
+        arg_restricted = g.get("arg_restricted_count", 0)
+        shapes = []
+        if binary_wide:
+            shapes.append(f"{binary_wide} binary-wide: any arguments")
+        if arg_restricted:
+            shapes.append(f"{arg_restricted} argument-restricted")
+        if shapes:
+            line += " (" + "; ".join(shapes) + ")"
+        if g.get("security"):
+            line += f", security={g['security']}"
+        if g.get("ask"):
+            line += f", ask={g['ask']}"
+        evidence.append(line)
     ev_summary = "; ".join(evidence[:4])
     extra = f" (+{len(evidence) - 4} more)" if len(evidence) > 4 else ""
     return _finding(

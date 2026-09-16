@@ -1274,11 +1274,16 @@ CATALOG: list[CheckMeta] = [
     # lying-PASS); B-236's own adversarial review REFUTED that: OpenClaw computes the
     # effective exec policy as minSecurity(tools.exec.security, execApprovals.security)
     # + maxAsk(tools.exec.ask, execApprovals.ask) (bash-tools*.js:581-582;
-    # exec-approvals-BIKWP8_V.js:1126-1140), so a standing grant can only TIGHTEN the
-    # gate, never loosen it -- B8/B22/B23/B48's PASS was already correct. This check is
-    # therefore a pure visibility/inventory advisory (WARN-only, never FAIL, scored=False):
-    # it surfaces a standing grant the user may have forgotten about, it does not claim
-    # the grant defeats any other check's verdict.
+    # exec-approvals-BIKWP8_V.js:1126-1140) -- on those two TIER knobs (security/ask), a
+    # standing grant can only TIGHTEN the gate, never loosen it, so B8/B22/B23/B48's PASS
+    # was already correct. That refutation is scoped to the tier knobs ONLY (C-430): the
+    # allowlist entry's own CONTENTS are a separate axis -- an allow-always entry exists
+    # precisely to WIDEN what auto-approves, and a path-only entry (no argPattern -- the
+    # default on every non-Windows OpenClaw build, per buildArgPatternFromArgv) widens it
+    # to the WHOLE BINARY, any arguments. This check is therefore a pure visibility/
+    # inventory advisory (WARN-only, never FAIL, scored=False): it surfaces a standing
+    # grant the user may have forgotten about, it does not claim the grant defeats any
+    # other check's verdict.
     CheckMeta(
         "B172",
         "Standing exec-approvals.json allow-always grant (uninventoried persisted authority)",
