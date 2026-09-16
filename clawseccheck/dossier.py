@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
+from pathlib import Path
 
 from .catalog import (
     BY_ID, FAIL, FAIL_WEIGHT_STATUSES, PASS, UNKNOWN, WARN, ast_for,
@@ -659,6 +660,27 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     # to break the tie — see `_decode_ladder`'s own docstring), so the honest move is not a
     # smarter guess: it is refusing to let the prose axes claim they read text they did not.
     assumed_encoding = tuple(sorted(set(getattr(ctx, "assumed_encoding_files", None) or [])))
+    # B-777: `_is_own_source` (checks/_vet.py -> collector.py) short-circuits BEFORE any
+    # text or code is read, returning a single B13 PASS Finding and recording the
+    # resolved target's basename on ctx.self_excluded_skills — the same field report.py's
+    # --emit-manifest self-exclusion note already reads (B-786). Every axis past "danger"
+    # is therefore genuinely unmeasured on this path: not because no code exists (it
+    # does — this fires on ClawSecCheck's own ~7,000-line engine), but because scanning
+    # our own attack-signature database for malware signatures would self-flag by
+    # design. Without this, those axes fell through to `code_measurable=False` ->
+    # "no executable code to analyze" (build/behavior fell through to a bare PASS
+    # instead) — a false claim about the artifact (B-628) on top of an unearned PASS.
+    # No `or str(target)` fallback: `vet_skill` appends the exact same
+    # `Path(path).expanduser().name` (see `_vet_resolved_skill`/`resolve_skill_target`,
+    # which `build_profile`'s `target` argument is always the resolved output of — cli.py
+    # never passes the pre-resolution string), including the empty string a bare "."
+    # target produces. Substituting `str(target)` there would compare "." against the ""
+    # `_is_own_source` actually recorded and silently miss the match.
+    self_source = bool(
+        ctx is not None
+        and target_type in ("skill", "plugin")
+        and Path(target).expanduser().name in (getattr(ctx, "self_excluded_skills", None) or [])
+    )
 
     axes: list[AxisResult] = []
     for axis in AXES:
@@ -666,6 +688,12 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
         bucket = buckets[axis]
         prose_gap = axis in _PROSE_AXES and bool(assumed_encoding)
         if not assessed:
+            no_signal = UNKNOWN
+        elif self_source and axis != "danger":
+            # Checked before the connections/persistence code_measurable branch (which
+            # would also land on UNKNOWN here, for the same underlying reason) and
+            # before the prose-axis PASS default, so build/behavior can no longer read
+            # an affirmative "no issue found" over text this scan never opened.
             no_signal = UNKNOWN
         elif axis in ("connections", "persistence"):
             no_signal = PASS if code_measurable else UNKNOWN
@@ -684,7 +712,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
         elif status == UNKNOWN and not bucket:
             reason, fix = _unmeasurable_reason(
                 axis, truncated=scan_truncated, unanalysed=bool(unread_code),
-                danger_only=bool(danger_only_code),
+                danger_only=bool(danger_only_code), self_source=self_source,
                 assumed_encoding=assumed_encoding if prose_gap else ()), ""
         else:
             reason, fix = _reason_and_fix(bucket, axis, empty_reason=_clean_reason(axis, families))
@@ -815,14 +843,15 @@ def _clean_reason(axis: str, families: set) -> str:
 
 def _unmeasurable_reason(axis: str, *, truncated: bool = False,
                         unanalysed: bool = False, danger_only: bool = False,
+                        self_source: bool = False,
                         assumed_encoding: tuple = ()) -> str:
-    """Why an axis could not be measured -- and the five reasons are not one reason.
+    """Why an axis could not be measured -- and the six reasons are not one reason.
 
     ``assumed_encoding`` (B-616) checked first: it names the actual file(s) and is the
-    most specific of the five, and the caller (`build_profile`) only ever passes it
+    most specific of the six, and the caller (`build_profile`) only ever passes it
     non-empty for the axis it genuinely caused -- it is never set alongside a `truncated`/
-    `unanalysed`/`danger_only` state for the SAME axis by construction (those three key off
-    `connections`/`persistence`'s code-measurability; this keys off the prose axes).
+    `unanalysed`/`danger_only`/`self_source` state for the SAME axis by construction (those
+    four key off measurability; this keys off the prose axes).
 
     B-628: "no executable code to analyze" is a claim about the ARTIFACT, and it is false
     whenever code is present. Two distinct ways it can be present and still unmeasured:
@@ -841,10 +870,22 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
       another: `unanalysed` stopped applying, and a plugin shipping install.py fell
       through to "no executable code to analyze" -- a claim about the ARTIFACT, and false.
 
-    Truncation wins the wording when both hold: "we stopped early" already implies the
+    * ``self_source`` (B-777) -- the target IS ``_is_own_source`` (checks/_vet.py's
+      self-scan short-circuit): nothing was read at all, deliberately, because a security
+      auditor's own attack-signature database would otherwise flag itself as malware.
+      Distinct from the other three: there is no budget/cap, no missing reader, and no
+      partial read -- the scan never started past the identity check. Before this state
+      existed the fallback wording ("no executable code to analyze") was false about the
+      artifact (B-628, same as the other two), and build/behavior fell through to an
+      unearned PASS ("no issue found") instead of even reaching this function, since only
+      `connections`/`persistence` gated on code-measurability -- see `build_profile`.
+
+    Truncation wins the wording when several hold: "we stopped early" already implies the
     rest is unknown, while naming an unread file would suggest the rest WAS read.
     ``unanalysed`` in turn wins over ``danger_only``: if some file had no reader at all,
     saying the code was "read for dangerous patterns" would overstate the coverage.
+    ``self_source`` is checked last of the four (`build_profile` never sets it alongside
+    the others -- see above -- so this ordering is defensive, not load-bearing).
     """
     if assumed_encoding:
         names = ", ".join(assumed_encoding[:2])
@@ -875,6 +916,18 @@ def _unmeasurable_reason(axis: str, *, truncated: bool = False,
             return ("code outside the declared skills was read for dangerous patterns "
                     "only, so its staged / persistent behavior was not separately measured")
         return "code outside the declared skills was read for dangerous patterns only"
+    if self_source:
+        tail = {
+            "connections": "so the outbound surface was not measured",
+            "persistence": "so staged / persistent behavior was not measured",
+            "build": "so least-privilege / pinning / authoring hygiene was not measured",
+            "behavior": "so override / jailbreak / forged-provenance directives were not measured",
+        }.get(axis, "so this was not measured")
+        return (
+            "this is ClawSecCheck's own source; a security auditor necessarily ships "
+            "attack signatures and payload text as data, so scanning it for malware "
+            f"would self-flag — only the danger axis ran, by design, {tail}"
+        )
     if axis == "connections":
         return "no executable code to analyze for outbound connections"
     if axis == "persistence":
