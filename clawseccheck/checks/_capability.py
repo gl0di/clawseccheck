@@ -89,14 +89,37 @@ _B71_INEFFECTIVE_RE = re.compile(r"[ *|&;/]|--")
 
 
 # B55: filesystem-write tool names. Matched as substrings so write_file / writeFile
-# variants of the same capability count. B-395: NONE of these are real OpenClaw tool
-# ids in the current dist (grounded: CORE_TOOL_DEFINITIONS names write/edit/apply_patch;
-# "fs_write" appears only inside two legacy deny constants, never as a grantable id) —
-# kept as a legacy-alias union (not the primary detection path any more, see
-# _B55_FS_WRITE_TOOLS / check_fs_write_exposure below) purely so old-style configs and
-# this project's own pre-existing fixtures/tests, which already use "fs_write" as their
-# token, keep matching.
+# variants of the same capability count. B-735 correction: the claim this comment used
+# to make — "NONE of these are real OpenClaw tool ids" — was wrong, and being believed
+# is exactly why fs_delete/fs_move went unmodelled for as long as they did (a name
+# believed fake is not a name anyone extends). Grounded against the installed 2026.9.4
+# dist: "fs_write" (plus "fs_delete"/"fs_move", added below) sits in the vendor's OWN
+# dangerous/fs tool family in two independent lists — DEFAULT_GATEWAY_HTTP_TOOL_DENY
+# (dangerous-tools-*.mjs) and ACP_UNSUPPORTED_INHERITED_TOOL_DENY
+# (subagent-capabilities-*.mjs), both grouping it with write/edit/apply_patch/exec. It
+# IS a real, dispatchable tool id — kept as a legacy-alias union (not the primary
+# detection path, see _B55_FS_WRITE_TOOLS / check_fs_write_exposure below) because this
+# project's own pre-existing fixtures/tests already use "fs_write" as their token and
+# because raw-token hint matching is what actually catches an EXPLICIT
+# tools.allow/alsoAllow grant of a tool _B68_FS_TOOLS' canonical resolution does not
+# enumerate (fs_delete/fs_move are not in _B68_FS_TOOLS — see that tuple's own comment).
+#
+# B-735: fs_delete / fs_move are the two other real fs-write-family tool ids the same
+# two vendor lists name (grouped with fs_write, not with the non-fs dangerous tools in
+# the same lists like terminal/portal/sessions_spawn) -- but deliberately NOT added to
+# the substring tuple above. C-135 adversarial review found "fs_delete"/"fs_move" as
+# SUBSTRINGS collide with plausible real tool names: "refs_delete"/"refs_move" (a git-
+# refs tool) and "prefs_delete"/"prefs_move" (a preferences tool) both end in "fs"
+# immediately before "_delete"/"_move" and would substring-match -- the identical B-395
+# false-positive shape bare "write"/"edit" caused, not the "fs_write"/"write_file"
+# shape (genuinely safe as a substring: no realistic tool name contains that exact
+# multi-segment sequence by accident). Matched by EXACT canonical-name membership
+# instead, the same treatment B-395 already gives "write"/"edit" for the same reason.
 _FS_WRITE_TOOL_HINTS = ("fs_write", "write_file", "writefile", "apply_patch")
+
+# The exact-match companion to _FS_WRITE_TOOL_HINTS -- see that tuple's B-735 comment
+# for why fs_delete/fs_move are matched here (exact) rather than there (substring).
+_FS_WRITE_TOOL_EXACT = frozenset({"fs_delete", "fs_move"})
 
 # F-169: _B55_FS_WRITE_TOOLS now lives in ._shared (A1 asks the same question).
 
@@ -956,12 +979,35 @@ def _b55_write_tools_granted(
 
     Delegates to `_b68_fs_tools_granted` (the canonical write/edit/apply_patch/
     group:fs/profile/widening resolution B55/B68/B84 already share) and unions in
-    B55's OWN legacy-alias fallback -- `_FS_WRITE_TOOL_HINTS` ("fs_write",
-    "write_file", "writefile", "apply_patch") matched against the raw allow/
-    alsoAllow tokens, because these are not real OpenClaw tool ids and
-    `_b68_fs_tools_granted` only recognizes the canonical `_B68_FS_TOOLS` names (see
-    check_fs_write_exposure's B-395 docstring section for why that union exists --
-    real fixtures, e.g. bad_b55_fs_write_broad, still use the legacy alias).
+    B55's OWN legacy-alias/raw-token fallback against the raw allow/alsoAllow tokens:
+    `_FS_WRITE_TOOL_HINTS` ("fs_write", "write_file", "writefile", "apply_patch"),
+    substring-matched, plus `_FS_WRITE_TOOL_EXACT` ("fs_delete", "fs_move"),
+    exact-canonical-match (C-135: as substrings they collide with plausible real tool
+    names like "refs_delete"/"prefs_move" -- see `_FS_WRITE_TOOL_HINTS`'s own B-735
+    comment). These ARE real OpenClaw tool ids (B-735 correction: this docstring used
+    to claim otherwise, which is exactly why fs_delete/fs_move went unmodelled for as
+    long as they did) -- the union exists because `_b68_fs_tools_granted` only
+    enumerates the canonical `_B68_FS_TOOLS` names via profile/group:fs/widening
+    resolution, and fs_write/fs_delete/fs_move are not in that tuple, so an EXPLICIT
+    `tools.allow`/`alsoAllow` grant of one of them is only caught by matching the raw
+    token directly (see check_fs_write_exposure's B-395 docstring section for the fuller
+    history -- real fixtures, e.g. bad_b55_fs_write_broad/bad_b55_fs_delete_broad/
+    bad_b55_fs_move_broad, use these tokens).
+
+    KNOWN GAP (B-735, disclosed rather than silently left, same shape as
+    check_fs_write_exposure's own documented gap #1): because fs_write/fs_delete/
+    fs_move are not in `_B68_FS_TOOLS`, they are recognized ONLY via a literal raw
+    token in `tools.allow`/`alsoAllow` -- never via `tools.profile="full"`, a bare
+    wildcard `"*"` allow, or `group:fs`, the way write/edit/apply_patch already are
+    through `_b68_fs_tools_granted`'s canonical resolution. A real OpenClaw `"*"`
+    allowlist grants fs_delete/fs_move too (they are ordinary tools, not a separate
+    permission), so `{"tools": {"allow": ["*"], "deny": ["write","edit","apply_patch"]}}`
+    reads as NO write tool granted here even though the runtime still grants
+    fs_delete/fs_move under the wildcard. Widening `_B68_FS_TOOLS` itself would close
+    this but also changes B68's workspace-confinement verdict and B84's grant model for
+    the SAME tuple -- a materially larger, differently-scoped change than this task
+    asked for (see the task's own "decide whether the whole deny set or only its fs
+    members" framing). Left as a follow-up, not fixed here.
 
     Returns ``(write_tools, enumerable, view, legacy_write)``: `write_tools` is the
     sorted write-capable subset (`_B55_FS_WRITE_TOOLS`) actually granted;
@@ -977,7 +1023,7 @@ def _b55_write_tools_granted(
     legacy_write = {
         canon
         for canon, raw in zip(view.named, view.raw_named)
-        if _hint([raw], _FS_WRITE_TOOL_HINTS)
+        if _hint([raw], _FS_WRITE_TOOL_HINTS) or canon in _FS_WRITE_TOOL_EXACT
     } - view.denied
     write_tools = sorted((set(granted) & _B55_FS_WRITE_TOOLS) | legacy_write)
     return write_tools, enumerable, view, legacy_write
@@ -1211,9 +1257,10 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
 
     B-395: grant resolution is delegated to `_b68_fs_tools_granted` (the same helper
     B68 already uses for this identical tool family) rather than re-derived here — the
-    prior independent accumulator only matched the LEGACY, non-canonical alias names in
-    `_FS_WRITE_TOOL_HINTS` ("fs_write" is not a real OpenClaw tool id) against a raw
-    `tools.allow` LIST only, so it produced a confident PASS on every real-world grant
+    prior independent accumulator only matched the names in `_FS_WRITE_TOOL_HINTS`
+    (real OpenClaw tool ids not enumerated by `_b68_fs_tools_granted`'s own canonical
+    `_B68_FS_TOOLS` resolution — B-735 correction, this used to wrongly call them fake)
+    against a raw `tools.allow` LIST only, so it produced a confident PASS on every real-world grant
     shape: the canonical tool ids (write/edit/apply_patch), group:fs, a wildcard "*"
     allowlist, tools.profile, and tools.alsoAllow all went undetected. The legacy alias
     list is kept as an additional union (see `write_tools` below) so old-style configs

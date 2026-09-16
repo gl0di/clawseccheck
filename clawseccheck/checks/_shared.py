@@ -862,7 +862,20 @@ OUTBOUND_TOOL_IDS = frozenset({"write", "edit", "apply_patch"})
 # question. §3.1 — a helper two topics reuse belongs in the leaf, not restated in each. A
 # second copy is exactly the drift that made B-450's consumer regexes miss every new class
 # member and left B-563's leg hints frozen at seven check ids.
-_B55_FS_WRITE_TOOLS = frozenset({"write", "edit", "apply_patch"})
+#
+# B-735: "fs_delete" and "fs_move" added. Both are real, dispatchable OpenClaw tool ids —
+# grounded against the installed 2026.9.4 dist, in TWO independent vendor lists naming the
+# fs-write family: DEFAULT_GATEWAY_HTTP_TOOL_DENY (dangerous-tools-*.mjs) —
+# ["exec","spawn","shell","fs_write","fs_delete","fs_move","apply_patch","terminal",...] —
+# and ACP_UNSUPPORTED_INHERITED_TOOL_DENY (subagent-capabilities-*.mjs) —
+# ["apply_patch","edit","exec","fs_delete","fs_move","fs_write","process","read","shell",
+# "spawn","write"]. Both lists group fs_delete/fs_move with fs_write/write/edit/apply_patch,
+# never with the non-fs dangerous tools in the same first list (terminal, portal,
+# sessions_spawn, ...) — deliberately NOT importing those here; they are real hazards but
+# not filesystem-write, a different question than this set answers. Deletion/move are not
+# less dangerous than an overwrite — arguably more, since a delete is not repairable by a
+# later write — so they get the identical treatment, not a lesser one.
+_B55_FS_WRITE_TOOLS = frozenset({"write", "edit", "apply_patch", "fs_delete", "fs_move"})
 
 
 # ---------- B-700: advice that names a key the user's own OpenClaw accepts ----------
@@ -3120,7 +3133,19 @@ def _agent_is_powerful(ctx: Context) -> bool:
     """
     cfg = ctx.config
     tools = _enabled_tools(cfg)
-    can_act = _hint(tools, ("exec", "shell", "fs_write", "deploy")) or "elevated" in tools
+    # B-735: fs_delete/fs_move added by EXACT membership, not folded into the _hint()
+    # substring tuple -- as substrings they collide with plausible real tool names
+    # ("refs_delete"/"prefs_move"), the identical risk B-395 found for bare "write"/
+    # "edit" (see risk.py's _has_exec_or_write_tools for the fuller citation). Without
+    # this, an agent whose only capability is fs_delete/fs_move and which is reachable
+    # by untrusted input read as low blast-radius here, so a genuinely absent
+    # host-monitoring posture stayed quiet for it.
+    can_act = (
+        _hint(tools, ("exec", "shell", "fs_write", "deploy"))
+        or "elevated" in tools
+        or "fs_delete" in tools
+        or "fs_move" in tools
+    )
     reachable = bool(_external_input_channels(cfg)) or _hint(tools, INPUT_TOOL_HINTS)
     return can_act and reachable
 

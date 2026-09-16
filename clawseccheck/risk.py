@@ -110,7 +110,7 @@ def _finding_by_id(findings: list[Finding], check_id: str) -> Finding | None:
 
 
 def _has_exec_or_write_tools(tools: list[str]) -> bool:
-    """True when exec, shell, fs_write or elevated tools are present.
+    """True when exec, shell, fs_write/fs_delete/fs_move or elevated tools are present.
 
     B-395 (C-135 round 1 caught a false-positive regression in the first attempt at
     this fix): "write"/"edit" are checked by EXACT membership, not folded into the
@@ -125,8 +125,24 @@ def _has_exec_or_write_tools(tools: list[str]) -> bool:
     REAL OpenClaw write-tool ids (B55/_capability.py's check_fs_write_exposure had the
     identical naming gap, grounded there against the installed dist) and are matched
     the same way B55 matches them: exact list membership, not substring. "fs_write" is
-    kept in the substring tuple for the same reason B55 keeps it: not a real tool id,
-    but this project's own existing configs/tests already use it as a token.
+    kept in the substring tuple because this project's own existing configs/tests
+    already use it as a token, not because it is fake -- B-735 correction: it (and
+    fs_delete/fs_move, added there and here together) ARE real OpenClaw tool ids,
+    grounded against the installed dist's own DEFAULT_GATEWAY_HTTP_TOOL_DENY /
+    ACP_UNSUPPORTED_INHERITED_TOOL_DENY lists (see checks/_shared.py's
+    _B55_FS_WRITE_TOOLS comment for the citation) -- they are simply not ones
+    `_b68_fs_tools_granted`'s canonical `_B68_FS_TOOLS` resolution enumerates.
+    "fs_delete"/"fs_move" are NOT safe in the substring tuple, unlike "fs_write" --
+    C-135 found real collisions ("refs_delete"/"refs_move", a plausible git-refs tool
+    name; "prefs_delete"/"prefs_move", a plausible preferences tool name -- both end in
+    "fs" immediately before "_delete"/"_move"). Matched by EXACT membership instead,
+    the same treatment "write"/"edit" already get here for the identical reason.
+
+    B-735: without this, B55 (check_fs_write_exposure) now correctly FAILs a config
+    granting only fs_delete/fs_move reached by an open/untrusted channel, while
+    RISK-01/RISK-03/RISK-10/RISK-24 (every rule gated on this predicate) stayed silent
+    for the identical config -- the same class of gap B-395 closed for fs_write itself,
+    recurring for the two tools this project's vocabulary had never named at all.
 
     `tools` here (risk._enabled_tools) is the raw tools.allow/gateway.tools.allow
     token list, not resolved against group:fs/a wildcard "*"/tools.profile the way
@@ -141,6 +157,8 @@ def _has_exec_or_write_tools(tools: list[str]) -> bool:
         or "elevated" in tools
         or "write" in tools
         or "edit" in tools
+        or "fs_delete" in tools
+        or "fs_move" in tools
     )
 
 
@@ -804,8 +822,16 @@ def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPat
     # grant with no exec/write tool at all, which would mislabel this branch -- the
     # guard at :418 already established at least one of {exec/write, elevated} is
     # present, so this picks the more specific label only when exec/write itself is.
+    # B-735 C-135: this mirrors _has_exec_or_write_tools's own needle/exact-match split
+    # exactly (fs_delete/fs_move by exact membership, not substring -- see that
+    # function's docstring) -- without it, a config granting only fs_delete/fs_move
+    # still correctly FAILed RISK-01 but the finding text wrongly said "elevated tool".
     is_exec_or_write = (
-        _hint(tools, ("exec", "shell", "fs_write", "deploy")) or "write" in tools or "edit" in tools
+        _hint(tools, ("exec", "shell", "fs_write", "deploy"))
+        or "write" in tools
+        or "edit" in tools
+        or "fs_delete" in tools
+        or "fs_move" in tools
     )
     tool_label = "exec/write tool" if is_exec_or_write else "elevated tool"
     return RiskPath(
