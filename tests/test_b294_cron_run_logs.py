@@ -187,6 +187,10 @@ def test_b168_no_longer_returns_verified_pass_over_an_unexamined_history(tmp_pat
     assert "3 past execution" in f.detail
     # It must NOT read as an accusation: self-erasure is the product default.
     assert "not proof of tampering" in f.detail
+    # C-135 follow-up (CLAWSECCHECK-B-657 review): the store was read to completion and
+    # genuinely holds zero jobs -- deleted by the runtime itself, not an unread cap or
+    # a read error. Genuinely absent, not present-but-unread.
+    assert f.engine_degraded is False
 
 
 def test_b168_empty_store_with_no_history_is_pass_but_no_signal(tmp_path):
@@ -337,6 +341,9 @@ def test_b189_does_not_claim_the_erased_payload_is_recoverable(tmp_path):
 def test_b189_unknown_when_state_db_absent(tmp_path):
     f = check_cron_run_log_orphans(_build_home(tmp_path, db=False))
     assert f.status == UNKNOWN
+    # C-135 follow-up (CLAWSECCHECK-B-657 review): genuinely absent (no state DB at
+    # all), not present-but-unread.
+    assert f.engine_degraded is False
 
 
 def test_b189_unknown_when_run_log_table_absent(tmp_path):
@@ -344,6 +351,7 @@ def test_b189_unknown_when_run_log_table_absent(tmp_path):
                       tables=("cron_jobs",))
     f = check_cron_run_log_orphans(ctx)
     assert f.status == UNKNOWN
+    assert f.engine_degraded is False
 
 
 def test_b189_unknown_when_run_log_table_present_but_empty(tmp_path):
@@ -352,16 +360,53 @@ def test_b189_unknown_when_run_log_table_present_but_empty(tmp_path):
     f = check_cron_run_log_orphans(ctx)
     assert f.status == UNKNOWN
     assert "prunes this table" in f.detail
+    # Read to completion and genuinely empty -- not present-but-unread.
+    assert f.engine_degraded is False
 
 
-def test_b189_unknown_when_job_definitions_unreadable(tmp_path):
-    """Run history without a readable definition set makes orphan-ness uncomputable —
-    every row would look orphaned for a reason unrelated to erasure. Refuse to guess."""
+def test_b189_unknown_when_no_job_store_found_at_all(tmp_path):
+    """Run history without ANY job store (JSON or SQLite) makes orphan-ness
+    uncomputable — every row would look orphaned for a reason unrelated to erasure.
+    Refuse to guess. Genuinely absent, not present-but-unread."""
     ctx = _build_home(tmp_path, runs=(("j1", "s1"),), tables=("cron_run_logs",))
     assert ctx.cron_found is False
     f = check_cron_run_log_orphans(ctx)
     assert f.status == UNKNOWN
-    assert "could not be read" in f.detail
+    assert "no cron job store" in f.detail
+    assert f.engine_degraded is False
+
+
+def test_b189_unknown_when_job_store_parse_error(tmp_path):
+    """C-135 follow-up: distinguishes the two causes a single combined branch used to
+    collapse (``not ctx.cron_found or ctx.cron_parse_error``). This one is a REAL store
+    that FAILED to parse, not an absent one — present-but-unread, so engine_degraded
+    must be True, unlike the genuinely-absent sibling above."""
+    ctx = _build_home(tmp_path, runs=(("j1", "s1"),), tables=("cron_run_logs",))
+    (ctx.home / "cron").mkdir(parents=True)
+    (ctx.home / "cron" / "jobs.json").write_text("{not valid json", encoding="utf-8")
+    ctx2 = Context(home=ctx.home)
+    _collect_cron(ctx.home, ctx2)
+    assert ctx2.cron_found is True
+    assert ctx2.cron_parse_error is True
+    f = check_cron_run_log_orphans(ctx2)
+    assert f.status == UNKNOWN
+    assert "could not be parsed/read" in f.detail
+    assert f.engine_degraded is True
+
+
+def test_b189_unknown_when_run_log_table_itself_unreadable(tmp_path):
+    """A genuinely corrupt state DB — not merely a table that is absent — is a read
+    failure, not an absence. Present-but-unread, so engine_degraded must be True."""
+    home = tmp_path / "openclaw"
+    (home / "state").mkdir(parents=True)
+    (home / "state" / "openclaw.sqlite").write_bytes(b"not a sqlite database at all")
+    ctx = Context(home=home)
+    _collect_cron(home, ctx)
+    assert ctx.cron_run_logs_found is True
+    assert ctx.cron_run_logs_parse_error is True
+    f = check_cron_run_log_orphans(ctx)
+    assert f.status == UNKNOWN
+    assert f.engine_degraded is True
 
 
 # --------------------------------------------------------------------------------------
@@ -392,6 +437,9 @@ def test_b189_truncated_job_read_does_not_report_live_jobs_as_erased(tmp_path):
     assert f.status == UNKNOWN
     assert "row cap" in f.detail
     assert "erased" in f.detail
+    # C-135 follow-up: the job definitions past the cap are present in the store, just
+    # never read -- present-but-unread, not genuinely absent.
+    assert f.engine_degraded is True
 
 
 def test_b189_still_passes_when_truncation_cannot_hide_an_orphan(tmp_path):
@@ -435,6 +483,10 @@ def test_b189_legacy_jobs_json_shadowing_the_live_table_is_unknown(tmp_path):
     f = check_cron_run_log_orphans(ctx2)
     assert f.status == UNKNOWN
     assert "legacy" in f.detail
+    # C-135 follow-up: the live SQLite rows are present, readable, real job
+    # definitions -- this check never opened them because the stale JSON store took
+    # priority. Present-but-unread, not absent.
+    assert f.engine_degraded is True
 
 
 def test_b189_shadowing_is_unknown_even_with_no_apparent_orphan(tmp_path):
@@ -623,6 +675,9 @@ def test_b168_does_not_certify_a_shadowed_store(tmp_path):
     assert f.status == UNKNOWN
     assert getattr(f, "pass_confidence", None) != "verified"
     assert "cron_jobs table" in f.detail
+    # C-135 follow-up: the live SQLite rows (including the hostile one) are present,
+    # readable, real job content this check never scanned. Present-but-unread.
+    assert f.engine_degraded is True
 
 
 def test_b168_still_passes_on_a_genuine_legacy_install(tmp_path):

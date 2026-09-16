@@ -318,6 +318,9 @@ def test_no_cron_store_at_all_is_unknown(tmp_path):
     (home / "openclaw.json").write_text("{}")
     r = check_cron_job_content(collect(home))
     assert r.status == UNKNOWN
+    # C-135 follow-up (CLAWSECCHECK-B-657 review): genuinely absent (no store at all),
+    # not present-but-unread.
+    assert r.engine_degraded is False
 
 
 def test_unreadable_jobs_json_is_unknown(tmp_path):
@@ -327,6 +330,8 @@ def test_unreadable_jobs_json_is_unknown(tmp_path):
     (home / "cron" / "jobs.json").write_text("{not valid json")
     r = check_cron_job_content(collect(home))
     assert r.status == UNKNOWN
+    # C-135 follow-up: present-but-unread (a real store this process could not parse).
+    assert r.engine_degraded is True
 
 
 # ---------------------------------------------------------------------------

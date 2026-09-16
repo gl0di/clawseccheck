@@ -1442,6 +1442,13 @@ def check_cron_job_content(ctx: Context) -> Finding:
               was read but held zero jobs and there is no execution trail either, the PASS
               carries pass_confidence="no_signal" rather than "verified" — nothing was
               actually inspected, so the clean verdict is by absence, not by evidence.
+
+    C-135 follow-up (CLAWSECCHECK-B-657 review): of the four UNKNOWN causes above,
+    ``Finding.engine_degraded`` is True only for "found but could not be parsed/read"
+    and the SHADOWED-store case — both are a real, present store this process
+    deliberately or accidentally never fully read. It stays False for "no cron store
+    found at all" and the "read and EMPTY" case: both are read to completion with
+    genuinely nothing there, not present-but-unread.
     """
     if not ctx.cron_found:
         return _finding(
@@ -1459,6 +1466,10 @@ def check_cron_job_content(ctx: Context) -> Finding:
             "A cron job store was found but could not be parsed/read — cannot determine.",
             "Fix the cron store (jobs.json or the state SQLite database) so it is valid "
             "and owner-readable, then re-run the audit.",
+            # C-135 follow-up (B-657 review): present-but-unread (a real
+            # store this process could not parse), not genuinely absent — same
+            # Finding.engine_degraded contract as B6/B172's identical shape.
+            engine_degraded=True,
         )
     # B-294 (DISK-3): the store was read successfully but holds ZERO job definitions, while
     # the run-log table shows jobs DID execute. Every definition that ran is gone -- which is
@@ -1470,6 +1481,12 @@ def check_cron_job_content(ctx: Context) -> Finding:
     # execution history the audit had never opened. B189 carries the advisory detail and the
     # session pivot; B168 just stops claiming a verified clean bill of health.
     if ctx.cron_store_empty and ctx.cron_run_logs:
+        # C-135 follow-up: engine_degraded stays at its False default here. The store was
+        # read to completion and genuinely holds zero definitions -- no cap, parse error,
+        # or unreadable input cut this read short. The erased jobs are GENUINELY ABSENT
+        # (deleted by the runtime itself, the product default for one-shot jobs), not
+        # present-but-unread -- the exact contrast catalog.py's Finding.engine_degraded
+        # docstring draws, on the "no openclaw.json at all" side of it.
         return _finding(
             "B168",
             UNKNOWN,
@@ -1633,6 +1650,11 @@ def check_cron_job_content(ctx: Context) -> Finding:
             "If ~/.openclaw/cron/jobs.json is a leftover from an older OpenClaw that no "
             "longer reads it, move it aside so the audit scans the live SQLite cron_jobs "
             "table instead, then re-run the audit.",
+            # C-135 follow-up: the live SQLite rows are present, readable, real job
+            # definitions this check deliberately never opened because the (stale)
+            # JSON store took priority -- present-but-unread, not absent, same
+            # Finding.engine_degraded contract as a byte-cap truncation.
+            engine_degraded=True,
         )
     return _finding(
         "B168",
@@ -1698,10 +1720,20 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
               Also emitted when the definition read was truncated but still covered every
               job id that appears in the run log (see the subset argument above).
     UNKNOWN — no state DB / no cron_run_logs table / table present but empty (pruning can
-              empty it, so "no rows" is not evidence nothing ran); the job definitions could
-              not be read at all; a legacy JSON store shadows the live SQLite table; or the
-              definition read was truncated AND an apparent orphan turned up — each of which
-              makes orphan-ness uncomputable.
+              empty it, so "no rows" is not evidence nothing ran); no job store found at
+              all; the job store was found but could not be parsed/read; a legacy JSON
+              store shadows the live SQLite table; or the definition read was truncated
+              AND an apparent orphan turned up — each of which makes orphan-ness
+              uncomputable.
+
+    C-135 follow-up (CLAWSECCHECK-B-657 review): ``Finding.engine_degraded`` is set True
+    only on the UNKNOWN branches whose cause is a real, present store this process could
+    not fully read (a parse/read error, a legacy-store shadow, or a row-cap truncation —
+    the run-log table's own PARSE error, the job store's own PARSE error, shadowing, and
+    truncation). It stays False on the "genuinely nothing here" branches — no state DB,
+    no run-log table, an empty (successfully read) run-log table, or no job store found
+    at all — matching ``not ctx.cron_found or ctx.cron_parse_error``'s two former causes
+    now split into separate branches below, since only the latter is present-but-unread.
     """
     if not ctx.cron_run_logs_found:
         return _finding(
@@ -1721,8 +1753,16 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
             "The cron run-log table was found but could not be read — cannot determine.",
             "Ensure ~/.openclaw/state/openclaw.sqlite is owner-readable and not locked by a "
             "running agent, then re-run the audit.",
+            # C-135 follow-up: present-but-unread (a real table this process could not
+            # read), not genuinely absent -- same Finding.engine_degraded contract as
+            # B168's identical cron_parse_error branch.
+            engine_degraded=True,
         )
     if not ctx.cron_run_logs:
+        # engine_degraded stays False: the table was read to completion and genuinely
+        # holds zero rows -- pruning is normal product behaviour, not an unread cap or
+        # a read error. Same "read fully, genuinely empty" reasoning as B168's
+        # cron_store_empty branch.
         return _finding(
             "B189",
             UNKNOWN,
@@ -1732,17 +1772,37 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
             "No action needed. Re-run the audit after scheduled jobs have executed if you "
             "want the execution trail reviewed.",
         )
-    if not ctx.cron_found or ctx.cron_parse_error:
+    if not ctx.cron_found:
+        # Run history exists but NO job store (JSON or SQLite) was ever found -- genuinely
+        # absent, not present-but-unread, so engine_degraded stays False. (cron_parse_error
+        # always implies cron_found=True in every collector._collect_cron code path, so
+        # this branch and the next are mutually exclusive, not a fallthrough.)
+        return _finding(
+            "B189",
+            UNKNOWN,
+            f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s), but "
+            "no cron job store (~/.openclaw/cron/jobs.json or the state SQLite cron_jobs "
+            "table) was found at all — without any surviving definitions there is no way to "
+            "tell which runs belong to jobs that no longer exist.",
+            "If cron jobs are configured, ensure the job store is present and owner-readable "
+            "so a future audit can inspect it, then re-run the audit.",
+        )
+    if ctx.cron_parse_error:
         # Run history exists but the DEFINITION set is unknown, so every row would look
         # "orphaned" for a reason that has nothing to do with erasure. Refuse to guess.
         return _finding(
             "B189",
             UNKNOWN,
             f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s), but "
-            "the cron job store could not be read — without the surviving definitions there "
-            "is no way to tell which runs belong to jobs that no longer exist.",
+            "the cron job store was found and could not be parsed/read — without the "
+            "surviving definitions there is no way to tell which runs belong to jobs that no "
+            "longer exist.",
             "Fix the cron job store (~/.openclaw/cron/jobs.json or the state SQLite "
             "cron_jobs table) so it is valid and owner-readable, then re-run the audit.",
+            # C-135 follow-up: present-but-unread (a real store this process could not
+            # parse), not genuinely absent -- same Finding.engine_degraded contract as
+            # B168's identical cron_parse_error branch.
+            engine_degraded=True,
         )
     if ctx.cron_store_shadowed:
         # A legacy jobs.json shadowing the live SQLite table is not a SUBSET of the truth —
@@ -1762,6 +1822,11 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
             "If ~/.openclaw/cron/jobs.json is a leftover from an older OpenClaw that no "
             "longer reads it, move it aside so the audit reads the live SQLite cron_jobs "
             "table instead, then re-run the audit.",
+            # C-135 follow-up: the live SQLite rows are present, readable, real job
+            # definitions this check never opened because the stale JSON store took
+            # priority -- present-but-unread, same Finding.engine_degraded contract as
+            # B168's identical cron_store_shadowed branch.
+            engine_degraded=True,
         )
 
     live = {j.get("id") for j in ctx.cron_jobs if j.get("id")}
@@ -1796,6 +1861,10 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
             "them as erased.",
             "Reduce the number of scheduled jobs so the whole store can be read, or review "
             "the execution trail directly with `--analyze-trajectory`.",
+            # C-135 follow-up: the job definitions past the row cap are present in the
+            # store, just never read -- present-but-unread, same Finding.engine_degraded
+            # contract as B168's byte-cap truncation shape.
+            engine_degraded=True,
         )
 
     orphan_ids = sorted({r["job_id"] for r in orphan_runs})
