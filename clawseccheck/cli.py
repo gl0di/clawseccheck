@@ -188,6 +188,56 @@ def _unicode_ok() -> bool:
         return False
 
 
+# CLAWSECCHECK-C-510 item 2: a plain audit can spend up to ~3 minutes on hostile
+# content (checks/__init__.py's own per-check budget allows several slow checks in a
+# row) with nothing printed the whole time -- indistinguishable from a hang to a user
+# watching the terminal, and killing what looks like a stuck process mid-write is
+# exactly the condition that produces the corrupt monitor/baseline state this tool
+# guards against elsewhere. `checks.run_all`'s `on_check_done` hook (threaded through
+# `audit(progress_cb=...)`) exists for exactly this, but is a no-op by default so every
+# non-CLI caller (every test in this suite) is unaffected -- only this default-audit
+# CLI path installs one.
+#
+# Interactive-only, deliberately: piped/redirected output (`--json`, a cron job, a
+# script capturing stdout) gets nothing, matching `should_color`'s own isatty gate
+# (ansi.py) rather than inventing a second interactivity test. `--quiet` also
+# suppresses it -- it asked for a quiet run. Throttled to at most once per ~2 seconds
+# (not once per check) so a fast host isn't spammed by a sub-millisecond check loop;
+# the count is still exact on the FINAL call (done == total always fires) so the last
+# line printed never undercounts. Written with `\r` + no trailing newline so it
+# overwrites in place rather than scrolling the terminal, and a bare `\r` + spaces
+# clears it on the last call so it doesn't linger under the report that follows.
+def _default_audit_progress_cb(args):
+    """Build the interactive stderr progress callback for the default audit path, or
+    None when progress feedback would not help (non-TTY stderr, `--quiet`, `--json`)."""
+    if getattr(args, "quiet", False) or getattr(args, "json", False):
+        return None
+    try:
+        interactive = sys.stderr.isatty()
+    except Exception:
+        interactive = False
+    if not interactive:
+        return None
+
+    import time  # noqa: PLC0415 — only this rarely-taken interactive branch needs it
+
+    state = {"last": 0.0}
+
+    def _cb(done: int, total: int) -> None:
+        now = time.monotonic()
+        finished = done >= total
+        if not finished and now - state["last"] < 2.0:
+            return
+        state["last"] = now
+        line = f"\rScanning... {done}/{total} checks"
+        if finished:
+            print(line + " " * 10 + "\r", end="", file=sys.stderr, flush=True)
+        else:
+            print(line, end="", file=sys.stderr, flush=True)
+
+    return _cb
+
+
 # B-351: when set, every _emit() line is also appended here. The appended --full
 # sections are printed as they are produced — the skill sweep in particular narrates
 # per-target because progress feedback matters on a run that can take minutes — so a
@@ -4809,7 +4859,8 @@ def _main(argv=None) -> int:
                                      include_deptree=not args.no_deptree,
                                      include_dist=not args.no_dist,
                                      attestation=attestation,
-                                     exhaustive=args.exhaustive)
+                                     exhaustive=args.exhaustive,
+                                     progress_cb=_default_audit_progress_cb(args))
     except (PermissionError, OSError) as exc:
         _emit(f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}")
         _emit("Fix the permissions (or run as the owning user) and re-run the audit.")

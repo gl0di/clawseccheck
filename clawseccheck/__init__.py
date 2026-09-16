@@ -133,7 +133,8 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
           include_sockets: bool = False, proc_root: str = "/proc",
           include_deptree: bool = False, openclaw_pkg_root=None,
           include_dist: bool = False,
-          exhaustive: bool = False):
+          exhaustive: bool = False,
+          progress_cb=None):
     """Run the full audit. Returns (ctx, findings, ScoreResult).
 
     `include_native=False` and `include_host=False` keep the engine fully offline
@@ -184,6 +185,10 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     scored point — by a corroborated runtime signal (a trajaudit-style skill/bootstrap
     indicator match; see scoring._runtime_cap_signal). Every runtime-consuming check
     (B83, B84, B85, B164, B180, T1/T2/T3) stays unable to move the grade any other way.
+
+    `progress_cb` (CLAWSECCHECK-C-510 item 2, default None) is passed straight through
+    to `run_all` as `on_check_done` -- see its docstring. A no-op for every existing
+    caller; only the CLI's interactive default-audit path supplies one.
     """
     ctx = build_context(home, include_host=include_host, host_root=host_root,
                        attestation=attestation, include_sockets=include_sockets,
@@ -191,7 +196,8 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
                        openclaw_pkg_root=openclaw_pkg_root, include_dist=include_dist,
                        exhaustive=exhaustive)
     lim = limits_for(ctx)
-    findings = run_all(ctx, check_budget_s=lim.check_budget_s, audit_budget_s=lim.audit_budget_s)
+    findings = run_all(ctx, check_budget_s=lim.check_budget_s, audit_budget_s=lim.audit_budget_s,
+                        on_check_done=progress_cb)
     ignore = _baseline.load_ignore(home)
     _baseline.apply(findings, ignore)
     # B-769: a fingerprint entry that matched nothing this run is either a repaired

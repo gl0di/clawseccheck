@@ -1705,7 +1705,22 @@ def _check_budget_finding(chk, kind: str, seconds: float | None = None) -> Findi
 
 
 def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
-            audit_budget_s: float = DEFAULT_AUDIT_BUDGET_S) -> list[Finding]:
+            audit_budget_s: float = DEFAULT_AUDIT_BUDGET_S,
+            on_check_done=None) -> list[Finding]:
+    # CLAWSECCHECK-C-510 item 2: a plain audit gives no progress feedback while it can
+    # spend up to ~3 minutes on hostile content (a slow check, or several, chewing
+    # through their own check_budget_s) -- a silent terminal for that long is
+    # indistinguishable from a hang, and a user who kills what they believe is a stuck
+    # process is exactly the mid-write condition that produces corrupt monitor/baseline
+    # state elsewhere in this tool. `on_check_done`, when given, is called as
+    # `on_check_done(done_count, total_count)` after EVERY check completes -- normally,
+    # budget-exceeded, or crashed alike, so a caller narrating progress sees the true
+    # count including degraded checks, never a lower one that reads as "fewer checks
+    # than the catalog". Optional and default None (a no-op call is skipped entirely,
+    # not just silenced) so every existing caller -- every test in this suite calls
+    # `audit()`/`run_all()` directly -- is byte-for-byte unaffected; only the CLI's
+    # interactive default-audit path installs one (cli.py).
+    #
     # Per-check isolation (B-101) + wall-clock budget (C-159): a crashing OR hanging
     # check degrades to one UNKNOWN finding instead of aborting the audit. This is the
     # DESIGNATED handler for a per-check deadline: ScanBudgetExceeded derives from
@@ -1715,9 +1730,12 @@ def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
     # KeyboardInterrupt / SystemExit still propagate) can no longer shadow it.
     findings: list[Finding] = []
     deadline = audit_deadline(audit_budget_s)
-    for chk in CHECKS:
+    total = len(CHECKS)
+    for done, chk in enumerate(CHECKS, start=1):
         if audit_budget_exceeded(deadline):
             findings.append(_check_budget_finding(chk, "audit"))
+            if on_check_done is not None:
+                on_check_done(done, total)
             continue
         try:
             with check_deadline(check_budget_s):
@@ -1743,4 +1761,6 @@ def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
                 traceback.format_exc(),
             )
             findings.append(_check_error_finding(chk, exc))
+        if on_check_done is not None:
+            on_check_done(done, total)
     return findings
