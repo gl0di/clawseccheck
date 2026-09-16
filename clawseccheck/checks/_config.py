@@ -8,6 +8,7 @@ import ipaddress
 import os
 from pathlib import Path
 from .. import attest as _attest
+from .. import openclawdist as _openclawdist
 from .. import sockets as _sockets
 from ..catalog import (
     CRITICAL,
@@ -69,6 +70,7 @@ from ._shared import (
     _mcp_leg_contributions,
     _node_commands,
     _norm_group_policy,
+    _numeric_version,
     _open_channels,
     _openclaw_generation,
     OUTBOUND_TOOL_HINTS,
@@ -204,11 +206,6 @@ _DANGER_FIXED = [
         True,
     ),
     (
-        "gateway.controlUi.dangerouslyDisableDeviceAuth",
-        "control-plane: Control-UI device identity auth disabled",
-        True,
-    ),
-    (
         "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback",
         "control-plane: Host-header origin fallback (CSRF/origin-bypass surface)",
         False,
@@ -286,6 +283,52 @@ _DANGER_FIXED_2026_8_1 = [
         "web_fetch may reach private/internal targets (SSRF via a model-selected URL)",
     ),
 ]
+
+
+# B-795: the build that made gateway.controlUi.dangerouslyDisableDeviceAuth RETIRED and
+# IGNORED rather than merely defaulted off. Grounded against the installed dist
+# (openclaw@2026.9.3, legacy-*.mjs): a `defineLegacyConfigMigration` entry named
+# "dangerouslyDisableDeviceAuth" whose message reads "gateway.controlUi.
+# dangerouslyDisableDeviceAuth is retired and ignored. Control UI browsers pair through
+# the normal device flow; run \"openclaw doctor --fix\" to remove the legacy key." —
+# re-confirmed present, unchanged, on the installed 2026.9.4 dist. Setting the key no
+# longer disables Control-UI device-identity auth or does anything else; the old
+# unconditional FAIL/HIGH row named a live security exposure that does not exist on
+# these builds.
+#
+# Same shape and same source order as `_workshop_symlink_knob` (B-783): only
+# `installed_dist_version` decides outright (it is the build that reads or ignores the
+# key right now); `meta.lastTouchedVersion` is consulted only once it already lands at
+# or after the retirement release, because a stale stamp proves nothing about what is
+# installed now. Not folded into `_openclaw_generation`'s modern/legacy split — that
+# threshold is pinned to 2026.8.1 and is compared at two dozen other call sites; a wrong
+# answer for THIS key must not move any of them.
+#
+# Caveat, recorded rather than hidden: 2026.9.3 is the first release this was actually
+# grounded against, not independently proven to be the release that introduced the
+# retirement — 2026.9.1/9.2 were not checked. If the real cutover lands earlier, this
+# constant is too conservative in the safe direction (it still treats those builds as
+# "honoured" and keeps the original FAIL), the same direction B-783 chose when it had
+# the identical gap.
+_DEVICE_AUTH_KNOB_RETIRED_MIN = (2026, 9, 3)
+
+
+def _device_auth_knob(ctx) -> str:
+    """Does the reader's OpenClaw still HONOUR gateway.controlUi.dangerouslyDisableDeviceAuth?
+
+    ``"retired"`` / ``"honoured"`` / ``"unknown"`` — three answers for the same reason
+    ``_workshop_symlink_knob`` has three: "we could not see the build" is not "the build
+    still reads it", and collapsing them manufactures a claim. Only ``"retired"`` may
+    silence the FAIL below; the other two both preserve today's behavior exactly.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        return "retired" if installed >= _DEVICE_AUTH_KNOB_RETIRED_MIN else "honoured"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _DEVICE_AUTH_KNOB_RETIRED_MIN:
+        return "retired"
+    return "unknown"
 
 
 # B-231: wildcard-authority detection for commands.ownerAllowFrom (FAIL/CRITICAL, above
@@ -1557,6 +1600,26 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         if dig(cfg, path):
             (fails if is_fail else warns).append(f"{path} — {label}")
 
+    # B-795: pulled out of _DANGER_FIXED's flat unconditional table because, unlike
+    # every other row there, whether this one means anything at all depends on the
+    # build — see `_device_auth_knob`. A build we could not identify keeps the
+    # original FAIL (Golden Rule #4 — do not drop a real finding for a build we did
+    # not see).
+    device_auth_note = ""
+    if dig(cfg, "gateway.controlUi.dangerouslyDisableDeviceAuth"):
+        if _device_auth_knob(ctx) == "retired":
+            device_auth_note = (
+                " NOTE: gateway.controlUi.dangerouslyDisableDeviceAuth is present in "
+                "the config, but OpenClaw 2026.9.3+ retired the key — it is ignored "
+                "and grants nothing; Control UI browsers pair through the normal "
+                "device flow instead. `openclaw doctor --fix` removes the stale line."
+            )
+        else:
+            fails.append(
+                "gateway.controlUi.dangerouslyDisableDeviceAuth — control-plane: "
+                "Control-UI device identity auth disabled"
+            )
+
     for path, label in _DANGER_FIXED_2026_8_1:
         node = cfg
         for key in path.split("."):
@@ -1658,7 +1721,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "B48",
             FAIL,
             "Wildcard-authority override(s) grant owner command authority or device "
-            "auto-pairing to ANY sender/IP (see evidence).",
+            "auto-pairing to ANY sender/IP (see evidence)." + device_auth_note,
             "Replace the wildcard with an explicit, scoped allowlist — e.g. "
             "commands.ownerAllowFrom to your own channel-native ID(s), or "
             "gateway.nodes.pairing.autoApproveCidrs to a specific host/private range. "
@@ -1671,7 +1734,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "B48",
             FAIL,
             "Dangerous break-glass override(s) that enable sandbox escape or control-plane "
-            "auth bypass are active (see evidence).",
+            "auth bypass are active (see evidence)." + device_auth_note,
             "Disable these unless a specific, temporary break-glass need requires one — each "
             "opens sandbox escape or control-plane authentication bypass. Restore the safe "
             "default (set to false / remove).",
@@ -1681,7 +1744,8 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         return _finding(
             "B48",
             WARN,
-            "One or more dangerous break-glass override flag(s) are enabled (see evidence).",
+            "One or more dangerous break-glass override flag(s) are enabled (see "
+            "evidence)." + device_auth_note,
             "Review each — OpenClaw documents these as 'keep disabled' break-glass toggles. "
             "Turn off any you do not actively need.",
             evidence=warns,
@@ -1690,7 +1754,8 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         "B48",
         PASS,
         "None of the break-glass override flags checked here are enabled (browser "
-        "SSRF's dangerouslyAllowPrivateNetwork is B38's subject, not B48's -- see B38).",
+        "SSRF's dangerouslyAllowPrivateNetwork is B38's subject, not B48's -- see "
+        "B38)." + device_auth_note,
         "Keep these break-glass toggles off unless an incident temporarily requires one.",
         pass_confidence="verified",
     )
