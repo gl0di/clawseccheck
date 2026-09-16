@@ -71,6 +71,23 @@ def test_b48_unsafe_external_content_warns():
     assert check_dangerous_overrides(_ctx(cfg)).status == "WARN"
 
 
+def test_b48_custom_plugins_ui_warns():
+    """C-507: gateway.controlUi.experimental.customPlugins lets a non-bundled,
+    user-installed plugin run native JS in the Control UI at the signed-in
+    operator's own Gateway authority (isControlUiPluginAllowed, dist/github-user-
+    identity-*.js). WARN, matching the sibling allowExternalEmbedUrls row -- opt-in,
+    defaults false, a deliberate operator act."""
+    cfg = {"gateway": {"controlUi": {"experimental": {"customPlugins": True}}}}
+    r = check_dangerous_overrides(_ctx(cfg))
+    assert r.status == "WARN"
+    assert any("customPlugins" in e for e in r.evidence)
+
+
+def test_b48_custom_plugins_ui_false_does_not_warn():
+    cfg = {"gateway": {"controlUi": {"experimental": {"customPlugins": False}}}}
+    assert check_dangerous_overrides(_ctx(cfg)).status == "PASS"
+
+
 def test_b48_channel_private_network_warns():
     cfg = {"channels": {"slack": {"network": {"dangerouslyAllowPrivateNetwork": True}}}}
     assert check_dangerous_overrides(_ctx(cfg)).status == "WARN"
@@ -149,3 +166,22 @@ def test_b48_never_unknown():
     for cfg in ({}, {"gateway": {"allowRealIpFallback": True}},
                 {"gateway": {"controlUi": {"dangerouslyDisableDeviceAuth": True}}}):
         assert check_dangerous_overrides(_ctx(cfg)).status != "UNKNOWN"
+
+
+# ---- C-507: real-config-shape fixture pair for gateway.controlUi.experimental.
+#      customPlugins, matching the bad_b48_web_fetch_ssrf / clean_b48_wildcard_authority
+#      convention for a new _DANGER_FIXED member ----
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
+
+
+def test_b48_custom_plugins_ui_fixture_warns():
+    from clawseccheck.collector import collect
+    r = check_dangerous_overrides(collect(FIXTURES / "bad_b48_custom_plugins_ui"))
+    assert r.status == "WARN"
+    assert any("customPlugins" in e for e in r.evidence)
+
+
+def test_b48_custom_plugins_ui_fixture_clean_passes():
+    from clawseccheck.collector import collect
+    r = check_dangerous_overrides(collect(FIXTURES / "clean_b48_custom_plugins_ui"))
+    assert r.status == "PASS"

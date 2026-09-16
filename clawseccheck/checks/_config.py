@@ -216,6 +216,26 @@ _DANGER_FIXED = [
         False,
     ),
     (
+        # C-507: grounded 2026-09-06 against the installed dist (openclaw@2026.9.2,
+        # re-confirmed on 2026.9.4) — schema description, verbatim: "Allow user-
+        # installed plugins to execute native JavaScript in the Control UI (default:
+        # false). Bundled plugin views remain available. Custom UI shares the
+        # signed-in operator's Gateway permissions; enable only for trusted plugins."
+        # Runtime gate (dist/github-user-identity-*.js, isControlUiPluginAllowed):
+        # `plugin.origin === "bundled" || ...customPlugins === true` — with the flag
+        # on, a NON-bundled, user-installed plugin runs native JS in the Control UI at
+        # the signed-in operator's own Gateway authority. WARN, not FAIL, matching the
+        # sibling allowExternalEmbedUrls row directly above: opt-in, defaults false, so
+        # a config setting it true is a deliberate operator act (same shape, same
+        # severity) — the flag alone is not yet an attack, it needs an untrusted
+        # installed plugin to combine with (tracked separately, not modelled as a
+        # RISK-* chain here — see C-507's own comment for why).
+        "gateway.controlUi.experimental.customPlugins",
+        "control-plane: user-installed plugins may run native JS in the Control UI "
+        "with the signed-in operator's Gateway permissions",
+        False,
+    ),
+    (
         "gateway.allowRealIpFallback",
         "x-real-ip fallback enabled (client-IP spoofing via forged header)",
         False,

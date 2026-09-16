@@ -66,6 +66,7 @@ gateway.controlUi.allowedOrigins
 gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback
 gateway.controlUi.dangerouslyDisableDeviceAuth
 gateway.controlUi.embedSandbox
+gateway.controlUi.experimental.customPlugins
 gateway.customBindHost
 gateway.http.endpoints.chatCompletions
 gateway.http.endpoints.chatCompletions.enabled
