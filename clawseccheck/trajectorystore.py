@@ -1014,7 +1014,8 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
     tool_defs: list[dict] = []
     meta = {
         "present": False, "dbs_found": 0, "dbs_read": 0, "dbs_unreadable": 0,
-        "events": 0, "unknown_version": False, "truncated": False, "non_text_rows": 0,
+        "events": 0, "unknown_version": False, "unknown_schema": False,
+        "truncated": False, "non_text_rows": 0,
     }
     if not isinstance(home, Path):
         return tool_defs, meta
@@ -1068,6 +1069,12 @@ def read_compiled_tool_descriptions(home) -> "tuple[list[dict], dict]":
             if not isinstance(rec, dict):
                 continue
             if rec.get("traceSchema") != _TRACE_SCHEMA:
+                # B-716: mirrors the JSONL reader's identical fix
+                # (trajectory.read_compiled_tool_descriptions) -- a mixed-schema SQLite
+                # row set (the same OpenClaw-upgrade-mid-session shape, now landing in
+                # the post-migration store) silently dropped records here with no
+                # disclosure before this.
+                meta["unknown_schema"] = True
                 continue
             if rec.get("schemaVersion") != _SCHEMA_VERSION:
                 meta["unknown_version"] = True

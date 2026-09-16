@@ -841,6 +841,17 @@ def check_capability_drift(ctx) -> object:
             "tool use to compare against the declared grant.",
             "Run on a host where an OpenClaw agent has produced session trajectories.",
         )
+    if meta.get("unknown_schema"):
+        # B-716: mirrors the unknown_version branch just below -- a mixed-schema file
+        # (the normal shape of an upgrade landing mid-session) silently dropped some
+        # records here too, before read_proven_tools ever saw a schemaVersion to check.
+        return _finding(
+            "T3",
+            UNKNOWN,
+            "A trajectory record used an unrecognised trajectory schema (traceSchema) — "
+            "the proven tool set is incomplete, so drift can't be assessed authoritatively.",
+            "Re-run against trajectories written by a supported OpenClaw version.",
+        )
     if meta.get("unknown_version"):
         return _finding(
             "T3",
@@ -1048,6 +1059,7 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "present": meta["present"],
         "files_scanned": meta["files_scanned"],
         "unknown_version": meta["unknown_version"],
+        "unknown_schema": meta.get("unknown_schema", False),  # B-716
         "truncated": meta["truncated"],
         "files_total": meta.get("files_total", 0),
         "files_capped": meta.get("files_capped", False),
@@ -1149,6 +1161,18 @@ def analysis_incompleteness(result: dict) -> "str | None":
         return "no trajectory sidecar was read"
     if not result.get("event_count"):
         return "no events could be parsed from the trajectory sidecar(s)"
+    if result.get("unknown_schema"):
+        # B-716: a mixed-schema file (the NORMAL shape of an OpenClaw upgrade landing
+        # mid-session, since sidecars are append-only) has SOME records this reader
+        # parsed fine and SOME it silently dropped -- event_count > 0 so the clause
+        # above does not catch it, and unclassified/schemaVersion checks below do not
+        # either, since they only ever see the surviving records. Ordered before
+        # `unknown_version` deliberately: a wholesale rename (traceSchema differs on
+        # EVERY record) already reports the more fundamental "nothing parsed" via the
+        # event_count clause above, so reaching this point means at least one record
+        # DID match this reader's schema -- i.e. some were kept and some were dropped,
+        # which is the narrower, more specific fact worth naming first.
+        return "some records used an unrecognised trajectory schema (traceSchema)"
     if result.get("unknown_version"):
         return "some records used an unrecognised trajectory schema version"
     if result.get("files_capped"):
@@ -1319,6 +1343,17 @@ def render_behavioral_analysis(ctx, *, explicit_path: str | None = None,
             f"  scanned {r['files_scanned']} trajectory file(s), {r['event_count']} event(s) "
             f"across {r['thread_count']} thread(s)/turn(s)."
         )
+        if r.get("unknown_schema"):
+            # B-716 (C-135 round 2): this hand-rolled report block reads `r` directly and
+            # was not touched by the original fix, which only updated
+            # analysis_incompleteness() -- so the per-finding T1/T2/T3 UNKNOWN text
+            # correctly named a traceSchema mismatch while this leading disclosure line
+            # silently stayed quiet for that exact case. Ordered before unknown_version,
+            # matching analysis_incompleteness()'s own ordering, though both can be
+            # True at once and both lines then print.
+            lines.append(f"  {q} Some records used an unrecognised trajectory schema "
+                         "(traceSchema) — results are INCOMPLETE (treat as UNKNOWN, not "
+                         "authoritative).")
         if r["unknown_version"]:
             lines.append(f"  {q} Some records used an unrecognised trajectory schema version — "
                          "results are INCOMPLETE (treat as UNKNOWN, not authoritative).")

@@ -695,6 +695,53 @@ def test_unknown_on_unrecognised_schema_version(tmp_path):
     assert meta["unknown_version"] is True
 
 
+def test_mixed_trace_schema_discloses_incompleteness_not_a_confident_pass(tmp_path):
+    """B-716: a mixed-schema file (a real compiled record on our schema, plus another
+    record on a renamed one -- the normal shape of an OpenClaw upgrade landing
+    mid-session) must not read as a confident, complete PASS. Mirrors how
+    unknown_version already gets disclosed in this exact 'incomplete' note."""
+    good = _compiled(BENIGN_TOOLS)
+    mismatched = dict(good, traceSchema="openclaw-trajectory-v2")
+    _write_trajectory(tmp_path, [good, mismatched])
+    f = _run(tmp_path)
+    assert f.status == "PASS", f.detail  # the surviving record is genuinely benign
+    assert "unrecognised schema" in f.detail
+    _defs, meta = read_compiled_tool_descriptions(tmp_path)
+    assert meta["unknown_schema"] is True
+
+
+def test_wholesale_trace_schema_mismatch_does_not_claim_no_record_existed(tmp_path):
+    """B-716 (C-135 round 2): a WHOLESALE mismatch -- every context.compiled record
+    dropped, tool_defs empty -- used to fall into this check's `if not tool_defs:`
+    branch and claim 'the trajectory sidecars carry no context.compiled record', which
+    is false: a record WAS present and was silently dropped. Must name the mismatch
+    instead of denying the record ever existed."""
+    mismatched = dict(_compiled(BENIGN_TOOLS), traceSchema="openclaw-trajectory-v2")
+    _write_trajectory(tmp_path, [mismatched])
+    f = _run(tmp_path)
+    assert f.status == "UNKNOWN", f.detail
+    assert "carry no 'context.compiled' record" not in f.detail
+    assert "unrecognised trajectory schema" in f.detail
+    _defs, meta = read_compiled_tool_descriptions(tmp_path)
+    assert meta["unknown_schema"] is True
+    assert _defs == []
+
+
+def test_sqlite_wholesale_trace_schema_mismatch_does_not_claim_nothing_recoverable(tmp_path):
+    """B-716 (C-135 round 2), SQLite sibling of the JSONL test above: the SQLite-era
+    fallback reader (trajectorystore.read_compiled_tool_descriptions) had the identical
+    silent-drop bug, one layer further away (no meta['unknown_schema'] key existed at
+    all before this fix) -- and this check's own STATUS_LOCATOR_STALE branch claimed
+    'carried no recoverable context.compiled record', equally false when a record was
+    present and schema-mismatched."""
+    mismatched = dict(_compiled(BENIGN_TOOLS), traceSchema="openclaw-trajectory-v2")
+    _write_agent_sqlite_db(tmp_path, "main", [("s1", 0, mismatched)])
+    f = _run(tmp_path)
+    assert f.status == "UNKNOWN", f.detail
+    assert "carried no recoverable 'context.compiled' record" not in f.detail
+    assert "unrecognised trajectory schema" in f.detail
+
+
 # ---------------------------------------------------------------------------
 # §8 — the reader must never read the user's conversation.
 # ---------------------------------------------------------------------------

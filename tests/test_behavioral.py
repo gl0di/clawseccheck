@@ -537,6 +537,114 @@ def test_analyze_unknown_schema_version_marked(tmp_path):
     assert r["event_count"] == 0
 
 
+# ---------------------------------------------------------------------------
+# B-716: a mixed-schema trajectory file (some records on our traceSchema, some on a
+# different one) used to yield a clean PASS over the dropped records -- schemaVersion
+# mismatches were already disclosed via unknown_version; traceSchema mismatches were a
+# bare, silent `continue`. A mixed file is the NORMAL shape of an upgrade landing
+# mid-session (sidecars are append-only per session), not an exotic edge case.
+# ---------------------------------------------------------------------------
+
+def _traj_rec(name, *, trace_schema="openclaw-trajectory", schema_version=1, seq=1):
+    return {
+        "traceSchema": trace_schema, "schemaVersion": schema_version, "type": "tool.call",
+        "ts": str(seq), "seq": seq, "sessionId": "s1",
+        "data": {"name": name, "threadId": "th1"},
+    }
+
+
+def test_analyze_mixed_schema_file_sets_unknown_schema_not_a_clean_pass(tmp_path):
+    """The task's own reproduction, case 4: one benign record on our schema plus a real
+    trifecta on a renamed schema used to PASS cleanly ('No thread shows an ingress ->
+    sensitive -> egress sequence') because event_count > 0 from the surviving benign
+    record. Must now disclose the schema mismatch instead."""
+    import json
+
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True)
+    lines = [
+        json.dumps(_traj_rec("list_files", seq=1)),  # survives -- our schema
+        json.dumps(_traj_rec("web_fetch", trace_schema="openclaw-trajectory-v2", seq=2)),
+        json.dumps(_traj_rec("read_credential_file", trace_schema="openclaw-trajectory-v2", seq=3)),
+        json.dumps(_traj_rec("send_message", trace_schema="openclaw-trajectory-v2", seq=4)),
+    ]
+    (d / "s.trajectory.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    r = analyze(_ctx(tmp_path))
+    assert r["unknown_schema"] is True
+    assert r["event_count"] == 1  # only the surviving benign record
+
+    from clawseccheck.behavioral import analysis_incompleteness
+
+    assert analysis_incompleteness(r) == (
+        "some records used an unrecognised trajectory schema (traceSchema)"
+    )
+    # The trifecta finding itself must not read as a confident, complete PASS -- T1's
+    # own UNKNOWN-on-incompleteness branch (B-559) is what analysis_incompleteness feeds.
+    t1 = next(f for f in r["findings"] if f.id == "T1")
+    assert t1.status == UNKNOWN
+
+
+def test_analyze_wholesale_schema_rename_still_reports_the_more_fundamental_fact(tmp_path):
+    """DoD: a wholesale rename (EVERY record on a different traceSchema) must still
+    report 'no events could be parsed' -- the more fundamental fact -- not the narrower
+    'some records used an unrecognised schema' one. event_count == 0 here, so the
+    event_count clause in analysis_incompleteness fires first, before unknown_schema is
+    ever consulted, exactly the ordering the DoD asks for."""
+    import json
+
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True)
+    lines = [
+        json.dumps(_traj_rec("web_fetch", trace_schema="openclaw-trajectory-v2", seq=1)),
+        json.dumps(_traj_rec("read_credential_file", trace_schema="openclaw-trajectory-v2", seq=2)),
+        json.dumps(_traj_rec("send_message", trace_schema="openclaw-trajectory-v2", seq=3)),
+    ]
+    (d / "s.trajectory.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    r = analyze(_ctx(tmp_path))
+    assert r["unknown_schema"] is True  # still true -- every record was dropped
+    assert r["event_count"] == 0
+
+    from clawseccheck.behavioral import analysis_incompleteness
+
+    assert analysis_incompleteness(r) == "no events could be parsed from the trajectory sidecar(s)"
+
+
+def test_analyze_pure_control_no_schema_mismatch_at_all(tmp_path):
+    """Negative control: a file entirely on our own schema must not set unknown_schema."""
+    import json
+
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True)
+    (d / "s.trajectory.jsonl").write_text(
+        json.dumps(_traj_rec("list_files")) + "\n", encoding="utf-8"
+    )
+    r = analyze(_ctx(tmp_path))
+    assert r["unknown_schema"] is False
+    assert r["event_count"] == 1
+
+
+def test_render_behavioral_analysis_discloses_unknown_schema(tmp_path):
+    """C-135 round 2: render_behavioral_analysis() has its OWN hand-rolled
+    incompleteness block (separate from analysis_incompleteness(), which the original
+    fix updated) -- it must ALSO print the leading 'results are INCOMPLETE' disclosure
+    for a traceSchema mismatch, matching the existing schemaVersion (unknown_version)
+    line exactly, not just the per-finding T1/T2/T3 detail text."""
+    import json
+
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True)
+    lines = [
+        json.dumps(_traj_rec("list_files", seq=1)),
+        json.dumps(_traj_rec("web_fetch", trace_schema="openclaw-trajectory-v2", seq=2)),
+    ]
+    (d / "s.trajectory.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out = render_behavioral_analysis(_ctx(tmp_path), ascii_only=True)
+    assert "unrecognised trajectory schema (traceSchema)" in out
+    assert "results are INCOMPLETE" in out
+
+
 def test_analyze_truncation_marked_and_a_signal_past_the_cap_is_missed(tmp_path):
     """C-180: a real trifecta placed entirely past the 8MB per-file scan cap must
     not silently produce a clean PASS with no indication anything was cut off."""

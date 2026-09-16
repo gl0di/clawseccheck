@@ -8396,9 +8396,36 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
         # `corr` is guaranteed set (non-None) in every branch below: reaching them
         # requires `not meta.get("present")`, which is exactly this block's own gate.
         if meta.get("present"):
-            # JSONL sidecars exist but carry no compiled record -- independent of
-            # SQLite entirely; unchanged from before B-811.
-            why = "the trajectory sidecars carry no 'context.compiled' record"
+            # B-716 (round 2 of this check's own C-135): a wholesale traceSchema/
+            # schemaVersion mismatch on every context.compiled record this reader saw
+            # drops ALL of them, landing here with tool_defs empty -- the OLD text
+            # below ("no record") is FALSE in that case: a record was present and was
+            # dropped, not absent. Checked before the generic claim, not instead of it,
+            # since the generic claim is still correct when neither flag fired.
+            if meta.get("unknown_schema") or meta.get("unknown_version"):
+                # C-135 round 2: worded to NOT assert a context.compiled record was
+                # confirmed present -- the pre-filter that reaches this flag matches on
+                # a raw substring in the line (cheap, deliberate; see the reader's own
+                # comment), not on the record's parsed `type`, so a record using
+                # {mismatch} could be an ordinary tool.call whose arguments happen to
+                # contain the literal text, not a dropped compiled record at all. The
+                # honest claim is narrower: something was dropped unread, possibly
+                # including a compiled record, not "there was one and it was dropped".
+                mismatch = []
+                if meta.get("unknown_schema"):
+                    mismatch.append("an unrecognised trajectory schema (traceSchema)")
+                if meta.get("unknown_version"):
+                    mismatch.append("an unrecognised schema version")
+                why = (
+                    "the trajectory sidecars carry at least one record using "
+                    f"{' and/or '.join(mismatch)}, so this reader cannot confirm "
+                    "whether a 'context.compiled' record was present and dropped, or "
+                    "genuinely absent"
+                )
+            else:
+                # JSONL sidecars exist but carry no compiled record -- independent of
+                # SQLite entirely; unchanged from before B-811.
+                why = "the trajectory sidecars carry no 'context.compiled' record"
         elif corr.status == _trajectorystore.STATUS_LOCATOR_STALE:
             dbs_found = sqlite_meta.get("dbs_found", 0) if sqlite_meta else 0
             dbs_read = sqlite_meta.get("dbs_read", 0) if sqlite_meta else 0
@@ -8419,6 +8446,24 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
                 why = (
                     f"OpenClaw recorded trajectory evidence in {dbs_found} SQLite "
                     "database(s), but none were readable"
+                )
+            elif sqlite_meta.get("unknown_schema") or sqlite_meta.get("unknown_version"):
+                # B-716: mirrors the JSONL branch above (same C-135 round-2 wording
+                # caution -- the pre-filter matches a raw substring, not a parsed
+                # `type`, so this is not a confirmed compiled-record claim). Checked
+                # before the "genuinely nothing recoverable" claim just below, which
+                # would otherwise be false here.
+                mismatch = []
+                if sqlite_meta.get("unknown_schema"):
+                    mismatch.append("an unrecognised trajectory schema (traceSchema)")
+                if sqlite_meta.get("unknown_version"):
+                    mismatch.append("an unrecognised schema version")
+                why = (
+                    f"OpenClaw's SQLite trajectory store was read ({dbs_read} "
+                    "database(s)) and carries at least one record using "
+                    f"{' and/or '.join(mismatch)}, so this reader cannot confirm "
+                    "whether a 'context.compiled' record was present and dropped, or "
+                    "genuinely absent"
                 )
             else:
                 # B-811: we DID read the SQLite store this time (the whole point of
@@ -8457,11 +8502,13 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
         sqlite_incomplete = ""
         if sqlite_meta and (
             sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
+            or sqlite_meta.get("unknown_schema")  # B-716
         ):
             sqlite_incomplete = (
-                " Note: SQLite scan bounds (a byte/row/length cap, a non-text row, or "
-                "an unrecognised schema version) meant some records were not examined "
-                "there either, so this is incomplete even for what was checked."
+                " Note: SQLite scan bounds (a byte/row/length cap, a non-text row, an "
+                "unrecognised schema, or an unrecognised schema version) meant some "
+                "records were not examined there either, so this is incomplete even "
+                "for what was checked."
             )
         return _finding(
             "B185",
@@ -8551,11 +8598,12 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             f"{sqlite_meta['dbs_read']} SQLite trajectory database(s)"
         )
         incomplete = ""
-        if sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version"):
+        if (sqlite_meta.get("truncated") or sqlite_meta.get("unknown_version")
+                or sqlite_meta.get("unknown_schema")):  # B-716
             incomplete = (
-                " Note: SQLite scan bounds (a byte/row/length cap, a non-text row, or "
-                "an unrecognised schema version) meant some records were not examined, "
-                "so this verdict is incomplete."
+                " Note: SQLite scan bounds (a byte/row/length cap, a non-text row, an "
+                "unrecognised schema, or an unrecognised schema version) meant some "
+                "records were not examined, so this verdict is incomplete."
             )
     else:
         scope = (
@@ -8564,11 +8612,16 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             f"{meta.get('files_scanned', 0)} session log(s)"
         )
         incomplete = ""
-        if meta.get("truncated") or meta.get("files_capped") or meta.get("unknown_version"):
+        if (meta.get("truncated") or meta.get("files_capped")
+                or meta.get("unknown_version") or meta.get("unknown_schema")):
+            # B-716: unknown_schema added -- a mixed-schema file (an OpenClaw upgrade
+            # landing mid-session, since sidecars are append-only) silently drops some
+            # records here too, same as unknown_version already disclosed.
             incomplete = (
                 " Note: scan bounds (per-file byte cap, per-file count cap, an "
-                "oversized line, or an unrecognised schema version) meant some records "
-                "were not examined, so this verdict is incomplete."
+                "oversized line, an unrecognised schema, or an unrecognised schema "
+                "version) meant some records were not examined, so this verdict is "
+                "incomplete."
             )
 
     posthoc = (

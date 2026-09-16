@@ -462,6 +462,7 @@ def read_proven_tools_by_origin(
     by_origin: dict = {}
     meta = {
         "present": False, "files_scanned": 0, "unknown_version": False,
+        "unknown_schema": False,
         "files_total": 0, "files_capped": False,
         "pointer_targets_missing": 0, "pointer_out_of_home": 0, "pointer_invalid": 0,
         "pointer_scan_capped": False,
@@ -497,6 +498,13 @@ def read_proven_tools_by_origin(
                     if not isinstance(rec, dict):
                         continue
                     if rec.get("traceSchema") != _TRACE_SCHEMA:
+                        # B-716: this used to be a bare drop with no signal -- the
+                        # SAME asymmetry `schemaVersion` (just below) already closed.
+                        # A trajectory sidecar is append-only per session, so an
+                        # OpenClaw upgrade mid-session is the NORMAL way a file ends
+                        # up with SOME records on this schema and some not; a mixed
+                        # file must not read as a clean, complete scan.
+                        meta["unknown_schema"] = True
                         continue
                     if rec.get("schemaVersion") != _SCHEMA_VERSION:
                         meta["unknown_version"] = True
@@ -683,7 +691,7 @@ def read_compiled_tool_descriptions(
     tool_defs: list[dict] = []
     meta = {
         "present": False, "files_scanned": 0, "events": 0,
-        "unknown_version": False, "truncated": False,
+        "unknown_version": False, "unknown_schema": False, "truncated": False,
         "files_total": 0, "files_capped": False,
         "path_unreadable": False,  # B-683
         "pointer_targets_missing": 0, "pointer_out_of_home": 0, "pointer_invalid": 0,
@@ -731,6 +739,9 @@ def read_compiled_tool_descriptions(
                     if not isinstance(rec, dict):
                         continue
                     if rec.get("traceSchema") != _TRACE_SCHEMA:
+                        # B-716: mirrors schemaVersion's own disclosure just below --
+                        # see that task for why a bare drop here was the bug.
+                        meta["unknown_schema"] = True
                         continue
                     if rec.get("schemaVersion") != _SCHEMA_VERSION:
                         meta["unknown_version"] = True
@@ -910,7 +921,8 @@ def read_events(
     """
     events: list[dict] = []
     meta = {
-        "present": False, "files_scanned": 0, "unknown_version": False, "truncated": False,
+        "present": False, "files_scanned": 0, "unknown_version": False,
+        "unknown_schema": False, "truncated": False,
         "files_total": 0, "files_capped": False,
         # B-683: the named path could not be opened at all.
         "path_unreadable": False,
@@ -975,6 +987,10 @@ def read_events(
                     if not isinstance(rec, dict):
                         continue
                     if rec.get("traceSchema") != _TRACE_SCHEMA:
+                        # B-716: mirrors schemaVersion's own disclosure just below --
+                        # see that task for why a bare drop here was the bug. T1/T2/T3
+                        # all read this meta via analysis_incompleteness().
+                        meta["unknown_schema"] = True
                         continue
                     if rec.get("schemaVersion") != _SCHEMA_VERSION:
                         meta["unknown_version"] = True
