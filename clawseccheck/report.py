@@ -1349,22 +1349,41 @@ _ASCII_MAP = ASCII_MAP
 _asciify = asciify
 
 
+# B-756: the field set the per-finding digest covers, named as a constant rather than
+# left implicit in a dict literal so a test can pin it — a silent rename/drop is what
+# hid the original defect. The version this replaced read `check_id`/`rule_id`/
+# `verdict`/`path`/`file`/`line`: NONE of those ever existed on `Finding`
+# (catalog.Finding's real fields are id/title/severity/status/detail/fix/framework/...),
+# so every one of those `getattr(f, name, default)` reads silently fell back to its
+# default — the receipt was effectively `sha256(severity + detail[:200])` per finding.
+# Measured: flipping every finding's status to PASS, or renaming every check id,
+# produced a byte-identical receipt. `id` binds the receipt to WHICH check; `status` to
+# its verdict (the entire point of tamper evidence — a receipt that cannot move when a
+# FAIL becomes a PASS attests to nothing); `title`/`fix`/`detail` to the text a reader
+# actually sees. `path`/`line`/`verdict` are dropped rather than kept as dead reads —
+# `Finding` carries none of them, and a `getattr` default is exactly what let a dead
+# field hide here before.
+_SCAN_RECEIPT_FIELDS = ("id", "status", "severity", "title", "fix", "detail")
+_SCAN_RECEIPT_TRUNCATE = 200
+
+
 def compute_scan_receipt(findings) -> str:
     """Compute a deterministic Merkle-style root hash over all findings.
 
-    Each finding is hashed individually; hashes are sorted then combined.
-    Returns a 64-char hex string. Empty/None findings → sha256 of empty bytes.
-    Pure stdlib, local-only. Never raises.
+    Each finding is hashed individually over `_SCAN_RECEIPT_FIELDS` — every one a
+    guaranteed-present `Finding` attribute, read with no `getattr` default (a missing
+    attribute raises, caught by this function's own try/except below, rather than
+    silently hashing an empty string the way the B-756 bug did). Hashes are sorted
+    then combined. Returns a 64-char hex string. Empty/None findings → sha256 of empty
+    bytes. Pure stdlib, local-only. Never raises.
     """
     try:
         def finding_digest(f):
-            canonical = json.dumps({
-                "check_id": str(getattr(f, "check_id", "") or getattr(f, "rule_id", "")),
-                "verdict": str(getattr(f, "verdict", "") or getattr(f, "severity", "")),
-                "path": str(getattr(f, "path", "") or getattr(f, "file", "")),
-                "line": int(getattr(f, "line", 0) or 0),
-                "detail": str(getattr(f, "detail", "") or "")[:200],
-            }, sort_keys=True, ensure_ascii=True)
+            canonical = json.dumps(
+                {name: str(getattr(f, name) or "")[:_SCAN_RECEIPT_TRUNCATE]
+                 for name in _SCAN_RECEIPT_FIELDS},
+                sort_keys=True, ensure_ascii=True,
+            )
             return hashlib.sha256(canonical.encode()).hexdigest()
 
         if not findings:
