@@ -953,22 +953,66 @@ def test_b409_profile_substring_false_positive_stays_bounded_by_allowlist(tmp_pa
     # `write` and `edit` are NOT granted despite "barcode-reader" matching the powerful-
     # profile substring. `apply_patch` is, and that is not the substring artefact: the vendor
     # grants it for the same allow-implies / deny-does-not-propagate reason it does under a
-    # real profile name.
+    # real profile name. B-736: this stays WARN, not FAIL — the escalation B-736 adds to
+    # `explicit_write_grant` is deliberately gated on `not widenings` (this config has one:
+    # the per-agent "barcode-reader" profile), preserving B-409 C-135 round 2's finding that
+    # a widening-involved grant carries more uncertainty than the bare global layer alone.
     assert f.status == WARN, f.detail
     assert f.status != FAIL
 
 
-def test_b409_explicit_write_grant_ignores_a_denied_named_token(tmp_path):
-    # Direct regression for the explicit_write_grant deny-subtraction fix: a write
-    # token that is BOTH named in tools.allow AND denied must not count as "explicit"
-    # on its own (matching legacy_write's existing deny-subtracted pattern).
+def test_b736_write_denied_apply_patch_survives_escalates_to_fail(tmp_path):
+    """B-736 headline regression: allow:["write"], deny:["write"] does NOT deny
+    apply_patch (the vendor's write=>apply_patch implication only ever adds on the
+    allow side; deny only ever removes the LITERAL token it names) -- so this is a
+    real, deny-surviving write-capable grant, reachable by an open channel with no
+    approval gate. That is FAIL territory, not the silent PASS this task found
+    ("No filesystem-write tool (write / edit / apply_patch) is granted.") on a config
+    an operator wrote specifically to restrict write access.
+    """
     home = _write_config(
         tmp_path,
-        '{"tools": {"allow": ["write"], "deny": ["write"]},'
+        '{"tools": {"allow": ["read", "write"], "deny": ["write"]},'
         ' "channels": {"telegram": {"dmPolicy": "open"}}}',
     )
     f = _b55(home)
-    assert f.status == PASS, f.detail
+    assert f.status == FAIL, f.detail
+    assert "apply_patch" in f.detail
+
+
+def test_b736_write_denied_apply_patch_survives_grant_model_unit():
+    """The unit-level pin, at the resolver the bug report itself executed against."""
+    from clawseccheck.checks._capability import _b68_fs_tools_granted
+
+    granted, enumerable = _b68_fs_tools_granted(
+        {"tools": {"allow": ["read", "write"], "deny": ["write"]}}
+    )
+    assert enumerable is True
+    assert granted == ["apply_patch", "read"], granted
+
+
+def test_b736_write_never_allowed_apply_patch_stays_absent():
+    """Regression bound: the implication only ever ADDS apply_patch when "write" was
+    actually named in allow. A config that never allowed "write" at all must not
+    suddenly grant apply_patch."""
+    from clawseccheck.checks._capability import _b68_fs_tools_granted
+
+    granted, enumerable = _b68_fs_tools_granted({"tools": {"allow": ["read"]}})
+    assert enumerable is True
+    assert granted == ["read"], granted
+
+
+def test_b736_apply_patch_itself_denied_stays_denied():
+    """Regression bound: if apply_patch is ALSO explicitly denied (not just "write"),
+    the implication must not resurrect it -- deny wins for its own literal token,
+    exactly as it does in the vendor's per-policy AND."""
+    from clawseccheck.checks._capability import _b68_fs_tools_granted
+
+    granted, enumerable = _b68_fs_tools_granted(
+        {"tools": {"allow": ["read", "write"], "deny": ["write", "apply_patch"]}}
+    )
+    assert enumerable is True
+    assert granted == ["read"], granted
 
 
 def test_b409_evidence_does_not_assert_widening_when_no_global_profile_set(tmp_path):

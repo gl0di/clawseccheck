@@ -594,6 +594,28 @@ def _b68_fs_workspace_only_scopes(cfg: dict) -> list[tuple[str, object]]:
 # (audit.nondeep.runtime-C3y1Q5Fi.js:583-588).
 _B68_FS_TOOLS = ("read", "write", "edit", "apply_patch")
 
+# B-736: `write` IMPLIES `apply_patch` (dist `tool-policy-match-DS7InkLt.js:24`,
+# `createToolPolicyMatcher`'s `writeAllowsApplyPatch` parameter, default `true` --
+# toolgrant.py's own module docstring "ALIAS TABLE"/implication section is the grounding
+# citation; reused here rather than re-derived). A policy whose allow list names `write`
+# but not `apply_patch` still lets `apply_patch` through THAT policy -- and, evaluated
+# per policy inside the vendor's AND, a policy that DENIES `write` does NOT deny
+# `apply_patch`: they are separate tokens at the deny layer, and the implication only
+# ever adds on the allow side. `_tool_policy_view` (this module) modelled neither
+# direction ("NOT modelled, deliberately" in its own docstring, before this fix) --
+# `toolgrant.py` already modelled it correctly for the PER-AGENT scopes `_b68_fs_tools_
+# granted` consults (B-668/S3's `scoped` set below), so the accumulator's GLOBAL layer
+# was the one place a hardened `deny:["write"]` config still silently kept apply_patch
+# reachable and told the operator otherwise. Grounded to be the ONLY such implication in
+# the dist: `createToolPolicyMatcher` special-cases exactly this one pair, and
+# toolgrant.py's own dist-executed grounding (tests/test_toolgrant_dist_grounding.py)
+# has never found a second. Fixed LOCALLY in `_b68_fs_tools_granted` (not in
+# `_tool_policy_view` itself, which B44 also reads for an unrelated self-report
+# cross-check that has no vetted reason to inherit this) -- the narrower of the two
+# options the task weighed, matching every other consumer of `_tool_policy_view` staying
+# byte-identical to before.
+_B68_WRITE_IMPLIES = "apply_patch"
+
 
 class _ToolPolicyView(NamedTuple):
     """One resolution of the GLOBAL tools.* layer, shared by B44/B55/B68/B84.
@@ -901,6 +923,18 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     # its own.
     if not view.enumerable and not widenings and not scoped:
         return [], False
+
+    # B-736: the write=>apply_patch implication (see _B68_WRITE_IMPLIES above), applied
+    # ONCE here after every source that can grant "write" has already unioned in --
+    # named/grants_all/group:fs/profile/widenings all reach this point through `granted`,
+    # so this one line covers all of them instead of repeating the check at each site.
+    # Deliberately BEFORE the deny subtraction below, mirroring the vendor's own order
+    # (createToolPolicyMatcher checks deny first for the LITERAL token being tested, then
+    # allow, then the implication) -- so a config that ALSO explicitly denies
+    # "apply_patch" itself (not just "write") still has it removed at that step, exactly
+    # as it should.
+    if "write" in granted:
+        granted.add(_B68_WRITE_IMPLIES)
 
     # `view.denied` is the GLOBAL deny list and is applied only to the globally-derived set.
     # `scoped` already came from the vendor predicate, which applies every deny layer itself
@@ -1378,12 +1412,41 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # the root there too (the widening now intersects with a real global allowlist
     # instead of granting wholesale), but this clause is fixed to match `legacy_write`'s
     # existing pattern regardless, so it can't become a landmine for the next change.
+    # B-736: "write" named in tools.allow drives the write=>apply_patch implication in
+    # `_b68_fs_tools_granted` (see `_B68_WRITE_IMPLIES` there) — and naming "write" in
+    # allow at ALL is an explicit operator action, never an implicit-wildcard artifact,
+    # regardless of whether the literal "write" token itself survives the deny
+    # subtraction. Without this disjunct, `tools.allow: ["write"], tools.deny:
+    # ["write"]` reached `explicit_write_grant=False` even though write_tools is
+    # ["apply_patch"] (a real, deny-surviving grant) — falling into the
+    # "the only write-tool grant signal is tools.alsoAllow's implicit wildcard" WARN
+    # branch below and reporting a FACTUALLY WRONG mechanism (tools.allow was not
+    # absent). Guarded by `_B68_WRITE_IMPLIES not in view.denied` so it doesn't claim
+    # explicitness for a config where apply_patch itself is ALSO explicitly denied —
+    # symmetric with every other disjunct here already being deny-aware.
+    #
+    # `not widenings`: deliberately does NOT escalate when a per-agent tools.profile
+    # widening is ALSO in play (B-409 C-135 round 2's confirmed false-FAIL territory —
+    # test_b409_c135_exact_repro_no_longer_fails / _multi_token_deny_variant). That
+    # round found the true effective grant under a widening carries MORE uncertainty
+    # than the bare global layer alone: seven still-unread narrowing layers (per-agent
+    # allow/deny, channel/group, toolsBySender, byProvider) could remove it for that
+    # agent unseen by this static check, so it stays the "traces to a per-agent
+    # tools.profile" WARN below rather than jumping straight to FAIL. This disjunct is
+    # scoped to the BARE GLOBAL case B-736's own repro is ("no agents at all... so no
+    # per-agent resolution is involved") — exactly where no such extra layer exists to
+    # be wrong about.
     explicit_write_grant = bool(
         (set(view.named) & _B55_FS_WRITE_TOOLS) - view.denied
         or legacy_write
         or "*" in view.named
         or "group:fs" in view.named
         or (view.profile is not None and _profile_is_powerful(view.profile))
+        or (
+            not widenings
+            and "write" in view.named
+            and _B68_WRITE_IMPLIES not in view.denied
+        )
     )
 
     label = ", ".join(write_tools)
