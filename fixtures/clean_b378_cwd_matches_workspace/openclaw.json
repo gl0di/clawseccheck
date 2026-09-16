@@ -1,0 +1,8 @@
+{
+  "agents": {
+    "defaults": {
+      "cwd": "/home/testuser/.openclaw/workspace",
+      "workspace": "/home/testuser/.openclaw/workspace"
+    }
+  }
+}

@@ -3277,6 +3277,24 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="skills",
     ),
+    # B378: agents.defaults.cwd / agents.entries.<id>.cwd — new
+    # in OpenClaw 2026.9.1, grounded against the installed 2026.9.4 dist's zod schema
+    # (AgentDefaultsSchema / AgentEntryBaseSchema both carry a plain `cwd:
+    # string().optional()` sibling to `workspace`). See
+    # check_agent_cwd_relocation (checks/_capability.py) for the full
+    # resolveAgentRunCwd / resolveAttemptWorkspaceSandbox grounding. MEDIUM severity,
+    # hardening/scored — a real reach-widening signal, not merely informative, but
+    # the WARN-only design (never FAIL) reflects that the check cannot prove
+    # relocation against OpenClaw's full implicit-workspace fallback chain, only
+    # against an EXPLICITLY declared workspace (see the check's own docstring).
+    CheckMeta(
+        "B378",
+        "agents.*.cwd relocates the task/exec working directory outside the workspace",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Sandbox",
+        surface="agents",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}

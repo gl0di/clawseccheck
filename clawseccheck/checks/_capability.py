@@ -2589,3 +2589,189 @@ def check_exec_path_prepend(ctx: Context) -> Finding:
         "replaces the global one.",
         evidence=sorted(risky)[:8] or None,
     )
+
+
+def _b378_normalize_path_for_compare(raw: str, home: Path) -> str:
+    """Light textual normalization for comparing two DECLARED path strings.
+
+    NOT a port of ``resolveUserPath`` — it only expands a leading ``~`` against *home*
+    and runs :func:`os.path.normpath`. Good enough to prove two config strings denote
+    the same directory (the one thing ``check_agent_cwd_relocation`` uses it for); never
+    used to derive a path that was not itself explicitly written into the config — see
+    that check's own docstring for why the implicit workspace default is deliberately
+    not reconstructed.
+    """
+    s = raw.strip()
+    if s == "~" or s.startswith("~/") or s.startswith("~\\"):
+        s = str(home) + s[1:]
+    return os.path.normpath(s)
+
+
+def check_agent_cwd_relocation(ctx: Context) -> Finding:
+    """B378: ``agents.defaults.cwd`` / ``agents.entries.<id>.cwd``
+    relocate an agent's task/exec working directory away from its workspace.
+
+    New surface in OpenClaw 2026.9.1. Grounded directly against the installed
+    2026.9.4 dist, not the descriptions map: the zod schema (``zod-schema-*.mjs``)
+    carries ``cwd: string().optional()`` as a plain sibling of ``workspace`` on BOTH
+    ``AgentDefaultsSchema`` and ``AgentEntryBaseSchema`` (the record-keyed
+    ``agents.entries.<id>`` / legacy array ``agents.list[]`` entry shape). Resolution
+    is ``resolveAgentRunCwd(cfg, agentId)`` (``agent-scope-config-*.mjs``):
+    ``normalizeOptionalString(resolveAgentEntry(cfg, agentId)?.cwd) ??
+    normalizeOptionalString(cfg.agents?.defaults?.cwd)`` — an agent's own ``cwd`` wins,
+    the global default applies only when it is unset, and there is no containment
+    check against the workspace at config-read time.
+
+    Why it is worth a finding: ``resolveAttemptWorkspaceSandbox``
+    (``workspace-sandbox-*.mjs``) throws *"cwd override is not supported for sandboxed
+    embedded agent runs"* whenever ``sandbox?.enabled && requestedCwd && requestedCwd
+    !== resolvedWorkspace`` — the identical guard (different wording) also covers
+    compaction (``compact-*.mjs``) and subagent/visible-session runs
+    (``sessions-spawn-tool-*.mjs``). So a configured ``cwd`` that differs from the
+    workspace is a two-fact signal, not one: the run is necessarily UNSANDBOXED for
+    that mismatch to succeed at all, AND the agent's exec/bash surface defaults to an
+    arbitrary directory that neither B4 (sandbox) nor B-666/``toolpolicy.py``'s
+    workspace-confinement reach model ever considers — both assume "the workspace" is
+    where a run's tools actually operate.
+
+    Deliberately narrow about what counts as a PROVEN no-op: a configured ``cwd`` is
+    cleared only when it is textually equal (after ``~``-expansion) to that SAME
+    scope's own EXPLICITLY declared ``workspace`` — falling back to
+    ``agents.defaults.workspace`` when the scope declares no ``workspace`` of its own,
+    which is sound for ANY scope (not just the implicit default agent): a non-default
+    agent's real implicit workspace is ``join(agents.defaults.workspace, id)``, an
+    id-suffixed string that would essentially never coincidentally equal a hand-written
+    ``cwd``, so crediting the coarser comparison costs no realistic false PASS while it
+    clears the common "single default agent, cwd and workspace both set only at
+    agents.defaults" shape. This check does NOT go further and reconstruct OpenClaw's
+    full ``resolveAgentWorkspaceDir`` fallback chain (the ``join(...)`` itself, or the
+    unconfigured-implicit-directory case) to decide those cases — porting that wrong
+    would fabricate a comparison target rather than merely miss one, the exact failure
+    mode the sibling ``agent_roster()`` / ``toolpolicy.py`` ports guard against with
+    differential testing. Every other case WARNs instead: the field's own schema
+    description ("Also used as the working directory when agents.defaults.cwd is
+    unset") exists specifically so the two CAN differ, so a WARN default with one
+    narrow, provable exemption is the reading that stays sound in the quiet direction,
+    not a coin flip that risks a false PASS.
+
+    UNKNOWN        — the config could not be read.
+    not_applicable — no ``cwd`` is declared anywhere (the overwhelming majority of
+                     configs today; the surface is brand new). When ``agents.list`` /
+                     ``agents.entries`` is not declared at all, ``agents.defaults.cwd``
+                     still applies to the single implicit agent (``resolveAgentEntry``
+                     returns nothing for it, so resolution falls straight through to
+                     the default) and is evaluated as that one scope.
+    PASS           — every scope with a configured ``cwd`` has it textually equal to
+                     that scope's own explicit ``workspace``.
+    WARN           — at least one scope configures ``cwd`` with no proof it matches
+                     its workspace. scored=True.
+
+    Deliberately not double-counted: when a roster (``agents.list``/``agents.entries``)
+    IS declared, ``agents.defaults.cwd`` is evaluated only through the specific roster
+    entries that actually inherit it (those with no ``cwd`` of their own) — never also
+    as a bare top-level scope, which would flag ``agents.defaults.cwd`` even when every
+    declared agent overrides it with its own ``cwd`` and the default is genuinely dead
+    config nothing resolves to.
+    """
+    unreadable = _config_unreadable("B378", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B378",
+            UNKNOWN,
+            "No config was read, so agents.*.cwd relocation could not be assessed.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
+    def _clean(v):
+        return v.strip() if isinstance(v, str) and v.strip() else None
+
+    default_cwd = _clean(dig(cfg, "agents.defaults.cwd"))
+    default_workspace = _clean(dig(cfg, "agents.defaults.workspace"))
+    roster = agent_roster(cfg)
+
+    scopes: list[tuple[str, str, "str | None"]] = []
+    if not roster:
+        # No agents.list / agents.entries declared at all: exactly one implicit agent
+        # runs, resolveAgentEntry() returns nothing for it regardless of id, and
+        # resolveAgentRunCwd falls straight through to agents.defaults.cwd.
+        if default_cwd is not None:
+            scopes.append(("agents.defaults.cwd", default_cwd, default_workspace))
+    else:
+        for agent in roster:
+            entry = agent.entry
+            own_cwd = _clean(entry.get("cwd"))
+            effective_cwd = own_cwd if own_cwd is not None else default_cwd
+            if effective_cwd is None:
+                continue
+            own_workspace = _clean(entry.get("workspace"))
+            # When this entry declares no workspace of its own, agents.defaults.workspace
+            # is also a SOUND no-op proof target, not just own_workspace: OpenClaw's own
+            # resolveAgentWorkspaceDir falls the DEFAULT agent back to exactly
+            # agents.defaults.workspace, and for a NON-default agent the real fallback is
+            # join(agents.defaults.workspace, id) -- a different, id-suffixed string that
+            # would essentially never coincidentally equal a hand-written cwd, so crediting
+            # the coarser comparison here costs no realistic false PASS while it does clear
+            # the extremely common "single default agent, cwd and workspace both set only
+            # at agents.defaults" shape that a roster entry (e.g. an empty
+            # agents.entries.main: {}) would otherwise falsely WARN on.
+            workspace_for_proof = own_workspace if own_workspace is not None else default_workspace
+            name = entry.get("name") or agent.id or agent.index
+            scopes.append((f"{agent.labelled(name)}.cwd", effective_cwd, workspace_for_proof))
+
+    if not scopes:
+        return _finding(
+            "B378",
+            UNKNOWN,
+            "No agents.defaults.cwd or per-agent cwd is configured.",
+            "—",
+            not_applicable=True,
+        )
+
+    relocated: list[str] = []
+    for label, cwd_val, workspace_val in scopes:
+        if workspace_val is not None and (
+            _b378_normalize_path_for_compare(cwd_val, ctx.home)
+            == _b378_normalize_path_for_compare(workspace_val, ctx.home)
+        ):
+            continue  # proven no-op: cwd is that same scope's own declared workspace
+        note = (
+            f"workspace={workspace_val!r}" if workspace_val
+            else "no explicit workspace declared for this scope"
+        )
+        relocated.append(f"{label}={cwd_val!r} ({note})")
+
+    if not relocated:
+        return _finding(
+            "B378",
+            PASS,
+            "Every configured agents.*.cwd matches that scope's own declared "
+            "workspace — no relocation.",
+            "Keep cwd in sync with workspace, or drop it if it was never meant to "
+            "differ.",
+            config_field_paths=frozenset(
+                {"agents.defaults.cwd", "agents.defaults.workspace"}
+            ),
+        )
+
+    return _finding(
+        "B378",
+        WARN,
+        "agents.*.cwd relocates the task/exec working directory away from the "
+        f"agent's own workspace for: {'; '.join(relocated)}. OpenClaw itself rejects "
+        "a sandboxed run whose cwd differs from its workspace (\"cwd override is not "
+        "supported for sandboxed ... runs\"), so this configuration either runs "
+        "unsandboxed with an arbitrary exec/bash working directory outside the "
+        "workspace, or fails at runtime.",
+        "Confirm the relocation is intentional and that the agent is meant to run "
+        "unsandboxed. If it should stay confined, remove cwd (or set it equal to "
+        "workspace) instead of relying on the sandbox guard to catch a mismatch at "
+        "runtime.",
+        evidence=relocated,
+        config_field_paths=frozenset(
+            {"agents.defaults.cwd", "agents.defaults.workspace"}
+        ),
+    )

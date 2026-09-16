@@ -14,6 +14,7 @@
 #
 # --- read off the OpenClaw config ROOT ---------------------------------------------
 acp.runtime.installCommand
+agents.defaults.cwd
 agents.defaults.elevatedDefault
 agents.defaults.embeddedAgent.projectSettingsPolicy
 agents.defaults.heartbeat

@@ -2683,6 +2683,20 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
+### B378 - agents.*.cwd relocates the task/exec working directory outside the workspace
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Sandbox
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: agents.*.cwd relocates the task/exec working directory outside the workspace
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

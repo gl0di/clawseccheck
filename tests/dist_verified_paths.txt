@@ -15,6 +15,7 @@
 # openclaw-version: 2026.9.4
 #
 acp.runtime.installCommand
+agents.defaults.cwd
 agents.defaults.elevatedDefault
 agents.defaults.embeddedAgent.projectSettingsPolicy
 agents.defaults.heartbeat

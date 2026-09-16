@@ -299,6 +299,8 @@ from ._capability import (
     check_fs_write_exposure,
     check_node_denycommands_ineffective,
     check_path_safety,
+    _b378_normalize_path_for_compare,
+    check_agent_cwd_relocation,
 )
 
 from ._config import (
@@ -1471,6 +1473,12 @@ CHECKS = [
     # B352 — tools.exec.pathPrepend: what OpenClaw exports ahead of $PATH for every
     # exec run. Skips scopes where host=node, which the runtime ignores.
     check_exec_path_prepend,
+    # B378 — agents.defaults.cwd / agents.entries.<id>.cwd (new
+    # in OpenClaw 2026.9.1): relocates the task/exec working directory away from the
+    # workspace, which OpenClaw's own sandbox guard rejects unless the run is
+    # unsandboxed. WARN-only; PASS only when cwd provably matches that scope's own
+    # declared workspace.
+    check_agent_cwd_relocation,
     # B355 (C-408) — models.providers.*.localService.command: a binary OpenClaw spawns
     # at provider startup. WARN when writable by another account; the relative-path
     # case the original stub worried about is refuted (the runtime refuses to spawn
