@@ -5034,6 +5034,30 @@ def check_installed_skills(ctx: Context) -> Finding:
         for name, entries in sorted(ctx.skill_coverage_gaps.items())
         for entry in entries
     ]
+    # B-745: same carve-out as `_skill_read_gaps` above (the B-552 precedent) — a
+    # bundled native executable is a fact worth keeping even when an earlier bucket
+    # (e.g. `warns_js`) wins the cascade below and the `warnings` bucket — computed
+    # later, at its own point in the cascade — is never reached. Registered eagerly
+    # under a "_"-prefixed key so it rides into `fx.evidence` on EVERY branch (C-358
+    # contract) without ever becoming a corroborating signal or winning the ladder
+    # itself. The `warnings` bucket further down still carries the same fact for when
+    # IT is the winner, so that branch's detail text is unchanged (no regression) —
+    # this only rescues the fact for every OTHER winner.
+    #
+    # Deliberately NOT the same string as the `warnings` bucket's alarm text below:
+    # that text is the SIGNAL ("here is a bundled binary"); this is the COVERAGE half
+    # — no check in this tool reads compiled code, so those bytes were never examined
+    # — which is what makes it a coverage note under C-358's own definition rather
+    # than a second copy of the same alarm.
+    _stowaway_note = (
+        [
+            "coverage: native executable(s) bundled in the skill, not analyzed by any "
+            "check here (compiled code is opaque to this scanner): "
+            + ", ".join(ctx.stowaway_files[:4])
+        ]
+        if getattr(ctx, "stowaway_files", None)
+        else []
+    )
     _signal_buckets: dict[str, list] = {
         "crit": crit,
         "high": high,
@@ -5063,6 +5087,8 @@ def check_installed_skills(ctx: Context) -> Finding:
         "_h6_advisory": h6_advisory,
         # B-552: same carve-out — see _skill_read_gaps' declaration above.
         "_skill_read_gaps": _skill_read_gaps,
+        # B-745: same carve-out — see _stowaway_note's declaration above.
+        "_stowaway_note": _stowaway_note,
     }
     if crit:
         extra = f" (+{len(crit) - 6} more)" if len(crit) > 6 else ""
