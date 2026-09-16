@@ -3529,16 +3529,34 @@ def check_trifecta(ctx: Context) -> Finding:
             evidence=active,
         )
 
+    # B-803: a run that never found openclaw.json at all leaves ctx.config == {} —
+    # exactly the same shape as a genuinely empty, fully-read config (B-166's own note
+    # at the top of this function). `_capabilities_attested`/`_meaningful_tool_surface`
+    # below treat an attested roster as license to trust every OFF leg they gate, but an
+    # attestation only speaks to the AGENT's own declared tools — it says nothing about
+    # channels/dmPolicy or the rest of the config surface this run never read at all. A
+    # config-blind run therefore let an attested roster silence every hedge and reach a
+    # confident PASS on the flagship CRITICAL check, which is strictly worse than the
+    # honest "Cannot determine" WARN a blind run gets without one (measured: PASS
+    # 'Active legs 1/3' vs the correct WARN once attested tools are added to an
+    # otherwise-empty home). `not ctx.config`, not just `not ctx.config_found`, so a
+    # hand-built test Context that sets a real config dict without also setting
+    # config_found=True (this file's own convention — see e.g. test_checks.py's `_a1`)
+    # stays inert; only an ACTUALLY empty config participates.
+    config_blind = not getattr(ctx, "config_found", False) and not ctx.config
+
     # Thin-surface guard (B-033): runtime tools granted at session start (message,
     # exec_command, web_*, memory_*) are NOT written to openclaw.json, so an
     # input/outbound leg that looks OFF can still be live. We only trust an OFF leg
     # when the user has attested the agent's real tool inventory (--attest). An
     # unrelated tools.allow entry must NOT silence this — a no-op name was previously
-    # enough to flip WARN→PASS without changing real exposure.
+    # enough to flip WARN→PASS without changing real exposure. A config-blind run
+    # (B-803) can never trust the attestation to stand in for the config it never saw,
+    # so it forces this hedge regardless of what `_meaningful_tool_surface` says.
     runtime_unknown = [
         k for k, v in legs.items() if not v and k in ("untrusted input", "outbound actions")
     ]
-    if runtime_unknown and not _meaningful_tool_surface(ctx):
+    if runtime_unknown and (config_blind or not _meaningful_tool_surface(ctx)):
         return _finding(
             "A1",
             WARN,
@@ -3619,10 +3637,14 @@ def check_trifecta(ctx: Context) -> Finding:
     # `write`/`apply_patch`) — "read" cannot simply be added to a substring hint list
     # without matching "thread"/"spreadsheet". Tracked separately; not widened here,
     # because raising a leg is FAIL-capable movement and this change adds no FAIL.
-    if not legs["sensitive data"] and not _capabilities_attested(ctx):
+    # B-803: same reasoning as the config_blind guard above, for the one leg this
+    # thin-surface family doesn't already cover. `config_blind` forces this hedge too
+    # (`or` below) — an attestation cannot single-handedly clear the sensitive-data leg
+    # on a run that never read the config it would need to corroborate that with.
+    if not legs["sensitive data"] and (config_blind or not _capabilities_attested(ctx)):
         reach = scopes_reaching_outside_workspace(ctx.config)
         store = _credential_store_state(getattr(ctx, "home", None))
-        if reach or store["incomplete"]:
+        if reach or store["incomplete"] or config_blind:
             why = []
             if reach:
                 # B-712: when one of these scopes is `sandbox.mode: "non-main"`, whether it
@@ -3644,6 +3666,12 @@ def check_trifecta(ctx: Context) -> Finding:
                     f" ({store['reason']}), so nothing found in it means 'not found',"
                     " not 'not there'"
                 )
+            if config_blind:
+                why.append(
+                    "no OpenClaw config was found on this host at all, so nothing about"
+                    " this leg was actually read — an attested roster speaks only to the"
+                    " agent's own tools, not to channels or the rest of the config surface"
+                )
             return _finding(
                 "A1",
                 WARN,
@@ -3651,7 +3679,11 @@ def check_trifecta(ctx: Context) -> Finding:
                 + " Cannot determine from config: sensitive data. The leg is reported"
                 f" off because no data tool is named in the config, but {'; and '.join(why)}.",
                 (
-                    "Set tools.fs.workspaceOnly=true, or narrow tools.profile to"
+                    "Run this audit against a host where openclaw.json exists, or attest"
+                    " the full picture (tools, credential exposure) so this leg can be"
+                    " resolved instead of left undetermined."
+                    if config_blind
+                    else "Set tools.fs.workspaceOnly=true, or narrow tools.profile to"
                     " 'minimal' or 'messaging' (or add 'read' to tools.deny), so file"
                     " tools cannot reach credentials outside the workspace."
                     if reach
