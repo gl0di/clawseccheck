@@ -128,8 +128,41 @@ _BIDI_MARK_SRC = (
     "\u200e-\u200f"   # LRM, RLM
     "\u061c"          # Arabic Letter Mark
 )
+# B-646: a fourth, DELIBERATELY SEPARATE source -- stripped by the same
+# normalizer as the Tier 1 class above, but never folded into
+# _ZERO_WIDTH_CLASS_SRC, because it must NOT feed the unconditional Tier-1
+# signal (see _has_dense_vs_supplement_channel below for why, and
+# docs/research/ for the corpus measurement this range is grounded against):
+#   U+FE00-FE0D  : variation selectors 1-14 -- EXCLUDING FE0E/FE0F (U+FE0E/
+#                  U+FE0F), the two presentation selectors that are
+#                  legitimate and PERVASIVE in ordinary emoji-using text (see
+#                  the Tier 2 comment inside obfuscation_signals). FE00-FE0D
+#                  have no comparable everyday use.
+#   U+E0100-E01EF: Variation Selectors Supplement -- a 240-symbol invisible
+#                  alphabet (~8 bits/code point) dense enough to carry a real
+#                  payload, published and in live use (a real skill encodes
+#                  Cashu tokens through it). Below the Unicode Tag block
+#                  (U+E0000-E007F) this project already handles separately,
+#                  so it needs its own range, not a raised _TAG_BLOCK_HI.
+#   U+3164, U+FFA0: HANGUL FILLER / HALFWIDTH HANGUL FILLER -- legitimate as
+#                  Hangul jamo composition placeholders in real Korean text
+#                  (same Tier 2 candidates named in obfuscation_signals),
+#                  included here because they are as capable of carrying a
+#                  presence/absence bit as any other member of this class.
+# Measured across 338,751 real third-party skill files: stripping this whole
+# set costs ZERO new findings (nothing downstream keys on whether these
+# specific characters survive normalization to produce one) -- the asymmetry
+# that makes stripping unconditionally sound while signalling on it is not
+# (see _has_dense_vs_supplement_channel).
+_VS_SUPPLEMENT_CLASS_SRC = (
+    "\ufe00-\ufe0d"          # variation selectors 1-14 (NOT FE0E/FE0F)
+    "\U000e0100-\U000e01ef"  # Variation Selectors Supplement
+    "\u3164"                 # Hangul Filler
+    "\uffa0"                 # Halfwidth Hangul Filler
+)
 _INVISIBLE_RE = re.compile(
-    "[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + _BIDI_MARK_SRC + "]"
+    "[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + _BIDI_MARK_SRC
+    + _VS_SUPPLEMENT_CLASS_SRC + "]"
 )
 
 # B-766: stripping a bidi control (above) removes the CHARACTER, not the character-order
@@ -658,6 +691,50 @@ def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> b
     return False
 
 
+_VS_SUPPLEMENT_RE = re.compile("[" + _VS_SUPPLEMENT_CLASS_SRC + "]")
+
+# B-646: grounded against a direct probe of the same 338,751-file real skill
+# corpus the class above cites. An UNGATED signal over this class touches a
+# small number of files (a handful of stray, single-digit occurrences —
+# scraped web content, a minifier artifact, decode noise off a mislabeled
+# binary file), none anywhere near the density a real encoded payload needs;
+# the corpus's one genuine positive (a published skill encoding Cashu tokens
+# through the Supplement range) carries 384 code points behind one emoji.
+# 32 sits comfortably above every measured noise sample (max 20) and matches
+# the threshold C038's OWN "run of >= 4 or a total of >= 32" invisible-count
+# gate already uses elsewhere in this codebase (checks/_mcp.py) — not a fresh
+# number, a second application of one this project already trusted.
+_VS_SUPPLEMENT_SIGNAL_MIN_COUNT = 32
+
+
+def _has_dense_vs_supplement_channel(text: str) -> bool:
+    """True when *text* carries enough Variation-Selector-Supplement-class
+    characters (see `_VS_SUPPLEMENT_CLASS_SRC`) to look like a deliberate
+    invisible-alphabet channel rather than one or two incidental occurrences
+    (B-646).
+
+    Deliberately COUNT-gated rather than unconditional like the Tier 1 zero-
+    width class: this class's two most common members in real text —
+    U+3164/U+FFA0 (Hangul fillers) and, had they been included, U+FE0E/
+    U+FE0F (the ordinary emoji-presentation selectors, kept OUT of this class
+    entirely) — have honest, common uses, so a bare-presence signal here
+    would WARN on ordinary Korean or emoji-heavy content. A real encoded
+    payload needs many symbols (roughly 8 bits/code point across this class),
+    so requiring a real count catches the channel while a stray one or two
+    stays quiet — the same reasoning the pre-existing C038 invisible-count
+    gate already applies one check up the stack, generalised to this
+    specific class rather than reused directly (C038's own counter combines
+    a DIFFERENT class — see its own module comment for why the two must not
+    be merged).
+
+    No per-character exemption (unlike U+200D/U+180E above): the payload
+    here lives in WHICH selector is chosen, not in where one sits relative
+    to its neighbours, so a flanking check would answer a question this
+    channel does not ask.
+    """
+    return len(_VS_SUPPLEMENT_RE.findall(text)) >= _VS_SUPPLEMENT_SIGNAL_MIN_COUNT
+
+
 def obfuscation_signals(text: str) -> list[str]:
     """Return human-readable evidence strings for each class of de-obfuscation
     that *changed* the text.  Returns an empty list when the text is clean.
@@ -667,6 +744,10 @@ def obfuscation_signals(text: str) -> list[str]:
       - "bidi-override / embedding controls found" — bidi controls stripped
       - "Unicode Tag-block characters found" — Tag-block (U+E0000-E007F) run present,
         not explained away as a legitimate flag-subdivision emoji sequence (B-232)
+      - "dense variation-selector / invisible-alphabet channel found" — enough
+        Variation-Selectors-Supplement-class characters (U+FE00-FE0D minus
+        FE0E/FE0F, U+E0100-E01EF, U+3164, U+FFA0) to look like a deliberate
+        encoded channel rather than an incidental occurrence (B-646)
       - "confusable characters folded to ASCII" — confusable map applied
     """
     signals: list[str] = []
@@ -717,27 +798,46 @@ def obfuscation_signals(text: str) -> list[str]:
     #
     # TIER 2 -- DELIBERATELY DEFERRED, NOT IN THIS CLASS (record only; do not
     # add without the per-character discriminator described below):
-    #   U+FE00-FE0F : variation selectors. Legitimate and PERVASIVE here --
-    #                 U+FE0F alone is what turns a base glyph into emoji
-    #                 presentation (an emoji heart, warning sign or check mark
-    #                 each carry it), so a bare presence signal would false-fire
-    #                 on ordinary emoji-using prose across the whole engine
-    #                 (B58, the content ring, C-038).
+    #   U+FE0E, U+FE0F : the two emoji-presentation variation selectors.
+    #                 Legitimate and PERVASIVE -- U+FE0F alone is what turns a
+    #                 base glyph into emoji presentation (an emoji heart,
+    #                 warning sign or check mark each carry it), so a bare
+    #                 presence signal would false-fire on ordinary emoji-using
+    #                 prose across the whole engine (B58, the content ring,
+    #                 C-038). Measured (B-646): U+FE0F alone appears in 10.7%
+    #                 of a 338,751-file real skill corpus.
     #   U+2800      : BRAILLE PATTERN BLANK -- legitimate whenever real Braille
     #                 text is present (a blank cell inside a Braille run),
     #                 indistinguishable from an invisible-channel member without
     #                 knowing whether it sits among other Braille Patterns code
     #                 points (U+2800-28FF).
-    #   U+3164, U+FFA0 : HANGUL FILLER / HALFWIDTH HANGUL FILLER -- legitimate
-    #                 as Hangul jamo composition placeholders in real Korean
-    #                 text.
     #   Sound direction for a future Tier 2: count the code point, but excuse it
     #   per character when it sits among genuinely related script/emoji context
     #   -- not a bare presence class. `_is_emoji_codepoint` (above) and
     #   `_is_zwj_between_emoji`'s flanking-character check are the existing
     #   precedent for that shape; adding Tier 2 to this class without one would
     #   just move the false-positive class B-450 was scoped to avoid (punishing
-    #   an ordinary emoji/Korean/Braille user) onto these code points instead.
+    #   an ordinary emoji/Braille user) onto these code points instead.
+    #
+    # TIER 3 (B-646) -- a separate, COUNT-GATED signal, not folded into the
+    # unconditional Tier 1 class above:
+    #   U+FE00-FE0D (NOT FE0E/FE0F), U+E0100-E01EF (Variation Selectors
+    #   Supplement -- a 240-symbol invisible alphabet, an order of magnitude
+    #   denser than the Tier 1 ZWSP/ZWJ-style channels, published and in live
+    #   use by a real skill to encode Cashu tokens behind a single emoji),
+    #   U+3164, U+FFA0 (Hangul fillers). Stripped unconditionally by
+    #   _INVISIBLE_RE (see _VS_SUPPLEMENT_CLASS_SRC's own comment for why that
+    #   is safe -- measured zero new findings across the same 338,751-file
+    #   corpus) but signalled only above _VS_SUPPLEMENT_SIGNAL_MIN_COUNT
+    #   occurrences (see _has_dense_vs_supplement_channel): unlike Tier 1,
+    #   this class's most common real-world members (the Hangul fillers) have
+    #   an honest single-occurrence use, and the payload this class exists to
+    #   catch needs many symbols to carry anything, so a count gate is the
+    #   sound direction the paragraph above asks for -- applied at the class
+    #   level here rather than per-character, because the position/effect
+    #   predicates that per-character exemption uses do not apply: the
+    #   payload lives in WHICH selector is chosen, not in a split, so
+    #   stripping it reveals nothing to check for.
     # ------------------------------------------------------------------------
     # B-490: both bodies now come from the module-level sources above, so the
     # signal and the stripper cannot drift apart again (they did, for 14 members).
@@ -757,6 +857,8 @@ def obfuscation_signals(text: str) -> list[str]:
         signals.append("bidi-override / embedding controls found")
     if _has_suspicious_tag_run(text):
         signals.append("Unicode Tag-block characters found")
+    if _has_dense_vs_supplement_channel(text):
+        signals.append("dense variation-selector / invisible-alphabet channel found")
 
     # Check whether confusable folding would change the NFKC-normalized text.
     nfkc = unicodedata.normalize("NFKC", _INVISIBLE_RE.sub("", text))
