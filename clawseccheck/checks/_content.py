@@ -60,6 +60,7 @@ from ._shared import (
     _mcp_servers,
     _mcp_tool_texts,
     _skill_frontmatter_block,
+    _username_safe_path,
     _web_fetch_enabled,
 )
 
@@ -14744,6 +14745,15 @@ def check_symlink_escape(ctx: Context) -> Finding:
     for root in roots:
         for link in _enumerate_symlinks(root, state):
             try:
+                # C-456 FU (adversarial review note): every `root` here comes from
+                # `_symlink_scan_roots`, which only ever yields ctx.home or a subpath of
+                # it, and `link` is discovered by walking inside `root` -- so this
+                # ValueError branch is provably unreachable today and `rel` never falls
+                # back to an absolute, unredacted `str(link)`. Left in (not asserted away)
+                # because that's an invariant of `_symlink_scan_roots`'s current shape, not
+                # of this function -- if a future root ever lived outside ctx.home, silently
+                # dropping the fallback would turn a defensive branch into a crash instead
+                # of a leak, which is worse.
                 rel = str(link.relative_to(ctx.home))
             except ValueError:
                 rel = str(link)
@@ -14754,7 +14764,10 @@ def check_symlink_escape(ctx: Context) -> Finding:
             try:
                 real = Path(os.path.realpath(link))
             except OSError:
-                unknowns.append(f"{rel} -> {raw} (unresolvable)")
+                # C-456 FU: `raw` is the literal on-disk symlink text, which can itself be
+                # an absolute path (a skill author wrote `os.symlink("/home/x/...", link)`)
+                # -- so it carries the operator's username exactly like `real` below.
+                unknowns.append(f"{rel} -> {_username_safe_path(raw)} (unresolvable)")
                 continue
             # Sensitivity is a property of the TARGET PATH, not of whether it currently
             # exists on the vetting box: `data -> ~/.ssh` is an exfil primitive whether or
@@ -14762,23 +14775,29 @@ def check_symlink_escape(ctx: Context) -> Finding:
             # non-sensitive dangling link is a genuine "can't assess" -> UNKNOWN.
             sclass = _symlink_target_sensitive(real)
             in_tree = real == contain_root or contain_root in real.parents
+            # C-456 FU: `real` is the resolved symlink TARGET, not a path under ctx.home --
+            # in --vet mode ctx.home is the vetted skill dir, unrelated to the operator's
+            # real account home the target usually lives under, so `_detail_path` (relative
+            # to ctx.home) would miss it. `_username_safe_path` collapses Path.home() instead,
+            # the right frame for a target that can point anywhere on the host (B-757).
+            safe_real = _username_safe_path(real)
             if sclass and not in_tree:
                 # A symlink that ESCAPES the workspace/home tree into a sensitive store is the
                 # exfil primitive — reading through it hands the skill a secret it could not
                 # otherwise reach.
-                fails.append(f"{rel} -> {real} [{sclass}]")
+                fails.append(f"{rel} -> {safe_real} [{sclass}]")
             elif sclass and in_tree:
                 # C-228 / C-135: a sensitive-named target that stays INSIDE the tree the agent
                 # was already handed (a monorepo `apps/api/.env -> ../../.env`, a direnv
                 # `sub/.envrc -> ../.envrc`) adds no new reach — the file is already readable
                 # without the link. Not an escape; surface as WARN for a human look, never FAIL.
-                warns.append(f"{rel} -> {real} [{sclass}, stays in-tree]")
+                warns.append(f"{rel} -> {safe_real} [{sclass}, stays in-tree]")
             elif not real.exists():  # follows the link: False == dangling
-                unknowns.append(f"{rel} -> {raw} (broken / dangling)")
+                unknowns.append(f"{rel} -> {_username_safe_path(raw)} (broken / dangling)")
             elif in_tree:
                 pass  # PASS: stays inside the skill/workspace tree
             else:
-                warns.append(f"{rel} -> {real} (escapes the skill/workspace tree)")
+                warns.append(f"{rel} -> {safe_real} (escapes the skill/workspace tree)")
 
     cap_note = (
         f" (symlink scan cap of {_SYMLINK_SCAN_CAP} hit — some links not inspected)"
