@@ -29,10 +29,12 @@ This is UNKNOWN-on-dirty-content, not the B-614 lying-PASS class, so the directi
 conservative; what was false is the stated REASON, on a surface whose entire job is the
 install decision.
 
-**What the fix deliberately does not touch.** `build_profile`'s `ctx` variable still points
-at `pool[0]` for its two other consumers (`assessed`, `_danger_coverage_gap`). Those are
-blind on the plugin path for the same missing-attribute reason, but changing them moves a
-score cap rather than a sentence — a separate change needing its own measurement.
+**What this fix deliberately did not touch, at the time.** `build_profile`'s `ctx` variable
+still pointed at `pool[0]` for its two other consumers (`assessed`, `_danger_coverage_gap`).
+Those were blind on the plugin path for the same missing-attribute reason, but changing them
+moved a score cap rather than a sentence — a separate change needing its own measurement.
+CLAWSECCHECK-B-635 made that change: both now fold over `_pool_contexts(pool)` too. See
+tests/test_b635_plugin_pool_contexts.py.
 """
 from __future__ import annotations
 
