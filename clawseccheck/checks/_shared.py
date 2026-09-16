@@ -120,7 +120,7 @@ def _detail_path(value, home) -> str:
     verbatim: that string is a function of the audited subject, so it belongs in the
     finding's identity (and in the text, since it is what the owner has to go fix).
 
-    C-456 FU (CLAWSECCHECK-B-819): consolidated here from three byte-identical copies
+    C-456 FU (B-819): consolidated here from three byte-identical copies
     that had drifted apart independently in checks/_host.py, checks/_config.py and
     checks/_lifecycle.py, per this project's own §3.1 rule (a helper reused by 2+ topics
     belongs in checks/_shared.py). Unlike ``_username_safe_path`` above, this takes an
@@ -844,7 +844,7 @@ SENSITIVE_TOOL_IDS = frozenset({"read", "memory_get", "memory_search"})
 # bare `fs_read`/`fs_write` core allowlist entry, and `resolveCoreToolProfilePolicy(
 # "minimal")` grants neither under the real policy resolver — both fixtures do not
 # demonstrate what their names claim. That is clawrange's corpus, a different project;
-# filed there, not edited from here (CLAWSECCHECK-B-674).
+# filed there, not edited from here (B-674).
 SENSITIVE_TOOL_HINTS = (
     "db",
     "sql",
@@ -1110,7 +1110,7 @@ def _meta(cid: str):
 # not the cure. `risk.py` now imports these from here, so there is one implementation and one
 # place a future C-135 round has to land.
 #
-# CLAWSECCHECK-C-454: even after that move, the raw `sandbox.docker.binds` NORMALIZATION
+# C-454: even after that move, the raw `sandbox.docker.binds` NORMALIZATION
 # step (dict->get->str/list-coercion, fail-closed on a malformed shape) was still
 # duplicated FOUR times: `_sandbox_has_writable_bind` below, `_peragent_sandbox_evidence`
 # and `check_sandbox`'s defaults-level block (both `checks/_config.py`), and RISK-16's
@@ -4037,7 +4037,7 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     # see OUTBOUND_TOOL_IDS. Exact match, alias-folded, over the config's grants and over
     # an attested roster, mirroring B-667's SENSITIVE_TOOL_IDS treatment of the inbound
     # leg exactly (same helpers, same shape, no confinement guard — no vetted per-scope
-    # write-confinement model exists yet, see CLAWSECCHECK-F-186).
+    # write-confinement model exists yet, see F-186).
     outbound.extend(_tool_id_sources(cfg, OUTBOUND_TOOL_IDS))
     outbound.extend(_attested_tool_id_sources(ctx, OUTBOUND_TOOL_IDS))
     if dig(cfg, "tools.elevated.allowFrom"):
