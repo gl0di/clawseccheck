@@ -1421,7 +1421,7 @@ def check_cron_job_content(ctx: Context) -> Finding:
               carries pass_confidence="no_signal" rather than "verified" — nothing was
               actually inspected, so the clean verdict is by absence, not by evidence.
 
-    C-135 follow-up (CLAWSECCHECK-B-657 review): of the four UNKNOWN causes above,
+    C-135 follow-up (B-657 review): of the four UNKNOWN causes above,
     ``Finding.engine_degraded`` is True only for "found but could not be parsed/read"
     and the SHADOWED-store case — both are a real, present store this process
     deliberately or accidentally never fully read. It stays False for "no cron store
@@ -1717,7 +1717,7 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
               AND an apparent orphan turned up — each of which makes orphan-ness
               uncomputable.
 
-    C-135 follow-up (CLAWSECCHECK-B-657 review): ``Finding.engine_degraded`` is set True
+    C-135 follow-up (B-657 review): ``Finding.engine_degraded`` is set True
     only on the UNKNOWN branches whose cause is a real, present store this process could
     not fully read (a parse/read error, a legacy-store shadow, or a row-cap truncation —
     the run-log table's own PARSE error, the job store's own PARSE error, shadowing, and
