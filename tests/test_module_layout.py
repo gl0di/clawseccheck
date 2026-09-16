@@ -92,7 +92,8 @@ _EXEMPT = {
                             "approval / update-pinning / self-modification / supply-chain "
                             "topic (17 checks + helpers); topic-faithful and over budget "
                             "by design. A finer split is a later cycle.",
-    "checks/_content.py": "~14,623 lines — the content-security ring: 51 check functions, 178 "
+    "checks/_content.py": "~15,129 lines (restated 2026-09-16, C-437 — was ~14,623) — the "
+                          "content-security ring: 51 check functions, 178 "
                           "private helpers and 241 module regexes. Restated 2026-09-06 "
                           "(C-432), and the previous reason is RETRACTED rather than "
                           "reworded. It read: kept as one unit because SKILL_CONTENT_RING "
@@ -297,7 +298,10 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~7,267 lines — the python/shell/js parser families; its own split is "
+    "skillast.py": "~7,875 lines (restated 2026-09-16, B-643 — was ~7,267; the addition is "
+                   "two more taint-propagation node types, with/for statement bindings in "
+                   "_external_tainted_names, not a new parser family) — the "
+                   "python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target). Restated "
                    "2026-09-06 (B-752), and the guard's own instruction is to reconsider "
                    "the split rather than bump the number, so here is where the growth "
