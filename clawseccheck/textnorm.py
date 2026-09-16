@@ -424,6 +424,81 @@ def _is_zwj_between_emoji(chars: list[str], idx: int) -> bool:
     )
 
 
+# The Mongolian Unicode block (U+1800-U+18AF) — the letters/digits/punctuation
+# a flanking character must fall inside, PLUS a general-category allowlist so
+# a flanking character must be a genuinely spacing/visible glyph. Built as an
+# allowlist rather than "anything in range" or "anything not U+180E", because
+# an allowlist's failure mode is the safe one (an unrecognised category is
+# simply not Mongolian enough, so the WARN still fires) where a denylist's
+# failure mode is silence (see the adversarial-finding note below for why
+# "not U+180E" alone was not enough).
+_MONGOLIAN_BLOCK_LO = 0x1800
+_MONGOLIAN_BLOCK_HI = 0x18AF
+_MONGOLIAN_VISIBLE_CATEGORIES = frozenset({
+    "Lo",  # letters (the bulk of the block)
+    "Lm",  # modifier letter (U+1843 MONGOLIAN LETTER TODO LONG VOWEL SIGN)
+    "Nd",  # digits (U+1810-1819)
+    "Po",  # punctuation (birga, comma, colon, ellipsis, …)
+    "Pd",  # dash punctuation (U+1806 MONGOLIAN TODO SOFT HYPHEN)
+})
+
+
+def _is_mongolian_flanked_180e(chars: list[str], idx: int) -> bool:
+    """True when the MONGOLIAN VOWEL SEPARATOR (U+180E) at *chars[idx]* sits
+    directly between two Mongolian-block (U+1800-U+18AF) LETTER/PUNCTUATION
+    characters -- i.e. it is doing its one honest job, separating a
+    word-final consonant from a suffix vowel inside a literal Mongolian text
+    run -- rather than being an invisible-channel character spliced into
+    unrelated content (B-647).
+
+    A flanking character must be in the Mongolian block AND carry one of the
+    "visible glyph" general categories above (`unicodedata.category`) — TWO
+    independent adversarial findings against earlier drafts of this
+    function, both closed by tightening what counts as a flanking character
+    rather than by special-casing one more code point (a lesson repeated
+    elsewhere in this codebase: an enumerated denylist is fragile in exactly
+    this way):
+
+      1. Plain "in [0x1800, 0x18AF]" let U+180E itself count as a flanking
+         character -- it is inside that range. A RUN of consecutive U+180E
+         characters padded by one real Mongolian letter on each OUTER edge
+         then exempted every character in the run: an unbounded invisible
+         channel armoured by two letters, cheaper than the emoji-ZWJ
+         precedent's bypass cost (which needs a real, individually-
+         recognisable emoji on every side of every ZWJ, not just the ends).
+      2. Narrowing to "in-block AND not U+180E" was still not enough: the
+         three Mongolian Free Variation Selectors (U+180B-180D, category
+         Mn -- combining marks, invisible in normal rendering, NOT swept by
+         the Cf-only zero-width class above so never flagged themselves)
+         are in-block and not U+180E, so alternating U+180E/FVS needed no
+         outer padding at all -- every interior U+180E had an FVS neighbour
+         on both sides. The category allowlist excludes Mn (and Cf, Cn, and
+         everything else that is not a spacing glyph) directly, closing
+         this without an FVS-specific special case, and closes the same
+         class of gap for any future invisible/combining Mongolian-block
+         addition without another patch.
+
+    Immediate-neighbour check, unlike *_is_zwj_between_emoji*'s
+    modifier-skipping walk: U+180E's own comment names no adjacent
+    "modifier" class to skip over, and the vowel separator's actual function
+    puts it directly between two letters with no intervening character, so
+    there is nothing to walk past. Both neighbours must exist and both must
+    qualify; U+180E at the very start or end of a string is never exempt
+    (same "never exempt at a string boundary" rule *_is_zwj_between_emoji*
+    uses).
+    """
+    if idx <= 0 or idx >= len(chars) - 1:
+        return False  # at a string boundary — never exempt
+
+    def _is_visible_mongolian(ch: str) -> bool:
+        cp = ord(ch)
+        return (_MONGOLIAN_BLOCK_LO <= cp <= _MONGOLIAN_BLOCK_HI
+                and unicodedata.category(ch) in _MONGOLIAN_VISIBLE_CATEGORIES)
+
+    return (_is_visible_mongolian(chars[idx - 1])
+            and _is_visible_mongolian(chars[idx + 1]))
+
+
 # ---------------------------------------------------------------------------
 # Module-level, content-keyed memo for normalize_for_scan on large blobs. The
 # same multi-megabyte skill/bootstrap blobs get re-normalized call after call
@@ -542,15 +617,24 @@ def normalize_for_scan(text: str) -> str:
 
 def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> bool:
     """True when *text* contains a zero-width / invisible char that is NOT
-    explained away as part of a legitimate emoji ZWJ sequence (B-088 / A3).
+    explained away as part of a legitimate emoji ZWJ sequence (B-088 / A3) or
+    a literal Mongolian text run (B-647).
 
     Every code point *zero_width_re* matches is unconditionally suspicious --
     see the class comment above ``_ZERO_WIDTH_RE`` in *obfuscation_signals* for
     the full, curated list (B-450) and why each member has no honest use in
-    agent-facing text -- with exactly ONE exception: U+200D (ZWJ) is suspicious
-    UNLESS it sits between two emoji code points (see *_is_zwj_between_emoji*),
-    in which case it is a normal emoji ZWJ sequence (e.g. 🧑‍⚖️) and must
-    not be flagged.
+    agent-facing text -- with exactly TWO exceptions:
+
+      - U+200D (ZWJ) is suspicious UNLESS it sits between two emoji code
+        points (see *_is_zwj_between_emoji*), in which case it is a normal
+        emoji ZWJ sequence (e.g. 🧑‍⚖️) and must not be flagged.
+      - U+180E (MONGOLIAN VOWEL SEPARATOR) is suspicious UNLESS it sits
+        directly between two Mongolian-block characters (see
+        *_is_mongolian_flanked_180e*), in which case it is doing its one
+        honest job inside literal Mongolian text and must not be flagged.
+        B-647: the class comment above named this exact exemption ("no
+        honest reason to appear outside literal Mongolian text runs") and
+        shipped without it, false-WARNing on a real Mongolian-language skill.
 
     Iterates over Python ``str`` code points directly (each element of a
     Python 3 ``str`` is already a full code point, astral chars included —
@@ -561,12 +645,15 @@ def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> b
         return False
 
     chars = list(text)
-    # Re-scan by code-point index so ZWJ neighbours can be inspected.
+    # Re-scan by code-point index so a flagged char's neighbours can be inspected.
     for idx, ch in enumerate(chars):
         if not zero_width_re.match(ch):
             continue
-        if ord(ch) == 0x200D and _is_zwj_between_emoji(chars, idx):
+        cp = ord(ch)
+        if cp == 0x200D and _is_zwj_between_emoji(chars, idx):
             continue  # legitimate emoji ZWJ sequence — not suspicious
+        if cp == 0x180E and _is_mongolian_flanked_180e(chars, idx):
+            continue  # literal Mongolian text run — not suspicious
         return True
     return False
 
@@ -618,7 +705,15 @@ def obfuscation_signals(text: str) -> list[str]:
     #   U+180E      : MONGOLIAN VOWEL SEPARATOR -- category Cf (format,
     #                 invisible) since Unicode 10.0; no honest reason to appear
     #                 outside literal Mongolian text runs, and never in an MCP
-    #                 tool description or install-time target.
+    #                 tool description or install-time target. B-647: unlike
+    #                 the other Tier 1 members above, this ONE has a per-
+    #                 character exemption, same shape as U+200D below --
+    #                 flanked directly by two Mongolian-block characters
+    #                 (see `_is_mongolian_flanked_180e`) means it is doing its
+    #                 actual job inside literal Mongolian text, not splicing
+    #                 unrelated content. Measured false-WARN before this
+    #                 exemption existed: a real Mongolian-language skill's
+    #                 own prose.
     #
     # TIER 2 -- DELIBERATELY DEFERRED, NOT IN THIS CLASS (record only; do not
     # add without the per-character discriminator described below):
