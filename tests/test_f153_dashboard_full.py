@@ -510,6 +510,41 @@ class TestCapParity:
         assert "1 of 5 layers did not run" in second_line
         assert "agent self-report (not submitted)" in second_line
 
+    def test_dashboard_full_fast_names_the_same_missing_layers_as_full_json_fast(
+            self, capsys):
+        """CLAWSECCHECK-B-768: `--dashboard --full --fast` used to under-report
+        `missing_layers` by one against the IDENTICAL `--full --fast --json` run —
+        `logs_trajectories` silently read as `ran` on the dashboard only, because that
+        branch's inline PHASE_BEHAVIORAL projection (`_dashboard_phases`, cli.py) added
+        NOTHING to the ledger when `--fast` skipped the behavioural replay, while
+        `to_ledger`'s own contract (pipeline.py) is that `logs_trajectories` starts
+        `ran` and only a PHASE_BEHAVIORAL entry PRESENT in the ledger can worsen it — an
+        absent phase is indistinguishable from a clean one. `_build_layer_ledger`
+        (the --full/--json path) already added an explicit skipped entry for exactly
+        this reason; the dashboard branch now does too.
+
+        Proven to fail on the pre-fix code: before this change the JSON list below had
+        4 entries (including logs_trajectories) and the dashboard line said "3 of 5".
+        """
+        main(["--home", SAFE, *BASE, "--full", "--fast", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["graded"] is False
+        json_missing = {d["layer"] for d in payload["missing_layers"]}
+        # Non-vacuity: this fixture/flag combination really does miss 4 layers, so a
+        # regression that silently drops one from EITHER surface has something to drop.
+        assert json_missing == {
+            "installed_sweep", "logs_trajectories", "self_report", "live_behaviour"}
+
+        main(["--home", SAFE, *BASE, "--dashboard", "--full", "--fast"])
+        dash_out = capsys.readouterr().out
+        second_line = dash_out.splitlines()[1]
+        assert "No grade yet" in second_line
+        assert f"{len(json_missing)} of 5 layers did not run" in second_line
+        assert "logs and trajectories" in second_line, second_line
+        assert "installed skills and plugins" in second_line
+        assert "agent self-report" in second_line
+        assert "live behaviour test" in second_line
+
 
 # ─────────────────────────── flag coherence: --compact / --quiet ───────────────────────────
 

@@ -5560,9 +5560,27 @@ def _main(argv=None) -> int:
                         complete=False, section=False,
                         detail=(f"the skill sweep could not complete ({_sanitize(str(_exc))})"
                                 " — no skill verdict below can be relied on."))
+        # B-768: `_behavioral_absent` follows the SAME "default to the --fast reading,
+        # narrow it once we know better" shape `_plugin_absent`/`_skill_absent` above
+        # already use — and, unlike this branch's earlier `behavioral_phase = None`
+        # (which this replaces), it is NEVER left as a bare `None` that a later `if`
+        # could skip adding to the ledger. `to_ledger`'s own contract (see its
+        # docstring) is that `logs_trajectories` STARTS `ran` and PHASE_BEHAVIORAL can
+        # only make it WORSE *when present in `self.phases`* — a phase silently absent
+        # from the ledger is indistinguishable from one that ran clean, which is
+        # exactly how `--dashboard --full --fast` under-reported `missing_layers` by
+        # one entry against the identical `--full --fast --json` run: `run_pipeline`'s
+        # own P8 (three-way fast/budget/ran branch, mirrored below) never has this gap,
+        # because it always `result.add()`s something for PHASE_BEHAVIORAL.
+        _behavioral_absent = _pipeline._skipped(
+            _pipeline.PHASE_BEHAVIORAL, "skipped — --fast was given.", section=False)
         behavioral_phase = None
-        if not args.fast and not budget_exceeded(full_deadline):
-            behavioral_phase = _pipeline.run_behavioral(ctx, ascii_only=ascii_only)
+        if not args.fast:
+            if budget_exceeded(full_deadline):
+                _behavioral_absent = _pipeline._not_reached(
+                    _pipeline.PHASE_BEHAVIORAL, DEFAULT_FULL_BUDGET_S)
+            else:
+                behavioral_phase = _pipeline.run_behavioral(ctx, ascii_only=ascii_only)
         # B-723: the ledger this branch scores against is now projected from the phases
         # that ACTUALLY ran, not from `_resolve_runtime_caps`'s pre-sweep promise. Built
         # here rather than from a `run_pipeline` call because this branch runs its phases
@@ -5576,8 +5594,8 @@ def _main(argv=None) -> int:
                               if skill_sweep is not None else _skill_absent)
         _dashboard_phases.add(_pipeline.record_plugin_sweep(plugin_sweep,
                                                             absent=_plugin_absent))
-        if behavioral_phase is not None:
-            _dashboard_phases.add(behavioral_phase)
+        _dashboard_phases.add(behavioral_phase
+                              if behavioral_phase is not None else _behavioral_absent)
         _ledger = _dashboard_phases.to_ledger(
             findings, degraded_count=score.degraded_count, attestation=attestation,
             live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis,
