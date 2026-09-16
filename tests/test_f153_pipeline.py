@@ -96,7 +96,7 @@ def test_phase_result_to_json_sanitizes_and_rounds_elapsed():
 class _FakeSweep:
     def __init__(self, *, no_roots=False, no_targets=False, complete=True,
                 has_fail=False, counts=None, not_scanned=None,
-                discovery_incomplete_reasons=None):
+                discovery_incomplete_reasons=None, rows=None):
         self.no_roots = no_roots
         self.no_targets = no_targets
         self.complete = complete
@@ -105,6 +105,13 @@ class _FakeSweep:
                                   "truncated": 0, "skipped": 0}
         self._not_scanned = not_scanned or []
         self.discovery_incomplete_reasons = discovery_incomplete_reasons or []
+        # CLAWSECCHECK-B-764: deliberately NOT set unless the caller passes it -- most
+        # existing callers of this fake exercise record_skill_sweep, which never reads
+        # `rows` at all, and `_sweep_flagged_names`'s own `getattr(sweep, "rows",
+        # None)` fallback exists precisely so a sweep object without one degrades to
+        # "nothing named" instead of raising.
+        if rows is not None:
+            self.rows = rows
 
     def counts(self):
         return self._counts
@@ -1180,3 +1187,75 @@ def test_run_pipeline_records_the_skill_sweep_it_was_handed():
     assert skill.status == pl.STATUS_RAN
     assert skill.has_fail is True
     assert skill.elapsed_s == 1.5
+
+
+# ---------------------------------------------------------------------------
+# CLAWSECCHECK-B-764: _sweep_phase_from / _sweep_data name what was flagged, not
+# just how many -- the plugin sweep's default reporting path (text `lines` and
+# JSON `pluginSweep`) had a fails/warns COUNT with no identity attached to it.
+# ---------------------------------------------------------------------------
+
+def test_sweep_flagged_names_splits_fail_and_warn_by_row_status():
+    rows = [("bad-one", "FAIL", 3), ("meh", "WARN", 1), ("clean", "PASS", 0)]
+    dangerous, suspicious = pl._sweep_flagged_names(_FakeSweep(rows=rows))
+    assert dangerous == ["bad-one"]
+    assert suspicious == ["meh"]
+
+
+def test_sweep_flagged_names_empty_without_rows_attribute():
+    """A sweep object exposing only the documented published surface (no `rows`,
+    matching `_FakeVetSweep` elsewhere in this file) must degrade to "nothing named",
+    never raise."""
+    dangerous, suspicious = pl._sweep_flagged_names(_FakeVetSweep([]))
+    assert dangerous == []
+    assert suspicious == []
+
+
+def test_named_sweep_line_caps_at_three_with_a_remainder_count():
+    line = pl._named_sweep_line("Dangerous", ["a", "b", "c", "d", "e"])
+    assert line == "Dangerous: a, b, c, +2 more."
+
+
+def test_named_sweep_line_no_remainder_under_the_cap():
+    assert pl._named_sweep_line("Dangerous", ["a", "b"]) == "Dangerous: a, b."
+
+
+def test_sweep_phase_from_text_lines_name_the_dangerous_and_suspicious_targets():
+    rows = [("evil-plugin", "FAIL", 2), ("iffy-plugin", "WARN", 1),
+            ("clean-plugin", "PASS", 0)]
+    sweep = _FakeSweep(
+        counts={"total": 3, "fails": 1, "warns": 1, "safe": 1,
+                "truncated": 0, "skipped": 0},
+        rows=rows,
+    )
+    phase = pl._sweep_phase_from(pl.PHASE_PLUGIN_SWEEP, sweep, unit="plugin",
+                                 elapsed_s=0.1, full_detail_flag="--vet-plugin <path>")
+    joined = " ".join(phase.lines)
+    assert "evil-plugin" in joined
+    assert "iffy-plugin" in joined
+    assert "Dangerous: evil-plugin." in phase.lines
+    assert "Suspicious: iffy-plugin." in phase.lines
+
+
+def test_sweep_phase_from_no_flagged_line_when_everything_is_clean():
+    sweep = _FakeSweep(
+        counts={"total": 1, "fails": 0, "warns": 0, "safe": 1,
+                "truncated": 0, "skipped": 0},
+        rows=[("clean-plugin", "PASS", 0)],
+    )
+    phase = pl._sweep_phase_from(pl.PHASE_PLUGIN_SWEEP, sweep, unit="plugin",
+                                 elapsed_s=0.1, full_detail_flag="--vet-plugin <path>")
+    assert not any(ln.startswith("Dangerous:") or ln.startswith("Suspicious:")
+                  for ln in phase.lines)
+
+
+def test_sweep_data_carries_full_uncapped_name_lists():
+    rows = [(f"bad-{i}", "FAIL", 1) for i in range(5)]
+    sweep = _FakeSweep(
+        counts={"total": 5, "fails": 5, "warns": 0, "safe": 0,
+                "truncated": 0, "skipped": 0},
+        rows=rows,
+    )
+    data = pl._sweep_data(sweep)
+    assert data["dangerous"] == [f"bad-{i}" for i in range(5)]
+    assert data["suspicious"] == []

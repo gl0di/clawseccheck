@@ -362,6 +362,39 @@ def resolve_plugin_sweep():
     return fn if callable(fn) else None
 
 
+def _sweep_flagged_names(sweep) -> "tuple[list[str], list[str]]":
+    """``(dangerous names, suspicious names)`` from *sweep*'s own ``rows``
+    (CLAWSECCHECK-B-764).
+
+    ``rows`` (a list of ``(sanitized target id, status, evidence count)`` — see
+    ``PluginSweep``/``cli.SkillSweep``) is deliberately NOT part of the published
+    duck-type surface :func:`_sweep_phase_from` otherwise relies on
+    (``no_roots``/``no_targets``/``counts()``/``has_fail``/``complete``/
+    ``not_scanned()``), so a hypothetical sweep implementation that lacks it degrades
+    to two empty lists here rather than raising — the same tolerance the rest of this
+    module already gives an unusual/duck-typed sweep object. Names are already
+    sanitized once in ``rows`` at collection time (matching ``cli.py``'s
+    ``_sweep_to_json`` docstring note for the identical reason), so no second pass here.
+    """
+    rows = getattr(sweep, "rows", None)
+    if not rows:
+        return [], []
+    dangerous = [n for n, s, _e in rows if s == "FAIL"]
+    suspicious = [n for n, s, _e in rows if s == "WARN"]
+    return dangerous, suspicious
+
+
+def _named_sweep_line(label: str, names: "list[str]", *, cap: int = 3) -> str:
+    """``"Dangerous: a, b, +2 more."`` — same cap/format as the SKILL SWEEP quiet
+    line's own ``dangerous`` naming (``cli.py::_sweep_quiet_line``), reused here so the
+    plugin sweep's default reporting path stops being the one place a flagged target's
+    identity never reaches the reader (CLAWSECCHECK-B-764)."""
+    shown = ", ".join(names[:cap])
+    if len(names) > cap:
+        shown += f", +{len(names) - cap} more"
+    return f"{label}: {shown}."
+
+
 def _sweep_phase_from(name: str, sweep, *, unit: str, elapsed_s: float,
                       full_detail_flag: str) -> PhaseResult:
     """Build a :class:`PhaseResult` from any sweep exposing the published surface."""
@@ -380,7 +413,17 @@ def _sweep_phase_from(name: str, sweep, *, unit: str, elapsed_s: float,
         if c.get("skipped"):
             detail += f", {c['skipped']} not scanned (budget exceeded)"
         detail += "."
-        lines = [detail, f"Full detail: {full_detail_flag}."]
+        lines = [detail]
+        # CLAWSECCHECK-B-764: name what was flagged, not just how many -- "a plugin is
+        # a problem" is not actionable without which one, and plugin roots come from
+        # OpenClaw's own sqlite index (a user cannot easily enumerate candidates by
+        # hand to go find it themselves).
+        dangerous, suspicious = _sweep_flagged_names(sweep)
+        if dangerous:
+            lines.append(_named_sweep_line("Dangerous", dangerous))
+        if suspicious:
+            lines.append(_named_sweep_line("Suspicious", suspicious))
+        lines.append(f"Full detail: {full_detail_flag}.")
     return PhaseResult(
         name=name,
         status=STATUS_RAN,
@@ -396,12 +439,19 @@ def _sweep_phase_from(name: str, sweep, *, unit: str, elapsed_s: float,
 
 def _sweep_data(sweep) -> dict:
     """Machine-readable roll-up of any sweep, for ``--full --json``."""
+    dangerous, suspicious = _sweep_flagged_names(sweep)
     return {
         "no_roots": bool(sweep.no_roots),
         "no_targets": bool(sweep.no_targets),
         "complete": bool(sweep.complete),
         "counts": dict(sweep.counts()),
         "not_scanned": [_sanitize(str(t)) for t in sweep.not_scanned()],
+        # CLAWSECCHECK-B-764: the FULL (uncapped, unlike the text line above) name
+        # lists behind counts.fails/counts.warns -- so a JSON consumer can act on a
+        # flagged plugin/skill without re-deriving identity from `not_scanned` (which
+        # names only what was SKIPPED/TRUNCATED, never what was vetted and flagged).
+        "dangerous": [_sanitize(n) for n in dangerous],
+        "suspicious": [_sanitize(n) for n in suspicious],
     }
 
 
