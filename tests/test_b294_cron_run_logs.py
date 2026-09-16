@@ -362,6 +362,11 @@ def test_b189_unknown_when_run_log_table_present_but_empty(tmp_path):
     assert "prunes this table" in f.detail
     # Read to completion and genuinely empty -- not present-but-unread.
     assert f.engine_degraded is False
+    # C-488: the wording names the ONE table this fixture actually has, rather than
+    # generically naming both.
+    assert ctx.cron_run_logs_table == "cron_run_logs"
+    assert "`cron_run_logs`" in f.detail
+    assert "task_runs" not in f.detail
 
 
 def test_b189_unknown_when_no_job_store_found_at_all(tmp_path):
@@ -404,6 +409,9 @@ def test_b189_unknown_when_run_log_table_itself_unreadable(tmp_path):
     _collect_cron(home, ctx)
     assert ctx.cron_run_logs_found is True
     assert ctx.cron_run_logs_parse_error is True
+    # C-488: a genuine read failure never gets far enough to resolve a shape -- the field
+    # must not invent one.
+    assert ctx.cron_run_logs_table is None
     f = check_cron_run_log_orphans(ctx)
     assert f.status == UNKNOWN
     assert f.engine_degraded is True

@@ -1749,6 +1749,13 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
             # B168's identical cron_parse_error branch.
             engine_degraded=True,
         )
+    # C-488: from here on ctx.cron_run_logs_found is True and cron_run_logs_parse_error is
+    # False, so the collector DID resolve a shape -- ctx.cron_run_logs_table is guaranteed
+    # set to "cron_run_logs" or "task_runs". Name that ONE table instead of the generic
+    # "cron run-log table" every branch below used to say, which is exactly the wording
+    # gap this task exists to close (at most one table is ever the relevant fact once we
+    # get this far -- the "genuinely neither exists" case already returned above).
+    table_label = ctx.cron_run_logs_table or "cron run-log"
     if not ctx.cron_run_logs:
         # engine_degraded stays False: the table was read to completion and genuinely
         # holds zero rows -- pruning is normal product behaviour, not an unread cap or
@@ -1757,9 +1764,9 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         return _finding(
             "B189",
             UNKNOWN,
-            "The cron run-log table is present but empty — no execution history to examine. "
-            "OpenClaw prunes this table on its own, so an empty table is not evidence that "
-            "nothing ever ran.",
+            f"The `{table_label}` table is present but empty — no execution history to "
+            "examine. OpenClaw prunes this table on its own, so an empty table is not "
+            "evidence that nothing ever ran.",
             "No action needed. Re-run the audit after scheduled jobs have executed if you "
             "want the execution trail reviewed.",
         )
@@ -1771,7 +1778,7 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         return _finding(
             "B189",
             UNKNOWN,
-            f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s), but "
+            f"The `{table_label}` table records {len(ctx.cron_run_logs)} past execution(s), but "
             "no cron job store (~/.openclaw/cron/jobs.json or the state SQLite cron_jobs "
             "table) was found at all — without any surviving definitions there is no way to "
             "tell which runs belong to jobs that no longer exist.",
@@ -1784,7 +1791,7 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         return _finding(
             "B189",
             UNKNOWN,
-            f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s), but "
+            f"The `{table_label}` table records {len(ctx.cron_run_logs)} past execution(s), but "
             "the cron job store was found and could not be parsed/read — without the "
             "surviving definitions there is no way to tell which runs belong to jobs that no "
             "longer exist.",
@@ -1804,7 +1811,7 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         return _finding(
             "B189",
             UNKNOWN,
-            f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s), but "
+            f"The `{table_label}` table records {len(ctx.cron_run_logs)} past execution(s), but "
             "the job definitions were read from a legacy ~/.openclaw/cron/jobs.json while "
             "the state SQLite cron_jobs table also holds rows — so the definitions read are "
             "not the ones the runtime actually uses. Comparing the execution trail against "
@@ -1845,7 +1852,7 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         return _finding(
             "B189",
             UNKNOWN,
-            f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s) that "
+            f"The `{table_label}` table records {len(ctx.cron_run_logs)} past execution(s) that "
             "include job id(s) with no definition in what was read — but the job-definition "
             "read hit its row cap, so definitions past the cap were never seen. Those job "
             "id(s) may simply be among the ones not read, so this check declines to report "

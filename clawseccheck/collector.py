@@ -779,6 +779,18 @@ class Context:
     cron_run_logs: list = field(default_factory=list)
     cron_run_logs_found: bool = False        # the cron_run_logs table was present and read
     cron_run_logs_parse_error: bool = False  # table present but could not be read
+    # C-488: WHICH of the two shapes `cron_run_logs_found` actually resolved to -- discarded
+    # before this field existed, forcing every consumer (B189) to name both tables in its
+    # UNKNOWN wording even though at most one is ever the relevant fact on a given machine.
+    # "cron_run_logs" | "task_runs" | None (neither present, or the read genuinely failed
+    # before a shape was determined -- see cron_run_logs_parse_error). Never derived from an
+    # OpenClaw version: the state-consolidation-v13 migration does not map onto one release,
+    # which is why the collector branches on table presence in the first place.
+    cron_run_logs_table: "str | None" = None
+    # A mid-migration database can hold BOTH tables -- the collector already prefers the
+    # legacy one in that case (unchanged behaviour), but which table was PREFERRED must not
+    # collapse the distinct fact that the other one also existed.
+    cron_run_logs_both_tables_present: bool = False
     # B-295 (DISK-4): debug-proxy traffic-capture METADATA from the same state DB. Row
     # COUNTS only -- capture_events.headers_json holds bearer tokens and .data_text holds
     # request bodies, so no captured content is ever read (§8). See _collect_capture_state.
@@ -4581,6 +4593,14 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
     ``_collect_plugin_trust`` uses on this exact database. Neither table present leaves
     ``cron_run_logs_found`` False — UNKNOWN downstream, never a fake PASS (Golden Rule #4).
+
+    C-488: ``ctx.cron_run_logs_table`` records WHICH of the two shapes was actually read
+    (``"cron_run_logs"`` | ``"task_runs"`` | ``None``) — previously only decided in the
+    local ``modern`` variable and then discarded, forcing every consumer (B189) to name
+    BOTH tables in its UNKNOWN wording even though at most one is ever the relevant fact
+    on a given machine. ``ctx.cron_run_logs_both_tables_present`` separately preserves the
+    mid-migration fact above (both tables existed) without collapsing it into which one
+    was preferred.
     """
     state_dir = home / "state"
     sqlite_candidates = (
@@ -4608,6 +4628,10 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
             # `scripts/state_db_drift_gate.py`'s SELECT/FROM extractor as a third table
             # this reader expects to exist.
             legacy_present = bool(list(conn.execute("PRAGMA table_info(cron_run_logs)")))
+            # C-488: probed EAGERLY (not lazily inside an `elif`) so a mid-migration DB
+            # holding both tables can be recorded as such even though only one is read --
+            # this is the fact `ctx.cron_run_logs_both_tables_present` exists to preserve.
+            modern_present = bool(list(conn.execute("PRAGMA table_info(task_runs)")))
             if legacy_present:
                 # LEGACY table -- unchanged from before B-709. Preferred even when
                 # task_runs also exists (a mid-migration DB): this is the table the
@@ -4622,7 +4646,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
                 )
                 rows = cur.fetchall()
                 modern = False
-            elif list(conn.execute("PRAGMA table_info(task_runs)")):
+            elif modern_present:
                 # MODERN successor (OpenClaw 2026.8.2+). Filtered to runtime='cron' so a
                 # non-cron task_runs row (e.g. runtime='subagent') is never mistaken for a
                 # cron execution -- that would invent cron history that never happened.
@@ -4648,6 +4672,8 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
         return
 
     ctx.cron_run_logs_found = True
+    ctx.cron_run_logs_table = "task_runs" if modern else "cron_run_logs"
+    ctx.cron_run_logs_both_tables_present = legacy_present and modern_present
     run_logs_truncated = len(rows) > _MAX_CRON_RUN_LOGS
     rows = rows[:_MAX_CRON_RUN_LOGS]  # discard the probe row; the scanned set stays capped
     if modern:
