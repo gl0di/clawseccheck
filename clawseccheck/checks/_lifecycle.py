@@ -2103,7 +2103,9 @@ def check_human_approval(ctx: Context) -> Finding:
     destructive = _hint(tools, OUTBOUND_TOOL_HINTS)
     if not destructive:
         return _finding("B8", UNKNOWN, "No destructive/outbound tools detected.", "—")
-    if not _has_approval_gate(cfg):
+    # B-644: pass `tools` so an exec-scoped gate is never read as covering a non-exec
+    # write tool (fs_write/write/edit/elevated) — see `_has_approval_gate`'s docstring.
+    if not _has_approval_gate(cfg, tools):
         return _finding(
             "B8",
             WARN,
@@ -3418,6 +3420,14 @@ def check_self_modification(ctx: Context) -> Finding:
         )
 
     # Condition (c): approval gate (real OpenClaw field: tools.exec.mode/security/ask)
+    # B-644 considered, deliberately NOT applied here: unlike B8/B46/B18 (which claim
+    # a gate fully covers the action), this check's own WARN text already discloses
+    # the gate as partial ("risk is reduced but not eliminated") rather than claiming
+    # full coverage -- downgrading FAIL to WARN on ANY real tools.exec.* gate,
+    # regardless of exact tool-family match, is this check's deliberate, heavily
+    # regression-tested calibration (see BLK-01 tests in tests/test_b22.py). Making
+    # this tool-aware would flip WARN->FAIL for `_cfg_with_tools()`'s own
+    # fs_write+shell+exec.mode='ask' shape and contradict that calibration.
     has_approval = _has_approval_gate(cfg)
 
     joined = "; ".join(writable[:6])

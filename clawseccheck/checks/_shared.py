@@ -2927,7 +2927,43 @@ def _unclassified_leg_verbs(tools: list) -> list:
     return out
 
 
-def _has_approval_gate(cfg: dict) -> bool:
+# B-644: tool tokens whose write capability is NOT reached by tools.exec.mode/
+# security/ask at all (see `_has_approval_gate`'s docstring — it is schema-scoped to
+# that field family alone). Matched with the same discipline risk.py's
+# `_has_exec_or_write_tools` already uses for this exact vocabulary: "fs_write" is
+# safe as an unanchored substring (multi-word, no realistic accidental collision —
+# see that function's own B-735 note), but "write"/"edit"/"fs_delete"/"fs_move" are
+# matched by EXACT membership only (B-395/B-735 C-135 rounds: "write"/"edit" are
+# common English-word fragments — "underwriter", "credit_score" — and
+# "fs_delete"/"fs_move" collide with "refs_delete"/"prefs_delete" as substrings).
+# Deliberately narrower than OUTBOUND_TOOL_HINTS: "send"/"webhook"/"http_post"/
+# "publish" are a different tool family (messaging/network) that this fix does not
+# touch — only the write-to-local-files/elevated-escalation family the B20/B22/RISK-07
+# self-modification shape actually depends on.
+_NON_EXEC_WRITE_TOKENS = ("write", "edit", "fs_delete", "fs_move", "elevated")
+
+
+def _exec_gate_covers_tools(tools) -> bool:
+    """B-644: whether the write-capable tool set *tools* is exec-family enough for
+    `tools.exec.mode/security/ask` to have any bearing on it at all.
+
+    False when *tools* contains a non-exec write tool (fs_write/write/edit/
+    fs_delete/fs_move/elevated) — none of those are reached by tools.exec.* (see
+    `_has_approval_gate`'s own grounded field list), so an exec-scoped gate does not
+    cover them regardless of its own value. True otherwise, INCLUDING when *tools*
+    is empty/None: a caller that has not established a non-exec write tool is
+    present gets the plain exec-only reading `_has_approval_gate(cfg)` already gave
+    before this fix — this helper only ever narrows, never widens, what counts as
+    gated.
+    """
+    if not tools:
+        return True
+    if _hint(tools, ("fs_write",)):
+        return False
+    return not any(t in tools for t in _NON_EXEC_WRITE_TOKENS)
+
+
+def _has_approval_gate(cfg: dict, tools=None) -> bool:
     """Return True when the config has a meaningful exec approval gate.
 
     Real fields — grounded against the installed OpenClaw dist's Zod schema
@@ -2949,7 +2985,20 @@ def _has_approval_gate(cfg: dict) -> bool:
     outright ("exec denied: allowlist miss", ask="off"). There is no path where
     security="allowlist" alone lets an unmatched command run unattended, so a sparse
     allowlist makes this MORE restrictive, never a false gate.
+
+    B-644: this function is scoped to tools.exec.* ONLY — it has no visibility into
+    which tool would actually carry out a write. A chain that suppresses on this
+    return value alone reads a config with, say, `fs_write` granted and NO exec at
+    all as "gated" purely because an unrelated tools.exec.mode='ask' happens to be
+    set. Pass the caller's own write-capable `tools` list (whatever it already
+    computed to decide a write/outbound action is in play) so this can refuse to
+    call the write gated when the tool doing it is not exec-family
+    (`_exec_gate_covers_tools`). `tools=None` (the default) keeps the OLD exec-only
+    reading unchanged — for callers where the action being gated is already known to
+    be exec-only, or that have not yet been audited for this gap.
     """
+    if tools is not None and not _exec_gate_covers_tools(tools):
+        return False
     mode = dig(cfg, "tools.exec.mode")
     security = dig(cfg, "tools.exec.security")
     ask = dig(cfg, "tools.exec.ask")

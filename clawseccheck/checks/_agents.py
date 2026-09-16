@@ -471,6 +471,10 @@ def check_multiagent_exposure(ctx: Context) -> Finding:
             "—",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
+    # B-644: threaded through both `_has_approval_gate` calls below so an exec-scoped
+    # gate is never read as covering the non-exec "elevated" grant these branches are
+    # actually about — see `_has_approval_gate`'s docstring.
+    tools = _enabled_tools(cfg)
     # Untrusted ingress = open/allowlist/paired (authenticated sender != trusted
     # content), matching the trifecta input leg computed in _trifecta_legs(); an
     # allowlist channel is ingress here too. NB: B55's FAIL gate deliberately uses
@@ -478,7 +482,8 @@ def check_multiagent_exposure(ctx: Context) -> Finding:
     ext_ch = _external_input_channels(cfg)
     legs = _trifecta_legs(ctx)
     if not all(legs.values()):
-        if ext_ch and bool(dig(cfg, "tools.elevated.allowFrom")) and not _has_approval_gate(cfg):
+        if (ext_ch and bool(dig(cfg, "tools.elevated.allowFrom"))
+                and not _has_approval_gate(cfg, tools)):
             return _finding(
                 "B46",
                 WARN,
@@ -498,7 +503,7 @@ def check_multiagent_exposure(ctx: Context) -> Finding:
             "amplifier does not apply.",
             "Keep at least one trifecta leg off the shared surface as agents are added.",
         )
-    if _has_approval_gate(cfg):
+    if _has_approval_gate(cfg, tools):
         return _finding(
             "B46",
             PASS,
@@ -1670,7 +1675,9 @@ def check_subagents(ctx: Context) -> Finding:
             "tools.exec.mode to 'ask'/'allowlist' to gate subagent actions.",
         )
 
-    if _has_approval_gate(cfg):
+    # B-644: pass `tools` so an exec-scoped gate is never read as covering the
+    # non-exec "elevated" grant — see `_has_approval_gate`'s docstring.
+    if _has_approval_gate(cfg, tools):
         return _finding(
             "B18",
             PASS,

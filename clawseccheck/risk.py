@@ -1052,11 +1052,12 @@ def _rule_self_modification(ctx: Context, findings: list[Finding],
     if not _has_exec_or_write_tools(tools):
         return None
     # Only fire when there is no approval gate (real OpenClaw field: tools.exec.mode).
-    # B-494: `_has_approval_gate` reads only `tools.exec.*` and does not know a bare
-    # fs_write grant (no exec tool) is left ungated by an exec-only "ask" mode -- a
-    # known gap in the approval-gate scope, deliberately NOT fixed or worked around
-    # here (wider than this rule; shared by the pre-existing B20/B22 path too).
-    if _has_approval_gate(cfg):
+    # B-644 (closes the B-494 gap noted here): `_has_approval_gate` reads only
+    # `tools.exec.*` and on its own does not know a bare fs_write grant (no exec
+    # tool) is left ungated by an exec-only "ask" mode. Passing `tools` makes it
+    # refuse to call a non-exec write tool (fs_write/write/edit/elevated) gated by
+    # an exec-scoped key at all -- shared by the pre-existing B20/B22 path too.
+    if _has_approval_gate(cfg, tools):
         return None
     return RiskPath(
         id="RISK-07",
