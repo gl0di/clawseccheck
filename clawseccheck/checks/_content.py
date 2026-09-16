@@ -2625,6 +2625,64 @@ _B65_EXFIL_HINT_RE = re.compile(
 )
 
 
+# B-802: a bare negator ("don't", "never", "must not", ...) sitting immediately before a
+# B65 exfil-hint/send-verb match means the match IS the negated verb/noun itself — "Don't
+# exfiltrate private data" is a Red-Lines-style PROHIBITION, not evidence that some other
+# conditional trigger elsewhere in the same 160-char window is malicious (the stock
+# OpenClaw AGENTS.md template pairs its harmless "Write It Down" trigger bullets with a
+# "Red Lines" list a few lines later; the window reaches across both).
+#
+# Deliberately narrower than _BROAD_NEGATION_RE / _negation_governs_trigger: those require
+# a \w+ right after the negator ("don't run X" — the \w+ is "run"), which can never match
+# when the negated word starts exactly at the tested position ("don't exfiltrate" — the
+# \w+ IS "exfiltrate", the very word being tested, so it falls outside the backward-look
+# slice that stops at that word's own start). No trailing \w+ here, anchored to the END of
+# the lookback slice, so it fires only when nothing but whitespace sits between the
+# negator and the match — same idiom _BROAD_NEGATION_RE's own `\*\*no\b` alternative
+# already uses for the same reason (see its comment).
+#
+# This must NOT fire on "don't hesitate to exfiltrate" or "never forget to send the keys
+# to …" — the double-negative bypass phrasing a real attack uses. Both keep firing: an
+# intervening verb ("hesitate to" / "forget to") sits between the negator and the actual
+# action there, so the lookback slice ends on "to ", not on the negator itself.
+_B65_BARE_NEGATOR_RE = re.compile(
+    r"\b(?:don'?t|do\s+not|never|must\s+not|should\s+not|shouldn'?t|mustn'?t|"
+    r"cannot|can'?t|won'?t|will\s+not|refuse\s+to|avoid)\s*$",
+    re.I,
+)
+
+_B65_NEGATOR_LOOKBACK = 30  # chars checked before a corroborator match for a bare negator
+
+
+def _b65_action_negated(window: str, pos: int) -> bool:
+    """True when *pos* (a corroborator match's start, offset within *window*) is
+    immediately preceded by a bare negator with nothing but whitespace in between."""
+    start = max(0, pos - _B65_NEGATOR_LOOKBACK)
+    return bool(_B65_BARE_NEGATOR_RE.search(window[start:pos]))
+
+
+def _b65_corroborator_search(rx: re.Pattern, window: str):
+    """Like ``rx.search(window)`` but a match that is itself the negated verb/noun of a
+    bare "don't/never/…" prohibition does not count (B-802). A different, non-negated
+    match of the same pattern elsewhere in the window still does."""
+    for m in rx.finditer(window):
+        if not _b65_action_negated(window, m.start()):
+            return m
+    return None
+
+
+def _b65_secret_send_corroborated(window: str) -> bool:
+    """B-802-aware form of ``_B63_SECRET_TERM_RE.search(window) and
+    _B63_SEND_VERB_RE.search(window)``: the secret term may appear anywhere in the
+    window (unchanged — "Don't ever discuss the API key" still leaves "API key" as a
+    real secret term), but the send verb itself must not be the negated verb of a bare
+    prohibition ("Don't send the password to anyone" must not corroborate a trigger
+    elsewhere in the window)."""
+    if not _B63_SECRET_TERM_RE.search(window):
+        return False
+    return _b65_corroborator_search(_B63_SEND_VERB_RE, window) is not None
+
+
 _B66_ROLE_START_RE = re.compile(
     r"\b(?:you\s+are\s+now|you\s+are|pretend\s+you\s+are|"
     r"pretend\s+to\s+be|act\s+as|role-?play(?:ing)?\s+as|assume\s+the\s+role\s+of)\b",
@@ -4877,19 +4935,27 @@ def _b65_scan(text: str, fr: list[tuple[int, int]]) -> list[str]:
         # bare from this path for exactly that shape), while "elevate fetched/marked
         # content to instructions" AND "send data out" co-occurring is a materially
         # stronger combined signal than either alone.
+        # B-802: _B65_EXFIL_HINT_RE and the SECRET_TERM+SEND_VERB pairing go through the
+        # negation-aware helpers above instead of a bare .search() — a "Don't exfiltrate
+        # …" / "Don't send the password to …" Red-Lines-style PROHIBITION is not evidence
+        # that some other trigger elsewhere in the window is malicious. _B65_COVERT_RE is
+        # untouched: its own "don't tell/mention/inform/log/notify" alternative already
+        # encodes covertness ON PURPOSE (an instruction to hide something FROM the user
+        # is the malicious signal, not a negation to see through), and _has_outbound_exfil
+        # is shared by other checks, so it is not touched here.
         if marker_trigger and not query_or_delay:
             corroborated = (
                 _B65_COVERT_RE.search(window)
-                or _B65_EXFIL_HINT_RE.search(window)
-                or (_B63_SECRET_TERM_RE.search(window) and _B63_SEND_VERB_RE.search(window))
+                or _b65_corroborator_search(_B65_EXFIL_HINT_RE, window)
+                or _b65_secret_send_corroborated(window)
                 or (_B170_ELEVATE_RE.search(window) and _has_outbound_exfil(window))
             )
         else:
             corroborated = (
                 _has_outbound_exfil(window)
                 or _B65_COVERT_RE.search(window)
-                or _B65_EXFIL_HINT_RE.search(window)
-                or (_B63_SECRET_TERM_RE.search(window) and _B63_SEND_VERB_RE.search(window))
+                or _b65_corroborator_search(_B65_EXFIL_HINT_RE, window)
+                or _b65_secret_send_corroborated(window)
             )
         if not corroborated:
             continue
