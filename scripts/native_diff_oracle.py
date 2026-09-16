@@ -169,20 +169,26 @@ def run_native_raw(openclaw_bin: str = "openclaw", timeout: int = 60):
             "openclaw CLI not on PATH — this oracle needs a real install to diff "
             "against."
         )
-    unsafe = _untrusted_exec_reason(exe)
-    if unsafe:
-        return "skipped", [], (
-            f"openclaw at {os.path.realpath(exe)} not run: {unsafe}."
-        )
+    trust = _untrusted_exec_reason(exe)
+    trust_caveat = ""
+    if trust is not None:
+        must_skip, reason = trust
+        if must_skip:
+            return "skipped", [], (
+                f"openclaw at {os.path.realpath(exe)} not run: {reason}."
+            )
+        # B-774: mirrors native.run_native_audit's own disclosure — the trust check
+        # does not apply on this platform, so this proceeds but says so.
+        trust_caveat = f" (install-path trust check not performed: {reason})"
     try:
         proc = subprocess.run(
             [exe, "security", "audit", "--json"],
             capture_output=True, text=True, timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:
-        return "timeout", [], f"openclaw security audit timed out after {timeout}s"
+        return "timeout", [], f"openclaw security audit timed out after {timeout}s{trust_caveat}"
     except OSError as exc:
-        return "error", [], f"could not run openclaw: {exc}"
+        return "error", [], f"could not run openclaw: {exc}{trust_caveat}"
 
     data = _parse(proc.stdout)
     if data is None:
@@ -190,9 +196,10 @@ def run_native_raw(openclaw_bin: str = "openclaw", timeout: int = 60):
             note = f"openclaw security audit exited {proc.returncode}"
             if proc.stderr:
                 note += f": {proc.stderr.strip()[:300]}"
-            return "error", [], note
-        return "error", [], "could not parse openclaw security audit JSON output"
-    return "ok", _extract(data), f"{len(_extract(data))} raw native finding(s)"
+            return "error", [], note + trust_caveat
+        return "error", [], "could not parse openclaw security audit JSON output" + trust_caveat
+    return ("ok", _extract(data),
+           f"{len(_extract(data))} raw native finding(s)" + trust_caveat)
 
 
 # ---------------------------------------------------------------------- diff

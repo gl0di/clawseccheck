@@ -57,7 +57,7 @@ def test_run_native_raw_reuses_the_untrusted_exec_guard(monkeypatch):
     never bypass the guard for its own convenience."""
     monkeypatch.setattr(oracle.shutil, "which", lambda *_a, **_k: "/tmp/fake-openclaw")
     monkeypatch.setattr(oracle, "_untrusted_exec_reason",
-                        lambda _exe: "group/world-writable install path")
+                        lambda _exe: (True, "group/world-writable install path"))
     status, raw, note = oracle.run_native_raw()
     assert status == "skipped"
     assert raw == []
