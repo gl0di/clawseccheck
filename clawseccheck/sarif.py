@@ -11,6 +11,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 from . import brand
@@ -77,6 +78,52 @@ def _sarif_text(s: str) -> str:
     have reopened the identical leak one field over).
     """
     return _redact_home_paths(_sanitize(s))
+
+
+# B-633: `_redact_home_paths` is PREFIX-matching against the three literal shapes a
+# real $HOME takes (`/home/<user>`, `/Users/<user>`, `C:\Users\<user>`) -- it is not a
+# general basename reduction. A workspace or cron-store path that resolves under any
+# OTHER root (e.g. `--home /mnt/backup`, or this suite's own /tmp HOME-isolation
+# sandbox) still reached `analysis_completeness.limit_hits` verbatim after that fix --
+# pinned as a known residual by `tests/test_b620_sarif_limit_hits_path.py` until this
+# change. Matches an absolute-path TOKEN (POSIX or Windows) embedded anywhere in a
+# `limit_hits` sentence -- the real producers wrap it in parens or single quotes
+# (`collector.py`'s `"... ({resolved})"` and `"cron store '{jobs_json}' ..."`), never
+# bare, so stopping at the first whitespace/quote/paren captures exactly the path and
+# nothing either side of it. The leading `(?<![\w~])` matters: without it this matched
+# "/skills" out of ordinary prose like "bootstrap/skills" (mangling it to
+# "bootstrapskills") and matched the "/.cache/x" tail of an ALREADY-folded
+# "~/.cache/x" (leaving a stray "~" and a truncated path) -- both found by construction
+# while writing this, not by a separate review pass. Requiring the character before the
+# slash be neither a word character nor "~" restricts matches to a path that starts a
+# token (after whitespace, an opening paren/quote, or the string start).
+_NON_HOME_ABS_PATH_RE = re.compile(
+    r"(?<![\w~])/[^\s'\"()]+|(?<![\w~])[A-Za-z]:\\[^\s'\"()]+"
+)
+
+
+def _basename_only(match: "re.Match[str]") -> str:
+    """`re.sub` replacement: reduce one matched absolute-path token to its basename."""
+    raw = match.group(0).rstrip("/\\")
+    tail = re.split(r"[\\/]", raw)[-1]
+    return tail or match.group(0)
+
+
+def _sarif_limit_hit_text(s: str) -> str:
+    """B-633: `_redact_home_paths`, then reduce any absolute path IT left behind to a
+    bare basename -- deliberately separate from `_sarif_text` above and applied only to
+    the SARIF copy of `limit_hits`, never to `_redact_home_paths` itself (shared with
+    other surfaces -- widening it there was explicitly rejected, see the task) and never
+    to `ctx.limit_hits` (the stored `LimitHit` objects three other consumers read
+    verbatim for a verdict: B13, dossier.py leg 2, cli.sweep_installed_skills).
+
+    Basename reduction is strictly LOSSIER than `~`-substitution on purpose: a path
+    `_redact_home_paths` already folded to `~/.cache/csc-b620-ws` does not start with
+    `/`, so this step leaves it exactly alone -- only a path that fell outside the
+    recognized $HOME shapes (and so is still a bare `/...` or `X:\\...` token) is
+    reduced further, down to `csc-b620-ws`.
+    """
+    return _NON_HOME_ABS_PATH_RE.sub(_basename_only, _redact_home_paths(s))
 
 
 def _build_analysis_completeness(
@@ -413,10 +460,13 @@ def render_sarif(
         # `report._redact_home_paths` (B-381's precedent for this exact shape, already
         # applied to the --dashboard card) rather than reimplementing path folding a
         # second time -- this repo has been burned by divergent redaction tables before.
-        # A NEW list of plain strings is built here; `ctx.limit_hits` (its `LimitHit`
-        # objects, read verbatim by B13/dossier.py leg 2/cli.sweep_installed_skills) is
-        # never touched.
-        limit_hits = [_redact_home_paths(str(h)) for h in (getattr(ctx, "limit_hits", None) or [])]
+        # B-633: `_redact_home_paths` alone is $HOME-clean, not path-clean -- a resolved
+        # path under any OTHER root still leaked. `_sarif_limit_hit_text` adds the
+        # basename-reduction step for what that helper leaves behind (see its own
+        # docstring). A NEW list of plain strings is built here; `ctx.limit_hits` (its
+        # `LimitHit` objects, read verbatim by B13/dossier.py leg 2/
+        # cli.sweep_installed_skills) is never touched.
+        limit_hits = [_sarif_limit_hit_text(str(h)) for h in (getattr(ctx, "limit_hits", None) or [])]
         path_traversal_violations = list(getattr(ctx, "path_traversal_violations", []))
         file_manifest = dict(getattr(ctx, "file_manifest", {}))
         disclosures = [
