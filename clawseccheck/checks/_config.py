@@ -24,11 +24,13 @@ from ..catalog import (
 from ..collector import (
     BOOTSTRAP_FILES,
     LIMIT_DOMAIN_CONFIG,
+    LIMIT_DOMAIN_ENV,
     SKILL_DIRS,
     Context,
     agent_roster,
     dig,
     env_evidence_readable,
+    limit_hits_for,
     persistent_env_evidence,
 )
 from ..safeio import walk_dir_safely
@@ -1295,7 +1297,13 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
               — one compromise's blast radius spans every listed provider.
     PASS    — credentials exist but the ingress+outbound combination is not
               present — blast radius is not broadly reachable.
-    UNKNOWN — no auth.profiles and no gateway.auth.token found to assess.
+    UNKNOWN — no auth.profiles and no gateway.auth.token found to assess. When the ONLY
+              reason none was found is that a systemd unit or global dotenv file the
+              collector read was truncated by its byte cap
+              (``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``) — so an env-supplied
+              OPENCLAW_GATEWAY_TOKEN/_PASSWORD could sit past the cut — this UNKNOWN is
+              ``engine_degraded=True`` (B-657): the credential surface this
+              check inventories may be non-empty and simply unread, not genuinely absent.
 
     PRIVACY: provider names only are included in findings.  The account/email
     portion of profile keys (after ":") and any token values are NEVER emitted.
@@ -1328,6 +1336,27 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     has_credentials = bool(providers) or has_gateway_token or has_env_gateway_token
 
     if not has_credentials:
+        # B-657: "no credentials" is a claim that the env-sourced leg
+        # (has_env_gateway_token, via _gateway_env_credential -> persistent_env_evidence)
+        # was read to completion. A systemd unit or global dotenv file the collector DID
+        # read but truncated at its byte cap can hide a real OPENCLAW_GATEWAY_TOKEN/
+        # _PASSWORD past the cut, so this is present-but-unread, not genuinely absent —
+        # the exact contrast catalog.py's Finding.engine_degraded exists for, same
+        # DEGRADED_CHECK_CAP consequence as the B6/B172 fix (f748869).
+        if limit_hits_for(ctx, LIMIT_DOMAIN_ENV):
+            return _finding(
+                "B41",
+                "UNKNOWN",
+                "No auth.profiles or gateway.auth.token found in the config, and no "
+                "environment-supplied gateway credential was found in the systemd unit(s) "
+                "or global dotenv file(s) that were read — but at least one of them "
+                "exceeded the collector's byte cap, so a credential past the cut would not "
+                "have been seen. The credential surface cannot be ruled empty.",
+                "Keep OpenClaw's systemd unit files and global dotenv files "
+                "(~/.openclaw/.env, ~/.config/openclaw/gateway.env) under the collector's "
+                "size cap, then re-run the audit.",
+                engine_degraded=True,
+            )
         return _finding(
             "B41",
             "UNKNOWN",
@@ -2983,7 +3012,12 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
               readable to check for an environment-supplied credential, on a
               non-loopback bind — cannot tell whether the gateway is genuinely
               unauthenticated or env-authenticated, so this must not default to a
-              fabricated PASS.
+              fabricated PASS. Also UNKNOWN, ``engine_degraded=True``
+              (B-657), when a persistent artifact WAS read but the
+              collector's byte cap truncated it (``limit_hits_for(ctx,
+              LIMIT_DOMAIN_ENV)``) — an env-supplied credential could sit past the cut,
+              so "no usable credential" is a claim about text that was never scanned,
+              not a verified absence.
 
     B-310: this check used to read ONLY `gateway.auth.mode` from config, so a gateway
     authenticated by an environment-supplied credential (OPENCLAW_GATEWAY_TOKEN/
@@ -3056,6 +3090,28 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
             if _env_cred is not None and len(_env_cred.strip()) >= 24:
                 mode = "token"
                 cred_src = f"an environment-supplied credential ({_env_cred_src})"
+            elif _env_cred is None and limit_hits_for(ctx, LIMIT_DOMAIN_ENV):
+                # B-657: truncation implies the file WAS found and opened
+                # (ctx.dotenv_found/unit_env_found are set before the byte-cap check
+                # fires), so env_evidence_readable(ctx) is already True here and the
+                # "not readable at all" branch below can never catch this case. A
+                # credential past the cut is present-but-unread, not genuinely absent —
+                # same DEGRADED_CHECK_CAP consequence as the B6/B172 fix (f748869).
+                return _finding(
+                    "B80",
+                    UNKNOWN,
+                    "gateway.auth.mode is not set in config, the bind is non-loopback, and no "
+                    "usable environment-supplied gateway credential was found in the systemd "
+                    "unit(s) or global dotenv file(s) that were read — but at least one of "
+                    "them exceeded the collector's byte cap, so a credential past the cut "
+                    "would not have been seen. Cannot determine whether the auth endpoint is "
+                    "brute-forceable.",
+                    "Keep OpenClaw's systemd unit files and global dotenv files "
+                    "(~/.openclaw/.env, ~/.config/openclaw/gateway.env) under the collector's "
+                    "size cap, or set gateway.auth.mode explicitly, then re-run the audit.",
+                    config_field_paths={"gateway.auth.mode"},
+                    engine_degraded=True,
+                )
             elif _env_cred is None and not env_evidence_readable(ctx):
                 return _finding(
                     "B80",
@@ -3068,8 +3124,8 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
                     "global dotenv files, or set gateway.auth.mode explicitly.",
                     config_field_paths={"gateway.auth.mode"},
                 )
-            # else: env evidence was readable and carried nothing usable (absent, or a
-            # sub-24-char value not treated as authenticating) -> mode stays None,
+            # else: env evidence was readable IN FULL and carried nothing usable (absent,
+            # or a sub-24-char value not treated as authenticating) -> mode stays None,
             # falls through to the ordinary "not token/password" PASS below, exactly as
             # before B-310 for a truly-unauthenticated gateway.
         # else: a config token IS present but below the 24-char bar. B2 already FAILs
@@ -3441,13 +3497,19 @@ def check_secrets(ctx: Context) -> Finding:
         if _pattern_hits_real_secret(SECRET_PATTERNS, text):
             ev.append(f"secret-like string in {fname}")
     if ev:
+        # B-759: named against the audited home, not a hardcoded `~/.openclaw` — the
+        # config path this run actually read (`ctx.config_path`, falling back to the
+        # conventional filename under `ctx.home` for the rare case it was never
+        # resolved) so the copy-pasted chmod acts on the config this run diagnosed,
+        # not a different home on a machine that has several.
+        _b1_cfg = ctx.config_path or (ctx.home / "openclaw.json")
         return _finding(
             "B1",
             FAIL,
             "; ".join(ev),
             "Move secrets to `openclaw secrets configure` / env vars, never into "
-            "bootstrap files; `chmod 600 ~/.openclaw/openclaw.json` and `chmod 700 "
-            "~/.openclaw` so config-stored tokens are not readable by others.",
+            f"bootstrap files; `chmod 600 {_b1_cfg}` and `chmod 700 {ctx.home}` so "
+            "config-stored tokens are not readable by others.",
             ev,
         )
     # B-228: openclaw.json present but unparseable/unreadable — bootstrap-file secrets
@@ -3751,12 +3813,15 @@ def check_tls(ctx: Context) -> Finding:
             f"openclaw.json is group/world-readable ({oct(ctx.config_mode)[-3:]}) — at-rest risk"
         )
     if ev:
+        # B-759: see B1's own comment above — named against the audited home, not a
+        # hardcoded `~/.openclaw`.
+        _b11_cfg = ctx.config_path or (ctx.home / "openclaw.json")
         return _finding(
             "B11",
             WARN,
             "; ".join(ev),
             "Terminate TLS (reverse proxy / tailscale) for any non-loopback bind; "
-            "`chmod 600 ~/.openclaw/openclaw.json` and `chmod 700 ~/.openclaw`.",
+            f"`chmod 600 {_b11_cfg}` and `chmod 700 {ctx.home}`.",
             ev,
         )
     # B-228: guard the terminal PASS only — _perms_loose(ctx) above is a real, config-
@@ -4988,7 +5053,13 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
               instruct users to set it. A FAIL would punish following the vendor's manual.
     PASS    — a global dotenv file exists and none of the toggles are on in it.
     UNKNOWN — no global dotenv file exists AND the audited home is not this user's own, so
-              there is nothing to have read.
+              there is nothing to have read. Also UNKNOWN, ``engine_degraded=True``
+              (B-657), when a global dotenv file WAS read but exceeded the collector's
+              byte cap (``ctx.dotenv_truncated``) — a toggle past the cut would silently
+              disable a protection with no disclosure. Not gated on the shared
+              ``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``: this check's only evidence source
+              (``dotenv_override``) never reads a systemd unit's environment, and that
+              domain also covers unit-file truncation this check never touches.
 
     **Scope, stated exactly.** A variable exported in the shell that launched an
     already-running agent leaves no on-disk trace and is not detectable from here — that
@@ -5022,6 +5093,26 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
             "permanently, record why — a persistent break-glass is a standing exception, "
             "not a default.",
             evidence=hits,
+        )
+
+    if ctx.dotenv_found and ctx.dotenv_truncated:
+        # B-657 (C-135 round 2): "none of the toggles are on" is a claim about a
+        # COMPLETED read of every global dotenv file. A file the collector DID read but
+        # cut at its byte cap can hide a real OPENCLAW_ALLOW_INSECURE_PRIVATE_WS/
+        # OPENCLAW_LOAD_SHELL_ENV past the cut -- present-but-unread, not genuinely
+        # absent, the same DEGRADED_CHECK_CAP consequence as the B6/B172 fix (f748869).
+        return _finding(
+            "B192",
+            UNKNOWN,
+            "No break-glass environment toggle was found in the global dotenv file(s) "
+            "that were read, but at least one of them exceeded the collector's byte cap "
+            "("
+            + ", ".join(_detail_path(p, ctx.home) for p in ctx.dotenv_files)
+            + ") — a toggle past the cut would not have been seen.",
+            "Keep OpenClaw's global dotenv files (~/.openclaw/.env, "
+            "~/.config/openclaw/gateway.env) under the collector's size cap, then "
+            "re-run the audit.",
+            engine_degraded=True,
         )
 
     if ctx.dotenv_found:

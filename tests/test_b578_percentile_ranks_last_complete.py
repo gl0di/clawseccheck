@@ -92,6 +92,21 @@ def test_with_no_complete_check_it_names_the_invocation_that_makes_one(tmp_path)
     assert "--full" in out
 
 
+def test_the_full_command_advice_does_not_overpromise_what_full_alone_can_do(tmp_path):
+    """CLAWSECCHECK-B-759: this used to say "Run '<prefix> --full' to complete one" —
+    but `--full` alone can never complete a run: self_report needs a real --attest
+    file and live_behaviour needs a real --judged-bundle file, neither of which
+    --full produces by itself (docs/USAGE.md's own layer-5 note: the active
+    self-test flags are standalone modes that do not combine with an audit run). The
+    old wording read as a single copy-pasteable fix; it was not one.
+    """
+    hist = _write_history(tmp_path / "h.jsonl", [_ungraded_row()])
+    out = _percentile_line(_ungraded_score(), True, hist)
+    assert "to complete one" not in out, out
+    assert "--attest" in out and "--judged-bundle" in out, out
+    assert "alone will not produce one" in out, out
+
+
 # ------------------------------------------------------------------ C-135: the leak
 def test_this_runs_own_withheld_number_is_never_published(tmp_path):
     """The tempting wrong fix, pinned shut.

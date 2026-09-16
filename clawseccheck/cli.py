@@ -1400,11 +1400,23 @@ def _percentile_line(score, ascii_only: bool, history_path=None) -> str:
         opened = _missing_layers_sentence(score)
         row = _last_complete_history_row(history_path)
         if row is None:
+            # B-759: this used to say `Run '{command_prefix()} --full' to complete
+            # one` — a promise `--full` cannot keep on its own. `--full` alone can
+            # only ever close installed_sweep/logs_trajectories/static; self_report
+            # needs a real `--attest <file>` and live_behaviour needs a real
+            # `--judged-bundle <file>` (docs/USAGE.md's own layer-5 note: the active
+            # self-test flags are standalone modes that do not combine with an audit
+            # run, so producing that bundle is a separate, multi-step act this tool
+            # cannot do in one invocation). Naming the real constraint, not a command
+            # that reads as copy-pasteable but silently cannot complete a run.
             text = (
                 f"{opened} No rank yet — a percentile compares a score against a "
                 "reference profile of complete audits, and no complete check has been "
-                f"recorded here yet. Run '{command_prefix()} --full' to complete one, then "
-                "'--percentile' to rank it."
+                f"recorded here yet. '{command_prefix()} --full' alone will not "
+                "produce one: self-report and live-behaviour need their own inputs "
+                "too (a real --attest file and a real --judged-bundle file — see "
+                "docs/USAGE.md's layer-5 self-test recipe for how those are made). "
+                "Once a run completes all five layers, '--percentile' will rank it."
             )
         else:
             when = row.get("date") or row.get("ts") or "an earlier run"

@@ -199,3 +199,36 @@ def test_b01_bootstrap_pure_reference_alone_passes():
     ctx = _ctx({}, bootstrap={"SOUL.md": 'Use apiKey: "${OPENAI_KEY}" from env.'})
     f = check_secrets(ctx)
     assert f.status == PASS
+
+
+# ---- fix text names the audited home, not a hardcoded default ----
+
+def test_b01_fix_text_names_the_audited_home_not_a_hardcoded_default():
+    """CLAWSECCHECK-B-759: the remediation used to say `chmod 600 ~/.openclaw/
+    openclaw.json` / `chmod 700 ~/.openclaw` unconditionally, regardless of the
+    audited --home. On a machine with several homes, following that instruction
+    literally edits a DIFFERENT config than the one this run diagnosed."""
+    home = Path("/srv/openclaw-secondary")
+    ctx = _ctx({"hooks": {"token": "any-value"}})
+    ctx.home = home
+    f = check_secrets(ctx)
+    assert f.status == FAIL
+    assert "~/.openclaw" not in f.fix, f.fix
+    # config_path unset here (the _ctx helper never sets it) -> falls back to
+    # home/openclaw.json, the same conventional filename the unpatched code
+    # hardcoded, but rooted at the REAL audited home instead of a fixed default.
+    assert str(home / "openclaw.json") in f.fix, f.fix
+    assert str(home) in f.fix, f.fix
+
+
+def test_b01_fix_text_uses_the_resolved_config_path_when_known():
+    """A non-default config filename/location (ctx.config_path, set by the real
+    collector when the config was actually found somewhere) must be named exactly,
+    not silently reconstructed as home/openclaw.json."""
+    home = Path("/srv/openclaw-secondary")
+    ctx = _ctx({"hooks": {"token": "any-value"}})
+    ctx.home = home
+    ctx.config_path = home / "config" / "openclaw.json"
+    f = check_secrets(ctx)
+    assert f.status == FAIL
+    assert str(home / "config" / "openclaw.json") in f.fix, f.fix
