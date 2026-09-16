@@ -222,6 +222,161 @@ def test_naming_a_retired_key_the_user_actually_has_is_allowed():
     assert not _offending([Fake()], {"logging": {"redactSensitive": "off"}})
 
 
+# ---------------------------------------------------------------------------------------
+# CLAWSECCHECK-C-514: the 2026.9.3 workshop-symlink-knob retirement wave.
+#
+# A SEPARATE table and sweep, not a merge into RETIRED_IN_2026_8_1 / _QUALIFIERS: the
+# shared qualifier tuple is checked against every entry in every table swept together, so
+# folding "2026.9.3" into it would let a 9.3-only qualifier excuse an unrelated 8.1-retired
+# key inside the 8.1 sweep -- quietly loosening a guard that already exists (see B-783,
+# checks/_shared.py::_SYMLINK_KNOB_RETIRED_MIN).
+#
+# Value is None (not a replacement key): OpenClaw 2026.9.3 REMOVED
+# skills.workshop.allowSymlinkTargetWrites outright rather than renaming it, so there is no
+# "modern key" that could leak backward onto a pre-9.3 build the way logging.audit.enabled
+# could leak onto a 2026.7.x reader above.
+RETIRED_IN_2026_9_3 = {
+    "skills.workshop.allowSymlinkTargetWrites": None,
+}
+
+_QUALIFIERS_9_3 = ("2026.9.3", "2026.9.2")
+
+_MODERN_9_3 = "2026.9.3"
+_LEGACY_9_3 = "2026.9.2"  # the adjacent build that still HONOURS the key (B-783)
+
+
+def _offending_9_3(findings, cfg):
+    """`_offending`, scoped to the 2026.9.3 retirement wave and its own qualifier tuple.
+
+    Build-AGNOSTIC by design, exactly like `_offending` above: it only reads the finding
+    text and the config, never `ctx.installed_dist_version`. That means it must only ever
+    be evaluated against findings generated on a build that has actually retired the key
+    (>= 2026.9.3) or an unknown build -- calling it against findings from an UNRETIRED
+    build (e.g. `_LEGACY_9_3`) is a false-positive trap: on 2026.9.2 the key is genuinely
+    still honoured, so B175's WARN correctly names it with no qualifier, and this function
+    would flag that correct advice as an offender (confirmed by direct execution against
+    the real `workshop-enabled-no-symlink-key` config, C-135 adversarial pass). `_offending`
+    has the identical constraint -- its own legacy-build test never calls it either,
+    using a narrower targeted substring check instead. Do not add a call site here that
+    evaluates `_offending_9_3` against `_LEGACY_9_3` (or any pre-2026.9.3) findings.
+    """
+    out = []
+    for f in findings:
+        for field in ("detail", "fix"):
+            text = getattr(f, field, None)
+            if not isinstance(text, str):
+                continue
+            for key in RETIRED_IN_2026_9_3:
+                if not _names_key(text, key):
+                    continue
+                if any(q in text for q in _QUALIFIERS_9_3):
+                    continue
+                if _config_has(cfg, key):
+                    continue  # the user has this key; naming it is correct
+                out.append(f"{f.id}.{field}: {key}")
+    return out
+
+
+# Two shapes, deliberately different from each other:
+#
+# * `workshop-hardened-symlink` -- the `hardened+symlink` shape from
+#   tests/test_b783_symlink_knob_retired.py's `_hardened_cfg()`: autonomy off and approval
+#   pending (so B175 cannot reach its FAIL/WARN "enabled and auto" branches), with
+#   allowSymlinkTargetWrites=true. On the UNRETIRED build (`_LEGACY_9_3`, exercised by the
+#   reachability test below) this reaches B175's final partial-gap WARN branch and names
+#   the retired key in both `reasons` and `fix`; on the MODERN build (`_MODERN_9_3`,
+#   exercised by the headline test) B-783's fix routes it to the earlier PASS branch
+#   instead, with a `retired_note` disclosure -- still naming the key, but never in a WARN.
+#   The key is IN the config either way, so `_config_has` always excuses it here -- this
+#   entry proves both branches are reachable, not that the sweep can detect a regression.
+# * `workshop-enabled-no-symlink-key` -- enabled+pending WITHOUT the symlink key set at
+#   all. The same final WARN branch's `symlink_advice` clause still names
+#   allowSymlinkTargetWrites (as the informational "leave it at its default" recommendation
+#   B-783 added), but now the key is absent from the config, so `_config_has` does NOT
+#   excuse it -- this is the entry that actually exercises the class of bug B-783 fixed:
+#   handed a monkeypatched `_workshop_symlink_knob` that always answers "honoured" (i.e.
+#   the pre-fix behaviour), this config makes the headline sweep below fail, where the
+#   hardened+symlink entry above would stay silent regardless. Verified by hand before
+#   trusting this guard (CLAWSECCHECK-C-514 test plan).
+_CONFIGS_9_3 = [
+    ("workshop-hardened-symlink", {"skills": {"workshop": {
+        "autonomous": {"mode": "off"},
+        "approvalPolicy": "pending",
+        "allowSymlinkTargetWrites": True,
+    }}}),
+    ("workshop-enabled-no-symlink-key", {"skills": {"workshop": {
+        "autonomous": {"mode": "auto"},
+        "approvalPolicy": "pending",
+    }}}),
+]
+
+
+@pytest.mark.parametrize("label,cfg", _CONFIGS_9_3, ids=[n for n, _c in _CONFIGS_9_3])
+def test_no_advice_names_the_retired_9_3_key_on_a_modern_build(label, cfg):
+    """The headline, mirroring test_no_advice_names_a_retired_key_on_a_modern_build.
+
+    On a build we can see is 2026.9.3+, nothing may name
+    skills.workshop.allowSymlinkTargetWrites unqualified unless the user's own config
+    still has the (now-inert) line."""
+    offenders = _offending_9_3(_findings(cfg, _MODERN_9_3), cfg)
+    assert not offenders, (
+        "advice names a key OpenClaw 2026.9.3 no longer reads, unqualified:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nRoute the text through checks/_shared.py::_workshop_symlink_knob, as B175 "
+          "does."
+    )
+
+
+@pytest.mark.parametrize("label,cfg", _CONFIGS_9_3, ids=[n for n, _c in _CONFIGS_9_3])
+def test_the_9_3_config_reaches_b175s_warn_branch_on_an_unretired_build(label, cfg):
+    """Proves `_CONFIGS_9_3` is not vacuous: on the adjacent build that still HONOURS the
+    key (2026.9.2), this config must actually reach B175's final WARN branch and name the
+    key -- otherwise the headline test above would pass by never exercising anything."""
+    findings = _findings(cfg, _LEGACY_9_3)
+    b175 = next(f for f in findings if f.id == "B175")
+    assert b175.status == "WARN"
+    assert "skills.workshop.allowSymlinkTargetWrites" in (b175.detail + b175.fix)
+
+
+def test_the_9_3_guard_is_not_vacuous():
+    """Mirrors test_the_guard_is_not_vacuous: proves the sweep can actually fail."""
+    class Fake:
+        id = "FAKE"
+        detail = "Set skills.workshop.allowSymlinkTargetWrites to true."
+        fix = "Set skills.workshop.allowSymlinkTargetWrites to true."
+    assert _offending_9_3([Fake()], {}), "the 9.3 sweep cannot detect a retired key"
+
+
+def test_the_9_3_sweep_catches_the_class_of_bug_b_783_fixed(monkeypatch):
+    """Positive control over the REAL check, not just the Fake above: force
+    `_workshop_symlink_knob` back to always reporting "honoured" (the pre-B-783 shape,
+    where the retirement is never detected) and confirm the headline sweep actually goes
+    red on `workshop-enabled-no-symlink-key` -- the config chosen above specifically
+    because `_config_has` cannot excuse it. Without this, a sweep that always passes
+    (e.g. an empty RETIRED_IN_2026_9_3, or a table entry that never matches real text)
+    would look identical to a working one."""
+    import clawseccheck.checks._lifecycle as lifecycle
+
+    monkeypatch.setattr(lifecycle, "_workshop_symlink_knob", lambda ctx: "honoured")
+    cfg = dict(next(c for n, c in _CONFIGS_9_3 if n == "workshop-enabled-no-symlink-key"))
+    offenders = _offending_9_3(_findings(cfg, _MODERN_9_3), cfg)
+    assert offenders, (
+        "the 9.3 sweep did not catch a simulated regression to the pre-B-783 shape -- "
+        "it cannot be trusted to catch a real one"
+    )
+
+
+def test_naming_the_retired_9_3_key_the_user_actually_has_is_allowed():
+    """Mirrors test_naming_a_retired_key_the_user_actually_has_is_allowed: a config that
+    CONTAINS the retired key may still be told to remove it by name."""
+    class Fake:
+        id = "FAKE"
+        detail = "skills.workshop.allowSymlinkTargetWrites is set."
+        fix = "Delete skills.workshop.allowSymlinkTargetWrites."
+    cfg = {"skills": {"workshop": {"allowSymlinkTargetWrites": True}}}
+    assert not _offending_9_3([Fake()], cfg)
+
+
 def test_disk_subagent_disclosure_names_the_modern_key():
     """B18's disk-grounded disclosure (`_disk_subagent_disclosure`) fires only when the
     state DB's `subagent_runs` table has rows the config does not explain -- unreachable
@@ -265,8 +420,27 @@ def _dist_root() -> "Path | None":
 @pytest.mark.skipif(_dist_root() is None, reason="no installed OpenClaw dist")
 def test_the_retired_table_matches_the_installed_dist():
     """The table is ours; this asks OpenClaw. Without it the table rots exactly the way
-    the advice it guards did — an in-source list nobody re-grounds."""
+    the advice it guards did — an in-source list nobody re-grounds.
+
+    CLAWSECCHECK-C-514: RETIRED_IN_2026_9_3 is merged into the same probe, but ONLY when
+    the installed build is actually >= 2026.9.3 — on a 2026.9.2 box
+    skills.workshop.allowSymlinkTargetWrites still resolves in the schema (B-783: the
+    key is HONOURED there, not retired), so an unconditional assertion would fail on that
+    machine for the wrong reason: a true positive about a build we are not claiming to
+    ground against."""
+    from clawseccheck.openclawdist import _numeric_parts, _read_version
+
     root = _dist_root()
+    # `_read_version` (not a hand-rolled json.loads here) already guards a manifest that
+    # is missing, unreadable, or shaped unexpectedly (non-dict JSON, a non-string
+    # "version") and degrades to "" rather than raising -- re-implementing that
+    # narrower would risk this local-only oracle aborting with a raw traceback instead
+    # of the honest "version undeterminable, 8.1-only table" fallback below.
+    installed_version = _read_version(root)
+    installed_parts = _numeric_parts(installed_version) if installed_version else None
+    retired_table = dict(RETIRED_IN_2026_8_1)
+    if installed_parts is not None and installed_parts >= (2026, 9, 3):
+        retired_table.update(RETIRED_IN_2026_9_3)
     script = """
 const z = await import(process.env.OC_SCHEMA);
 const cases = JSON.parse(process.env.OC_CASES);
@@ -296,7 +470,7 @@ console.log(JSON.stringify(out));
     )
     schema = bundles[0]
     cases = {k: ("array" if k.endswith(("list", "Commands")) else "bool")
-             for k in RETIRED_IN_2026_8_1}
+             for k in retired_table}
     # Arguments go through the environment, not argv: `node -e` does not lay out extra
     # argv the way a script file does, and the first version of this silently handed the
     # JSON to `import()` and skipped itself with a module-not-found message.
@@ -310,8 +484,9 @@ console.log(JSON.stringify(out));
     still_valid = sorted(k for k, ok in accepted.items() if ok)
     assert not still_valid, (
         "these keys are listed as retired but the installed OpenClaw still accepts "
-        f"them: {still_valid}. Either the table is wrong, or this machine is on a build "
-        "older than 2026.8.1 — check `openclaw --version` before editing the table."
+        f"them: {still_valid}. Either a table is wrong, or this machine is on a build "
+        "older than the wave it claims to ground — check `openclaw --version` before "
+        "editing either table."
     )
 
 
