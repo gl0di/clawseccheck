@@ -2226,6 +2226,24 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="host",
     ),
+    # B379 (F-178): host-level scheduled persistence (systemd user *.timer / world-
+    # readable system cron) that names OpenClaw, outside openclaw.json's own `cron`
+    # block (C048 covers only that). See check_host_scheduled_persistence
+    # (checks/_host.py) for the full three-way scoping (why .service/shell_rc are
+    # excluded, why the signal is a name/content match rather than bare existence).
+    # Advisory, never FAIL — matches B150's precedent one entry up (a real host
+    # scheduling surface, legitimate infrastructure that also happens to be a
+    # persistence substrate worth disclosing).
+    CheckMeta(
+        "B379",
+        "Host-level scheduled persistence (cron/systemd timer) naming OpenClaw",
+        LOW,
+        "advisory",
+        "Persistence / Host Watch",
+        scored=False,
+        confidence="MEDIUM",
+        surface="host",
+    ),
     # B151: third-party Codex CLI connector caches (agents/*/agent/codex-home/.tmp/
     # plugins/plugins/*/hooks.json) that wire a shell script to a tool-use/lifecycle
     # event. Informational disclosure of an upload-shaped surface in a third-party

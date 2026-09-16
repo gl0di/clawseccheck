@@ -1971,6 +1971,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B379 - Host-level scheduled persistence (cron/systemd timer) naming OpenClaw
+
+- Severity: LOW
+- Block: advisory
+- Framework: Persistence / Host Watch
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Host-level scheduled persistence (cron/systemd timer) naming OpenClaw
+- Remediation:
+  - none
+
 ### B151 - Codex connector shell hooks in the plugin doc-cache
 
 - Severity: LOW

@@ -8,6 +8,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from .. import hostpersist as _hostpersist
 from .. import trajectory as _trajectory
 from .. import trajectorystore as _trajectorystore
 from ..catalog import (
@@ -1024,6 +1025,174 @@ def check_systemd_persistence(ctx: Context) -> Finding:
         f"({', '.join(other_ev[:6])}); none set Restart=always.",
         "Keep restart policies intentional and documented.",
         evidence=other_ev[:6],
+    )
+
+
+def _host_entry_abs_path(entry_path: str, home: Path) -> Path:
+    """Reconstruct the absolute path a `hostpersist.HostEntry.path` string came from.
+
+    `hostpersist.scan()` deliberately renders home-rooted entries as `~/...` (never a
+    raw absolute path with the account name — see its own module docstring) and
+    everything else (the /etc families) as-is. This is the one place that string gets
+    turned back into a real Path so this check can open the file; the reconstructed
+    absolute path itself is never put into a Finding's detail/evidence, only the
+    already-redacted `entry_path` string is.
+    """
+    if entry_path.startswith("~/"):
+        return home / entry_path[2:]
+    return Path(entry_path)
+
+
+def _bounded_read_text(path: Path) -> "str | None":
+    """Best-effort bounded read of *path* as text, or None on any read failure.
+
+    None means "could not check this entry's content" — the caller must not treat
+    that as "no match", only as reduced confidence (the entry's own file NAME is
+    still checked either way). Bounded to `hostpersist.MAX_FILE_BYTES` so this never
+    reads more of a host file than `hostpersist.scan()` itself was willing to digest.
+    """
+    try:
+        if path.is_symlink() and not path.exists():
+            return None
+        if not path.is_file():
+            return None
+        with open(path, "rb") as fh:
+            raw = fh.read(_hostpersist.MAX_FILE_BYTES)
+        return raw.decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+# ---------- B379 (F-178): host-level scheduled persistence outside OpenClaw's own ----------
+# ---------- cron config (crontab / systemd timers) ------------------------------------------
+#
+# C048 (checks/_lifecycle.py) covers exactly one surface: OpenClaw's OWN `cron` config
+# block. Its own docstring has said so since B-496 (commit 373c910) — it does not read,
+# and never claimed to read, the HOST's own scheduler. An agent that can write to the
+# filesystem can install a systemd user timer or drop a file under a world-readable
+# /etc/cron.* directory, and neither was visible anywhere in this audit before this
+# check. `--monitor` (F-179, hostpersist.py) already watches this surface for DRIFT —
+# a change between two runs. This check gives the surface a one-shot VERDICT too, for
+# every invocation that never runs --monitor at all (the default `clawseccheck` audit).
+#
+# hostpersist.py is METADATA-ONLY by design (digest, never content — ZKDS): the right
+# leaf for --monitor's "did this change" question, and the wrong shape alone for this
+# check's "does this reference OpenClaw" question. So this check re-opens the exact
+# same, already-enumerated, already-bounded set of paths hostpersist.scan() found and
+# reads their content narrowly (bounded to hostpersist.MAX_FILE_BYTES, same as the leaf
+# itself), searching only for the single case-insensitive "openclaw" marker B150
+# already uses (collector.systemd_unit_is_openclaw_related — the one definition, not a
+# second copy). The raw content itself never reaches a Finding: only "a match was
+# found at <redacted path>".
+CHECKS_HOST_ENTRY_FAMILIES = (
+    _hostpersist.FAMILY_SYSTEMD,
+    _hostpersist.FAMILY_SYSTEM_CRON,
+)
+
+
+def check_host_scheduled_persistence(ctx: Context) -> Finding:
+    """B379 (F-178) — host-level scheduled persistence (systemd user TIMER / system
+    cron) that names OpenClaw, outside openclaw.json's own `cron` block (C048).
+
+    Deliberately narrow, three ways:
+
+    1. Systemd user **service** units are B150's territory (Restart=always
+       persistence) — reusing them here would double-report the same unit under two
+       ids. Only `.timer` entries count here: the actual periodic-scheduling
+       primitive, and the one systemd shape B150 does not look at.
+    2. Shell startup files (`hostpersist.FAMILY_SHELL_RC`) are excluded. Per
+       hostpersist.py's own module docstring they are in scope for B324
+       (env.shellEnv.enabled) only — and ~/.bashrc existing at all is close to
+       universal, so counting it here would be a guaranteed false-positive flood on
+       every real machine (Golden Rule #5).
+    3. The identifying signal is a plain, bounded, case-insensitive "openclaw" match
+       on an entry's own name or content — never bare existence. Measured on a real
+       dev box: /etc/cron.* alone carries dozens of ordinary distro-packaged entries
+       (anacron, logrotate, sysstat, apport, dpkg, man-db, google-chrome...); an
+       existence-only WARN would have fired on every single one of them.
+
+    WARN    — a systemd-user `.timer` or a world-readable system-cron entry names
+              OpenClaw. Disclosure only, like B150/B193 — a legitimate scheduled
+              housekeeping task reads identically to a planted one from a static
+              scan; both are worth a human look, so this never FAILs.
+    UNKNOWN — no OpenClaw-named entry found, and hostpersist.scan() could not read
+              something in this surface — overwhelmingly the account's own crontab
+              spool, which is mode 1730 root:crontab and unreadable by its own owner
+              without a subprocess this read-only tool will not run (hostpersist.py's
+              own module docstring). This is the closest static analogue to the
+              published attack this check exists for, and the one part of the
+              surface that can never clear to PASS on a normal Linux box — an honest
+              gap, not a silent one.
+    UNKNOWN (not_applicable) — no host scheduling surface was present to look at at
+              all (no systemd-user dir, no /etc/cron.* paths, no crontab spool) —
+              non-Linux, a minimal container, or systemd simply not in use.
+    PASS    — every location hostpersist.scan() looked at was actually read (nothing
+              in `scan.unreadable`) and none of it names OpenClaw.
+    """
+    home = ctx.home.parent  # the ACCOUNT home, never ctx.home (~/.openclaw) — see
+    # hostpersist.py's own module docstring: passing ctx.home there once silently
+    # returned 23 entries instead of 36, every home-rooted family missing, no error.
+    scan = _hostpersist.scan(home=home)
+
+    hits: list[str] = []
+    for entry in scan.entries:
+        if entry.family == _hostpersist.FAMILY_SYSTEMD and not entry.path.endswith(".timer"):
+            continue  # .service persistence is B150's territory, not this check's
+        if entry.family not in CHECKS_HOST_ENTRY_FAMILIES:
+            continue  # shell_rc is B324's concern (env.shellEnv.enabled), not this one's
+        name = Path(entry.path).name
+        content = _bounded_read_text(_host_entry_abs_path(entry.path, home)) or ""
+        if _systemd_unit_is_openclaw_related(name, content):
+            label = _hostpersist.FAMILY_LABELS.get(entry.family, entry.family)
+            hits.append(f"{label}: {entry.path}")
+
+    if hits:
+        return _finding(
+            "B379",
+            WARN,
+            "Host-level scheduled persistence names OpenClaw, outside openclaw.json's "
+            "own cron block (already covered by C048): " + "; ".join(hits[:8]) + ". "
+            "Disclosure only — a legitimate scheduled task reads the same as a planted "
+            "one from a static scan.",
+            "Confirm each entry above is intentional. If it should not exist, remove it "
+            "(`systemctl --user disable --now <name>.timer`, or edit the /etc/cron.* "
+            "file directly).",
+            evidence=hits,
+            confidence="MEDIUM",
+        )
+
+    if scan.unreadable:
+        return _finding(
+            "B379",
+            UNKNOWN,
+            "No OpenClaw-related systemd timer or system-cron entry was found, but "
+            f"{len(scan.unreadable)} host scheduling location(s) could not be read — "
+            "typically the account's own crontab spool, which needs root or a "
+            "subprocess this read-only tool will not run. This is not the same as "
+            "confirming nothing is scheduled.",
+            "Run `crontab -l` yourself to check your personal crontab — this tool "
+            "cannot read it.",
+            evidence=list(scan.unreadable),
+        )
+
+    if not scan.families_seen:
+        return _finding(
+            "B379",
+            UNKNOWN,
+            "No host-level scheduling surface (systemd user units, system cron, or a "
+            "crontab spool) was found on this host — host-level scheduled persistence "
+            "does not apply.",
+            "—",
+            not_applicable=True,
+        )
+
+    return _finding(
+        "B379",
+        PASS,
+        "Host-level scheduled persistence (systemd user timers, system cron) was "
+        "checked and nothing found there names OpenClaw.",
+        "Re-run after installing or changing a systemd user timer or a system cron "
+        "entry.",
     )
 
 

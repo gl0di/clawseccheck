@@ -168,6 +168,7 @@ from ._host import (
     check_host_egress_posture,
     check_incident_readiness,
     check_systemd_persistence,
+    check_host_scheduled_persistence,
     check_bundled_root_override,
     check_unit_embedded_gateway_secret,
     check_audit_trail_signals,
@@ -1513,6 +1514,7 @@ CHECKS = [
     check_pending_device_pairing_scope,  # B138 — dangling high-scope pending device pairing
     check_paired_device_operator_authority,  # B176 — standing operator authority in devices/paired.json (B-243)
     check_systemd_persistence,  # B150 — systemd user-unit Restart=always persistence
+    check_host_scheduled_persistence,  # B379 — systemd timer / system cron naming OpenClaw, outside C048's scope (F-178)
     check_codex_plugin_hooks,  # B151 — codex connector shell hooks in the plugin doc-cache
     check_orphaned_plugin_caches,  # B152 — on-disk plugin cache not in plugins.entries
     check_undeclared_plugin_load_path,  # B348 — plugins.load.paths entry not in plugins.entries (F-161)

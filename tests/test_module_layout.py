@@ -142,7 +142,7 @@ _EXEMPT = {
                       "fence layers are what to lift out, not an arbitrary halving. Same "
                       "sequencing as checks/_content.py — that one is twice this size and "
                       "has the simpler seam, so it goes first.",
-    "checks/_host.py": "~1,324 lines — the host-monitor / incident-readiness topic "
+    "checks/_host.py": "~1,779 lines — the host-monitor / incident-readiness topic "
                        "(B10/B16/B50-B54 + the attestation helpers). Sat at EXACTLY 1,200 "
                        "for a while, i.e. one line under a tripwire, and crossed it with "
                        "B-514: check_audit_log went from a 2-branch stub that returned "
@@ -151,7 +151,12 @@ _EXEMPT = {
                        "false / redaction off / explicit true / unset-with-no-schema-"
                        "default). The extra lines are user-facing verdict text, not "
                        "machinery; squeezing them to hold a line count would trade the "
-                       "report's clarity for a number. A finer split is a later cycle.",
+                       "report's clarity for a number. Restated 2026-09-16 (F-178, "
+                       "CLAWSECCHECK-B-379): 1,324 -> 1,779 with check_host_scheduled_"
+                       "persistence, this module's own next entry in the same "
+                       "host-monitor family (systemd timer / system cron, sibling of "
+                       "B150 one function up) — same reasoning, a real new check's "
+                       "verdict text, not padding. A finer split is a later cycle.",
     # Restated 2026-09-05 (B-742): 7,597 -> 8,111. B-727 restated `_lifecycle.py` one day
     # earlier and, while measuring, wrote down that THIS file "sits at 97% of its own
     # tolerance" and that the table "needs a restate-and-reconsider pass, not one entry at
