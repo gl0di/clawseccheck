@@ -155,6 +155,13 @@ def test_the_coverage_arms_still_win_over_the_traversal_arm(tmp_path):
     an unreadable file and a traversal archive: UNKNOWN with engine_degraded=True. Promoting
     a rank-3 arm above them would swap a capped, honest UNKNOWN for a confident FAIL that
     hides the gap — a worse trade than the one being fixed.
+
+    B-754: this exact fixture is what that follow-up bug was found with — the coverage arm
+    winning the VERDICT (asserted below, unchanged) used to also mean the traversal was
+    never MENTIONED anywhere in the finding. `escape_via_zip.txt` must now be named
+    alongside the coverage disclosure, not instead of it (see
+    tests/test_b754_unreadable_erases_traversal.py for the full rendered-surface coverage:
+    the vet dossier text, the audit report text, and JSON).
     """
     home = _home(tmp_path, "d", extra_file=False)
     locked = home / "workspace" / "skills" / "demo" / "locked.py"
@@ -168,6 +175,11 @@ def test_the_coverage_arms_still_win_over_the_traversal_arm(tmp_path):
     assert f.status == "UNKNOWN", f.status
     assert getattr(f, "engine_degraded", False) is True, (
         "the coverage arm must keep engine_degraded, or the audit score loses its cap"
+    )
+    assert "locked.py" in f.detail, "the coverage disclosure must survive (B-754)"
+    assert _TRAVERSAL_MEMBER.rsplit("/", 1)[-1] in f.detail, (
+        f"the confirmed traversal must be named alongside the coverage gap, not erased "
+        f"by it (B-754): {f.detail!r}"
     )
 
 

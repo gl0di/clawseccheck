@@ -5090,6 +5090,17 @@ def check_installed_skills(ctx: Context) -> Finding:
         # B-745: same carve-out — see _stowaway_note's declaration above.
         "_stowaway_note": _stowaway_note,
     }
+    # B-754: computed here — before every coverage-arm branch below (parse_error_paths /
+    # skill_limit_hits / the unreadable-file sub-branch) — rather than at its own point in
+    # the cascade (where it used to sit, just above its own `if _path_traversal:` check),
+    # so a coverage arm that wins the cascade can still see whether a CONFIRMED archive
+    # escape was ALSO found in whatever WAS read. Registered into `_signal_buckets` here
+    # too so `corroborating_buckets` reflects it regardless of which arm wins (unchanged
+    # contract — see `_b13_verdict`). This does not move where `_path_traversal` is ACTED
+    # on for severity/status purposes: that stays at the traversal arm's own place in the
+    # cascade, still ranked below crit/high and below the coverage arms, per B-746.
+    _path_traversal = getattr(ctx, "path_traversal_violations", None) or []
+    _signal_buckets["path_traversal"] = _path_traversal
     if crit:
         extra = f" (+{len(crit) - 6} more)" if len(crit) > 6 else ""
         # B-555, accepted §2.5 residual: when a paste/transfer host is what convicted,
@@ -5224,16 +5235,48 @@ def check_installed_skills(ctx: Context) -> Finding:
         # check from FAIL to "no malware signature or known-bad indicator").
         unreadable = list(getattr(ctx, "unreadable_files", None) or [])
         if unreadable:
-            return _b13_verdict(
-                HIGH,
-                UNKNOWN,
+            _detail = (
                 "Part of this skill could not be READ, so it was not scanned — coverage "
-                f"is incomplete ({len(unreadable)} path(s)): " + "; ".join(unreadable[:6]),
+                f"is incomplete ({len(unreadable)} path(s)): " + "; ".join(unreadable[:6])
+            )
+            _fix = (
                 "These paths are present but unopenable (permissions, a dangling link, or "
                 "an I/O error), so nothing can be concluded about what they contain. Make "
                 "them readable and re-run, or inspect them manually before trusting this "
                 "skill — an unreadable path is not an absent one. An entry marked "
-                "'(directory not entered)' hides an unbounded subtree, not a single file.",
+                "'(directory not entered)' hides an unbounded subtree, not a single file."
+            )
+            # B-754: the coverage gap above still WINS this verdict (status/severity/winner
+            # below are unchanged — see the B-746 ordering comment at the traversal arm's
+            # own place in the cascade), but a confirmed archive escape found in whatever
+            # COULD be read must not go unmentioned just because an unrelated file elsewhere
+            # in the skill happened to be unreadable. Named here, in `detail` — not `fix` —
+            # because `detail` is the one field every rendered surface (the dossier's Danger
+            # row, the audit report's per-skill summary line, and the JSON `detail`/`reason`
+            # fields) unconditionally shows; `fix` only ever reaches a reader through the
+            # single "Fix (top)" slot, which a co-occurring WARN (e.g. B88) can and does win
+            # instead (collector.py's `unreadable_manifests` comment documents that same
+            # slot-contention for a different pair of findings). This DOES change this
+            # finding's `detail`-keyed baseline fingerprint when a traversal is present
+            # alongside an unreadable file — deliberately: an existing
+            # `.clawseccheckignore` entry for "coverage incomplete" must not go on silently
+            # matching once the situation is no longer just an incomplete read but a
+            # confirmed escape underneath it.
+            if _path_traversal:
+                _detail += (
+                    " — separately, a confirmed archive path traversal was ALSO found in "
+                    "what could be read: " + "; ".join(_path_traversal[:6])
+                )
+                _fix += (
+                    " Separately: this skill also contains a confirmed archive path "
+                    "traversal (see detail) — treat it as dangerous regardless of what the "
+                    "unreadable path turns out to hold."
+                )
+            return _b13_verdict(
+                HIGH,
+                UNKNOWN,
+                _detail,
+                _fix,
                 unreadable,
                 _signal_buckets,
                 "skill_limit_hits",
@@ -5312,11 +5355,17 @@ def check_installed_skills(ctx: Context) -> Finding:
     # `skill_limit_hits` / the unreadable-file branch answer "the scan could not see
     # everything", and they carry `engine_degraded`, which caps the audit score. Measured
     # on a home holding BOTH an unreadable file and a traversal archive: the coverage arm
-    # wins and the finding keeps engine_degraded=True. Promoting a rank-3 arm above them
-    # would trade a capped, honest UNKNOWN for a confident FAIL that hides the gap — a
-    # worse trade than the one being fixed here.
-    _path_traversal = getattr(ctx, "path_traversal_violations", None) or []
-    _signal_buckets["path_traversal"] = _path_traversal
+    # STILL wins here and the finding keeps engine_degraded=True — that ordering requirement
+    # is unchanged. Promoting a rank-3 arm above them would trade a capped, honest UNKNOWN
+    # for a confident FAIL that hides the gap — a worse trade than the one being fixed here.
+    #
+    # B-754: what WAS wrong is narrower than the ordering above — the coverage arm winning
+    # used to mean the traversal, which the scan DID find, was never MENTIONED anywhere in
+    # the finding (`_path_traversal` was computed and checked only here, past the coverage
+    # arms' own early returns). `_path_traversal` is now computed earlier (see the comment
+    # at its computation above) precisely so the unreadable-file branch can name a
+    # confirmed escape in its own `detail` — status/severity there is untouched, so the
+    # VERDICT still degrades to UNKNOWN/CAUTION exactly as before; only the SILENCE is fixed.
     if _path_traversal:
         _fix = "Ensure archives inside skills do not attempt path traversal."
         # B-747 (§2.5(d)): a member name shaped like a Windows drive reference is convicted
