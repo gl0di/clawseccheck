@@ -355,6 +355,7 @@ from ._config import (
     check_gateway_rate_limit,
     check_gateway_remote_ssh_host_key_policy,
     check_hook_template_content,
+    check_hook_transform_modules,
     check_hooks_enable_toggles,
     check_least_privilege,
     check_local_first,
@@ -1432,6 +1433,7 @@ CHECKS = [
     check_dangerous_overrides,
     check_privileged_commands_exposure,  # B171 — commands.bash/config/mcp/plugins gate (B-235)
     check_hook_template_content,  # B169 — hooks.mappings[] template content scan (B-231)
+    check_hook_transform_modules,  # B380 — hooks.mappings[].transform.module inventory/writability (C-406)
     check_fs_write_exposure,
     check_controlui_origins,
     check_plugin_permission_mode,

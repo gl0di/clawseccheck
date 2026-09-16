@@ -96,6 +96,7 @@ hooks.internal.entries
 hooks.internal.load.extraDirs
 hooks.mappings
 hooks.token
+hooks.transformsDir
 logging.file
 memory.search.remote
 meta.lastTouchedVersion

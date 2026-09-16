@@ -14,6 +14,7 @@ from ..catalog import (
     CRITICAL,
     FAIL,
     HIGH,
+    MEDIUM,
     PASS,
     UNKNOWN,
     WARN,
@@ -2423,6 +2424,132 @@ def check_hook_template_content(ctx: Context) -> Finding:
         "No hooks.mappings[] messageTemplate/textTemplate carries an embedded directive.",
         "Keep hook templates free of instruction-override or install-directive content.",
         pass_confidence="verified",
+    )
+
+
+def check_hook_transform_modules(ctx: Context) -> Finding:
+    """B380 (C-406) — hooks.mappings[].transform.module: config-loaded code run on
+    every matching message/event.
+
+    A configured hook transform is a relative module path OpenClaw dynamically
+    imports and invokes on every matching message, BEFORE the agent (or any other
+    check in this audit) ever sees the message -- `loadTransform` ->
+    `importFileModule`/`resolveFunctionModuleExport`. Grounded against the installed
+    OpenClaw dist (2026.9.4), by SYMBOL rather than bundle filename -- bundle names
+    are content-hashed and rename every release (this task's own 2026-09-02
+    re-grounding comment already caught one rename; `hooks-CwxdiIeO.mjs` today,
+    `hooks-4_CM-Biu.js` on 2026.8.2, `hooks-Bjrm8pWp.js` originally):
+      loadTransform / resolveContainedPath / resolveOptionalContainedPath
+                                        hooks-CwxdiIeO.mjs
+      importFileModule / resolveFunctionModuleExport
+                                        module-loader-BF97Ap2W.mjs (stable across all
+                                        three releases checked)
+    Schema descriptions (schema-DbKC3IUo.mjs), quoted verbatim -- OpenClaw's OWN docs
+    already flag this as a code-review surface:
+      hooks.transformsDir: "Base directory for hook transform modules referenced by
+        mapping transform.module paths. Use a controlled repo directory so dynamic
+        imports remain reviewable and predictable."
+      hooks.mappings[].transform.module: "Relative transform module path loaded from
+        hooks.transformsDir to rewrite incoming payloads before delivery. Keep
+        modules local, reviewed, and free of path traversal patterns."
+
+    Never FAIL, deliberately -- re-verified against the installed dist before writing
+    this check (not assumed from the task's own citations, which were themselves
+    already stale once): BOTH the module path and `hooks.transformsDir` itself are
+    CONFINED (`resolveContainedPath` requires the resolved path to stay inside its
+    base directory, checked via `isPathInside` on both the nominal AND the
+    realpath-resolved form; `resolveOptionalContainedPath` resolves a configured
+    `hooks.transformsDir` AS A SUBDIRECTORY of `<configDir>/hooks/transforms`, not as
+    an arbitrary path). So there is no `../`-escape or arbitrary-absolute-path vector
+    to FAIL on -- this is disclosure only, the same advisory shape as B150/B171/B341.
+
+    WARN    — a transform module is configured AND the resolved transforms directory
+              is group- or world-writable (`_dir_replaceable_by_others`) -- another
+              local account could plant or replace a transform module that then runs
+              on the next matching message, unrelated to the confinement above (which
+              only bounds WHERE the path resolves, not WHO can write there).
+    WARN    — a transform module is configured but the directory is not writable by
+              others (or its permissions could not be determined) -- still disclosed,
+              since this is config-loaded local code executing on live messages
+              regardless of directory permissions; MEDIUM only escalates when the
+              writability exposure is also present.
+    UNKNOWN — openclaw.json present but unparseable/unreadable, or not read at all.
+    PASS    — no hooks.mappings[] declares a transform.module.
+    """
+    unreadable = _config_unreadable("B380", ctx)
+    if unreadable is not None:
+        return unreadable
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B380",
+            UNKNOWN,
+            "No config was read, so whether any hooks.mappings[] declares a "
+            "transform.module could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    cfg = ctx.config
+    mappings = dig(cfg, "hooks.mappings")
+    modules: list[str] = []
+    if isinstance(mappings, list):
+        for i, m in enumerate(mappings):
+            if not isinstance(m, dict):
+                continue
+            transform = m.get("transform")
+            if not isinstance(transform, dict):
+                continue
+            mod = transform.get("module")
+            if isinstance(mod, str) and mod.strip():
+                modules.append(f"hooks.mappings[{i}].transform.module={mod.strip()!r}")
+
+    if not modules:
+        return _finding(
+            "B380",
+            PASS,
+            "No hooks.mappings[] declares a transform.module.",
+            "No action needed unless a hook transform is added later.",
+        )
+
+    # Best-effort resolution of the confined transforms directory, for a WRITABILITY
+    # check only -- NOT a re-implementation of resolveContainedPath's own path-escape
+    # validation (already re-verified above; irrelevant to "who can write here").
+    # Mirrors the vendor's own base (`path.join(configDir, "hooks", "transforms")`,
+    # configDir == ctx.home here) and its own resolution of a configured
+    # transformsDir AS A SUBDIRECTORY of that base, not of configDir directly.
+    transforms_dir = ctx.home / "hooks" / "transforms"
+    custom = dig(cfg, "hooks.transformsDir")
+    if isinstance(custom, str) and custom.strip():
+        transforms_dir = transforms_dir / custom.strip()
+    why = _dir_replaceable_by_others(transforms_dir)
+
+    label = "; ".join(modules[:6])
+    extra = f" (+{len(modules) - 6} more)" if len(modules) > 6 else ""
+    if why:
+        return _finding(
+            "B380",
+            WARN,
+            f"{len(modules)} hooks.mappings[] transform.module(s) configured — "
+            "config-loaded local code that runs on every matching message/event, "
+            f"before the agent sees it — and the resolved transforms directory "
+            f"({transforms_dir}) is {why}, so another local account could plant or "
+            "replace a transform module: " + label + extra,
+            "Restrict the transforms directory to owner-only (chmod 700), or move "
+            "it out of a shared/group-writable location. Review each configured "
+            "transform module's source either way.",
+            evidence=modules,
+            severity=MEDIUM,
+        )
+    return _finding(
+        "B380",
+        WARN,
+        f"{len(modules)} hooks.mappings[] transform.module(s) configured — "
+        "config-loaded local code that runs on every matching message/event, "
+        "before the agent sees it: " + label + extra,
+        "Review each transform module's source. The module path is confined to "
+        "hooks.transformsDir and cannot escape it via '../', but a reviewed, "
+        "version-controlled transforms directory is still the safer setup.",
+        evidence=modules,
+        confidence="HIGH",
     )
 
 

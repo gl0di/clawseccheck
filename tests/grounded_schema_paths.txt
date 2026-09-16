@@ -108,6 +108,7 @@ hooks.internal.installs
 hooks.internal.load.extraDirs
 hooks.mappings
 hooks.token
+hooks.transformsDir
 lastTouchedVersion
 logging.file
 logging.redactSensitive

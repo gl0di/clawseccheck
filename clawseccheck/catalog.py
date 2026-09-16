@@ -2400,6 +2400,26 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="hooks",
     ),
+    # B380 (C-406): hooks.mappings[].transform.module -- a config-loaded module path
+    # OpenClaw dynamically imports and invokes on every matching message, before the
+    # agent (or any other check) ever sees it. Never FAIL: both the module path and
+    # hooks.transformsDir itself are CONFINED (resolveContainedPath/
+    # resolveOptionalContainedPath, re-verified against the installed 2026.9.4 dist --
+    # see check_hook_transform_modules's own docstring for the symbol-level
+    # grounding), so there is no path-escape vector to FAIL on. Advisory disclosure,
+    # same shape as its sibling B179 immediately above (also hooks-surface, also
+    # advisory/LOW/scored=False), escalated to MEDIUM only when the resolved
+    # transforms directory is also group/world-writable.
+    CheckMeta(
+        "B380",
+        "hooks.mappings[].transform.module — config-loaded code run on messages",
+        LOW,
+        "advisory",
+        "Persistence / Supply-Chain Tamper",
+        scored=False,
+        confidence="HIGH",
+        surface="hooks",
+    ),
     # B181 (B-257): an installed skill's bytes no longer match the SHA-256 digests ClawHub
     # recorded for it AT INSTALL TIME (.clawhub/lock.json -> skills.<slug>.skillFile +
     # verification.artifact.files[]; and the per-skill .clawhub/origin.json). Both records

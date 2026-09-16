@@ -2095,6 +2095,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B380 - hooks.mappings[].transform.module — config-loaded code run on messages
+
+- Severity: LOW
+- Block: advisory
+- Framework: Persistence / Supply-Chain Tamper
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: hooks.mappings[].transform.module — config-loaded code run on messages
+- Remediation:
+  - none
+
 ## Hardening checks
 
 ### B181 - Installed skill modified after install (recorded ClawHub install hashes)
