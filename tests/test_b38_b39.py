@@ -65,6 +65,23 @@ def test_b38_private_network_false_does_not_fail():
     assert f.status == PASS
 
 
+def test_b38_private_network_truthy_nonbool_string_does_not_fail():
+    # CLAWSECCHECK-C-135-B722-followup: the installed 2026.9.4 dist types this field as
+    # a plain boolean() (no coercion) inside a strictObject, and the runtime's own bypass
+    # gate (isPrivateNetworkAllowedByPolicy, src/infra/net/ssrf.ts) is `=== true` --
+    # a truthy non-bool value never actually enables private-network access, so `is True`
+    # (not a truthy check) is the correct gate here. Pins the behavior risk.py's
+    # _browser_ssrf() was found to diverge from (a truthy bool() read there).
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": "true",
+            "hostnameAllowlist": ["example.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status != FAIL, f.detail
+
+
 # --- FAIL: noSandbox == true ---
 
 def test_b38_no_sandbox_fails():

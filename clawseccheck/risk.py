@@ -679,10 +679,31 @@ def _has_mutable_identity(findings: list[Finding], cfg: dict) -> bool:
 
 
 def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
-    """True when B38 FAILs OR browser.ssrfPolicy.dangerouslyAllowPrivateNetwork is set."""
+    """True when B38 FAILs OR browser.ssrfPolicy.dangerouslyAllowPrivateNetwork is set.
+
+    "Set" means the literal boolean `True`, matching B38's own `is True` gate
+    (checks/_egress.py) and the installed runtime's actual bypass predicate. Verified
+    2026-09-16 (CLAWSECCHECK-C-135-B722-followup, independently re-derived by a second
+    adversarial pass) against the installed 2026.9.4 dist: the zod schema types the
+    field as a plain `boolean().optional()` (zod-schema.core, SsrFPolicyConfigSchema)
+    with no coercion -- but the coercion-proof ground truth is the RUNTIME gate itself,
+    not schema rejection: `resolveBrowserSsrFPolicy` (config-Dc3xLSSD.mjs:117-130)
+    normalizes with `allowPrivateNetwork === true || dangerouslyAllowPrivateNetwork ===
+    true` and explicitly `delete`s the legacy `allowPrivateNetwork` alias before that
+    check, and the actual bypass predicate, `isPrivateNetworkAllowedByPolicy`
+    (src/infra/net/ssrf.ts, compiled as ssrf-DNi3J6fi.mjs:111-112), is
+    `policy?.dangerouslyAllowPrivateNetwork === true || policy?.allowPrivateNetwork ===
+    true` -- strict equality both times. So even a truthy value that reaches this code
+    (e.g. via `openclaw doctor --fix` re-writing an ambiguous legacy value verbatim,
+    doctor-config-flow-BoTzHMKN.mjs:216-229) still cannot flip the gate: no JS value
+    satisfies `x === true` except the boolean `true`. A `bool(...)` truthy read here
+    previously fired RISK-05/RISK-15 on values (a non-empty string, `1`, a non-empty
+    list, ...) that the real runtime never treats as enabling the private-network
+    bypass -- a false positive on rules whose own docstrings claim zero-FP.
+    """
     if _finding_status(findings, "B38") == FAIL:
         return True
-    return bool(dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork"))
+    return dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
 
 
 def _control_plane_exposed(findings: list[Finding], cfg: dict) -> bool:
