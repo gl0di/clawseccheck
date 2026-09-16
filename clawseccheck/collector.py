@@ -163,6 +163,11 @@ _MAX_CRON_RUN_LOGS = 500
 _MAX_EXEC_APPROVALS_BYTES = _MAX_CONFIG_BYTES
 _MAX_EXEC_APPROVALS_AGENTS = 200
 
+# F-192: `update_runs` is one row per self-update attempt (chat/control-ui/cli/campaign/
+# mac-app/api triggered) -- a far rarer event than a cron tick, so a generous cap that
+# never truncates a real machine while still bounding a hostile/corrupt store.
+_MAX_UPDATE_RUNS = 50
+
 # B-725: the shared skill-library surface in the state DB (skill_library_entries,
 # skill_uploads) -- bounded the same way as the row-scanning readers above. A hostile
 # or padded DB must not turn this into an unbounded scan; the consuming check needs
@@ -746,6 +751,18 @@ class Context:
     config_machine_state_read: bool = False
     config_machine_state_unparsed: set = field(default_factory=set)
     cron_store_shadowed: bool = False
+    # F-192: OpenClaw's own self-update ledger (`update_runs` in the state DB, new at
+    # 2026.9.2). Three fields, same "could not look" / "looked, nothing there" /
+    # "looked, found data" distinction as `config_machine_state` / `_read` / its error
+    # sibling -- collapsing them would let an unreadable ledger read as "no self-updates
+    # ever ran". Each entry is a plain dict of the SAFE scalar columns only (run_id,
+    # trigger, phase, status, reason, created_at_ms, updated_at_ms, finished_at_ms,
+    # downtime_ms) -- see `_collect_update_runs` for why the *_json blob columns are
+    # never read at all (field-select, not digest).
+    update_runs: list = field(default_factory=list)
+    update_runs_read: bool = False        # the table was present and queried at all
+    update_runs_parse_error: bool = False  # table present but the read genuinely failed
+    update_runs_truncated: bool = False   # the _MAX_UPDATE_RUNS row cap was hit
     # B-294: the cron EXECUTION trail (cron_run_logs in ~/.openclaw/state/openclaw.sqlite,
     # OR (B-709) its task_runs successor on a database that has run the migration -- see
     # _collect_cron_run_logs's docstring, and note it selects on the OBSERVED TABLES, not
@@ -4773,6 +4790,130 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
             ctx.config_machine_state_unparsed.add(state_key)
 
 
+def _collect_update_runs(home: Path, ctx: Context) -> None:
+    """F-192: read-only collection of OpenClaw's OWN self-update ledger (`update_runs` in
+    the shared state database), new at OpenClaw 2026.9.2 (state schema `PRAGMA user_version`
+    15).
+
+    Grounded against the installed dist's `OPENCLAW_STATE_SCHEMA_SQL` literal (verbatim,
+    task description) -- located by SYMBOL across
+    `openclaw-state-db-cache-*.js` / `openclaw-state-db-contract-*.js` /
+    `update-run-ledger-*.js`, never by a hash-suffixed filename, since the hashes rotate
+    every release:
+
+        CREATE TABLE IF NOT EXISTS update_runs (
+          run_id TEXT PRIMARY KEY NOT NULL, created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          trigger TEXT NOT NULL CHECK (trigger IN
+              ('chat','control-ui','cli','campaign','mac-app','api')),
+          phase   TEXT NOT NULL CHECK (phase IN ('requested','staging','validating',
+              'repairing','activating','restarting','verifying','finished')),
+          status  TEXT NOT NULL CHECK (status IN
+              ('running','succeeded','failed','rolled-back','skipped')),
+          reason TEXT, origin_json TEXT NOT NULL, target_json TEXT NOT NULL,
+          before_json TEXT NOT NULL, after_json TEXT NOT NULL, steps_json TEXT NOT NULL,
+          verification_json TEXT NOT NULL, repair_json TEXT NOT NULL,
+          confirmed_at_ms INTEGER, finished_at_ms INTEGER, downtime_ms INTEGER, ...
+        ) STRICT;
+
+    Why it matters: `trigger = 'chat'` is first-class self-modification evidence -- an
+    OpenClaw self-update initiated FROM a conversation turn -- that `checks/_lifecycle.py`
+    and `openclawdist.py` can currently only INFER from bytes that changed on disk; they see
+    that the install moved, never who moved it, from what, to what, or whether it rolled
+    back. And a row stuck at `status = 'running'` is the exact shape of the known "UI update
+    leaves gateway down" failure (`update.run` rewrites dist under the running updater;
+    ENOENT aborts the restart) -- a signal this tool could not see at all before this reader.
+
+    FIELD-SELECT, not a digest, and never a wildcard select: the same database holds live
+    OAuth tokens under `authProfiles.store` / `auth.sharedStore` (§8), so only an explicit
+    column list is bound into the query. The seven `*_json` blob columns
+    (origin/target/before/after/steps/verification/repair) are bounded (<=16KB each by the
+    schema's own CHECK) but MAY name filesystem paths belonging to the machine's update
+    history -- this reader does not read them at all, so there is nothing to redact or
+    render home-relative downstream. Only the nine scalar columns that answer "who
+    triggered a self-update, what phase/status did it reach, when" are selected.
+
+    Three ``ctx`` fields (`update_runs` / `update_runs_read` / `update_runs_parse_error`),
+    the same "could not look" vs "looked, nothing there" vs "looked, found data" split
+    `config_machine_state` uses: `update_runs_read` False means the table could not be
+    consulted at all (UNDETERMINED downstream, never a fake "no self-updates ran" PASS,
+    Golden Rule #4). A declared table is not an existing table either -- 13 of the
+    `skill_library_*` family are absent from a real live DB despite their own
+    `CREATE TABLE IF NOT EXISTS` (B-725's docstring), so table absence is probed via
+    `PRAGMA table_info`, not inferred from an OpenClaw version string: the state schema is
+    versioned on its own line and one state version does not map onto one OpenClaw release.
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
+    every other reader on this database uses.
+    """
+    state_dir = home / "state"
+    capped: list = []
+    candidates = (
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        # Same disclosure discipline as `_collect_config_machine_state`: a capped walk
+        # that never reached the DB is not the same fact as "no state store", and must not
+        # be reported as if it were (GR#4).
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the self-update ledger was not read"
+            )
+        return
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = 1")
+            # Presence-by-metadata, not exception-driven fallback: `PRAGMA table_info` on a
+            # missing table returns zero rows without raising, so it cannot be confused with
+            # a genuine read failure (a locked db, a corrupt page) the way catching
+            # `sqlite3.OperationalError: no such table` can.
+            if not list(conn.execute("PRAGMA table_info(update_runs)")):
+                return  # declared in the schema, absent from THIS db -> stays UNDETERMINED
+            cur = conn.execute(
+                "SELECT run_id, trigger, phase, status, reason, created_at_ms, "
+                "updated_at_ms, finished_at_ms, downtime_ms FROM update_runs "
+                "ORDER BY created_at_ms DESC LIMIT ?",
+                # Off-by-one truncation probe, same idiom as the cron readers: one extra
+                # row over the cap tells a table holding exactly the cap apart from one
+                # holding more, without a second query.
+                (_MAX_UPDATE_RUNS + 1,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # A state DB predating this table is not a corrupt store -- same honest
+        # UNDETERMINED as "table absent" above (mirrors every other reader here).
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(f"could not read update_runs from {db_path}: {exc}")
+            ctx.update_runs_read = True
+            ctx.update_runs_parse_error = True
+        return
+
+    ctx.update_runs_read = True
+    if len(rows) > _MAX_UPDATE_RUNS:
+        ctx.update_runs_truncated = True
+        rows = rows[:_MAX_UPDATE_RUNS]  # discard the probe row; the scanned set stays capped
+    for (run_id, trigger, phase, status, reason, created_at_ms, updated_at_ms,
+         finished_at_ms, downtime_ms) in rows:
+        ctx.update_runs.append({
+            "run_id": run_id,
+            "trigger": trigger,
+            "phase": phase,
+            "status": status,
+            "reason": reason,
+            "created_at_ms": created_at_ms,
+            "updated_at_ms": updated_at_ms,
+            "finished_at_ms": finished_at_ms,
+            "downtime_ms": downtime_ms,
+        })
+
+
 def _collect_capture_state(home: Path, ctx: Context) -> None:
     """B-295 (DISK-4): read-only METADATA about OpenClaw's debug-proxy traffic capture,
     stored in the shared state database (~/.openclaw/state/openclaw.sqlite).
@@ -7209,6 +7350,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)
     _collect_capture_state(home, ctx)  # B-295: debug-proxy capture row counts (metadata only)
+    _collect_update_runs(home, ctx)    # F-192: OpenClaw's own self-update ledger
     _collect_skill_library_state(home, ctx)  # B-725: shared skill-library reachability/integrity
     _collect_subagent_runs(home, ctx)  # B-296: subagent-spawn registry disclosure for B18
     _collect_audit_events(home, ctx)   # F-134 (DISK-1): runtime audit_events trail, --behavioral only
