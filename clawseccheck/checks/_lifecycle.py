@@ -1300,6 +1300,19 @@ def check_cron_scheduler(ctx: Context) -> Finding:
     unreadable = _config_unreadable("C048", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "openclaw.json present but unparseable" —
+    # on a host with NO openclaw.json at all, config_parse_error is False and
+    # ctx.config is `{}`, so `dig(ctx.config, "cron")` would silently resolve to None
+    # and fall through to the PASS below about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "C048",
+            UNKNOWN,
+            "No config was read, so whether a top-level `cron` scheduler is configured "
+            "could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cron = dig(ctx.config, "cron")
     if cron:
         return _finding(
@@ -1933,6 +1946,19 @@ def check_hook_policy_bypass(ctx: Context) -> Finding:
     unreadable = _config_unreadable("C6", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so every dig() below would silently degrade to None/absent and fall
+    # through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "C6",
+            UNKNOWN,
+            "No config was read, so whether a pre-v2026.6.10 hook-composition "
+            "tool-policy-drop exposure applies could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     raw = dig(cfg, "meta.lastTouchedVersion") or dig(cfg, "lastTouchedVersion")
     parsed = _parse_version(str(raw)) if raw else None
@@ -3189,6 +3215,23 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             "missing command path there before removing it.",
             warns,
         )
+    # B-661: unlike the duplicate-skill scan above (which walks disk load roots
+    # directly), the "no dead MCP command paths" half is read ENTIRELY from
+    # `ctx.config` (`_mcp_servers(ctx.config or {})`), and `skill_load_roots` also
+    # takes `ctx.config` to find any CUSTOM grouped skill roots beyond the standard
+    # ones. On a host where openclaw.json was never found, both legs silently see
+    # "nothing configured" rather than "not checked" — the same fail-open shape as
+    # every other check in this audit, just partial rather than total. A clean
+    # PASS here is honest only when the config locus was actually read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _custom(
+            "B104", LOW, UNKNOWN,
+            "No duplicate skill installs found in the standard load roots, but no config "
+            "was read — any custom skill load roots and any configured MCP server dead "
+            "command paths could not be checked.",
+            "Run the audit on the host where ~/.openclaw lives so config-declared skill "
+            "roots and MCP servers can be reconciled too.",
+        )
     return _custom(
         "B104", LOW, PASS,
         "No duplicate skill installs or dead MCP command paths found.",
@@ -3797,7 +3840,20 @@ def check_skill_symlink_target_writability(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B367", ctx)
     if unreadable is not None:
         return unreadable
-    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one that explicitly leaves allowSymlinkTargets unset and fall through to a
+    # PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B367", UNKNOWN,
+            "No config was read, so whether skills.load.allowSymlinkTargets widens "
+            "symlink resolution for skill code could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    cfg = ctx.config
     targets = dig(cfg, "skills.load.allowSymlinkTargets")
     if targets is None:
         return _finding(
@@ -3906,7 +3962,20 @@ def check_skill_load_hot_reload(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B368", ctx)
     if unreadable is not None:
         return unreadable
-    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one that explicitly sets watch=false and fall through to a PASS about a config
+    # nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B368", UNKNOWN,
+            "No config was read, so whether skills.load.watch hot-reloads skill "
+            "definitions could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    cfg = ctx.config
     watch = dig(cfg, "skills.load.watch")
     if watch is not None and not isinstance(watch, bool):
         return _finding(
@@ -4218,6 +4287,11 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
               operator.write), especially combined with isRepair=true — this is a
               pending pairing awaiting human approval, not proof of compromise.
     UNKNOWN — devices/pending.json exists but is unreadable or not valid JSON.
+
+    B-661: exempt from the "23 checks PASS on an unread config" audit. This check
+    never reads ``ctx.config`` — the locus is ``devices/pending.json`` under
+    ``ctx.home``, checked by presence/content alone regardless of whether
+    openclaw.json was found or parsed.
     """
     import json as _json
 
@@ -4348,6 +4422,11 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
               authority via a live (non-revoked) token -- an inventory advisory (count +
               age), never proof of compromise.
     UNKNOWN -- devices/paired.json exists but is unreadable or not valid JSON.
+
+    B-661: exempt from the "23 checks PASS on an unread config" audit. This check
+    never reads ``ctx.config`` -- the locus is ``devices/paired.json`` under
+    ``ctx.home``, checked by presence/content alone regardless of whether
+    openclaw.json was found or parsed.
     """
     import json as _json
     import time as _time
@@ -4618,6 +4697,13 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
               (B-258) the only failed verifications are ones whose every recorded
               reason is inconclusive (an unfinished security audit / a missing skill
               card), which is "the registry has not answered yet", not a rejection.
+
+    B-661: the PASS above is NOT a config-derived fact and is exempt from the
+    "23 checks PASS on an unread config" audit. This check never reads
+    ``ctx.config`` at all — the locus is ``.clawhub/lock.json`` on disk under each
+    workspace dir, walked unconditionally regardless of whether openclaw.json was
+    found or parsed. "No lock file" is a real, directly-observed disk fact on any
+    host, config-readable or not.
     """
     import json as _json
 
@@ -5663,6 +5749,11 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
     WARN    — a legacy file is present.
     PASS    — neither is present.
     UNKNOWN — the credentials/ directory exists but could not be listed.
+
+    B-661: exempt from the "23 checks PASS on an unread config" audit. This check
+    never reads ``ctx.config`` — both loci are filenames under ``ctx.home``
+    (``credentials/*-allowFrom.json``, ``identity/device-auth.json``), checked by
+    presence alone regardless of whether openclaw.json was found or parsed.
     """
     found: list[str] = []
     unreadable: list[str] = []
@@ -5749,6 +5840,11 @@ def check_restart_handoff_stale(ctx: Context) -> Finding:
     PASS    — present and not yet expired (a normal, still-open handoff window), or
               absent entirely.
     UNKNOWN — present but unreadable/unparseable, or missing/malformed expiresAt.
+
+    B-661: exempt from the "23 checks PASS on an unread config" audit. This check
+    never reads ``ctx.config`` — the locus is
+    ``gateway-supervisor-restart-handoff.json`` under ``ctx.home``, checked by
+    presence/content alone regardless of whether openclaw.json was found or parsed.
     """
     import json as _json
     import time as _time

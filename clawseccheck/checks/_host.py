@@ -20,6 +20,7 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    LIMIT_DOMAIN_CONFIG,
     Context,
     bundled_root_overrides,
     dig,
@@ -39,6 +40,7 @@ from ._shared import (
     _openclaw_generation,
     _plugins,
     _retired_key_note,
+    _surface_absent,
 )
 from ..invocation import command_prefix
 
@@ -313,6 +315,21 @@ def check_audit_log(ctx: Context) -> Finding:
     # a chance to fire first.
     if (unreadable := _config_unreadable("B10", ctx)) is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`. The B-524 comment above says the guard "belongs at the top" precisely to
+    # stop the audit_enabled-is-None branch below from reporting the documented
+    # default about a file nothing read — but it only ever checked parse errors, so
+    # the not-found case still fell all the way through to that same PASS.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B10",
+            UNKNOWN,
+            "No config was read, so whether the metadata audit ledger is switched on "
+            "could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     # B-700: canonical first, legacy as the fallback — see the migration quoted above.
     # The container is read with plain dict access, exactly as `_shared._node_commands`

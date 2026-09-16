@@ -1445,6 +1445,19 @@ def check_subagent_spawn_limits(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B81", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so all three dig() calls below would silently resolve to None (no limit
+    # raised) and fall through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B81",
+            UNKNOWN,
+            "No config was read, so whether subagent spawn limits are raised beyond "
+            "the recommended defaults could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     depth = dig(cfg, "agents.defaults.subagents.maxSpawnDepth")
     children = dig(cfg, "agents.defaults.subagents.maxChildrenPerAgent")

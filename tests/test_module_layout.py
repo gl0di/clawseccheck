@@ -165,8 +165,10 @@ _EXEMPT = {
     # `_mcp.py` has owed since I-022 is still owed and is now the second-largest piece of
     # structural debt in the tree after `_content.py`; vet_plugin alone (the dispatcher,
     # its tree sweep and the plugin sweep) is a coherent unit that could leave.
-    "checks/_mcp.py": "~8,115 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
-                      "topic-faithful and over budget by design. Restated 2026-09-06 "
+    "checks/_mcp.py": "~8,625 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
+                      "topic-faithful and over budget by design. Restated 2026-09-16 "
+                      "(B-661 added a config-found guard to three checks, +510 lines) — "
+                      "originally restated 2026-09-06 "
                       "(C-432) with the measurement the old 'a finer split is a later "
                       "cycle' never carried: 20 check functions, 2 vet entry points, 64 "
                       "private helpers, 59 regexes. Unlike checks/_content.py this file "

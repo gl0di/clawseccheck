@@ -24,6 +24,12 @@ def _ctx(
 ) -> Context:
     c = Context(home=Path("/nonexistent"))
     c.config = cfg
+    # B-661: this helper's `cfg` argument stands for a config that WAS found and
+    # read (including a legitimately-empty `{}`) — every call site in this file
+    # relies on that. config_found defaults to False on a bare Context(), which
+    # would now trip check_secrets' own B-661 guard and turn every PASS here into
+    # a false UNKNOWN.
+    c.config_found = True
     if bootstrap is not None:
         c.bootstrap = bootstrap
     if config_mode is not None:

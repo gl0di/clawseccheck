@@ -59,6 +59,7 @@ def test_single_unreferenced_skill_is_not_orphaned(tmp_path):
     (sd / "SKILL.md").write_text("---\nname: lonely\n---\n\nbody\n", encoding="utf-8")
     c = Context(home=tmp_path)
     c.config = {}
+    c.config_found = True  # B-661: `{}` here means a real, found, empty config
     c.bootstrap = {}
     c.installed_skills = {}
     assert check_offboarding_hygiene(c).status == PASS
@@ -74,6 +75,7 @@ def _mk_skill(root: Path, name: str) -> None:
 def _ctx(home: Path, config=None) -> Context:
     c = Context(home=home)
     c.config = config or {}
+    c.config_found = True  # B-661: a real, found config (possibly legitimately empty)
     c.bootstrap = {}
     c.installed_skills = {}
     return c

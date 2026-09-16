@@ -1453,6 +1453,19 @@ def check_provider_baseurl(ctx: Context) -> Finding:
     """
     if (f := _config_unreadable("B178", ctx)) is not None:
         return f
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(ctx.config, "models.providers")` would silently resolve to None
+    # and fall through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B178",
+            UNKNOWN,
+            "No config was read, so whether any model provider baseUrl uses a "
+            "cleartext http:// endpoint could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
 
     providers = dig(ctx.config, "models.providers")
@@ -1614,9 +1627,23 @@ def check_otel_content_capture_egress(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B365", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one that explicitly leaves diagnostics.otel unset and fall through to a PASS
+    # about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B365",
+            UNKNOWN,
+            "No config was read, so whether diagnostics.otel ships raw agent turn "
+            "content off-host could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
 
-    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    cfg = ctx.config
 
     # Hand-walked, not dig(): dig() collapses "key absent" and "key present but
     # malformed" to the same None, and here those two states have OPPOSITE verdicts —
@@ -1792,9 +1819,24 @@ def check_memory_search_remote_egress(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B366", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one with no memory.search.remote set anywhere and fall through to the PASS
+    # about a config nobody read. The docstring already promised "UNKNOWN — unread
+    # config"; this makes the code do it.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B366",
+            UNKNOWN,
+            "No config was read, so whether memory.search.remote sends embedded "
+            "memory chunks off-host could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
 
-    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    cfg = ctx.config
 
     sources: list[tuple[str, dict]] = []
     global_remote = dig(cfg, "memory.search.remote")
@@ -2049,6 +2091,26 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B82", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one that explicitly leaves diagnostics.cacheTrace unset and fall through to a
+    # PASS about a config nobody read (the dotenv-only env-override witness below is
+    # independent of openclaw.json and stays reachable regardless).
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        override = _b82_env_override(ctx)
+        if override is not None:
+            return override
+        return _finding(
+            "B82",
+            UNKNOWN,
+            "No config was read, so whether diagnostics.cacheTrace.enabled switches on "
+            "bulk per-turn transcript logging could not be determined. No "
+            "OPENCLAW_CACHE_TRACE override was found in the files OpenClaw loads at "
+            "startup.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config if isinstance(ctx.config, dict) else {}
     # Walk the two containers by hand rather than through dig(): dig() collapses "key
     # absent" and "key present but malformed" to the same None, and here those two states
@@ -2910,6 +2972,19 @@ def check_discovery_mdns_mode(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B73", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(cfg, "discovery.mdns.mode")` would silently resolve to None and
+    # fall through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B73",
+            UNKNOWN,
+            "No config was read, so whether discovery.mdns.mode broadly advertises "
+            "the agent on the local network could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     mode = dig(cfg, "discovery.mdns.mode")
     if mode != "full":
@@ -3231,6 +3306,19 @@ def check_webfetch_redirects(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B83", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(cfg, "tools.web.fetch.enabled")` would silently resolve to a
+    # falsy value and fall through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B83",
+            UNKNOWN,
+            "No config was read, so whether the web-fetch tool follows an excessive "
+            "redirect chain could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     if not dig(cfg, "tools.web.fetch.enabled"):
         return _finding(

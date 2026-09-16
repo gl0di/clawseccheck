@@ -1531,6 +1531,19 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B48", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so every dig() below would silently degrade to "absent" and fall through
+    # to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B48",
+            UNKNOWN,
+            "No config was read, so whether any dangerously*/allowUnsafe* break-glass "
+            "override is active could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     fails: list[str] = []
     warns: list[str] = []
@@ -1862,6 +1875,19 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B171", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so every commands.* dig() below would silently degrade to "absent" and
+    # fall through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B171",
+            UNKNOWN,
+            "No config was read, so whether any commands.bash/config/mcp/plugins "
+            "privileged in-chat command surface is enabled could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
 
     # Literal dig() calls (not an f-string in a loop) so the §4 schema-grounding AST
@@ -2084,6 +2110,20 @@ def check_audit_suppressions(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B173", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(cfg, "security.audit.suppressions")` would silently resolve to
+    # None and fall through to the (previously `pass_confidence="verified"`) PASS
+    # about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B173",
+            UNKNOWN,
+            "No config was read, so whether security.audit.suppressions silences any "
+            "native-audit finding could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     suppressions = dig(cfg, "security.audit.suppressions")
     if not isinstance(suppressions, list) or not suppressions:
@@ -2178,6 +2218,19 @@ def check_hook_template_content(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B169", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(cfg, "hooks.mappings")` would silently resolve to None and fall
+    # through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B169",
+            UNKNOWN,
+            "No config was read, so whether any hooks.mappings[] messageTemplate/"
+            "textTemplate carries an embedded directive could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     mappings = dig(cfg, "hooks.mappings")
     fail_ev: list[str] = []
@@ -2324,6 +2377,19 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B179", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so every hooks.* dig() below would silently degrade to "absent" and fall
+    # through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B179",
+            UNKNOWN,
+            "No config was read, so whether any hooks.enabled / hooks.internal "
+            "enable-toggle is configured could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     evidence: list[str] = []
     extra_dirs_hit = False
@@ -2747,6 +2813,19 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B80", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(cfg, "gateway.bind", "")`'s `""` default lands in LOOPBACK below
+    # and an unread config would be reported as a PROVEN loopback bind.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B80",
+            UNKNOWN,
+            "No config was read, so whether the gateway auth endpoint is exposed to "
+            "remote brute-force could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
     # Loopback is checked before mode/credential resolution: a loopback bind is not
@@ -2953,6 +3032,19 @@ def check_proxy_header_forging(ctx: Context) -> Finding:
     unreadable = _config_unreadable("C032", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(ctx.config, "gateway.allowRealIpFallback")` would silently
+    # resolve to None and fall through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "C032",
+            UNKNOWN,
+            "No config was read, so whether gateway.allowRealIpFallback broadly trusts "
+            "proxied source headers could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     fallback = dig(ctx.config, "gateway.allowRealIpFallback")
     if not fallback:
         return _finding(
@@ -3184,6 +3276,24 @@ def check_secrets(ctx: Context) -> Finding:
             "and re-run; in the meantime, manually confirm `chmod 600 "
             "~/.openclaw/openclaw.json`.",
         )
+    # B-661: the two guards above ("present but unparseable" / "parsed but
+    # unstattable") do not cover "no openclaw.json at all" — bootstrap-file secrets
+    # (checked unconditionally above) still legitimately FAIL either way, but the
+    # PASS wording below says "No exposed plaintext secrets", which conflates
+    # "checked the config and found none" with "never checked the config at all".
+    # secret_paths is necessarily empty here whenever config_found is False (it is
+    # derived from an empty ctx.config), so this cannot mask a real config-content
+    # finding — it only stops the terminal sentence from overclaiming.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B1",
+            UNKNOWN,
+            "No config was read, so whether openclaw.json itself carries a plaintext "
+            "secret could not be determined. No secret-like string was found in the "
+            "readable bootstrap files.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     note = ""
     pc = "verified"
     if secret_paths:
@@ -3342,6 +3452,23 @@ def check_tls(ctx: Context) -> Finding:
             "Check why the audit could not stat() openclaw.json (see the run's errors) "
             "and re-run; in the meantime, manually confirm `chmod 600 "
             "~/.openclaw/openclaw.json`.",
+        )
+    # B-661: the two guards above only cover "openclaw.json present but unparseable"
+    # (_config_unreadable) and "parsed but unstattable" — on a host with NO
+    # openclaw.json at all, config_found is False, config_parse_error is False, and
+    # ctx.config is `{}`. `bind`/`tls` above then silently read as "absent" and this
+    # PASS would assert a proven-safe transport about a config nobody read. The
+    # `_perms_loose`-only WARN path above this stays reachable on a genuinely
+    # unparseable config (a real, content-independent file-mode signal); only this
+    # terminal "everything is fine" claim needs the config to have actually loaded.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B11",
+            UNKNOWN,
+            "No config was read, so whether the gateway transport is loopback/TLS "
+            "could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     return _finding(
         "B11",

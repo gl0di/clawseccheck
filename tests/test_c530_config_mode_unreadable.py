@@ -47,12 +47,17 @@ class TestB11TransportPerms:
         f = check_tls(_ctx(cfg, tmp_path, config_mode=0o600))
         assert f.status == PASS
 
-    def test_still_passes_on_a_plain_non_openclaw_host(self, tmp_path):
+    def test_still_unknown_on_a_plain_non_openclaw_host(self, tmp_path):
         # config_mode is ALSO None here, but for an unrelated reason: there is no
         # openclaw.json to stat() at all (config_found=False) -- must not be mistaken
         # for the "parsed but stat() failed" bug case above.
+        #
+        # B-661: this used to assert PASS, pinning the exact fail-open bug B-661
+        # describes -- "Transport is loopback/TLS" asserted about a config nobody
+        # read. check_tls now guards config_found directly (see its own B-661
+        # comment) and reports UNKNOWN here instead.
         f = check_tls(_ctx({}, tmp_path, config_mode=None, config_found=False))
-        assert f.status == PASS
+        assert f.status == UNKNOWN
 
 
 class TestB1SecretsPerms:
@@ -68,10 +73,12 @@ class TestB1SecretsPerms:
         f = check_secrets(_ctx({}, tmp_path, config_mode=None))
         assert f.status == PASS
 
-    def test_still_passes_on_a_plain_non_openclaw_host(self, tmp_path):
-        # Same config_found distinction as check_tls above.
+    def test_still_unknown_on_a_plain_non_openclaw_host(self, tmp_path):
+        # Same config_found distinction as check_tls above, and the same B-661
+        # correction: this used to assert PASS ("No exposed plaintext secrets.")
+        # about a config nobody read.
         f = check_secrets(_ctx({}, tmp_path, config_mode=None, config_found=False))
-        assert f.status == PASS
+        assert f.status == UNKNOWN
 
     def test_still_fails_when_secret_present_and_perms_were_actually_read_loose(self, tmp_path):
         cfg = {"apiKey": _AWS_KEY}

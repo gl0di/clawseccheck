@@ -4823,7 +4823,20 @@ def check_acp_backend_inventory(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B369", ctx)
     if unreadable is not None:
         return unreadable
-    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one that explicitly leaves acp unset and fall through to a PASS about a config
+    # nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B369", UNKNOWN,
+            "No config was read, so whether acp.backend routes agent turns to a "
+            "plugin backend could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    cfg = ctx.config
     acp = cfg.get("acp")
     if "acp" in cfg and not isinstance(acp, dict):
         return _finding(
@@ -4920,7 +4933,21 @@ def check_agent_runtime_id_inventory(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B370", ctx)
     if unreadable is not None:
         return unreadable
-    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one with no agentRuntime.id overrides at all and fall through to a PASS about
+    # a config nobody read. The docstring already promised "UNKNOWN — unread
+    # config"; this makes the code do it.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B370", UNKNOWN,
+            "No config was read, so whether any model entry overrides agentRuntime.id "
+            "could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    cfg = ctx.config
 
     found: list[str] = []
 
@@ -5509,6 +5536,19 @@ def check_mcp_external_endpoint(ctx: Context) -> Finding:
     unreadable = _config_unreadable("C047", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `_mcp_servers({})` would silently resolve to no servers and fall
+    # through to a PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "C047",
+            UNKNOWN,
+            "No config was read, so whether any MCP server points at a non-local "
+            "endpoint could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     servers = _mcp_servers(ctx.config)
     external = []
     # B-073: keep only scheme://host of the endpoint in evidence — userinfo, path,

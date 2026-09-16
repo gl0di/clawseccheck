@@ -13,6 +13,7 @@ from clawseccheck.collector import Context
 def _ctx(cfg):
     c = Context(home=Path("/x"))
     c.config = cfg
+    c.config_found = True  # B-661: `cfg` stands for a real, found config
     c.bootstrap = {}
     return c
 
