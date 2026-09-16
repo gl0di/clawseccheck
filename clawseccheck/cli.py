@@ -5371,6 +5371,10 @@ def _main(argv=None) -> int:
         _chain_status = history_verify(args.history)
         _emit(render_trend(rows, ascii_only, chain_status=_chain_status,
                           window=None if args.all else DEFAULT_TREND_WINDOW))
+        # B-697: render_trend's own return value ends with no trailing blank line (its
+        # output is also consumed elsewhere, so that stays untouched) -- the separator
+        # belongs here, between the two SEPARATE _emit calls, not inside the renderer.
+        _emit("")
         _emit(_percentile_line(score, ascii_only, args.history))
         return 0
 
