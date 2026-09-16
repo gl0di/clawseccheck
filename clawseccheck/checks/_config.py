@@ -6,6 +6,7 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import ipaddress
 import os
+import re
 from pathlib import Path
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist
@@ -87,6 +88,7 @@ from ._shared import (
     _resolved_default_input_channels,
     _sandbox_docker_binds,
     _secret_paths,
+    SECRET_KEY_RE,
     SECRET_PATTERNS,
     SENSITIVE_TOOL_HINTS,
     _substituted_dm_policy_channels,
@@ -3618,6 +3620,140 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
         PASS,
         f"Scanned {len(candidates)} home file(s); no plaintext secret-shaped values detected.",
         "Keep secrets out of home files; prefer the OpenClaw secrets store or environment injection.",
+    )
+
+
+# ---------- C-405: secrets stored at OpenClaw-redactor-blind config paths ----------
+#
+# MEASURED FIRST, per this task's own instruction, before writing anything here — both
+# real consumers, not just the underlying patterns: `_secret_paths(cfg)` (B1's own
+# detector) and `_c015_has_secret(text)` (C015's own detector) were run directly against
+# five representative configs. Four missed; the positive control (an ordinary `apiKey`)
+# was caught:
+#   {"headers": {"Authorization": "Bearer <token>"}}     -> MISSED by both
+#   {"auth": {"bearer": "<token>"}}                       -> MISSED by both
+#   {"auth": {"tokens": ["<token>", "<token>"]}}          -> MISSED by both
+#   {"encryption": {"key": "<token>"}}                    -> MISSED by both
+#   {"tools": {"apiKey": "<token>"}}                      -> caught (control)
+#
+# Two DISTINCT reasons, not one:
+#   1. `SECRET_KEY_RE` (checks/_shared.py) is `password|secret|token|api[_-]?key|
+#      apikey|bottoken` -- "Authorization", "bearer", and bare "key" match none of
+#      those alternatives at all, so `_secret_paths`'s key-name test never even
+#      reaches the value.
+#   2. `_secret_paths`'s own recursion only tests `SECRET_KEY_RE.search(k)` when a
+#      dict value is a bare STRING; once it descends into a LIST (the `elif
+#      isinstance(obj, list)` branch), each element is recursed into with no key at
+#      all, so a `"tokens": ["<a>", "<b>"]` array is invisible even though "tokens"
+#      itself matches `SECRET_KEY_RE` fine -- the key/value pairing is lost, not the
+#      keyword.
+#
+# `logsafe.py`'s own redactor was also checked (this task's "separate, quick
+# self-audit" ask): it imports this SAME `SECRET_KEY_RE` from `checks/_shared.py`
+# rather than keeping a second copy, so gap #1 above is identical for our own log
+# redaction -- widening the marker set below closes both at once, deliberately, rather
+# than as a side effect.
+#
+# Deliberately a NEW, narrowly-scoped helper rather than widening the SHARED
+# `SECRET_KEY_RE`/`_secret_paths` in place: `_secret_paths` feeds B1, a SCORED,
+# FAIL-capable check, and `SECRET_KEY_RE` also feeds `logsafe.redact()`'s live output
+# path. Adding a bare "key" alternative to that shared, UNANCHORED substring regex
+# would match "primaryKey"/"foreignKey"/"sortKey"/"keyword" -- ordinary, non-secret
+# field names that contain "key" as a substring -- and widen a scored FAIL surface on
+# a false positive none of those deserve. This check's own key match
+# (`_REDACTOR_BLIND_KEY_RE`) is anchored to the WHOLE key segment instead
+# (`^(authorization|bearer|key)$`, case-insensitive) so "primaryKey" cannot collide,
+# and it feeds only THIS new, unscored, WARN-only, never-FAIL check -- never B1.
+_REDACTOR_BLIND_KEY_RE = re.compile(r"^(authorization|bearer|key)$", re.I)
+
+
+def _redactor_blind_secret_paths(obj, prefix: str = "", depth: int = 0) -> list:
+    """Dotted paths of a secret-shaped value sitting at a key name neither OpenClaw's
+    own config-value redactor nor our own `_secret_paths`/`SECRET_KEY_RE` recognizes
+    -- see the module comment above for the measurement and the two distinct gaps
+    this closes. Mirrors `_secret_paths`'s own walk shape (same depth bound, same
+    16-char / `_is_secret_reference` value gate) so the two stay easy to compare.
+    """
+    found: list = []
+    if depth >= 100:  # mirrors _shared._MAX_WALK_DEPTH
+        return found
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            path = f"{prefix}.{k}" if prefix else k
+            if (
+                isinstance(v, str)
+                and len(v) >= 16
+                and not _is_secret_reference(v)
+                and _REDACTOR_BLIND_KEY_RE.match(k)
+            ):
+                found.append(path)
+                continue
+            if isinstance(v, list) and SECRET_KEY_RE.search(k):
+                for i, item in enumerate(v):
+                    if (
+                        isinstance(item, str)
+                        and len(item) >= 16
+                        and not _is_secret_reference(item)
+                    ):
+                        found.append(f"{path}[{i}]")
+            found.extend(_redactor_blind_secret_paths(v, path, depth + 1))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            found.extend(_redactor_blind_secret_paths(v, f"{prefix}[{i}]", depth + 1))
+    return found
+
+
+def check_redactor_blind_secret_paths(ctx: Context) -> Finding:
+    """B381 (C-405) — a secret-shaped value sits at a config path neither OpenClaw's
+    own redactor nor this tool's own SECRET_KEY_RE-based detection recognizes (see the
+    module comment above `_redactor_blind_secret_paths` for the measurement).
+
+    Unlike B1, this is NOT gated on file permissions: the threat this check names is
+    OpenClaw's own runtime echoing the value back through `config get` output,
+    trajectory logs, or a message channel relay — a leak that happens regardless of
+    who else can read openclaw.json on disk. Never FAIL: a false positive here costs
+    a WARN, not a hard-capped grade, and this is a narrow, hand-anchored key-name
+    match (see `_REDACTOR_BLIND_KEY_RE`'s own comment for why it is anchored rather
+    than a substring test) rather than the exhaustively-vetted `SECRET_KEY_RE`.
+
+    WARN    — a redactor-blind path holds a secret-shaped value.
+    UNKNOWN — openclaw.json present but unparseable/unreadable, or not read at all.
+    PASS    — no such path found.
+    """
+    unreadable = _config_unreadable("B381", ctx)
+    if unreadable is not None:
+        return unreadable
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B381",
+            UNKNOWN,
+            "No config was read, so whether a secret-shaped value sits at a "
+            "redactor-blind path could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    paths = _redactor_blind_secret_paths(ctx.config)
+    if not paths:
+        return _finding(
+            "B381",
+            PASS,
+            "No secret-shaped value found at a config path OpenClaw's own redactor "
+            "does not recognize (Authorization/bearer/key/plural-tokens-as-a-list).",
+            "No action needed.",
+        )
+    label = ", ".join(paths[:6])
+    extra = f" (+{len(paths) - 6} more)" if len(paths) > 6 else ""
+    return _finding(
+        "B381",
+        WARN,
+        f"{len(paths)} secret-shaped value(s) at a config path OpenClaw's own "
+        "redactor does not recognize, so it will not be masked in config-get "
+        f"output, trajectory logs, or a relayed message channel: {label}{extra}",
+        "Move the value to `openclaw secrets configure` (a SecretRef indirection), "
+        "or to a path OpenClaw's redactor does recognize (a key name containing "
+        "password/secret/token/apiKey) — never a bare Authorization/bearer/key field "
+        "or a plural token array.",
+        evidence=paths,
     )
 
 

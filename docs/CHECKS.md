@@ -1875,6 +1875,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B381 - Secret-shaped value at an OpenClaw-redactor-blind config path
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Secrets / Redaction Blind Spot
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Secret-shaped value at an OpenClaw-redactor-blind config path
+- Remediation:
+  - none
+
 ### C047 - Non-local MCP server endpoint (manual review)
 
 - Severity: LOW

@@ -4,8 +4,8 @@ Honest map of what ClawSecCheck checks today, what it does **not** yet check, an
 the gaps are. `UNKNOWN` is never counted as `PASS`; gaps below are areas with no check at
 all (so they can't even surface as a finding). Updated 2026-09-15 for v4.1.1.
 
-Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 217 catalogued,
-of which **213 run in a default audit**; the three T-series behavioral checks plus B191
+Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) — 218 catalogued,
+of which **214 run in a default audit**; the three T-series behavioral checks plus B191
 (OpenClaw's own `audit_events` runtime trail) execute only under `--behavioral`
 total; see `docs/CHECKS.md` for the full generated list, plus the
 combinational risk engine `RISK-01..RISK-26`, the install-time vetters `--vet` (B13 plus
@@ -58,7 +58,7 @@ third-party reputation database behind any verdict here.
 | Threat | Covered by | Notes |
 |---|---|---|
 | **Lethal Trifecta** (headline correlation) | A1 | Untrusted input × sensitive data × outbound actions active together — the tool's single CRITICAL trifecta check; keep at most 2 of 3. A leg is a capability the config **declares** and does not confine: a file `read` counts while `tools.fs.workspaceOnly` is not true and the agent is not fully sandboxed, which are the same two guards OpenClaw's own audit uses. A capability present only through OpenClaw's permissive default is reported as undetermined (WARN), not as a leg `[CHECK: A1]` |
-| Plaintext secrets in config / bootstrap | B1 | Reports key paths, not values `[CHECK: B1]` |
+| Plaintext secrets in config / bootstrap | B1, B381 | Reports key paths, not values. B381 (C-405) covers the DISTINCT gap B1's own `SECRET_KEY_RE`-based `_secret_paths` (and OpenClaw's own config-value redactor) leaves open — a secret-shaped value at a key name neither recognizes (`headers.Authorization`, a bare `bearer`/`key` field, or a `tokens` array, where `_secret_paths`' own recursion loses the key/value pairing once it descends into a list) — measured directly against both detectors before writing the check, not assumed. Deliberately a separate, narrowly-anchored check rather than widening the shared `SECRET_KEY_RE` in place, since that regex also feeds B1 (scored) and `logsafe.redact()`'s live output path, and a bare "key" alternative there would collide with ordinary field names like `primaryKey`/`sortKey` as a substring. WARN-only, unscored, never FAIL `[CHECK: B1, B381]` |
 | System-prompt / secret leak in tool output | B9 | `[CHECK: B9]` |
 | Audit log & sensitive redaction | B10 | `[CHECK: B10]` |
 | Native-audit suppression list transparency | B173 | `security.audit.suppressions` permanently silences specific findings of OpenClaw's OWN `openclaw security audit` (and therefore native.py's fold-in of it too) — disclosed as WARN when non-empty, escalated to FAIL only when a suppressed checkId is grounded as unconditionally critical in the native audit source (B-237) `[CHECK: B173]` |

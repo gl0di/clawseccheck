@@ -2111,6 +2111,26 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="secrets",
     ),
+    # B381 (C-405): a secret-shaped value sits at a config path neither OpenClaw's own
+    # redactor nor SECRET_KEY_RE/_secret_paths (B1's own detector) recognizes --
+    # measured directly (see check_redactor_blind_secret_paths's own docstring):
+    # Authorization/bearer/bare-key key names, and a "tokens" array (SECRET_KEY_RE
+    # matches the key, but _secret_paths' own recursion loses the key/value pairing
+    # once it descends into a list). Deliberately a NEW, narrowly ANCHORED check
+    # rather than widening the shared SECRET_KEY_RE in place -- that regex also feeds
+    # B1 (scored, FAIL-capable) and logsafe.redact()'s live output path, and a bare
+    # "key" alternative there would match ordinary field names like "primaryKey"/
+    # "sortKey" as a substring. WARN-only, unscored, never FAIL.
+    CheckMeta(
+        "B381",
+        "Secret-shaped value at an OpenClaw-redactor-blind config path",
+        MEDIUM,
+        "advisory",
+        "Secrets / Redaction Blind Spot",
+        scored=False,
+        confidence="MEDIUM",
+        surface="secrets",
+    ),
     CheckMeta(
         "C047",
         "Non-local MCP server endpoint (manual review)",

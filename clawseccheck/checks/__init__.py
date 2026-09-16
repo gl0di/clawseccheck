@@ -362,6 +362,7 @@ from ._config import (
     check_local_model_service_command,
     check_privileged_commands_exposure,
     check_proxy_header_forging,
+    check_redactor_blind_secret_paths,
     check_sandbox,
     check_secrets,
     check_secrets_at_rest_home,
@@ -1332,6 +1333,7 @@ CHECKS = [
     check_trifecta,
     check_secrets,
     check_secrets_at_rest_home,
+    check_redactor_blind_secret_paths,  # B381 — secret-shaped value at a redactor-blind config path (C-405)
     check_gateway,
     check_least_privilege,
     check_sandbox,
