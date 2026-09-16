@@ -60,9 +60,14 @@ def test_badge_write_failure_returns_nonzero(tmp_path, capsys, _break_writes):
 
 
 def test_badge_write_failure_emits_message(tmp_path, capsys, _break_writes):
+    """C-449: the diagnostic is on stderr (matching the success note), stdout stays clean,
+    and it names the path the user asked for, not the atomic-write temp file."""
     out = _no_parent_path(tmp_path, ".svg")
     main(["--home", VULN] + BASE + ["--badge", str(out)])
-    assert "could not write badge" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "could not write badge" not in captured.out
+    assert "could not write badge" in captured.err
+    assert str(out) in captured.err
 
 
 def test_html_write_failure_returns_nonzero(tmp_path, capsys, _break_writes):
@@ -73,9 +78,13 @@ def test_html_write_failure_returns_nonzero(tmp_path, capsys, _break_writes):
 
 
 def test_html_write_failure_emits_message(tmp_path, capsys, _break_writes):
+    """C-449: see test_badge_write_failure_emits_message above."""
     out = _no_parent_path(tmp_path, ".html")
     main(["--home", VULN] + BASE + ["--html", str(out)])
-    assert "could not write HTML report" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "could not write HTML report" not in captured.out
+    assert "could not write HTML report" in captured.err
+    assert str(out) in captured.err
 
 
 def test_sarif_write_failure_returns_nonzero(tmp_path, capsys, _break_writes):
@@ -86,9 +95,13 @@ def test_sarif_write_failure_returns_nonzero(tmp_path, capsys, _break_writes):
 
 
 def test_sarif_write_failure_emits_message(tmp_path, capsys, _break_writes):
+    """C-449: see test_badge_write_failure_emits_message above."""
     out = _no_parent_path(tmp_path, ".sarif")
     main(["--home", VULN] + BASE + ["--sarif", str(out)])
-    assert "could not write SARIF" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "could not write SARIF" not in captured.out
+    assert "could not write SARIF" in captured.err
+    assert str(out) in captured.err
 
 
 def test_save_write_failure_returns_nonzero(tmp_path, capsys, _break_writes):

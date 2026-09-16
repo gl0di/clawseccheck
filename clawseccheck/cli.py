@@ -4994,7 +4994,14 @@ def _main(argv=None) -> int:
             _record_history_point(score, args, _live_signal, findings)
             return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
-            _emit(f"(could not write badge: {exc})")
+            # C-449: on stderr, matching the success note above and the tool's own
+            # `note:`-goes-to-stderr convention — a CI watching stderr for problems
+            # must not see silence on a failed export. Named against the REQUESTED
+            # path (`_path_problem_text`, B-562), not the atomic-write temp file the
+            # raw exception names, which the user never typed and cannot match.
+            print(f"(could not write badge: "
+                  f"{_path_problem_text(args.badge, exc, what='badge file')})",
+                  file=sys.stderr)
             return 1
 
     if _mode == "html":
@@ -5008,7 +5015,11 @@ def _main(argv=None) -> int:
             _record_history_point(score, args, _live_signal, findings)
             return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
-            _emit(f"(could not write HTML report: {exc})")
+            # C-449: see the badge branch above for why this is stderr + the
+            # requested path rather than stdout + the atomic-write temp file.
+            print(f"(could not write HTML report: "
+                  f"{_path_problem_text(args.html, exc, what='HTML report file')})",
+                  file=sys.stderr)
             return 1
 
     if _mode == "sarif":
@@ -5019,7 +5030,11 @@ def _main(argv=None) -> int:
             _record_history_point(score, args, _live_signal, findings)
             return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
-            _emit(f"(could not write SARIF: {exc})")
+            # C-449: see the badge branch above for why this is stderr + the
+            # requested path rather than stdout + the atomic-write temp file.
+            print(f"(could not write SARIF: "
+                  f"{_path_problem_text(args.sarif, exc, what='SARIF file')})",
+                  file=sys.stderr)
             return 1
 
     # C-373: `--dashboard --pdf <path>` is the chat delivery PAIR — the card is the
@@ -5272,7 +5287,14 @@ def _main(argv=None) -> int:
             # re-elects when `--dashboard` is present, so `_mode == "pdf"` implies no
             # dashboard was asked for.
             if _mode == "pdf":
-                _emit(f"(could not write PDF report: {exc})")
+                # C-449: bare `--pdf` is the whole deliverable, same as badge/HTML/SARIF
+                # above — stderr, and named against the requested path, not the
+                # atomic-write temp file. The `_pdf_side_output` inline-substitution
+                # branch below is untouched: rc 0 there is B-459's own deliberate fix,
+                # and its stdout placement is part of that fix (see its own comment).
+                print(f"(could not write PDF report: "
+                      f"{_path_problem_text(args.pdf, exc, what='PDF report file')})",
+                      file=sys.stderr)
                 return 1
             _emit(f"(could not write PDF report: {exc} — showing the full report inline)")
         if not args.dashboard:
