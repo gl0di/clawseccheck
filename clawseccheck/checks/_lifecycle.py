@@ -1260,7 +1260,12 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
         # Classify by filename: a known identity file gets the critical (FAIL-on-world)
         # rule; anything else is treated as soft (memory) -> WARN only.
         soft = p.name not in _CRITICAL_BOOTSTRAP
-        if _classify_file(p, f"{p} [attested]", soft=soft):
+        # B-652 (FU-3): labelled by BASENAME, not the absolute path the attestation
+        # supplied -- this string is rendered Finding evidence (world_write/
+        # group_write via _classify_file), and an absolute path carries the user's
+        # login name (§8). Mirrors B22's identical fix for the same attested-path
+        # label, a few hundred lines up in this same file.
+        if _classify_file(p, f"{p.name} [attested]", soft=soft):
             found_any = True
 
     if not found_any:
