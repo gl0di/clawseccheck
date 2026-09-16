@@ -1730,7 +1730,17 @@ def _param_argv_call_sites(
     if fn not in getattr(tree, "body", []):
         return None  # not a bare top-level function
     args = fn.args
-    if args.vararg or args.kwarg:
+    # B-655 (gap 1b): the blanket "fn takes *args/**kwargs -> bail" was sound for an
+    # ORDINARY parameter (its position genuinely cannot be pinned down once a
+    # `*args`/`**kwargs` unpack could appear at a call site) but does not hold when
+    # `param_name` IS the vararg itself: its binding at every call site is exactly
+    # "every positional argument from index len(positional_names) onward", and a
+    # `**kwargs` unpack at a CALL SITE (as opposed to in fn's own signature) is
+    # already bailed on below regardless of which param is being resolved. So the
+    # vararg case gets its own narrow carve-out; every other multi-star shape still
+    # bails exactly as before.
+    is_vararg_param = args.vararg is not None and args.vararg.arg == param_name
+    if (args.vararg or args.kwarg) and not is_vararg_param:
         return None
 
     fn_name = fn.name
@@ -1744,7 +1754,11 @@ def _param_argv_call_sites(
 
     positional_names = [a.arg for a in (*args.posonlyargs, *args.args)]
     kwonly_names = {a.arg for a in args.kwonlyargs}
-    if param_name in positional_names:
+    vararg_start = None
+    if is_vararg_param:
+        vararg_start = len(positional_names)  # everything from here on binds to *args
+        pos_index = None
+    elif param_name in positional_names:
         pos_index = positional_names.index(param_name)
     elif param_name in kwonly_names:
         pos_index = None  # keyword-only -- must be bound by keyword at every call site
@@ -1773,6 +1787,32 @@ def _param_argv_call_sites(
             return None
         if any(kw.arg is None for kw in call.keywords):  # **kwargs unpack at the call
             return None
+        if is_vararg_param:
+            # No keyword form exists for a vararg -- synthesize one ast.List out of
+            # every positional call argument past fn's own leading positional
+            # params, and hand it to the EXISTING `_all_call_sites_bind_fixed_argv`
+            # unchanged (same literal-argv / argv0-shell-indirect-exec rules a
+            # non-vararg wrapper already gets, including the retracted-and-narrowed
+            # "sh -c <tainted>" case). A call passing fewer args than
+            # `vararg_start` yields an empty slice, not an IndexError; an empty
+            # synthesized List is then treated as unresolvable by
+            # `_all_call_sites_bind_fixed_argv` (its own "not resolved.elts" guard)
+            # -- conservative, not a crash.
+            #
+            # C-135: a synthesized node is not in `owner_map` (it was built by
+            # walking the REAL tree before this node existed), and
+            # `_all_call_sites_bind_fixed_argv` resolves taint VISIBILITY by
+            # `owner_map.get(expr)` -- an unregistered node reads as module scope
+            # only, silently dropping a caller-local tainted variable (reproduced:
+            # `payload = os.environ["X"]; sh("sh", "-c", payload)` cleared to
+            # non-crit before this line existed, the exact "sh -c <tainted>"
+            # regression B-413 layer 2 exists to catch). Registering the synthetic
+            # node under the CALL's own owning scope makes it resolve exactly like
+            # the real, non-synthetic list a non-vararg call site already gets.
+            synthetic = ast.List(elts=list(call.args[vararg_start:]), ctx=ast.Load())
+            owner_map[synthetic] = owner_map.get(call)
+            bound_exprs.append(synthetic)
+            continue
         kw_match = next((kw.value for kw in call.keywords if kw.arg == param_name), None)
         if kw_match is not None:
             bound_exprs.append(kw_match)
@@ -1907,6 +1947,43 @@ def _all_call_sites_bind_fixed_argv(
     return True
 
 
+def _name_rebound_anywhere(tree: ast.AST, name: str) -> bool:
+    """B-655 (C-135): True if `name` (a builtin this module is about to trust, e.g.
+    "list"/"tuple") is rebound ANYWHERE in the file -- a def/class of that name, an
+    assignment/for/with/walrus/except/import target, or a function parameter.
+
+    Whole-file and NOT scope-precise, on purpose -- the same conservative-only
+    philosophy `_param_argv_call_sites`'s own name-reference walk already documents:
+    a rebinding inside a scope that could never actually reach the call site being
+    checked still counts here, which only ever makes a caller MORE conservative
+    (refuse to trust the builtin), never less, so this stays sound without needing
+    full scope resolution. Comprehension/match-statement binding forms are not
+    walked (`ast.MatchAs`/`ast.MatchStar`, a comprehension's own `for`-target) --
+    accepted as a narrower gap than the one this closes: shadowing a BUILTIN NAME
+    from inside one of those forms is materially more contrived than the plain
+    `def list(...)`/`list = ...` shapes this exists to catch.
+    """
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == name
+        ):
+            return True
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if (alias.asname or alias.name) == name:
+                    return True
+        if isinstance(node, ast.arg) and node.arg == name:
+            return True
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and node.id == name
+        ):
+            return True
+    return False
+
+
 def _subprocess_taint_is_command_injection(
     node: ast.Call,
     tainted: set,
@@ -1950,6 +2027,36 @@ def _subprocess_taint_is_command_injection(
                 break  # explicit shell=False -> fall through to the argv-form check
             return True  # shell=True, or a dynamic value we cannot prove is False
     first = node.args[0] if node.args else None
+    # B-655 (gap 1c): `check_output(list(args))` -- the sink's first argument is an
+    # ast.Call, not a Name, so neither the literal-List/Tuple branch below nor the
+    # bare-Name/layer-2 branch was ever reached, independently of whether `args` is
+    # the wrapper's own vararg. Unwrap the narrowest possible shape -- a single
+    # positional argument, no keywords, no starred unpacking, to the builtin name
+    # `list`/`tuple` -- to the Name it wraps, so it can flow into the SAME
+    # resolution paths a bare `check_output(args)` already gets.
+    #
+    # C-135: this unwrap trusts that `list`/`tuple` still means the builtin. A file
+    # that SHADOWS the name (`def list(x): return ["sh", "-c", tainted]`) could make
+    # the unwrap "resolve" to a Name that is not actually what gets called at
+    # runtime -- reproduced: without a shadow check, that shape silently cleared a
+    # command built entirely by the attacker-controlled shadow, for the ordinary
+    # non-vararg wrapper idiom as well as the new vararg one. Only unwrap when
+    # `tree` is available (needed to check) AND the name is not rebound anywhere in
+    # the file -- whole-file, NOT scope-precise, same conservative-only philosophy
+    # as `_param_argv_call_sites`'s own name-reference walk: a rebinding this cannot
+    # actually reach from this call site still refuses the unwrap, which only ever
+    # makes the result MORE conservative, never less.
+    if (
+        isinstance(first, ast.Call)
+        and isinstance(first.func, ast.Name)
+        and first.func.id in ("list", "tuple")
+        and len(first.args) == 1
+        and not first.keywords
+        and isinstance(first.args[0], ast.Name)
+        and tree is not None
+        and not _name_rebound_anywhere(tree, first.func.id)
+    ):
+        first = first.args[0]
     if isinstance(first, ast.Name) and list_bindings:
         first = list_bindings.get(first.id, first)  # resolve a var-bound command list
     if isinstance(first, (ast.List, ast.Tuple)):
@@ -1982,9 +2089,16 @@ def _subprocess_taint_is_command_injection(
         and list_bindings_by_call is not None
     ):
         fn = owner_map.get(node)
-        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-            a.arg == first.id for a in (*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs)
-        ):
+        # B-655 (gap 1a): the vararg name (`*args`) was excluded from this gate, so
+        # layer 2 never even attempted to run for `def sh(*args): check_output(args)`
+        # -- `_param_argv_call_sites` now resolves the vararg case too (see its own
+        # docstring), so it must be allowed to try.
+        is_named_param = isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+            any(a.arg == first.id
+                for a in (*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs))
+            or (fn.args.vararg is not None and fn.args.vararg.arg == first.id)
+        )
+        if is_named_param:
             call_sites = _param_argv_call_sites(fn, first.id, tree, owner_map)
             if call_sites is not None and _all_call_sites_bind_fixed_argv(
                 call_sites, list_bindings_by_call, owner_map, ext_taint_map, parent_scope, shadow_cache
