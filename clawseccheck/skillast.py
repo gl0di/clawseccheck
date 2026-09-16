@@ -677,6 +677,43 @@ def _external_tainted_names(
         for a nested comprehension), never the comprehension itself, matching
         `_own_bound_names`'s deliberate choice not to treat a walrus target as a
         comprehension's own bound name either.
+
+    B-643: two more binding forms join the same fixpoint, same four `sourced`
+    predicates, same `_bucket_new_taint` redirection -- found because `with open(p)
+    as fh: exec(fh.read())` (the idiom every style guide recommends) produced only
+    `DANGEROUS_SINK`, while the byte-identical `fh = open(p); exec(fh.read())`
+    produced `TT5_CMD_INJECTION` too. Same code, same sink, same source; only the
+    binding form differed.
+
+      * `with ctx_expr as target:` / `async with` -- `target` (Name, or a Tuple/List
+        for `with a() as (x, y):`) is tainted when `ctx_expr` is sourced. Neither
+        `with` nor `async with` introduces a new Python scope, so `owner_map` already
+        attributes every part of it to the enclosing function/module (no
+        `_build_toplevel_owner_map` change needed, unlike the comprehension case
+        above). A bare `with lock:` (no `as`) binds nothing and is skipped.
+      * plain `for target in iterable:` / `async for` (a statement, NOT the
+        `ast.comprehension` clause above) -- the direct sibling gap: `for line in
+        urlopen(url): exec(line)` is exactly as common a shape as the comprehension
+        form B-414 already covered, and was equally invisible before this.
+
+    Investigated and deliberately NOT changed, per this task's own "look for
+    siblings" note -- each checked against the SAME four `sourced` predicates this
+    function already uses, not assumed clean:
+
+      * `except X as e:` -- `e` is bound to a raised exception object, not to a
+        `sourced`-testable expression at all (there is no RHS to run the four
+        predicates against); tainting it would need a new, speculative heuristic
+        ("was this exception raised by a network/file call"), not an application of
+        the existing one. Left as a documented gap, not silently absorbed into this
+        fix.
+      * `match` capture patterns (`case [x, y]:`, `case Point(x=x):`) -- real but
+        rare in skill code, Python 3.10+ only, and each pattern kind
+        (MatchAs/MatchStar/MatchSequence/MatchMapping/MatchClass) needs its own
+        capture-name extraction; a distinct piece of work from this fix's scope.
+      * function parameters with a tainted default value -- already a non-issue:
+        `_func_param_taint_by_scope` (B-413 layer 1, see its own docstring) taints
+        EVERY parameter of every function unconditionally, specific default value or
+        not, so there is no separate "tainted default" gap to close here.
     """
     tainted: dict = {}
     for scope, names in func_param_taint.items():
@@ -684,6 +721,22 @@ def _external_tainted_names(
 
     assigns = [n for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AugAssign))]
     comprehensions = [n for n in ast.walk(tree) if isinstance(n, ast.comprehension)]
+    # B-643: `with ctx as name:` / `async with ctx as name:` items. `with` introduces
+    # NO new Python scope (unlike a comprehension), so `_build_toplevel_owner_map`'s
+    # generic `_map_scope_subtree` branch already owner-maps every descendant of a
+    # `With`/`AsyncWith` node to the SAME enclosing function/module scope as the rest
+    # of that body -- no owner_map change needed, only this propagation loop.
+    with_items = [
+        (node, item)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.With, ast.AsyncWith))
+        for item in node.items
+    ]
+    # B-643: plain `for target in iterable:` / `async for` statements -- the sibling
+    # gap the task's own "look for siblings" note names. Distinct from
+    # `ast.comprehension` above (a `[... for x in y]` clause): a statement-level For/
+    # AsyncFor also introduces no new scope, so the same owner_map reasoning applies.
+    for_stmts = [n for n in ast.walk(tree) if isinstance(n, (ast.For, ast.AsyncFor))]
     namedexprs = [
         n
         for n in ast.walk(tree)
@@ -784,6 +837,53 @@ def _external_tainted_names(
             scope = owner_map.get(gen)
             global_names, nonlocal_names = _global_nonlocal_for(scope)
             for name in _assign_target_names(gen.target):
+                if _bucket_new_taint(name, scope, global_names, nonlocal_names):
+                    changed = True
+
+        # B-643: `with ctx_expr as target:` -- ctx_expr is tested exactly like an
+        # assignment RHS (same four `sourced` predicates), and `target` (Name/Tuple/
+        # List, `_assign_target_names` unpacks either) is bucketed exactly like one.
+        # An item with no `as` clause (`optional_vars is None`, e.g. a bare
+        # `with lock:`) binds nothing and is skipped.
+        for with_node, item in with_items:
+            if item.optional_vars is None:
+                continue
+            ctx_expr = item.context_expr
+            visible = _tainted_names_visible(ctx_expr, tainted, owner_map, parent_scope, shadow_cache)
+            sourced = (
+                _value_is_tainted_source(ctx_expr, visible)
+                or _rhs_has_subscript_environ(ctx_expr)
+                or _rhs_has_fstring_taint(ctx_expr, visible)
+                or bool(_names_in(ctx_expr) & visible)
+            )
+            if not sourced:
+                continue
+            scope = owner_map.get(with_node)
+            global_names, nonlocal_names = _global_nonlocal_for(scope)
+            for name in _assign_target_names(item.optional_vars):
+                if _bucket_new_taint(name, scope, global_names, nonlocal_names):
+                    changed = True
+
+        # B-643: plain `for target in iterable:` / `async for`, sibling of the
+        # comprehension `for` case above -- same four `sourced` predicates over
+        # `iterable`, same `_assign_target_names` unpacking for `target`. Unlike a
+        # comprehension's generator clause, a statement-level For/AsyncFor owner-maps
+        # to the SAME enclosing scope as `iterable` itself (no separate-scope
+        # first-iterator special case is needed here).
+        for stmt in for_stmts:
+            iterable = stmt.iter
+            visible = _tainted_names_visible(iterable, tainted, owner_map, parent_scope, shadow_cache)
+            sourced = (
+                _value_is_tainted_source(iterable, visible)
+                or _rhs_has_subscript_environ(iterable)
+                or _rhs_has_fstring_taint(iterable, visible)
+                or bool(_names_in(iterable) & visible)
+            )
+            if not sourced:
+                continue
+            scope = owner_map.get(stmt)
+            global_names, nonlocal_names = _global_nonlocal_for(scope)
+            for name in _assign_target_names(stmt.target):
                 if _bucket_new_taint(name, scope, global_names, nonlocal_names):
                     changed = True
 
