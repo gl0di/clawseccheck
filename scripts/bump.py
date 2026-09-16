@@ -14,7 +14,10 @@ Usage:
   python3 scripts/bump.py --set X.Y.Z           # set an explicit version
   python3 scripts/bump.py --suggest             # print the level recommended by
                                                 # Conventional Commits since the last
-                                                # tag, then exit (writes nothing)
+                                                # release actually tagged on `main`
+                                                # (not HEAD's own ancestry — see
+                                                # _resolve_release_base), then exit
+                                                # (writes nothing)
   python3 scripts/bump.py patch --date 2026-06-23   # override the release date
   python3 scripts/bump.py patch --dry-run       # show changes, write nothing
 
@@ -59,23 +62,59 @@ def _next_version(cur: str, level: str) -> str:
     return f"{major}.{minor}.{patch + 1}"
 
 
-def _commits_since_last_tag() -> list[str]:
-    try:
-        tag = subprocess.run(
-            ["git", "describe", "--tags", "--abbrev=0"],
-            cwd=ROOT, capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        rng = f"{tag}..HEAD"
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        rng = "HEAD"  # no tags yet (or no git) — consider all reachable commits
+def _resolve_release_base() -> "tuple[str | None, str]":
+    """The most recently TAGGED release, resolved the way this repo's dev->main flow
+    actually works — not by walking HEAD's own ancestry.
+
+    A release tag lands on a merge commit in ``main`` (§6 step 6), and ``main`` only
+    moves at release time (the "dev->main branch flow" convention) — routine work lands
+    on ``dev``, which keeps going and never merges ``main`` back in. So a bare
+    ``git describe --tags --abbrev=0`` run on ``dev`` walks *dev's own* history and can
+    land on a stale tag that a later release already superseded on ``main``, silently
+    re-counting commits that already shipped (C-493: measured 438 vs. the correct 410).
+
+    Tries ``main`` first (a release tag's actual home), then ``origin/main`` (a fresh
+    clone with no local ``main``), then bare ``HEAD`` (a repo with no dev->main split at
+    all, where the old behaviour was already correct). Returns ``(tag, ref)`` — or
+    ``(None, "HEAD")`` when nothing resolves (no tags yet, or no git) — so the caller can
+    print *what this was compared against* instead of asserting a base with no evidence.
+    """
+    for ref in ("main", "origin/main", "HEAD"):
+        try:
+            subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", ref],
+                cwd=ROOT, capture_output=True, text=True, check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+        try:
+            tag = subprocess.run(
+                ["git", "describe", "--tags", "--abbrev=0", ref],
+                cwd=ROOT, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+        if tag:
+            return tag, ref
+    return None, "HEAD"
+
+
+def _commits_since_last_tag() -> "tuple[list[str], str | None, str]":
+    """``(commits, base_tag, compared_against)`` — commits NOT contained in the resolved
+    release base (see ``_resolve_release_base``), i.e. what the *next* release would
+    actually ship, not merely what postdates some tag reachable from HEAD's own
+    ancestry. ``base_tag`` is ``None`` when no tag was found at all (a fresh repo)."""
+    base_tag, compared_against = _resolve_release_base()
+    rng = f"{base_tag}..HEAD" if base_tag else "HEAD"
     try:
         out = subprocess.run(
             ["git", "log", rng, "--format=%s%n%b%x00"],
             cwd=ROOT, capture_output=True, text=True, check=True,
         ).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return []
-    return [c.strip() for c in out.split("\x00") if c.strip()]
+        return [], base_tag, compared_against
+    commits = [c.strip() for c in out.split("\x00") if c.strip()]
+    return commits, base_tag, compared_against
 
 
 def _suggest_level(commits: list[str]) -> str:
@@ -137,10 +176,24 @@ def main(argv: list[str] | None = None) -> int:
     cur = _current_version()
 
     if args.suggest:
-        commits = _commits_since_last_tag()
+        commits, base_tag, compared_against = _commits_since_last_tag()
         level = _suggest_level(commits)
         print(f"current: {cur}")
-        print(f"commits since last tag: {len(commits)}")
+        if base_tag:
+            print(f"compared against: {base_tag}  (resolved via {compared_against})")
+            print(f"commits not in {base_tag}: {len(commits)}")
+        else:
+            print("compared against: no tags found -- considering all of HEAD's history")
+            print(f"commits: {len(commits)}")
+        # An absent signal must not read as a measured negative (C-493): zero breaking
+        # markers found means "this commit log cannot justify a major", never "nothing
+        # breaking shipped" — §7 has never required the marker, so its absence is
+        # entirely uninformative about whether a breaking change actually happened.
+        if level != "major":
+            print(
+                f"no `!:` or `BREAKING CHANGE:` markers found in {len(commits)} commit(s) "
+                "-- a major bump will not be suggested even if one is warranted."
+            )
         print(f"suggested bump: {level}  ->  {_next_version(cur, level)}")
         return 0
 
