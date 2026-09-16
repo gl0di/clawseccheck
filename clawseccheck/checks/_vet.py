@@ -4065,6 +4065,16 @@ def _js_warn_sub_signals(rules: set, contributing_skills: set) -> set:
     return named or {_B13_WINNER_SUBSIGNAL["warns_js"]}
 
 
+# B-634: the reserved `_signal_buckets` key `check_installed_skills` uses to smuggle
+# agent-config-persistence hits (a list of `[status, text]` pairs, NOT plain evidence
+# strings) through to `_b13_verdict` below, regardless of which of its ~28 return sites
+# ends up winning the cascade. A named constant rather than a literal at both ends so a
+# typo at either site fails loudly (KeyError / silently-empty-list) rather than quietly
+# desyncing — a plain string literal duplicated at two call sites is exactly the kind of
+# drift this module's own comments elsewhere warn about.
+_B13_PERSISTENCE_AXIS_KEY = "_persistence_axis_reasons"
+
+
 def _b13_verdict(
     severity: str,
     status: str,
@@ -4124,14 +4134,33 @@ def _b13_verdict(
     # letting it in there would leak "we declined to look" into a field that means
     # "something else also fired"). This is what keeps a fence disclosure off the
     # install gate: `status` is decided before we get here and is never revised.
-    _coverage = [n for key, bucket in signal_buckets.items() if key.startswith("_")
-                 for n in bucket]
+    #
+    # B-634: `_B13_PERSISTENCE_AXIS_KEY` is excluded here on purpose — its entries are
+    # `[status, text]` PAIRS for `.axis_reasons`, not plain evidence strings, so folding
+    # it through this loop the way every other "_"-prefixed bucket is would append raw
+    # lists into `fx.evidence` instead of strings. Handled separately, below.
+    _coverage = [
+        n for key, bucket in signal_buckets.items()
+        if key.startswith("_") and key != _B13_PERSISTENCE_AXIS_KEY
+        for n in bucket
+    ]
     fx.evidence = fx.evidence + _coverage + [NPM_DEPTREE_SKILL_COVERAGE_NOTE]
     fx.corroborating_buckets = [
         name
         for name, bucket in signal_buckets.items()
         if bucket and name != winner and not name.startswith("_")
     ]
+    # B-634: B13 is a hard "danger"-only entry in dossier._AXIS_BY_ID — axis_for() never
+    # even looks at .axis_reasons for it — so this is a SECOND, additive axis on top of
+    # the primary danger bucketing, not a substitute for it (dossier.py routes it there
+    # explicitly; see the B-634 comment in build_profile's bucketing loop). Every one of
+    # this function's ~28 callers passes signal_buckets, so an agent-config-persistence
+    # hit reaches the Persistence axis regardless of which bucket actually won the
+    # cascade — the fact that a skill writes to a live agent-context file does not
+    # become less true because a louder, unrelated signal also fired.
+    _persistence_reasons = signal_buckets.get(_B13_PERSISTENCE_AXIS_KEY) or []
+    if _persistence_reasons:
+        fx.axis_reasons = {"persistence": _persistence_reasons}
     return fx
 
 
@@ -4189,6 +4218,17 @@ def check_installed_skills(ctx: Context) -> Finding:
         [],
         [],
     )
+    # B-634: agent-config persistence hits (writes to an agent-context file such as
+    # ~/.bashrc/CLAUDE.md/AGENTS.md — _agent_config_write_hits below), collected eagerly
+    # across every skill regardless of which cascade branch below ends up winning the
+    # B13 verdict. Every one of B13's ~28 `_b13_verdict(...)` returns folds this into the
+    # winning Finding's `.axis_reasons["persistence"]` (see `_b13_verdict`'s own comment)
+    # — B13 is a hard "danger"-only entry in `dossier._AXIS_BY_ID`, so without this the
+    # Persistence axis never sees the fact at all: it stays an empty bucket and prints
+    # its default clean "no dormant or staged code detected", one line under the same
+    # evidence admitting a live config write. Each entry is `[status, evidence_text]`,
+    # the shape `dossier._route_axis_reasons` already expects (same idiom B339 uses).
+    _persistence_axis_reasons: list = []
     warns_timebomb: list[str] = []
     warns_host_exfil: list[str] = []  # C-203: host/machine-identity info -> outbound sink
     warns_telemetry_undisclosed: list[str] = []  # B-342: undisclosed excessive telemetry
@@ -4828,8 +4868,12 @@ def check_installed_skills(ctx: Context) -> Finding:
                 and not _config_write_carries_dangerous_payload(blob)
             ):
                 _persist_warn.append(f"{evidence} (skill's own declared purpose)")
+                # B-634: same severity as the crit/high cascade would give this exact
+                # hit if nothing else had already fired for this skill.
+                _persistence_axis_reasons.append([WARN, f"{evidence} (skill's own declared purpose)"])
             else:
                 high.append(evidence)
+                _persistence_axis_reasons.append([FAIL, evidence])
 
         # C-199 (SkillTrustBench T09): insecure temp-file handling — hardcoded/
         # predictable /tmp path opened for write. WARN regardless of exfil/other
@@ -5089,6 +5133,10 @@ def check_installed_skills(ctx: Context) -> Finding:
         "_skill_read_gaps": _skill_read_gaps,
         # B-745: same carve-out — see _stowaway_note's declaration above.
         "_stowaway_note": _stowaway_note,
+        # B-634: NOT a coverage-string bucket like its underscore-prefixed siblings above
+        # — see _B13_PERSISTENCE_AXIS_KEY's and _b13_verdict's own comments. Registered
+        # under the shared constant so `_b13_verdict` reads exactly what is written here.
+        _B13_PERSISTENCE_AXIS_KEY: _persistence_axis_reasons,
     }
     # B-754: computed here — before every coverage-arm branch below (parse_error_paths /
     # skill_limit_hits / the unreadable-file sub-branch) — rather than at its own point in

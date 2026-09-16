@@ -602,6 +602,23 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
         ax = axis_for(f)
         if ax is not None:
             buckets[ax].append(f)
+            if f.id == "B13":
+                # B-634: B13 is a hard "danger"-only id in _AXIS_BY_ID, so axis_for()
+                # never even looks at .axis_reasons for it -- the line above always
+                # fires, unconditionally, for every B13 finding. This is an ADDITIONAL
+                # route on top of that, never a replacement: checks/_vet.py sets
+                # .axis_reasons["persistence"] on the returned finding whenever an
+                # agent-config-persistence hit (a live write to ~/.bashrc/CLAUDE.md/
+                # AGENTS.md/etc.) fired anywhere in the scan, regardless of which B13
+                # cascade branch actually won the verdict -- otherwise the Persistence
+                # axis never saw that fact at all and printed its default clean "no
+                # dormant or staged code detected" one line under the evidence proving
+                # otherwise. Uses the same dual-axis idiom B339 already established, via
+                # _route_axis_reasons; fallback_axis=None because an empty
+                # .axis_reasons here means this particular verdict carried no
+                # persistence-specific fact -- nothing to add, not a reason to fall
+                # back onto some other axis.
+                _route_axis_reasons(f, buckets, fallback_axis=None)
         elif f.id == "PLUGIN-VET":
             # Container aggregate: its dispatched sub-findings ride on .ring_findings and
             # are already flattened into the pool, so they bucket on their own. The
