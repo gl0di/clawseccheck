@@ -86,7 +86,7 @@ _MODE_C_VERDICT: dict[str, str] = {
 }
 
 
-def verdict_for(overall_status: str) -> str:
+def verdict_for(overall_status: str, *, not_applicable: bool = False) -> str:
     """Map a VetProfile's `overall_status` to Mode C's install-recommendation word.
 
     `overall_status` is itself the categorical rollup `_grade_profile` derives from the
@@ -100,12 +100,27 @@ def verdict_for(overall_status: str) -> str:
         PASS    -> INSTALL         (nothing found across every assessable axis)
         UNKNOWN -> CAUTION         (not assessable -- never presented as a green light)
 
+    *not_applicable* (CLAWSECCHECK-B-764) overrides all of the above to `NA` ("N/A"),
+    reusing the exact word already used for an inapplicable AXIS (see `NA` above) rather
+    than inventing a second "nothing here" vocabulary. This is for a target that
+    genuinely has NOTHING to assess -- `--vet-mcp` over zero configured servers being
+    the motivating case: the underlying `Finding` already carries `not_applicable=True`
+    (it can only be `True` when `status == UNKNOWN`, per `Finding.__post_init__`), but
+    before this parameter existed that fact never reached this function, so an empty MCP
+    server set rendered `CAUTION` -- "there is something to be cautious about" -- when
+    the honest answer is "there is nothing here to assess". `build_profile` is the only
+    caller that ever passes `True`; the cli.py re-vet-on-change call site, which asks a
+    genuine "could not determine" question with real content present, always leaves this
+    at its default and keeps reading CAUTION for UNKNOWN, correctly.
+
     This is the ONE place that mapping is made: the text dossier, --json, --advise, and
     SARIF's vetProfile all read `VetProfile.verdict` (computed once, in `build_profile`,
     via this function) rather than keeping their own copy -- so they cannot disagree.
     Any status this dict doesn't recognize (defensive only -- `_grade_profile` never
     returns one) also reads CAUTION, the conservative default.
     """
+    if not_applicable:
+        return NA
     return _MODE_C_VERDICT.get(overall_status, "CAUTION")
 
 # ── Finding → axis bucketing ──────────────────────────────────────────────────
@@ -297,6 +312,23 @@ def _worst(findings: list):
     if not findings:
         return None
     return max(findings, key=lambda f: _STATUS_RANK.get(f.status, 0))
+
+
+def _pool_wholly_not_applicable(pool: list) -> bool:
+    """True when EVERY finding in a non-empty pool is `not_applicable` (CLAWSECCHECK-B-764).
+
+    The one caller, `build_profile`, feeds this into `verdict_for`'s `not_applicable=`
+    to tell a genuinely empty target (`--vet-mcp` with zero configured servers, whose
+    engine returns exactly one `Finding(id="MCP-VET", status=UNKNOWN,
+    not_applicable=True)`) apart from an ordinary undetermined assessment. Deliberately
+    ALL-of, not ANY-of: a plugin/skill pool commonly buckets several findings (the
+    container's own aggregate plus every dispatched sub-check), and it would take every
+    one of them agreeing "nothing here" for the whole profile to be inapplicable --
+    one real UNKNOWN or PASS beside a not_applicable sibling means something WAS
+    assessed, so CAUTION (or better) is still the honest word. An empty pool is its own
+    branch in `build_profile` and never reaches this helper.
+    """
+    return bool(pool) and all(getattr(f, "not_applicable", False) for f in pool)
 
 
 def _danger_coverage_gap(danger_bucket: list, ctx) -> bool:
@@ -560,7 +592,8 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
                        else "nothing to assess")
             for a in AXES
         ]
-        return VetProfile(target, target_type, UNKNOWN, verdict_for(UNKNOWN), "N/A", 0, axes, [], [])
+        return VetProfile(target, target_type, UNKNOWN,
+                          verdict_for(UNKNOWN, not_applicable=True), "N/A", 0, axes, [], [])
 
     # Bucket every finding into an axis (or unmapped / decomposed-container).
     buckets: dict[str, list] = {a: [] for a in AXES}
@@ -775,7 +808,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
         target=target,
         target_type=target_type,
         overall_status=overall_status,
-        verdict=verdict_for(overall_status),
+        verdict=verdict_for(overall_status, not_applicable=_pool_wholly_not_applicable(pool)),
         overall_grade=grade,
         score=score,
         axes=axes,
