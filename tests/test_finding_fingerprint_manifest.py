@@ -434,37 +434,93 @@ def test_no_detail_is_environment_derived():
     )
 
 
-def test_no_finding_detail_is_clock_dependent():
-    """Re-audit the whole corpus with the wall clock frozen 45 days ahead and require
-    every fingerprint to be unchanged.
+# B-729: sampled, not the full corpus. Measured on this box: one full-corpus
+# `_fingerprint_pairs` pass over all ~734 homes is ~45s, so the naive "freeze, re-audit
+# the whole corpus, compare" shape this test used to have would cost ~90s just for the
+# unfrozen + frozen pair (on top of the row-level guard's own full pass elsewhere in this
+# file). A clock-dependent `Finding.detail` is a property of the CHECK CODE PATH that
+# produced it, not of any one fixture's content -- if a check reads the wall clock, it
+# does so on every fixture that check fires on, not selectively -- so a representative
+# cross-section catches it exactly as reliably as the full corpus would. Stride over the
+# already-sorted (and therefore prefix-diverse: bad_/clean_/home_/traj_/warn_/...)
+# CORPUS rather than a random sample, so the set is 100% deterministic across runs and
+# machines and needs no seed.
+_CLOCK_SAMPLE = CORPUS[::7]
 
-    Patching ``time.time`` is exhaustive for the check engine: it is the only wall-clock
-    read in the package outside ``scanbudget``'s ``time.monotonic()`` deadlines, and no
-    module under ``clawseccheck/checks/`` calls ``datetime.now()``/``date.today()``.
-    Before B-348 this failed on B176 for three fixtures unless the age was folded away;
-    now it passes with the fold doing nothing, because no detail reads the clock at all.
+
+def _clock_dependence_drift(sample: list[Path]) -> dict[str, list[str]]:
+    """The one property this guard pins: freezing the wall clock 45 days ahead must not
+    move any finding's fingerprint, compared to an UNFROZEN run of the SAME tree taken
+    moments apart -- never against the committed manifest.
+
+    B-729: comparing against the committed manifest (the original shape of this guard)
+    could not tell "a detail reads the clock" apart from "the manifest is stale for some
+    unrelated reason" -- both look identical from that vantage point, and the message
+    named the wrong cause for the latter (confirmed live: a fixture rename unrelated to
+    time made this fail alongside the correct, and accurately-worded, row-level manifest
+    guard). Comparing two live runs of the same tree is now the only source of truth this
+    function touches; ``test_clock_guard_is_immune_to_a_stale_manifest_...`` below pins
+    that a corrupted manifest cannot make it misfire.
     """
-    committed = _load_manifest()
-    frozen = time.time() + 45 * 86_400
-    original = time.time
-    time.time = lambda: frozen
+    unfrozen = {
+        str(home.relative_to(FIXTURES)): _encode_pairs(_fingerprint_pairs(home))
+        for home in sample
+    }
+    frozen_at = time.time() + 45 * 86_400
+    original_time = time.time
+    time.time = lambda: frozen_at
     try:
-        drifted = {
-            str(home.relative_to(FIXTURES)): _changed_ids(
-                _encode_pairs(_fingerprint_pairs(home)),
-                committed.get(str(home.relative_to(FIXTURES)), ""),
-            )
-            for home in CORPUS
-            if _encode_pairs(_fingerprint_pairs(home))
-            != committed.get(str(home.relative_to(FIXTURES)), "")
+        frozen = {
+            str(home.relative_to(FIXTURES)): _encode_pairs(_fingerprint_pairs(home))
+            for home in sample
         }
     finally:
-        time.time = original
+        time.time = original_time
+    return {
+        rel: _changed_ids(frozen[rel], unfrozen[rel])
+        for rel in unfrozen
+        if frozen[rel] != unfrozen[rel]
+    }
+
+
+def test_no_finding_detail_is_clock_dependent():
+    """Patching ``time.time`` is exhaustive for the check engine: it is the only
+    wall-clock read in the package outside ``scanbudget``'s ``time.monotonic()``
+    deadlines, and no module under ``clawseccheck/checks/`` calls
+    ``datetime.now()``/``date.today()``. Before B-348 this failed on B176 for three
+    fixtures unless the age was folded away; now it passes with the fold doing nothing,
+    because no detail reads the clock at all.
+    """
+    drifted = _clock_dependence_drift(_CLOCK_SAMPLE)
     assert not drifted, (
         "some Finding.detail text is a function of the wall clock, so its fingerprint "
         "changes on an unchanged config and silently orphans real users' "
         f".clawseccheckignore suppressions: {sorted(drifted.items())[:5]}"
     )
+
+
+def test_clock_guard_is_immune_to_a_stale_manifest_that_has_nothing_to_do_with_the_clock():
+    """B-729's control case, pinned permanently: corrupt the COMMITTED MANIFEST for a
+    real fixture with a change that has nothing to do with the wall clock -- exactly the
+    B-720 shape that used to make the old, mis-anchored version of this guard misreport
+    "clock-dependent" on an ordinary stale-manifest condition. The row-level guard's own
+    comparison against that corrupted manifest genuinely would disagree (proving the
+    corruption is real and would trip the guard that is SUPPOSED to catch it); the
+    clock-dependence guard, which no longer reads the manifest at all, must be completely
+    unaffected by it.
+    """
+    home = _CLOCK_SAMPLE[0]
+    rel = str(home.relative_to(FIXTURES))
+    real = _encoded(home)
+    corrupted_manifest = {rel: real + ",ZZFAKE:deadbeef"}
+
+    # The condition test_fingerprints_match_the_committed_manifest exists to catch: this
+    # corrupted entry really does disagree with a live audit, unrelated to any clock.
+    assert corrupted_manifest[rel] != real
+
+    # The fix: _clock_dependence_drift never consults the manifest (corrupted or not) --
+    # so corrupting it changes nothing about the clock guard's own live-vs-live result.
+    assert not _clock_dependence_drift(_CLOCK_SAMPLE)
 
 
 def test_no_finding_detail_leaks_a_machine_specific_path():
