@@ -1,13 +1,25 @@
 """Corroborate WHERE an agent's trajectory evidence actually lives (F-187).
 
 OpenClaw moved from JSONL trajectory sidecar files to a SQLite-backed store around
-version 9.x. ``trajectory.find_trajectory_files`` still globs only
-``agents/*/sessions/*.trajectory.jsonl`` -- the pre-migration layout -- and on a current
-install that glob is silently empty on every run: the runtime's own trajectory recorder
-now defaults to a SQLite sink, and its "doctor" renamed the historical JSONL sidecars
-away rather than leaving them in place. ``traceSchema``/``schemaVersion`` are UNCHANGED
-across this move (it is not a schema change), so a build-time oracle over trajectory
-files would never have caught it; this module is a RUNTIME corroborator instead.
+version 9.x. Before B-732, ``trajectory.find_trajectory_files`` globbed only
+``agents/*/sessions/*.trajectory.jsonl`` -- the pre-migration layout -- and on an
+install past that migration the glob was silently empty on every run: the runtime's own
+trajectory recorder now defaults to a SQLite sink, and its "doctor" renamed the
+historical JSONL sidecars away rather than leaving them in place. B-732 closed PART of
+that gap: ``find_trajectory_files`` now also follows a pointer file
+(``*.trajectory-path.json``) to its ``runtimeFile`` when the pointer is valid, confined
+to home, and the target still exists -- so ``STATUS_LIVE`` below can now be reached
+via a pointer-recovered file the classic glob alone would have missed, not only via a
+literal classic-glob match. ``corroborate()``'s own ``evidence`` list does not currently
+distinguish "found by the classic glob" from "found only by following a pointer" for the
+LIVE case (see the decision rule below) -- both fold into the same "not blind" verdict,
+which is honest but loses that provenance detail; the CASES this module exists for on a
+9.x install -- ``jsonl_count == 0`` and evidence living only in SQLite/the archive/a
+dangling pointer -- are unaffected, since a pointer whose target is genuinely gone still
+correctly falls through to ``pointer_missing``. ``traceSchema``/``schemaVersion`` are
+UNCHANGED across the SQLite move (it is not a schema change), so a build-time oracle
+over trajectory files would never have caught it; this module is a RUNTIME corroborator
+instead.
 
 **The core problem this exists to solve.** "Zero trajectory sidecars found" is the exact
 same observation whether an agent never ran a single session, or whether it has months of
@@ -753,12 +765,15 @@ def corroborate(home) -> TrajectoryCorroboration:
 
     Decision rule, in order:
 
-    1. A live ``.trajectory.jsonl`` sidecar exists -> :data:`STATUS_LIVE` -- today's
-       locator's own happy path, unconditionally, regardless of what else is found. A
-       machine that still has live sidecars is not blind, whatever else is true of it.
-    2. No live sidecar, but a dangling pointer target, an import-archive entry, or a
-       SQLite row exists -> :data:`STATUS_LOCATOR_STALE` -- real evidence the agent ran,
-       stored somewhere the classic glob does not look.
+    1. ``find_trajectory_files()`` finds a live ``.trajectory.jsonl`` sidecar (via the
+       classic glob OR, since B-732, a valid in-home pointer) -> :data:`STATUS_LIVE` --
+       today's locator's own happy path, unconditionally, regardless of what else is
+       found. A machine that still has live sidecars is not blind, whatever else is
+       true of it. This does not distinguish which of the two locator paths found it.
+    2. No live sidecar reachable at all, but a dangling pointer target (its own
+       ``runtimeFile`` does not exist, or resolves outside home), an import-archive
+       entry, or a SQLite row exists -> :data:`STATUS_LOCATOR_STALE` -- real evidence
+       the agent ran, stored somewhere ``find_trajectory_files()`` still does not reach.
     3. Nothing in any known container -> :data:`STATUS_NO_RESIDUE` -- honestly
        indistinguishable from "never ran" (see the module docstring's closing
        paragraph); never reported as a confident "this agent never ran".

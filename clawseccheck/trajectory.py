@@ -26,6 +26,7 @@ payloads) nor ``context.compiled``'s ``systemPrompt``/``prompt``/``messages`` si
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 # Version gate: only parse the format we have grounded. Any other value -> we don't guess.
@@ -35,6 +36,164 @@ _SCHEMA_VERSION = 1
 # Bounds so a large/padded fleet of session logs can't blow up the scan (DoS guard).
 _MAX_FILES = 60
 _MAX_BYTES_PER_FILE = 8_000_000
+
+# ---------------------------------------------------------------------------
+# B-732: OpenClaw locates a session's trajectory sidecar through a POINTER file
+# (``<session>.trajectory-path.json``) that names the runtime file by an absolute path,
+# not only by the ``agents/*/sessions/*.trajectory.jsonl`` glob this module used alone
+# before. Grounded against the installed dist (``paths-*.mjs``, ``cleanup-*.mjs``):
+#
+#   isTrajectoryPointerArtifactName(name) = name.endsWith(".trajectory-path.json")
+#   TRAJECTORY_POINTER_FILE_MAX_BYTES = 65536
+#   resolveTrajectoryPointerFilePath(sessionFile) =
+#       sessionFile.endsWith(".jsonl") ? sessionFile.slice(0,-6)+".trajectory-path.json" : ...
+#   safeTrajectorySessionFileName(sessionId) =
+#       (/[^A-Za-z0-9_-]/g -> "_", sliced to 120) or "session" if nothing alnum survives
+#   validation (cleanup-*.mjs): traceSchema === "openclaw-trajectory-pointer" &&
+#       schemaVersion === 1 && sessionId === <expected> && typeof runtimeFile === "string"
+#       && runtimeFile.trim() !== ""
+#
+# A pointer is attacker-writable (anything that can write into agents/*/sessions/ can
+# write one), and the vendor's own reader `path.resolve()`s runtimeFile unconditionally
+# -- so unlike the runtime-content read below, following one is a read-PRIMITIVE, not a
+# convenience. This module refuses to open a resolved target outside the audited home
+# rather than following it; see `_resolve_pointer_target`.
+_POINTER_SUFFIX = ".trajectory-path.json"
+_POINTER_TRACE_SCHEMA = "openclaw-trajectory-pointer"
+_POINTER_SCHEMA_VERSION = 1
+_POINTER_MAX_BYTES = 65536  # TRAJECTORY_POINTER_FILE_MAX_BYTES, paths-*.mjs
+
+# C-135: no per-pointer bound existed before max_files trimmed the FINAL union, so a
+# directory salted with many pointer files paid real I/O (stat/read/json.loads/resolve)
+# per pointer regardless of max_files. Same cap and name as trajectorystore.py's own
+# independent pointer scan (_MAX_POINTER_SCAN=500) -- not shared code (that module
+# counts, this one resolves and opens), but the same number for the same reason.
+_MAX_POINTER_SCAN = 500
+
+_UNSAFE_SESSION_CHARS_RE = re.compile(r"[^A-Za-z0-9_-]")
+_SESSION_HAS_ALNUM_RE = re.compile(r"[A-Za-z0-9]")
+
+
+def _safe_trajectory_session_file_name(session_id: str) -> str:
+    """Port of the vendor's ``safeTrajectorySessionFileName`` (``paths-*.mjs``).
+
+    Differentially verified by EXECUTING the real function (node) over 8 cases --
+    a plain UUID, empty string, all-punctuation, a 200-char run, non-ASCII letters,
+    path-traversal-shaped input, embedded spaces, and mixed-case/hyphen/underscore --
+    0 disagreements. A pure, 2-line function; this is the proportionate level of
+    verification for it, not the multi-thousand-case batteries a stateful policy
+    resolver (toolgrant.py/toolpolicy.py) needs.
+    """
+    safe = _UNSAFE_SESSION_CHARS_RE.sub("_", session_id)[:120]
+    return safe if _SESSION_HAS_ALNUM_RE.search(safe) else "session"
+
+
+def _resolve_pointer_target(pointer_path: Path, home_resolved: Path) -> "tuple[str, Path | None]":
+    """Read, validate and resolve one trajectory pointer file.
+
+    Returns ``(status, path)``:
+
+      "resolved"     -- a valid pointer whose ``runtimeFile`` resolves INSIDE
+                         *home_resolved* and exists. ``path`` is that resolved Path.
+      "missing"      -- valid and in-home, but the named file does not exist (or could
+                         not be stat()ed) -- e.g. the 8.1-era JSONL-to-SQLite migration
+                         archived it away (trajectorystore.py's ``corroborate()`` is the
+                         module that explains THAT asymmetry; this module only reports
+                         the fact, never guesses a cause).
+      "out_of_home"  -- valid, but ``runtimeFile`` resolves OUTSIDE the audited home.
+                         REFUSED -- ``path`` is the escaping target, for disclosure only,
+                         never opened.
+      "invalid"      -- unreadable, oversized (> _POINTER_MAX_BYTES), not JSON, not a
+                         dict, fails the vendor's own schema/session-id validation, or
+                         names a target that is not itself SHAPED like a trajectory
+                         sidecar (C-135: confinement to home alone is not enough --
+                         without this, a pointer could redirect the scan onto ANY
+                         in-home file, e.g. a credentials store, which is then opened
+                         and read line-by-line by every caller, not merely path-listed).
+                         ``path`` is None. Real disk evidence a session existed, but not
+                         ours to follow -- never counted as "missing" (that would claim
+                         a real target is gone when we could not even read the claim).
+
+    C-135, disclosed rather than silently accepted: this validates confinement and shape
+    at DISCOVERY time, not at the moment a caller actually opens the file — a pointer
+    naming an in-home, correctly-suffixed path that is (or is later replaced by) a
+    symlink to something outside home could still be followed at open() time by a
+    caller that does not itself re-check. Closing that fully needs every caller of the
+    returned paths to open with O_NOFOLLOW/re-verify, which is a larger change than this
+    task's own scope (a locator, not every reader); the local-attacker model here is
+    the same one this whole module already accepts (an attacker able to write into
+    agents/*/sessions/ can already forge a trajectory sidecar's CONTENT there directly).
+    """
+    # B-549 precedent (collector.py): a FIFO/socket/device node glob-matched as
+    # `*.trajectory-path.json` would `read_bytes()` and block forever (a FIFO with no
+    # writer) or read unbounded data (a character device) — the stat()-based size check
+    # below does not save this, since e.g. a FIFO's st_size is 0. `is_file()` is a stat,
+    # not an open, so it cannot itself hang; it must run before ANY read of this path.
+    try:
+        if not pointer_path.is_file():
+            return "invalid", None
+        pointer_size = pointer_path.stat().st_size
+    except OSError:
+        return "invalid", None
+    if pointer_size > _POINTER_MAX_BYTES:
+        return "invalid", None
+    try:
+        raw = pointer_path.read_bytes()
+    except OSError:
+        return "invalid", None
+    if len(raw) > _POINTER_MAX_BYTES:
+        return "invalid", None
+    try:
+        rec = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return "invalid", None
+    if not isinstance(rec, dict):
+        return "invalid", None
+    if rec.get("traceSchema") != _POINTER_TRACE_SCHEMA:
+        return "invalid", None
+    if rec.get("schemaVersion") != _POINTER_SCHEMA_VERSION:
+        return "invalid", None
+    session_id = rec.get("sessionId")
+    if not isinstance(session_id, str) or not session_id:
+        return "invalid", None
+    # The vendor validates sessionId against an externally-known expected value (it is
+    # looking UP a pointer for a session it already knows); a bare scan has no such
+    # external value, so the pointer's own FILENAME is the claim -- mirroring how the
+    # vendor's writer derived that filename from the sessionId in the first place
+    # (resolveTrajectoryPointerFilePath <- safeTrajectorySessionFileName(sessionId)).
+    # Known, disclosed limitation: the vendor's regex runs over JS UTF-16 CODE UNITS;
+    # this port runs over Python Unicode CODEPOINTS. The two agree for every sessionId
+    # shape actually observed (OpenClaw generates these as UUIDs -- ASCII only), and
+    # diverge only for a sessionId containing an astral-plane character, which would
+    # make a genuine vendor-written pointer fail this check -- a coverage gap (that
+    # session's trajectory is skipped, unless the plain glob still finds it), never a
+    # confinement bypass, since a REJECTED pointer is never followed.
+    name = pointer_path.name
+    if not name.endswith(_POINTER_SUFFIX):
+        return "invalid", None
+    stem = name[: -len(_POINTER_SUFFIX)]
+    if _safe_trajectory_session_file_name(session_id) != stem:
+        return "invalid", None
+    target = rec.get("runtimeFile")
+    if not isinstance(target, str) or not target.strip():
+        return "invalid", None
+    if not target.endswith(".trajectory.jsonl"):
+        return "invalid", None
+    try:
+        resolved = Path(target).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        return "invalid", None
+    try:
+        in_home = resolved.is_relative_to(home_resolved)
+    except (OSError, ValueError):
+        in_home = False
+    if not in_home:
+        return "out_of_home", resolved
+    try:
+        exists = resolved.is_file()
+    except OSError:
+        exists = False
+    return ("resolved", resolved) if exists else ("missing", resolved)
 
 
 def explicit_path_problem(explicit_path: str | None) -> str | None:
@@ -119,9 +278,15 @@ def find_trajectory_files(
     """Return trajectory sidecar paths under *home* (newest-first, capped at *max_files*).
 
     Read-only glob of the grounded sidecar layout
-    ``agents/*/sessions/*.trajectory.jsonl`` (recon §9.1). Returns ``[]`` on any error, or
-    when *home* is not a ``Path``, so callers can treat "no on-disk record" uniformly. Only
-    paths are returned — no file contents are read here (§8).
+    ``agents/*/sessions/*.trajectory.jsonl`` (recon §9.1), UNIONED (B-732) with every
+    session a POINTER file (``agents/*/sessions/*.trajectory-path.json``) names, since
+    OpenClaw itself locates a session's trajectory that way, not only by this glob —
+    see ``_resolve_pointer_target`` for the validation/confinement this follows. A
+    session with only a runtime file (no pointer) or only a pointer (no runtime file
+    scanned by the glob, e.g. a differently-named target) is found either way; the union
+    is deduplicated by resolved path so a session with BOTH is not counted twice. Returns
+    ``[]`` on any error, or when *home* is not a ``Path``, so callers can treat "no on-disk
+    record" uniformly. Only paths are returned — no file contents are read here (§8).
 
     If ``stats`` (a dict) is provided, it is populated with ``files_total`` (the number of
     trajectory sidecars found before the cap was applied) and ``files_capped`` (True when
@@ -130,11 +295,29 @@ def find_trajectory_files(
     already disclosed (C-180 ``truncated``), but the per-FILE cap silently dropped the
     oldest sessions with no signal a caller could surface — B-245 closes that gap. The
     default (``None``) keeps the original behaviour for existing callers.
+
+    B-732 adds four more ``stats`` keys, additive and equally optional: ``pointer_
+    targets_missing`` (a valid, in-home pointer whose named file does not exist — NEVER
+    folded into "no trajectory sidecars"; see ``trajectorystore.corroborate()`` for what
+    this asymmetry usually means), ``pointer_out_of_home`` (a valid pointer whose
+    ``runtimeFile`` resolves OUTSIDE *home* — refused, never opened; disclosed so the
+    refusal is a fact a caller can report, not a silent drop), ``pointer_invalid``
+    (a pointer that could not be read, was oversized, or failed schema/session-id
+    validation — real disk evidence a session existed, but not ours to follow or to
+    count as "missing", which would claim a real target is gone when we could not even
+    read the claim), and ``pointer_scan_capped`` (True when more than
+    ``_MAX_POINTER_SCAN`` pointer files were present and the excess were never even
+    opened — a DoS guard, mirroring ``trajectorystore.py``'s own independent pointer
+    cap of the same size).
     """
     if not isinstance(home, Path):
         if stats is not None:
             stats["files_total"] = 0
             stats["files_capped"] = False
+            stats["pointer_targets_missing"] = 0
+            stats["pointer_out_of_home"] = 0
+            stats["pointer_invalid"] = 0
+            stats["pointer_scan_capped"] = False
         return []
     try:
         files = list(home.glob("agents/*/sessions/*.trajectory.jsonl"))
@@ -142,7 +325,84 @@ def find_trajectory_files(
         if stats is not None:
             stats["files_total"] = 0
             stats["files_capped"] = False
+            stats["pointer_targets_missing"] = 0
+            stats["pointer_out_of_home"] = 0
+            stats["pointer_invalid"] = 0
+            stats["pointer_scan_capped"] = False
         return []
+
+    try:
+        home_resolved = home.resolve()
+    except (OSError, ValueError, RuntimeError):
+        home_resolved = home
+    # `seen_resolved` is built lazily, on the FIRST pointer that actually resolves --
+    # not unconditionally up front. The common case today (pointer-based location is a
+    # newer OpenClaw mechanism) is zero pointer files, and a host with a large
+    # trajectory history would otherwise pay one resolve() syscall per glob-found file
+    # for a dedup set nothing ever consults.
+    seen_resolved: "set[Path] | None" = None
+    pointer_targets_missing = 0
+    pointer_out_of_home = 0
+    pointer_invalid = 0
+    pointer_scan_capped = False
+    scanned = 0
+    try:
+        pointer_it = home.glob(f"agents/*/sessions/*{_POINTER_SUFFIX}")
+    except OSError:
+        pointer_it = iter(())
+    try:
+        # C-135: iterated LAZILY with an early break, mirroring trajectorystore.py's
+        # own _pointer_files -- `list(home.glob(...))` first would fully enumerate and
+        # construct a Path per match (real work) for every entry BEFORE the cap could
+        # apply, so a directory salted with far more than _MAX_POINTER_SCAN pointers
+        # would still pay the enumeration cost the cap exists to avoid.
+        for p in pointer_it:
+            if scanned >= _MAX_POINTER_SCAN:
+                pointer_scan_capped = True
+                break
+            scanned += 1
+            status, target = _resolve_pointer_target(p, home_resolved)
+            if status == "resolved":
+                if seen_resolved is None:
+                    seen_resolved = set()
+                    for f in files:
+                        try:
+                            seen_resolved.add(f.resolve())
+                        except (OSError, ValueError, RuntimeError):
+                            pass
+                if target not in seen_resolved:
+                    seen_resolved.add(target)
+                    # C-135: re-anchor onto the CALLER's own `home` Path, not
+                    # `home_resolved` — a glob result is naturally prefixed by `home`
+                    # itself (however it was passed in, resolved or not), and a
+                    # downstream consumer that does `path.relative_to(home)`
+                    # (incident.py's tamper-evidence hashing) must see the same
+                    # prefix shape from a pointer-found file as from a glob-found
+                    # one, or a symlinked ancestor of `home` (a worktree, a
+                    # symlinked /tmp) makes relative_to() raise and the entry
+                    # silently drops. resolved is already PROVEN inside
+                    # home_resolved above; relative_to here is informational
+                    # reshaping, not a second security check.
+                    try:
+                        files.append(home / target.relative_to(home_resolved))
+                    except ValueError:
+                        files.append(target)
+            elif status == "missing":
+                pointer_targets_missing += 1
+            elif status == "out_of_home":
+                pointer_out_of_home += 1
+            else:
+                pointer_invalid += 1
+    except OSError:
+        # C-135: a directory becoming unreadable (permission change, concurrent
+        # removal, a transient I/O error) mid-enumeration stops this exactly like
+        # hitting the cap does -- some in-home pointers were never even looked at.
+        # Reuses `pointer_scan_capped` rather than inventing a second, narrower flag:
+        # to a caller, "hit the count cap" and "the scan itself was interrupted" both
+        # mean the same thing operationally (pointer counts are a lower bound, not
+        # exhaustive) -- the distinct CAUSE is not worth a second stats key.
+        pointer_scan_capped = True
+
     # Per-path mtime lookup that never raises: list.sort() evaluates the key for
     # every element before comparing any of them, so if the plain
     # `p.stat().st_mtime` lambda raised on ONE path (a broken symlink — e.g. a
@@ -166,6 +426,10 @@ def find_trajectory_files(
     if stats is not None:
         stats["files_total"] = len(files)
         stats["files_capped"] = len(files) > max_files
+        stats["pointer_targets_missing"] = pointer_targets_missing
+        stats["pointer_out_of_home"] = pointer_out_of_home
+        stats["pointer_invalid"] = pointer_invalid
+        stats["pointer_scan_capped"] = pointer_scan_capped
     return files[:max_files]
 
 
@@ -199,11 +463,17 @@ def read_proven_tools_by_origin(
     meta = {
         "present": False, "files_scanned": 0, "unknown_version": False,
         "files_total": 0, "files_capped": False,
+        "pointer_targets_missing": 0, "pointer_out_of_home": 0, "pointer_invalid": 0,
+        "pointer_scan_capped": False,
     }
     stats: dict = {}
     files = find_trajectory_files(home, max_files=max_files, stats=stats)
     meta["files_total"] = stats.get("files_total", 0)
     meta["files_capped"] = stats.get("files_capped", False)
+    meta["pointer_targets_missing"] = stats.get("pointer_targets_missing", 0)
+    meta["pointer_out_of_home"] = stats.get("pointer_out_of_home", 0)
+    meta["pointer_invalid"] = stats.get("pointer_invalid", 0)
+    meta["pointer_scan_capped"] = stats.get("pointer_scan_capped", False)
     if not files:
         return by_origin, meta
     meta["present"] = True
@@ -416,6 +686,8 @@ def read_compiled_tool_descriptions(
         "unknown_version": False, "truncated": False,
         "files_total": 0, "files_capped": False,
         "path_unreadable": False,  # B-683
+        "pointer_targets_missing": 0, "pointer_out_of_home": 0, "pointer_invalid": 0,
+        "pointer_scan_capped": False,
     }
 
     if explicit_path:
@@ -426,6 +698,10 @@ def read_compiled_tool_descriptions(
         files = find_trajectory_files(home, max_files=max_files, stats=stats)
         meta["files_total"] = stats.get("files_total", 0)
         meta["files_capped"] = stats.get("files_capped", False)
+        meta["pointer_targets_missing"] = stats.get("pointer_targets_missing", 0)
+        meta["pointer_out_of_home"] = stats.get("pointer_out_of_home", 0)
+        meta["pointer_invalid"] = stats.get("pointer_invalid", 0)
+        meta["pointer_scan_capped"] = stats.get("pointer_scan_capped", False)
     if not files:
         return tool_defs, meta
     meta["present"] = True
@@ -648,6 +924,8 @@ def read_events(
         # exhaustive, and behavioral.py's analysis_incompleteness() needs to name
         # each honestly.
         "unparseable_lines": False,
+        "pointer_targets_missing": 0, "pointer_out_of_home": 0, "pointer_invalid": 0,
+        "pointer_scan_capped": False,
     }
 
     if explicit_path:
@@ -658,6 +936,10 @@ def read_events(
         files = find_trajectory_files(home, max_files=max_files, stats=stats)
         meta["files_total"] = stats.get("files_total", 0)
         meta["files_capped"] = stats.get("files_capped", False)
+        meta["pointer_targets_missing"] = stats.get("pointer_targets_missing", 0)
+        meta["pointer_out_of_home"] = stats.get("pointer_out_of_home", 0)
+        meta["pointer_invalid"] = stats.get("pointer_invalid", 0)
+        meta["pointer_scan_capped"] = stats.get("pointer_scan_capped", False)
     if not files:
         return events, meta
     meta["present"] = True
