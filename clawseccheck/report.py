@@ -5773,7 +5773,8 @@ def render_permission_manifest(ctx, target: str) -> str:
 def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
                 ctx=None, skill_sweep: dict | None = None, plugin_sweep=None,
                 live_test_vulnerable: bool = False, live_test_reason: str | None = None,
-                behavioral_fired_ids=frozenset(), ledger=None) -> str:
+                behavioral_fired_ids=frozenset(), ledger=None,
+                version: str | None = None) -> str:
     actions = suggest_actions(findings, score)
     _json_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if ctx is not None else None
 
@@ -5783,12 +5784,25 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
             d["blast_radius"] = compute_blast_radius(_json_cfg, f.id)
         return d
 
+    # The audit payload was the one JSON surface with no
+    # producer-identity anchor -- render_vet_json/render_vet_all_json/
+    # render_judge_packet_json all take an explicit `version: str` from their caller
+    # (always `__version__`, threaded by cli.py). Matching that convention: an explicit
+    # `version=` is honoured so a caller can still assert it against
+    # `clawseccheck.__version__` itself, but a caller that omits it (e.g.
+    # adjudication.render_judged_json's internal `render_json(...)` call, which predates
+    # this and must keep working unchanged) gets the real installed version rather than a
+    # missing key -- same in-function import, for the same avoid-import-order-coupling
+    # reason, as `sbom.py::build_sbom`'s `from . import __version__`.
+    if version is None:
+        from . import __version__ as version  # noqa: PLC0415
     # C-423: `graded is False` means no consumer may read a real letter/number for
     # this run — "score"/"grade"/"raw_score" go to `None` (the keys stay present, so
     # `payload["score"]` reads `None` rather than raising `KeyError`). getattr/default
     # tolerates older duck-typed ScoreResult stand-ins, same as `earned`/`total` below.
     _graded = getattr(score, "graded", True)
     payload: dict = {
+        "version": version,
         "score": score.score if _graded else None,
         "grade": score.grade if _graded else None,
         "capped": score.capped,

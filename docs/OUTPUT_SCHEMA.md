@@ -24,6 +24,7 @@ before assuming a nested key is part of the contract; notably, the subject keys 
 
 | Field | Type | Always present | Description |
 |---|---|---|---|
+| `version` | `str` | yes | The ClawSecCheck build that produced this run — `clawseccheck.__version__`, e.g. `"4.1.1"`. Added because this was the one JSON surface with no producer-identity anchor: `--vet --json`, SARIF, `--sbom` and `--judge-packet` all carry a `version` field already (§11, §10, §21, §12), and 4.0.0's `graded`/`missing_layers`/`not_checked` breaking change means an archived audit payload otherwise has no field of its own saying which side of that change produced it (feature-detecting on `graded`'s presence works too, but a version string is the direct answer). A Stable addition (§17) — new optional top-level field, no existing key touched. |
 | `score` | `int \| null` | yes | Overall security score, 0–100. C-423: `null` when `graded` is `false` — no consumer may show a number for a run where a five-layer-ledger layer never ran at all. The key is always present; only its value goes `null`. |
 | `grade` | `str \| null` | yes | Letter grade: `"A"`, `"B"`, `"C"`, `"D"`, or `"F"`. C-423: `null` when `graded` is `false`, same rule as `score`. |
 | `capped` | `bool` | yes | `true` if the score was capped below `raw_score` (e.g. Lethal Trifecta triggered). |

@@ -6306,7 +6306,8 @@ def _main(argv=None) -> int:
                            live_test_vulnerable=live_signal.hit,
                            live_test_reason=live_signal.reason,
                            behavioral_fired_ids=behavioral_fired_ids,
-                           ledger=layer_ledger)
+                           ledger=layer_ledger,
+                           version=__version__)
         if full_pipeline is not None:
             # Additive merge, done here rather than by widening render_json's signature:
             # these keys belong to the pipeline, not to the audit payload, and every
