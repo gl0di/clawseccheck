@@ -798,6 +798,20 @@ SENSITIVE_TOOL_IDS = frozenset({"read", "memory_get", "memory_search"})
 
 
 
+# B-674 decision: keep the bare "fs_read" / "fs_write" substring hints below rather than
+# deleting them, even though neither is a real OpenClaw tool id (grounded against the
+# installed dist's `tool-catalog-*.js` CORE_TOOL_DEFINITIONS, sectionId "fs" — the real
+# ids are `read`/`write`/`edit`/`apply_patch`; see SENSITIVE_TOOL_IDS / OUTBOUND_TOOL_IDS
+# below for the exact-id layer that answers "did the runtime actually grant this"). Two
+# reasons to keep the substring, not one: it still catches a REAL namespaced MCP tool such
+# as `mcp__files__fs_read`, and a bare invented id in a core `tools.allow` still shows the
+# user INTENDED a grant OpenClaw silently ignores — worth surfacing, not worth deleting.
+# Known consequence, not fixed here: two clawrange corpus fixtures
+# (`trifecta_live`, `multiagent_trifecta`) are built on `tools.profile: "minimal"` plus a
+# bare `fs_read`/`fs_write` core allowlist entry, and `resolveCoreToolProfilePolicy(
+# "minimal")` grants neither under the real policy resolver — both fixtures do not
+# demonstrate what their names claim. That is clawrange's corpus, a different project;
+# filed there, not edited from here (CLAWSECCHECK-B-674).
 SENSITIVE_TOOL_HINTS = (
     "db",
     "sql",
@@ -822,6 +836,22 @@ OUTBOUND_TOOL_HINTS = (
     "deploy",
     "publish",
 )
+
+
+# B-674: OUTBOUND_TOOL_HINTS above is a substring match and cannot see OpenClaw's own
+# write-capable tool ids either — the same defect B-667 fixed for the inbound/sensitive
+# leg via SENSITIVE_TOOL_IDS. Grounded against the installed dist's `tool-catalog-*.js`
+# CORE_TOOL_DEFINITIONS: `write`/`edit`/`apply_patch` all carry `sectionId: "fs"`, and
+# none of the three matches any OUTBOUND_TOOL_HINTS entry as a substring ("write" is not
+# inside "send"/"webhook"/"exec"/"shell"/"deploy"/"publish"/"http_post"/"email_send"), so
+# a bare `tools.allow: ["write"]` (no powerful `tools.profile`, no substring collision)
+# raised no outbound leg at all before this. Exact match, alias-folded via `_canon_tool`,
+# mirroring SENSITIVE_TOOL_IDS exactly. Largely non-overlapping with the existing
+# `_profile_is_powerful` outbound source: "coding"/"full" already trip that profile-name
+# check, so this set's marginal reach is an explicit `tools.allow`/`alsoAllow`/attested
+# grant of one of these three ids under a profile `_profile_is_powerful` does not catch
+# (e.g. "minimal" widened with `alsoAllow: ["write"]`).
+OUTBOUND_TOOL_IDS = frozenset({"write", "edit", "apply_patch"})
 
 
 # B55/B-395: the real, canonical write-capable subset of _B68_FS_TOOLS. "read" is
@@ -3835,6 +3865,13 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
 
     outbound: list = []
     outbound.extend(_tool_hint_sources(cfg, OUTBOUND_TOOL_HINTS))
+    # B-674: the generic hints above cannot see OpenClaw's own write-capable tool ids —
+    # see OUTBOUND_TOOL_IDS. Exact match, alias-folded, over the config's grants and over
+    # an attested roster, mirroring B-667's SENSITIVE_TOOL_IDS treatment of the inbound
+    # leg exactly (same helpers, same shape, no confinement guard — no vetted per-scope
+    # write-confinement model exists yet, see CLAWSECCHECK-F-186).
+    outbound.extend(_tool_id_sources(cfg, OUTBOUND_TOOL_IDS))
+    outbound.extend(_attested_tool_id_sources(ctx, OUTBOUND_TOOL_IDS))
     if dig(cfg, "tools.elevated.allowFrom"):
         outbound.append("tools.elevated.allowFrom is set")
     profile = dig(cfg, "tools.profile")

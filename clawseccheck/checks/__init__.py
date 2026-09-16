@@ -126,6 +126,7 @@ from ._shared import (
     _norm_group_policy,
     _open_channels,
     OUTBOUND_TOOL_HINTS,
+    OUTBOUND_TOOL_IDS,
     _OWN_ENGINE_MARKERS,
     parse_bind_host,
     _perms_loose,
