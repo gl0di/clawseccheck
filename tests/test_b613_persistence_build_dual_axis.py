@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from clawseccheck.catalog import PASS, UNKNOWN, WARN
+from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import vet_skill
 from clawseccheck.dossier import build_profile
 
@@ -67,7 +67,19 @@ def test_b335_still_reaches_build_quality_on_the_two_mechanism_fixture():
     (PYTHONSTARTUP shell-rc) each in their own file. Pins that dual-routing did not
     silently drop B335 from the axis it already worked on before this change, and that
     both axes render the identical text (same Finding object, no per-axis `dc_replace`
-    fabrication)."""
+    fabrication).
+
+    C-135 (independent, post-commit): this fixture's mechanism-B file
+    (shell_bootstrap.py) also genuinely appends to ~/.bashrc, which B13's own
+    agent-config-persistence detector has always caught (a plain text-proximity
+    scan, unrelated to B335/AST taint tracking) — but B13 was confined to the
+    Danger axis only until a LATER, separate fix (c6bc747, 2026-09-16, "route an
+    agent-config-persistence hit onto the Persistence axis") routed it onto
+    Persistence too, mirroring this very task's own reasoning for B335. That
+    landed after this test was written (2026-08-25) and correctly escalates this
+    fixture's persistence axis to FAIL — verified directly: B13/B335/B375 are ALL
+    still present in persistence.findings, nothing was dropped, this is a real
+    correctness improvement the test predates, not a regression."""
     target = _FIX / "bad_b335_runtime_persist_install" / "skills" / "envtools"
     profile = build_profile(vet_skill(str(target)), "envtools", "skill")
 
@@ -76,8 +88,11 @@ def test_b335_still_reaches_build_quality_on_the_two_mechanism_fixture():
 
     assert build.status == WARN
     assert any(f.id == "B335" for f in build.findings)
-    assert persistence.status == WARN
+    assert persistence.status == FAIL
     assert any(f.id == "B335" for f in persistence.findings)
+    assert any(f.id == "B13" for f in persistence.findings), (
+        "B13's own ~/.bashrc write hit (c6bc747) must still reach Persistence too"
+    )
 
     build_detail = next(f.detail for f in build.findings if f.id == "B335")
     persistence_detail = next(f.detail for f in persistence.findings if f.id == "B335")
