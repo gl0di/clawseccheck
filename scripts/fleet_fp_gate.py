@@ -39,6 +39,14 @@ What it compares, and what it deliberately does not:
   * Unsuppressed FAILs only -- what the user actually sees. The count of suppressed
     FAILs is recorded alongside, so a change that silently widens suppression is at
     least visible to a reader.
+  * RISK-* combinational chains too (C-492), as their own `scope="risk"` rows with the
+    same `(scope, target, id)` identity as a FAIL -- not just `checks/` verdicts.
+    Discovered via B-730: RISK-02 (Lethal Trifecta) fired HIGH on this machine's own
+    real config for days on end, and `compare` reported "OK" the entire time, because
+    `RiskPath` objects never entered the snapshot at all. Severity is CONTEXT here too,
+    not identity, mirroring the same explicit choice `fail_key` already makes for
+    Finding rows -- a chain re-graded HIGH<->MEDIUM by a catalog change is not a new
+    false positive; only a chain appearing or disappearing is (see `risk_rows`).
   * Only a snapshot where every check actually RAN. A check that crashes or overruns
     its wall-clock budget (C-159) degrades to an `ERR:<check>` UNKNOWN, which means a
     real FAIL can silently go missing -- observed live on this machine under parallel
@@ -73,7 +81,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from clawseccheck import __version__, audit, vet_plugin, vet_skill  # noqa: E402
+from clawseccheck import (  # noqa: E402
+    __version__,
+    audit,
+    load_ignore,
+    risk_paths,
+    vet_plugin,
+    vet_skill,
+)
 from clawseccheck.catalog import FAIL_WEIGHT_STATUSES  # noqa: E402
 from clawseccheck.collector import skill_load_roots  # noqa: E402
 from clawseccheck.safeio import secure_dir, secure_write_text  # noqa: E402
@@ -231,6 +246,34 @@ def fail_key(row):
     return (row["scope"], row["target"], row["id"])
 
 
+def risk_rows(paths, *, scope="risk"):
+    """Normalized rows for RISK-* combinational chains (C-492), same shape and identity
+    as ``fail_rows()`` -- ``(scope, target, id)`` via the same ``fail_key`` -- so
+    ``acknowledge``/``compare``/the diagnosis index all work on a RISK chain unchanged.
+    ``target`` is always ``""``: every RISK rule reads the whole config plus the
+    already-computed Finding pool, never one installed skill or plugin, so there is no
+    per-target identity to carry the way ``scope="vet"`` rows have one.
+
+    C-492's own DoD point 2, decided explicitly rather than left implicit: severity is
+    CONTEXT here too, not identity -- mirrors ``fail_key``'s existing choice for Finding
+    rows. A chain re-graded HIGH<->MEDIUM by a catalog change is not a new false
+    positive; only a chain appearing or disappearing is.
+
+    A ``RiskPath`` entering ``risk.risk_paths()``'s return list at all IS the positive
+    signal (its own docstring: "fires only on POSITIVE evidence for every link"), unlike
+    a ``Finding`` pool where most entries are PASS/WARN and must be filtered by
+    ``.status``. So the only filter here is suppression -- ``.suppressed``, set the same
+    way ``Finding.suppressed`` is, from ``.clawseccheckignore`` (B-154).
+    """
+    rows = [
+        {"scope": scope, "target": "", "id": p.id, "severity": p.severity}
+        for p in (paths or [])
+        if not getattr(p, "suppressed", False)
+    ]
+    rows.sort(key=fail_key)
+    return rows
+
+
 def diagnosis_index(baseline):
     """``{fail_key: entry}`` for the baseline's recorded diagnoses.
 
@@ -318,6 +361,12 @@ def build_snapshot(home=DEFAULT_HOME):
     installed npm tree; leaving it off here left the fleet-FP gate structurally blind to
     the newest FAIL-capable check -- exactly the surface C-303 exists to guard. All three
     are read-only and subprocess-free, so a gate may take them.
+
+    C-492: also computes the RISK-* combinational chains (``scope="risk"``, see
+    ``risk_rows``) over the SAME ``ctx``/``findings`` the audit above already produced --
+    not a second scan, mirroring ``cli.py``'s own ``risk_paths(ctx, findings,
+    ignore=load_ignore(home))`` call so a suppressed chain (``.clawseccheckignore``)
+    stays suppressed here too, the same as a suppressed Finding already did.
     """
     home_path = Path(home).expanduser()
     _ctx, findings, score = audit(
@@ -326,6 +375,7 @@ def build_snapshot(home=DEFAULT_HOME):
     )
 
     rows = fail_rows(findings, scope="audit")
+    rows.extend(risk_rows(risk_paths(_ctx, findings, ignore=load_ignore(home_path))))
     suppressed = sum(
         1 for f in findings
         if getattr(f, "status", None) in FAIL_WEIGHT_STATUSES
@@ -729,11 +779,12 @@ def main(argv=None):
     p_ack.add_argument("--baseline", default=DEFAULT_BASELINE)
     p_ack.add_argument("--snapshot", default=None,
                        help="reuse a snapshot JSON instead of running a fresh scan")
-    p_ack.add_argument("--id", required=True, help="check id, e.g. B181")
-    p_ack.add_argument("--scope", default="audit", choices=("audit", "vet", "vet-plugin"))
+    p_ack.add_argument("--id", required=True, help="check id, e.g. B181 or RISK-02")
+    p_ack.add_argument("--scope", default="audit",
+                       choices=("audit", "vet", "vet-plugin", "risk"))
     p_ack.add_argument("--target", default="",
                        help="skill name for a vet-scope FAIL, plugin name for vet-plugin; "
-                            "empty for the audit itself")
+                            "empty for the audit itself and for a risk-scope chain")
     p_ack.add_argument("--note", required=True,
                        help="why this FAIL is expected -- printed on every later run")
 

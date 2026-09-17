@@ -6,6 +6,7 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import ipaddress
 import os
+import re
 import socket
 import time
 from pathlib import Path
@@ -25,6 +26,7 @@ from ..collector import (
     agent_roster,
     dig,
 )
+from .. import trajectorystore as _trajectorystore
 from . import _shared
 from ._shared import (
     LOOPBACK,
@@ -328,7 +330,8 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     """B38 — Browser control / cookie & SSRF exposure.
 
     FAIL    — browser is configured AND (dangerouslyAllowPrivateNetwork == true
-              OR noSandbox == true). Either flag is a CRITICAL-class primitive:
+              OR the legacy browser.ssrfPolicy.allowPrivateNetwork alias == true
+              OR noSandbox == true). Either private-network flag is a CRITICAL-class primitive:
               private-network access enables cloud-metadata credential theft;
               no-sandbox means the headless browser can escape OS isolation.
     WARN    — browser is configured but ssrfPolicy.allowedHostnames /
@@ -367,7 +370,43 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         )
 
     ssrf_policy = browser.get("ssrfPolicy") if isinstance(browser.get("ssrfPolicy"), dict) else {}
-    allow_private = ssrf_policy.get("dangerouslyAllowPrivateNetwork")
+    # C-135 adversarial pass, 2026-09-16, grounded against the installed 2026.9.4 dist:
+    # the browser's own config resolver, resolveBrowserSsrFPolicy (config-Dc3xLSSD.mjs:
+    # 117-130), ORs a LEGACY flat `allowPrivateNetwork` alias into
+    # `dangerouslyAllowPrivateNetwork` before the browser ever uses the policy --
+    # `dangerouslyAllowPrivateNetwork = allowPrivateNetwork === true ||
+    # dangerouslyAllowPrivateNetwork === true`. The canonical schema is `.strict()` and
+    # rejects the legacy key outright, so a config carrying it fails validation at
+    # startup -- but that does NOT make it safe-by-rejection: `resolveStartupConfigSnapshot`
+    # (automatic-startup-config-repair-Dwz3nno7.mjs:56-59, wired into the real boot path at
+    # pre-bootstrap-Da_13P9b.mjs:255) auto-repairs an invalid snapshot IN MEMORY via the
+    # same migration doctor uses (applyLegacyDoctorMigrations, which folds
+    # normalizeLegacyBrowserConfig from doctor-config-flow-BoTzHMKN.mjs:216-229) and boots
+    # with the repaired config -- silently, on EVERY startup, with no explicit
+    # "openclaw doctor" invocation needed. The disk WRITE-back of that repair, however,
+    # only happens through the separate `doctor` command flow
+    # (doctor-config-preflight-BOxHQnVM.mjs), which pre-bootstrap does not call. So the
+    # raw config file this check reads can show the legacy key indefinitely while the
+    # running daemon already granted private-network access on every boot -- a config
+    # setting ONLY the legacy key is a live, silent bypass, not a theoretical one, and
+    # was previously invisible to this check (dangerouslyAllowPrivateNetwork alone).
+    # Read both, `is True` on each -- not a truthy check, matching the coercion-proof
+    # gate below and risk.py's own C-135-B722-followup note.
+    #
+    # Two OTHER candidate keys were checked and do NOT apply here, so they are
+    # deliberately NOT read: OpenClaw's isPrivateNetworkOptInEnabled
+    # (ssrf-policy-CFLWuj1r.mjs) also reads a nested `network.allowPrivateNetwork` /
+    # `network.dangerouslyAllowPrivateNetwork` shape, but that shape belongs to CHANNEL
+    # configs only (channels.<provider>.network.*; its own migration in
+    # legacy-private-network-migration-BOjQqQum.mjs is scoped to `channels.<channelKey>`,
+    # never to `browser`). The canonical browser/tools.web.fetch schema,
+    # SsrFPolicyConfigSchema (zod-schema.core-mVpnhNqD.mjs:70-77, a `.strict()` object),
+    # has exactly 5 fields and no `network` member, and resolveBrowserSsrFPolicy never
+    # reads `cfg?.ssrfPolicy?.network`. Reading it here would fabricate a field path that
+    # does not exist for this subsystem (Golden Rule #4).
+    dangerously_allow_private = ssrf_policy.get("dangerouslyAllowPrivateNetwork")
+    legacy_allow_private = ssrf_policy.get("allowPrivateNetwork")
+    allow_private = dangerously_allow_private is True or legacy_allow_private is True
     no_sandbox = browser.get("noSandbox")
     # B-515: the installed dist honours TWO sibling allowlist keys and merges them at
     # runtime -- allowedHostnames (current) and hostnameAllowlist (legacy/alternate).
@@ -380,9 +419,14 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     )
 
     fail_ev: list[str] = []
-    if allow_private is True:
+    if allow_private:
+        trigger_keys = []
+        if dangerously_allow_private is True:
+            trigger_keys.append("dangerouslyAllowPrivateNetwork")
+        if legacy_allow_private is True:
+            trigger_keys.append("allowPrivateNetwork (legacy alias)")
         fail_ev.append(
-            "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork=true — "
+            f"browser.ssrfPolicy.{'/'.join(trigger_keys)}=true — "
             "agent browser can reach internal/metadata IPs (169.254.169.254 cloud-credential theft)"
         )
     if no_sandbox is True:
@@ -392,15 +436,42 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         )
 
     if fail_ev:
-        return _finding(
-            "B38",
-            FAIL,
-            "; ".join(fail_ev),
+        fix = (
             "Set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false to block "
             "cloud-metadata IP access; set browser.noSandbox to false (or omit it) to "
             "keep the OS sandbox active. Also add browser.ssrfPolicy.allowedHostnames "
             "(or the legacy browser.ssrfPolicy.hostnameAllowlist) to restrict which "
-            "hosts the browser may reach.",
+            "hosts the browser may reach."
+        )
+        if legacy_allow_private is True:
+            fix += (
+                " browser.ssrfPolicy.allowPrivateNetwork is the retired alias for the "
+                "same flag — OpenClaw ORs it into dangerouslyAllowPrivateNetwork before "
+                "the browser ever uses the policy, so dangerouslyAllowPrivateNetwork=false "
+                "alone will not close this while allowPrivateNetwork stays true. Set it to "
+                "false too, or remove it and run 'openclaw doctor --fix' to migrate it."
+            )
+        # B-722: only add the blockedHostnames lever when the private-network flag
+        # is the (or one of the) actual triggers -- B38 can also FAIL on noSandbox alone,
+        # with neither flag ever set, and advice about "if the flag cannot be turned off"
+        # would be confusing noise pointed at a flag this config never enabled. C-135
+        # (independent adversarial pass) found this unconditional in the first draft.
+        if allow_private:
+            fix += (
+                " If the private-network flag cannot be turned off, an "
+                "allowedHostnames/hostnameAllowlist entry alone does not close this: on "
+                "OpenClaw 2026.9.1 and later, also add browser.ssrfPolicy.blockedHostnames "
+                "naming at least the cloud-metadata addresses — 169.254.169.254, "
+                "metadata.google.internal, 100.100.100.200 — OpenClaw checks that deny "
+                "list before DNS and allow rules, even with private-network access "
+                "enabled, so it is the one lever that still blocks them while the flag "
+                "stays on."
+            )
+        return _finding(
+            "B38",
+            FAIL,
+            "; ".join(fail_ev),
+            fix,
             evidence=fail_ev,
         )
 
@@ -1452,6 +1523,19 @@ def check_provider_baseurl(ctx: Context) -> Finding:
     """
     if (f := _config_unreadable("B178", ctx)) is not None:
         return f
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(ctx.config, "models.providers")` would silently resolve to None
+    # and fall through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B178",
+            UNKNOWN,
+            "No config was read, so whether any model provider baseUrl uses a "
+            "cleartext http:// endpoint could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
 
     providers = dig(ctx.config, "models.providers")
@@ -1613,9 +1697,23 @@ def check_otel_content_capture_egress(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B365", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one that explicitly leaves diagnostics.otel unset and fall through to a PASS
+    # about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B365",
+            UNKNOWN,
+            "No config was read, so whether diagnostics.otel ships raw agent turn "
+            "content off-host could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
 
-    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    cfg = ctx.config
 
     # Hand-walked, not dig(): dig() collapses "key absent" and "key present but
     # malformed" to the same None, and here those two states have OPPOSITE verdicts —
@@ -1791,9 +1889,24 @@ def check_memory_search_remote_egress(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B366", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one with no memory.search.remote set anywhere and fall through to the PASS
+    # about a config nobody read. The docstring already promised "UNKNOWN — unread
+    # config"; this makes the code do it.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B366",
+            UNKNOWN,
+            "No config was read, so whether memory.search.remote sends embedded "
+            "memory chunks off-host could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     from ..logsafe import sanitize_url_host_only  # noqa: PLC0415
 
-    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    cfg = ctx.config
 
     sources: list[tuple[str, dict]] = []
     global_remote = dig(cfg, "memory.search.remote")
@@ -1918,6 +2031,14 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
       so the config verdict is the correct one. No heuristic guessing.
     * nothing observed, a global dotenv exists, and the audited home is not this user's own
       → **UNKNOWN** rather than an affirmative all-clear (Golden Rule #4).
+    * nothing observed, a global dotenv exists, and it exceeded the collector's byte cap
+      (``ctx.dotenv_truncated``) → **UNKNOWN**, ``engine_degraded=True`` (B-657):
+      OPENCLAW_CACHE_TRACE could sit past the cut, so ``None`` here would let a caller's
+      config-derived PASS stand over content that was never scanned. Gated on
+      ``ctx.dotenv_truncated``, NOT the shared ``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``
+      (C-135 round 2, A2): ``dotenv_override`` never reads ``ctx.unit_env_values``, so the
+      domain-wide signal — which also fires on a truncated systemd unit this function
+      never touches — would degrade this check over a file it never opened.
 
     A variable exported in the shell of an already-running agent leaves no on-disk trace
     and is not detectable here — a process boundary, not something a wider read could fix.
@@ -1969,6 +2090,33 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
             "Run the audit on the machine and account the agent runs as, with no --home "
             "argument, so the environment that actually applies can be read.",
             evidence=[f"global dotenv present: {', '.join(ctx.dotenv_files)}"],
+        )
+    # B-657: on the common audited-home-is-own path (the branch above only
+    # guards the OTHER-home case), `raw is None` can mean OPENCLAW_CACHE_TRACE sits past
+    # the collector's global-dotenv byte cap, not that it is genuinely unset. Every
+    # caller of this function treats `None` as "no override" and lets a config-derived
+    # PASS stand — which would then claim a clean bill of health over content that was
+    # never scanned.
+    #
+    # C-135 round 2 (A2): gated on ctx.dotenv_truncated, NOT limit_hits_for(ctx,
+    # LIMIT_DOMAIN_ENV) — that domain is shared with systemd-unit truncation, which this
+    # function's only evidence source (dotenv_override, dotenv_values/os.environ only,
+    # never unit_env_values) never reads. Using the domain-wide signal would degrade this
+    # check over a systemd unit it never opened a byte of.
+    if ctx.dotenv_truncated:
+        return _finding(
+            "B82",
+            UNKNOWN,
+            "The config does not switch cache-trace diagnostics on, and no "
+            "OPENCLAW_CACHE_TRACE override was found in the global dotenv file(s) that "
+            "were read — but at least one of them exceeded the collector's byte cap, so "
+            "an override past the cut would not have been seen. A clean bill of health "
+            "cannot be given over content that was never scanned.",
+            "Keep OpenClaw's global dotenv files (~/.openclaw/.env, "
+            "~/.config/openclaw/gateway.env) under the collector's size cap, then "
+            "re-run the audit.",
+            evidence=[f"global dotenv present: {', '.join(ctx.dotenv_files)}"],
+            engine_degraded=True,
         )
     return None
 
@@ -2048,6 +2196,26 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B82", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one that explicitly leaves diagnostics.cacheTrace unset and fall through to a
+    # PASS about a config nobody read (the dotenv-only env-override witness below is
+    # independent of openclaw.json and stays reachable regardless).
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        override = _b82_env_override(ctx)
+        if override is not None:
+            return override
+        return _finding(
+            "B82",
+            UNKNOWN,
+            "No config was read, so whether diagnostics.cacheTrace.enabled switches on "
+            "bulk per-turn transcript logging could not be determined. No "
+            "OPENCLAW_CACHE_TRACE override was found in the files OpenClaw loads at "
+            "startup.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config if isinstance(ctx.config, dict) else {}
     # Walk the two containers by hand rather than through dig(): dig() collapses "key
     # absent" and "key present but malformed" to the same None, and here those two states
@@ -2909,6 +3077,19 @@ def check_discovery_mdns_mode(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B73", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(cfg, "discovery.mdns.mode")` would silently resolve to None and
+    # fall through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B73",
+            UNKNOWN,
+            "No config was read, so whether discovery.mdns.mode broadly advertises "
+            "the agent on the local network could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     mode = dig(cfg, "discovery.mdns.mode")
     if mode != "full":
@@ -3230,6 +3411,19 @@ def check_webfetch_redirects(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B83", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(cfg, "tools.web.fetch.enabled")` would silently resolve to a
+    # falsy value and fall through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B83",
+            UNKNOWN,
+            "No config was read, so whether the web-fetch tool follows an excessive "
+            "redirect chain could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     if not dig(cfg, "tools.web.fetch.enabled"):
         return _finding(
@@ -3538,13 +3732,35 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     from ..scanbudget import audit_deadline, limits_for  # noqa: PLC0415
 
     sinks = discover_log_sinks(ctx)
+
+    # B-817: this discovery has no notion of the SQLite-backed trajectory store
+    # (trajectorystore.py) — a `kind="trajectory"` sink here is a JSONL sidecar only.
+    # When no such sidecar was found among the sinks, corroborate against the SQLite
+    # container so a clean PASS/UNKNOWN never stays silent about evidence this content
+    # scan structurally cannot read (event_json is never opened — see
+    # trajectorystore.py's own §8 paragraph). Locator-stale is the only status worth
+    # disclosing here: STATUS_LIVE never reaches this branch (a live sidecar would
+    # already be a `kind="trajectory"` sink) and STATUS_NO_RESIDUE has nothing to
+    # disclose.
+    sqlite_trajectory_disclosure = ""
+    if not any(sink.kind == "trajectory" for sink in sinks):
+        home = getattr(ctx, "home", None)
+        corro = _trajectorystore.corroborate(home) if isinstance(home, Path) else None
+        if corro is not None and corro.status == _trajectorystore.STATUS_LOCATOR_STALE:
+            sqlite_trajectory_disclosure = (
+                " trajectory evidence exists in a SQLite-backed store this content "
+                "scan cannot read (agents/*/agent/openclaw-agent.sqlite; event_json "
+                f"is never opened, by design) — {corro.sqlite_rows} row(s) across "
+                f"{corro.sqlite_sessions} session(s) unexamined."
+            )
+
     if not sinks:
         return _finding(
             "B164",
             UNKNOWN,
             "No agent log/transcript sinks found (no logging.file, cacheTrace, trajectory "
             "sidecar, session transcript, config-audit log, memory file, or install backup) "
-            "— nothing to content-scan.",
+            f"— nothing to content-scan.{sqlite_trajectory_disclosure}",
             "Enable OpenClaw's default trajectory sidecar (on by default) and/or "
             "logging.file so a future run has a log corpus to threat-hunt.",
         )
@@ -3680,6 +3896,11 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     # logscan.summarize_truncation's docstring for why this replaced the old generic
     # "results may be incomplete" wording.
     note = summarize_truncation(all_results)
+    # B-817: same disclosure the "no sinks at all" branch carries above, folded in here
+    # so it reaches the WARN and PASS paths too (both build their detail off `note`) —
+    # a sink list that HAS entries but no JSONL trajectory sidecar among them must not
+    # go quiet about SQLite-only evidence either.
+    note += sqlite_trajectory_disclosure
     # B-314: same honesty discipline for a sink skipped by the cumulative check-level
     # deadline (_LOG_HUNT_CHECK_BUDGET_S) — never silently omitted from the count.
     if skipped_for_time:
@@ -3764,10 +3985,47 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
 #   reconfigured to a locally-launching driver later, and the check never claims the
 #   binary WILL launch -- only that it is configured and, if it does launch, is not
 #   tamper-proof.
-def check_browser_executable_path(ctx: Context) -> Finding:
-    """B321 — browser.executablePath / browser.profiles.*.{executablePath,mcpCommand}.
+#
+#   B-653: mcpArgs is mcpCommand's sibling and was completely unread (grep found zero
+#   hits before this fix). Grounded against the INSTALLED dist (openclaw@2026.9.4, not
+#   the task's own now-dead 2026.7.1-2 bundle citations): `browser.profiles.*.mcpArgs`
+#   is `string[]` (zod-schema-*.js: `mcpArgs: array(string()).optional()`; schema
+#   description "Extra per-profile Chrome DevTools MCP arguments for existing-session
+#   attachment, such as --no-usage-statistics"), read only for `driver:
+#   "existing-session"` profiles -- same gate as mcpCommand. `normalizeChromeMcpOptions`
+#   (chrome-mcp-options-*.mjs) hands `options.mcpArgs` to a yargs parser with
+#   `alias: {browserUrl: "u", wsEndpoint: "w"}` and `boolean: ["autoConnect"]` -- so
+#   mcpArgs is not just inert extra flags: `--browserUrl`/`-u`, `--wsEndpoint`/`-w`, or
+#   bare `--autoConnect` OVERRIDE which endpoint the Chrome DevTools MCP session
+#   connects to, taking precedence over `cdpUrl` entirely (`overridesConnection` short-
+#   circuits the normal cdpUrl-derived connection args). That is the SAME underlying
+#   risk B322 already grades for the `cdpUrl` field (an off-host CDP endpoint handing a
+#   remote party the browser session) reachable through a field B322 never reads.
+#   Deliberately NOT implemented here: resolving/classifying the actual endpoint value
+#   the way B322's `_cdp_url_classify` does (loopback vs remote vs unresolvable) -- that
+#   needs the same care B322's own extensive normalization comments show it took, and
+#   folding a second URL classifier into B321 under this task's narrower scope ("read
+#   mcpArgs") risks exactly the under-grounded-detector failure mode this project's own
+#   C-135 process exists to catch. So this only DISCLOSES that a connection-overriding
+#   flag is present in mcpArgs, at the same WARN/scored=False tier as mcpCommand, and
+#   names the gap in the finding's own fix text (B322 follow-up filed separately). A
+#   textual flag match only -- never resolves, validates, or classifies the URL itself.
+_B321_MCP_ENDPOINT_FLAG_RE = re.compile(
+    r"^--(browserUrl|wsEndpoint|autoConnect)(=.*)?$|^-[uw](=.*)?$"
+)
 
-    Two distinct sub-signals share this one check ID:
+# DEFAULT_CHROME_MCP_FEATURE_ARGS, chrome-mcp-options-*.mjs — the vendor appends these
+# unconditionally unless the config already carries an equivalent, so an mcpArgs entry
+# that merely restates one is not an override (see the WARN-evidence comment below).
+_B321_DEFAULT_MCP_FEATURE_ARGS = frozenset(
+    {"--no-usage-statistics", "--experimentalStructuredContent"}
+)
+
+
+def check_browser_executable_path(ctx: Context) -> Finding:
+    """B321 — browser.executablePath / browser.profiles.*.{executablePath,mcpCommand,mcpArgs}.
+
+    Three sub-signals share this one check ID:
 
     (A) executablePath (top-level and per-profile) — see the module comment above for
         the grounding. FAIL-capable: a configured, existing path that is writable by
@@ -3786,6 +4044,12 @@ def check_browser_executable_path(ctx: Context) -> Finding:
         WARN-only, and `scored=False` on that specific branch (this check's CheckMeta
         otherwise stays scored — see the FAIL branch above), mirroring B192/B324's
         precedent for a legitimate, commonly-wanted customization a FAIL would punish.
+    (C) profiles.<name>.mcpArgs (existing-session driver only, B-653) — mcpCommand's
+        sibling, previously unread entirely. Same WARN/scored=False tier as (B) — see
+        the module comment above for the grounding, including why a
+        browserUrl/wsEndpoint/autoConnect endpoint-override flag inside it is only
+        DISCLOSED here, never classified/escalated (that is B322's domain, filed
+        separately).
 
     FAIL    — a configured executablePath (top-level or any profile's) exists on disk
               and either the file itself or its containing directory is group/world-
@@ -3796,25 +4060,26 @@ def check_browser_executable_path(ctx: Context) -> Finding:
               directory entry, e.g. via rename/symlink, even if the file's own mode is
               tight). Requires host-filesystem scanning; see UNKNOWN below when it is
               off.
-    WARN    — an existing-session profile's mcpCommand is set to a non-default value
-              (scored=False on this branch — see (B) above).
+    WARN    — an existing-session profile's mcpCommand is a non-default value and/or
+              its mcpArgs is a non-empty list (scored=False on this branch — see (B)/(C)
+              above).
     PASS    — at least one executablePath was configured, host-scanned, and none is
-              writable by another account; no mcpCommand override found.
-    UNKNOWN — no browser config at all; OR browser is configured but neither an
-              executablePath (top-level or per-profile) nor an existing-session
-              mcpCommand override is set anywhere — nothing to assess (B-362: sets
-              ``not_applicable`` here — the config locus was read COMPLETELY and
-              neither sub-signal exists anywhere in the browser block, so there is
-              genuinely nothing for this check to assess, not merely an unassessed
-              risk); OR an executablePath is configured but host-filesystem scanning
-              is disabled (ctx.include_host is False / --no-host) — mirrors C5's own
-              --no-host gate (checks/_capability.py check_path_safety): writability
-              cannot be assessed without stat()-ing the real path, and this check does
-              not fall back to reporting the independent mcpCommand signal alone in
-              that specific run to keep the "assessment incomplete" verdict
-              unambiguous — a subsequent run without --no-host (the CLI default)
-              evaluates both signals normally. This THIRD branch stays a real UNKNOWN
-              (not not_applicable) — candidates were found, the scan is merely
+              writable by another account; no mcpCommand override and no mcpArgs found.
+    UNKNOWN — no browser config at all; OR browser is configured but none of
+              executablePath (top-level or per-profile), an existing-session mcpCommand
+              override, or an existing-session mcpArgs entry is set anywhere — nothing
+              to assess (B-362: sets ``not_applicable`` here — the config locus was read
+              COMPLETELY and no sub-signal exists anywhere in the browser block, so
+              there is genuinely nothing for this check to assess, not merely an
+              unassessed risk); OR an executablePath is configured but host-filesystem
+              scanning is disabled (ctx.include_host is False / --no-host) — mirrors
+              C5's own --no-host gate (checks/_capability.py check_path_safety):
+              writability cannot be assessed without stat()-ing the real path, and this
+              check does not fall back to reporting the independent mcpCommand/mcpArgs
+              signal alone in that specific run to keep the "assessment incomplete"
+              verdict unambiguous — a subsequent run without --no-host (the CLI
+              default) evaluates every signal normally. This THIRD branch stays a real
+              UNKNOWN (not not_applicable) — candidates were found, the scan is merely
               incomplete right now.
     """
     browser = ctx.config.get("browser")
@@ -3822,7 +4087,7 @@ def check_browser_executable_path(ctx: Context) -> Finding:
         return _finding(
             "B321",
             UNKNOWN,
-            "No browser config — executablePath / mcpCommand not applicable.",
+            "No browser config — executablePath / mcpCommand / mcpArgs not applicable.",
             "—",
             not_applicable=_browser_surface_absent(ctx),
         )
@@ -3848,13 +4113,44 @@ def check_browser_executable_path(ctx: Context) -> Finding:
                     "the vendor default (npx -y chrome-devtools-mcp@latest) — OpenClaw "
                     "does not validate this command/path before spawning it"
                 )
+            # B-653: mcpArgs, mcpCommand's sibling — see the module comment above for
+            # the grounding (including the browserUrl/wsEndpoint/autoConnect
+            # connection-override flags, disclosed but not classified/resolved here).
+            # C-135: an entry that is exactly one of the vendor's OWN
+            # DEFAULT_CHROME_MCP_FEATURE_ARGS (chrome-mcp-options-*.mjs) is dropped
+            # before flagging — the vendor appends both of those unconditionally
+            # regardless of config (only suppressing --no-usage-statistics from its own
+            # defaults when the user's mcpArgs already carries a usage-statistics
+            # flag, never the reverse), so a config that merely RESTATES a default is
+            # not an override in any sense the mcpCommand=="npx" precedent above
+            # would flag either.
+            mcp_args = spec.get("mcpArgs")
+            if isinstance(mcp_args, list):
+                clean_args = [
+                    a.strip() for a in mcp_args
+                    if isinstance(a, str) and a.strip()
+                    and a.strip() not in _B321_DEFAULT_MCP_FEATURE_ARGS
+                ]
+                if clean_args:
+                    endpoint_note = (
+                        " — includes a browserUrl/wsEndpoint/autoConnect flag, which "
+                        "overrides which endpoint the MCP session connects to"
+                        if any(_B321_MCP_ENDPOINT_FLAG_RE.match(a) for a in clean_args)
+                        else ""
+                    )
+                    mcp_warn_ev.append(
+                        f"browser.profiles.{name}.mcpArgs={clean_args!r} passes extra "
+                        "arguments to the spawned Chrome DevTools MCP process — "
+                        f"OpenClaw does not validate them before use{endpoint_note}"
+                    )
 
     if not candidates and not mcp_warn_ev:
         return _finding(
             "B321",
             UNKNOWN,
             "browser is configured but no executablePath (top-level or per-profile) "
-            "and no existing-session mcpCommand override is set — nothing to assess.",
+            "and no existing-session mcpCommand/mcpArgs override is set — nothing to "
+            "assess.",
             "—",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
@@ -3938,9 +4234,12 @@ def check_browser_executable_path(ctx: Context) -> Finding:
             "B321",
             WARN,
             f"{len(mcp_warn_ev)} existing-session browser profile(s) override the "
-            "Chrome DevTools MCP command from the vendor default — see evidence.",
-            "Confirm the configured mcpCommand points to a binary you trust; OpenClaw "
-            "does not validate it before spawning.",
+            "Chrome DevTools MCP command and/or pass it extra arguments — see "
+            "evidence.",
+            "Confirm the configured mcpCommand points to a binary you trust and that "
+            "mcpArgs contains only arguments you intend, especially any "
+            "browserUrl/wsEndpoint/autoConnect entry (it redirects the MCP session's "
+            "browser connection); OpenClaw does not validate either before use.",
             evidence=mcp_warn_ev[:6],
             scored=False,
         )

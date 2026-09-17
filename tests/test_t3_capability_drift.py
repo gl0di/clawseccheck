@@ -203,6 +203,31 @@ def test_unknown_when_no_declared_grant(tmp_path):
     assert check_capability_drift(_ctx(tmp_path)).status == UNKNOWN
 
 
+def test_unknown_when_a_record_used_an_unrecognised_trace_schema(tmp_path):
+    """B-716: check_capability_drift's own meta.get("unknown_version") UNKNOWN branch
+    already existed for a schemaVersion mismatch; a traceSchema mismatch was a bare,
+    silent drop with no matching branch -- a mixed-schema file dropped some records
+    here too before this fix, with no signal the proven set was incomplete."""
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({
+            "traceSchema": "openclaw-trajectory", "schemaVersion": 1, "type": "tool.call",
+            "ts": "1", "seq": 1, "sessionId": "s1", "data": {"name": "bash", "threadId": "th1"},
+        }),
+        json.dumps({
+            "traceSchema": "openclaw-trajectory-v2", "schemaVersion": 1, "type": "tool.call",
+            "ts": "2", "seq": 2, "sessionId": "s1",
+            "data": {"name": "delete_forever", "threadId": "th1"},
+        }),
+    ]
+    (d / "s1.trajectory.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    ctx = _ctx(tmp_path, allow=["bash"])
+    f = check_capability_drift(ctx)
+    assert f.status == UNKNOWN
+    assert "traceSchema" in f.detail
+
+
 def test_unknown_when_profile_grants_without_toplevel_allow(tmp_path):
     """C-135 (architect-confirmed): OpenClaw's schema forbids allow+alsoAllow and recommends
     'profile + alsoAllow'. In that shape the profile ('coding') grants high-blast core tools

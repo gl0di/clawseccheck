@@ -88,6 +88,7 @@ from ._shared import (
     _agent_legs,
     _agent_tools_widenings,
     _agents_without_exec_gate,
+    _bind_mentions_docker_sock,
     _bind_mode_is_ro,
     _canon_tool,
     _canonical_ipv4,
@@ -126,6 +127,7 @@ from ._shared import (
     _norm_group_policy,
     _open_channels,
     OUTBOUND_TOOL_HINTS,
+    OUTBOUND_TOOL_IDS,
     _OWN_ENGINE_MARKERS,
     parse_bind_host,
     _perms_loose,
@@ -134,6 +136,7 @@ from ._shared import (
     _real_exec_enabled,
     _resolve_sandbox_scope,
     _safe_mtime,
+    _sandbox_docker_binds,
     _sandbox_has_writable_bind,
     SECRET_KEY_RE,
     _SECRET_PATH_RE,
@@ -167,6 +170,7 @@ from ._host import (
     check_host_egress_posture,
     check_incident_readiness,
     check_systemd_persistence,
+    check_host_scheduled_persistence,
     check_bundled_root_override,
     check_unit_embedded_gateway_secret,
     check_audit_trail_signals,
@@ -299,6 +303,8 @@ from ._capability import (
     check_fs_write_exposure,
     check_node_denycommands_ineffective,
     check_path_safety,
+    _b378_normalize_path_for_compare,
+    check_agent_cwd_relocation,
 )
 
 from ._config import (
@@ -349,12 +355,14 @@ from ._config import (
     check_gateway_rate_limit,
     check_gateway_remote_ssh_host_key_policy,
     check_hook_template_content,
+    check_hook_transform_modules,
     check_hooks_enable_toggles,
     check_least_privilege,
     check_local_first,
     check_local_model_service_command,
     check_privileged_commands_exposure,
     check_proxy_header_forging,
+    check_redactor_blind_secret_paths,
     check_sandbox,
     check_secrets,
     check_secrets_at_rest_home,
@@ -1325,6 +1333,7 @@ CHECKS = [
     check_trifecta,
     check_secrets,
     check_secrets_at_rest_home,
+    check_redactor_blind_secret_paths,  # B381 — secret-shaped value at a redactor-blind config path (C-405)
     check_gateway,
     check_least_privilege,
     check_sandbox,
@@ -1426,6 +1435,7 @@ CHECKS = [
     check_dangerous_overrides,
     check_privileged_commands_exposure,  # B171 — commands.bash/config/mcp/plugins gate (B-235)
     check_hook_template_content,  # B169 — hooks.mappings[] template content scan (B-231)
+    check_hook_transform_modules,  # B380 — hooks.mappings[].transform.module inventory/writability (C-406)
     check_fs_write_exposure,
     check_controlui_origins,
     check_plugin_permission_mode,
@@ -1471,6 +1481,12 @@ CHECKS = [
     # B352 — tools.exec.pathPrepend: what OpenClaw exports ahead of $PATH for every
     # exec run. Skips scopes where host=node, which the runtime ignores.
     check_exec_path_prepend,
+    # B378 — agents.defaults.cwd / agents.entries.<id>.cwd (new
+    # in OpenClaw 2026.9.1): relocates the task/exec working directory away from the
+    # workspace, which OpenClaw's own sandbox guard rejects unless the run is
+    # unsandboxed. WARN-only; PASS only when cwd provably matches that scope's own
+    # declared workspace.
+    check_agent_cwd_relocation,
     # B355 (C-408) — models.providers.*.localService.command: a binary OpenClaw spawns
     # at provider startup. WARN when writable by another account; the relative-path
     # case the original stub worried about is refuted (the runtime refuses to spawn
@@ -1504,6 +1520,7 @@ CHECKS = [
     check_pending_device_pairing_scope,  # B138 — dangling high-scope pending device pairing
     check_paired_device_operator_authority,  # B176 — standing operator authority in devices/paired.json (B-243)
     check_systemd_persistence,  # B150 — systemd user-unit Restart=always persistence
+    check_host_scheduled_persistence,  # B379 — systemd timer / system cron naming OpenClaw, outside C048's scope (F-178)
     check_codex_plugin_hooks,  # B151 — codex connector shell hooks in the plugin doc-cache
     check_orphaned_plugin_caches,  # B152 — on-disk plugin cache not in plugins.entries
     check_undeclared_plugin_load_path,  # B348 — plugins.load.paths entry not in plugins.entries (F-161)
@@ -1526,7 +1543,7 @@ CHECKS = [
     check_secrets_provider_exec,  # B194 — secrets.providers.* exec-source escape flags (E-060 item 1)
     check_browser_extra_args,  # B195 — browser.extraArgs dangerous Chrome launch flags (E-060 item 2)
     check_browser_evaluate_enabled,  # B196 — browser.evaluateEnabled arbitrary-JS sink (E-060 item 3)
-    check_browser_executable_path,  # B321 — browser.executablePath / profiles.*.executablePath / mcpCommand (E-060 item 4)
+    check_browser_executable_path,  # B321 — browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs (E-060 item 4, B-653)
     check_browser_existing_session_profile,  # B322 — browser.profiles.*.userDataDir / cdpUrl / driver:"existing-session" (E-060 item 5)
     check_browser_cdp_control_port,  # B330 — unauthenticated CDP control port: off-host cdpUrl / --remote-allow-origins (C-298)
     check_marketplace_feed_provenance,  # B325 — marketplaces.feeds non-canonical registry (E-060 item 8)
@@ -1696,7 +1713,22 @@ def _check_budget_finding(chk, kind: str, seconds: float | None = None) -> Findi
 
 
 def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
-            audit_budget_s: float = DEFAULT_AUDIT_BUDGET_S) -> list[Finding]:
+            audit_budget_s: float = DEFAULT_AUDIT_BUDGET_S,
+            on_check_done=None) -> list[Finding]:
+    # C-510 item 2: a plain audit gives no progress feedback while it can
+    # spend up to ~3 minutes on hostile content (a slow check, or several, chewing
+    # through their own check_budget_s) -- a silent terminal for that long is
+    # indistinguishable from a hang, and a user who kills what they believe is a stuck
+    # process is exactly the mid-write condition that produces corrupt monitor/baseline
+    # state elsewhere in this tool. `on_check_done`, when given, is called as
+    # `on_check_done(done_count, total_count)` after EVERY check completes -- normally,
+    # budget-exceeded, or crashed alike, so a caller narrating progress sees the true
+    # count including degraded checks, never a lower one that reads as "fewer checks
+    # than the catalog". Optional and default None (a no-op call is skipped entirely,
+    # not just silenced) so every existing caller -- every test in this suite calls
+    # `audit()`/`run_all()` directly -- is byte-for-byte unaffected; only the CLI's
+    # interactive default-audit path installs one (cli.py).
+    #
     # Per-check isolation (B-101) + wall-clock budget (C-159): a crashing OR hanging
     # check degrades to one UNKNOWN finding instead of aborting the audit. This is the
     # DESIGNATED handler for a per-check deadline: ScanBudgetExceeded derives from
@@ -1706,9 +1738,12 @@ def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
     # KeyboardInterrupt / SystemExit still propagate) can no longer shadow it.
     findings: list[Finding] = []
     deadline = audit_deadline(audit_budget_s)
-    for chk in CHECKS:
+    total = len(CHECKS)
+    for done, chk in enumerate(CHECKS, start=1):
         if audit_budget_exceeded(deadline):
             findings.append(_check_budget_finding(chk, "audit"))
+            if on_check_done is not None:
+                on_check_done(done, total)
             continue
         try:
             with check_deadline(check_budget_s):
@@ -1734,4 +1769,6 @@ def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
                 traceback.format_exc(),
             )
             findings.append(_check_error_finding(chk, exc))
+        if on_check_done is not None:
+            on_check_done(done, total)
     return findings

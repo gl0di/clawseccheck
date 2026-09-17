@@ -313,3 +313,109 @@ def test_mcp_command_warn_is_unscored(tmp_path):
     r = check_browser_executable_path(collect(home))
     assert r.status == WARN
     assert r.scored is False
+
+
+# ---------------------------------------------------------------------------
+# B-653: mcpArgs — mcpCommand's sibling, previously unread entirely
+# ---------------------------------------------------------------------------
+
+def test_mcp_args_on_existing_session_warns(tmp_path):
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session", "mcpArgs": ["--pinned-custom-flag"],
+                 "color": "#00AA00"}
+    }}})
+    r = check_browser_executable_path(collect(home))
+    assert r.status == WARN
+    assert r.scored is False
+    assert any("mcpArgs" in e and "pinned-custom-flag" in e for e in r.evidence)
+
+
+def test_mcp_args_matching_vendor_default_is_not_flagged(tmp_path):
+    """DEFAULT_CHROME_MCP_FEATURE_ARGS (chrome-mcp-options-*.mjs) -- the vendor appends
+    --no-usage-statistics / --experimentalStructuredContent unconditionally, so a
+    config that merely restates one is not an override, mirroring the
+    mcpCommand=="npx" exemption above."""
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session",
+                 "mcpArgs": ["--no-usage-statistics", "--experimentalStructuredContent"],
+                 "color": "#00AA00"}
+    }}})
+    r = check_browser_executable_path(collect(home))
+    assert r.status == UNKNOWN
+
+
+def test_mcp_args_on_non_existing_session_driver_is_ignored(tmp_path):
+    """Same schema/runtime gate as mcpCommand -- mcpArgs only applies to the
+    existing-session driver (normalizeChromeMcpOptions is only reached for that
+    driver); a profile using driver:"openclaw" setting mcpArgs is not a real signal."""
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "main": {"driver": "openclaw", "mcpArgs": ["--browserUrl", "http://evil.example"],
+                 "color": "#FFFFFF"}
+    }}})
+    r = check_browser_executable_path(collect(home))
+    assert r.status == UNKNOWN
+
+
+def test_empty_mcp_args_list_is_not_flagged(tmp_path):
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session", "mcpArgs": [], "color": "#00AA00"}
+    }}})
+    r = check_browser_executable_path(collect(home))
+    assert r.status == UNKNOWN
+
+
+def test_mcp_args_non_string_entries_are_dropped(tmp_path):
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session", "mcpArgs": [5, None, "  "],
+                 "color": "#00AA00"}
+    }}})
+    r = check_browser_executable_path(collect(home))
+    assert r.status == UNKNOWN
+
+
+def test_mcp_args_endpoint_override_flag_gets_a_named_note(tmp_path):
+    """--browserUrl/--wsEndpoint/--autoConnect (and short aliases -u/-w) redirect which
+    endpoint the Chrome DevTools MCP session connects to (chrome-mcp-options-*.mjs's
+    yargs alias table) -- disclosed by name, not classified/escalated (that is B322's
+    domain)."""
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session",
+                 "mcpArgs": ["--browserUrl", "http://198.51.100.5:9222"],
+                 "color": "#00AA00"}
+    }}})
+    r = check_browser_executable_path(collect(home))
+    assert r.status == WARN
+    ev = " ".join(r.evidence)
+    assert "mcpArgs" in ev
+    assert "redirect" in ev.lower() or "overrides which endpoint" in ev.lower()
+
+
+def test_mcp_args_endpoint_flag_short_alias_and_equals_form_detected(tmp_path):
+    for flag in ("-u", "-w", "--wsEndpoint=ws://198.51.100.5:1234", "--autoConnect"):
+        home = _home(tmp_path, config={"browser": {"profiles": {
+            "user": {"driver": "existing-session", "mcpArgs": [flag], "color": "#00AA00"}
+        }}})
+        r = check_browser_executable_path(collect(home))
+        assert r.status == WARN, flag
+        assert "overrides which endpoint" in " ".join(r.evidence), flag
+
+
+def test_mcp_args_without_endpoint_flag_has_no_endpoint_note(tmp_path):
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session", "mcpArgs": ["--pinned-custom-flag"],
+                 "color": "#00AA00"}
+    }}})
+    r = check_browser_executable_path(collect(home))
+    assert r.status == WARN
+    assert "overrides which endpoint" not in " ".join(r.evidence)
+
+
+def test_mcp_args_and_mcp_command_both_reported(tmp_path):
+    home = _home(tmp_path, config={"browser": {"profiles": {
+        "user": {"driver": "existing-session", "mcpCommand": "/opt/pinned-mcp",
+                 "mcpArgs": ["--pinned-custom-flag"], "color": "#00AA00"}
+    }}})
+    r = check_browser_executable_path(collect(home))
+    assert r.status == WARN
+    ev = " ".join(r.evidence)
+    assert "mcpCommand" in ev and "mcpArgs" in ev

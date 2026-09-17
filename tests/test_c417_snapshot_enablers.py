@@ -377,7 +377,11 @@ _SNAPSHOT_KEY_HELPERS = {"_dim": 1, "_frontier": 1, "_num": 1, "_num_or_none": 1
                          # here are int-or-tuple: the helper reads a scope hash and a
                          # figure, and a map that could only name one would have declared
                          # the manifest complete while missing the other.
-                         "raw_backstop": (2, 3)}
+                         # C-469 added a second pair (earned/total), so the tuple grew to
+                         # four positions rather than staying at two — the same reasoning
+                         # extended, not a new one: a map naming only the first pair would
+                         # again declare the manifest complete while missing the second.
+                         "raw_backstop": (2, 3, 4, 5)}
 
 
 def _keys_read_from_a_stored_snapshot() -> set:

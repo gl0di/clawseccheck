@@ -14,6 +14,7 @@
 #
 # --- read off the OpenClaw config ROOT ---------------------------------------------
 acp.runtime.installCommand
+agents.defaults.cwd
 agents.defaults.elevatedDefault
 agents.defaults.embeddedAgent.projectSettingsPolicy
 agents.defaults.heartbeat
@@ -37,6 +38,7 @@ agents.list
 agents.subagents
 audit.enabled
 auth.profiles
+browser.ssrfPolicy.allowPrivateNetwork
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
 channels
 channels.defaults.contextVisibility
@@ -72,6 +74,7 @@ gateway.controlUi.allowedOrigins
 gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback
 gateway.controlUi.dangerouslyDisableDeviceAuth
 gateway.controlUi.embedSandbox
+gateway.controlUi.experimental.customPlugins
 gateway.customBindHost
 gateway.host
 gateway.http.endpoints.chatCompletions
@@ -106,6 +109,7 @@ hooks.internal.installs
 hooks.internal.load.extraDirs
 hooks.mappings
 hooks.token
+hooks.transformsDir
 lastTouchedVersion
 logging.file
 logging.redactSensitive

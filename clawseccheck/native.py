@@ -22,24 +22,39 @@ from dataclasses import dataclass, field
 from .catalog import CRITICAL, FAIL, HIGH, LOW, MEDIUM, Finding
 
 
-def _untrusted_exec_reason(exe: str) -> str | None:
-    """Return a reason if *exe* (or its directory) is writable by group/other on
-    POSIX — i.e. a local user could have swapped the binary we are about to run.
+def _untrusted_exec_reason(exe: str) -> "tuple[bool, str] | None":
+    """Return ``(must_skip, reason)`` if *exe* (or its directory) could not be trusted
+    enough to exec, or ``None`` if it was CHECKED and found clean — i.e. writable by
+    group/other on POSIX, which means a local user could have swapped the binary we are
+    about to run.
 
-    The audit flags group/world-writable install dirs in others, so it must not
-    blindly exec from such a path itself (B-014).  Stat failures / non-POSIX
-    return None so the normal exec path is unaffected.
+    The audit flags group/world-writable install dirs in others, so it must not blindly
+    exec from such a path itself (B-014). Two DIFFERENT reasons a caller might see no
+    green light here (B-774 — both used to collapse into plain `None`, reading exactly
+    like a verified-clean path):
+
+    * ``must_skip=True`` — POSIX and the mode bits prove it writable (never exec), OR the
+      stat itself raised ``OSError`` — an unreadable path is not a trusted one, so this
+      fails CLOSED the same as a confirmed-unsafe verdict (Option 1: "cheap, strictly
+      safer, and cannot affect a healthy machine — a stat of a binary `shutil.which` just
+      resolved does not normally fail").
+    * ``must_skip=False`` — non-POSIX, where ``os.stat().st_mode``'s group/other bits
+      carry no meaning at all (Windows uses NTFS ACLs — the same "can't read those
+      read-only" limitation `checks/_host.py`'s B85 already discloses rather than
+      silently reading as clean). The check genuinely does not apply here, not merely
+      "failed to run" — so the caller may still exec, but must disclose that this trust
+      check specifically could not be made, never render it as an absence of concern.
     """
     if os.name != "posix":
-        return None
+        return (False, "this platform's file permissions can't be read as POSIX mode bits")
     try:
         real = os.path.realpath(exe)
         for target in (real, os.path.dirname(real)):
             mode = os.stat(target).st_mode
             if mode & (stat.S_IWGRP | stat.S_IWOTH):
-                return "group/world-writable install path"
-    except OSError:
-        return None
+                return (True, "group/world-writable install path")
+    except OSError as exc:
+        return (True, f"could not check install-path permissions ({exc})")
     return None
 
 _SEV_MAP = {
@@ -123,21 +138,30 @@ def run_native_audit(openclaw_bin: str = "openclaw", timeout: int = 60,
         return NativeResult("not_found", note=(
             "openclaw CLI not on PATH — run this inside OpenClaw to also include "
             "its built-in `openclaw security audit`."))
-    unsafe = _untrusted_exec_reason(exe)
-    if unsafe:
-        return NativeResult("skipped", note=(
-            f"openclaw at {os.path.realpath(exe)} not run: {unsafe}. "
-            "Restore owner-only perms on the binary/dir, or run from a trusted PATH, "
-            "to include the built-in audit."))
+    trust = _untrusted_exec_reason(exe)
+    trust_caveat = ""
+    if trust is not None:
+        must_skip, reason = trust
+        if must_skip:
+            return NativeResult("skipped", note=(
+                f"openclaw at {os.path.realpath(exe)} not run: {reason}. "
+                "Restore owner-only perms on the binary/dir, or run from a trusted PATH, "
+                "to include the built-in audit."))
+        # B-774: the install-path trust check does not apply on this platform (see
+        # _untrusted_exec_reason) — proceed, but carry an honest disclosure into
+        # whatever this call returns below, so "unverifiable" never reads the same
+        # as "checked, clean" the way a bare `None` note used to.
+        trust_caveat = f" (install-path trust check not performed: {reason})"
     try:
         proc = subprocess.run(
             [exe, "security", "audit", "--json"],
             capture_output=True, text=True, timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:
-        return NativeResult("timeout", note=f"openclaw security audit timed out after {timeout}s")
+        return NativeResult("timeout",
+                            note=f"openclaw security audit timed out after {timeout}s{trust_caveat}")
     except OSError as exc:
-        return NativeResult("error", note=f"could not run openclaw: {exc}")
+        return NativeResult("error", note=f"could not run openclaw: {exc}{trust_caveat}")
 
     data = _parse(proc.stdout)
     if data is None:
@@ -145,10 +169,12 @@ def run_native_audit(openclaw_bin: str = "openclaw", timeout: int = 60,
             note = f"openclaw security audit exited {proc.returncode}"
             if proc.stderr:
                 note += f": {proc.stderr.strip()[:300]}"
-            return NativeResult("error", note=note)
-        return NativeResult("error", note="could not parse openclaw security audit JSON output")
+            return NativeResult("error", note=note + trust_caveat)
+        return NativeResult("error", note="could not parse openclaw security audit JSON output"
+                            + trust_caveat)
     findings = [_to_finding(d) for d in _extract(data)]
     note = f"{len(findings)} finding(s) from openclaw security audit"
     if proc.returncode != 0:
         note += f" (openclaw exited {proc.returncode})"
+    note += trust_caveat
     return NativeResult("ok", findings=findings, note=note)

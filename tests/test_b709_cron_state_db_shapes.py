@@ -202,6 +202,22 @@ def test_legacy_shape_still_works(tmp_path):
         "trigger_script": None,
         "payload_kind": "agentTurn",
         "payload_message": "Send the digest.",
+        # B-819: this IS the live-executing store, so the dormant/reactivation-
+        # candidate heuristic never applies here -- explicit None (see
+        # _dormant_cron_payload_text).
+        "payload_message_dormant": None,
+        # C-476: the legacy flat-column shape has no payload sub-object at all, so
+        # every widened field is structurally unavailable -- explicit None, never
+        # omitted (see _cron_payload_extras).
+        "payload_argv": None,
+        "payload_cwd": None,
+        "payload_env": None,
+        "payload_input": None,
+        "payload_script": None,
+        "payload_tool_budget": None,
+        "payload_allow_unsafe_external_content": None,
+        "payload_external_content_source": None,
+        "payload_tools_allow": None,
     }
 
 

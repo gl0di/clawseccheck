@@ -7,9 +7,11 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Callable
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist  # B-502: C4 single-run version-rollback signal
-from .. import trajectory as _trajectory  # B-294/B189: session pivot for erased cron jobs
+from .. import trajectory as _trajectory  # B-294/B189: session pivot for erased cron jobs (JSONL sidecar)
+from .. import trajectorystore as _trajectorystore  # B-813: session pivot for erased cron jobs (SQLite store)
 from ..catalog import (
     BY_ID,
     FAIL,
@@ -20,16 +22,20 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    LIMIT_DOMAIN_APPROVALS,
+    LIMIT_DOMAIN_BOOTSTRAP,
     LIMIT_DOMAIN_CONFIG,
     Context,
     agent_roster,
     dig,
+    limit_hits_for,
 )
 from ..safeio import walk_dir_safely
 from .. import deptree as _deptree  # B349: bounded, read-only dependency-tree enumeration
 from ..skillast import analyze_javascript as _analyze_javascript
 from ..textnorm import (
     confusable_in_ascii_context,  # B349: benign i18n vs homoglyph substitution
+    has_naked_bidi_override,  # C-515/B-766: Trojan-Source-style override, B58's sibling signal
     normalize_for_scan,
     obfuscation_signals,
 )
@@ -56,6 +62,7 @@ from ._shared import (
     _agents_without_exec_gate,
     _config_unreadable,
     _custom,
+    _detail_path,
     _enabled_tools,
     _key_advice,
     _openclaw_generation,
@@ -71,29 +78,6 @@ from ._shared import (
     _workshop_symlink_knob,
 )
 from ..invocation import command_prefix
-
-
-def _detail_path(value, home) -> str:
-    """Render *value* for a ``Finding.detail``: relative to the audited home when it lies
-    inside it, with a single ``..`` segment when it lies under the home's parent (the
-    ``~`` slot of a real OpenClaw home, where ``.config/...`` lives). Anything else is
-    returned unchanged. A composite string that merely *starts* with such a path is
-    rewritten the same way, so a source label like ``<unit> (Environment=)`` still works.
-
-    ``baseline.fingerprint()`` hashes ``Finding.detail``, and a user's
-    ``.clawseccheckignore`` keys a per-finding suppression on that hash — so an absolute
-    scan-root path baked into a detail silently orphans that suppression the moment the
-    workspace or the scanned skill moves, and it leaks the reporter's directory layout
-    into any report they share. The audited root is printed once in the report header
-    instead. A path the CONFIG itself declares in absolute form is deliberately left
-    verbatim: that string is a function of the audited subject, so it belongs in the
-    finding's identity (and in the text, since it is what the owner has to go fix).
-    """
-    text = str(value)
-    for base, prefix in ((str(home), ""), (str(Path(home).parent), ".." + os.sep)):
-        if base and base != os.sep and text.startswith(base + os.sep):
-            return prefix + text[len(base) + 1:]
-    return text
 
 
 # ---------- B23: approval-bypass directives in bootstrap ----------
@@ -171,7 +155,31 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal — the single file that defines the
 #       (2026, 7, 0) instead PASSes the vulnerable "2026.7.1-2" (false negative).
 # Neither direction is expressible here: a correction-release boundary needs a comparator
 # change (e.g. a (base_tuple, correction_int) pair), not a new table row.
-_KNOWN_ADVISORIES: list[tuple[str, tuple[int, ...], str, str]] = [
+#
+# C-414: a row is 4 elements (id, max_vulnerable_version_tuple, fixed_version_str, title) —
+# version-only, matching on `parsed <= max_vuln` alone, exactly as every row below already
+# does — OR 5 elements, with a `condition: Callable[[dict], bool]` appended that takes
+# `ctx.config` and returns whether THIS host's config shape can actually reach the
+# defect. `check_known_vulns` treats a 4-tuple as `condition=None` (version-only,
+# unchanged), so EVERY EXISTING ROW BELOW IS LEFT AS A PLAIN 4-TUPLE — a config-
+# conditioned advisory only ever adds a 5th element to its OWN row, never pads the rest
+# of the table. A condition that raises is treated as unproven (the row does not match) —
+# never let a broken predicate manufacture a FAIL (Golden Rule #5).
+#
+# ⚠️ HARD SEQUENCING GATE — do not add a row (4- or 5-element) for an UNFIXED defect.
+# This repo is PUBLIC (GitHub + ClawHub). A row fingerprints a specific, already-PATCHED
+# version boundary; shipping one for a defect OpenClaw has not fixed yet publishes a
+# 0-day with a config-level PoC attached, and breaks the coordinated-disclosure process
+# this project committed to (epic E-073). Golden Rule #4 also forbids inventing an
+# advisory id — an undisclosed defect has none to cite. Order is mandatory every time:
+# privately disclose -> maintainer ships a fix -> a real version boundary + advisory id
+# exists -> THEN a row (with or without a condition) may be added. A config-conditioned
+# row is not exempt from this gate merely because it is more precise than a version-only
+# one — precision does not change what it discloses.
+_KNOWN_ADVISORIES: list[
+    tuple[str, tuple[int, ...], str, str]
+    | tuple[str, tuple[int, ...], str, str, Callable[[dict], bool]]
+] = [
     (
         "GHSA-g8p2-7wf7-98mq",
         (2026, 1, 28),
@@ -1016,6 +1024,24 @@ def check_bootstrap_injection(ctx: Context) -> Finding:
         )
     ev = []
     for fname, text in ctx.bootstrap.items():
+        # C-515/B-766: a bidi OVERRIDE (U+202D/U+202E, Trojan-Source-style) conceals
+        # text order from every pattern the loop below can run — that is exactly what
+        # the attack defeats, so it is checked on the RAW text, unconditionally on
+        # whether any INJECTION_PATTERNS match the (still-reversed) normalized text.
+        # Mirrors B58's identical B-766 wiring in checks/_content.py exactly, MINUS
+        # that check's `_whole_text_is_defensive` dampening — B6 has no such concept
+        # for its existing INJECTION_PATTERNS signal either (a plain, undampened FAIL
+        # on any match, by design), so adding dampening only for this new signal would
+        # make B6 MORE lenient here than it already is everywhere else. Do not widen
+        # `has_naked_bidi_override` to the embedding/isolate/mark class — see its own
+        # docstring in textnorm.py for why that would re-punish genuine Hebrew/Arabic
+        # bootstrap prose.
+        if has_naked_bidi_override(text):
+            ev.append(
+                f"{fname}: bidi override (Trojan-Source-style) conceals text order "
+                "from byte-level pattern matching — cannot be verified safe"
+            )
+            continue
         norm = normalize_for_scan(text)
         for pat in INJECTION_PATTERNS:
             if pat.search(norm):
@@ -1030,6 +1056,33 @@ def check_bootstrap_injection(ctx: Context) -> Finding:
             "from SOUL.md/AGENTS.md/TOOLS.md. Add an explicit rule: treat content from "
             "channels/web/email as untrusted data, never as instructions.",
             ev,
+        )
+    # B-657: a claim of "no directive found" is a claim about a COMPLETED read of every
+    # bootstrap file. `ctx.bootstrap` can be non-empty (so the UNKNOWN branch above
+    # never fires) while still missing content -- a workspace dir this process could not
+    # even stat, a specific file it could not open, or a file that exceeded the
+    # collector's byte cap (the bootstrap-scanning loop inline in collector.collect(),
+    # LIMIT_DOMAIN_BOOTSTRAP) all leave SOME bootstrap text scanned and SOME silently
+    # absent. A FAIL above is a positive observation about text that really was read and
+    # really does carry a directive -- it stands regardless (same ordering B168 already
+    # established for the identical shape). Only the verdict-by-ABSENCE is unsound, so
+    # only PASS degrades.
+    if limit_hits_for(ctx, LIMIT_DOMAIN_BOOTSTRAP):
+        return _finding(
+            "B6",
+            UNKNOWN,
+            "No injection-prone directive found in the bootstrap text that WAS read, "
+            "but at least one bootstrap file or workspace directory could not be fully "
+            "read (unreadable, or exceeded the size cap) — a clean bill of health "
+            "cannot be given over content that was never scanned.",
+            "Ensure every SOUL.md/AGENTS.md/TOOLS.md and its containing workspace "
+            "directory is owner-readable and under the collector's size cap, then "
+            "re-run the audit.",
+            # C-135: present-but-unread content (a real file the collector's own cap
+            # cut short), not genuinely absent -- catalog.py's Finding.engine_degraded
+            # doc names this exact contrast and this exact consequence (the
+            # DEGRADED_CHECK_CAP "cannot rule out a CRITICAL" treatment).
+            engine_degraded=True,
         )
     return _finding(
         "B6",
@@ -1185,7 +1238,12 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
         # Classify by filename: a known identity file gets the critical (FAIL-on-world)
         # rule; anything else is treated as soft (memory) -> WARN only.
         soft = p.name not in _CRITICAL_BOOTSTRAP
-        if _classify_file(p, f"{p} [attested]", soft=soft):
+        # B-652 (FU-3): labelled by BASENAME, not the absolute path the attestation
+        # supplied -- this string is rendered Finding evidence (world_write/
+        # group_write via _classify_file), and an absolute path carries the user's
+        # login name (§8). Mirrors B22's identical fix for the same attested-path
+        # label, a few hundred lines up in this same file.
+        if _classify_file(p, f"{p.name} [attested]", soft=soft):
             found_any = True
 
     if not found_any:
@@ -1274,6 +1332,19 @@ def check_cron_scheduler(ctx: Context) -> Finding:
     unreadable = _config_unreadable("C048", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "openclaw.json present but unparseable" —
+    # on a host with NO openclaw.json at all, config_parse_error is False and
+    # ctx.config is `{}`, so `dig(ctx.config, "cron")` would silently resolve to None
+    # and fall through to the PASS below about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "C048",
+            UNKNOWN,
+            "No config was read, so whether a top-level `cron` scheduler is configured "
+            "could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cron = dig(ctx.config, "cron")
     if cron:
         return _finding(
@@ -1308,6 +1379,13 @@ def check_cron_scheduler(ctx: Context) -> Finding:
 def check_cron_job_content(ctx: Context) -> Finding:
     """B168 (B-231 sub-item 1) — cron JOB STORE content scan.
 
+    C-476: also scans a `command`-kind payload's `argv` vector (joined space-separated,
+    the way a shell would see the words) and a `script`-kind payload's `script` body —
+    the collector already read these (`_cron_payload_extras`) but this check never
+    looked at their content, only at whether the job WAS a command/script (the
+    `is_exec` self-erasure heuristic below). Same detectors, same evidence shape as
+    payload.message/trigger.script.
+
     C048 (above) only sees the top-level `cron` config *key*; the actual scheduled job
     payloads live in a separate store the collector now reads read-only (B-231):
     ~/.openclaw/cron/jobs.json, or the SQLite-backed cron_jobs table when the JSON file
@@ -1335,13 +1413,31 @@ def check_cron_job_content(ctx: Context) -> Finding:
               trail shows jobs did run — the definitions that ran are gone, so there is
               nothing left to scan and a PASS would be a lie; or (W-DB2 round-3) the
               definitions came from a legacy jobs.json that the live SQLite cron_jobs table
-              SHADOWS, so the scanned set is provably not the set that executes. All three
-              suppress only a clean verdict — a FAIL/WARN found in what WAS read still
-              stands, so none of them can hide a payload the scan actually caught.
-    PASS    — a cron store was read and no job triggers any signal. B-294: when the store
-              was read but held zero jobs and there is no execution trail either, the PASS
-              carries pass_confidence="no_signal" rather than "verified" — nothing was
-              actually inspected, so the clean verdict is by absence, not by evidence.
+              SHADOWS, so the scanned set is provably not the set that executes; or the
+              job-definition read hit the collector's row cap (``ctx.cron_jobs_truncated``)
+              — unlike B189's identical-looking flag, this has no subset argument to lean
+              on: an unread job past the cap can only ADD a directive this scan would have
+              caught, never remove one, so a clean verdict over a truncated read is unsound
+              regardless of whether anything suspicious turned up among the jobs that WERE
+              read. All causes above suppress only a clean verdict — a FAIL/WARN found in
+              what WAS read still stands, so none of them can hide a payload the scan
+              actually caught.
+    PASS    — a cron store was read and no job triggers any signal, with the row cap not
+              hit and no legacy-store shadowing. B-294: when the store was read but held
+              zero jobs and there is no execution trail either, the PASS carries
+              pass_confidence="no_signal" rather than "verified" — nothing was actually
+              inspected, so the clean verdict is by absence, not by evidence. (This PASS
+              does not cover a separate, narrower gap: a per-job ``job_json`` blob in the
+              modern SQLite schema that fails to parse enters ``ctx.cron_jobs`` with empty
+              content and is counted as "scanned" without content-scanning it — that hole
+              predates this gate and is not something ``ctx.cron_jobs_truncated`` catches.)
+
+    C-135 follow-up (B-657 review; row-cap gate added in a later pass):
+    ``Finding.engine_degraded`` is True for "found but could not be parsed/read", the
+    SHADOWED-store case, and the row-cap-truncation case — all three are a real, present
+    store this process deliberately or accidentally never fully read. It stays False for
+    "no cron store found at all" and the "read and EMPTY" case: both are read to
+    completion with genuinely nothing there, not present-but-unread.
     """
     if not ctx.cron_found:
         return _finding(
@@ -1359,6 +1455,10 @@ def check_cron_job_content(ctx: Context) -> Finding:
             "A cron job store was found but could not be parsed/read — cannot determine.",
             "Fix the cron store (jobs.json or the state SQLite database) so it is valid "
             "and owner-readable, then re-run the audit.",
+            # C-135 follow-up (B-657 review): present-but-unread (a real
+            # store this process could not parse), not genuinely absent — same
+            # Finding.engine_degraded contract as B6/B172's identical shape.
+            engine_degraded=True,
         )
     # B-294 (DISK-3): the store was read successfully but holds ZERO job definitions, while
     # the run-log table shows jobs DID execute. Every definition that ran is gone -- which is
@@ -1370,6 +1470,12 @@ def check_cron_job_content(ctx: Context) -> Finding:
     # execution history the audit had never opened. B189 carries the advisory detail and the
     # session pivot; B168 just stops claiming a verified clean bill of health.
     if ctx.cron_store_empty and ctx.cron_run_logs:
+        # C-135 follow-up: engine_degraded stays at its False default here. The store was
+        # read to completion and genuinely holds zero definitions -- no cap, parse error,
+        # or unreadable input cut this read short. The erased jobs are GENUINELY ABSENT
+        # (deleted by the runtime itself, the product default for one-shot jobs), not
+        # present-but-unread -- the exact contrast catalog.py's Finding.engine_degraded
+        # docstring draws, on the "no openclaw.json at all" side of it.
         return _finding(
             "B168",
             UNKNOWN,
@@ -1438,12 +1544,60 @@ def check_cron_job_content(ctx: Context) -> Finding:
     for job in ctx.cron_jobs:
         job_label = f"cron job '{job.get('id') or job.get('name') or '?'}'"
         _scan_field(f"{job_label}.payload.message", job.get("payload_message"))
+        # B-819: a dormant/legacy-shaped payload in the JSON-file cron store -- wrong-
+        # case kind, a systemEvent's content parked in `.message` instead of `.text`,
+        # or a missing `payload.kind`/`payload` object entirely. Nothing today reads
+        # this file to execute jobs, but a future `openclaw doctor` run silently
+        # reactivates it with content intact (collector._dormant_cron_payload_text).
+        # The label discloses that explicitly, same disclosure idiom as B-555's
+        # advice-text carve-out -- this is a positive observation about a file that
+        # really is on disk (B189/shadow-store precedent), not a live-execution claim.
+        _scan_field(
+            f"{job_label}.payload (dormant legacy shape — would be reactivated by "
+            "`openclaw doctor`)",
+            job.get("payload_message_dormant"),
+        )
         _scan_field(f"{job_label}.trigger.script", job.get("trigger_script"))
+        # C-476: a `command`-kind payload's argv vector and a `script`-kind payload's
+        # body were collected (collector._cron_payload_extras) but never content-scanned
+        # -- `is_exec` below already treated `payload_kind == "command"` as an execution
+        # surface for the self-erasing-job heuristic, but the actual argv/script TEXT
+        # itself was invisible to every detector this function already runs against
+        # payload.message/trigger.script. argv is a list, joined the same way a shell
+        # would see the words (space-separated) so the content-ring regexes (a
+        # curl|bash pipe-to-shell pattern, a base64 instruction-override) can match
+        # across argv element boundaries the way they already match across a sentence.
+        argv = job.get("payload_argv")
+        if isinstance(argv, list):
+            _scan_field(f"{job_label}.payload.argv", " ".join(str(a) for a in argv))
+        _scan_field(f"{job_label}.payload.script", job.get("payload_script"))
+        # C-135 (adversarial pass): argv alone can look innocuous (["bash"],
+        # ["python3", "-"]) while the actual payload rides in `input` — the spawned
+        # process's stdin. Same content-injection risk as argv/script; scanned the
+        # same way.
+        _scan_field(f"{job_label}.payload.input", job.get("payload_input"))
+        # C-135 (independent, post-commit): `payload_cwd`/`payload_env` are collected
+        # by collector._cron_payload_extras (same call as argv/script/input above) but
+        # deliberately NOT content-scanned here yet, unlike toolsAllow/agentTurn's
+        # allowUnsafeExternalContent/externalContentSource, whose deferral this task
+        # already states explicitly. Making that the same here: a poisoned env value
+        # (an injected LD_PRELOAD path, an attacker-controlled interpreter flag riding
+        # in an env var a spawned process trusts) is a real, distinct execution-time
+        # risk from argv/script/input content, but widening this FAIL-capable check's
+        # scan surface needs its own C-135 pass and fixtures, not a same-commit
+        # add-on — tracked separately (internal task tracker) rather than left
+        # silently unscanned.
 
-        is_exec = bool(job.get("trigger_script")) or job.get("payload_kind") == "command"
+        # C-476: `script`-kind is an execution surface exactly like `command`-kind (an
+        # arbitrary script body vs. an argv vector) and was missing from this flag —
+        # widened alongside the new content-scanning above, not left half-covered.
+        is_exec = (
+            bool(job.get("trigger_script"))
+            or job.get("payload_kind") in ("command", "script")
+        )
         if job.get("delete_after_run") and is_exec:
             warn_ev.append(
-                f"{job_label}: deleteAfterRun + exec trigger/command payload "
+                f"{job_label}: deleteAfterRun + exec trigger/command/script payload "
                 "(self-erasing job)"
             )
 
@@ -1509,6 +1663,36 @@ def check_cron_job_content(ctx: Context) -> Finding:
             "If ~/.openclaw/cron/jobs.json is a leftover from an older OpenClaw that no "
             "longer reads it, move it aside so the audit scans the live SQLite cron_jobs "
             "table instead, then re-run the audit.",
+            # C-135 follow-up: the live SQLite rows are present, readable, real job
+            # definitions this check deliberately never opened because the (stale)
+            # JSON store took priority -- present-but-unread, not absent, same
+            # Finding.engine_degraded contract as a byte-cap truncation.
+            engine_degraded=True,
+        )
+    # Row-cap truncation gate. Deliberately AFTER the FAIL/WARN returns above (same
+    # ordering discipline as cron_store_shadowed immediately above it) and deliberately
+    # UNCONDITIONAL, unlike B189's identical-looking ctx.cron_jobs_truncated branch: B189
+    # can stay a sound PASS under truncation because "no orphan" is a claim about a
+    # SUBSET relationship (more definitions read can only shrink the orphan set, never
+    # grow it), but this check's PASS is "no directive found ANYWHERE in the store", and
+    # an unread job past the cap can only ADD to fail_ev/warn_ev, never remove from it --
+    # so there is no subset argument here to make a truncated PASS sound. Same "lying
+    # PASS over unread content" shape f748869 closed for B6/B172.
+    if ctx.cron_jobs_truncated:
+        return _finding(
+            "B168",
+            UNKNOWN,
+            f"Scanned {len(ctx.cron_jobs)} cron job(s) and found no embedded "
+            "instruction-override or install directive — but the job-definition read hit "
+            "its row cap, so definitions past the cap were never seen. A clean bill of "
+            "health cannot be given over job payloads that were never scanned.",
+            "Reduce the number of scheduled jobs so the whole store can be read, or "
+            "review the unscanned jobs directly.",
+            # C-135 follow-up: the job definitions past the row cap are present in the
+            # store, just never read -- present-but-unread, same Finding.engine_degraded
+            # contract as this check's cron_store_shadowed branch and B189's identical
+            # truncation shape.
+            engine_degraded=True,
         )
     return _finding(
         "B168",
@@ -1574,10 +1758,20 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
               Also emitted when the definition read was truncated but still covered every
               job id that appears in the run log (see the subset argument above).
     UNKNOWN — no state DB / no cron_run_logs table / table present but empty (pruning can
-              empty it, so "no rows" is not evidence nothing ran); the job definitions could
-              not be read at all; a legacy JSON store shadows the live SQLite table; or the
-              definition read was truncated AND an apparent orphan turned up — each of which
-              makes orphan-ness uncomputable.
+              empty it, so "no rows" is not evidence nothing ran); no job store found at
+              all; the job store was found but could not be parsed/read; a legacy JSON
+              store shadows the live SQLite table; or the definition read was truncated
+              AND an apparent orphan turned up — each of which makes orphan-ness
+              uncomputable.
+
+    C-135 follow-up (B-657 review): ``Finding.engine_degraded`` is set True
+    only on the UNKNOWN branches whose cause is a real, present store this process could
+    not fully read (a parse/read error, a legacy-store shadow, or a row-cap truncation —
+    the run-log table's own PARSE error, the job store's own PARSE error, shadowing, and
+    truncation). It stays False on the "genuinely nothing here" branches — no state DB,
+    no run-log table, an empty (successfully read) run-log table, or no job store found
+    at all — matching ``not ctx.cron_found or ctx.cron_parse_error``'s two former causes
+    now split into separate branches below, since only the latter is present-but-unread.
     """
     if not ctx.cron_run_logs_found:
         return _finding(
@@ -1597,28 +1791,63 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
             "The cron run-log table was found but could not be read — cannot determine.",
             "Ensure ~/.openclaw/state/openclaw.sqlite is owner-readable and not locked by a "
             "running agent, then re-run the audit.",
+            # C-135 follow-up: present-but-unread (a real table this process could not
+            # read), not genuinely absent -- same Finding.engine_degraded contract as
+            # B168's identical cron_parse_error branch.
+            engine_degraded=True,
         )
+    # C-488: from here on ctx.cron_run_logs_found is True and cron_run_logs_parse_error is
+    # False, so the collector DID resolve a shape -- ctx.cron_run_logs_table is guaranteed
+    # set to "cron_run_logs" or "task_runs". Name that ONE table instead of the generic
+    # "cron run-log table" every branch below used to say, which is exactly the wording
+    # gap this task exists to close (at most one table is ever the relevant fact once we
+    # get this far -- the "genuinely neither exists" case already returned above).
+    table_label = ctx.cron_run_logs_table or "cron run-log"
     if not ctx.cron_run_logs:
+        # engine_degraded stays False: the table was read to completion and genuinely
+        # holds zero rows -- pruning is normal product behaviour, not an unread cap or
+        # a read error. Same "read fully, genuinely empty" reasoning as B168's
+        # cron_store_empty branch.
         return _finding(
             "B189",
             UNKNOWN,
-            "The cron run-log table is present but empty — no execution history to examine. "
-            "OpenClaw prunes this table on its own, so an empty table is not evidence that "
-            "nothing ever ran.",
+            f"The `{table_label}` table is present but empty — no execution history to "
+            "examine. OpenClaw prunes this table on its own, so an empty table is not "
+            "evidence that nothing ever ran.",
             "No action needed. Re-run the audit after scheduled jobs have executed if you "
             "want the execution trail reviewed.",
         )
-    if not ctx.cron_found or ctx.cron_parse_error:
+    if not ctx.cron_found:
+        # Run history exists but NO job store (JSON or SQLite) was ever found -- genuinely
+        # absent, not present-but-unread, so engine_degraded stays False. (cron_parse_error
+        # always implies cron_found=True in every collector._collect_cron code path, so
+        # this branch and the next are mutually exclusive, not a fallthrough.)
+        return _finding(
+            "B189",
+            UNKNOWN,
+            f"The `{table_label}` table records {len(ctx.cron_run_logs)} past execution(s), but "
+            "no cron job store (~/.openclaw/cron/jobs.json or the state SQLite cron_jobs "
+            "table) was found at all — without any surviving definitions there is no way to "
+            "tell which runs belong to jobs that no longer exist.",
+            "If cron jobs are configured, ensure the job store is present and owner-readable "
+            "so a future audit can inspect it, then re-run the audit.",
+        )
+    if ctx.cron_parse_error:
         # Run history exists but the DEFINITION set is unknown, so every row would look
         # "orphaned" for a reason that has nothing to do with erasure. Refuse to guess.
         return _finding(
             "B189",
             UNKNOWN,
-            f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s), but "
-            "the cron job store could not be read — without the surviving definitions there "
-            "is no way to tell which runs belong to jobs that no longer exist.",
+            f"The `{table_label}` table records {len(ctx.cron_run_logs)} past execution(s), but "
+            "the cron job store was found and could not be parsed/read — without the "
+            "surviving definitions there is no way to tell which runs belong to jobs that no "
+            "longer exist.",
             "Fix the cron job store (~/.openclaw/cron/jobs.json or the state SQLite "
             "cron_jobs table) so it is valid and owner-readable, then re-run the audit.",
+            # C-135 follow-up: present-but-unread (a real store this process could not
+            # parse), not genuinely absent -- same Finding.engine_degraded contract as
+            # B168's identical cron_parse_error branch.
+            engine_degraded=True,
         )
     if ctx.cron_store_shadowed:
         # A legacy jobs.json shadowing the live SQLite table is not a SUBSET of the truth —
@@ -1629,7 +1858,7 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         return _finding(
             "B189",
             UNKNOWN,
-            f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s), but "
+            f"The `{table_label}` table records {len(ctx.cron_run_logs)} past execution(s), but "
             "the job definitions were read from a legacy ~/.openclaw/cron/jobs.json while "
             "the state SQLite cron_jobs table also holds rows — so the definitions read are "
             "not the ones the runtime actually uses. Comparing the execution trail against "
@@ -1638,6 +1867,11 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
             "If ~/.openclaw/cron/jobs.json is a leftover from an older OpenClaw that no "
             "longer reads it, move it aside so the audit reads the live SQLite cron_jobs "
             "table instead, then re-run the audit.",
+            # C-135 follow-up: the live SQLite rows are present, readable, real job
+            # definitions this check never opened because the stale JSON store took
+            # priority -- present-but-unread, same Finding.engine_degraded contract as
+            # B168's identical cron_store_shadowed branch.
+            engine_degraded=True,
         )
 
     live = {j.get("id") for j in ctx.cron_jobs if j.get("id")}
@@ -1665,13 +1899,17 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         return _finding(
             "B189",
             UNKNOWN,
-            f"The cron run-log table records {len(ctx.cron_run_logs)} past execution(s) that "
+            f"The `{table_label}` table records {len(ctx.cron_run_logs)} past execution(s) that "
             "include job id(s) with no definition in what was read — but the job-definition "
             "read hit its row cap, so definitions past the cap were never seen. Those job "
             "id(s) may simply be among the ones not read, so this check declines to report "
             "them as erased.",
             "Reduce the number of scheduled jobs so the whole store can be read, or review "
             "the execution trail directly with `--analyze-trajectory`.",
+            # C-135 follow-up: the job definitions past the row cap are present in the
+            # store, just never read -- present-but-unread, same Finding.engine_degraded
+            # contract as B168's byte-cap truncation shape.
+            engine_degraded=True,
         )
 
     orphan_ids = sorted({r["job_id"] for r in orphan_runs})
@@ -1687,7 +1925,27 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         }
     except (OSError, ValueError):
         on_disk = set()
+    # B-813: on a SQLite-era install (~9.x+) find_trajectory_files() always returns [] --
+    # the runtime's own trajectory recorder now defaults to trajectory_runtime_events in
+    # each agent's openclaw-agent.sqlite, and the classic JSONL glob it feeds `on_disk` is
+    # silently empty. Without a second lookup here, every such session fell into the
+    # "no transcript on disk" bucket below -- which is FALSE: there is real evidence, just
+    # not in the container that bucket's wording describes. `sqlite_session_ids` only ever
+    # proves a session id EXISTS in that store (never opens `event_json` -- see
+    # trajectorystore.py's module docstring, §8), so a third bucket is added rather than
+    # folding this into either existing one.
+    sqlite_sessions = (
+        _trajectorystore.sqlite_session_ids(ctx.home)
+        if isinstance(ctx.home, Path)
+        else frozenset()
+    )
     readable = [s for s in sessions if s in on_disk]
+    # JSONL takes priority when a session id happens to show up in both containers (the
+    # vendor's own migration doctor can leave a live sidecar behind alongside imported
+    # SQLite rows) -- it is the one `--analyze-trajectory` can actually read today, so a
+    # session already counted as "still on disk" is never also counted as sqlite-only.
+    sqlite_only = [s for s in sessions if s not in on_disk and s in sqlite_sessions]
+    unreadable = [s for s in sessions if s not in on_disk and s not in sqlite_sessions]
 
     ev = [
         f"cron job '{jid}': {sum(1 for r in orphan_runs if r['job_id'] == jid)} run(s) "
@@ -1698,13 +1956,39 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         ev.append(f"(+{len(orphan_ids) - 10} more erased job id(s))")
     for s in readable[:10]:
         ev.append(f"pivot: session transcript '{s}' is still on disk — review it directly")
-    for s in [s for s in sessions if s not in on_disk][:10]:
+    for s in sqlite_only[:10]:
+        ev.append(
+            f"pivot: session '{s}' has trajectory evidence in the SQLite store "
+            "(agents/*/agent/openclaw-agent.sqlite), not the classic JSONL sidecar — direct "
+            "review tooling for this container is not yet available"
+        )
+    for s in unreadable[:10]:
         ev.append(f"pivot: session '{s}' referenced by an erased job's run log (no transcript on disk)")
 
-    pivot_note = (
-        f" {len(readable)} of these session(s) still have a transcript on disk."
-        if readable else ""
-    )
+    # B-813/B-555: `pivot_note` folds session counts into `detail`, which baseline.fingerprint()
+    # hashes -- that coupling already existed for the JSONL `readable` count before this change,
+    # so extending it to the new, honestly-distinct SQLite count does not newly orphan any
+    # `.clawseccheckignore` entry; it keeps the same field carrying the same KIND of fact
+    # (a count derived from the machine's own disk state, already true of `readable`) rather
+    # than moving anything new into a hashed field. The wording keeps the two counts textually
+    # separate so "on disk" (JSONL) is never conflated with "in the SQLite store".
+    if readable and sqlite_only:
+        pivot_note = (
+            f" {len(readable)} of these session(s) still have a transcript on disk, and "
+            f"{len(sqlite_only)} more have evidence in the SQLite trajectory store (not a "
+            "JSONL transcript)."
+        )
+    elif readable:
+        pivot_note = (
+            f" {len(readable)} of these session(s) still have a transcript on disk."
+        )
+    elif sqlite_only:
+        pivot_note = (
+            f" {len(sqlite_only)} of these session(s) have evidence in the SQLite "
+            "trajectory store (not a JSONL transcript)."
+        )
+    else:
+        pivot_note = ""
     return _finding(
         "B189",
         WARN,
@@ -1749,7 +2033,37 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
     PASS    — the store was read and no agent has an "allow-always" entry (the common
               case -- e.g. freshly-provisioned defaults/agents are both empty `{}`).
     UNKNOWN — exec-approvals.json is absent (or a symlink, never followed), or was
-              found but could not be parsed/read.
+              found but could not be parsed/read; OR (B-657) the store parsed fine but
+              exceeded the collector's byte cap or its agent-count cap
+              (``_MAX_EXEC_APPROVALS_AGENTS``) -- some agents/content were never
+              scanned, so "no agent has a grant" cannot be said of the whole store. A
+              WARN found among the agents that WERE scanned still stands (checked
+              first, same ordering as B6/B168).
+
+    C-430: an "allow-always" entry with no `argPattern` is not the same standing grant
+    as one that carries one. Grounded against the installed dist: on every non-Windows
+    platform, OpenClaw's own argPattern builders return `undefined` BY DESIGN, so a
+    POSIX "always allow" click persists a path-only entry -- and the runtime's own
+    matcher (exec-command-resolution*.js) treats a missing `argPattern` as a wildcard
+    over argv. One click on a POSIX host therefore grants the binary with ANY
+    arguments, durably -- for an argument-weaponizable binary (`git`, `tar`, `ssh`,
+    `find`, `awk`, ...) that is a standing arbitrary-execution grant, not merely "this
+    binary is trusted". `collector._collect_exec_approvals` now splits each agent's
+    tally into `binary_wide_count` (no `argPattern`) and `arg_restricted_count` (a real
+    `argPattern`) so this check's evidence can say which kind a reader is looking at,
+    instead of a bare number that reads the same either way. This is a pure disclosure
+    change on already-collected data: still WARN-only, `scored=False`, no FAIL and no
+    new tuning surface -- the OpenClaw-side defect itself (the matcher's own
+    interpretation of a missing argPattern) is out of scope for this project.
+
+    Disclosed limitation (found on the adversarial pass): "argument-restricted" means
+    only that SOME `argPattern` string is present -- this check does not, and per its
+    own scope is not meant to, evaluate whether that pattern is actually narrow (an
+    OpenClaw-persisted `argPattern` of e.g. `.*` would match any argv and count as
+    "restricted" here while granting exactly as much as a path-only entry). Evaluating a
+    persisted regex's own permissiveness is a materially different, much larger check
+    than "does this entry structurally carry the field the runtime keys on" -- the
+    question this one answers, matching the task's own two-shape framing.
     """
     if not ctx.exec_approvals_found:
         return _finding(
@@ -1773,6 +2087,28 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
 
     grants = [g for g in ctx.exec_approvals_grants if g.get("allow_always_count")]
     if not grants:
+        # B-657: "no agent has a standing grant" is a claim about every agent the store
+        # holds. exec_approvals_parse_error only catches a store that failed to parse at
+        # all -- it does not catch a store that parsed FINE but exceeded the
+        # collector's byte cap or agent-count cap (collector._collect_exec_approvals,
+        # LIMIT_DOMAIN_APPROVALS), where the agents/content past the cap were never
+        # scanned. Same ordering as B6/B168: a WARN above (a grant found in what WAS
+        # scanned) stands regardless; only this verdict-by-absence degrades.
+        if limit_hits_for(ctx, LIMIT_DOMAIN_APPROVALS):
+            return _finding(
+                "B172",
+                UNKNOWN,
+                "No standing 'allow-always' exec grant found among the agents that WERE "
+                "scanned, but exec-approvals.json exceeded a collector size/count cap — "
+                "some agents or content were never read, so a clean bill of health "
+                "cannot be given.",
+                "Keep exec-approvals.json under the collector's size cap, or prune "
+                "stale agent entries, then re-run the audit.",
+                # C-135: present-but-unread agents (a real store the collector's own
+                # cap cut short), not a genuinely empty/absent store -- same
+                # Finding.engine_degraded contract as B6's identical branch above.
+                engine_degraded=True,
+            )
         return _finding(
             "B172",
             PASS,
@@ -1784,12 +2120,27 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
             pass_confidence="verified",
         )
 
-    evidence = [
-        f"agent '{g['agent_id']}': {g['allow_always_count']} allow-always pattern(s)"
-        + (f", security={g['security']}" if g.get("security") else "")
-        + (f", ask={g['ask']}" if g.get("ask") else "")
-        for g in grants
-    ]
+    evidence = []
+    for g in grants:
+        line = f"agent '{g['agent_id']}': {g['allow_always_count']} allow-always pattern(s)"
+        # C-430: name which SHAPE each grant is, not just how many. `.get(..., 0)`
+        # defensively -- these two keys exist on every grant `collector.py` builds, but
+        # a hand-built ctx in a test must not KeyError rather than degrade to "unknown
+        # shape" (which then simply adds no parenthetical, same as before this change).
+        binary_wide = g.get("binary_wide_count", 0)
+        arg_restricted = g.get("arg_restricted_count", 0)
+        shapes = []
+        if binary_wide:
+            shapes.append(f"{binary_wide} binary-wide: any arguments")
+        if arg_restricted:
+            shapes.append(f"{arg_restricted} argument-restricted")
+        if shapes:
+            line += " (" + "; ".join(shapes) + ")"
+        if g.get("security"):
+            line += f", security={g['security']}"
+        if g.get("ask"):
+            line += f", ask={g['ask']}"
+        evidence.append(line)
     ev_summary = "; ".join(evidence[:4])
     extra = f" (+{len(evidence) - 4} more)" if len(evidence) > 4 else ""
     return _finding(
@@ -1821,6 +2172,19 @@ def check_hook_policy_bypass(ctx: Context) -> Finding:
     unreadable = _config_unreadable("C6", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so every dig() below would silently degrade to None/absent and fall
+    # through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "C6",
+            UNKNOWN,
+            "No config was read, so whether a pre-v2026.6.10 hook-composition "
+            "tool-policy-drop exposure applies could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     raw = dig(cfg, "meta.lastTouchedVersion") or dig(cfg, "lastTouchedVersion")
     parsed = _parse_version(str(raw)) if raw else None
@@ -1853,7 +2217,9 @@ def check_human_approval(ctx: Context) -> Finding:
     destructive = _hint(tools, OUTBOUND_TOOL_HINTS)
     if not destructive:
         return _finding("B8", UNKNOWN, "No destructive/outbound tools detected.", "—")
-    if not _has_approval_gate(cfg):
+    # B-644: pass `tools` so an exec-scoped gate is never read as covering a non-exec
+    # write tool (fs_write/write/edit/elevated) — see `_has_approval_gate`'s docstring.
+    if not _has_approval_gate(cfg, tools):
         return _finding(
             "B8",
             WARN,
@@ -2621,7 +2987,10 @@ _B33_EVIDENCE_CAP = 20
 def check_known_vulns(ctx: Context) -> Finding:
     """B33 — Known-vulnerable OpenClaw version gate.
 
-    FAIL    — installed version <= one or more known advisories' max_vulnerable_version_tuple.
+    FAIL    — installed version <= one or more known advisories' max_vulnerable_version_tuple,
+              AND — for a config-conditioned row (C-414) — that row's `condition(ctx.config)`
+              also holds. A version-only row (still the vast majority of the table) has no
+              condition to satisfy, matching on version alone exactly as before this task.
               Reports EVERY matching advisory (B-332) — not just the first row in table
               order — and the `fix` targets the HIGHEST fixed_version across all matches,
               since that is the only version that actually clears the finding. Returning on
@@ -2629,7 +2998,11 @@ def check_known_vulns(ctx: Context) -> Finding:
               as remediation: a version still vulnerable to every later advisory in the
               table, turning the fix into a multi-step upgrade treadmill instead of a single
               correct jump.
-    PASS    — installed version is past all known advisory fixes.
+    PASS    — installed version is past all known advisory fixes, OR every version-matched
+              config-conditioned row's condition came back False (this host's config shape
+              cannot reach that particular defect) or raised (C-414: an unproven condition
+              never manufactures a FAIL — Golden Rule #5 — so it is treated the same as
+              "condition did not hold", not surfaced as its own UNKNOWN).
     UNKNOWN — meta.lastTouchedVersion is missing or cannot be parsed.
     """
     raw_ver = dig(ctx.config, "meta.lastTouchedVersion") or dig(ctx.config, "lastTouchedVersion")
@@ -2656,7 +3029,23 @@ def check_known_vulns(ctx: Context) -> Finding:
 
     # Collect EVERY matching row (table order is oldest-first, so this is already a
     # deterministic, stable ordering across runs) rather than returning on the first.
-    matched = [row for row in _KNOWN_ADVISORIES if parsed <= row[1]]
+    #
+    # C-414: version match alone is not enough for a config-conditioned (5-element) row —
+    # its condition(ctx.config) must also hold. `row[4]` is only ever present on a 5-tuple
+    # (a plain 4-tuple version-only row indexes nothing past row[3]), so `len(row) < 5` is
+    # checked first and short-circuits `row[4]` for every existing row untouched by this
+    # task. A condition that raises is caught and treated as "did not hold" — never let a
+    # broken predicate manufacture a FAIL (Golden Rule #5); it degrades to silently not
+    # matching this one row, not to a crash or a finding of its own.
+    def _condition_holds(row: tuple) -> bool:
+        if len(row) < 5:
+            return True
+        try:
+            return bool(row[4](ctx.config))
+        except Exception:
+            return False
+
+    matched = [row for row in _KNOWN_ADVISORIES if parsed <= row[1] and _condition_holds(row)]
     if not matched:
         return _finding(
             "B33",
@@ -2665,11 +3054,11 @@ def check_known_vulns(ctx: Context) -> Finding:
             "Keep OpenClaw updated and re-check after new advisories are published.",
         )
 
-    matched_ids = [ghsa_id for ghsa_id, _max_vuln, _fixed_ver, _desc in matched]
+    matched_ids = [row[0] for row in matched]
     # The only version that actually clears the finding is the HIGHEST fixed_version
     # across every matched advisory — a lower fixed_version leaves later advisories open.
     highest_fixed_ver = max(
-        (fixed_ver for _ghsa_id, _max_vuln, fixed_ver, _desc in matched),
+        (row[2] for row in matched),
         key=lambda v: _parse_version(v) or (),
     )
 
@@ -3054,6 +3443,23 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             "missing command path there before removing it.",
             warns,
         )
+    # B-661: unlike the duplicate-skill scan above (which walks disk load roots
+    # directly), the "no dead MCP command paths" half is read ENTIRELY from
+    # `ctx.config` (`_mcp_servers(ctx.config or {})`), and `skill_load_roots` also
+    # takes `ctx.config` to find any CUSTOM grouped skill roots beyond the standard
+    # ones. On a host where openclaw.json was never found, both legs silently see
+    # "nothing configured" rather than "not checked" — the same fail-open shape as
+    # every other check in this audit, just partial rather than total. A clean
+    # PASS here is honest only when the config locus was actually read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _custom(
+            "B104", LOW, UNKNOWN,
+            "No duplicate skill installs found in the standard load roots, but no config "
+            "was read — any custom skill load roots and any configured MCP server dead "
+            "command paths could not be checked.",
+            "Run the audit on the host where ~/.openclaw lives so config-declared skill "
+            "roots and MCP servers can be reconciled too.",
+        )
     return _custom(
         "B104", LOW, PASS,
         "No duplicate skill installs or dead MCP command paths found.",
@@ -3128,6 +3534,14 @@ def check_self_modification(ctx: Context) -> Finding:
         )
 
     # Condition (c): approval gate (real OpenClaw field: tools.exec.mode/security/ask)
+    # B-644 considered, deliberately NOT applied here: unlike B8/B46/B18 (which claim
+    # a gate fully covers the action), this check's own WARN text already discloses
+    # the gate as partial ("risk is reduced but not eliminated") rather than claiming
+    # full coverage -- downgrading FAIL to WARN on ANY real tools.exec.* gate,
+    # regardless of exact tool-family match, is this check's deliberate, heavily
+    # regression-tested calibration (see BLK-01 tests in tests/test_b22.py). Making
+    # this tool-aware would flip WARN->FAIL for `_cfg_with_tools()`'s own
+    # fs_write+shell+exec.mode='ask' shape and contradict that calibration.
     has_approval = _has_approval_gate(cfg)
 
     joined = "; ".join(writable[:6])
@@ -3662,7 +4076,20 @@ def check_skill_symlink_target_writability(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B367", ctx)
     if unreadable is not None:
         return unreadable
-    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one that explicitly leaves allowSymlinkTargets unset and fall through to a
+    # PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B367", UNKNOWN,
+            "No config was read, so whether skills.load.allowSymlinkTargets widens "
+            "symlink resolution for skill code could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    cfg = ctx.config
     targets = dig(cfg, "skills.load.allowSymlinkTargets")
     if targets is None:
         return _finding(
@@ -3771,7 +4198,20 @@ def check_skill_load_hot_reload(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B368", ctx)
     if unreadable is not None:
         return unreadable
-    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so the coercion below would silently treat an UNREAD config the same as
+    # one that explicitly sets watch=false and fall through to a PASS about a config
+    # nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B368", UNKNOWN,
+            "No config was read, so whether skills.load.watch hot-reloads skill "
+            "definitions could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    cfg = ctx.config
     watch = dig(cfg, "skills.load.watch")
     if watch is not None and not isinstance(watch, bool):
         return _finding(
@@ -4083,6 +4523,11 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
               operator.write), especially combined with isRepair=true — this is a
               pending pairing awaiting human approval, not proof of compromise.
     UNKNOWN — devices/pending.json exists but is unreadable or not valid JSON.
+
+    B-661: exempt from the "23 checks PASS on an unread config" audit. This check
+    never reads ``ctx.config`` — the locus is ``devices/pending.json`` under
+    ``ctx.home``, checked by presence/content alone regardless of whether
+    openclaw.json was found or parsed.
     """
     import json as _json
 
@@ -4213,6 +4658,11 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
               authority via a live (non-revoked) token -- an inventory advisory (count +
               age), never proof of compromise.
     UNKNOWN -- devices/paired.json exists but is unreadable or not valid JSON.
+
+    B-661: exempt from the "23 checks PASS on an unread config" audit. This check
+    never reads ``ctx.config`` -- the locus is ``devices/paired.json`` under
+    ``ctx.home``, checked by presence/content alone regardless of whether
+    openclaw.json was found or parsed.
     """
     import json as _json
     import time as _time
@@ -4483,6 +4933,13 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
               (B-258) the only failed verifications are ones whose every recorded
               reason is inconclusive (an unfinished security audit / a missing skill
               card), which is "the registry has not answered yet", not a rejection.
+
+    B-661: the PASS above is NOT a config-derived fact and is exempt from the
+    "23 checks PASS on an unread config" audit. This check never reads
+    ``ctx.config`` at all — the locus is ``.clawhub/lock.json`` on disk under each
+    workspace dir, walked unconditionally regardless of whether openclaw.json was
+    found or parsed. "No lock file" is a real, directly-observed disk fact on any
+    host, config-readable or not.
     """
     import json as _json
 
@@ -5108,7 +5565,12 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
               enterprise mirror is legitimate and disclosed.
     PASS    — every endpoint observed is the public ClawHub.
     UNKNOWN — nothing recorded the endpoint and no override was observable, so the issuer of
-              those verdicts cannot be determined either way (Golden Rule #4).
+              those verdicts cannot be determined either way (Golden Rule #4). Also
+              UNKNOWN, ``engine_degraded=True`` (B-657), when a global dotenv file WAS
+              read but exceeded the collector's byte cap (``ctx.dotenv_truncated``) — a
+              registry/codeload override past the cut would not have been seen, so a PASS
+              built only from lock.json's settled, past-tense provenance would overclaim
+              that the NEXT install/update is safe from repointing too.
 
     Evidence is taken in the order of how well it describes the AUDITED subject:
 
@@ -5195,6 +5657,35 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
             "host served anything malicious, which would need a network lookup this tool "
             "deliberately never makes.",
             evidence=items[:6],
+        )
+
+    if ctx.dotenv_truncated:
+        # B-657 (C-135 round 2, adversarial review): `observed_canonical` mixes lock.json
+        # records (settled, past-tense provenance for ALREADY-installed skills) with
+        # THIS run's env-var check (whether a CURRENT override would repoint the NEXT
+        # install/update). A global dotenv file the collector read but truncated at its
+        # byte cap can hide a non-canonical OPENCLAW_REGISTRY_URL/_CODELOAD_URL past the
+        # cut while lock.json records alone still make `observed_canonical` truthy — so a
+        # PASS below would claim the registry question is settled when the env leg was
+        # never actually resolved, present-but-unread rather than genuinely clean.
+        return _finding(
+            "B184",
+            UNKNOWN,
+            "A persistent endpoint override could not be fully checked: a global dotenv "
+            "file OpenClaw loads at startup was read but exceeded the collector's byte "
+            "cap, so a ClawHub registry or GitHub codeload override past the cut would "
+            "not have been seen. Whether the next skill install/update would be repointed "
+            "away from the public registry cannot be determined"
+            + (
+                f" (recorded provenance for {observed_canonical} existing "
+                "record(s)/setting(s) is still the public registry)"
+                if observed_canonical else ""
+            )
+            + ".",
+            "Keep OpenClaw's global dotenv files (~/.openclaw/.env, "
+            "~/.config/openclaw/gateway.env) under the collector's size cap, then "
+            "re-run the audit.",
+            engine_degraded=True,
         )
 
     if observed_canonical:
@@ -5528,6 +6019,11 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
     WARN    — a legacy file is present.
     PASS    — neither is present.
     UNKNOWN — the credentials/ directory exists but could not be listed.
+
+    B-661: exempt from the "23 checks PASS on an unread config" audit. This check
+    never reads ``ctx.config`` — both loci are filenames under ``ctx.home``
+    (``credentials/*-allowFrom.json``, ``identity/device-auth.json``), checked by
+    presence alone regardless of whether openclaw.json was found or parsed.
     """
     found: list[str] = []
     unreadable: list[str] = []
@@ -5614,6 +6110,11 @@ def check_restart_handoff_stale(ctx: Context) -> Finding:
     PASS    — present and not yet expired (a normal, still-open handoff window), or
               absent entirely.
     UNKNOWN — present but unreadable/unparseable, or missing/malformed expiresAt.
+
+    B-661: exempt from the "23 checks PASS on an unread config" audit. This check
+    never reads ``ctx.config`` — the locus is
+    ``gateway-supervisor-restart-handoff.json`` under ``ctx.home``, checked by
+    presence/content alone regardless of whether openclaw.json was found or parsed.
     """
     import json as _json
     import time as _time
@@ -5954,12 +6455,20 @@ def check_update_pinning(ctx: Context) -> Finding:
 
     A malicious skill UPDATE is a supply-chain risk (runs with agent permissions).
 
-    WARN  — auto-update for skills/plugins is enabled (blind trust in upstream);
+    WARN  — the config REQUESTS auto-update for skills/plugins (update.auto.enabled /
+            update.auto / autoUpdate / auto_update) — worded as configured intent, not
+            effective behaviour (C-376): OpenClaw's own
+            runtime also gates auto-update on OPENCLAW_NO_AUTO_UPDATE in the gateway's
+            own environment, which this config-only, offline audit cannot observe, so a
+            host with that variable set gets this WARN even though auto-update will not
+            actually run there — a disclosed, sound limitation (reading THIS process's
+            own environment instead would answer a different question and was rejected,
+            see the code comment at the call site);
             OR update.channel is "dev"/"beta" (C-413 — the same blind-trust risk
             applied to OpenClaw's own build, not just skills/plugins);
             OR a plugin/skill entry records a floating ref (branch name / 'latest').
     PASS  — at least one entry is present and all have a pinned tag/commit or an
-            integrity hash; no auto-update enabled; update.channel is unset,
+            integrity hash; no auto-update requested; update.channel is unset,
             "stable", or "extended-stable".
     UNKNOWN — no plugin/skill config from which pinning can be determined.
     """
@@ -5980,8 +6489,23 @@ def check_update_pinning(ctx: Context) -> Finding:
     if auto_update is True or (
         isinstance(auto_update, str) and auto_update.lower() in ("true", "yes", "1", "on")
     ):
+        # C-376: worded as configured INTENT, not effective behaviour. Grounded against
+        # the installed dist (update-startup*.js): OpenClaw's own runtime ANDs
+        # `update.auto.enabled` with `!isTruthyEnvValue(process.env.OPENCLAW_NO_AUTO_
+        # UPDATE)` before auto-update actually runs — a variable set in the GATEWAY's
+        # own environment, which this config-only, offline audit has no way to observe
+        # (reading THIS process's os.environ would answer a different, wrong question —
+        # whichever shell happened to run the audit — not the gateway's; C-303 exists to
+        # stop exactly that kind of unsound-but-plausible move). The old wording asserted
+        # "is enabled" (effective behaviour) over a config-only observation; this states
+        # only what was actually read.
         warn_ev.append(
-            "auto-update for skills/plugins is enabled — blind trust in upstream is a supply-chain risk"
+            "the config requests auto-update for skills/plugins (update.auto.enabled / "
+            "update.auto / autoUpdate / auto_update) — blind trust in upstream is a "
+            "supply-chain risk if it actually runs. OpenClaw's own runtime also gates "
+            "this on the OPENCLAW_NO_AUTO_UPDATE environment variable in the gateway's "
+            "own environment, which this config-only audit cannot observe — this "
+            "reports what the config requests, not necessarily what is running."
         )
 
     # ---- signal 1b (C-413): update.channel on a pre-release tier ----

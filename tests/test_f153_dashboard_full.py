@@ -448,6 +448,35 @@ class TestCliDashboardFull:
         assert rc == 0
         assert "Coverage of OpenClaw surfaces" in out
 
+    def test_dashboard_full_coverage_page_reaches_the_card(self, capsys):
+        """F-165: `--dashboard --full` is the ONE path that hand-rolls its own phases
+        instead of calling `pipeline.run_pipeline()` (see the comment above
+        `_dashboard_phases` in cli.py), so it is the specific call site that needed
+        its own `coverage.build_coverage_page()` call — this pins that it actually
+        reaches render_dashboard's inline card, not just the underlying function
+        when called directly with a hand-built page."""
+        rc = main(["--home", VULN, *BASE, "--dashboard", "--full"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Coverage page" in out
+
+    def test_dashboard_full_coverage_page_reaches_html_and_pdf_riders(self, tmp_path, capsys):
+        """Same CLI wiring, the other two renderers the DoD names. `--pdf`/`--html`
+        riding `--dashboard --full` collapses the printed card to an overview (the
+        full tail block, including this one, moves into the PDF — same as every
+        other tail-block section, e.g. RISK chains), so this checks the FILES
+        rather than `out`."""
+        html_path = tmp_path / "r.html"
+        pdf_path = tmp_path / "r.pdf"
+        rc = main(["--home", VULN, *BASE, "--dashboard", "--full",
+                  "--html", str(html_path), "--pdf", str(pdf_path)])
+        assert rc == 0
+        html = html_path.read_text(encoding="utf-8")
+        assert "Coverage page" in html
+        from _pdftext import content_text  # noqa: PLC0415
+        pdf_text = content_text(pdf_path.read_bytes())
+        assert "Coverage page" in pdf_text
+
 
 class TestCapParity:
     def _bundle(self, tmp_path: Path) -> str:
@@ -480,6 +509,41 @@ class TestCapParity:
         assert "No grade yet" in second_line
         assert "1 of 5 layers did not run" in second_line
         assert "agent self-report (not submitted)" in second_line
+
+    def test_dashboard_full_fast_names_the_same_missing_layers_as_full_json_fast(
+            self, capsys):
+        """CLAWSECCHECK-B-768: `--dashboard --full --fast` used to under-report
+        `missing_layers` by one against the IDENTICAL `--full --fast --json` run —
+        `logs_trajectories` silently read as `ran` on the dashboard only, because that
+        branch's inline PHASE_BEHAVIORAL projection (`_dashboard_phases`, cli.py) added
+        NOTHING to the ledger when `--fast` skipped the behavioural replay, while
+        `to_ledger`'s own contract (pipeline.py) is that `logs_trajectories` starts
+        `ran` and only a PHASE_BEHAVIORAL entry PRESENT in the ledger can worsen it — an
+        absent phase is indistinguishable from a clean one. `_build_layer_ledger`
+        (the --full/--json path) already added an explicit skipped entry for exactly
+        this reason; the dashboard branch now does too.
+
+        Proven to fail on the pre-fix code: before this change the JSON list below had
+        4 entries (including logs_trajectories) and the dashboard line said "3 of 5".
+        """
+        main(["--home", SAFE, *BASE, "--full", "--fast", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["graded"] is False
+        json_missing = {d["layer"] for d in payload["missing_layers"]}
+        # Non-vacuity: this fixture/flag combination really does miss 4 layers, so a
+        # regression that silently drops one from EITHER surface has something to drop.
+        assert json_missing == {
+            "installed_sweep", "logs_trajectories", "self_report", "live_behaviour"}
+
+        main(["--home", SAFE, *BASE, "--dashboard", "--full", "--fast"])
+        dash_out = capsys.readouterr().out
+        second_line = dash_out.splitlines()[1]
+        assert "No grade yet" in second_line
+        assert f"{len(json_missing)} of 5 layers did not run" in second_line
+        assert "logs and trajectories" in second_line, second_line
+        assert "installed skills and plugins" in second_line
+        assert "agent self-report" in second_line
+        assert "live behaviour test" in second_line
 
 
 # ─────────────────────────── flag coherence: --compact / --quiet ───────────────────────────

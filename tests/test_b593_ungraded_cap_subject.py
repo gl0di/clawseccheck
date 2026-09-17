@@ -207,12 +207,16 @@ def test_the_three_sites_share_one_constant():
     # paragraph from quietly growing its own copy again; the constant itself stays defined
     # and is still checked by test_the_two_forms_differ_only_in_capitalisation.
     #
-    # The TAIL form serves the three sites in report.py that follow it with an em dash:
-    # render_report's cascade line, render_dashboard's card, and render_html's ungraded cap
-    # paragraph. render_report's arrived last -- B-600 fixed the card and the HTML, and the
-    # 2026-08-21 review found the text report still silently dropping an ordinary severity
-    # cap the other three disclosed. pdf.py:632 is the fourth and final consumer, checked by
-    # tests/test_b600_ungraded_cap_reaches_every_surface.py.
+    # The TAIL form serves FOUR sites in report.py that follow it with an em dash:
+    # render_report's cascade line, render_dashboard's card, render_card's ascii/text
+    # card, and render_html's ungraded cap paragraph -- four genuinely distinct
+    # functions (re-verified against source directly, not assumed: this count was
+    # previously mis-described as three, conflating render_dashboard and render_card
+    # into one site -- both are real, independent consumers and always were).
+    # render_report's arrived last -- B-600 fixed the card and the HTML, and the
+    # 2026-08-21 review found the text report still silently dropping an ordinary
+    # severity cap the other three disclosed. pdf.py:632 is a separate, fifth
+    # consumer, checked by tests/test_b600_ungraded_cap_reaches_every_surface.py.
     # Count real INTERPOLATIONS, not occurrences of the name: the derivation line and the
     # prose comments mention it too, and counting those makes the pin drift for reasons
     # that have nothing to do with a new consumer appearing.
@@ -221,7 +225,7 @@ def test_the_three_sites_share_one_constant():
     _sentence = [ln for ln in _uses if "_UNGRADED_CAP_TAIL_SENTENCE" in ln]
     _tail = [ln for ln in _uses if ln not in _sentence]
     assert len(_sentence) == 0, _sentence      # took off all three paragraphs by B-600
-    assert len(_tail) == 3, _tail              # card, render_html, render_report's generic line
+    assert len(_tail) == 4, _tail              # render_report, render_dashboard, render_card, render_html
 
 
 def test_the_two_forms_differ_only_in_capitalisation():

@@ -26,6 +26,16 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A8: without this the job's default is 360 minutes while it holds CLAWHUB_TOKEN +
+    # contents:write + id-token:write — and the Publish step has already demonstrated a
+    # real ~10.5-minute hang (see that step's own comment, 2026-08-06 incident). 90
+    # minutes covers the normal worst case — smoke-gate test suite, both preflight
+    # curl checks with their retries, the actual publish, "Confirm publication
+    # surfaced"'s own up to 40-minute poll (C-368) plus the pre-existing warn-only
+    # surfaced-check's up to 10-minute poll (both can run back-to-back on a
+    # CLI-reported failure) — with headroom for a slow runner, while still catching a
+    # genuine hang well short of the 360-minute default.
+    timeout-minutes: 90
     # contents:write is needed to create the GitHub Release (the repo default token is
     # read-only). id-token:write is needed for cosign's keyless/OIDC signing below (it
     # exchanges the job's short-lived GitHub Actions OIDC token for a Fulcio cert — no
@@ -66,21 +76,24 @@ jobs:
 
       - name: Resolve & verify version
         id: ver
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
+          set -euo pipefail
           FM="$(grep -m1 '^version:' SKILL.md | awk '{print $2}')"
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            VER="${{ github.event.inputs.version }}"
+          if [ -n "${INPUT_VERSION}" ]; then
+            VER="${INPUT_VERSION}"
           elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             VER="${GITHUB_REF_NAME#v}"
           else
             VER="$FM"
           fi
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "resolved version=$VER  (SKILL.md frontmatter=$FM)"
           if [ "$VER" != "$FM" ]; then
             echo "::error::Version '$VER' does not match SKILL.md frontmatter '$FM' — bump SKILL.md first."
             exit 1
           fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -93,6 +106,7 @@ jobs:
           # compromised or typosquatted pytest/ruff release must not be able to execute
           # here (C-183 — same supply-chain discipline as the pinned clawhub@0.23.3
           # install above). Bump these deliberately, like clawhub@ / markdownlint-cli@.
+          set -euo pipefail
           python -m pip install pytest==7.4.4 ruff==0.15.20
           python -m pytest -q
           ruff check .
@@ -116,6 +130,7 @@ jobs:
         # quietly lying. An unreadable path raises out of package_digest() and fails the
         # job, which is correct: never sign a digest over a tree we could not fully read.
         run: |
+          set -euo pipefail
           python3 - <<'PYEOF'
           from clawseccheck import __version__
           from clawseccheck.integrity import (
@@ -165,7 +180,9 @@ jobs:
         # --new-bundle-format's default to true, which silently ignores the
         # --output-signature/--output-certificate flags (C-189). --bundle is the
         # supported single-file path and round-trips on both cosign v2 and v3.
+        id: sign
         run: |
+          set -euo pipefail
           cosign sign-blob --yes \
             --bundle SHA256SUMS.txt.bundle \
             SHA256SUMS.txt
@@ -200,7 +217,7 @@ jobs:
         env:
           SKIP_CHECK: ${{ inputs.skip_previous_release_check }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           if [ "${SKIP_CHECK:-false}" = "true" ]; then
             echo "::notice::Previous-release check skipped by explicit workflow input."
             exit 0
@@ -212,7 +229,14 @@ jobs:
             exit 0
           fi
           API="https://clawhub.ai/api/v1/skills/clawseccheck/versions/${PREV}"
-          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$API" || echo 000)"
+          # A6: `-w` already prints '000' itself on a transport failure (curl also
+          # exits non-zero in that case), so `|| echo 000` used to run TOO, appending a
+          # second '000' inside the same command substitution and garbling CODE. The
+          # fallback now lives outside the substitution, where it *replaces* CODE
+          # instead of being concatenated onto whatever curl already wrote out.
+          # --retry gives a transient blip (not a real outage) a chance to resolve
+          # before this becomes a hard release-blocking failure.
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-delay 2 "$API")" || CODE="000"
           if [ "$CODE" = "200" ]; then
             echo "Previous release ${PREV} is live on ClawHub."
             exit 0
@@ -298,10 +322,13 @@ jobs:
           echo "Staged size: $(du -sh dist/clawseccheck | cut -f1)"
 
       - name: Guard — fail fast if the staged bundle is unexpectedly large
-        # The `environment: release` approval is a human-spent resource, and every step
-        # after this one consumes it. This guard exists so an obviously-wrong bundle — a
-        # stray binary, a re-added docs/assets tree — is caught before that click rather
-        # than after. `clawhub publish` uploads every staged file as a raw, uncompressed
+        # A10: `environment: release` is ONE job-level approval gate, checked once
+        # before the job's steps even start (including checkout) — it is not a
+        # per-step budget that each later step individually "spends". This guard still
+        # runs as early as possible after staging so an obviously-wrong bundle — a
+        # stray binary, a re-added docs/assets tree — is caught before the rest of the
+        # job's (already-approved) work runs on it, rather than surfacing only at real
+        # upload time. `clawhub publish` uploads every staged file as a raw, uncompressed
         # multipart form part (no tar/gzip on this path — confirmed by reading the
         # installed CLI), so the staged tree size on disk IS the upload size.
         #
@@ -385,6 +412,26 @@ jobs:
           [ "$MISSING" -eq 0 ] || exit 1
           echo "Preflight OK — SKILL.md present and every relative link resolves."
 
+      - name: Preflight — confirm the CURRENT version is not already published
+        # A5: this workflow already curls this same endpoint twice for OTHER versions
+        # (the previous-release check above, and the warn-only post-publish check below)
+        # but never once for the version this run is about to publish. `clawhub publish`
+        # rejects a duplicate with its own error ("Version X already exists") only after
+        # the approval gate has already been spent and the dry-run has already run — so a
+        # re-run against an already-published version (e.g. re-triggering this workflow by
+        # hand on a tag that already shipped) wastes a click and ~10 minutes for a result
+        # this one curl call can rule out up front, before the dry-run even starts.
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+            "https://clawhub.ai/api/v1/skills/clawseccheck/versions/${VER}")"
+          if [ "$CODE" = "200" ]; then
+            echo "::error::Version ${VER} is already published on ClawHub — nothing to do."
+            exit 1
+          fi
+
       # NB: this step runs `clawhub publish` too, so it is the SECOND invocation in this
       # file. tests/test_publish_workflow.py is step-aware (it attributes each invocation
       # to its own step and tells the two apart by --dry-run) precisely so that this
@@ -406,12 +453,44 @@ jobs:
           --changelog "Release ${{ steps.ver.outputs.version }} (${{ github.sha }})"
           --dry-run
 
+      - name: Probe pre-publish liveness
+        # C-368: classifies (never gates) whether this version was ALREADY live on
+        # ClawHub immediately before this run's own publish attempt — the narrow race
+        # window left after the "not already published" preflight above (which already
+        # hard-fails the common case of re-running on a shipped tag) and this run's
+        # own upload. Its answer tells "Decide release action" below whether a later
+        # CLI-reported failure means "the #3349 ghost reservation actually published
+        # our bundle" (pre_live=false) or "this exact version was already live for
+        # some other reason" (pre_live=true, i.e. a genuine DUPLICATE) — it never
+        # blocks anything itself.
+        id: pre
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          if bash .github/scripts/clawhub-version-live.sh clawseccheck "$VER"; then
+            echo "live=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "live=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish skill
         # --name sets the human-facing ClawHub title (grounded: the CLI's `publish --help`
         # lists "--name <name>  Display name"). Without it ClawHub falls back to the
         # title-cased dir basename ("Clawseccheck"). This value MUST equal SKILL.md
         # metadata.display_name.en — tests/test_publish_workflow.py fails the build if they
         # drift, so the title stays a single source of truth (B-015 fix-item 2).
+        #
+        # C-368: continue-on-error + id: publish — see "Decide release action" below.
+        # The ClawHub CLI has a proven false-failure mode (the #3349 ghost reservation):
+        # it can exit 1 with "Version X already exists" on a run whose upload actually
+        # succeeded and surfaces minutes later. Treating that exit code as authoritative
+        # used to abort the whole job right here, silently skipping the GitHub Release
+        # and leaving the surfaced-check unable to run — for a publish that, in fact,
+        # had worked (v3.59.0, v3.60.0, v3.61.0). The CLI's own outcome is now advisory
+        # input to Decide; the ClawHub API (queried by Confirm below) is authoritative.
+        id: publish
+        continue-on-error: true
         run: >
           clawhub publish ./dist/clawseccheck
           --slug clawseccheck
@@ -420,29 +499,121 @@ jobs:
           --version "${{ steps.ver.outputs.version }}"
           --changelog "Release ${{ steps.ver.outputs.version }} (${{ github.sha }})"
 
+      - name: Confirm publication surfaced
+        # C-368: only runs when the CLI reported failure, so a normal success pays no
+        # poll cost. Polls up to 40×60s (clears the ~29-minute worst observed indexing
+        # lag, v3.52.1) for the helper's two-signal check to flip true — what separates
+        # a #3349 false failure (the bundle really did land) from a genuine one (413,
+        # auth, a real duplicate). Deliberately never `exit 1` here: this step only
+        # REPORTS: "Decide release action" below is the single place that turns a
+        # confirmed non-surfacing into a failed job.
+        id: confirm
+        if: ${{ !cancelled() && steps.publish.outcome == 'failure' }}
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          LIVE=false
+          for i in $(seq 1 40); do
+            if bash .github/scripts/clawhub-version-live.sh clawseccheck "$VER"; then
+              LIVE=true
+              echo "Version ${VER} confirmed live on ClawHub after ~${i} min despite the" \
+                   "CLI-reported failure — this is the #3349 ghost-reservation false" \
+                   "failure, not a real one."
+              break
+            fi
+            if [ "$i" -lt 40 ]; then
+              sleep 60
+            fi
+          done
+          echo "live=${LIVE}" >> "$GITHUB_OUTPUT"
+
       - name: Check whether this version surfaced (warn only)
         # Deliberately NOT a hard gate. Indexing lag is real and variable: v3.53.0 was fully
         # processed in ~20 minutes, while v3.52.1 still 404'd 29 minutes after upload and
         # landed later with a backdated createdAt. Failing the build on that would be a false
         # alarm, and this repo does not ship false alarms. A version that never surfaces is
         # caught for real by the previous-release gate at the top of the NEXT release.
+        #
+        # `if: ${{ !cancelled() }}` (A1): without it this step inherits the default implicit
+        # success() condition, so it is skipped exactly when the Publish step above fails —
+        # the one scenario this reality-probe exists for. !cancelled() runs it after any
+        # earlier failure short of the job being cancelled, so a failed publish still gets
+        # checked instead of leaving the run silent about what actually happened.
+        if: ${{ !cancelled() }}
         env:
           VER: ${{ steps.ver.outputs.version }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           API="https://clawhub.ai/api/v1/skills/clawseccheck/versions/${VER}"
           for i in $(seq 1 10); do
-            CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$API" || echo 000)"
+            # A6: see the previous-release preflight above for why the fallback lives
+            # outside the command substitution instead of `|| echo 000` inside it.
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-delay 2 "$API")" || CODE="000"
             if [ "$CODE" = "200" ]; then
               echo "Version ${VER} is live on ClawHub (visible after ~${i} min)."
               exit 0
             fi
-            sleep 60
+            # A7: don't burn the trailing sleep after the last attempt — nothing
+            # reads it, it only stretches every failing run to the full 10 minutes.
+            if [ "$i" -lt 10 ]; then
+              sleep 60
+            fi
           done
           echo "::warning::Version ${VER} was accepted but is not visible after 10 minutes" \
                "(HTTP ${CODE}). This is usually just indexing lag. If it never appears, the" \
                "next release will fail its previous-release preflight — check the page, or" \
                "run: clawhub scan download clawseccheck --version ${VER}"
+
+      - name: Decide release action
+        # C-368: the single place that turns {CLI outcome, pre-publish liveness,
+        # post-failure confirmation} into a verdict. The ClawHub API (Probe/Confirm) is
+        # authoritative; the CLI's own exit code is advisory only, because it has a
+        # proven false-failure mode (#3349). Truth table:
+        #   publish succeeded                                    -> PUBLISHED           (release, pass)
+        #   publish failed, Confirm live, wasn't live beforehand  -> PUBLISHED_VIA_GHOST (release, pass)
+        #   publish failed, Confirm live, WAS live beforehand     -> DUPLICATE           (release, pass)
+        #   publish failed, Confirm not live                      -> GENUINE_FAILURE     (no release, FAIL)
+        # Pure logic over the three earlier steps' outputs — no network calls here, so
+        # this step itself cannot flake. `!cancelled()` (not the default success()) so
+        # it still runs and logs an explicit verdict even after an earlier hard failure
+        # (e.g. the smoke gate), landing on GENUINE_FAILURE in that case too.
+        id: decide
+        if: ${{ !cancelled() }}
+        env:
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          PRE_LIVE: ${{ steps.pre.outputs.live }}
+          CONFIRM_LIVE: ${{ steps.confirm.outputs.live }}
+          IS_TAG: ${{ github.ref_type == 'tag' }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH_OUTCOME" = "success" ]; then
+            VERDICT=PUBLISHED
+            CREATE_RELEASE=true
+            FAIL_JOB=false
+          elif [ "${CONFIRM_LIVE:-false}" = "true" ]; then
+            if [ "${PRE_LIVE:-false}" = "true" ]; then
+              VERDICT=DUPLICATE
+            else
+              VERDICT=PUBLISHED_VIA_GHOST
+            fi
+            CREATE_RELEASE=true
+            FAIL_JOB=false
+          else
+            VERDICT=GENUINE_FAILURE
+            CREATE_RELEASE=false
+            FAIL_JOB=true
+          fi
+          if [ "$IS_TAG" != "true" ]; then
+            CREATE_RELEASE=false
+          fi
+          echo "Verdict: ${VERDICT} (publish.outcome=${PUBLISH_OUTCOME}," \
+               "pre_live=${PRE_LIVE:-<unset>}, confirm_live=${CONFIRM_LIVE:-<unset>})"
+          {
+            echo "verdict=${VERDICT}"
+            echo "create_release=${CREATE_RELEASE}"
+            echo "fail_job=${FAIL_JOB}"
+          } >> "$GITHUB_OUTPUT"
 
       # Create a matching GitHub Release so the "Latest release" badge tracks the tag.
       # Uses the runner's built-in gh CLI (no third-party action → respects the
@@ -460,16 +631,49 @@ jobs:
         # SHA256SUMS.txt alone, while README/FAQ tell users to verify the install with
         # `cosign verify-blob --bundle`. The signed digest is a property of the TAGGED
         # TREE, not of the registry, so it must land whatever the registry replied.
-        if: ${{ !cancelled() && github.ref_type == 'tag' }}
+        #
+        # C-368: gated on Decide's verdict instead of `steps.sign.outcome == 'success'`
+        # alone. Decide already folds that precondition in — a signing failure means
+        # Publish never even ran, so publish.outcome stays unset, Confirm never runs
+        # (its own `if:` requires outcome == 'failure'), and Decide lands on
+        # GENUINE_FAILURE — while ALSO correctly refusing a release for a real
+        # 413/auth failure that Publish DID reach (which the old `steps.sign.outcome`
+        # gate could not tell apart from a false one; that was this task's own bug).
+        if: ${{ !cancelled() && github.ref_type == 'tag' && steps.decide.outputs.create_release == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           VER="${GITHUB_REF_NAME#v}"
           NOTES="$(awk -v v="## [$VER]" 'index($0,v){f=1;next} /^## \[/{f=0} f' CHANGELOG.md)"
           [ -z "$NOTES" ] && NOTES="Release ${GITHUB_REF_NAME} — see CHANGELOG.md."
           gh release create "${GITHUB_REF_NAME}" --verify-tag \
             --title "ClawSecCheck ${GITHUB_REF_NAME}" --notes "$NOTES" \
             || echo "GitHub Release already exists for ${GITHUB_REF_NAME}"
+          # C-368: --clobber removed — a DUPLICATE verdict must never let this run's
+          # bytes silently overwrite a prior, honestly-signed release's assets.
+          # Tolerate "already attached" instead of failing loudly on a re-run.
           gh release upload "${GITHUB_REF_NAME}" \
             SHA256SUMS.txt SHA256SUMS.txt.bundle \
-            --clobber
+            || echo "Release assets already attached for ${GITHUB_REF_NAME} (not overwriting)."
+
+      - name: Finalize job status
+        # C-368: the single pass/fail point for this job's publish outcome. Every step
+        # upstream either never fails the job on its own (Publish has
+        # continue-on-error, Confirm and the warn-only surfaced-check never exit 1) or
+        # already fails it honestly on its own defect (smoke gate, signing, staging
+        # guards, the earlier preflights) — this step exists so Decide's
+        # GENUINE_FAILURE verdict actually fails the job, since Publish's own
+        # continue-on-error would otherwise let a real publish failure go green.
+        if: always()
+        env:
+          FAIL_JOB: ${{ steps.decide.outputs.fail_job }}
+          VERDICT: ${{ steps.decide.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          if [ "${FAIL_JOB:-}" = "true" ]; then
+            echo "::error::Publish verdict: ${VERDICT:-UNKNOWN}. Failing the job — see the" \
+                 "'Decide release action' step above for why."
+            exit 1
+          fi
+          echo "Publish verdict: ${VERDICT:-<not reached>}. Job passes."

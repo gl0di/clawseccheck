@@ -94,23 +94,23 @@ def test_sarif_limit_hits_redacts_production_home_prefixes_end_to_end(tmp_path, 
     assert any(h.startswith("custom workspace") and "~/.cache/csc-b620-ws" in h for h in hits), hits
 
 
-def test_sarif_limit_hits_still_leaks_a_non_home_absolute_path(tmp_path):
-    """PINNED RESIDUAL -- not fixed by this change; reported to the coordinator as its
-    own follow-up (B-620's diagnosis, not a new defect found independently).
+def test_sarif_limit_hits_reduces_a_non_home_absolute_path_to_its_basename(tmp_path):
+    """CLOSES the residual `test_sarif_limit_hits_still_leaks_a_non_home_absolute_path`
+    used to pin (B-633).
 
     `report._redact_home_paths` / `_HOME_PATH_RE` is PREFIX-matching against the three
     literal shapes a real `$HOME` takes (`/home/<user>`, `/Users/<user>`,
-    `C:\\Users\\<user>`) -- it is not a general basename reduction. A workspace (or,
-    identically, a `--home`) that resolves under any OTHER root still reaches SARIF
-    `limit_hits` VERBATIM today. This suite's own HOME-isolation fixture
+    `C:\\Users\\<user>`) -- it is not a general basename reduction, and a workspace (or,
+    identically, a `--home`) that resolves under any OTHER root used to reach SARIF
+    `limit_hits` VERBATIM. This suite's own HOME-isolation fixture
     (`conftest.py:223`, `/tmp/pytest-of-.../isolated-homeN/...`) is one live instance;
     a real user running `clawseccheck --home /mnt/backup` is another.
 
-    Deliberately a plain assertion of CURRENT behaviour -- no `xfail`/`skip` (forbidden
-    here) -- so the next reader does not read the tests above and conclude SARIF is now
-    fully path-clean. Closing this needs a basename-reduction helper for the SARIF copy
-    specifically; that is a separate, deliberate decision (lossier than `~`-substitution
-    -- see sarif.py's B-620 comment), not something to fold into this change silently.
+    `sarif.py`'s `_sarif_limit_hit_text` now adds a basename-reduction step, applied
+    only after `_redact_home_paths` and only to this SARIF copy -- deliberately lossier
+    than `~`-substitution (the full path is gone, not just the username), which is why
+    it is a separate step rather than folded into the shared helper (see that
+    function's own docstring).
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -134,10 +134,12 @@ def test_sarif_limit_hits_still_leaks_a_non_home_absolute_path(tmp_path):
     assert any("csc-b620-ws" in h for h in hits), hits  # non-vacuity
 
     resolved_outside = str(outside.resolve())
-    assert any(resolved_outside in h for h in hits), (
-        "residual behaviour changed -- either this is now fixed (replace this pin with "
-        "a real no-leak assertion) or something else moved: " + repr(hits)
-    )
+    for h in hits:
+        assert resolved_outside not in h, h
+        assert str(outside.parent.resolve()) not in h, h
+    # Lossy by design: the basename survives (still useful for someone matching a
+    # scan against a known workspace name), the directory it lived under does not.
+    assert any("csc-b620-ws" in h for h in hits), hits
 
 
 def test_stored_ctx_limit_hits_is_untouched(tmp_path):
@@ -196,7 +198,14 @@ def test_render_sarif_does_not_mutate_ctx_limit_hits():
 
 def test_render_sarif_redacts_via_the_shared_home_path_helper():
     """Single source of truth: the SARIF output must match `report._redact_home_paths`
-    applied directly, not a second, independently-written redaction rule."""
+    applied directly, not a second, independently-written redaction rule.
+
+    Every entry here is $HOME-shaped (redacted to a `~/...` remainder by
+    `_redact_home_paths` alone), so B-633's basename-reduction step -- which only acts
+    on a path `_redact_home_paths` left untouched -- is a no-op for all four and this
+    equality holds unchanged. `test_sarif_limit_hits_reduces_a_non_home_absolute_path_
+    to_its_basename` (above) and the two tests below exercise the step itself.
+    """
     from clawseccheck.collector import Context
     from clawseccheck.report import _redact_home_paths
     from clawseccheck.sarif import render_sarif
@@ -215,6 +224,82 @@ def test_render_sarif_redacts_via_the_shared_home_path_helper():
 
     assert got == [_redact_home_paths(e) for e in entries]
     assert not any("/home/dave" in g for g in got), got
+
+
+def test_render_sarif_reduces_a_non_home_path_to_its_basename_unit_level():
+    """Unit-level counterpart to the subprocess repro above, and the negative-space
+    check that matters: a path OUTSIDE every recognized $HOME shape is reduced, while a
+    path `_redact_home_paths` already folded (`~/...`) is left exactly alone -- proving
+    the two steps compose rather than one undoing the other."""
+    from clawseccheck.collector import Context
+    from clawseccheck.sarif import render_sarif
+
+    entries = [
+        "cron store '/mnt/backup/.local/share/openclaw/cron/jobs.json' exceeded the cap",
+        "custom workspace 'z' resolves outside the audited --home (/home/dave/.cache/z)",
+    ]
+    ctx = Context(home=Path("/tmp"))
+    ctx.limit_hits = list(entries)
+
+    doc = json.loads(render_sarif([], ctx=ctx))
+    got = doc["runs"][0]["properties"]["analysis_completeness"]["limit_hits"]
+
+    assert "/mnt/backup" not in got[0] and "jobs.json" in got[0], got[0]
+    assert got[1] == "custom workspace 'z' resolves outside the audited --home (~/.cache/z)", got[1]
+
+
+def test_render_sarif_preserves_a_home_fold_that_is_not_the_leading_token():
+    """2026-09-17, caught only by macOS CI (never reproduced on Linux): `/home` is a
+    live autofs trigger there (`auto_master` -> `auto_home`), so `collector.py`'s
+    `Path(...).resolve()` on a `/home/<user>/...` workspace value can come back
+    PREFIXED rather than untouched, e.g. `/System/Volumes/Data/home/testuser/...` --
+    the same class of divergence already measured once for a different function
+    (`_username_safe_path`, e185271). `_redact_home_paths` still finds and folds the
+    `/home/<user>` segment, but since it is no longer the string's leading token, the
+    fold lands mid-string (`/System/Volumes/Data~/.cache/x`) -- one single
+    `_NON_HOME_ABS_PATH_RE` match starting before the fold, so a naive basename
+    reduction swallowed the `~/...` remainder along with the outer prefix, undoing
+    the fold `_redact_home_paths` had just done. This is the unit-level regression the
+    subprocess-based end-to-end test could not pin on a Linux runner."""
+    from clawseccheck.collector import Context
+    from clawseccheck.sarif import render_sarif
+
+    entry = (
+        "custom workspace 'csc-b620-ws' resolves outside the audited --home "
+        "(/System/Volumes/Data/home/testuser/.cache/csc-b620-ws) — bootstrap/skills "
+        "read from there are outside the scoped audit"
+    )
+    ctx = Context(home=Path("/tmp"))
+    ctx.limit_hits = [entry]
+
+    doc = json.loads(render_sarif([], ctx=ctx))
+    got = doc["runs"][0]["properties"]["analysis_completeness"]["limit_hits"]
+
+    assert "/System/Volumes/Data" not in got[0], got[0]
+    assert "/home/testuser" not in got[0], got[0]
+    assert "~/.cache/csc-b620-ws" in got[0], got[0]
+
+
+def test_render_sarif_limit_hit_basename_reduction_does_not_mangle_ordinary_slash_prose():
+    """Adversarial case found while implementing B-633, not by a later review pass: a
+    naive "reduce anything starting with /" regex also matched the "/skills" in ordinary
+    prose like "bootstrap/skills", mangling it to "bootstrapskills". Pins that a slash
+    preceded by a word character is never treated as a path start."""
+    from clawseccheck.collector import Context
+    from clawseccheck.sarif import render_sarif
+
+    entry = (
+        "custom workspace 'w' resolves outside the audited --home "
+        "(/mnt/backup/w) - bootstrap/skills read from there are outside the scoped audit"
+    )
+    ctx = Context(home=Path("/tmp"))
+    ctx.limit_hits = [entry]
+
+    doc = json.loads(render_sarif([], ctx=ctx))
+    got = doc["runs"][0]["properties"]["analysis_completeness"]["limit_hits"][0]
+
+    assert "bootstrap/skills" in got, got
+    assert "/mnt/backup" not in got, got
 
 
 def test_sarif_limit_hits_empty_stays_empty():

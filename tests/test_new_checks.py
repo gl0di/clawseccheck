@@ -103,10 +103,26 @@ def test_b18_subagents_risky_no_approval_warns():
     assert check_subagents(c).status == "WARN"
 
 
-def test_b18_subagents_risky_with_approval_passes():
+def test_b18_subagents_exec_risky_with_approval_passes():
+    # B-644 positive control: an exec-family risky tool with an exec-scoped gate
+    # stays suppressed.
+    c = _ctx({"agents": {"subagents": {"maxConcurrent": 4}},
+              "tools": {"allow": ["exec"], "exec": {"mode": "ask"}}})
+    assert check_subagents(c).status == "PASS"
+
+
+def test_b18_subagents_elevated_only_with_exec_gate_still_warns():
+    # B-644 negative control: tools.exec.mode/security/ask is scoped to the exec/bash
+    # surface only (grounded in _capability.py's B-395 comment: "tools.elevated gates
+    # the exec/bash privileged-command escalation surface ... it is not one of
+    # OpenClaw's tool-policy resolution layers") -- it has no bearing on a bare
+    # tools.elevated.allowFrom grant, so setting tools.exec.mode='ask' must not read
+    # as "elevated/exec actions require approval" when the only risky tool present is
+    # "elevated". This used to assert PASS, which was pinning the exact bug B-644
+    # describes.
     c = _ctx({"agents": {"subagents": {"maxConcurrent": 4}},
               "tools": {"elevated": {"allowFrom": ["o"]}, "exec": {"mode": "ask"}}})
-    assert check_subagents(c).status == "PASS"
+    assert check_subagents(c).status == "WARN"
 
 
 def test_b18_subagents_no_risky_unknown():

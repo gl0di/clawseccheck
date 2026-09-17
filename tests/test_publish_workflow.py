@@ -1005,14 +1005,16 @@ def _size_guard_threshold_bytes() -> int:
 
 
 def test_size_guard_step_runs_right_after_staging_and_before_any_publish() -> None:
-    """The bundle-size guard must fail BEFORE the release tag's approval gets spent.
+    """The bundle-size guard must fail BEFORE any of the job's publish work runs.
 
-    v3.59.0 discovered its 413 only at real-upload time — after the tag was already
-    pushed and the `environment: release` manual approval already spent on a bundle that
-    was always going to fail (CLAWSECCHECK-B-440, folded from CLAWSECCHECK-B-443).
-    Anchored to running immediately after the 'Stage publishable files' step (so it sees
-    the CHANGELOG.md trim) and strictly before the first 'clawhub publish' invocation
-    (including the --dry-run preflight).
+    v3.59.0 discovered its 413 only at real-upload time — after the `environment:
+    release` manual approval (one job-level gate, checked once before checkout — not a
+    per-step resource that each later step individually "spends") had already let the
+    whole job proceed on a bundle that was always going to fail (CLAWSECCHECK-B-440,
+    folded from CLAWSECCHECK-B-443). Anchored to running immediately after the 'Stage
+    publishable files' step (so it sees the CHANGELOG.md trim) and strictly before the
+    first 'clawhub publish' invocation (including the --dry-run preflight), so an
+    obviously bad bundle is caught before any of that later work runs on it.
     """
     steps = _steps()
     names = [_step_name(s) for s in steps]
@@ -1144,4 +1146,389 @@ def test_size_guard_passes_on_a_staged_bundle_within_budget(tmp_path) -> None:
     )
     assert "Staged bundle size OK" in proc.stdout, (
         f"Expected the OK confirmation line in stdout.\nstdout: {proc.stdout!r}"
+    )
+
+
+# ---------------------------------------------------------------------------------
+# CLAWSECCHECK-C-368: a false 'already exists' CLI exit used to abort the job right
+# at Publish, silently skipping the GitHub Release and leaving the surfaced-check
+# unable to run for a publish that had actually succeeded (v3.59.0, v3.60.0,
+# v3.61.0). The fix decouples the Release/job-pass decision from the CLI's exit
+# code: Publish gets continue-on-error, a Confirm step re-checks the ClawHub API
+# itself on a reported failure, and a pure-logic Decide step turns
+# {publish.outcome, pre-publish liveness, post-failure confirmation} into a verdict
+# that a Finalize step turns into the job's actual pass/fail.
+# ---------------------------------------------------------------------------------
+
+HELPER_SCRIPT = REPO_ROOT / ".github" / "scripts" / "clawhub-version-live.sh"
+
+
+def _step_shell_block(step_name: str) -> str:
+    """Extract the literal `run: |` body of the step named *step_name*.
+
+    Same pattern as _size_guard_shell_block(): executed verbatim by the tests below,
+    so what's under test is the real workflow shell, not a paraphrase that could
+    quietly stop matching.
+    """
+    lines = _lines()
+    start = next(
+        (i for i, ln in enumerate(lines) if ln.strip() == f"- name: {step_name}"),
+        None,
+    )
+    assert start is not None, f"No '- name: {step_name}' step found in the workflow."
+    run_i = None
+    for i in range(start + 1, len(lines)):
+        if lines[i].strip().startswith("- name:"):
+            break
+        if lines[i].strip() == "run: |":
+            run_i = i
+            break
+    assert run_i is not None, f"Step {step_name!r} has no 'run: |' literal block."
+    indent = len(lines[run_i]) - len(lines[run_i].lstrip())
+    body = []
+    for ln in lines[run_i + 1:]:
+        if ln.strip() and (len(ln) - len(ln.lstrip())) <= indent:
+            break
+        body.append(ln)
+    return textwrap.dedent("\n".join(body))
+
+
+def test_c368_publish_resilience_step_wiring() -> None:
+    """Probe -> Publish(continue-on-error) -> Confirm -> surfaced-check(warn) ->
+    Decide -> Release(gated on decide) -> Finalize, in that exact relative order,
+    with the specific fields each step must read/write.
+
+    Pins the step order and wiring so a future edit cannot silently collapse this
+    back into the old single-step shape where a CLI false-failure dropped the
+    Release (the original C-368 defect).
+    """
+    steps = _steps()
+    names = [_step_name(s) for s in steps]
+
+    expected_order = [
+        "Probe pre-publish liveness",
+        "Publish skill",
+        "Confirm publication surfaced",
+        "Check whether this version surfaced (warn only)",
+        "Decide release action",
+        "Create GitHub Release",
+        "Finalize job status",
+    ]
+    indices = []
+    for name in expected_order:
+        assert name in names, f"Missing step {name!r} in the publish workflow."
+        indices.append(names.index(name))
+    assert indices == sorted(indices), (
+        f"C-368 tail steps are out of order. Expected this relative order: "
+        f"{expected_order}. Found indices {indices} in {names}."
+    )
+
+    def body_of(name: str) -> str:
+        return "\n".join(text for _, text in steps[names.index(name)])
+
+    publish_body = body_of("Publish skill")
+    assert "id: publish" in publish_body, (
+        "The Publish step needs 'id: publish' so later steps can read "
+        "steps.publish.outcome."
+    )
+    assert "continue-on-error: true" in publish_body, (
+        "The Publish step needs continue-on-error: true so a CLI false-failure "
+        "(#3349) does not abort the job before Confirm/Decide ever run."
+    )
+    # id:/continue-on-error: must sit above run: or _publish_invocations() sweeps
+    # them into the invocation's own args (a known landmine from the A1-A4 pass).
+    publish_lines = publish_body.splitlines()
+    id_line = next(i for i, ln in enumerate(publish_lines) if "id: publish" in ln)
+    run_line = next(i for i, ln in enumerate(publish_lines) if ln.strip() == "run: >")
+    assert id_line < run_line, "id: publish must sit above run: in the Publish step."
+
+    confirm_body = body_of("Confirm publication surfaced")
+    assert "id: confirm" in confirm_body
+    assert "steps.publish.outcome == 'failure'" in confirm_body, (
+        "Confirm must only run when the CLI reported failure, so a normal success "
+        "pays no poll cost."
+    )
+    assert "exit 1" not in " ".join(confirm_body.split()), (
+        "Confirm must never exit 1 itself — Decide is the single place that turns a "
+        "confirmed non-surfacing into a failed job."
+    )
+
+    decide_body = body_of("Decide release action")
+    assert "id: decide" in decide_body
+    for token in (
+        "steps.publish.outcome", "steps.pre.outputs.live", "steps.confirm.outputs.live",
+    ):
+        assert token in decide_body, f"Decide must read {token!r}."
+
+    release_body = body_of("Create GitHub Release")
+    assert "steps.decide.outputs.create_release == 'true'" in release_body, (
+        "The Release step must be gated on Decide's verdict, not on the Publish "
+        "step's raw exit code or on steps.sign.outcome alone (that gate could not "
+        "tell a real 413/auth failure apart from a false #3349 one — the original "
+        "defect)."
+    )
+    assert "--clobber" not in release_body, (
+        "The release-asset upload must not use --clobber: a DUPLICATE verdict must "
+        "never let this run's bytes overwrite a prior, honestly-signed release."
+    )
+
+    finalize_body = body_of("Finalize job status")
+    assert "if: always()" in finalize_body, (
+        "Finalize must run with if: always() so it can report even after an "
+        "earlier failure short of cancellation."
+    )
+    assert "steps.decide.outputs.fail_job" in finalize_body
+    assert "exit 1" in " ".join(finalize_body.split()), (
+        "Finalize must be able to exit 1 — it is the single pass/fail point for the "
+        "job's publish verdict, since Publish's own continue-on-error would "
+        "otherwise let a real publish failure go green."
+    )
+
+
+def test_probe_and_confirm_steps_use_the_shared_helper_script() -> None:
+    """Both liveness checks must call the SAME helper script.
+
+    Two independent inline implementations could drift apart; a shared script
+    means the pre-publish probe and the post-failure confirm always agree on what
+    "live" means.
+    """
+    assert HELPER_SCRIPT.exists(), (
+        "clawhub-version-live.sh is missing — Probe/Confirm have nothing to call."
+    )
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    count = text.count(".github/scripts/clawhub-version-live.sh")
+    assert count == 2, (
+        f"Expected exactly 2 references to the helper script (Probe + Confirm), "
+        f"found {count}."
+    )
+
+
+def test_helper_script_is_never_staged_for_publish() -> None:
+    """.github/scripts/*.sh is CI-only tooling — it must never ship to ClawHub
+    installs alongside the audited skill.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    stage_start = text.index("Stage publishable files")
+    stage_end = text.index("\n      - name:", stage_start + 1)
+    stage_body = text[stage_start:stage_end]
+    assert ".github" not in stage_body, (
+        "The staging step must not copy .github/ (including the new "
+        "clawhub-version-live.sh helper) into the published bundle."
+    )
+
+
+def test_helper_script_requires_both_signals() -> None:
+    """The discriminator must AND its two signals, never OR them.
+
+    Ground truth (task description): a genuine publish answers 200 with a matching
+    `version` + non-empty `files` on the versions endpoint, AND
+    `latestVersion.version` equals it on the skill endpoint. An OR would let
+    either signal alone certify a live version, reopening exactly the false-signal
+    risk this script exists to close.
+    """
+    text = HELPER_SCRIPT.read_text(encoding="utf-8")
+    assert "/versions/" in text
+    assert "latestVersion" in text
+    assert "files" in text
+    assert re.search(
+        r'\[\s*"\$SIG1"\s*=\s*"true"\s*\]\s*&&\s*\[\s*"\$LATEST"\s*=\s*"\$VER"\s*\]',
+        text,
+    ), (
+        "The helper's final line must AND signal 1 (versions/<ver> 200 + non-empty "
+        "files) with signal 2 (latestVersion==<ver>)."
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.parametrize(
+    "name,versions_code,versions_body,skill_body,expect_live",
+    [
+        (
+            "live",
+            "200",
+            {"version": "9.9.9", "files": ["a.py"]},
+            {"latestVersion": {"version": "9.9.9"}},
+            True,
+        ),
+        (
+            "orphan-404",
+            "404",
+            {},
+            {"latestVersion": {"version": "9.9.8"}},
+            False,
+        ),
+        (
+            "hollow-200-no-files",
+            "200",
+            {"version": "9.9.9", "files": []},
+            {"latestVersion": {"version": "9.9.9"}},
+            False,
+        ),
+        (
+            "stale-latest-version",
+            "200",
+            {"version": "9.9.9", "files": ["a.py"]},
+            {"latestVersion": {"version": "9.9.8"}},
+            False,
+        ),
+        (
+            "null-latest-version-mid-reindex",
+            "200",
+            {"version": "9.9.9", "files": ["a.py"]},
+            {"latestVersion": None},
+            False,
+        ),
+    ],
+)
+def test_clawhub_version_live_two_signal_discriminator(
+    tmp_path, name, versions_code, versions_body, skill_body, expect_live,
+) -> None:
+    """The helper script executed for real, offline, against a stubbed `curl`.
+
+    A successful publish answers 200 with a matching `version` + non-empty `files`
+    on the versions endpoint, AND `latestVersion.version` equal to it on the skill
+    endpoint (task description ground truth). The #3349 ghost-orphan fails signal 1
+    (404). A hollow 200 with no files (the v3.54.0 accepted-but-invisible shape) and
+    a stale or null latestVersion must each independently fail the discriminator —
+    this is what stops either signal alone from being trusted.
+    """
+    assert HELPER_SCRIPT.exists(), "clawhub-version-live.sh is missing."
+
+    bin_dir = tmp_path / "stubbin"
+    bin_dir.mkdir()
+    stub = bin_dir / "curl"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'url=""\n'
+        'out=""\n'
+        "for ((i=1;i<=$#;i++)); do\n"
+        '  a="${!i}"\n'
+        '  case "$a" in http*) url="$a" ;; esac\n'
+        '  if [ "$a" = "-o" ]; then j=$((i+1)); out="${!j}"; fi\n'
+        "done\n"
+        'case "$url" in\n'
+        "  */versions/*)\n"
+        '    cat "$STUB_VERSIONS_BODY" > "$out"\n'
+        '    printf \'%s\' "$(cat "$STUB_VERSIONS_CODE")"\n'
+        "    ;;\n"
+        "  *)\n"
+        '    cat "$STUB_SKILL_BODY"\n'
+        "    ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+    versions_body_file = tmp_path / "versions_body.json"
+    versions_body_file.write_text(json.dumps(versions_body), encoding="utf-8")
+    versions_code_file = tmp_path / "versions_code.txt"
+    versions_code_file.write_text(versions_code, encoding="utf-8")
+    skill_body_file = tmp_path / "skill_body.json"
+    skill_body_file.write_text(json.dumps(skill_body), encoding="utf-8")
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["STUB_VERSIONS_BODY"] = str(versions_body_file)
+    env["STUB_VERSIONS_CODE"] = str(versions_code_file)
+    env["STUB_SKILL_BODY"] = str(skill_body_file)
+
+    proc = subprocess.run(
+        ["bash", str(HELPER_SCRIPT), "clawseccheck", "9.9.9"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if expect_live:
+        assert proc.returncode == 0, (
+            f"[{name}] expected live=true (exit 0).\n"
+            f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+        )
+    else:
+        assert proc.returncode != 0, (
+            f"[{name}] expected live=false (nonzero exit).\n"
+            f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+        )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.parametrize(
+    "case_id,publish_outcome,pre_live,confirm_live,is_tag,"
+    "expected_verdict,expected_create,expected_fail",
+    [
+        ("normal-success", "success", "false", "", "true", "PUBLISHED", "true", "false"),
+        (
+            "false-failure-surfaces", "failure", "false", "true", "true",
+            "PUBLISHED_VIA_GHOST", "true", "false",
+        ),
+        (
+            "genuine-duplicate-retag", "failure", "true", "true", "true",
+            "DUPLICATE", "true", "false",
+        ),
+        (
+            "genuine-failure-never-surfaces", "failure", "false", "false", "true",
+            "GENUINE_FAILURE", "false", "true",
+        ),
+        (
+            "success-but-not-a-tag-run", "success", "false", "", "false",
+            "PUBLISHED", "false", "false",
+        ),
+    ],
+)
+def test_decide_release_action_truth_table(
+    tmp_path, case_id, publish_outcome, pre_live, confirm_live, is_tag,
+    expected_verdict, expected_create, expected_fail,
+) -> None:
+    """Decide's pure-logic truth table, executed under `bash -eo pipefail` — the
+    same shell mode GitHub Actions runs every `run:` block under — so an errexit
+    trap (e.g. a `cond && action` short-circuit) would be caught here exactly as it
+    would in CI, not just asserted by reading the source.
+
+    Covers both DoD adversarial scenarios by name: a real failure that never
+    surfaces must NOT release and must fail the job
+    (genuine-failure-never-surfaces); a CLI false failure that DOES surface must
+    release and must NOT fail the job (false-failure-surfaces). Also covers the
+    #3349 ghost-reservation's DUPLICATE branch and the non-tag-run guard.
+    """
+    script = tmp_path / "decide.sh"
+    script.write_text(_step_shell_block("Decide release action"), encoding="utf-8")
+    output_file = tmp_path / "github_output"
+    output_file.write_text("", encoding="utf-8")
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "PUBLISH_OUTCOME": publish_outcome,
+            "PRE_LIVE": pre_live,
+            "CONFIRM_LIVE": confirm_live,
+            "IS_TAG": is_tag,
+            "GITHUB_OUTPUT": str(output_file),
+        }
+    )
+    proc = subprocess.run(
+        ["bash", "-eo", "pipefail", str(script)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 0, (
+        f"[{case_id}] Decide must never fail itself (pure logic, no network).\n"
+        f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    )
+
+    outputs = dict(
+        line.split("=", 1)
+        for line in output_file.read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    )
+    assert outputs.get("verdict") == expected_verdict, (
+        f"[{case_id}] verdict: expected {expected_verdict!r}, got "
+        f"{outputs.get('verdict')!r}.\nstdout: {proc.stdout!r}"
+    )
+    assert outputs.get("create_release") == expected_create, (
+        f"[{case_id}] create_release: expected {expected_create!r}, got "
+        f"{outputs.get('create_release')!r}."
+    )
+    assert outputs.get("fail_job") == expected_fail, (
+        f"[{case_id}] fail_job: expected {expected_fail!r}, got "
+        f"{outputs.get('fail_job')!r}."
     )

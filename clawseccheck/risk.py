@@ -110,7 +110,7 @@ def _finding_by_id(findings: list[Finding], check_id: str) -> Finding | None:
 
 
 def _has_exec_or_write_tools(tools: list[str]) -> bool:
-    """True when exec, shell, fs_write or elevated tools are present.
+    """True when exec, shell, fs_write/fs_delete/fs_move or elevated tools are present.
 
     B-395 (C-135 round 1 caught a false-positive regression in the first attempt at
     this fix): "write"/"edit" are checked by EXACT membership, not folded into the
@@ -125,8 +125,24 @@ def _has_exec_or_write_tools(tools: list[str]) -> bool:
     REAL OpenClaw write-tool ids (B55/_capability.py's check_fs_write_exposure had the
     identical naming gap, grounded there against the installed dist) and are matched
     the same way B55 matches them: exact list membership, not substring. "fs_write" is
-    kept in the substring tuple for the same reason B55 keeps it: not a real tool id,
-    but this project's own existing configs/tests already use it as a token.
+    kept in the substring tuple because this project's own existing configs/tests
+    already use it as a token, not because it is fake -- B-735 correction: it (and
+    fs_delete/fs_move, added there and here together) ARE real OpenClaw tool ids,
+    grounded against the installed dist's own DEFAULT_GATEWAY_HTTP_TOOL_DENY /
+    ACP_UNSUPPORTED_INHERITED_TOOL_DENY lists (see checks/_shared.py's
+    _B55_FS_WRITE_TOOLS comment for the citation) -- they are simply not ones
+    `_b68_fs_tools_granted`'s canonical `_B68_FS_TOOLS` resolution enumerates.
+    "fs_delete"/"fs_move" are NOT safe in the substring tuple, unlike "fs_write" --
+    C-135 found real collisions ("refs_delete"/"refs_move", a plausible git-refs tool
+    name; "prefs_delete"/"prefs_move", a plausible preferences tool name -- both end in
+    "fs" immediately before "_delete"/"_move"). Matched by EXACT membership instead,
+    the same treatment "write"/"edit" already get here for the identical reason.
+
+    B-735: without this, B55 (check_fs_write_exposure) now correctly FAILs a config
+    granting only fs_delete/fs_move reached by an open/untrusted channel, while
+    RISK-01/RISK-03/RISK-10/RISK-24 (every rule gated on this predicate) stayed silent
+    for the identical config -- the same class of gap B-395 closed for fs_write itself,
+    recurring for the two tools this project's vocabulary had never named at all.
 
     `tools` here (risk._enabled_tools) is the raw tools.allow/gateway.tools.allow
     token list, not resolved against group:fs/a wildcard "*"/tools.profile the way
@@ -141,6 +157,8 @@ def _has_exec_or_write_tools(tools: list[str]) -> bool:
         or "elevated" in tools
         or "write" in tools
         or "edit" in tools
+        or "fs_delete" in tools
+        or "fs_move" in tools
     )
 
 
@@ -661,10 +679,52 @@ def _has_mutable_identity(findings: list[Finding], cfg: dict) -> bool:
 
 
 def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
-    """True when B38 FAILs OR browser.ssrfPolicy.dangerouslyAllowPrivateNetwork is set."""
+    """True when B38 FAILs OR browser.ssrfPolicy.dangerouslyAllowPrivateNetwork (or the
+    legacy allowPrivateNetwork alias) is set.
+
+    "Set" means the literal boolean `True`, matching B38's own `is True` gate
+    (checks/_egress.py) and the installed runtime's actual bypass predicate. Verified
+    2026-09-16 (an independent C-135 adversarial pass, re-derived a second time)
+    against the installed 2026.9.4 dist: the zod schema types the
+    field as a plain `boolean().optional()` (zod-schema.core, SsrFPolicyConfigSchema)
+    with no coercion -- but the coercion-proof ground truth is the RUNTIME gate itself,
+    not schema rejection: `resolveBrowserSsrFPolicy` (config-Dc3xLSSD.mjs:117-130)
+    normalizes with `allowPrivateNetwork === true || dangerouslyAllowPrivateNetwork ===
+    true` and explicitly `delete`s the legacy `allowPrivateNetwork` alias before that
+    check, and the actual bypass predicate, `isPrivateNetworkAllowedByPolicy`
+    (src/infra/net/ssrf.ts, compiled as ssrf-DNi3J6fi.mjs:111-112), is
+    `policy?.dangerouslyAllowPrivateNetwork === true || policy?.allowPrivateNetwork ===
+    true` -- strict equality both times. So even a truthy value that reaches this code
+    (e.g. via `openclaw doctor --fix` re-writing an ambiguous legacy value verbatim,
+    doctor-config-flow-BoTzHMKN.mjs:216-229) still cannot flip the gate: no JS value
+    satisfies `x === true` except the boolean `true`. A `bool(...)` truthy read here
+    previously fired RISK-05/RISK-15 on values (a non-empty string, `1`, a non-empty
+    list, ...) that the real runtime never treats as enabling the private-network
+    bypass -- a false positive on rules whose own docstrings claim zero-FP.
+
+    C-135 adversarial pass, 2026-09-16: B38 itself now ORs in the legacy flat
+    `allowPrivateNetwork` alias (checks/_egress.py) -- resolveBrowserSsrFPolicy
+    (config-Dc3xLSSD.mjs:117-130) folds it into dangerouslyAllowPrivateNetwork before the
+    browser ever uses the policy. The canonical schema rejects the legacy key outright,
+    but the real boot path auto-repairs an invalid config IN MEMORY on every startup
+    (resolveStartupConfigSnapshot, wired at pre-bootstrap-Da_13P9b.mjs:255) via the same
+    migration `openclaw doctor` uses, WITHOUT writing the fix back to disk -- so a raw
+    config setting ONLY the legacy key is a live, silent bypass on every boot, not
+    something gated behind a doctor run the operator may never have done. See B38's own
+    grounding comment (checks/_egress.py) for the full chain. Mirrored here so a raw
+    config setting ONLY the legacy key still drives RISK-05/RISK-15, not just B38. A
+    nested `network.allowPrivateNetwork`/
+    `network.dangerouslyAllowPrivateNetwork` shape also exists in the installed dist
+    (isPrivateNetworkOptInEnabled, ssrf-policy-CFLWuj1r.mjs) but is CHANNEL-scoped only
+    (channels.<provider>.network.*) and does not apply to browser.ssrfPolicy -- see B38's
+    own grounding comment -- so it is deliberately not read here either.
+    """
     if _finding_status(findings, "B38") == FAIL:
         return True
-    return bool(dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork"))
+    return (
+        dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
+        or dig(cfg, "browser.ssrfPolicy.allowPrivateNetwork") is True
+    )
 
 
 def _control_plane_exposed(findings: list[Finding], cfg: dict) -> bool:
@@ -804,8 +864,16 @@ def _rule_open_sender_exec(ctx: Context, tools: list[str], cfg: dict) -> RiskPat
     # grant with no exec/write tool at all, which would mislabel this branch -- the
     # guard at :418 already established at least one of {exec/write, elevated} is
     # present, so this picks the more specific label only when exec/write itself is.
+    # B-735 C-135: this mirrors _has_exec_or_write_tools's own needle/exact-match split
+    # exactly (fs_delete/fs_move by exact membership, not substring -- see that
+    # function's docstring) -- without it, a config granting only fs_delete/fs_move
+    # still correctly FAILed RISK-01 but the finding text wrongly said "elevated tool".
     is_exec_or_write = (
-        _hint(tools, ("exec", "shell", "fs_write", "deploy")) or "write" in tools or "edit" in tools
+        _hint(tools, ("exec", "shell", "fs_write", "deploy"))
+        or "write" in tools
+        or "edit" in tools
+        or "fs_delete" in tools
+        or "fs_move" in tools
     )
     tool_label = "exec/write tool" if is_exec_or_write else "elevated tool"
     return RiskPath(
@@ -1005,11 +1073,12 @@ def _rule_self_modification(ctx: Context, findings: list[Finding],
     if not _has_exec_or_write_tools(tools):
         return None
     # Only fire when there is no approval gate (real OpenClaw field: tools.exec.mode).
-    # B-494: `_has_approval_gate` reads only `tools.exec.*` and does not know a bare
-    # fs_write grant (no exec tool) is left ungated by an exec-only "ask" mode -- a
-    # known gap in the approval-gate scope, deliberately NOT fixed or worked around
-    # here (wider than this rule; shared by the pre-existing B20/B22 path too).
-    if _has_approval_gate(cfg):
+    # B-644 (closes the B-494 gap noted here): `_has_approval_gate` reads only
+    # `tools.exec.*` and on its own does not know a bare fs_write grant (no exec
+    # tool) is left ungated by an exec-only "ask" mode. Passing `tools` makes it
+    # refuse to call a non-exec write tool (fs_write/write/edit/elevated) gated by
+    # an exec-scoped key at all -- shared by the pre-existing B20/B22 path too.
+    if _has_approval_gate(cfg, tools):
         return None
     return RiskPath(
         id="RISK-07",
@@ -1418,6 +1487,17 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
         return None
     if not _browser_ssrf(findings, cfg):
         return None
+    # B-722: _browser_ssrf() is true on "B38 FAILs" OR "the flag is set" -- and B38 can
+    # FAIL on browser.noSandbox alone, with neither private-network flag ever set. The
+    # blockedHostnames caveat below is about that flag specifically; gate it on the real
+    # config value so it never appears pointed at a flag this config never enabled (C-135,
+    # independent adversarial pass, found this unconditional in the first draft).
+    # 2026-09-16 C-135 follow-up: OR in the legacy flat allowPrivateNetwork alias too --
+    # same grounding as _browser_ssrf() above.
+    allow_private = (
+        dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
+        or dig(cfg, "browser.ssrfPolicy.allowPrivateNetwork") is True
+    )
     return RiskPath(
         id="RISK-15",
         severity=HIGH,
@@ -1453,7 +1533,25 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
             # fires it is itself rejected by the schema.
             + _key_advice(ctx, "browser.ssrfPolicy.hostnameAllowlist",
                           "browser.ssrfPolicy.allowedHostnames")
-            + ". Breaking either leg breaks the chain."
+            + (
+                # B-722: an allowedHostnames/hostnameAllowlist entry does not close this
+                # leg while dangerouslyAllowPrivateNetwork stays true -- the allowlist
+                # restricts which EXTRA hosts are reachable, it does not re-block the
+                # private-network addresses the flag already opened. blockedHostnames
+                # (2026.9.1+) is checked before DNS and allow rules even with
+                # private-network access enabled (grounded: dist ssrf-policy-helpers/ssrf
+                # modules, resolveHostnamePolicyChecks), so it is the one lever that
+                # still holds for an operator who cannot turn the flag off. Only shown
+                # when the flag is the config's actual trigger (see allow_private above)
+                # -- B38/RISK-15 can also fire on browser.noSandbox alone.
+                ". If dangerouslyAllowPrivateNetwork must stay on, also add "
+                "browser.ssrfPolicy.blockedHostnames (OpenClaw 2026.9.1 and later) naming "
+                "at least the cloud-metadata addresses — 169.254.169.254, "
+                "metadata.google.internal, 100.100.100.200 — which still blocks them "
+                "even with the flag enabled."
+                if allow_private else "."
+            )
+            + " Breaking either leg breaks the chain."
         ),
     )
 

@@ -228,3 +228,81 @@ def test_run_pipeline_ctx_none_page_absent_from_sections():
     result = pl.PipelineResult()
     assert result.coverage_page == {}
     assert not any("COVERAGE" in line for line in pl.render_sections(result))
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: the three renderers this page's DoD names (PDF / dashboard / HTML) —
+# rejected three times over (2026-08-09, 08-11, 08-12, and again in the 2026-09-05
+# sweep) for carrying the computation but never reaching these render paths. Each
+# renderer gets both directions: the block appears when `coverage_page` is supplied,
+# and every pre-existing caller (no `coverage_page` argument at all) is unaffected.
+# ---------------------------------------------------------------------------
+
+def _real_page():
+    ctx = collect(FIXTURES / "clean_full")
+    from clawseccheck.checks import run_all
+    findings = run_all(ctx)
+    return ctx, findings, cov.build_coverage_page(ctx, findings)
+
+
+def test_render_dashboard_includes_coverage_page_when_supplied():
+    from clawseccheck.report import render_dashboard
+    from clawseccheck.scoring import compute
+    ctx, findings, page = _real_page()
+    score = compute(findings, ctx)
+    card = render_dashboard(findings, score, ctx=ctx, full=True, coverage_page=page)
+    assert "Coverage page" in card
+    assert "OpenClaw core" in card  # a real subject label, not just the heading
+
+
+def test_render_dashboard_coverage_page_absent_by_default():
+    """Every pre-existing caller passes no `coverage_page` — must stay byte-silent
+    on this block, same as before this feature existed."""
+    from clawseccheck.report import render_dashboard
+    from clawseccheck.scoring import compute
+    ctx, findings, _page = _real_page()
+    score = compute(findings, ctx)
+    card = render_dashboard(findings, score, ctx=ctx, full=True)
+    assert "Coverage page" not in card
+
+
+def test_render_html_includes_coverage_page_when_supplied():
+    from clawseccheck.report import render_html
+    from clawseccheck.scoring import compute
+    ctx, findings, page = _real_page()
+    score = compute(findings, ctx)
+    html = render_html(findings, score, ctx=ctx, coverage_page=page)
+    assert "Coverage page" in html
+    assert "OpenClaw core" in html
+
+
+def test_render_html_coverage_page_absent_by_default():
+    from clawseccheck.report import render_html
+    from clawseccheck.scoring import compute
+    ctx, findings, _page = _real_page()
+    score = compute(findings, ctx)
+    html = render_html(findings, score, ctx=ctx)
+    assert "Coverage page" not in html
+
+
+def test_render_pdf_includes_coverage_page_when_supplied():
+    from _pdftext import content_text
+    from clawseccheck.pdf import render_pdf
+    from clawseccheck.scoring import compute
+    ctx, findings, page = _real_page()
+    score = compute(findings, ctx)
+    data = render_pdf(findings, score, ctx=ctx, coverage_page=page)
+    text = content_text(data)
+    assert "Coverage page" in text
+    assert "OpenClaw core" in text
+
+
+def test_render_pdf_coverage_page_absent_by_default():
+    from _pdftext import content_text
+    from clawseccheck.pdf import render_pdf
+    from clawseccheck.scoring import compute
+    ctx, findings, _page = _real_page()
+    score = compute(findings, ctx)
+    data = render_pdf(findings, score, ctx=ctx)
+    text = content_text(data)
+    assert "Coverage page" not in text

@@ -26,6 +26,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -446,6 +447,131 @@ def test_record_carries_a_live_diagnosis_and_drops_a_stale_one():
 def test_carry_diagnoses_handles_a_first_ever_record():
     kept, dropped = gate.carry_diagnoses(None, _snapshot([_row("A1")]))
     assert kept == [] and dropped == []
+
+
+# ------------------------------------------------------------- layer 1: RISK chains (C-492)
+#
+# `scripts/fleet_fp_gate.py` used to see `Finding` objects only -- `RiskPath` objects
+# (the 26 RISK-* combinational chains) never entered the snapshot, so a false-positive
+# HIGH on one (RISK-02 fired for days on this project's own real machine, per B-730)
+# could never trip the gate. `risk_rows()` gives a RISK chain the identical
+# `(scope, target, id)` shape a FAIL row already has, so every generic mechanism below
+# (`compare`, `add_diagnosis`, the diagnosis index) needs no scope-specific branch.
+
+def _rp(rid, severity=HIGH, *, suppressed=False):
+    """A minimal stand-in for `risk.RiskPath` -- `risk_rows()` only reads `.id`,
+    `.severity` and `.suppressed`, via `getattr`, so a real RiskPath is not needed to
+    exercise it (and constructing one means satisfying every RISK-rule's own
+    ctx/findings preconditions, which is exactly the second scan this gate must not
+    perform)."""
+    return SimpleNamespace(id=rid, severity=severity, suppressed=suppressed)
+
+
+def test_risk_rows_keeps_only_unsuppressed_chains():
+    paths = [_rp("RISK-01"), _rp("RISK-09", suppressed=True), _rp("RISK-22", CRITICAL)]
+    assert {r["id"] for r in gate.risk_rows(paths)} == {"RISK-01", "RISK-22"}
+
+
+def test_risk_rows_target_is_always_empty_scope_is_risk_and_rows_are_sorted():
+    rows = gate.risk_rows([_rp("RISK-09"), _rp("RISK-02", CRITICAL)])
+    assert [r["id"] for r in rows] == ["RISK-02", "RISK-09"]  # fail_key sort, not severity
+    assert {r["target"] for r in rows} == {""}
+    assert {r["scope"] for r in rows} == {"risk"}
+
+
+def test_risk_rows_carries_no_extra_fields():
+    row = gate.risk_rows([_rp("RISK-02")])[0]
+    assert set(row) == {"scope", "target", "id", "severity"}
+
+
+def test_compare_flags_a_new_risk_chain_as_a_blocker():
+    """The exact defect this task closes: a RISK-* chain now blocks a `compare` run the
+    same way a check FAIL already does."""
+    baseline = _snapshot([])
+    snap = _snapshot([_row("RISK-02", scope="risk", severity=CRITICAL)])
+    result = gate.compare(snap, baseline)
+    assert result["blocked"] is True
+    assert [r["id"] for r in result["new_fails"]] == ["RISK-02"]
+
+
+def test_compare_reports_a_resolved_risk_chain_and_does_not_block():
+    baseline = _snapshot([_row("RISK-02", scope="risk", severity=CRITICAL)])
+    snap = _snapshot([])
+    result = gate.compare(snap, baseline)
+    assert result["blocked"] is False
+    assert [r["id"] for r in result["resolved_fails"]] == ["RISK-02"]
+
+
+def test_a_risk_chain_severity_regrade_alone_is_not_a_new_fail():
+    """Mirrors `test_a_severity_regrade_alone_is_not_a_new_fail` for the check-FAIL
+    identity -- C-492's DoD point 2, decided the same way for RISK rows."""
+    baseline = _snapshot([_row("RISK-02", scope="risk", severity=HIGH)])
+    snap = _snapshot([_row("RISK-02", scope="risk", severity=CRITICAL)])
+    result = gate.compare(snap, baseline)
+    assert result["blocked"] is False
+    assert result["new_fails"] == []
+
+
+def test_add_diagnosis_refuses_a_risk_chain_that_is_not_live():
+    baseline = _snapshot([])
+    snap = _snapshot([])  # RISK-02 not live
+    with pytest.raises(ValueError, match="not a live FAIL"):
+        gate.add_diagnosis(baseline, snap, scope="risk", target="", check_id="RISK-02",
+                           note="known: empty credentials dir, see B-730")
+
+
+def test_add_diagnosis_accepts_a_live_risk_chain():
+    baseline = _snapshot([])
+    snap = _snapshot([_row("RISK-02", scope="risk", severity=CRITICAL)])
+    updated = gate.add_diagnosis(baseline, snap, scope="risk", target="", check_id="RISK-02",
+                                 note="known: empty credentials dir, see B-730")
+    result = gate.compare(snap, updated)
+    assert result["blocked"] is False
+    assert [r["id"] for r in result["known_fails"]] == ["RISK-02"]
+    assert result["known_fails"][0]["diagnosis"] == "known: empty credentials dir, see B-730"
+
+
+def test_check_fail_behaviour_is_unchanged_when_risk_rows_are_present():
+    """Explicit regression guard (per this task's own test plan): a snapshot carrying
+    BOTH an audit-scope FAIL and a risk-scope chain still blocks/resolves/diagnoses each
+    independently -- adding the risk scope must not perturb the 21+ call sites' worth of
+    existing expectations around the audit/vet/vet-plugin scopes."""
+    baseline = _snapshot([_row("B181"), _row("RISK-02", scope="risk", severity=CRITICAL)])
+    snap = _snapshot([
+        _row("B181"),                                      # unchanged -- known already
+        _row("RISK-02", scope="risk", severity=CRITICAL),  # unchanged -- known already
+        _row("B999", scope="vet", target="beta"),           # genuinely new
+    ])
+    result = gate.compare(snap, baseline)
+    assert result["blocked"] is True
+    assert [r["id"] for r in result["new_fails"]] == ["B999"]
+    assert result["resolved_fails"] == []
+
+
+def test_build_snapshot_wires_risk_rows_into_the_fail_set(monkeypatch):
+    """Tests the CALL SITE, not just `risk_rows()` in isolation (per the project's own
+    'test the wiring, not the helper' lesson) -- this would fail if the `risk_rows(...)`
+    call were ever removed from `build_snapshot`, the exact shape of the original defect.
+    """
+    ctx = SimpleNamespace(plugin_index_records=[])
+    score = SimpleNamespace(score=50, grade="F")
+
+    monkeypatch.setattr(
+        gate, "audit",
+        lambda home, **kw: (ctx, [_f("B1", FAIL)], score),
+    )
+    monkeypatch.setattr(gate, "discover_targets", lambda home: ([], []))
+    monkeypatch.setattr(gate, "discover_plugin_roots", lambda ctx: ([], []))
+    monkeypatch.setattr(gate, "load_ignore", lambda home: set())
+    monkeypatch.setattr(
+        gate, "risk_paths",
+        lambda ctx, findings, ignore=None: [_rp("RISK-02", CRITICAL)],
+    )
+
+    snap = gate.build_snapshot(home="/nonexistent/does-not-matter")
+    ids_by_scope = {(r["scope"], r["id"]) for r in snap["fails"]}
+    assert ("audit", "B1") in ids_by_scope
+    assert ("risk", "RISK-02") in ids_by_scope
 
 
 # ------------------------------------------------------- layer 2: local, real baseline

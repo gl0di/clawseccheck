@@ -1332,6 +1332,36 @@ _NOT_IN_CURRENT_SCHEMA = {
         "depend on it."
     ),
 
+    # ---- retired key, still HONOURED by the runtime's own in-memory repair -----------
+    # Same category as agents.defaults.tools below (undeclared but read), for a
+    # RETIRED key rather than an undocumented one: EXECUTED against
+    # SsrFPolicyConfigSchema (zod-schema.core-mVpnhNqD.mjs:70-76, `.strict()`, 5 fields:
+    # dangerouslyAllowPrivateNetwork/allowRfc2544BenchmarkRange/
+    # allowIpv6UniqueLocalRange/allowedHostnames/blockedHostnames):
+    # `schema.safeParse({allowPrivateNetwork: true})` ->
+    # `[{code: "unrecognized_keys", keys: ["allowPrivateNetwork"], path: []}]`. So a raw
+    # openclaw.json carrying only this key fails canonical validation outright — but
+    # `resolveStartupConfigSnapshot`'s pre-bootstrap repair (config-Dc3xLSSD.mjs:117-130)
+    # ORs it into `dangerouslyAllowPrivateNetwork` and `delete`s it from the resolved
+    # config IN MEMORY on every boot, before the strict schema ever sees it, and does so
+    # without writing the repair back to disk (the write-back only happens via the
+    # separate `doctor` flow, doctor-config-flow-BoTzHMKN.mjs:217-228, which pre-bootstrap
+    # never calls). So the raw file can carry this key indefinitely while the running
+    # daemon already granted private-network access. B38/RISK-05/RISK-15 (checks/_egress.py,
+    # risk.py) read it directly for exactly that reason — reading only the canonical key
+    # would miss a live, silent bypass a schema-validity check would wrongly certify as
+    # closed."
+    "browser.ssrfPolicy.allowPrivateNetwork": (
+        "safeParse: unrecognized_keys@browser.ssrfPolicy keys=[\"allowPrivateNetwork\"] "
+        "(SsrFPolicyConfigSchema, zod-schema.core-mVpnhNqD.mjs:70-76, is .strict() with "
+        "exactly 5 fields and does not include this legacy key); READ ANYWAY because the "
+        "runtime's own pre-bootstrap repair (config-Dc3xLSSD.mjs:117-130) folds it into "
+        "dangerouslyAllowPrivateNetwork in memory on every boot without writing the fix "
+        "back to disk (doctor-config-flow-BoTzHMKN.mjs:217-228 owns the on-disk migration "
+        "and pre-bootstrap never calls it) — a raw config carrying only this key is a "
+        "live, silent private-network bypass a schema-validity read would miss entirely."
+    ),
+
     # ---- undeclared but HONOURED by the runtime (a category of its own) ---------------
     # Not a legacy read and not a retirement: this key is absent from the CURRENT schema
     # and the CURRENT runtime reads it anyway. It is registered here rather than dropped

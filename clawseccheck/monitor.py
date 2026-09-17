@@ -506,7 +506,16 @@ WATCHED_DIMENSIONS = (
     "openclaw_install",
     "plugins",
     "raw_score",
+    # C-469: the exact numerator/denominator behind `raw_score` (`ScoreResult.earned`/
+    # `.total`, B-505) — recorded alongside the rounded percentage so the backstop above
+    # can see a regression smaller than one rounded integer (~4 weight units on a real
+    # machine). Written unconditionally, same as `raw_score` itself: `getattr(score,
+    # "earned"/"total", None)` on every run, `None` only for the handful of duck-typed
+    # test doubles that carry no such attribute at all (see `raw_backstop`'s C-469 note —
+    # an absent figure on either side just skips the refinement, same self-healing idiom).
+    "raw_score_earned",
     "raw_score_scope",
+    "raw_score_total",
     "scope",
     "score",
     "skill_provenance",
@@ -644,6 +653,17 @@ def snapshot(ctx, findings, score, prev: "dict | None" = None,
         # diff() refuse to trust a raw-score fall across a denominator that moved (an
         # upgrade shipping new checks), rather than comparing two incomparable numbers.
         "raw_score_scope": _raw_score_scope(findings),
+        # C-469: the exact numerator/denominator raw_score was rounded FROM
+        # (`ScoreResult.earned`/`.total`, B-505). `raw_score` alone cannot show a fall
+        # smaller than its own rounding (~4 weight units on a real ~407-unit machine);
+        # `raw_backstop` reads these to catch one, but only once the scope hash above also
+        # pins per-check weight equal (see that function's and `_raw_score_scope`'s C-469
+        # notes) — comparing earned directly is unsound without that. `getattr(..., None)`,
+        # same tolerance as `raw_score` itself: a handful of duck-typed test doubles carry
+        # `.score`/`.grade` only, and an absent figure here just means this run cannot
+        # refine the comparison, never a fabricated zero.
+        "raw_score_earned": getattr(score, "earned", None),
+        "raw_score_total": getattr(score, "total", None),
         "grade": score.grade,
         # B-511: whether this run EARNED that grade. E-077 withholds the letter unless all
         # five layers ran, and since C-426 the default run does not — so `score`/`grade`

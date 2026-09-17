@@ -7,7 +7,7 @@ its absence from a baseline suppresses the drop alert outright.
 """
 
 from __future__ import annotations
-from ..catalog import FAIL, FAIL_WEIGHT_STATUSES, UNKNOWN  # noqa: F401
+from ..catalog import FAIL, FAIL_WEIGHT_STATUSES, UNKNOWN, WEIGHT  # noqa: F401
 from ._shared import (  # noqa: F401
     NOTE_NO_PRIOR_RECORD,
     NOTE_RECORD_DAMAGED,
@@ -104,8 +104,13 @@ def _diff_score(
             # FAILs. Keeping the rules here and restating them there is the shape B-689,
             # B-692 and B-693 each turned out to be. The note TEXTS stay here: they address
             # a monitor user, and the trend addresses its own reader.
+            # C-469: the two extra keys let `raw_backstop` compare the exact `earned`
+            # figure (not just the rounded `raw_score` percentage) when both snapshots
+            # recorded it — see that function's docstring for why the weight-aware scope
+            # hash above is what makes doing so sound.
             verdict, p_raw, c_raw = raw_backstop(
-                prev, curr, "raw_score_scope", "raw_score")
+                prev, curr, "raw_score_scope", "raw_score",
+                "raw_score_earned", "raw_score_total")
             # C-418: this backstop is the ONLY thing that catches posture worsening once an
             # open FAIL has pinned the displayed score, so a run where it cannot fire is a
             # run with a real hole in it — and the hole was previously invisible.
@@ -142,9 +147,9 @@ def _diff_score(
 def _raw_score_scope(findings) -> str:
     """C-135/FIX1: a hash of exactly the check ids ``scoring.compute()`` folded into THIS
     run's ``raw_score`` denominator — scored, not UNKNOWN/ARCHIVE, and not suppressed
-    unless it is a FAIL. Mirrors ``scoring.compute()``'s own ``scored`` selection by hand
-    (kept in sync deliberately rather than imported, since ``scoring.py`` is a sibling
-    module this fix does not touch).
+    unless it is a FAIL — PAIRED WITH each one's own weight. Mirrors ``scoring.compute()``'s
+    own ``scored`` selection by hand (kept in sync deliberately rather than imported, since
+    ``scoring.py`` is a sibling module this fix does not touch).
 
     ``raw_score`` is a weighted PASS-RATE, and its denominator is exactly this set's total
     weight. That denominator grows every time a release ships new checks, so two
@@ -157,6 +162,22 @@ def _raw_score_scope(findings) -> str:
     alerts that correctly do not exist. This campaign alone moved the catalog from 143 to
     148 checks, so the defect would have fired on the project's own next release.
 
+    C-469: WEIGHT joined the hashed pair after an adversarial pass on that task's first
+    attempt found the same class of hole one layer down. An id-only scope hash says two
+    runs scored the same CHECKS, never that they scored them the same WAY — a check whose
+    SEVERITY is data-dependent (e.g. B171, CRITICAL vs HIGH depending on which
+    `commands.*` surface is enabled) can retune between two runs with the id set
+    byte-identical. Concretely: B9 MEDIUM(3)->LOW(1) staying PASS both runs, and B12
+    LOW(1)->MEDIUM(3) staying FAIL both runs, hold `total` at 3+1=4 in both runs (so a
+    naive `total` equality check does not catch it either) while `earned` falls 3->1 with
+    NO check's status ever changing — a false "posture degraded" pointing at check-level
+    alerts that do not exist. Hashing `id:weight` pairs makes a lone retune move the scope
+    hash itself, so it reads as RAW_SCOPE_MOVED (a denominator that moved) rather than a
+    fabricated RAW_DEGRADED — and it is what makes comparing `earned` directly sound at
+    all: identical scope now PROVES identical per-check weight, so an `earned` fall behind
+    it can only come from a check's own status moving. See `raw_backstop`'s earned/total
+    branch (`monitordims/_shared.py`).
+
     The sibling PASS->FAIL arm below already carries the matching guard for exactly this
     reason (``pc.get(cid) == PASS``, chosen so "a check newly added by an upgrade, absent
     from the previous snapshot, cannot fire") — that reasoning had not been carried to
@@ -168,8 +189,8 @@ def _raw_score_scope(findings) -> str:
     a verdict against a moved denominator, the same self-healing, absent-key-is-a-no-op
     idiom every other dimension in this module already uses.
     """
-    ids = sorted(
-        f.id for f in findings
+    scored = [
+        f for f in findings
         if f.scored
         # B-751: mirrors scoring.compute()'s exclusions, which is why this moved with it.
         # The traversal status was excluded alongside UNKNOWN, so the drift signature did
@@ -177,5 +198,8 @@ def _raw_score_scope(findings) -> str:
         and f.status != UNKNOWN
         and (not getattr(f, "suppressed", False)
              or f.status in FAIL_WEIGHT_STATUSES)
-    )
-    return _h(",".join(ids))
+    ]
+    # C-469: `id:weight`, not just `id` — see the docstring. `WEIGHT[f.severity]` mirrors
+    # exactly what `scoring.compute()` sums into `total` for this same finding.
+    pairs = sorted(f"{f.id}:{WEIGHT[f.severity]}" for f in scored)
+    return _h(",".join(pairs))

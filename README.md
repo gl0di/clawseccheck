@@ -18,7 +18,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="210 security checks · 26 attack-chain detectors · 23,228 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.9.4 verified" width="900">
+    <img src="docs/assets/stats-light.svg" alt="214 security checks · 26 attack-chain detectors · 24,370 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.9.4 verified" width="900">
   </picture>
 </p>
 
@@ -153,6 +153,21 @@ history all live under `~/.clawseccheck/` and are removable at any time
 (`--purge`). Points elsewhere with `--state` / `--events` if you want to keep
 several watches apart.
 
+**Prefer it running continuously instead of on a schedule?** `--watch` is the
+same mode, run a different way: instead of you or a cron job invoking
+`--monitor` again, it stays running and re-scans automatically the moment
+something relevant changes under `--home` (debounced — real-time on Linux via
+inotify, a bounded poll elsewhere). It never returns until stopped (`Ctrl-C`),
+and writes only under `--data-dir`, exactly like `--monitor`:
+
+```bash
+clawseccheck --watch
+```
+
+Check whether one is already running with `--watch-status` — read-only, and
+it never starts a watch itself. Full mechanism and liveness details:
+[User guide](docs/USAGE.md#--watch--continuous-real-time-monitoring).
+
 ### C · Before you install — *is this thing safe to add?*
 
 Run it on the event. Gives you INSTALL / CAUTION / DO-NOT-INSTALL — not a
@@ -214,7 +229,7 @@ These are the areas a full check covers across its five layers:
 | 🔐 **Secrets & data at rest** | Are your tokens, keys, and conversations lying around readable? |
 | 📡 **Monitoring & readiness** | Would you even notice a compromise — and could you investigate it? |
 
-On top of the 210 individual checks, a **risk engine** hunts for deadly
+On top of the 214 individual checks, a **risk engine** hunts for deadly
 *combinations* — chains like "untrusted input → reachable secrets → outbound
 tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)**.
 
@@ -247,7 +262,7 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
   capabilities — plus a documented zero-false-positive-FAIL release
   discipline: an alarm reaching you is a specific, reproducible, test-pinned
   condition in your own config, not a keyword match dressed up as a scan.
-- **Built like it matters.** 23,228 automated tests run on every change, a
+- **Built like it matters.** 24,370 automated tests run on every change, a
   false alarm is treated as a release-blocking bug, and every release is
   cryptographically signed.
 - **Free and readable.** MIT-licensed, pure Python standard library, zero
@@ -422,7 +437,21 @@ clawseccheck --html report.html      # standalone HTML report (private)
 clawseccheck --pdf report.pdf        # complete audit as a paginated PDF (attach into chat)
 clawseccheck --exhaustive            # raise the scan caps: slower, maximum coverage
 clawseccheck --fail-on high          # CI gate: exit 1 if an unsuppressed FAIL at/above HIGH exists
+clawseccheck --explain B2            # full detail on one check, no full re-scan
+clawseccheck --retest B2             # re-check just that one after a fix
+clawseccheck --save-run              # snapshot this run so a later --diff can compare it
+clawseccheck --diff RUN1 RUN2        # new/fixed findings between two saved runs
+clawseccheck --incident-open         # open a tracked incident record from this run's findings
+clawseccheck --incident-mark ID investigating   # move it through open/investigating/mitigated/closed
+clawseccheck --incident-show ID      # its status, history, and the --monitor timeline since it opened
+clawseccheck --judge-packet          # export borderline findings for a host-agent second opinion
 ```
+
+Two more nuances the User guide covers in full: `--save-sbom-run` / `--sbom-diff` do for
+the bill-of-materials what `--save-run` / `--diff` do for findings — added/removed/changed
+components between two points in time — and `--exit-code-scheme graduated` reuses
+`--monitor`'s 0/1/3 convention for `--fail-on`/`--exit-code` instead of the default binary
+0/1, for a CI consumer that wants "could not produce a verdict" told apart from a real FAIL.
 
 The **[User guide](docs/USAGE.md)** covers the modes and recipes — vetting engines,
 drift monitoring, attestation, red-team self-tests. `clawseccheck --help` is the
@@ -464,7 +493,7 @@ as unprotected on Windows — see the [User guide](docs/USAGE.md) for the detail
 | Document | What it covers |
 |---|---|
 | [User guide](docs/USAGE.md) | Recipes, monitoring modes, and trust details |
-| [Check catalog](docs/CHECKS.md) | All 210 checks: what they verify and how to remediate |
+| [Check catalog](docs/CHECKS.md) | All 214 checks: what they verify and how to remediate |
 | [Threat coverage](docs/THREAT_COVERAGE.md) | OWASP LLM Top 10 / Agentic threat mapping |
 | [Bundled IOC dataset](docs/IOC_DATA.md) | Provenance policy, refresh cadence, and freshness discipline for the known-bad catalog |
 | [Output schema](docs/OUTPUT_SCHEMA.md) | The frozen `--json` / SARIF contract |

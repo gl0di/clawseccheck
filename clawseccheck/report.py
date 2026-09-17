@@ -65,7 +65,17 @@ def _sanitize(s: str) -> str:
     if not s:
         return s
     s = _BAD_CHARS_RE.sub("", _ANSI_OSC_RE.sub("", s))
-    for c in "\r\n\t":
+    # B-770 (C-135): the fold used to cover only \r/\n/\t. _BAD_CHARS_RE just above
+    # already removes \x0b/\x0c/\x1c-\x1e and \r (all inside its \x0b-\x1f range), but
+    # three more characters Python's OWN `str.splitlines()` treats as a line boundary
+    # were left unfolded: \x85 NEL, \u2028 LINE SEPARATOR, \u2029 PARAGRAPH SEPARATOR
+    # -- the same set `_breaks_the_line_it_is_printed_on` names for --vet-plan's
+    # command blocks (B-577). `pipeline.py::run_behavioral`'s own `rendered.
+    # splitlines()` re-split treats every one of them as a boundary too, so an
+    # unfolded one here forges an extra `PhaseResult.lines` entry out of a single
+    # string this function had already "sanitized" -- letting attacker-influenced
+    # trajectory text (e.g. a tool-call verb name) forge a fake report line/section.
+    for c in "\r\n\t\x85\u2028\u2029":
         s = s.replace(c, " ")
     # Lazy import avoids the report -> logsafe -> checks import cycle during package
     # initialisation. Every renderer shares this boundary, so secret redaction cannot be
@@ -115,11 +125,26 @@ def _redact_home_paths(text: str) -> str:
       read and `--watch-log`'s events read all share -- a path a user types on the
       command line routinely embeds their own username, and this text reaches stderr
       unconditionally, not just inside `--dashboard`.
+    * `_sanitize_tree` (C-456) wraps every string in the JSON-tree output family --
+      unlike the two callers above, this genuinely IS a single choke point, because
+      render_json/render_vet_json/render_vet_all_json/render_advise_json, sarif.py's
+      whole-log pass, adjudication.py's judge packet, and pipeline.py's C8 tree all
+      already call it for the (previously secret-only) `_sanitize` pass. `--json` and
+      SARIF are named together in docs/USAGE.md as the CI-gating / machine-consumed
+      surface, and the no-PATH `--pdf` (fixed separately, at its own render call in
+      pdf.py, since PDF has no tree to route through this function) is how OpenClaw
+      attaches a report to a chat message -- both routinely leave the machine the same
+      way the dashboard card and SARIF already did. `incident.py`'s evidence-pack
+      builder deliberately does NOT go through `_sanitize_tree` (it calls
+      `_finding_to_dict` directly and `json.dumps`s its own payload) and is therefore
+      NOT redacted here, matching that module's own "verbatim... never mutates"
+      doctrine for a forensic-preservation artifact.
 
     Each caller applies this function itself, at its own render boundary, rather than
-    this module reaching out to redact on their behalf -- there is no single choke
-    point all of report/sarif/cli output passes through, so the alternative would be
-    re-deciding the redaction (and the regex) per call site instead of sharing it.
+    this module reaching out to redact on their behalf -- for everything except the
+    JSON-tree family above, there is still no single choke point all of report/sarif/
+    cli output passes through, so re-deciding the redaction (and the regex) per call
+    site remains the alternative there.
     """
     if not text:
         return text
@@ -171,9 +196,19 @@ def _evidence_bullets(
 
 
 def _sanitize_tree(value):
-    """Recursively sanitize untrusted strings in machine-readable output trees."""
+    """Recursively sanitize untrusted strings in machine-readable output trees.
+
+    C-456: also folds a leading user-home path segment to '~' (`_redact_home_paths`),
+    mirroring `sarif.py`'s per-field `_sarif_text` wrapping (B-620) -- extended here so
+    every OTHER JSON tree that already funnels through this one function gets the same
+    protection with no per-call-site duplication: render_json, render_vet_json,
+    render_vet_all_json, render_advise_json (all in this module), sarif.py's own
+    whole-log pass, adjudication.py's judge packet, and pipeline.py's C8 tree.
+    `incident.py` deliberately does NOT call this function (see its own module
+    docstring's "verbatim... never mutates" doctrine) and is unaffected.
+    """
     if isinstance(value, str):
-        return _sanitize(value)
+        return _redact_home_paths(_sanitize(value))
     if isinstance(value, list):
         return [_sanitize_tree(item) for item in value]
     if isinstance(value, tuple):
@@ -500,6 +535,30 @@ def _cap_also_clause(extras: list[str]) -> str:
 # share the constant, so they cannot drift into three different sentences again.
 _UNGRADED_CAP_TAIL = "it would have capped the grade, but this run has no grade to cap."
 _UNGRADED_CAP_TAIL_SENTENCE = _UNGRADED_CAP_TAIL[0].upper() + _UNGRADED_CAP_TAIL[1:]
+
+# B-761: the text report renders the "Highest-risk paths" attack-chain synthesis, the
+# capability graph, and the "What you can do next" recommendations — `render_html`
+# and `pdf.render_pdf` do not, and used to say nothing about the gap. Both exports
+# stayed "findings-only view, honestly disclosed" (option 2 of the task's two
+# acceptable outcomes) rather than growing renderers for a graph and a chain synthesis
+# in HTML/PDF markup, so this one sentence is the single source of that disclosure —
+# shared verbatim so it cannot drift into two different claims about what a shared
+# report contains, the same discipline `_UNGRADED_CAP_TAIL` above already follows.
+_EXPORT_FINDINGS_ONLY_NOTE = (
+    'This is a findings-only view. It does not include the "Highest-risk paths" '
+    'attack-chain synthesis, the capability graph, or the "What you can do next" '
+    "recommendations — see the full text report (the default output, or --save) for those."
+)
+
+# B-761 follow-up: the richer `--dashboard --full --pdf` document DOES carry a "RISK
+# chains" section (render_pdf's own `risk` parameter, wired at that call site) —
+# printing the 3-item note above on THAT document would itself be the false claim
+# this task exists to stop. This is the 2-item remainder for exactly that path: what
+# is still missing when the attack-chain synthesis is not.
+_EXPORT_RISK_INCLUDED_NOTE = (
+    'This PDF does not include the capability graph or the "What you can do next" '
+    "recommendations — see the full text report (the default output, or --save) for those."
+)
 
 
 def _cap_primary_reason_text(primary: str, score: ScoreResult, *,
@@ -1324,22 +1383,50 @@ _ASCII_MAP = ASCII_MAP
 _asciify = asciify
 
 
+# B-756: the field set the per-finding digest covers, named as a constant rather than
+# left implicit in a dict literal so a test can pin it — a silent rename/drop is what
+# hid the original defect. The version this replaced read `check_id`/`rule_id`/
+# `verdict`/`path`/`file`/`line`: NONE of those ever existed on `Finding`
+# (catalog.Finding's real fields are id/title/severity/status/detail/fix/framework/...),
+# so every one of those `getattr(f, name, default)` reads silently fell back to its
+# default — the receipt was effectively `sha256(severity + detail[:200])` per finding.
+# Measured: flipping every finding's status to PASS, or renaming every check id,
+# produced a byte-identical receipt. `id` binds the receipt to WHICH check; `status` to
+# its verdict (the entire point of tamper evidence — a receipt that cannot move when a
+# FAIL becomes a PASS attests to nothing); `title`/`fix`/`detail` to the text a reader
+# actually sees. `path`/`line`/`verdict` are dropped rather than kept as dead reads —
+# `Finding` carries none of them, and a `getattr` default is exactly what let a dead
+# field hide here before.
+_SCAN_RECEIPT_FIELDS = ("id", "status", "severity", "title", "fix", "detail")
+_SCAN_RECEIPT_TRUNCATE = 200
+
+
 def compute_scan_receipt(findings) -> str:
     """Compute a deterministic Merkle-style root hash over all findings.
 
-    Each finding is hashed individually; hashes are sorted then combined.
-    Returns a 64-char hex string. Empty/None findings → sha256 of empty bytes.
-    Pure stdlib, local-only. Never raises.
+    Each finding is hashed individually over `_SCAN_RECEIPT_FIELDS` — every one a
+    guaranteed-present `Finding` attribute, read with no `getattr` default (a missing
+    attribute raises, caught by this function's own try/except below, rather than
+    silently hashing an empty string the way the B-756 bug did). Hashes are sorted
+    then combined. Returns a 64-char hex string. Empty/None findings → sha256 of empty
+    bytes. Pure stdlib, local-only. Never raises.
+
+    `status` is hashed through `catalog.display_status`, NOT the raw field (B-756
+    follow-up, tests/test_b755_status_substitution_oracle.py): every FAIL-weight
+    status (`FAIL_WEIGHT_STATUSES` — today `FAIL` and `SKILL_ARCHIVE_PATH_TRAVERSAL`)
+    must produce the SAME receipt, because B-755's oracle requires every consumer to
+    treat them identically — a receipt that moved between two literal spellings of the
+    same verdict would itself be exactly the "discriminates between FAIL-weight
+    statuses" defect that oracle exists to catch. Canonicalising still moves the
+    receipt on any REAL verdict change (FAIL/SKILL_ARCHIVE_PATH_TRAVERSAL -> PASS,
+    -> WARN, -> UNKNOWN, ...), which is the whole point B-756 fixed.
     """
     try:
         def finding_digest(f):
-            canonical = json.dumps({
-                "check_id": str(getattr(f, "check_id", "") or getattr(f, "rule_id", "")),
-                "verdict": str(getattr(f, "verdict", "") or getattr(f, "severity", "")),
-                "path": str(getattr(f, "path", "") or getattr(f, "file", "")),
-                "line": int(getattr(f, "line", 0) or 0),
-                "detail": str(getattr(f, "detail", "") or "")[:200],
-            }, sort_keys=True, ensure_ascii=True)
+            fields = {name: str(getattr(f, name) or "")[:_SCAN_RECEIPT_TRUNCATE]
+                      for name in _SCAN_RECEIPT_FIELDS}
+            fields["status"] = display_status(fields["status"])
+            canonical = json.dumps(fields, sort_keys=True, ensure_ascii=True)
             return hashlib.sha256(canonical.encode()).hexdigest()
 
         if not findings:
@@ -4170,7 +4257,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
                      ascii_only: bool = False, ctx=None, full: bool = False,
                      risk=None, plugin_sweep=None, behavioral=None,
                      adjudication=None, compact: bool = False, pdf_path=None,
-                     compact_reserve: int = 0) -> str:
+                     compact_reserve: int = 0, coverage_page: dict | None = None) -> str:
     """Deterministic chat Dashboard card — Sections 1-2 of SKILL.md Step 3, pasted verbatim,
     plus an optional Section 3 (B-356) with per-skill vet verdicts, plus (F-153) the rest
     of --full's pipeline when `full=True`.
@@ -4440,6 +4527,18 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     if coverage_lines:
         tail_block += "\n" + "\n".join(coverage_lines) + "\n"
 
+    # F-165: the per-subject "was everything looked at" page (coverage.build_coverage_page)
+    # — a different question from `_coverage_lines` just above (config-SURFACE coverage,
+    # "which checks ran") — this is TARGET coverage ("were all N plugins vetted, all M
+    # trajectory files read"). `coverage_page` is optional and additive: every pre-existing
+    # caller passes nothing and reproduces the exact prior card, byte-identical.
+    if coverage_page:
+        from .coverage import coverage_page_lines as _coverage_page_lines  # noqa: PLC0415
+        cov_page_lines = _coverage_page_lines(coverage_page, ascii_only=ascii_only)
+        if cov_page_lines:
+            tail_block += ("\n" + f"{sep} Coverage page {sep}" + "\n"
+                          + "\n".join(cov_page_lines) + "\n")
+
     glance_marker = "" if ascii_only else "👀 "
     footer_block = "\nFull pipeline detail: --save <path> or --html <path>.\n" if compact else ""
 
@@ -4497,27 +4596,58 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     # columns and grew the graded card's box past the 39 C-428 fixed it at, which is an
     # invariant a test pins deliberately — a word is not worth breaking byte-identity for.
     l2 = f"  Lethal Trifecta: {_tri}" + (" (unverified)" if _tri == "?/3" else "")
+    # B-763: "Lethal Trifecta: 2/3" named a threat model and a fraction with no
+    # explanation anywhere on this artifact — the one a user posts publicly. A reader
+    # who does not already know the term learns only a number out of 3. One short row
+    # naming the three legs (kept under the established 39-column floor below, so it
+    # never grows the box on its own) — see catalog.py's own A1 title for the same three
+    # legs named in full ("untrusted input", "sensitive data", "outbound").
+    l2_gloss = "  (untrusted input, data, egress)"
     l3 = "  audited by ClawSecCheck" + ("" if ascii_only else f" {brand.MASCOT}")
+    # B-625: --card accepted --full/--behavioral and rendered NOTHING for the result --
+    # every other surface that carries a grade (render_report, render_html,
+    # render_dashboard) discloses a capped score through this exact shared
+    # `_cap_cascade`; this was the one shareable badge that stayed silent about WHY its
+    # own number is lower than the raw audit found. Same Golden Rule #4 shape B-465/
+    # B-467 already fixed on render_dashboard's card -- reusing the identical shared
+    # cascade rather than a fourth hand-rolled copy of the six-signal priority ladder.
+    # `None` on an uncapped run (the overwhelmingly common case), so a graded card with
+    # nothing capping it renders byte-identically to before this change.
+    _cap_primary, _cap_extras = _cap_cascade(score)
+    _mark = "!" if ascii_only else "⚠️"
+    cap_line = None
+    if getattr(score, "graded", True) and _cap_primary is not None:
+        cap_line = (
+            f"  {_mark} capped from {score.raw_score}/100 — "
+            f"{_cap_primary_reason_text(_cap_primary, score)}{_cap_also_clause(_cap_extras)}"
+        )
+    elif _cap_primary is not None:
+        # Same reasoning as render_dashboard's ungraded branch: "capped from N/100" has
+        # no number to attach to on a run with no grade, so `_UNGRADED_CAP_TAIL` states
+        # the fact without presupposing one.
+        cap_line = (
+            f"  {_mark} {_cap_primary_reason_text(_cap_primary, score)}"
+            f"{_cap_also_clause(_cap_extras)} — {_UNGRADED_CAP_TAIL}"
+        )
+    lines = [l1, l2, l2_gloss] + ([cap_line] if cap_line else [])
     # C-428: the width was a hardcoded 39, sized for "A ( 95/100)". The ungraded line is
     # longer than that, and `:<39` pads but never truncates — so the box art broke open
     # on exactly the runs the ungraded work introduced. Grow to fit; never shrink below
-    # the established 39 so a graded card renders byte-identically to before.
-    width = max(39, len(l1), len(l2))
+    # the established 39 so a graded, uncapped card renders byte-identically to before.
+    width = max([39] + [len(ln) for ln in lines])
     # Mascot header line, once (design-system Foundations); --ascii drops it to
     # stay pure-ASCII, matching render_dashboard's convention.
     header = "" if ascii_only else f"{brand.header()}\n"
     if ascii_only:
         top = bot = "+" + "-" * width + "+"
-        body = "\n".join(f"|{ln:<{width}}|" for ln in (l1, l2, l3))
+        body = "\n".join(f"|{ln:<{width}}|" for ln in (*lines, l3))
         return _asciify(f"{top}\n{body}\n{bot}")
     top = "┌" + "─" * width + "┐"
     bot = "└" + "─" * width + "┘"
     # the mascot emoji is double-width in many terminals; pad l3 one less
-    body = "\n".join([
-        f"│{l1:<{width}}│",
-        f"│{l2:<{width}}│",
-        f"│{l3:<{width - 1}}│",
-    ])
+    body = "\n".join(
+        [f"│{ln:<{width}}│" for ln in lines] + [f"│{l3:<{width - 1}}│"]
+    )
     return f"{header}{top}\n{body}\n{bot}"
 
 
@@ -4856,7 +4986,18 @@ _VET_VERDICT = {FAIL: "DANGEROUS", WARN: "SUSPICIOUS", PASS: "NO KNOWN ISSUE", U
 
 
 def _finding_to_dict(f: Finding) -> dict:
-    """Serialize one Finding to the frozen public JSON shape (shared by every renderer)."""
+    """Serialize one Finding to the frozen public JSON shape (shared by every renderer).
+
+    C-456: deliberately does NOT redact home paths here (only `_sanitize`'s secret-value
+    masking) -- unlike every OTHER caller of this dict, `incident.py`'s evidence-pack
+    builder calls this directly and never routes its payload through `_sanitize_tree`
+    (see that module's own "verbatim... never mutates" doctrine), so redacting HERE would
+    silently change that forensic artifact's content. The redaction lives one level up,
+    in `_sanitize_tree` itself, which every SHARING-shaped JSON renderer (render_json,
+    render_vet_json, render_vet_all_json, render_advise_json, sarif.py's tree pass,
+    adjudication.py's judge packet, pipeline.py's C8 tree) already funnels through --
+    see `_sanitize_tree`'s own docstring.
+    """
     _meta = BY_ID.get(f.id)
     return {"id": f.id, "title": _sanitize(f.title), "severity": f.severity,
             "status": f.status, "detail": _sanitize(f.detail),
@@ -5773,7 +5914,8 @@ def render_permission_manifest(ctx, target: str) -> str:
 def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
                 ctx=None, skill_sweep: dict | None = None, plugin_sweep=None,
                 live_test_vulnerable: bool = False, live_test_reason: str | None = None,
-                behavioral_fired_ids=frozenset(), ledger=None) -> str:
+                behavioral_fired_ids=frozenset(), ledger=None,
+                version: str | None = None) -> str:
     actions = suggest_actions(findings, score)
     _json_cfg: dict | None = (getattr(ctx, "config", {}) or {}) if ctx is not None else None
 
@@ -5783,12 +5925,25 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
             d["blast_radius"] = compute_blast_radius(_json_cfg, f.id)
         return d
 
+    # The audit payload was the one JSON surface with no
+    # producer-identity anchor -- render_vet_json/render_vet_all_json/
+    # render_judge_packet_json all take an explicit `version: str` from their caller
+    # (always `__version__`, threaded by cli.py). Matching that convention: an explicit
+    # `version=` is honoured so a caller can still assert it against
+    # `clawseccheck.__version__` itself, but a caller that omits it (e.g.
+    # adjudication.render_judged_json's internal `render_json(...)` call, which predates
+    # this and must keep working unchanged) gets the real installed version rather than a
+    # missing key -- same in-function import, for the same avoid-import-order-coupling
+    # reason, as `sbom.py::build_sbom`'s `from . import __version__`.
+    if version is None:
+        from . import __version__ as version  # noqa: PLC0415
     # C-423: `graded is False` means no consumer may read a real letter/number for
     # this run — "score"/"grade"/"raw_score" go to `None` (the keys stay present, so
     # `payload["score"]` reads `None` rather than raising `KeyError`). getattr/default
     # tolerates older duck-typed ScoreResult stand-ins, same as `earned`/`total` below.
     _graded = getattr(score, "graded", True)
     payload: dict = {
+        "version": version,
         "score": score.score if _graded else None,
         "grade": score.grade if _graded else None,
         "capped": score.capped,
@@ -5968,7 +6123,7 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
 
 
 def render_html(findings: list[Finding], score: ScoreResult, native=None,
-                *, ctx=None, plugin_sweep=None) -> str:
+                *, ctx=None, plugin_sweep=None, coverage_page: dict | None = None) -> str:
     """Standalone self-contained HTML report (inline CSS, no external assets).
 
     Includes the brand mark + wordmark, a grade badge (colored via
@@ -6153,6 +6308,27 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             f'{_excluded_html}</section>')
     else:
         subject_inventory_html = ""
+
+    # F-165: the per-subject "was everything looked at" page (coverage.
+    # build_coverage_page) — TARGET coverage ("were all N plugins vetted, all M
+    # trajectory files read"), a different question from the "Inventory by subject"
+    # table above (what did we FIND) and from the config-surface coverage the text
+    # report's own "Coverage of OpenClaw surfaces" block answers (which checks ran).
+    # `coverage_page` is optional and additive: every pre-existing caller passes
+    # nothing and reproduces the exact prior page, byte-identical. `<pre>` because
+    # `coverage_page_lines` already formats nested "not scanned" sub-items via leading
+    # spaces — a list would have to re-derive that structure to preserve it.
+    if coverage_page:
+        from .coverage import coverage_page_lines as _coverage_page_lines  # noqa: PLC0415
+        _cov_lines = _coverage_page_lines(coverage_page, ascii_only=False)
+        coverage_page_html = (
+            '<section class="cov-page" aria-label="Coverage page">'
+            '<h2 class="section-title">Coverage page</h2>'
+            f'<pre class="cov-page-body">{esc(chr(10).join(_cov_lines))}</pre>'
+            '</section>'
+        ) if _cov_lines else ""
+    else:
+        coverage_page_html = ""
 
     # B-306 (C-135 follow-up #3, 2026-07-21): gate on the granular cap signals, not
     # `score.capped` alone — see the matching comment in render_report for why
@@ -6503,6 +6679,11 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             background: var(--dot); margin-right: 0.4rem; vertical-align: middle; }}
         .inv-note {{ margin: 0.6rem 0 0; color: var(--muted); font-size: 0.85rem;
             line-height: 1.45; }}
+        .cov-page {{ margin: 1.75rem 0 0; }}
+        .cov-page-body {{ margin: 0.5rem 0 0; padding: 0.9rem 1rem; border-radius: 0.5rem;
+            background: var(--card); border: 1px solid var(--line); color: var(--ink);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.82rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }}
         .footer {{ margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
             text-align: center; color: var(--muted); font-size: 0.8rem; }}
         @media (max-width: 560px) {{ .container {{ padding: 1.4rem; }} .header h1 {{ font-size: 1.3rem; }} }}
@@ -6560,11 +6741,14 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
 
         {subject_inventory_html}
 
+        {coverage_page_html}
+
         <h2 class="section-title">{esc(section_findings)}</h2>
         {nav_html}
         {findings_html}
 
-        <footer class="footer">Generated locally by ClawSecCheck · read-only against your OpenClaw config · this report never leaves your machine</footer>
+        <footer class="footer">Generated locally by ClawSecCheck · read-only against your OpenClaw config · this report never leaves your machine
+            <br>{esc(_EXPORT_FINDINGS_ONLY_NOTE)}</footer>
     </main>
 </body>
 </html>'''
@@ -6623,7 +6807,11 @@ def render_brief(state: "dict | None", events: "list | None",
                  history: "list | None" = None, *, now=None,
                  state_mtime_iso: "str | None" = None,
                  ascii_only: bool = False) -> str:
-    """One to five lines: is the watch alive, and what did it say while you were away.
+    """Zero to five lines: is the watch alive, and what did it say while you were away.
+
+    Empty ("") means healthy and quiet — a fresh baseline, nothing notable in the
+    journal, no history concern — and is itself the report (Option A): nothing earns a
+    line unless it is informative.
 
     Pure: every input is passed in, nothing is read or written here. *state* is the parsed
     drift baseline (or None when there is none), *events* the journal entries, *history*
@@ -6652,8 +6840,9 @@ def render_brief(state: "dict | None", events: "list | None",
                 lines.append(
                     f"Last drift baseline was written {_brief_age_words(age)} (file time — "
                     "this baseline predates run timestamps, so the exact run is unknown).")
-        elif age is not None:
-            lines.append(f"Last drift check: {_brief_age_words(age)}.")
+        # Option A (Dave): a fresh, healthy check earns no line here — restating "Last
+        # drift check: Xh ago" carried zero signal and every session paid its cost. `age`
+        # is already set above; the staleness ladder right below still fires unchanged.
         if age is None:
             lines.append("A drift baseline exists but carries no timestamp, so how long "
                          "ago it was taken cannot be determined.")
@@ -6693,7 +6882,10 @@ def render_brief(state: "dict | None", events: "list | None",
         lines.append("The score history holds no rows from a real check — only test runs. "
                      "Nothing here reflects this machine.")
 
-    if not lines:
-        lines.append("No baseline, no events, no history — nothing to report yet.")
-    out = "\n".join(lines).rstrip() + "\n"
+    # No catch-all "nothing to report yet" line here on purpose: `lines` can now be
+    # genuinely empty (a healthy, recently-checked baseline, no events, no history
+    # concern) and that IS the report — a manufactured line would contradict Option A's
+    # "stay silent when healthy". `state is None` never reaches here empty: section 1
+    # above always appends "Nothing is watching..." unconditionally in that case.
+    out = "\n".join(lines).rstrip() + "\n" if lines else ""
     return _asciify(out) if ascii_only else out

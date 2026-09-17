@@ -29,6 +29,7 @@ FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 def _ctx(cfg: dict) -> Context:
     c = Context(home=Path("/nonexistent"))
     c.config = cfg
+    c.config_found = True  # B-661: `cfg` stands for a real, found config
     return c
 
 

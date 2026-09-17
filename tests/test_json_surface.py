@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from clawseccheck import __version__
 from clawseccheck.catalog import SURFACES
 from clawseccheck.cli import main
 
@@ -232,11 +233,54 @@ def test_json_projection_on_safe_fixture(capsys):
 
 def test_json_backcompat_existing_keys_present(capsys):
     doc = _json_doc(VULN, capsys)
-    for key in ("score", "grade", "capped", "raw_score", "trifecta",
+    for key in ("version", "score", "grade", "capped", "raw_score", "trifecta",
                 "findings", "next_actions", "capability_graph",
                 "secret_reachability", "intentAttestationRequests",
                 "scan_receipt"):
         assert key in doc, f"back-compat: top-level key {key!r} missing from --json"
+
+
+# ---------------------------------------------------------------------------
+# version: the audit payload's producer-identity anchor
+# ---------------------------------------------------------------------------
+
+def test_json_version_matches_package_version_on_vuln(capsys):
+    doc = _json_doc(VULN, capsys)
+    assert doc["version"] == __version__
+
+
+def test_json_version_matches_package_version_on_safe(capsys):
+    doc = _json_doc(SAFE, capsys)
+    assert doc["version"] == __version__
+
+
+def test_json_version_is_a_non_empty_string(capsys):
+    doc = _json_doc(VULN, capsys)
+    assert isinstance(doc["version"], str)
+    assert doc["version"]
+
+
+def test_render_json_version_defaults_to_package_version_when_omitted():
+    """A caller that omits version= (e.g. adjudication.render_judged_json's internal
+    render_json(...) call) must still get the real installed version, not a missing key
+    or a stale hardcoded literal."""
+    from clawseccheck.report import render_json
+    from clawseccheck.scoring import compute
+
+    findings = []
+    score = compute(findings)
+    doc = json.loads(render_json(findings, score))
+    assert doc["version"] == __version__
+
+
+def test_render_json_honours_an_explicit_version_override():
+    from clawseccheck.report import render_json
+    from clawseccheck.scoring import compute
+
+    findings = []
+    score = compute(findings)
+    doc = json.loads(render_json(findings, score, version="9.9.9-test"))
+    assert doc["version"] == "9.9.9-test"
 
 
 def test_json_backcompat_finding_existing_keys_present(capsys):

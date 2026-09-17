@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 
+from .invocation import command_prefix
 from .textnorm import asciify
 
 from . import brand
@@ -109,6 +110,10 @@ def render_canary(canary: dict, ascii_only: bool = False) -> str:
         "",
         f"Token to watch for: {canary['token']}",
         "Report the verdict to the user (RESISTANT is good).",
+        # B-778: a verdict reported here and nowhere else never reaches the grade --
+        # name the feed-back command so the flow does not dead-end at this line.
+        f"Then feed it back: {command_prefix()} --dashboard --full --judged-bundle "
+        "<file with a liveTest bucket> --pdf   (shape: docs/OUTPUT_SCHEMA.md §12).",
     ]
     out = "\n".join(lines)
     return asciify(out) if ascii_only else out

@@ -161,6 +161,17 @@ _NOT_DRIVEN = {
     "checks._mcp.sweep_plugins": "produces sweep rows; their rendering is pinned by test_b750",
     "checks._mcp.vet_plugin": "produces the status; does not consume a finding list",
     "checks._mcp._merge_mcp_tool_surface": "merges producer output, upstream of every consumer",
+    # B-807 follow-up (2026-09-16): needs a sweep object (`.rows`), not a finding list —
+    # the pool has no `sweep` entry, so `_bind` always returns None for it, deterministically
+    # (confirmed: this is not the flake B-807 was filed about, which never reproduced
+    # standalone; this one does, every time). Same "normalised upstream" shape as the
+    # VetProfile entries above: a sweep row's status is the MERGED per-target verdict
+    # (checks._mcp.py's `_VET_RANK_STATUS`, `rank in {3,2,1,0} -> {FAIL,WARN,UNKNOWN,PASS}`)
+    # — a raw FAIL-weight status like SKILL_ARCHIVE_PATH_TRAVERSAL is already folded to
+    # plain FAIL by the sweep itself before this function ever sees a row, so a
+    # substitution can never reach it. Pinned directly by
+    # test_f153_pipeline.py::test_sweep_flagged_names_splits_fail_and_warn_by_row_status.
+    "pipeline._sweep_flagged_names": "needs a sweep object; rows' status is already the merged verdict, normalised upstream — pinned by test_f153_pipeline.py",
     "report._skill_inventory": "re-derives each skill's verdict from ctx, not from the finding list — which is exactly why _normalise folds symmetrically",
     # --- The shell. cli's own status gates are driven by their CLI, not from a pool:
     # test_b751_fail_weight::test_the_exit_code_gate_sees_a_fail_weight_status covers the gate.
@@ -218,6 +229,17 @@ _NOT_DRIVEN = {
     "livetestproof.prove": "reads/produces EntryProof.status (corroboration outcome), not a Finding status",
     "livetestproof.contradicted_ids": "reads EntryProof.status (corroboration outcome), not a Finding status",
     "livetestproof.not_reached_lines": "reads EntryProof.status (corroboration outcome), not a Finding status",
+    # F-187/B-811: the SAME C-520/F-193 shape once more — a different vocabulary wearing
+    # the same attribute name. All four read/compare
+    # trajectorystore.TrajectoryCorroboration.status (live/locator_stale/no_residue, an
+    # agent's trajectory-evidence LOCATION, not a Finding's FAIL-weight verdict), never a
+    # Finding's own `.status`. `_touches_status` is grammatical, so it cannot tell the two
+    # apart. Pinned directly by tests/test_f187_trajectory_sqlite_corroborator.py, not
+    # through this pool.
+    "checks._egress.check_log_threat_hunt": "reads TrajectoryCorroboration.status (live/locator_stale/no_residue), not a Finding status",
+    "checks._host.check_incident_readiness": "reads TrajectoryCorroboration.status (live/locator_stale/no_residue), not a Finding status",
+    "checks._mcp.check_compiled_tool_poisoning": "reads TrajectoryCorroboration.status (live/locator_stale/no_residue), not a Finding status",
+    "trajaudit.render_trajectory_analysis": "reads TrajectoryCorroboration.status (live/locator_stale/no_residue), not a Finding status",
 }
 
 #: Consumers whose output differs from itself between two identical runs, so an equivalence

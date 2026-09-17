@@ -114,7 +114,9 @@ def test_catalog_scored_false_ids_match_the_audited_set():
     architect audit — the corpus test above is what actually enforces the invariant."""
     unscored = {c.id for c in BY_ID.values() if not c.scored}
     assert {"B43", "B55", "B70", "B185", "B186", "B193", "B324", "B322", "B323", "B325"} <= unscored
-    assert len(unscored) == 94  # +1: B375 (F-177) AST function-scoped sitecustomize/PYTHONSTARTUP install
+    assert len(unscored) == 97  # +3: B379/B380/B381 (host scheduled persistence,
+    # hooks transform modules, redactor-blind secret paths) — all WARN-only/disclosure
+    # checks, added unscored like every other advisory check in this set
 
 
 # ── Targeted: the two downgrades (FAIL -> WARN, CheckMeta unchanged) ──────────────────

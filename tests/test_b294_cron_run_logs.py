@@ -54,11 +54,26 @@ _CRON_RUN_LOGS_DDL = (
     "entry_json TEXT NOT NULL, created_at INTEGER NOT NULL, "
     "PRIMARY KEY (store_key, job_id, seq))"
 )
+# B-813: the per-agent SQLite trajectory store's own DDL, copied verbatim from
+# tests/test_f187_trajectory_sqlite_corroborator.py's `_add_agent_db` (which itself
+# matches trajectorystore.TRAJECTORY_TABLE_NAME / trajectorystore._SELECT_TRAJECTORY_ROWS)
+# rather than re-derived here, so the fixture cannot drift from the real reader's schema.
+_TRAJECTORY_RUNTIME_EVENTS_DDL = (
+    "CREATE TABLE trajectory_runtime_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, "
+    "run_id TEXT, event_json TEXT NOT NULL, created_at INTEGER NOT NULL, "
+    "PRIMARY KEY (session_id, seq))"
+)
 
 
 def _build_home(tmp_path, *, jobs=(), runs=(), tables=("cron_jobs", "cron_run_logs"),
-                sessions=(), db=True):
-    """Materialise a fake ~/.openclaw with a state DB. Writes only under tmp_path."""
+                sessions=(), sqlite_sessions=(), db=True):
+    """Materialise a fake ~/.openclaw with a state DB. Writes only under tmp_path.
+
+    ``sessions`` writes classic JSONL sidecars under ``agents/main/sessions/`` (unchanged).
+    ``sqlite_sessions`` (B-813) additionally populates a per-agent
+    ``agents/main/agent/openclaw-agent.sqlite`` with a ``trajectory_runtime_events`` row for
+    each session id, matching the real container `trajectorystore.sqlite_session_ids` reads.
+    """
     home = tmp_path / "openclaw"
     home.mkdir(exist_ok=True)
     if db:
@@ -87,6 +102,20 @@ def _build_home(tmp_path, *, jobs=(), runs=(), tables=("cron_jobs", "cron_run_lo
         sess = home / "agents" / "main" / "sessions"
         sess.mkdir(parents=True, exist_ok=True)
         (sess / f"{sid}.trajectory.jsonl").write_text("{}\n", encoding="utf-8")
+    if sqlite_sessions:
+        agent_dir = home / "agents" / "main" / "agent"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(agent_dir / "openclaw-agent.sqlite")
+        try:
+            conn.execute(_TRAJECTORY_RUNTIME_EVENTS_DDL)
+            for sid in sqlite_sessions:
+                conn.execute(
+                    "INSERT INTO trajectory_runtime_events VALUES (?,?,?,?,?)",
+                    (sid, 0, "run-1", "{}", 0),
+                )
+            conn.commit()
+        finally:
+            conn.close()
     ctx = Context(home=home)
     _collect_cron(home, ctx)
     return ctx
@@ -158,6 +187,10 @@ def test_b168_no_longer_returns_verified_pass_over_an_unexamined_history(tmp_pat
     assert "3 past execution" in f.detail
     # It must NOT read as an accusation: self-erasure is the product default.
     assert "not proof of tampering" in f.detail
+    # C-135 follow-up (CLAWSECCHECK-B-657 review): the store was read to completion and
+    # genuinely holds zero jobs -- deleted by the runtime itself, not an unread cap or
+    # a read error. Genuinely absent, not present-but-unread.
+    assert f.engine_degraded is False
 
 
 def test_b168_empty_store_with_no_history_is_pass_but_no_signal(tmp_path):
@@ -243,6 +276,56 @@ def test_b189_pivot_distinguishes_a_session_with_no_transcript(tmp_path):
     assert any("sess-gone" in e and "no transcript on disk" in e for e in f.evidence)
 
 
+# --------------------------------------------------------------------------------------
+# B-813: a third pivot bucket for sessions whose only evidence is the SQLite trajectory
+# store (the post-migration container find_trajectory_files() is blind to).
+# --------------------------------------------------------------------------------------
+
+def test_b189_pivot_surfaces_a_session_only_in_the_sqlite_store(tmp_path):
+    """An orphaned run whose session exists ONLY in SQLite (no JSONL sidecar) must fire the
+    new sqlite_only pivot line, name the SQLite container, and must NOT claim the session
+    is 'still on disk' — that wording is reserved for the JSONL bucket."""
+    ctx = _build_home(tmp_path, jobs=(), runs=(("ghost", "sess-sqlite"),),
+                      sqlite_sessions=("sess-sqlite",))
+    f = check_cron_run_log_orphans(ctx)
+    assert f.status == WARN
+    matches = [e for e in f.evidence if "sess-sqlite" in e]
+    assert len(matches) == 1
+    line = matches[0]
+    assert "SQLite" in line
+    assert "openclaw-agent.sqlite" in line
+    assert "still on disk" not in line
+    assert "no transcript on disk" not in line
+    # The pivot_note in `detail` must also name the SQLite store honestly, distinct from
+    # the "transcript on disk" JSONL wording.
+    assert "SQLite trajectory store" in f.detail
+    assert "still have a transcript on disk" not in f.detail
+
+
+def test_b189_pivot_jsonl_takes_priority_over_sqlite_when_both_have_the_session(tmp_path):
+    """A session present in BOTH containers is counted once, as the JSONL ('still on
+    disk') bucket — never double-reported, and never demoted to the SQLite wording."""
+    ctx = _build_home(tmp_path, jobs=(), runs=(("ghost", "sess-both"),),
+                      sessions=("sess-both",), sqlite_sessions=("sess-both",))
+    f = check_cron_run_log_orphans(ctx)
+    matches = [e for e in f.evidence if "sess-both" in e]
+    assert len(matches) == 1
+    assert "still on disk" in matches[0]
+    assert "SQLite" not in matches[0]
+
+
+def test_b189_pivot_note_mentions_both_counts_when_both_buckets_are_nonempty(tmp_path):
+    ctx = _build_home(
+        tmp_path, jobs=(),
+        runs=(("ghost", "sess-disk"), ("ghost", "sess-db")),
+        sessions=("sess-disk",),
+        sqlite_sessions=("sess-db",),
+    )
+    f = check_cron_run_log_orphans(ctx)
+    assert "1 of these session(s) still have a transcript on disk" in f.detail
+    assert "1 more have evidence in the SQLite trajectory store" in f.detail
+
+
 def test_b189_does_not_claim_the_erased_payload_is_recoverable(tmp_path):
     """Honest labelling: this NARROWS DISK-3. The run record carries no copy of the job's
     payload.message, so the check must say what ran and where to look — not what it did."""
@@ -258,6 +341,9 @@ def test_b189_does_not_claim_the_erased_payload_is_recoverable(tmp_path):
 def test_b189_unknown_when_state_db_absent(tmp_path):
     f = check_cron_run_log_orphans(_build_home(tmp_path, db=False))
     assert f.status == UNKNOWN
+    # C-135 follow-up (CLAWSECCHECK-B-657 review): genuinely absent (no state DB at
+    # all), not present-but-unread.
+    assert f.engine_degraded is False
 
 
 def test_b189_unknown_when_run_log_table_absent(tmp_path):
@@ -265,6 +351,7 @@ def test_b189_unknown_when_run_log_table_absent(tmp_path):
                       tables=("cron_jobs",))
     f = check_cron_run_log_orphans(ctx)
     assert f.status == UNKNOWN
+    assert f.engine_degraded is False
 
 
 def test_b189_unknown_when_run_log_table_present_but_empty(tmp_path):
@@ -273,16 +360,61 @@ def test_b189_unknown_when_run_log_table_present_but_empty(tmp_path):
     f = check_cron_run_log_orphans(ctx)
     assert f.status == UNKNOWN
     assert "prunes this table" in f.detail
+    # Read to completion and genuinely empty -- not present-but-unread.
+    assert f.engine_degraded is False
+    # C-488: the wording names the ONE table this fixture actually has, rather than
+    # generically naming both.
+    assert ctx.cron_run_logs_table == "cron_run_logs"
+    assert "`cron_run_logs`" in f.detail
+    assert "task_runs" not in f.detail
 
 
-def test_b189_unknown_when_job_definitions_unreadable(tmp_path):
-    """Run history without a readable definition set makes orphan-ness uncomputable —
-    every row would look orphaned for a reason unrelated to erasure. Refuse to guess."""
+def test_b189_unknown_when_no_job_store_found_at_all(tmp_path):
+    """Run history without ANY job store (JSON or SQLite) makes orphan-ness
+    uncomputable — every row would look orphaned for a reason unrelated to erasure.
+    Refuse to guess. Genuinely absent, not present-but-unread."""
     ctx = _build_home(tmp_path, runs=(("j1", "s1"),), tables=("cron_run_logs",))
     assert ctx.cron_found is False
     f = check_cron_run_log_orphans(ctx)
     assert f.status == UNKNOWN
-    assert "could not be read" in f.detail
+    assert "no cron job store" in f.detail
+    assert f.engine_degraded is False
+
+
+def test_b189_unknown_when_job_store_parse_error(tmp_path):
+    """C-135 follow-up: distinguishes the two causes a single combined branch used to
+    collapse (``not ctx.cron_found or ctx.cron_parse_error``). This one is a REAL store
+    that FAILED to parse, not an absent one — present-but-unread, so engine_degraded
+    must be True, unlike the genuinely-absent sibling above."""
+    ctx = _build_home(tmp_path, runs=(("j1", "s1"),), tables=("cron_run_logs",))
+    (ctx.home / "cron").mkdir(parents=True)
+    (ctx.home / "cron" / "jobs.json").write_text("{not valid json", encoding="utf-8")
+    ctx2 = Context(home=ctx.home)
+    _collect_cron(ctx.home, ctx2)
+    assert ctx2.cron_found is True
+    assert ctx2.cron_parse_error is True
+    f = check_cron_run_log_orphans(ctx2)
+    assert f.status == UNKNOWN
+    assert "could not be parsed/read" in f.detail
+    assert f.engine_degraded is True
+
+
+def test_b189_unknown_when_run_log_table_itself_unreadable(tmp_path):
+    """A genuinely corrupt state DB — not merely a table that is absent — is a read
+    failure, not an absence. Present-but-unread, so engine_degraded must be True."""
+    home = tmp_path / "openclaw"
+    (home / "state").mkdir(parents=True)
+    (home / "state" / "openclaw.sqlite").write_bytes(b"not a sqlite database at all")
+    ctx = Context(home=home)
+    _collect_cron(home, ctx)
+    assert ctx.cron_run_logs_found is True
+    assert ctx.cron_run_logs_parse_error is True
+    # C-488: a genuine read failure never gets far enough to resolve a shape -- the field
+    # must not invent one.
+    assert ctx.cron_run_logs_table is None
+    f = check_cron_run_log_orphans(ctx)
+    assert f.status == UNKNOWN
+    assert f.engine_degraded is True
 
 
 # --------------------------------------------------------------------------------------
@@ -313,6 +445,9 @@ def test_b189_truncated_job_read_does_not_report_live_jobs_as_erased(tmp_path):
     assert f.status == UNKNOWN
     assert "row cap" in f.detail
     assert "erased" in f.detail
+    # C-135 follow-up: the job definitions past the cap are present in the store, just
+    # never read -- present-but-unread, not genuinely absent.
+    assert f.engine_degraded is True
 
 
 def test_b189_still_passes_when_truncation_cannot_hide_an_orphan(tmp_path):
@@ -356,6 +491,10 @@ def test_b189_legacy_jobs_json_shadowing_the_live_table_is_unknown(tmp_path):
     f = check_cron_run_log_orphans(ctx2)
     assert f.status == UNKNOWN
     assert "legacy" in f.detail
+    # C-135 follow-up: the live SQLite rows are present, readable, real job
+    # definitions -- this check never opened them because the stale JSON store took
+    # priority. Present-but-unread, not absent.
+    assert f.engine_degraded is True
 
 
 def test_b189_shadowing_is_unknown_even_with_no_apparent_orphan(tmp_path):
@@ -514,7 +653,7 @@ def _shadow_home(tmp_path, *, json_message, sqlite_rows):
     (home / "cron" / "jobs.json").write_text(json.dumps({
         "version": 1,
         "jobs": [{"id": "old", "name": "digest", "enabled": True,
-                  "payload": {"kind": "message", "message": json_message}}],
+                  "payload": {"kind": "agentTurn", "message": json_message}}],
     }), encoding="utf-8")
     conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
     try:
@@ -544,6 +683,9 @@ def test_b168_does_not_certify_a_shadowed_store(tmp_path):
     assert f.status == UNKNOWN
     assert getattr(f, "pass_confidence", None) != "verified"
     assert "cron_jobs table" in f.detail
+    # C-135 follow-up: the live SQLite rows (including the hostile one) are present,
+    # readable, real job content this check never scanned. Present-but-unread.
+    assert f.engine_degraded is True
 
 
 def test_b168_still_passes_on_a_genuine_legacy_install(tmp_path):
@@ -609,7 +751,7 @@ def _partitioned_shadow_home(tmp_path, *, store_key, home_name="openclaw", ddl=N
     jobs_json.write_text(json.dumps({
         "version": 1,
         "jobs": [{"id": "stale", "name": "digest", "enabled": True,
-                  "payload": {"kind": "message", "message": "Send me the daily digest."}}],
+                  "payload": {"kind": "agentTurn", "message": "Send me the daily digest."}}],
     }), encoding="utf-8")
     key = store_key(jobs_json) if callable(store_key) else store_key
     conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
@@ -769,7 +911,7 @@ def _real_home_with_custom_cron_store(tmp_path, *, configured_store, jobs_json_p
     (home / "cron" / "jobs.json").write_text(json.dumps({
         "version": 1,
         "jobs": [{"id": "stale", "name": "digest", "enabled": True,
-                  "payload": {"kind": "message", "message": "Send me the daily digest."}}],
+                  "payload": {"kind": "agentTurn", "message": "Send me the daily digest."}}],
     }), encoding="utf-8")
     conn = sqlite3.connect(home / "state" / "openclaw.sqlite")
     try:

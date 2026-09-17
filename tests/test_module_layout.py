@@ -40,6 +40,24 @@ _MAX_LINES = 1200
 # tracked debt, not a free pass — trim it as the I-022 modularization lands (the
 # companion staleness test fails if an exemption no longer applies).
 _EXEMPT = {
+    # B-816 (2026-09-15): 1,158 -> 1,208 lines (net +50: +58/-8, git diff --stat).
+    # SQLite-trajectory-container corroboration (trajectorystore.corroborate()) wired
+    # into self_test_corroboration()/render_self_test_corroboration()/
+    # render_trajectory_analysis() so --analyze-trajectory and the self-test-corroboration
+    # lines stop asserting "no trajectory sidecar was found" on a SQLite-era install with
+    # real evidence elsewhere — same disclosure pattern B85/B189/B164 already carry.
+    # 8 lines over budget, recorded rather than trimmed for the same reason scoring.py's
+    # entry below gives: shortening the new guard clauses' own documentation to slip back
+    # under would measure the comment, not the module. Split candidate, not attempted
+    # here: the canary/multi-turn self-test
+    # machinery (_SELFTEST_SOURCES, self_test_corroboration,
+    # render_self_test_corroboration, ~180 lines) is B-300's own concern and reads/writes
+    # nothing the rest of this file's trajectory-analysis code touches — a `selftest.py`
+    # leaf this module imports would leave ~1,030 here with no cycle.
+    "trajaudit.py": "~1,208 lines — the --analyze-trajectory engine (analyze/render_trajectory_"
+                    "analysis) plus B-300's canary/multi-turn self-test corroboration. Over "
+                    "budget by 8 lines since B-816. Split candidate named above; tracked "
+                    "debt, not a design statement.",
     # The first NON-checks/ entry, and the only one that is not a topic module. It is here
     # because the module was already at 1,194 of 1,200 before B-558's fifth ledger-derived
     # field — six lines of headroom is not a stable state, and the next field of any kind
@@ -58,7 +76,7 @@ _EXEMPT = {
                   "`assessment_coverage()`. Over budget by 17 lines since B-558 added "
                   "`layer_coverage`. Split candidate named above; tracked debt, not a "
                   "design statement.",
-    "checks/_config.py": "~5,191 lines (restated 2026-09-11, C-410 — was ~4,410, +18% "
+    "checks/_config.py": "~5,743 lines (restated 2026-09-16, B-795 — was ~5,191, +11% "
                          "stale) — the config-hardening topic (29 checks + helpers); "
                          "topic-faithful and over budget by design. A finer split is a "
                          "later cycle (I-022 secondary target).",
@@ -70,11 +88,12 @@ _EXEMPT = {
     # says it is not alone — `checks/_mcp.py` sits at 97% of its own tolerance, and five
     # more modules are past 70%. That whole table needs a restate-and-reconsider pass, not
     # one entry at a time as each next commit trips it.
-    "checks/_lifecycle.py": "~6,779 lines (restated 2026-09-12, C-413 — was ~6,172) — the "
+    "checks/_lifecycle.py": "~7,329 lines (restated 2026-09-17 — was ~6,779) — the "
                             "approval / update-pinning / self-modification / supply-chain "
                             "topic (17 checks + helpers); topic-faithful and over budget "
                             "by design. A finer split is a later cycle.",
-    "checks/_content.py": "~14,623 lines — the content-security ring: 51 check functions, 178 "
+    "checks/_content.py": "~15,129 lines (restated 2026-09-16, C-437 — was ~14,623) — the "
+                          "content-security ring: 51 check functions, 178 "
                           "private helpers and 241 module regexes. Restated 2026-09-06 "
                           "(C-432), and the previous reason is RETRACTED rather than "
                           "reworded. It read: kept as one unit because SKILL_CONTENT_RING "
@@ -124,7 +143,7 @@ _EXEMPT = {
                       "fence layers are what to lift out, not an arbitrary halving. Same "
                       "sequencing as checks/_content.py — that one is twice this size and "
                       "has the simpler seam, so it goes first.",
-    "checks/_host.py": "~1,324 lines — the host-monitor / incident-readiness topic "
+    "checks/_host.py": "~1,779 lines — the host-monitor / incident-readiness topic "
                        "(B10/B16/B50-B54 + the attestation helpers). Sat at EXACTLY 1,200 "
                        "for a while, i.e. one line under a tripwire, and crossed it with "
                        "B-514: check_audit_log went from a 2-branch stub that returned "
@@ -133,7 +152,12 @@ _EXEMPT = {
                        "false / redaction off / explicit true / unset-with-no-schema-"
                        "default). The extra lines are user-facing verdict text, not "
                        "machinery; squeezing them to hold a line count would trade the "
-                       "report's clarity for a number. A finer split is a later cycle.",
+                       "report's clarity for a number. Restated 2026-09-16 (F-178, "
+                       "CLAWSECCHECK-B-379): 1,324 -> 1,779 with check_host_scheduled_"
+                       "persistence, this module's own next entry in the same "
+                       "host-monitor family (systemd timer / system cron, sibling of "
+                       "B150 one function up) — same reasoning, a real new check's "
+                       "verdict text, not padding. A finer split is a later cycle.",
     # Restated 2026-09-05 (B-742): 7,597 -> 8,111. B-727 restated `_lifecycle.py` one day
     # earlier and, while measuring, wrote down that THIS file "sits at 97% of its own
     # tolerance" and that the table "needs a restate-and-reconsider pass, not one entry at
@@ -147,8 +171,10 @@ _EXEMPT = {
     # `_mcp.py` has owed since I-022 is still owed and is now the second-largest piece of
     # structural debt in the tree after `_content.py`; vet_plugin alone (the dispatcher,
     # its tree sweep and the plugin sweep) is a coherent unit that could leave.
-    "checks/_mcp.py": "~8,115 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
-                      "topic-faithful and over budget by design. Restated 2026-09-06 "
+    "checks/_mcp.py": "~8,625 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
+                      "topic-faithful and over budget by design. Restated 2026-09-16 "
+                      "(B-661 added a config-found guard to three checks, +510 lines) — "
+                      "originally restated 2026-09-06 "
                       "(C-432) with the measurement the old 'a finer split is a later "
                       "cycle' never carried: 20 check functions, 2 vet entry points, 64 "
                       "private helpers, 59 regexes. Unlike checks/_content.py this file "
@@ -250,7 +276,8 @@ _EXEMPT = {
                   "where the genuinely shared locals live and the one place a mistake "
                   "FABRICATES alerts rather than losing them. That is a data-flow question, not "
                   "a file move, and it is deliberately not bundled with this one.",
-    "risk.py": "~2,421 lines — the combinational attack-chain engine (one _rule_* per chain "
+    "risk.py": "~2,937 lines (restated 2026-09-17 — was ~2,421) — the combinational "
+               "attack-chain engine (one _rule_* per chain "
                "plus the shared leg predicates they compose). Crossed the 1,200-line ceiling "
                "with B-283 (c), which taught _channels_with_visibility_all the account -> "
                "channel -> default precedence the dist resolver uses; that helper MUST stay "
@@ -272,7 +299,10 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~7,267 lines — the python/shell/js parser families; its own split is "
+    "skillast.py": "~7,875 lines (restated 2026-09-16, B-643 — was ~7,267; the addition is "
+                   "two more taint-propagation node types, with/for statement bindings in "
+                   "_external_tainted_names, not a new parser family) — the "
+                   "python/shell/js parser families; its own split is "
                    "deferred to a later cycle (I-022 secondary target). Restated "
                    "2026-09-06 (B-752), and the guard's own instruction is to reconsider "
                    "the split rather than bump the number, so here is where the growth "
@@ -309,7 +339,8 @@ _EXEMPT = {
                   "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~6,951 lines — the read-only collection layer (config / bootstrap / skill "
+    "collector.py": "~7,542 lines (restated 2026-09-17 — was ~6,951) — the read-only "
+                    "collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
                     "+ .pyc/.wasm sniffing), grew again with B-610 (deriving the workspace "
@@ -374,7 +405,15 @@ _EXEMPT = {
                      "detectors from the renderer would separate each verdict from the text "
                      "that discloses its own limits, which is the pairing B-245 and B-559 "
                      "both exist to keep. A finer split is a later cycle.",
-    "adjudication.py": "~1,920 lines — the judge-packet builder. Crossed the budget with the "
+    "adjudication.py": "~2,433 lines — the judge-packet builder. Restated from ~1,920 on "
+                       "2026-09-16 by B-452: a sixth judge-packet-only evidence source "
+                       "(_keyword_gated_trigger_items, the antecedent/consequent structural "
+                       "detector for a keyword-gated hidden-trigger directive, plus its file-"
+                       "section/sentence-boundary helpers found necessary by two independent "
+                       "C-135 passes), the same shape as the pre-existing "
+                       "_recover_dropped_taint/_env_auth_kwarg_items sources — never a Finding, "
+                       "never scored, so it belongs beside its siblings rather than in "
+                       "checks/. Crossed the budget with the "
                        "ESET H1 2026 gap-closure pass (C-361: config field-path extraction so "
                        "the audit-path majority of findings, which cite a dig() path rather "
                        "than a file:line, stop always hitting the contentless evidence "

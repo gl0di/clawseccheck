@@ -82,11 +82,18 @@ def test_helper_alsoallow_broad_fs_tool_with_empty_allow_now_grants():
 def test_helper_dedupes_same_tool_in_allow_and_alsoallow():
     # MUST NOT CHANGE: tools.allow is non-empty ("write") -> unionAllow's implicit-
     # wildcard trigger (base absent/empty) does not fire, plain concat branch only.
+    #
+    # C-135 (independent, post-commit): d46fa3b ("deny:['write'] does not deny
+    # apply_patch; model the implication", 2026-09-16) taught this helper that a
+    # granted "write" implies "apply_patch" too (matching the real resolver's own
+    # semantics) — this test predates that landing and asserted the pre-implication
+    # grant set. "write" alone still dedupes fine; the extra member is the intended
+    # implication, not a duplication bug.
     granted, enumerable = _b68_fs_tools_granted(
         {"tools": {"allow": ["write"], "alsoAllow": ["write"]}}
     )
     assert enumerable is True
-    assert granted == ["write"]
+    assert granted == ["apply_patch", "write"]
 
 
 def test_helper_deny_wins_over_alsoallow():
@@ -215,12 +222,14 @@ def test_b68_check_bad_empty_allow_alsoallow_broad_fs_tool_warns():
 
 
 def test_b68_check_dedupes_same_tool_in_allow_and_alsoallow():
+    # C-135 (independent, post-commit): same d46fa3b implication as the helper test
+    # above — "write" granted now also implies "apply_patch" in the rendered evidence.
     f = check_exec_applypatch_workspace(
         _ctx({"tools": {"allow": ["write"], "alsoAllow": ["write"]}})
     )
     assert f.status == WARN
     granted_evidence = next(e for e in f.evidence if e.startswith("filesystem tools granted"))
-    assert granted_evidence == "filesystem tools granted: write"
+    assert granted_evidence == "filesystem tools granted: apply_patch, write"
 
 
 def test_b68_check_deny_wins_over_alsoallow():

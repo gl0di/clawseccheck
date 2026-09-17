@@ -418,9 +418,20 @@ class TestCliEndToEnd:
         # "nothing submitted" correctly never gets. That is a second real, intended
         # difference this test's own premise ("the ledger is the ONE thing that
         # differs") no longer states — asserted explicitly below instead.
+        #
+        # C-135 (independent, post-commit): `next_actions` joins the same exclusion
+        # for the same reason, found by a 2026-09-17 bisection -- B-779 (09a3c22,
+        # "stop offering a live-behaviour test the ledger already shows ran") gates
+        # the `live_test` next-step on the same ledger fact this test already knows
+        # differs. A submitted RESISTANT verdict makes live_behaviour read "ran", so
+        # the tool correctly stops suggesting a live test the user already ran --
+        # a THIRD real, intended difference, asserted explicitly below rather than
+        # silently widening the exclusion and losing coverage of everything else in
+        # `next_actions` (its own order/priority/command text for every OTHER id
+        # must still agree byte-for-byte between the two runs).
         def _without_the_ledger(payload):
             trimmed = {k: v for k, v in _drop_elapsed(payload).items()
-                       if k not in ("missing_layers", "not_checked")}
+                       if k not in ("missing_layers", "not_checked", "next_actions")}
             trimmed["runState"] = {k: v for k, v in trimmed["runState"].items()
                                    if k not in ("missingLayers", "notChecked")}
             return trimmed
@@ -428,6 +439,17 @@ class TestCliEndToEnd:
         assert _without_the_ledger(with_resistant) == _without_the_ledger(without_bundle)
         assert with_resistant["graded"] is False
         assert without_bundle["graded"] is False
+
+        # The intended next_actions difference: a submitted RESISTANT verdict drops
+        # the "run a live test" suggestion (already satisfied), every other action
+        # id/order is unaffected.
+        with_ids = [a["id"] for a in with_resistant["next_actions"]]
+        without_ids = [a["id"] for a in without_bundle["next_actions"]]
+        assert "live_test" not in with_ids, "a satisfied live test must not be re-suggested"
+        assert "live_test" in without_ids, "an unsubmitted live test must still be suggested"
+        assert with_ids == [a for a in without_ids if a != "live_test"], (
+            "every OTHER next action's presence and order must still agree"
+        )
 
         # Different ledger: RESISTANT means live_behaviour ran; nothing submitted
         # means it never got asked.
@@ -622,9 +644,9 @@ class TestTrendMonitorReachC135:
         return _bundle_file(tmp_path, {"liveTest": {"verdicts": [
             {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
 
-    def test_home_safe_baseline_is_uncapped_98_a(self, capsys):
+    def test_home_safe_baseline_is_uncapped_and_grades_a(self, capsys):
         # Sanity anchor: without a live-test bundle, home_safe's own default score
-        # really is 98/A -- so the 49/F assertions below are a genuine cap, not two
+        # really is 97/A -- so the 49/F assertions below are a genuine cap, not two
         # coincidentally-equal runs.
         #
         # --no-sockets (B-374, C-135 round 2, 2026-07-31): without it, this read the
@@ -634,12 +656,22 @@ class TestTrendMonitorReachC135:
         # home_safe's declared gateway.bind (127.0.0.1:8080) port number, but that
         # UNKNOWN-vs-FAIL split still depends on whatever happens to be listening on
         # this host, so the exact uncapped score is only deterministic with sockets
-        # scanning disabled. Only the actual VALUE (79 -> 98, C -> A) changed; the
-        # test's own point -- this is a real, non-49 baseline -- is unaffected.
+        # scanning disabled. The actual VALUE has moved twice now (79 -> 98 -> 97);
+        # the test's own point -- this is a real, non-49 baseline -- is unaffected.
+        # Deliberately not naming the number in the test's own NAME any more (it had
+        # already gone stale once) -- the assertion below is the single source of
+        # truth for the current value.
+        #
+        # 2026-09-16: 98 -> 97 under 6c11585 -- `_has_approval_gate` no longer lets
+        # `tools.exec.mode: "ask"` gate home_safe's separate `tools.elevated.allowFrom`
+        # grant, so B8 ("Human approval on destructive actions") correctly reads WARN
+        # instead of PASS: the fixture sets an exec-scoped gate but has no elevated-
+        # scoped one, and elevated is where the destructive-tool grant actually lives.
+        # Deliberate, not a regression -- the fixture genuinely is un-gated on that axis.
         #
         # C-425: this CLI run is itself ungraded (no --attest/--judged-bundle -- two
         # of five layers never ran), so --json's own score/grade are None here --
-        # asserted below. The 98/A anchor is taken from a plain library `audit()`
+        # asserted below. The 97/A anchor is taken from a plain library `audit()`
         # call over the SAME fixture/flags: `audit()` never builds a ledger, so it
         # scores exactly as `compute()` always has (C-422's "ledger=None means
         # graded" rule) -- the identical severity-weighted verdict this CLI run's own
@@ -652,7 +684,7 @@ class TestTrendMonitorReachC135:
         assert payload["grade"] is None
 
         _, _, graded_reference = audit(SAFE, include_native=False, include_sockets=False)
-        assert graded_reference.score == 98
+        assert graded_reference.score == 97
         assert graded_reference.grade == "A"
 
     def test_json_reference_is_capped_49_f(self, tmp_path, capsys):
@@ -829,8 +861,9 @@ class TestTrendMonitorReachC135:
     ):
         # RESISTANT never hits (self-attestation guard) -- both modes must stay
         # byte-identical to submitting nothing at all, exactly like the default path.
-        # --no-sockets: see test_home_safe_baseline_is_uncapped_98_a's comment -- the
-        # uncapped score is only deterministic with real-host socket scanning disabled.
+        # --no-sockets: see test_home_safe_baseline_is_uncapped_and_grades_a's comment
+        # -- the uncapped score is only deterministic with real-host socket scanning
+        # disabled.
         bundle = _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
             {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}})
         hist = tmp_path / "history.jsonl"
@@ -844,7 +877,10 @@ class TestTrendMonitorReachC135:
         # recorded number. The property is asserted the way it is actually meant --
         # BYTE-IDENTICAL to submitting nothing at all -- by running the same command
         # without a bundle and comparing the rows. That is a stronger statement than
-        # `score == 98` ever was: it catches any divergence, not just a score one.
+        # a bare `score ==` pin ever was: it catches any divergence, not just a score
+        # one -- which is exactly what let this test survive the fixture's own score
+        # moving (98 -> 97 under 6c11585) unaffected, unlike the sibling assertion
+        # below that pins the number directly.
         hist2 = tmp_path / "history2.jsonl"
         rc2 = main(["--home", SAFE, "--no-native", "--full", "--trend", "--ascii",
                     "--history", str(hist2), "--no-sockets"])
@@ -857,7 +893,7 @@ class TestTrendMonitorReachC135:
         # ...and RESISTANT genuinely did not cap the underlying verdict either.
         ctx, findings, uncapped = audit(SAFE, include_native=False, include_sockets=False)
         assert uncapped.graded is True
-        assert uncapped.score == 98
+        assert uncapped.score == 97
         assert uncapped.grade == "A"
 
 
@@ -906,7 +942,7 @@ class TestB379CapReachesRemainingDispatchPaths:
 
         This is the test that actually discriminates "bundle read" from "bundle
         silently dropped": `state.json` records the CAPPED underlying score (49), not
-        the uncapped 98, proving `_apply_live_test_cap` ran on a path that does not
+        the uncapped 97, proving `_apply_live_test_cap` ran on a path that does not
         pass `--full`.
 
         That the snapshot still persists a number the display withholds is a separate,
@@ -931,7 +967,7 @@ class TestB379CapReachesRemainingDispatchPaths:
     def test_percentile_reflects_the_capped_score(self, tmp_path, capsys):
         bundle = self._seeded_bundle(tmp_path)
         hist = tmp_path / "history.jsonl"
-        # Seed a reference distribution wide enough that an uncapped (98/A) vs. a
+        # Seed a reference distribution wide enough that an uncapped (97/A) vs. a
         # capped (49/F) run rank differently against it.
         for _ in range(3):
             main(["--home", SAFE, "--no-native", "--no-sockets", "--trend",

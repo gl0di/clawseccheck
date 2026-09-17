@@ -76,6 +76,24 @@ def _expr_text(node: ast.AST | None) -> str:
         return "".join(parts)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _expr_text(node.left) + _expr_text(node.right)
+    if isinstance(node, ast.IfExp):
+        # C-135 (independent, post-commit): the SAME failure this function's own
+        # fallback docstring already documents twice (RISK-15's `_key_advice(...)`
+        # call, RISK-23's `str(len(fired))`/`'; '.join(...)`) recurred a third time,
+        # in a shape neither prior fix covers -- a bare conditional expression
+        # (`text_a if runtime_flag else text_b`) whose branches are plain string
+        # literals with no Call anywhere in the subtree. The generic Call-elision
+        # fallback below only triggers when `ast.walk` finds a Call, so this fell
+        # through to `ast.unparse`, shipping ` if allow_private else '.'` -- raw
+        # Python syntax -- into docs/CHECKS.md's RISK-15 entry. A document has no
+        # run to evaluate the condition against, same reasoning as the Call case.
+        # When both branches render to the SAME text regardless (the condition is
+        # cosmetic, not informative), return that shared text -- an easy, safe win.
+        # Otherwise elide, exactly like a Call: real conditional guidance text is
+        # lost from the page rather than risking either a wrong branch presented as
+        # unconditional fact, or a third shape of leaked Python syntax.
+        body_text, orelse_text = _expr_text(node.body), _expr_text(node.orelse)
+        return body_text if body_text == orelse_text else "..."
     if isinstance(node, ast.Call) and _callee_name(node) == "_key_advice":
         # B-738: a fix string may resolve its config key against the READER's OpenClaw
         # generation via `checks/_shared.py::_key_advice(ctx, legacy, modern)`. The fallback

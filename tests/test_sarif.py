@@ -6,6 +6,7 @@ No file I/O is performed by render_sarif; all assertions are in-memory.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from clawseccheck import audit
 from clawseccheck.catalog import (
     CRITICAL, FAIL, HIGH, PASS, UNKNOWN, WARN, Finding,
 )
+from clawseccheck.checks import _shared
 from clawseccheck.sarif import render_sarif
 from clawseccheck.scoring import compute
 
@@ -285,17 +287,112 @@ def test_deterministic_output():
 # Integration: use audit() on real fixtures
 # ---------------------------------------------------------------------------
 
-def test_vuln_fixture_has_error_results():
-    _, findings, score = audit(FIXTURES / "home_vuln")
-    doc, _ = _parse(findings, score)
+# ---------------------------------------------------------------------------
+# B-651: the two tests below used to just run audit() over home_vuln/home_safe
+# and assert on the `level` set alone — a property that would pass identically
+# whether or not B-620's redaction fix (sarif._sarif_text / report._redact_home_paths)
+# existed at all, since nothing in either shipped fixture happens to produce a finding
+# that embeds an absolute home-directory path. A test that cannot fail for the defect
+# it appears to cover is worse than no test — it reads as coverage.
+#
+# Replaced with a real, hermetic C5 (native binary PATH safety) scenario, using the
+# exact live-leak-construction technique tests/test_b757_no_username_leak.py already
+# proved reliable: a genuinely writable (WARN scenario) or tight (PASS scenario)
+# install directory built under a monkeypatched $HOME, driven through the REAL
+# check_path_safety via a REAL audit() — not a synthetic Finding — so the "does a real
+# WARN reach SARIF as an error-level result" property the old tests nominally covered
+# is now driven by an ACTUAL condition that can flip (a real writable vs. tight
+# directory), rather than "whatever home_vuln happens to already trip".
+#
+# B-757 (checks/_shared._username_safe_path) already collapses this exact scenario's
+# leak to '~' at the CHECK layer, before SARIF ever sees it — confirmed by mutation, not
+# assumed: reverting sarif._sarif_text to skip report._redact_home_paths leaves both
+# tests below green, because there is nothing left in Finding.detail/evidence for that
+# fold to catch once B-757 has already run. So this pair is a real, non-vacuous
+# CHECK-TO-RENDERER integration guard (mutating _username_safe_path itself does fail
+# them) plus the genuine "does a real WARN reach SARIF as an error-level result"
+# property — not independent proof of sarif._sarif_text's own fold, which is what
+# tests/test_b620_sarif_results_path_redaction.py exists to give in isolation, using a
+# directly-constructed Finding that bypasses the check layer (and therefore B-757)
+# entirely — the one shape a real check can no longer produce.
+#
+# Also close to test_b757_no_username_leak.py::
+# test_no_renderer_leaks_the_home_prefix_over_a_real_audit (same live C5 leak, swept
+# across all five renderers) — this pair is the SARIF-specific slice of that property,
+# living in the file a reader of "SARIF fixture tests" actually opens, with a condition
+# (a real WARN vs. a real PASS) that can actually move the assertion, unlike the two
+# tests it replaces.
+# ---------------------------------------------------------------------------
+
+def _c5_leak_scenario(monkeypatch, tmp_path, *, writable: bool):
+    """Builds a real openclaw-install directory tree under a monkeypatched $HOME and
+    points `shutil.which` at it, so `check_path_safety` reports a genuine WARN
+    (`writable=True`, a world-writable bin dir) or PASS (`writable=False`, every
+    ancestor tightened) when driven for real inside `audit()`. Returns the sandbox
+    home `Path` so callers can assert redaction against it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    bin_dir = home / ".npm-global" / "lib" / "node_modules" / "openclaw" / "bin"
+    bin_dir.mkdir(parents=True)
+    fake_exe = bin_dir / "openclaw"
+    fake_exe.write_text("#!/bin/sh\necho openclaw")
+    fake_exe.chmod(0o755)
+    if writable:
+        bin_dir.chmod(0o777)  # world-writable -> WARN
+    else:
+        # mkdir(parents=True) leaves intermediates group-writable under a permissive
+        # umask -- tighten every ancestor _walk_ancestors will visit so this is
+        # genuinely a PASS, not an accidental WARN from mkdir's own default mode.
+        for d in (bin_dir, bin_dir.parent, bin_dir.parent.parent,
+                  bin_dir.parent.parent.parent, home / ".npm-global", home):
+            d.chmod(0o755)
+
+    monkeypatch.setattr(_shared, "_is_posix", lambda: True)
+    monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe))
+    monkeypatch.setenv("PATH", str(bin_dir))
+    return home
+
+
+def test_vuln_fixture_has_error_results(monkeypatch, tmp_path):
+    home = _c5_leak_scenario(monkeypatch, tmp_path, writable=True)
+    openclaw_home = home / ".openclaw"
+    shutil.copytree(FIXTURES / "home_vuln", openclaw_home)
+
+    ctx, findings, score = audit(openclaw_home, include_host=True)
+    c5 = next((f for f in findings if f.id == "C5"), None)
+    assert c5 is not None and c5.status == "WARN", "precondition: C5 must actually fire"
+    # Non-vacuity control: the pre-render finding really did inspect (and flag) the
+    # sandbox's own writable directory -- the collapsed '~/...' form, not merely the
+    # ABSENCE of the raw path, which could just as easily mean the scenario never fired
+    # at all. B-757 already folds this at the check layer (Finding.detail never carries
+    # the raw path here); this proves that, rather than assuming it.
+    assert str(home) not in c5.detail, c5.detail
+    assert "~/.npm-global/lib/node_modules/openclaw/bin" in c5.detail, c5.detail
+
+    doc, text = _parse(findings, score)
     results = doc["runs"][0]["results"]
     levels = {r["level"] for r in results}
     assert "error" in levels
 
+    assert str(home) not in text, text
+    c5_result = next(r for r in results if r["ruleId"] == "C5")
+    assert str(home) not in c5_result["message"]["text"], c5_result["message"]["text"]
+    assert "~/.npm-global/lib/node_modules/openclaw/bin" in c5_result["message"]["text"]
 
-def test_safe_fixture_has_no_error_results():
-    _, findings, score = audit(FIXTURES / "home_safe")
-    doc, _ = _parse(findings, score)
+
+def test_safe_fixture_has_no_error_results(monkeypatch, tmp_path):
+    home = _c5_leak_scenario(monkeypatch, tmp_path, writable=False)
+    openclaw_home = home / ".openclaw"
+    shutil.copytree(FIXTURES / "home_safe", openclaw_home)
+
+    ctx, findings, score = audit(openclaw_home, include_host=True)
+    c5 = next((f for f in findings if f.id == "C5"), None)
+    assert c5 is not None and c5.status == "PASS", "precondition: C5 must resolve clean"
+
+    doc, _text = _parse(findings, score)
     results = doc["runs"][0]["results"]
     error_results = [r for r in results if r["level"] == "error"]
     assert error_results == []

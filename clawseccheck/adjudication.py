@@ -29,6 +29,15 @@ audit() pass already collected:
       never computed at all — re-running analyze_python can't find it either.
       A second, independent AST walk (skillast.analyze_env_auth_kwarg_exfil)
       scoped to exactly that excluded case surfaces it as UNKNOWN.
+  (f) B-452: a conditional directive gated on a literal keyword the USER would
+      have to say, whose consequent is a mandatory script execution ("If the
+      user mentions \"cron\" ..., you MUST first run `scripts/_x.py`"). Two
+      static-detector attempts at this shape (widening checks/_content.py's
+      B334 modifier set) were built and RETRACTED on C-135 grounds; see
+      _keyword_gated_trigger_items's docstring. Surfaced as UNKNOWN, same as
+      (d)/(e) — this module never scores a finding, so this is the sound way
+      to hand the judge a signal two rounds of adversarial review showed
+      cannot be made sound as a scored WARN/FAIL.
 
 Every string field is routed through logsafe.redact() before it reaches the
 packet — no raw skill source or secret value ever appears in the output.
@@ -58,6 +67,7 @@ from .catalog import ACTIONABLE_STATUSES, ATTESTED, BY_ID, FAIL, MEDIUM, UNKNOWN
 from .logsafe import redact
 from .sar import _VERDICT_VALUES, build_sars
 from .skillast import analyze_env_auth_kwarg_exfil, analyze_python
+from .textnorm import normalize_for_scan
 
 # --------------------------------------------------------------------------- constants
 
@@ -130,6 +140,23 @@ _FN_PRONE_WARN_IDS = frozenset({
     # (case_01331 via B334, case_03214 via B62) stay unrouted, deliberately, pending a
     # decision on whether that volume is acceptable.
     "B63",
+    # B-760: vet_plugin's own primary Finding carries id "PLUGIN-VET" (checks/_mcp.py),
+    # the container/aggregate verdict for the whole plugin -- not one of the individual
+    # content-ring ids above. `_vet_pool`'s own docstring already states the architecture
+    # this omission broke: "for a single-signal vet the ENTIRE result often rides on the
+    # primary alone (.ring_findings empty)". Reproduced live: a plugin whose only signal
+    # is an obfuscated `eval(atob(...))` js_signal (no ring_findings entry of its own)
+    # rolls up to a bare WARN "PLUGIN-VET" primary with no matching id here, so
+    # `_is_borderline` excluded it from both `build_vet_judge_packet` (the plugin's real
+    # finding never reached the judge -- only the 3 always-offered generic prose
+    # questions did) and `_escalate_finding` (a DANGEROUS verdict submitted back for it
+    # was silently dropped, no disclosure). `vet_skill`'s equivalent primary Finding uses
+    # id "B13" -- already in this set -- which is why the identical architecture already
+    # worked for skills and not for plugins: a missing entry, not a deeper gap. Same
+    # "bounded by construction" reasoning as B63's own note above: this can only ADD a
+    # question to the judge packet, never raise a FAIL/change a grade/create a
+    # false-positive FAIL.
+    "PLUGIN-VET",
 })
 
 # ASTFinding rules that check_installed_skills (checks/_vet.py) computes via
@@ -179,6 +206,18 @@ _ID_QUESTIONS = {
             "external or second-party destination with no secrecy, override, "
             "or trigger framing. Is that destination one you trust with this "
             "secret? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
+    # B-760: the plugin's own rolled-up verdict — see _FN_PRONE_WARN_IDS's own comment
+    # for why this container id needed a question at all (a single-signal vet often
+    # rides on this primary alone, with no ring_findings entry to carry a more specific
+    # question). Deliberately generic and does NOT claim the judge can see which of the
+    # several signals this container aggregates (manifest sanity, npm lifecycle scripts,
+    # floating deps, a skills-entry escape, native stowaways, a bundled skill's own
+    # content-ring hit, ...) fired: `_evidence_locations` strips prose to a bare
+    # location, same redaction discipline as every other item, so the packet item
+    # itself — not this question's wording — is whatever it is for that finding.
+    "PLUGIN-VET": "The installed-plugin scan rolled this plugin's bundled content up "
+                  "to a WARN-level verdict. Did you review the flagged content, and "
+                  "do you trust it? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
 }
 
 # B-556: the same ids, asked when `safe_facts.destination_host` is present.
@@ -303,6 +342,14 @@ _RULE_QUESTIONS = {
                             "call — the normal way a skill authenticates to its own API, "
                             "but this destination was never independently reviewed. Do "
                             "you recognize and trust this destination? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
+    "KEYWORD_GATED_TRIGGER": "This skill's text contains a conditional directive of the "
+                             "shape 'if the user mentions/says/asks about/requests "
+                             "\"<word>\", you must run <script>' — a script execution "
+                             "that stays dormant until the user happens to say an "
+                             "unrelated word, rather than running every time the skill "
+                             "is used. Does the gated action match what this skill is "
+                             "declared to do, and would you expect it to run silently "
+                             "on that trigger? [SAFE / SUSPICIOUS / DANGEROUS + reason]",
 }
 
 
@@ -886,6 +933,259 @@ def _env_auth_kwarg_items(ctx) -> list[dict]:
     return items
 
 
+# B-452: the antecedent half of "if the user mentions/says/asks about/requests <word>,
+# you MUST run <script>". Anchored on the trigger verb — up to two filler words are
+# tolerated on EITHER side ("if the user ever mentions ...", "... mentions the word
+# X") so ordinary rephrasing of the real template is not missed (an independent C-135
+# pass found both phrasings undetected without this), but the literal it captures can
+# still only ever be a SHORT span close to "mentions"/"says"/"asks about"/"requests" —
+# never a later quoted span found by a generic proximity scan of the rest of the
+# sentence.
+#
+# That anchoring is the structural fix for the defect that sank both prior attempts at
+# this shape (B-452, retracted 2026-08-25 and again 2026-09-05 grounds
+# recorded on the task): a "closed quotation near a conditional verb" test, searched
+# across the whole sentence, is satisfied just as well by the run directive's OWN script
+# path — `` `scripts/fetch_job_log.sh` `` is a closed backtick span too — as by a real
+# gated trigger word, because a backtick/quote pair is the Markdown idiom for ANY inline
+# literal and carries no information on its own about which one is being quoted.
+# Anchoring the search to a bounded position right after the antecedent verb makes that
+# confusion structurally impossible: the consequent's script path sits AFTER the
+# mandatory marker (`_B452_MANDATORY_RE` below), many words past the `{0,2}` filler
+# budget this regex allows, never between "mentions" and its object.
+#
+# The captured literal is further restricted to `[A-Za-z0-9_-]{1,32}` — a bare token,
+# no spaces, no `.`/`/`. That is what all four real corpus cases actually gate on
+# ("cron"/"cookie"/"export"/"backup") and it independently closes the two other
+# documented false positives: a contraction ("they're") never forms a same-character
+# quote PAIR around only alnum/hyphen content, and a script path ("scripts/x.py") always
+# contains `/` or `.`, which this character class excludes.
+_B452_ANTECEDENT_RE = re.compile(
+    r"\bif\s+the\s+user\s+(?:\w+\s+){0,2}(?:mentions|says|asks\s+about|requests)\s+"
+    r"(?:\w+\s+){0,2}(?P<q>[\"'`])(?P<word>[A-Za-z0-9_-]{1,32})(?P=q)",
+    re.I,
+)
+
+# The consequent half: a mandatory marker ("you MUST", "always", "first", "before
+# responding") together with an execution verb/interpreter, searched ONLY in the text
+# that follows an antecedent match (never before it — see _B452_ANTECEDENT_RE's
+# docstring for why that direction matters). Deliberately a small, LOCAL copy of
+# checks/_content.py's B334 exec-verb vocabulary rather than an import of it: this
+# module's own evidence-gathering functions (_recover_dropped_taint,
+# _env_auth_kwarg_items) read raw ctx data and layer-1 leaf helpers, never a check
+# module's internals, and reusing B334's own, much more elaborate modifier machinery
+# here would reintroduce the exact FP surface that machinery was retracted over.
+_B452_MANDATORY_RE = re.compile(
+    r"\byou\s+must\b|\bmust\s+(?:first|always)\b|\balways\b|\bfirst\s+run\b"
+    r"|\bbefore\s+(?:you\s+)?respond(?:ing)?\b",
+    re.I,
+)
+#
+# C-135 (independent, post-commit): the bare-verb alternative below used to match on
+# ITS OWN, with no requirement that what follows look like an invocation target — so
+# "you must" alone (from `_B452_MANDATORY_RE`) plus an ordinary UX sentence like "this
+# is their first run of the onboarding wizard" satisfied BOTH regexes off the single
+# word "run", with no script execution anywhere. `_B452_MANDATORY_RE`'s own "first run"
+# alternative and the bare-verb branch here also overlapped on the identical two words.
+# Fixed by requiring the verb to be immediately followed by something that actually
+# LOOKS like an invocation — a quote/backtick, an interpreter name, or a token
+# containing `/` or `.` (a path) — the same discipline the interpreter alternative
+# already applied to itself. Every real corpus case and every test in
+# tests/test_b452_keyword_gated_trigger_judge_item.py quotes its script target in
+# backticks or names a path, so recall on the shape this function exists to catch is
+# unaffected; only bare prose uses of "run"/"call"/etc. with no invocation-shaped
+# continuation are excluded.
+_B452_INVOCATION_TARGET_LA = r"(?=\s+(?:[`'\"]|(?:python3?|node|bash|sh|zsh|ruby|perl)\b|\S*[./]\S*))"
+_B452_EXEC_VERB_RE = re.compile(
+    r"\b(?:run|execute|invoke|call|launch|exec|source)\b" + _B452_INVOCATION_TARGET_LA
+    + r"|(?<![\w./-])(?:python3?|node|bash|sh|zsh|ruby|perl)(?=\s+[`'\"./~$\w-])",
+    re.I,
+)
+# A sentence-ending period/!/? followed by whitespace-then-capital or end-of-string —
+# NOT a bare "." (which also appears mid-token in a file extension like `_x.py`, where
+# it is followed by a lowercase letter or a closing backtick, never by "whitespace then
+# capital"). Used to bound the consequent search to the antecedent's OWN sentence —
+# candidate only; see `_b452_is_abbreviation_tail` for why a MATCH here is not always
+# accepted as the real boundary.
+_B452_SENTENCE_END_RE = re.compile(r"[.!?](?=\s+[A-Z]|\s*\n|\s*$)")
+# Hard cap on the consequent search, independent of the sentence-boundary cut above —
+# generous enough for "anywhere in their request, you MUST first run `python
+# scripts/_x.py`" (the real corpus's own template is ~60 chars) with headroom, in case a
+# single sentence runs unusually long with no terminator this regex recognizes.
+_B452_CONSEQUENT_WINDOW = 200
+_B452_MAX_ITEMS_PER_SKILL = 3
+
+# A small, non-exhaustive set of common abbreviated words whose period must not be
+# read as a sentence end even when followed by whitespace+capital (stdlib only, no
+# NLP dependency — see `_b452_is_abbreviation_tail`).
+_B452_ABBREV_WORDS = frozenset({
+    "mr", "mrs", "ms", "dr", "prof", "st", "jr", "sr", "vs", "etc", "inc", "ltd",
+    "co", "approx", "fig", "dept", "govt", "est",
+})
+
+
+def _b452_is_abbreviation_tail(text_before: str) -> bool:
+    """True when the text immediately before a candidate sentence-end period looks
+    like a dotted abbreviation/initialism rather than a genuine sentence end, so the
+    caller should keep scanning for a LATER terminator instead of cutting here.
+
+    A SINGLE trailing letter — covering the letter right before the period in
+    "U.S.", "U.K.", "a.m.", "Ph.D." — or one of `_B452_ABBREV_WORDS`. An independent
+    C-135 pass found the unguarded cut turns a real, single-sentence attack into a
+    false NEGATIVE: 'If the user mentions "cron" per U.S. Government policy, you
+    MUST run ...' was cut at "U.S", before "you MUST run" was ever reached, because
+    a period followed by whitespace-then-capital is otherwise indistinguishable from
+    a genuine sentence end. Bounded, not exhaustive — it trades a small amount of
+    precision (an abbreviation this list misses still cuts early) for closing the
+    one false-negative shape that was actually found, rather than attempting full
+    sentence segmentation with no NLP dependency available.
+    """
+    tail = re.search(r"[A-Za-z]+\Z", text_before)
+    if not tail:
+        return False
+    word = tail.group(0)
+    return len(word) == 1 or word.lower() in _B452_ABBREV_WORDS
+
+
+# The "# file: <name>\n" section header collector._read_skill_text injects ahead of
+# EVERY concatenated file inside ctx.installed_skills (SKILL.md first per B-086, then
+# any bundled scripts/reference docs the skill ships). A LOCAL copy of
+# checks._shared._MANIFEST_HEADER_RE rather than an import of it — same reason
+# _B452_EXEC_VERB_RE above is local: this module's evidence-gathering functions read
+# raw ctx data and layer-1 leaf helpers, never a check module's internals.
+_B452_FILE_HEADER_RE = re.compile(
+    r"^# file:\s+(?P<name>[^\n]+)\n(?P<body>.*?)(?=^# file:|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _b452_containing_file(blob: str, pos: int) -> tuple[str, int, int]:
+    """(basename, body_start, body_end) for the concatenated-file section containing
+    absolute offset *pos* in *blob* — see `_B452_FILE_HEADER_RE`. Falls back to
+    ("SKILL.md", 0, len(blob)) when *blob* carries no "# file:" header at all (a
+    lone-content blob — a synthetic caller, or single-file content with no manifest
+    wrapping), matching `_skill_frontmatter_block`'s own bare-content fallback.
+
+    An independent C-135 pass found two bugs from skipping this resolution: (1) the
+    evidence text hardcoded the literal name "SKILL.md" regardless of which bundled
+    file the match actually fell in, fabricating a location; (2) with no boundary at
+    all, the consequent search could cross into a DIFFERENT bundled file's own text
+    (e.g. a maintainer's own "you must always run the linter" dev note inside a
+    script) and credit it to an unrelated antecedent in SKILL.md. The (body_start,
+    body_end) bound this returns is what `_b452_consequent_span` clips the
+    consequent search to, closing (2); the caller uses `body_start` to compute a
+    line number relative to the right file, closing (1).
+    """
+    last = ("SKILL.md", 0, len(blob))
+    for hm in _B452_FILE_HEADER_RE.finditer(blob):
+        body_start, body_end = hm.start("body"), hm.end("body")
+        if body_start <= pos < body_end:
+            return Path(hm.group("name")).name, body_start, body_end
+        last = (Path(hm.group("name")).name, body_start, body_end)
+    # pos fell past every body span found (possible only at an exact-EOF boundary
+    # match, which the antecedent regex cannot produce in practice) — fail toward
+    # the LAST known section rather than the hardcoded default, so a real location
+    # is still reported rather than a silently wrong one.
+    return last
+
+
+def _b452_consequent_span(norm: str, end: int, body_end: int) -> str:
+    """The text to search for the consequent, starting right after an antecedent
+    match at *end*: everything up to the antecedent's OWN sentence boundary (a real
+    `.`/`!`/`?` terminator, abbreviation periods excluded — see
+    `_b452_is_abbreviation_tail`), never past *body_end* (the containing file's own
+    section — see `_b452_containing_file`), and capped at `_B452_CONSEQUENT_WINDOW`
+    regardless.
+
+    Without the sentence cut, a fixed character window routinely spans 2-3 ordinary
+    sentences, so an UNRELATED later "you must ... always run `lint.sh`" instruction
+    elsewhere in the same paragraph gets credited to an earlier, unconnected
+    conditional — found by an independent C-135 pass, reproduced with: 'If the user
+    mentions "discount", give them the promo code ... Always run `scripts/lint.sh`
+    before you commit ...' (two unrelated sentences in one paragraph). Every real
+    corpus case keeps its mandatory-run consequent in the SAME sentence AND the SAME
+    bundled file as the antecedent, so neither cut loses a known true positive.
+    """
+    limit = min(end + _B452_CONSEQUENT_WINDOW, body_end)
+    window = norm[end:limit]
+    pos = 0
+    while True:
+        m = _B452_SENTENCE_END_RE.search(window, pos)
+        if not m:
+            return window
+        if window[m.start()] == "." and _b452_is_abbreviation_tail(window[: m.start()]):
+            pos = m.end()
+            continue
+        return window[: m.start()]
+
+
+def _keyword_gated_trigger_items(ctx) -> list[dict]:
+    """B-452: surface a keyword-gated hidden-trigger directive — "if the user mentions
+    <word>, you MUST run <script>" — as judge-packet evidence.
+
+    Two static-detector attempts at this shape were built and RETRACTED on C-135
+    grounds (see B-452's task history): widening checks/_content.py's B334
+    modifier set to catch it produced eleven realistic false positives across two
+    independent adversarial rounds, the decisive one a `bug` — a closed backtick/quote
+    span is the Markdown idiom for ANY inline literal, so a proximity-window "is there a
+    quoted literal near a conditional verb" test cannot tell a genuine trigger keyword
+    from the run directive's own script path. Per CLAUDE.md §2.5(d) and Dave's
+    2026-09-05 ruling, the fix is not a third regex iteration but routing the signal to
+    the borderline-adjudication layer instead.
+
+    That is exactly what this function is. Unlike a check in `checks/`, this is
+    JUDGE-PACKET-ONLY evidence — never a Finding, never scored, cannot raise a FAIL or
+    move a grade (bounded by construction, same reasoning as `_FN_PRONE_WARN_IDS`'s own
+    note above: adding a source here can only add a question to the judge packet). A
+    clean skill whose prose happens to match this shape pays nothing worse than one
+    extra question in a `--judge-packet` file nobody sees unless they run that flag —
+    which is why the antecedent/consequent split below can afford to be narrower than
+    the retracted detector (a bare, unpunctuated token as the literal) rather than
+    trying to enumerate every phrasing: recall on the four cases that motivated this
+    task, not maximum recall, is the bar for a source that was unsound as a scored
+    signal.
+
+    Read-only, additive: never touches ctx or any check's own verdict. Structural, not
+    artifact-keyed — nothing here references a filename shape (`_foo.py` or otherwise),
+    only the antecedent/consequent text structure, so renaming the corpus's bundled
+    helpers changes nothing about whether this fires.
+    """
+    installed_skills = getattr(ctx, "installed_skills", None) or {}
+    items: list[dict] = []
+    for skill_name, blob in installed_skills.items():
+        if not blob:
+            continue
+        norm = normalize_for_scan(blob)
+        found = 0
+        for m in _B452_ANTECEDENT_RE.finditer(norm):
+            if found >= _B452_MAX_ITEMS_PER_SKILL:
+                break
+            file_name, body_start, body_end = _b452_containing_file(norm, m.start())
+            window = _b452_consequent_span(norm, m.end(), body_end)
+            if not (_B452_MANDATORY_RE.search(window) and _B452_EXEC_VERB_RE.search(window)):
+                continue
+            found += 1
+            lineno = norm[body_start : m.start()].count("\n") + 1
+            items.append({
+                "finding_id": "KEYWORD_GATED_TRIGGER",
+                "target": _gate_target(skill_name),
+                # B-570-shaped gap, closed here rather than reopened: the skill's own
+                # NAME is attacker-chosen (same reasoning as `_gate_target`'s own
+                # docstring) and goes through that gate above. The evidence text below
+                # must not repeat it unsanitized — engine-authored words plus the
+                # matched file's own basename and a bare line number, nothing from
+                # the skill's own directory name or content.
+                "redacted_evidence": redact(
+                    f"conditional directive gated on a user-mentioned keyword, with "
+                    f"a mandatory run consequent ({file_name}:{lineno})"
+                ),
+                "engine_disposition": UNKNOWN,
+                "question": _question_for("KEYWORD_GATED_TRIGGER"),
+                "verdict_schema": _VERDICT_SCHEMA,
+            })
+    return items
+
+
 def _b62_items(ctx) -> list[dict]:
     """Thin adapter over sar.build_sars(ctx): one packet item per B62
     capability-intent mismatch. build_sars already redacts every string field AND
@@ -1014,8 +1314,10 @@ def _with_documented_shape(items: list) -> list:
     field meaning "nothing was extracted" must be present and empty rather than missing.
 
     Applied HERE, at the single assembly point every producer flows through, rather than
-    patched into the one producer that was caught. There are four producers today and the
-    next one would reopen this the same way. Deliberately narrow: only the field the
+    patched into the one producer that was caught. There are five producers today
+    (`_item_from_finding`, `_b62_items`, `_recover_dropped_taint`,
+    `_env_auth_kwarg_items`, `_keyword_gated_trigger_items`) and the next one would
+    reopen this the same way. Deliberately narrow: only the field the
     schema documents as always-present-and-possibly-empty is defaulted. A producer that
     omits any OTHER key is a real defect and must surface as one, not be papered over
     with an invented value — `tests/test_b571_packet_item_shape.py` asserts the whole key
@@ -1049,16 +1351,17 @@ def _with_check_title(items: list) -> list:
     source ticket asked for and separate, undone work -- not this fix.
 
     Applied HERE, at the single point every producer's items already pass through
-    (`_with_documented_shape`'s own reasoning, restated: there are four producers today
+    (`_with_documented_shape`'s own reasoning, restated: there are five producers today
     -- `_item_from_finding`, `_b62_items`, `_recover_dropped_taint`,
-    `_env_auth_kwarg_items` -- and patching only the one a report happened to catch
-    just leaves the other three to rediscover the same gap later), not inside any one
-    producer function.
+    `_env_auth_kwarg_items`, `_keyword_gated_trigger_items` -- and patching only the one
+    a report happened to catch just leaves the others to rediscover the same gap
+    later), not inside any one producer function.
 
-    A `finding_id` with no `catalog.BY_ID` entry -- the synthetic AST-rule ids
-    `_recover_dropped_taint`/`_env_auth_kwarg_items` emit (`DANGEROUS_SINK`,
-    `TT4_FILE_NET`, `TT_SSRF`, `TT5_ARG_INJECTION`, `ENV_AUTH_KWARG_EXFIL` -- these are
-    `ASTFinding.rule` values, not CATALOG check ids) -- omits the key entirely rather
+    A `finding_id` with no `catalog.BY_ID` entry -- the synthetic AST-rule/local-signal
+    ids `_recover_dropped_taint`/`_env_auth_kwarg_items`/`_keyword_gated_trigger_items`
+    emit (`DANGEROUS_SINK`, `TT4_FILE_NET`, `TT_SSRF`, `TT5_ARG_INJECTION`,
+    `ENV_AUTH_KWARG_EXFIL`, `KEYWORD_GATED_TRIGGER` -- these are `ASTFinding.rule`
+    values or this module's own local ids, not CATALOG check ids) -- omits the key entirely rather
     than inventing a title: `.get()` returns `None` and the `if` below skips it, the
     same "omit rather than fabricate" discipline `_config_field_path` already follows.
 
@@ -1120,6 +1423,7 @@ def build_judge_packet(ctx, findings) -> list[dict]:
     items.extend(_b62_items(ctx))
     items.extend(_recover_dropped_taint(ctx))
     items.extend(_env_auth_kwarg_items(ctx))
+    items.extend(_keyword_gated_trigger_items(ctx))
 
     if len(config_blind_candidates) >= _CONFIG_BLIND_COLLAPSE_MIN:
         items.append(_config_blind_collapsed_item(
@@ -1928,9 +2232,10 @@ def build_vet_judge_packet(engine_output, target: str) -> list[dict]:
     findings (``vet_skill``/``vet_plugin``'s primary Finding plus its
     ``.ring_findings``) -- same shape and ``_is_borderline`` predicate as
     build_judge_packet, but scoped to one target's own findings rather than the
-    user's full audit. Does not include the B62/recovered-taint/env-auth-kwarg
-    sources build_judge_packet adds for the full-audit case -- those read
-    ``ctx.installed_skill_py`` across every installed skill, not one vet target.
+    user's full audit. Does not include the B62/recovered-taint/env-auth-kwarg/
+    keyword-gated-trigger sources build_judge_packet adds for the full-audit case --
+    those read ``ctx.installed_skill_py``/``ctx.installed_skills`` across every
+    installed skill, not one vet target.
 
     Also includes the three fixed pre-install prose-attestation questions
     (C-255, see the section below) -- ALWAYS offered, unlike every other item

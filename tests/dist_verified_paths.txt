@@ -15,6 +15,7 @@
 # openclaw-version: 2026.9.4
 #
 acp.runtime.installCommand
+agents.defaults.cwd
 agents.defaults.elevatedDefault
 agents.defaults.embeddedAgent.projectSettingsPolicy
 agents.defaults.heartbeat
@@ -65,6 +66,7 @@ gateway.controlUi.allowedOrigins
 gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback
 gateway.controlUi.dangerouslyDisableDeviceAuth
 gateway.controlUi.embedSandbox
+gateway.controlUi.experimental.customPlugins
 gateway.customBindHost
 gateway.http.endpoints.chatCompletions
 gateway.http.endpoints.chatCompletions.enabled
@@ -94,6 +96,7 @@ hooks.internal.entries
 hooks.internal.load.extraDirs
 hooks.mappings
 hooks.token
+hooks.transformsDir
 logging.file
 memory.search.remote
 meta.lastTouchedVersion

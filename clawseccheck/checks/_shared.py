@@ -104,6 +104,39 @@ def _username_safe_path(path) -> str:
     return "~" if str(rest) == "." else f"~/{rest}"
 
 
+def _detail_path(value, home) -> str:
+    """Render *value* for a ``Finding.detail``: relative to the audited home when it lies
+    inside it, with a single ``..`` segment when it lies under the home's parent (the
+    ``~`` slot of a real OpenClaw home, where ``.config/...`` lives). Anything else is
+    returned unchanged. A composite string that merely *starts* with such a path is
+    rewritten the same way, so a source label like ``<unit> (Environment=)`` still works.
+
+    ``baseline.fingerprint()`` hashes ``Finding.detail``, and a user's
+    ``.clawseccheckignore`` keys a per-finding suppression on that hash — so an absolute
+    scan-root path baked into a detail silently orphans that suppression the moment the
+    workspace or the scanned skill moves, and it leaks the reporter's directory layout
+    into any report they share. The audited root is printed once in the report header
+    instead. A path the CONFIG itself declares in absolute form is deliberately left
+    verbatim: that string is a function of the audited subject, so it belongs in the
+    finding's identity (and in the text, since it is what the owner has to go fix).
+
+    C-456 FU (B-819): consolidated here from three byte-identical copies
+    that had drifted apart independently in checks/_host.py, checks/_config.py and
+    checks/_lifecycle.py, per this project's own §3.1 rule (a helper reused by 2+ topics
+    belongs in checks/_shared.py). Unlike ``_username_safe_path`` above, this takes an
+    explicit *home* rather than reading ``Path.home()`` -- the right choice for a value
+    that is a function of ``ctx.home`` specifically (an install/attestation path inside
+    the audited tree), not of the operator's real OS account home. A symlink TARGET that
+    can point anywhere on the host (B87) needs ``_username_safe_path`` instead; see its
+    call site in checks/_content.py for why.
+    """
+    text = str(value)
+    for base, prefix in ((str(home), ""), (str(Path(home).parent), ".." + os.sep)):
+        if base and base != os.sep and text.startswith(base + os.sep):
+            return prefix + text[len(base) + 1:]
+    return text
+
+
 def _perms_loose(ctx: Context) -> bool:
     """True only on POSIX when the config file is group/world-readable.
 
@@ -798,6 +831,20 @@ SENSITIVE_TOOL_IDS = frozenset({"read", "memory_get", "memory_search"})
 
 
 
+# B-674 decision: keep the bare "fs_read" / "fs_write" substring hints below rather than
+# deleting them, even though neither is a real OpenClaw tool id (grounded against the
+# installed dist's `tool-catalog-*.js` CORE_TOOL_DEFINITIONS, sectionId "fs" — the real
+# ids are `read`/`write`/`edit`/`apply_patch`; see SENSITIVE_TOOL_IDS / OUTBOUND_TOOL_IDS
+# below for the exact-id layer that answers "did the runtime actually grant this"). Two
+# reasons to keep the substring, not one: it still catches a REAL namespaced MCP tool such
+# as `mcp__files__fs_read`, and a bare invented id in a core `tools.allow` still shows the
+# user INTENDED a grant OpenClaw silently ignores — worth surfacing, not worth deleting.
+# Known consequence, not fixed here: two clawrange corpus fixtures
+# (`trifecta_live`, `multiagent_trifecta`) are built on `tools.profile: "minimal"` plus a
+# bare `fs_read`/`fs_write` core allowlist entry, and `resolveCoreToolProfilePolicy(
+# "minimal")` grants neither under the real policy resolver — both fixtures do not
+# demonstrate what their names claim. That is clawrange's corpus, a different project;
+# filed there, not edited from here (B-674).
 SENSITIVE_TOOL_HINTS = (
     "db",
     "sql",
@@ -824,6 +871,22 @@ OUTBOUND_TOOL_HINTS = (
 )
 
 
+# B-674: OUTBOUND_TOOL_HINTS above is a substring match and cannot see OpenClaw's own
+# write-capable tool ids either — the same defect B-667 fixed for the inbound/sensitive
+# leg via SENSITIVE_TOOL_IDS. Grounded against the installed dist's `tool-catalog-*.js`
+# CORE_TOOL_DEFINITIONS: `write`/`edit`/`apply_patch` all carry `sectionId: "fs"`, and
+# none of the three matches any OUTBOUND_TOOL_HINTS entry as a substring ("write" is not
+# inside "send"/"webhook"/"exec"/"shell"/"deploy"/"publish"/"http_post"/"email_send"), so
+# a bare `tools.allow: ["write"]` (no powerful `tools.profile`, no substring collision)
+# raised no outbound leg at all before this. Exact match, alias-folded via `_canon_tool`,
+# mirroring SENSITIVE_TOOL_IDS exactly. Largely non-overlapping with the existing
+# `_profile_is_powerful` outbound source: "coding"/"full" already trip that profile-name
+# check, so this set's marginal reach is an explicit `tools.allow`/`alsoAllow`/attested
+# grant of one of these three ids under a profile `_profile_is_powerful` does not catch
+# (e.g. "minimal" widened with `alsoAllow: ["write"]`).
+OUTBOUND_TOOL_IDS = frozenset({"write", "edit", "apply_patch"})
+
+
 # B55/B-395: the real, canonical write-capable subset of _B68_FS_TOOLS. "read" is
 # deliberately excluded — B68's tuple includes it because B68 asks a DIFFERENT question
 # ("is any fs tool reachable"), but B55 asks specifically about WRITE exposure.
@@ -832,7 +895,20 @@ OUTBOUND_TOOL_HINTS = (
 # question. §3.1 — a helper two topics reuse belongs in the leaf, not restated in each. A
 # second copy is exactly the drift that made B-450's consumer regexes miss every new class
 # member and left B-563's leg hints frozen at seven check ids.
-_B55_FS_WRITE_TOOLS = frozenset({"write", "edit", "apply_patch"})
+#
+# B-735: "fs_delete" and "fs_move" added. Both are real, dispatchable OpenClaw tool ids —
+# grounded against the installed 2026.9.4 dist, in TWO independent vendor lists naming the
+# fs-write family: DEFAULT_GATEWAY_HTTP_TOOL_DENY (dangerous-tools-*.mjs) —
+# ["exec","spawn","shell","fs_write","fs_delete","fs_move","apply_patch","terminal",...] —
+# and ACP_UNSUPPORTED_INHERITED_TOOL_DENY (subagent-capabilities-*.mjs) —
+# ["apply_patch","edit","exec","fs_delete","fs_move","fs_write","process","read","shell",
+# "spawn","write"]. Both lists group fs_delete/fs_move with fs_write/write/edit/apply_patch,
+# never with the non-fs dangerous tools in the same first list (terminal, portal,
+# sessions_spawn, ...) — deliberately NOT importing those here; they are real hazards but
+# not filesystem-write, a different question than this set answers. Deletion/move are not
+# less dangerous than an overwrite — arguably more, since a delete is not repairable by a
+# later write — so they get the identical treatment, not a lesser one.
+_B55_FS_WRITE_TOOLS = frozenset({"write", "edit", "apply_patch", "fs_delete", "fs_move"})
 
 
 # ---------- B-700: advice that names a key the user's own OpenClaw accepts ----------
@@ -1033,7 +1109,70 @@ def _meta(cid: str):
 # Moved rather than copied, deliberately: a fourth independently-drifting copy is the disease,
 # not the cure. `risk.py` now imports these from here, so there is one implementation and one
 # place a future C-135 round has to land.
+#
+# C-454: even after that move, the raw `sandbox.docker.binds` NORMALIZATION
+# step (dict->get->str/list-coercion, fail-closed on a malformed shape) was still
+# duplicated FOUR times: `_sandbox_has_writable_bind` below, `_peragent_sandbox_evidence`
+# and `check_sandbox`'s defaults-level block (both `checks/_config.py`), and RISK-16's
+# `_host_reaching_bind` (`risk.py`) -- exactly the divergence class B-673 already fixed
+# for `_bind_mode_is_ro`/`_resolve_sandbox_scope`, recurring one field over. Extracted as
+# `_sandbox_docker_binds` (below) and `_bind_mentions_docker_sock` -- NORMALIZATION and the
+# docker.sock label only, never the mode-aware "does this defeat containment" JUDGMENT,
+# which B4 and RISK-12 correctly answer differently and must go on answering differently:
+# B4 reports ANY declared bind (its own remediation says "drop host and docker.sock binds"
+# with no mode qualifier, and `test_b673_peragent_bind_scope.py::
+# test_the_ro_helper_is_not_wired_into_this_check` pins that `_bind_mode_is_ro` must never
+# reach it), while RISK-12 (a write/tamper chain) only counts a bind that is NOT verifiably
+# `:ro`. A first attempt at sharing `_bind_mode_is_ro` itself into B4 was tried and
+# RETRACTED for exactly this reason (see `_peragent_sandbox_evidence`'s own C-135 note) --
+# merging the JUDGMENT would repeat that mistake one field over; only the PARSING is safe
+# to share.
 # ---------------------------------------------------------------------------------------
+
+
+def _sandbox_docker_binds(sandbox: dict) -> "list | None":
+    """Normalize `sandbox.docker.binds` (real schema: a bind-spec string, or a list of
+    them) to a plain `list[str]`. The SINGLE reader of this field's raw shape — every
+    check/risk-path consumer below calls this instead of its own `.get("docker")` /
+    `.get("binds")` / isinstance chain, so a future consumer cannot re-diverge on the
+    normalization step the way B-673 already found four independent copies of.
+
+    Returns:
+      * `[]` — no `docker` key, or `docker` is a dict with no (or a falsy) `binds` key.
+        The ordinary "nothing declared" case.
+      * `list[str]` — `binds` is a string (wrapped as a 1-element list) or a list
+        (each entry coerced with `str()`, matching every caller's own prior handling).
+      * `None` — the shape is malformed/unparseable: `docker` is present but not a
+        dict, or `binds` is present but neither a string nor a list. Distinct from
+        `[]` so a caller that must fail closed on ambiguity (`_sandbox_has_writable_bind`)
+        can do so, while a caller that only wants evidence text (B4) can choose its own
+        policy for "present but unparseable" instead of losing the distinction entirely.
+    """
+    docker = sandbox.get("docker") if isinstance(sandbox, dict) else None
+    if docker is None:
+        return []
+    if not isinstance(docker, dict):
+        return None
+    binds = docker.get("binds")
+    if not binds:
+        return []
+    if isinstance(binds, str):
+        return [binds]
+    if isinstance(binds, list):
+        return [str(b) for b in binds]
+    return None
+
+
+def _bind_mentions_docker_sock(binds: "list | None") -> bool:
+    """True if any bind spec in *binds* (as returned by `_sandbox_docker_binds`)
+    references `docker.sock` — full host control / container-escape signal. The one
+    definition; every caller previously ran its own `"docker.sock" in " ".join(...)`.
+    `None` (a malformed `binds` shape) is not iterable content, so this returns False
+    for it — each caller already decides separately how to treat a malformed shape via
+    `_sandbox_docker_binds`'s own return value, before ever reaching this helper."""
+    if not binds:
+        return False
+    return any("docker.sock" in b for b in binds)
 
 
 def _bind_mode_is_ro(bind: object) -> bool:
@@ -1114,19 +1253,17 @@ def _sandbox_has_writable_bind(sandbox: dict) -> bool:
     round): ``sandbox.browser.binds`` (``resolveSandboxBrowserConfig``) is a
     SECOND, distinct bind surface this function never examines -- an unexamined
     false-negative candidate independent of the ``docker.binds`` leg above.
+
+    C-454: normalization delegated to ``_sandbox_docker_binds`` -- its ``None``
+    return (malformed ``docker``/``binds`` shape) maps to this function's own
+    fail-closed ``True``, preserving the exact behaviour this docstring already
+    documented before the extraction.
     """
-    docker = sandbox.get("docker") if isinstance(sandbox, dict) else None
-    if docker is None:
-        return False
-    if not isinstance(docker, dict):
+    binds = _sandbox_docker_binds(sandbox)
+    if binds is None:
         return True  # present but malformed -- fail closed, cannot verify safety
-    binds = docker.get("binds")
     if not binds:
         return False
-    if isinstance(binds, str):
-        binds = [binds]
-    if not isinstance(binds, list):
-        return True  # unparseable binds shape -- fail closed
     return any(not _bind_mode_is_ro(b) for b in binds)
 
 
@@ -2884,7 +3021,43 @@ def _unclassified_leg_verbs(tools: list) -> list:
     return out
 
 
-def _has_approval_gate(cfg: dict) -> bool:
+# B-644: tool tokens whose write capability is NOT reached by tools.exec.mode/
+# security/ask at all (see `_has_approval_gate`'s docstring — it is schema-scoped to
+# that field family alone). Matched with the same discipline risk.py's
+# `_has_exec_or_write_tools` already uses for this exact vocabulary: "fs_write" is
+# safe as an unanchored substring (multi-word, no realistic accidental collision —
+# see that function's own B-735 note), but "write"/"edit"/"fs_delete"/"fs_move" are
+# matched by EXACT membership only (B-395/B-735 C-135 rounds: "write"/"edit" are
+# common English-word fragments — "underwriter", "credit_score" — and
+# "fs_delete"/"fs_move" collide with "refs_delete"/"prefs_delete" as substrings).
+# Deliberately narrower than OUTBOUND_TOOL_HINTS: "send"/"webhook"/"http_post"/
+# "publish" are a different tool family (messaging/network) that this fix does not
+# touch — only the write-to-local-files/elevated-escalation family the B20/B22/RISK-07
+# self-modification shape actually depends on.
+_NON_EXEC_WRITE_TOKENS = ("write", "edit", "fs_delete", "fs_move", "elevated")
+
+
+def _exec_gate_covers_tools(tools) -> bool:
+    """B-644: whether the write-capable tool set *tools* is exec-family enough for
+    `tools.exec.mode/security/ask` to have any bearing on it at all.
+
+    False when *tools* contains a non-exec write tool (fs_write/write/edit/
+    fs_delete/fs_move/elevated) — none of those are reached by tools.exec.* (see
+    `_has_approval_gate`'s own grounded field list), so an exec-scoped gate does not
+    cover them regardless of its own value. True otherwise, INCLUDING when *tools*
+    is empty/None: a caller that has not established a non-exec write tool is
+    present gets the plain exec-only reading `_has_approval_gate(cfg)` already gave
+    before this fix — this helper only ever narrows, never widens, what counts as
+    gated.
+    """
+    if not tools:
+        return True
+    if _hint(tools, ("fs_write",)):
+        return False
+    return not any(t in tools for t in _NON_EXEC_WRITE_TOKENS)
+
+
+def _has_approval_gate(cfg: dict, tools=None) -> bool:
     """Return True when the config has a meaningful exec approval gate.
 
     Real fields — grounded against the installed OpenClaw dist's Zod schema
@@ -2906,7 +3079,20 @@ def _has_approval_gate(cfg: dict) -> bool:
     outright ("exec denied: allowlist miss", ask="off"). There is no path where
     security="allowlist" alone lets an unmatched command run unattended, so a sparse
     allowlist makes this MORE restrictive, never a false gate.
+
+    B-644: this function is scoped to tools.exec.* ONLY — it has no visibility into
+    which tool would actually carry out a write. A chain that suppresses on this
+    return value alone reads a config with, say, `fs_write` granted and NO exec at
+    all as "gated" purely because an unrelated tools.exec.mode='ask' happens to be
+    set. Pass the caller's own write-capable `tools` list (whatever it already
+    computed to decide a write/outbound action is in play) so this can refuse to
+    call the write gated when the tool doing it is not exec-family
+    (`_exec_gate_covers_tools`). `tools=None` (the default) keeps the OLD exec-only
+    reading unchanged — for callers where the action being gated is already known to
+    be exec-only, or that have not yet been audited for this gap.
     """
+    if tools is not None and not _exec_gate_covers_tools(tools):
+        return False
     mode = dig(cfg, "tools.exec.mode")
     security = dig(cfg, "tools.exec.security")
     ask = dig(cfg, "tools.exec.ask")
@@ -3090,7 +3276,19 @@ def _agent_is_powerful(ctx: Context) -> bool:
     """
     cfg = ctx.config
     tools = _enabled_tools(cfg)
-    can_act = _hint(tools, ("exec", "shell", "fs_write", "deploy")) or "elevated" in tools
+    # B-735: fs_delete/fs_move added by EXACT membership, not folded into the _hint()
+    # substring tuple -- as substrings they collide with plausible real tool names
+    # ("refs_delete"/"prefs_move"), the identical risk B-395 found for bare "write"/
+    # "edit" (see risk.py's _has_exec_or_write_tools for the fuller citation). Without
+    # this, an agent whose only capability is fs_delete/fs_move and which is reachable
+    # by untrusted input read as low blast-radius here, so a genuinely absent
+    # host-monitoring posture stayed quiet for it.
+    can_act = (
+        _hint(tools, ("exec", "shell", "fs_write", "deploy"))
+        or "elevated" in tools
+        or "fs_delete" in tools
+        or "fs_move" in tools
+    )
     reachable = bool(_external_input_channels(cfg)) or _hint(tools, INPUT_TOOL_HINTS)
     return can_act and reachable
 
@@ -3835,6 +4033,13 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
 
     outbound: list = []
     outbound.extend(_tool_hint_sources(cfg, OUTBOUND_TOOL_HINTS))
+    # B-674: the generic hints above cannot see OpenClaw's own write-capable tool ids —
+    # see OUTBOUND_TOOL_IDS. Exact match, alias-folded, over the config's grants and over
+    # an attested roster, mirroring B-667's SENSITIVE_TOOL_IDS treatment of the inbound
+    # leg exactly (same helpers, same shape, no confinement guard — no vetted per-scope
+    # write-confinement model exists yet, see F-186).
+    outbound.extend(_tool_id_sources(cfg, OUTBOUND_TOOL_IDS))
+    outbound.extend(_attested_tool_id_sources(ctx, OUTBOUND_TOOL_IDS))
     if dig(cfg, "tools.elevated.allowFrom"):
         outbound.append("tools.elevated.allowFrom is set")
     profile = dig(cfg, "tools.profile")

@@ -167,6 +167,35 @@ def test_main_debug_reraises_scan_budget_exceeded(monkeypatch):
         cli.main(["--home", _SAFE_HOME, "--debug"])
 
 
+def _ctrl_c(*a, **k):
+    raise KeyboardInterrupt
+
+
+def test_main_degrades_keyboard_interrupt_to_clean_exit(monkeypatch, capsys):
+    """CLAWSECCHECK-C-509: Ctrl+C mid-scan is a normal, expected user action, not a
+    bug — but KeyboardInterrupt derives from BaseException, so it was never caught
+    by the generic `except Exception` arm at all and used to dump a raw traceback,
+    breaking this module's own "never dump a raw traceback at users" promise."""
+    monkeypatch.setattr(cli, "audit", _ctrl_c)
+
+    rc = cli.main(["--home", _SAFE_HOME])  # must NOT raise, must NOT print a traceback
+
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "interrupted" in out.err
+    # Not the "unexpected internal error" / bug-report framing — a user-initiated
+    # interrupt is not a defect in this tool.
+    assert "unexpected internal error" not in out.err
+    assert "Traceback" not in out.err and "Traceback" not in out.out
+
+
+def test_main_debug_reraises_keyboard_interrupt(monkeypatch):
+    monkeypatch.setattr(cli, "audit", _ctrl_c)
+    import pytest  # noqa: PLC0415
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["--home", _SAFE_HOME, "--debug"])
+
+
 # ── Part 3: Python-version guard (CLAWSECCHECK-C-314) ─────────────────────────
 
 

@@ -241,6 +241,148 @@ def test_signals_word_joiner_still_flagged():
 
 
 # ---------------------------------------------------------------------------
+# B-647: U+180E (MONGOLIAN VOWEL SEPARATOR) flanked by Mongolian-block
+# (U+1800-U+18AF) characters is doing its one honest job in literal Mongolian
+# text, not splicing unrelated content — must NOT raise the zero-width signal.
+# Strings built via chr()/\u escapes only — never a raw invisible literal.
+# ---------------------------------------------------------------------------
+
+def test_signals_mongolian_vowel_separator_in_literal_text_not_flagged():
+    """The exact reported false-WARN: a real Mongolian-language string with
+    U+180E directly between two Mongolian-block letters."""
+    text = (
+        chr(0x1830) + chr(0x1820) + chr(0x1822) + chr(0x1828) + " "
+        + chr(0x182A) + chr(0x1820) + chr(0x1822) + chr(0x1828)
+        + chr(0x180E)
+        + chr(0x1820) + " " + chr(0x1824) + chr(0x1824)
+    )
+    signals = obfuscation_signals(text)
+    assert "zero-width / invisible characters found" not in signals
+
+
+def test_signals_mongolian_vowel_separator_splicing_ascii_word_still_flagged():
+    """A U+180E that splices two ASCII letters (hiding the word 'system') is
+    NOT flanked by Mongolian-block characters — must still WARN."""
+    spliced = "sys" + chr(0x180E) + "tem"
+    signals = obfuscation_signals(spliced)
+    assert "zero-width / invisible characters found" in signals
+
+
+def test_signals_lone_mongolian_vowel_separator_at_start_still_flagged():
+    """A U+180E with nothing before it (string start) is never exempt."""
+    text = chr(0x180E) + chr(0x1820) + chr(0x1822)
+    signals = obfuscation_signals(text)
+    assert "zero-width / invisible characters found" in signals
+
+
+def test_signals_lone_mongolian_vowel_separator_at_end_still_flagged():
+    """A U+180E with nothing after it (string end) is never exempt."""
+    text = chr(0x1820) + chr(0x1822) + chr(0x180E)
+    signals = obfuscation_signals(text)
+    assert "zero-width / invisible characters found" in signals
+
+
+def test_signals_mongolian_vowel_separator_flanked_one_side_only_still_flagged():
+    """Only ONE side Mongolian-block, the other ASCII — both flanks must
+    agree before this is exempted."""
+    text = chr(0x1820) + chr(0x180E) + "x"
+    signals = obfuscation_signals(text)
+    assert "zero-width / invisible characters found" in signals
+
+    text2 = "x" + chr(0x180E) + chr(0x1820)
+    signals2 = obfuscation_signals(text2)
+    assert "zero-width / invisible characters found" in signals2
+
+
+def test_signals_zero_width_space_still_flagged_near_mongolian():
+    """U+200B (zero-width space, NOT U+180E) must always flag even next to
+    Mongolian-block characters. Only U+180E gets the Mongolian exemption."""
+    text = chr(0x1820) + chr(0x200B) + chr(0x1820)
+    signals = obfuscation_signals(text)
+    assert "zero-width / invisible characters found" in signals
+
+
+def test_signals_180e_chain_padded_by_two_real_letters_still_flagged():
+    """Adversarial finding against the first draft of this exemption: U+180E
+    is itself inside the Mongolian block it checks against (U+1800-U+18AF),
+    so a RUN of consecutive U+180E characters padded by just one real
+    Mongolian letter on each outer edge must NOT be exempted wholesale --
+    every character in an arbitrarily long invisible run would otherwise
+    ride through armoured by two letters. Must still WARN, at any run length."""
+    for run_len in (2, 3, 10, 50):
+        payload = chr(0x1820) + chr(0x180E) * run_len + chr(0x1820)
+        signals = obfuscation_signals(payload)
+        assert "zero-width / invisible characters found" in signals, (
+            f"a run of {run_len} U+180E padded by real Mongolian letters was "
+            "wrongly exempted end to end"
+        )
+
+
+def test_is_mongolian_flanked_180e_rejects_a_180e_neighbour_directly():
+    """Unit-level pin on the exact bypass above, isolated from the surrounding
+    scan loop: a U+180E whose immediate neighbour is ANOTHER U+180E must
+    never be treated as Mongolian-flanked, even though U+180E's own code
+    point sits inside [0x1800, 0x18AF]."""
+    from clawseccheck.textnorm import _is_mongolian_flanked_180e
+
+    chars = list(chr(0x1820) + chr(0x180E) + chr(0x180E) + chr(0x1820))
+    # chars[1] is the first U+180E; its right neighbour (chars[2]) is also
+    # U+180E, which must disqualify it despite being in-range.
+    assert _is_mongolian_flanked_180e(chars, 1) is False
+    # chars[2] is the second U+180E; its left neighbour (chars[1]) is also
+    # U+180E, same disqualification from the other side.
+    assert _is_mongolian_flanked_180e(chars, 2) is False
+
+
+def test_is_mongolian_flanked_180e_true_for_the_genuine_single_occurrence():
+    """Positive control for the unit-level helper: a single U+180E between
+    two real, non-180E Mongolian letters is flanked."""
+    from clawseccheck.textnorm import _is_mongolian_flanked_180e
+
+    chars = list(chr(0x1828) + chr(0x180E) + chr(0x1820))
+    assert _is_mongolian_flanked_180e(chars, 1) is True
+
+
+def test_is_mongolian_flanked_180e_true_for_digit_and_punctuation_flanking():
+    """The exemption is not letters-only: Mongolian digits (Nd) and
+    punctuation (Po) are equally honest neighbours for a vowel separator."""
+    from clawseccheck.textnorm import _is_mongolian_flanked_180e
+
+    digits = list(chr(0x1810) + chr(0x180E) + chr(0x1811))
+    assert _is_mongolian_flanked_180e(digits, 1) is True
+    punct = list(chr(0x1800) + chr(0x180E) + chr(0x1802))
+    assert _is_mongolian_flanked_180e(punct, 1) is True
+
+
+def test_signals_180e_alternating_with_free_variation_selector_still_flagged():
+    """Second adversarial finding against this exemption: the three Mongolian
+    Free Variation Selectors (U+180B-180D) are in-block, category Mn
+    (combining mark), invisible in normal rendering, and NOT themselves
+    swept by the Cf-only zero-width class -- so alternating U+180E/FVS needs
+    NO outer letter padding at all; every interior U+180E would have an FVS
+    neighbour on both sides. Must still WARN, at any chain length, with or
+    without a trailing letter."""
+    for run_len in (1, 5, 20):
+        chain = (chr(0x180E) + chr(0x180B)) * run_len
+        for payload in (chr(0x1820) + chain, chr(0x1820) + chain + "x", chain):
+            signals = obfuscation_signals(payload)
+            assert "zero-width / invisible characters found" in signals, (
+                f"180E/FVS alternation (run_len={run_len}) wrongly exempted: "
+                f"{payload!r}"
+            )
+
+
+def test_is_mongolian_flanked_180e_rejects_a_free_variation_selector_neighbour():
+    """Unit-level pin on the FVS bypass: a U+180E flanked by a Free
+    Variation Selector (in-block, category Mn, not U+180E) must not be
+    treated as Mongolian-flanked."""
+    from clawseccheck.textnorm import _is_mongolian_flanked_180e
+
+    chars = list(chr(0x1820) + chr(0x180E) + chr(0x180B) + chr(0x1820))
+    assert _is_mongolian_flanked_180e(chars, 1) is False
+
+
+# ---------------------------------------------------------------------------
 # B-222: _nfkc_ascii_fold_changed — the generic (non-enumerated) companion to
 # confusable_in_ascii_context. Catches fullwidth / Mathematical Alphanumeric
 # Symbols spellings that NFKC compatibility-decomposes straight to plain ASCII

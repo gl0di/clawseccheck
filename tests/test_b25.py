@@ -74,6 +74,48 @@ def test_b25_auto_update_false_does_not_warn():
     assert check_update_pinning(_ctx(cfg)).status == "UNKNOWN"
 
 
+# ---- C-376: wording states configured intent, not effective behaviour ----
+#
+# OpenClaw's own runtime ANDs `update.auto.enabled` with `!isTruthyEnvValue(process.
+# env.OPENCLAW_NO_AUTO_UPDATE)` (the gateway's own environment, invisible to this
+# offline, config-only audit) before auto-update actually runs. The old wording said
+# "is enabled" — a claim about effective runtime behaviour this audit cannot verify.
+# It must instead say only what it actually read: the config REQUESTS auto-update.
+
+def test_b25_auto_update_wording_states_config_requests_not_effective_state():
+    cfg = {"update": {"auto": {"enabled": True}}}
+    f = check_update_pinning(_ctx(cfg))
+    assert f.status == "WARN"
+    assert "requests" in f.detail.lower()
+    # The old, retired claim of EFFECTIVE runtime state — must not reappear.
+    assert "is enabled" not in f.detail.lower()
+
+
+def test_b25_auto_update_wording_discloses_the_env_var_blind_spot():
+    """The WARN evidence must name the specific reason it can be wrong (the runtime
+    also gates on an environment variable this audit cannot see) — not just soften the
+    verb without explaining why."""
+    cfg = {"update": {"auto": {"enabled": True}}}
+    f = check_update_pinning(_ctx(cfg))
+    assert f.status == "WARN"
+    assert "OPENCLAW_NO_AUTO_UPDATE" in f.detail
+
+
+def test_b25_auto_update_wording_consistent_across_all_truthy_shapes():
+    """Every truthy shape of the auto-update key reaches the SAME reworded evidence
+    line -- not just the update.auto.enabled form."""
+    for cfg in (
+        {"update": {"auto": {"enabled": True}}},
+        {"update": {"auto": True}},
+        {"autoUpdate": True},
+        {"auto_update": True},
+    ):
+        f = check_update_pinning(_ctx(cfg))
+        assert f.status == "WARN"
+        assert "requests" in f.detail.lower()
+        assert "OPENCLAW_NO_AUTO_UPDATE" in f.detail
+
+
 # ---- WARN: floating ref in version/ref field ----
 
 def test_b25_version_latest_warns():

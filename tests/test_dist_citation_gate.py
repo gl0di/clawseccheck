@@ -18,16 +18,29 @@ CI checks out only the skill tree (B-106), so
 ``test_dist_citation_gate_passes_against_the_installed_dist`` below never runs there.
 ``test_baseline_file_parses_to_a_nonempty_pair_list`` needs no dist and stays
 always-on, so this module is not left fully skipped in CI.
+
+B-734: the baseline's own ``openclaw-version:``/``generated:``/``violations:`` header was
+inert -- ``scripts/dist_citation_gate.py`` writes it but nothing ever read it back, so it
+sat stamped ``2026.8.2`` for two releases while the gate itself ran green against an
+installed ``2026.9.1``. This is the identical failure ``test_state_schema_grounding.py``
+already records and fixed for its own sibling snapshot (see that module's docstring):
+"rewriting ``openclaw-version:`` to ``1999.1.1`` by hand left every other test green,
+because nothing actually read the stamp." ``_header_field``/the header-stamp tests below
+mirror that module's own fix, deliberately duplicated rather than shared -- the sibling
+module keeps its own copy the same way, and a one-regex helper is not worth a new shared
+module for two callers.
 """
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GATE_SCRIPT = REPO_ROOT / "scripts" / "dist_citation_gate.py"
+BASELINE_FILE = REPO_ROOT / "tests" / "dist_citation_baseline.txt"
 
 
 def _load_gate():
@@ -38,6 +51,100 @@ def _load_gate():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _header_field(header: str, name: str) -> "str | None":
+    """A ``# name: value`` header line's value. Mirrors
+    ``test_state_schema_grounding.py``'s helper of the same name/shape -- same idiom,
+    deliberately duplicated (see module docstring)."""
+    m = re.search(rf"^#\s*{re.escape(name)}:\s*(\S+)", header, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def _assert_stamp_matches_installed(baseline_path: Path, installed_version: str) -> None:
+    """The actual enforcement: the baseline's ``openclaw-version:`` stamp must equal the
+    version the caller resolved as installed. Factored out so the positive control below
+    can prove this raises on a mutated stamp, rather than only ever running against the
+    real (already-correct) baseline file."""
+    header = baseline_path.read_text(encoding="utf-8")
+    stamped = _header_field(header, "openclaw-version")
+    if stamped != installed_version:
+        raise AssertionError(
+            f"{baseline_path.name} is stamped openclaw-version: {stamped!r} but the "
+            f"installed OpenClaw is {installed_version!r} -- a stale/faked stamp used to "
+            "leave a sibling guard green once (test_state_schema_grounding.py's own "
+            "incident, and the exact bug B-734 was filed over). Re-record with "
+            "`python3 scripts/dist_citation_gate.py record`."
+        )
+
+
+def test_baseline_header_parses_all_three_fields_and_violations_count_matches():
+    """Always-on, no dist needed (B-734): a hand-mangled or truncated header must fail
+    here, in CI, where the version-anchored test below never runs (B-106). ``violations:``
+    self-describes the pair count, so it is checked against ``len(pairs)`` directly --
+    no dist required for that half either."""
+    text = BASELINE_FILE.read_text(encoding="utf-8")
+    version = _header_field(text, "openclaw-version")
+    generated = _header_field(text, "generated")
+    violations = _header_field(text, "violations")
+
+    assert version and re.match(r"^\d{4}\.\d+\.\d+$", version), (
+        f"bad/missing openclaw-version stamp: {version!r}"
+    )
+    assert generated and re.match(r"^\d{4}-\d{2}-\d{2}$", generated), (
+        f"bad/missing generated stamp: {generated!r}"
+    )
+    assert violations is not None and violations.isdigit(), (
+        f"bad/missing violations stamp: {violations!r}"
+    )
+
+    gate = _load_gate()
+    pairs = gate._read_baseline(BASELINE_FILE)
+    assert pairs is not None
+    assert int(violations) == len(pairs), (
+        f"header says violations: {violations} but the baseline body actually has "
+        f"{len(pairs)} pair(s) -- re-record with "
+        "`python3 scripts/dist_citation_gate.py record`."
+    )
+
+
+def test_stamp_check_goes_red_on_a_mutated_version(tmp_path):
+    """Positive control (B-734's own DoD): rewrite the stamp to a nonsense version in a
+    tmp copy and assert the check actually fails. Without this, the version-anchored
+    test below could pass against a header nothing reads -- which is the exact bug this
+    task was filed over."""
+    text = BASELINE_FILE.read_text(encoding="utf-8")
+    mutated, n = re.subn(
+        r"^# openclaw-version: .*$", "# openclaw-version: 1999.1.1", text,
+        count=1, flags=re.MULTILINE,
+    )
+    assert n == 1, "the version-stamp line pattern did not match the real baseline header"
+
+    tmp_baseline = tmp_path / "dist_citation_baseline.txt"
+    tmp_baseline.write_text(mutated, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="stamped openclaw-version"):
+        _assert_stamp_matches_installed(tmp_baseline, "2026.9.1")
+
+    # And the control's control: an UNmutated copy against the version it already
+    # carries must pass cleanly.
+    real_version = _header_field(text, "openclaw-version")
+    _assert_stamp_matches_installed(BASELINE_FILE, real_version)
+
+
+# ========================================================================================
+# LOCAL-ONLY (needs the dist, B-106). Skip is pinned as a skip.
+# ========================================================================================
+
+def test_baseline_openclaw_version_stamp_matches_installed_dist():
+    """The stamp must equal what's actually installed, from the gate's OWN
+    ``_locate_dist()`` resolver -- so this test cannot disagree with the gate itself
+    about which OpenClaw it means."""
+    gate = _load_gate()
+    dist_dir, version = gate._locate_dist()
+    if dist_dir is None:
+        pytest.skip("OpenClaw dist not installed -- dist citation gate is local-only")
+    _assert_stamp_matches_installed(BASELINE_FILE, version)
 
 
 def test_baseline_file_parses_to_a_nonempty_pair_list():

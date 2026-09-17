@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import base64
 import gzip
+import json
+import sqlite3
 from pathlib import Path
 
 from clawseccheck import audit
@@ -13,10 +15,39 @@ from clawseccheck.catalog import BY_ID, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_log_threat_hunt, run_all
 from clawseccheck.collector import Context
 from clawseccheck.report import render_report
+from clawseccheck.trajectorystore import TRAJECTORY_TABLE_NAME
 
 
 def _ctx(home: Path, config: dict | None = None) -> Context:
     return Context(home=home, config=config or {})
+
+
+def _add_agent_db(home: Path, agent: str, *, trajectory_rows=(),
+                   table=TRAJECTORY_TABLE_NAME) -> Path:
+    """CLAWSECCHECK-B-817: a per-agent SQLite trajectory database matching
+    trajectorystore.py's own DDL/_SELECT_TRAJECTORY_ROWS column shape exactly (same
+    fixture idiom as tests/test_f187_trajectory_sqlite_corroborator.py's
+    `_add_agent_db`, trimmed to what these tests need — no OAuth tables, since
+    nothing here asserts about them)."""
+    agent_dir = home / "agents" / agent / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    db_path = agent_dir / "openclaw-agent.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            f"CREATE TABLE {table} (session_id TEXT NOT NULL, seq INTEGER NOT NULL, "
+            "run_id TEXT, event_json TEXT NOT NULL, created_at INTEGER NOT NULL, "
+            "PRIMARY KEY (session_id, seq))"
+        )
+        for session_id, seq in trajectory_rows:
+            conn.execute(
+                f"INSERT INTO {table} VALUES (?,?,?,?,?)",
+                (session_id, seq, "run-1", json.dumps({"type": "tool.call"}), 0),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
 
 
 def test_b164_is_in_catalog_advisory_never_scored():
@@ -508,3 +539,72 @@ def test_b164_plaintext_support_bundle_also_pass(tmp_path):
     (logs_dir / "app.log").write_text(_B431_SUPPORT_BUNDLE, encoding="utf-8")
     f = check_log_threat_hunt(_ctx(tmp_path))
     assert f.status == PASS
+
+
+# --------------------------------------------------------------------- CLAWSECCHECK-B-817
+# discover_log_sinks (logdiscovery.py) has no notion of the SQLite-backed trajectory
+# store (trajectorystore.py) — a live JSONL sidecar is the only thing that ever earns a
+# `kind="trajectory"` sink. On a current (9.x+) install with no JSONL sidecars at all,
+# B164 used to go quiet about SQLite-only trajectory evidence in both its UNKNOWN and
+# its confident PASS/WARN paths. These pin the fix: the disclosure names row/session
+# counts, and only ever fires when no JSONL trajectory sidecar was discovered.
+
+def test_b164_sqlite_only_home_zero_other_sinks_discloses_sqlite_evidence(tmp_path):
+    """No JSONL sidecar, no other sink at all, but the SQLite store has real rows: the
+    UNKNOWN detail must name the SQLite evidence (row/session counts), not just list
+    'trajectory sidecar' among things checked-and-absent with total silence about it."""
+    _add_agent_db(tmp_path, "main", trajectory_rows=[("s1", 0), ("s1", 1), ("s2", 0)])
+    f = check_log_threat_hunt(_ctx(tmp_path))
+    assert f.status == UNKNOWN
+    assert "trajectory sidecar" in f.detail  # still named as checked-and-absent
+    assert "SQLite-backed store" in f.detail
+    assert "3 row(s)" in f.detail
+    assert "2 session(s)" in f.detail
+    assert "openclaw-agent.sqlite" in f.detail
+
+
+def test_b164_sqlite_only_home_with_other_sink_discloses_unscanned_evidence(tmp_path):
+    """No JSONL sidecar, but a different sink IS present (a bare logs/*.log file) and
+    scans clean — the confident PASS must still disclose the unscanned SQLite
+    evidence, not go silent about a gap the earlier UNKNOWN branch would have named."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "app.log").write_text(
+        "the agent read three files and summarized them\n", encoding="utf-8"
+    )
+    _add_agent_db(tmp_path, "main", trajectory_rows=[("s1", 0), ("s2", 0)])
+    f = check_log_threat_hunt(_ctx(tmp_path))
+    assert f.status == PASS
+    assert "SQLite-backed store" in f.detail
+    assert "2 row(s)" in f.detail
+    assert "2 session(s)" in f.detail
+
+
+def test_b164_live_jsonl_sidecar_suppresses_the_sqlite_disclosure(tmp_path):
+    """A live JSONL trajectory sidecar IS discovered (kind="trajectory") — the SQLite
+    corroborator must not even be consulted, so its disclosure never appears, even
+    though a per-agent SQLite database with real rows also happens to exist."""
+    sessions_dir = tmp_path / "agents" / "main" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "s1.trajectory.jsonl").write_text(
+        json.dumps({"sessionId": "s1", "seq": 0, "type": "tool.call"}) + "\n",
+        encoding="utf-8",
+    )
+    _add_agent_db(tmp_path, "main", trajectory_rows=[("s2", 0)])
+    f = check_log_threat_hunt(_ctx(tmp_path))
+    assert "SQLite-backed store" not in f.detail
+    assert "unexamined" not in f.detail
+
+
+def test_b164_jsonl_only_home_unchanged_by_b817(tmp_path):
+    """A plain JSONL-only home (no SQLite database anywhere) must produce byte-identical
+    behavior to before this change — no SQLite disclosure text of any kind."""
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "app.log").write_text(
+        "the agent read three files and summarized them\n", encoding="utf-8"
+    )
+    f = check_log_threat_hunt(_ctx(tmp_path))
+    assert f.status == PASS
+    assert "SQLite-backed store" not in f.detail
+    assert "unexamined" not in f.detail

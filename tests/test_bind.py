@@ -13,6 +13,7 @@ from clawseccheck.collector import Context
 def _ctx(cfg):
     c = Context(home=Path("/x"))
     c.config = cfg
+    c.config_found = True  # B-661: `cfg` stands for a real, found config
     c.bootstrap = {}
     return c
 
@@ -122,6 +123,43 @@ def test_b11_loose_perms_loopback_bind_warns():
     f = check_tls(ctx)
     assert f.status == "WARN"
     assert "readable" in f.detail or "group" in f.detail or "perms" in f.detail or "openclaw.json" in f.detail
+
+
+def test_b11_fix_text_names_the_audited_home_not_a_hardcoded_default():
+    """CLAWSECCHECK-B-759: the remediation used to say `chmod 600 ~/.openclaw/
+    openclaw.json` / `chmod 700 ~/.openclaw` unconditionally, regardless of the
+    audited --home. On a machine with several homes, following that instruction
+    literally edits a DIFFERENT config than the one this run diagnosed."""
+    home = Path("/srv/openclaw-secondary")
+    ctx = Context(home=home)
+    ctx.config = {"gateway": {"bind": "0.0.0.0:9000"}}
+    ctx.config_found = True
+    ctx.bootstrap = {}
+    ctx.config_mode = 0o600
+    f = check_tls(ctx)
+    assert f.status == "WARN"
+    assert "~/.openclaw" not in f.fix, f.fix
+    # config_path unset here -> falls back to home/openclaw.json, the same
+    # conventional filename the unpatched code hardcoded, but rooted at the REAL
+    # audited home instead of a fixed default.
+    assert str(home / "openclaw.json") in f.fix, f.fix
+    assert str(home) in f.fix, f.fix
+
+
+def test_b11_fix_text_uses_the_resolved_config_path_when_known():
+    """A non-default config filename/location (ctx.config_path, set by the real
+    collector when the config was actually found somewhere) must be named exactly,
+    not silently reconstructed as home/openclaw.json."""
+    home = Path("/srv/openclaw-secondary")
+    ctx = Context(home=home)
+    ctx.config = {"gateway": {"bind": "0.0.0.0:9000"}}
+    ctx.config_found = True
+    ctx.bootstrap = {}
+    ctx.config_mode = 0o600
+    ctx.config_path = home / "config" / "openclaw.json"
+    f = check_tls(ctx)
+    assert f.status == "WARN"
+    assert str(home / "config" / "openclaw.json") in f.fix, f.fix
 
 
 # ---- B11: funnel mode does not suppress TLS warning ----

@@ -362,6 +362,39 @@ def resolve_plugin_sweep():
     return fn if callable(fn) else None
 
 
+def _sweep_flagged_names(sweep) -> "tuple[list[str], list[str]]":
+    """``(dangerous names, suspicious names)`` from *sweep*'s own ``rows``
+    (B-764).
+
+    ``rows`` (a list of ``(sanitized target id, status, evidence count)`` — see
+    ``PluginSweep``/``cli.SkillSweep``) is deliberately NOT part of the published
+    duck-type surface :func:`_sweep_phase_from` otherwise relies on
+    (``no_roots``/``no_targets``/``counts()``/``has_fail``/``complete``/
+    ``not_scanned()``), so a hypothetical sweep implementation that lacks it degrades
+    to two empty lists here rather than raising — the same tolerance the rest of this
+    module already gives an unusual/duck-typed sweep object. Names are already
+    sanitized once in ``rows`` at collection time (matching ``cli.py``'s
+    ``_sweep_to_json`` docstring note for the identical reason), so no second pass here.
+    """
+    rows = getattr(sweep, "rows", None)
+    if not rows:
+        return [], []
+    dangerous = [n for n, s, _e in rows if s == "FAIL"]
+    suspicious = [n for n, s, _e in rows if s == "WARN"]
+    return dangerous, suspicious
+
+
+def _named_sweep_line(label: str, names: "list[str]", *, cap: int = 3) -> str:
+    """``"Dangerous: a, b, +2 more."`` — same cap/format as the SKILL SWEEP quiet
+    line's own ``dangerous`` naming (``cli.py::_sweep_quiet_line``), reused here so the
+    plugin sweep's default reporting path stops being the one place a flagged target's
+    identity never reaches the reader (B-764)."""
+    shown = ", ".join(names[:cap])
+    if len(names) > cap:
+        shown += f", +{len(names) - cap} more"
+    return f"{label}: {shown}."
+
+
 def _sweep_phase_from(name: str, sweep, *, unit: str, elapsed_s: float,
                       full_detail_flag: str) -> PhaseResult:
     """Build a :class:`PhaseResult` from any sweep exposing the published surface."""
@@ -380,7 +413,17 @@ def _sweep_phase_from(name: str, sweep, *, unit: str, elapsed_s: float,
         if c.get("skipped"):
             detail += f", {c['skipped']} not scanned (budget exceeded)"
         detail += "."
-        lines = [detail, f"Full detail: {full_detail_flag}."]
+        lines = [detail]
+        # B-764: name what was flagged, not just how many -- "a plugin is
+        # a problem" is not actionable without which one, and plugin roots come from
+        # OpenClaw's own sqlite index (a user cannot easily enumerate candidates by
+        # hand to go find it themselves).
+        dangerous, suspicious = _sweep_flagged_names(sweep)
+        if dangerous:
+            lines.append(_named_sweep_line("Dangerous", dangerous))
+        if suspicious:
+            lines.append(_named_sweep_line("Suspicious", suspicious))
+        lines.append(f"Full detail: {full_detail_flag}.")
     return PhaseResult(
         name=name,
         status=STATUS_RAN,
@@ -396,12 +439,19 @@ def _sweep_phase_from(name: str, sweep, *, unit: str, elapsed_s: float,
 
 def _sweep_data(sweep) -> dict:
     """Machine-readable roll-up of any sweep, for ``--full --json``."""
+    dangerous, suspicious = _sweep_flagged_names(sweep)
     return {
         "no_roots": bool(sweep.no_roots),
         "no_targets": bool(sweep.no_targets),
         "complete": bool(sweep.complete),
         "counts": dict(sweep.counts()),
         "not_scanned": [_sanitize(str(t)) for t in sweep.not_scanned()],
+        # B-764: the FULL (uncapped, unlike the text line above) name
+        # lists behind counts.fails/counts.warns -- so a JSON consumer can act on a
+        # flagged plugin/skill without re-deriving identity from `not_scanned` (which
+        # names only what was SKIPPED/TRUNCATED, never what was vetted and flagged).
+        "dangerous": [_sanitize(n) for n in dangerous],
+        "suspicious": [_sanitize(n) for n in suspicious],
     }
 
 
@@ -795,9 +845,25 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
     # 'verdicts': [] IS 'no verdicts submitted'"). This call site used to set
     # verdictsSubmitted=True whenever the RAW "judged" key was merely present,
     # regardless of whether anything actually parsed out of it.
+    #
+    # C-509: an empty {} bucket must also never REACH _parse_verdicts in the first
+    # place. `is not None` let a vacuous {} through, and _parse_verdicts' own "no
+    # usable entries" diagnostic (B-330) has no way to tell that apart from a
+    # genuinely malformed bucket a caller meant to fill in — so a bundle following
+    # this contract's own "e.g. {}" equivalence still printed a loud stderr complaint
+    # about nothing. A bare truthiness check treats {} exactly like the absent-key
+    # case below it, which is what the comment above already claims happens.
+    # C-135 (independent, post-commit): a bare truthiness check on `bundle.get
+    # ("judged")` swallowed every OTHER JSON-falsy "judged" shape too -- `[]`, `""`,
+    # `0`, `False` -- not just the intended `{}`. Those are malformed inputs (the
+    # exact B-597 confusion of a caller misplacing "verdicts" at the wrong nesting
+    # level), and pre-fix they correctly reached `_parse_verdicts`, which prints its
+    # own "top-level value is not a JSON object" diagnostic -- silently dropping that
+    # feedback was never the intent, only the vacuous `{}` case was. `!= {}` narrows
+    # the exemption back to exactly that one shape.
     verdicts_map = (
         _parse_verdicts(json.dumps(bundle["judged"]))
-        if bundle and bundle.get("judged") is not None
+        if bundle and bundle.get("judged") is not None and bundle.get("judged") != {}
         else {}
     )
     if verdicts_map:
@@ -1412,13 +1478,31 @@ def _worse_status(a: str, b: str) -> str:
 # can never disagree.
 _B164_NOT_SCANNED_RE = re.compile(r"(\d+) log/transcript sinks? not scanned")
 
+# B-817: B164's SQLite-trajectory disclosure (checks/_egress.py's
+# check_log_threat_hunt) names unscanned SQLite trajectory evidence with different
+# wording from the JSONL "not scanned" sentence above — parsed separately so it does
+# not have to match the same regex; purely additive, the JSONL regex/behavior above is
+# unchanged.
+_B164_SQLITE_UNSCANNED_RE = re.compile(
+    r"(\d+) row\(s\) across (\d+) session\(s\) unexamined"
+)
+
 
 def _b164_not_reached(findings) -> tuple:
     b164 = next((f for f in findings if getattr(f, "id", None) == "B164"), None)
     if b164 is None or not getattr(b164, "detail", None):
         return ()
+    out: tuple = ()
     m = _B164_NOT_SCANNED_RE.search(b164.detail)
-    return (f"{m.group(1)} log/transcript sink(s) not scanned",) if m else ()
+    if m:
+        out += (f"{m.group(1)} log/transcript sink(s) not scanned",)
+    m2 = _B164_SQLITE_UNSCANNED_RE.search(b164.detail)
+    if m2:
+        out += (
+            f"{m2.group(1)} SQLite trajectory row(s) across {m2.group(2)} "
+            "session(s) unexamined (agents/*/agent/openclaw-agent.sqlite)",
+        )
+    return out
 
 
 # ── the pipeline roll-up (P10) ───────────────────────────────────────────────

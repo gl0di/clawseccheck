@@ -1,0 +1,10 @@
+{
+  "agents": {
+    "entries": {
+      "web": {
+        "workspace": "/home/testuser/.openclaw/workspace-web",
+        "cwd": "/srv/checkout/repo"
+      }
+    }
+  }
+}

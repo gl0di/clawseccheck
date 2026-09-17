@@ -556,15 +556,23 @@ for a monitoring skill/plugin (ClawSec, `openclaw-security-monitor`, …) or mon
 config; if none is found it warns you and tells you how to add one.
 
 **`--monitor` — Agent Watch.** One way to *get* monitoring: re-audit on a schedule and alert,
-**by severity**, on what **changed** — a new or modified installed skill, `SOUL.md` drift, **any
-file appearing, changing or disappearing under `<workspace>/memory/`** (a new file there is
-reported even when nothing in it looks hostile — that subtree is where OpenClaw's own
-pre-compaction flush writes, so its appearance is INFO, not an accusation), a dropped
+**by severity**, on what **changed** — a new or modified installed skill, an installed skill's
+own provenance moving (updated, or drifted from what ClawHub recorded, without the user doing
+it), `SOUL.md` drift, **any file appearing, changing or disappearing under
+`<workspace>/memory/`** (a new file there is reported even when nothing in it looks hostile —
+that subtree is where OpenClaw's own pre-compaction flush writes, so its appearance is INFO, not
+an accusation), a plugin newly allowed to load (including `bundledDiscovery` flipping to
+allowlist bypass on upgrade), the resolved `tools.exec` shell-command policy widening, a new or
+replaced entry in the credential store, a dropped
 score (on the pair of runs being compared, when both carry a grade — see
 [Scoring](#scoring); the file/config/MCP/channel signals here don't depend on either
 run having one), **a check leaving PASS (for FAIL,
 WARN or UNKNOWN)**, **a newly connected MCP server, a new channel, the gateway becoming
-network-exposed, or a host monitor disappearing**. Each run appends the changes to a private local
+network-exposed, or a host monitor disappearing**, the installed OpenClaw package's own digests
+moving (supply-chain), the built-in native `openclaw security audit`'s own issue count moving,
+this machine's own startup/scheduling surface moving (systemd units/timers, shell rc, cron —
+best-effort), and — the watch reporting its own blind spots — anything it could not compare
+this run. Each run appends the changes to a private local
 journal (`~/.clawseccheck/events.jsonl`, owner-only, never uploaded); view the timeline with
 `--watch-log`.
 
@@ -841,6 +849,29 @@ a "fixed" entry among those checks may only mean the check did not run the secon
 that the issue was resolved. `--diff --json` prints a machine-readable payload — see
 `docs/OUTPUT_SCHEMA.md`.
 
+### Comparing two SBOM snapshots — `--save-sbom-run` / `--sbom-diff`
+
+The same idea as `--save-run`/`--diff` above, for the bill-of-materials instead of findings:
+"what components were added, removed, or changed between two points in time" needs its own
+snapshot, since `--sbom`'s own output is never retained.
+
+```bash
+clawseccheck --sbom --save-sbom-run                    # prints: (SBOM run saved as 2026-09-10T09:15:23 — ...)
+# ... time passes, a skill is added or updated ...
+clawseccheck --sbom --save-sbom-run                    # prints: (SBOM run saved as 2026-09-12T11:02:07 — ...)
+clawseccheck --sbom-diff 2026-09-10T09:15:23 2026-09-12T11:02:07
+```
+
+`--save-sbom-run` only works alongside `--sbom`, is **opt-in** the same way `--save-run` is, and
+persists the native-shape component inventory regardless of which `--format` you asked for —
+CycloneDX/SPDX are rendering choices, not what gets stored. Same retention window as
+`--save-run` (the last 50 saved runs), same run id (its timestamp), separate store file
+(`sbom_runs.jsonl`, alongside `runs.jsonl`).
+
+`--sbom-diff RUN_ID1 RUN_ID2` reads two saved SBOM runs (it runs no live audit itself) and
+reports added, removed, and changed components between them. `--sbom-diff --json` prints a
+machine-readable payload — see `docs/OUTPUT_SCHEMA.md`.
+
 ### Known limits of `--monitor` (read before relying on it)
 
 These are inherent boundaries of a **local, file-based, scheduled** drift detector — not bugs to
@@ -979,15 +1010,23 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   outside the target file itself, with no message printed, from a tool that otherwise promises
   read-only.
 
-**Is the watch still running?** `--brief` answers that in one to five lines, and it is the one
+**Is the watch still running?** `--brief` answers that in zero to five lines, and it is the one
 mode safe to run unprompted at the start of a session:
 
 ```bash
-clawseccheck --brief
+clawseccheck --brief --exit-code
 ```
 
 It reads the drift baseline, the event journal and the score history — and **writes nothing**.
 No audit, no snapshot, no journal append. That is what makes it safe to run without asking.
+
+**A healthy, recently-checked setup with nothing notable in the journal prints nothing at
+all.** The old unconditional "Last drift check: Xh ago." restated recency with no signal and
+every session paid its cost; it is gone. With `--exit-code`, the exit status carries the same
+fact for a host agent that would rather check `rc != 0` than parse prose: 0 means silent and
+healthy, non-zero means there is something to relay. A bare `--brief` (no `--exit-code`) always
+returns 0 regardless of content, the same opt-in convention as `--monitor`'s own
+`--exit-code`/`--fail-on`.
 
 It exists because of two gaps nothing else covers. The cheapest attack on a scheduled monitor is
 to **stop it running**: the attacker never touches `state.json` or the journal, so no file it
@@ -999,7 +1038,7 @@ The staleness ladder, and where the numbers come from:
 
 | Silence since the last check | What it says |
 | --- | --- |
-| under 3 days | the age, plainly |
+| under 3 days | nothing — healthy and quiet |
 | 3–14 days | longer than this setup's usual gap — confirm the schedule is still in place |
 | over 14 days | monitoring is effectively not running |
 
@@ -1501,6 +1540,7 @@ exists and still works, and the CI/power surface is unchanged. The grouping just
 | Need | Command |
 |---|---|
 | Monitor drift / view timeline | `clawseccheck --monitor` · `clawseccheck --watch-log` |
+| Run the same check continuously instead of on a schedule | `clawseccheck --watch` (stays running, re-scans on a relevant filesystem change) · `clawseccheck --watch-status` (is one already alive?) |
 | Score trend across past scans | `clawseccheck --trend` (plots the **graded** runs only; ungraded ones are recorded but carry no point) |
 | Compare two specific past runs — new/fixed findings | `clawseccheck --save-run` (opt-in per-run snapshot; prints the run id) · `clawseccheck --diff RUN_ID1 RUN_ID2` |
 | Verify the local stores weren't tampered with | `clawseccheck --verify-history` · `clawseccheck --verify-events` |
@@ -1513,14 +1553,14 @@ exists and still works, and the CI/power surface is unchanged. The grouping just
 | Vet a skill / a plugin explicitly | `clawseccheck --vet-skill ./skill` · `clawseccheck --vet-plugin ./plugin` |
 | Vet connected MCP servers | `clawseccheck --vet-mcp` |
 | Reputation gate before download | `clawseccheck --vet-source clawhub:some-skill` |
-| Vet every installed skill at once | `clawseccheck --vet-all` |
+| Vet every installed skill at once | `clawseccheck --vet-all` (alias: `--recursive`) |
 | Plan a zero-network vet / get an install call | `clawseccheck --vet-plan clawhub:some-skill` · `clawseccheck --advise ./quarantined` |
 
 **Works with any mode**
 
 | Need | Command |
 |---|---|
-| Skip native audit / host posture / socket scan / dependency-tree walk | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` · `clawseccheck --no-deptree` |
+| Skip native audit / host posture / socket scan / dependency-tree walk / installed-version check | `clawseccheck --no-native` · `clawseccheck --no-host` · `clawseccheck --no-sockets` · `clawseccheck --no-deptree` · `clawseccheck --no-dist` |
 | Disable local history / age notice | `clawseccheck --no-history` · `clawseccheck --no-update-notice` |
 | CI gate (needs no score) | `clawseccheck --fail-on high` · `clawseccheck --exit-code` |
 | Verify the engine itself | `clawseccheck --verify-self` |
@@ -1629,7 +1669,7 @@ python3 audit.py --log audit.log            # also write log to a local file
   `secondOpinion`/`vetSecondOpinion` when a `--judged-bundle` supplied verdicts, and
   `coveragePage` (§20 — scanned-vs-total per subject, every gap named) —
   see `docs/OUTPUT_SCHEMA.md` §1, which is the authoritative list. The same coverage data prints as a `CLAWSECCHECK COVERAGE`
-  text section under plain `--full`.
+  text section under plain `--full`, and as a "Coverage page" block in `--dashboard --full`, `--html`, and `--pdf`.
   - **`--fast`** (only with `--full`) drops the plugin sweep, behavioral replay, and skill
     sweep — keeping just the audit, self-test, vet-mcp, and the (free) adjudication packet —
     for CI runs where the deep phases are too slow. This is today's pre-F-150 `--full` shape.
@@ -1914,6 +1954,9 @@ python3 audit.py --log audit.log            # also write log to a local file
   (see "Full read scope" above), so this is the escape hatch on a very large tree or when you
   want the run confined. `--no-host` and `--no-sockets` skip host-monitor detection and the
   listening-socket scan the same way, and `--no-native` skips the built-in native audit.
+  `--no-dist` skips reading the installed OpenClaw package's own version (which C4 corroborates
+  against `meta.lastTouchedVersion` to surface a version rollback) — also a read-only `PATH`
+  lookup, no subprocess.
 
 ## Uninstall / cleanup
 
@@ -2105,6 +2148,15 @@ hard false positives on real configs.
   above — not as independent proof.
 - **May produce false positives and false negatives.** Evidence-gating keeps noise low,
   but heuristics can miss novel attack patterns and can misread edge-case configurations.
+- **A config setting and the runtime's *effective* behaviour can differ — the audit
+  reports the former.** B25 warns when `update.auto.enabled` is set, because that is
+  what the config file says. OpenClaw's own runtime also gates auto-update on
+  `OPENCLAW_NO_AUTO_UPDATE`, an environment variable in the *gateway's* own process —
+  invisible to this offline, config-only audit, which runs as a different process with
+  its own environment. Reading *this* process's `os.environ` instead would answer a
+  different, wrong question (whichever shell happened to run the audit, not the
+  gateway), so B25's wording states what the config requests, not a claim about
+  whether auto-update is actually running on your host.
 - **Read scope is bounded:** config, bootstrap markdown, installed-skill text, OpenClaw log
   files, agent session logs, the cron job store, the two global OpenClaw dotenv files,
   OpenClaw-related systemd user-unit environment lines, host OS recon (security-tool paths,
@@ -2146,7 +2198,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 801 test files and 23,154
+A security tool should be heavily tested — so it is: 861 test files and 24,370
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

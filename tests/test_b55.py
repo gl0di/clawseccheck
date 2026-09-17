@@ -16,12 +16,24 @@ invariant). Everything short of proven broad reach (an allowlist/paired channel,
 broad-reach signal at all) is unaffected and still stays WARN.
 
 B-395: the escalation above raised confidence without fixing detection. B55 re-derived
-the grant set itself, matching only the legacy, non-canonical alias names in
-_FS_WRITE_TOOL_HINTS ("fs_write" is not a real OpenClaw tool id) against a raw list —
-so the REAL tool ids (write/edit/apply_patch), group:fs, a wildcard "*" allowlist,
-tools.profile, and tools.alsoAllow all produced a confident, lying PASS. Fixed by
-delegating grant resolution to _b68_fs_tools_granted (the same helper B68 already uses
-for this identical tool family), keeping the legacy aliases as an additional union.
+the grant set itself, matching only the names in _FS_WRITE_TOOL_HINTS against a raw
+list — so the REAL tool ids write/edit/apply_patch (canonically resolved), group:fs, a
+wildcard "*" allowlist, tools.profile, and tools.alsoAllow all produced a confident,
+lying PASS. Fixed by delegating grant resolution to _b68_fs_tools_granted (the same
+helper B68 already uses for this identical tool family), keeping the raw-token names in
+_FS_WRITE_TOOL_HINTS as an additional union -- those names (fs_write, and since B-735
+fs_delete/fs_move too) ARE real OpenClaw tool ids, just not ones _b68_fs_tools_granted's
+canonical _B68_FS_TOOLS resolution enumerates (see _FS_WRITE_TOOL_HINTS's own comment,
+checks/_capability.py).
+
+B-735: fs_delete and fs_move were granted-but-unrecognized entirely -- neither name
+appeared in ANY vocabulary this tree kept, so a config granting only fs_delete (able to
+DELETE files, reachable by untrusted senders) PASSed cleanly. Both are real, dispatchable
+OpenClaw tool ids (grounded against the installed dist: DEFAULT_GATEWAY_HTTP_TOOL_DENY
+and ACP_UNSUPPORTED_INHERITED_TOOL_DENY both group them with fs_write/write/edit/
+apply_patch). Fixed the same way B-395 fixed fs_write: added to _FS_WRITE_TOOL_HINTS
+(checks/_capability.py) and to the shared _B55_FS_WRITE_TOOLS set (checks/_shared.py, so
+A1 and report.py's capability graph, which ask the identical question, see them too).
 """
 from pathlib import Path
 
@@ -73,6 +85,68 @@ def test_broad_fs_write_fails_on_bad_fixture():
     assert f.scored is True  # per-finding override — this specific Finding participates
     assert any("fs_write" in e for e in f.evidence)
     assert any("no approval gate" in e for e in f.evidence)
+
+
+# --------------------------------------------------------------------------- B-735
+# fs_delete / fs_move: two real write-family tool ids that were granted-but-unrecognized
+# by every vocabulary this tree kept, so a config granting only one of them PASSed B55
+# outright. Same FAIL/PASS shapes as fs_write above, same fixture pattern.
+def test_broad_fs_delete_fails_on_bad_fixture():
+    """The exact defect this task fixes: an agent able to DELETE files, reachable by
+    untrusted senders with no scoping, must not PASS."""
+    f = _b55(FIXTURES / "bad_b55_fs_delete_broad")
+    assert f.id == "B55"
+    assert f.status == FAIL
+    assert f.scored is True
+    assert any("fs_delete" in e for e in f.evidence)
+    assert any("no approval gate" in e for e in f.evidence)
+
+
+def test_broad_fs_move_fails_on_bad_fixture():
+    f = _b55(FIXTURES / "bad_b55_fs_move_broad")
+    assert f.id == "B55"
+    assert f.status == FAIL
+    assert f.scored is True
+    assert any("fs_move" in e for e in f.evidence)
+    assert any("no approval gate" in e for e in f.evidence)
+
+
+def test_fs_delete_scoped_with_no_channels_stays_pass():
+    """The negative control: fs_delete granted, no ingress channel declared at all, and
+    an approval gate -- the same genuinely-scoped shape test_gated_with_no_channels_
+    declared_stays_pass pins for fs_write."""
+    f = _b55(FIXTURES / "clean_b55_fs_delete_scoped")
+    assert f.status == PASS, f.detail
+
+
+def test_fs_move_scoped_with_no_channels_stays_pass():
+    f = _b55(FIXTURES / "clean_b55_fs_move_scoped")
+    assert f.status == PASS, f.detail
+
+
+def test_fs_delete_and_fs_move_are_write_tools_granted():
+    """Unit-level pin on the resolver itself, not just the check: an explicit
+    tools.allow grant of fs_delete/fs_move must surface in _b55_write_tools_granted's
+    write_tools output -- this is what both check_fs_write_exposure and report.py's
+    capability graph actually consume."""
+    from clawseccheck.checks._capability import _b55_write_tools_granted
+
+    for tool in ("fs_delete", "fs_move"):
+        write_tools, enumerable, _view, legacy_write = _b55_write_tools_granted(
+            {"tools": {"allow": [tool]}}
+        )
+        assert enumerable, tool
+        assert tool in write_tools, (tool, write_tools)
+        assert tool in legacy_write, (tool, legacy_write)
+
+
+def test_fs_delete_and_fs_move_are_in_the_shared_write_tool_set():
+    """A1 (checks/_config.py) and report.py's capability graph both intersect against
+    _B55_FS_WRITE_TOOLS directly (not through _b55_write_tools_granted) -- pin the
+    shared constant itself so a future edit cannot narrow it back down unnoticed."""
+    from clawseccheck.checks._shared import _B55_FS_WRITE_TOOLS
+
+    assert {"fs_delete", "fs_move", "write", "edit", "apply_patch"} <= _B55_FS_WRITE_TOOLS
 
 
 def test_bad_fixture_b55_is_scored_in_audit_but_checkmeta_is_not():
@@ -464,6 +538,92 @@ def test_risk01_does_not_fire_on_a_benign_tool_name_containing_write_substring(t
     ids = {p.id for p in risk_paths(ctx, findings)}
     assert "RISK-01" not in ids
     assert "RISK-03" not in ids
+
+
+# --------------------------------------------------------------------------- B-735
+# risk.py keeps ITS OWN independent write-tool vocabulary (_has_exec_or_write_tools),
+# never derived from _B55_FS_WRITE_TOOLS/_FS_WRITE_TOOL_HINTS -- C-135 on the fixture-
+# level widening above found RISK-01/03/10/24 stayed silent on a config B55 now
+# correctly FAILs, the exact class of gap B-395 already closed once for fs_write.
+def test_risk_hint_recognizes_fs_delete_and_fs_move():
+    assert _has_exec_or_write_tools(["fs_delete"])
+    assert _has_exec_or_write_tools(["fs_move"])
+
+
+def test_risk01_fires_on_an_open_channel_granting_only_fs_delete(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "open"}},'
+        ' "tools": {"allow": ["fs_delete"]}}',
+    )
+    ctx, findings, _ = audit(home)
+    ids = {p.id for p in risk_paths(ctx, findings)}
+    assert "RISK-01" in ids
+
+
+def test_risk01_fires_on_an_open_channel_granting_only_fs_move(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "open"}},'
+        ' "tools": {"allow": ["fs_move"]}}',
+    )
+    ctx, findings, _ = audit(home)
+    ids = {p.id for p in risk_paths(ctx, findings)}
+    assert "RISK-01" in ids
+
+
+def test_risk12_fires_on_bad_fs_delete_fixture():
+    """Mirrors test_risk12_fires_on_broad_write_plus_untrusted_ingress (fs_write)."""
+    ctx, findings, _ = audit(FIXTURES / "bad_b55_fs_delete_broad")
+    ids = {p.id for p in risk_paths(ctx, findings)}
+    assert "RISK-12" in ids
+
+
+def test_risk12_fires_on_bad_fs_move_fixture():
+    ctx, findings, _ = audit(FIXTURES / "bad_b55_fs_move_broad")
+    ids = {p.id for p in risk_paths(ctx, findings)}
+    assert "RISK-12" in ids
+
+
+def test_risk_hint_does_not_substring_match_refs_or_prefs_tools():
+    """C-135 on the fs_delete/fs_move widening itself: "refs_delete"/"refs_move" (a
+    plausible git-refs tool) and "prefs_delete"/"prefs_move" (a plausible preferences
+    tool) all end in "fs" immediately before "_delete"/"_move" and would substring-
+    match if fs_delete/fs_move were folded into _hint()'s substring tuple the way
+    fs_write is -- the exact reason they are matched by EXACT membership instead (see
+    _has_exec_or_write_tools's own docstring)."""
+    for benign_tool in ("refs_delete", "refs_move", "prefs_delete", "prefs_move"):
+        assert not _has_exec_or_write_tools([benign_tool, "web_search"]), benign_tool
+
+
+def test_risk01_does_not_fire_on_a_benign_tool_name_containing_fs_delete_substring(tmp_path):
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "open"}},'
+        ' "tools": {"allow": ["refs_delete", "web_search"]}}',
+    )
+    ctx, findings, _ = audit(home)
+    ids = {p.id for p in risk_paths(ctx, findings)}
+    assert "RISK-01" not in ids
+
+
+def test_b55_does_not_substring_match_refs_delete_as_fs_delete(tmp_path):
+    """The identical C-135 collision, pinned at B55 itself (_b55_write_tools_granted /
+    check_fs_write_exposure), not just at risk.py's independent vocabulary."""
+    from clawseccheck.checks._capability import _b55_write_tools_granted
+
+    write_tools, _enumerable, _view, legacy_write = _b55_write_tools_granted(
+        {"tools": {"allow": ["refs_delete"]}}
+    )
+    assert "fs_delete" not in write_tools
+    assert "fs_delete" not in legacy_write
+    home = _write_config(
+        tmp_path,
+        '{"channels": {"telegram": {"dmPolicy": "open"}},'
+        ' "tools": {"allow": ["refs_delete", "web_search"]}}',
+    )
+    f = _b55(home)
+    assert f.status == PASS, f.detail
 
 
 # --------------------------------------------------------------------- B-395 direction 1
@@ -953,22 +1113,66 @@ def test_b409_profile_substring_false_positive_stays_bounded_by_allowlist(tmp_pa
     # `write` and `edit` are NOT granted despite "barcode-reader" matching the powerful-
     # profile substring. `apply_patch` is, and that is not the substring artefact: the vendor
     # grants it for the same allow-implies / deny-does-not-propagate reason it does under a
-    # real profile name.
+    # real profile name. B-736: this stays WARN, not FAIL — the escalation B-736 adds to
+    # `explicit_write_grant` is deliberately gated on `not widenings` (this config has one:
+    # the per-agent "barcode-reader" profile), preserving B-409 C-135 round 2's finding that
+    # a widening-involved grant carries more uncertainty than the bare global layer alone.
     assert f.status == WARN, f.detail
     assert f.status != FAIL
 
 
-def test_b409_explicit_write_grant_ignores_a_denied_named_token(tmp_path):
-    # Direct regression for the explicit_write_grant deny-subtraction fix: a write
-    # token that is BOTH named in tools.allow AND denied must not count as "explicit"
-    # on its own (matching legacy_write's existing deny-subtracted pattern).
+def test_b736_write_denied_apply_patch_survives_escalates_to_fail(tmp_path):
+    """B-736 headline regression: allow:["write"], deny:["write"] does NOT deny
+    apply_patch (the vendor's write=>apply_patch implication only ever adds on the
+    allow side; deny only ever removes the LITERAL token it names) -- so this is a
+    real, deny-surviving write-capable grant, reachable by an open channel with no
+    approval gate. That is FAIL territory, not the silent PASS this task found
+    ("No filesystem-write tool (write / edit / apply_patch) is granted.") on a config
+    an operator wrote specifically to restrict write access.
+    """
     home = _write_config(
         tmp_path,
-        '{"tools": {"allow": ["write"], "deny": ["write"]},'
+        '{"tools": {"allow": ["read", "write"], "deny": ["write"]},'
         ' "channels": {"telegram": {"dmPolicy": "open"}}}',
     )
     f = _b55(home)
-    assert f.status == PASS, f.detail
+    assert f.status == FAIL, f.detail
+    assert "apply_patch" in f.detail
+
+
+def test_b736_write_denied_apply_patch_survives_grant_model_unit():
+    """The unit-level pin, at the resolver the bug report itself executed against."""
+    from clawseccheck.checks._capability import _b68_fs_tools_granted
+
+    granted, enumerable = _b68_fs_tools_granted(
+        {"tools": {"allow": ["read", "write"], "deny": ["write"]}}
+    )
+    assert enumerable is True
+    assert granted == ["apply_patch", "read"], granted
+
+
+def test_b736_write_never_allowed_apply_patch_stays_absent():
+    """Regression bound: the implication only ever ADDS apply_patch when "write" was
+    actually named in allow. A config that never allowed "write" at all must not
+    suddenly grant apply_patch."""
+    from clawseccheck.checks._capability import _b68_fs_tools_granted
+
+    granted, enumerable = _b68_fs_tools_granted({"tools": {"allow": ["read"]}})
+    assert enumerable is True
+    assert granted == ["read"], granted
+
+
+def test_b736_apply_patch_itself_denied_stays_denied():
+    """Regression bound: if apply_patch is ALSO explicitly denied (not just "write"),
+    the implication must not resurrect it -- deny wins for its own literal token,
+    exactly as it does in the vendor's per-policy AND."""
+    from clawseccheck.checks._capability import _b68_fs_tools_granted
+
+    granted, enumerable = _b68_fs_tools_granted(
+        {"tools": {"allow": ["read", "write"], "deny": ["write", "apply_patch"]}}
+    )
+    assert enumerable is True
+    assert granted == ["read"], granted
 
 
 def test_b409_evidence_does_not_assert_widening_when_no_global_profile_set(tmp_path):

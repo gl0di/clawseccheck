@@ -45,6 +45,19 @@ def test_html_report_contains_score():
     assert f"{score.score}/100" in html
 
 
+def test_html_report_discloses_it_omits_risk_next_actions_and_capability_graph():
+    """B-761: render_html never renders the "Highest-risk paths" attack-chain
+    synthesis, the capability graph, or "What you can do next" recommendations the
+    text report carries — proven true before this fix by their total absence from
+    the output. The omission must now be disclosed on the page itself, not silent."""
+    _, findings, score = audit(FIXTURES / "home_vuln")
+    html = render_html(findings, score)
+    assert "findings-only view" in html
+    assert "Highest-risk paths" in html
+    assert "capability graph" in html
+    assert "What you can do next" in html
+
+
 def test_html_report_uses_the_brand_mascot_not_the_magnifier():
     """C-241 regression: the <h1> title used to hardcode a stray 🔍 (magnifier-glass
     brand-drift) instead of the 🦞 mascot every other renderer uses; must now read

@@ -63,8 +63,11 @@ from .catalog import (
 from .layers import LAYER_ORDER, describe_layer
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
-    _coverage_lines, _degraded_incomplete_clause, _group_issues_by_subject, _mcp_inventory_lines,
-    _plugins_inventory_lines, _risk_chain_lines, _sanitize, _second_opinion_item_lines,
+    _coverage_lines, _degraded_incomplete_clause, _EXPORT_FINDINGS_ONLY_NOTE,
+    _EXPORT_RISK_INCLUDED_NOTE,
+    _group_issues_by_subject, _mcp_inventory_lines,
+    _plugins_inventory_lines, _redact_home_paths, _risk_chain_lines, _sanitize,
+    _second_opinion_item_lines,
     _second_opinion_lines,
     _SEV_ORDER, _UNGRADED_CAP_TAIL, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
     display_status,
@@ -333,9 +336,12 @@ class _PageFlow:
               gap_after: float = 2.0) -> None:
         """Draw one already-wrapped line, breaking to a new page first if it does not fit.
 
-        This is the single place text ever reaches the content stream, so every caller
-        (title, detail, labels, family headers) funnels through the same
-        sanitize -> ascii-safe -> pdf-literal-escape pipeline — nothing skips it."""
+        B-771: this used to be documented as "the single place text ever reaches the
+        content stream" -- true when written, false since `text_abs` (below) was added
+        for absolute-positioned cells (header/badge/summary-table). There are TWO text
+        paths into the content stream now, and both funnel through the identical
+        sanitize -> ascii-safe -> pdf-literal-escape pipeline — nothing skips it in
+        either one (see `text_abs`'s own docstring)."""
         line_h = size * 1.35
         self.ensure_space(gap_before + line_h)
         self.y -= gap_before
@@ -611,7 +617,15 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
     flow.line(f"[{status_word}] {f.id}: {_sanitize(f.title)}", size=11, bold=True, gap_after=1.0)
     flow.line(f"Severity: {f.severity}", size=9, color=sev_hex, gap_after=2.0)
     if f.detail:
-        flow.wrapped(f"Why: {_sanitize(f.detail)}", size=9.5, color="#444444", indent=8.0)
+        # C-456: the PDF is a share/attach surface (docs/USAGE.md — the no-PATH
+        # `--pdf` is how OpenClaw attaches a report to a chat message), the same
+        # sharing risk `_redact_home_paths` already closes for the dashboard card
+        # and SARIF. `_sanitize` alone only masks secret-shaped VALUES
+        # (logsafe.redact), never a username-bearing home path.
+        flow.wrapped(
+            f"Why: {_redact_home_paths(_sanitize(f.detail))}",
+            size=9.5, color="#444444", indent=8.0,
+        )
     # A block that straddled a page break has `bar_y_top` and the current `flow.y` in two
     # different pages' coordinate spaces — combining them into one rect height would be
     # meaningless (and the rect would land on the wrong page entirely). Skip the purely
@@ -640,7 +654,7 @@ def _finding_block(flow: _PageFlow, f: Finding) -> None:
 
 def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
                *, ctx=None, plugin_sweep=None, risk=None, behavioral=None,
-               adjudication=None) -> bytes:
+               adjudication=None, coverage_page: dict | None = None) -> bytes:
     """Render the complete audit (all FAIL/WARN findings, grouped BY SUBJECT the same way
     `render_html` groups them, under a branded header band + a per-subject summary table)
     as a paginated, base-14-only PDF. Returns bytes — this
@@ -697,8 +711,14 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         pct = max(0, min(100, int(score.score)))
         if pct:
             flow.rect(tx, bar_y - 7.0, 210.0 * pct / 100.0, 7.0, grade_color)
-        flow.text_abs(tx, badge_top - 46.0, f"Lethal Trifecta {_trifecta_ratio(findings)}",
-                      9.5, rgb=(0.40, 0.40, 0.40))
+        # B-763: named a threat model and a fraction with no explanation anywhere on
+        # this artifact — the one that gets attached and shared. Same short gloss as
+        # report.py's render_card, so the two shareable surfaces agree on the wording.
+        flow.text_abs(
+            tx, badge_top - 46.0,
+            f"Lethal Trifecta {_trifecta_ratio(findings)} "
+            "(untrusted input, data, egress)",
+            9.5, rgb=(0.40, 0.40, 0.40))
         flow.y = badge_top - badge_s - 12.0
     else:
         # C-423: `graded is False` means no consumer of this ScoreResult may ever print a
@@ -768,6 +788,19 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
             text = f"{reason}{also} - {_UNGRADED_CAP_TAIL}"
         flow.wrapped(text, size=9.5, color="#b94a48")
 
+    # B-761: this document's own scope, stated on its first page — the text report
+    # additionally carries the "Highest-risk paths" attack-chain synthesis, the
+    # capability graph, and "What you can do next" recommendations, and this PDF used
+    # to say nothing about omitting them. `risk` is the one of the three this renderer
+    # CAN carry (the "--full pipeline" RISK-chains block further down, when the caller
+    # supplied it) — the capability graph and next actions are absent from every PDF
+    # this function produces, so the note always names those, and names the
+    # attack-chain synthesis too only when this run's PDF will not otherwise show it.
+    flow.wrapped(
+        _EXPORT_RISK_INCLUDED_NOTE if risk else _EXPORT_FINDINGS_ONLY_NOTE,
+        size=8.5, color="#666666",
+    )
+
     # ── Severity chips ───────────────────────────────────────────────────────────
     flow.spacer(6.0)
     sev_counts = {sev: sum(1 for f in issues if f.severity == sev) for sev in (CRITICAL, HIGH, MEDIUM, LOW)}
@@ -833,6 +866,13 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
                     + _second_opinion_item_lines(adjudication))
     _pipeline_block(flow, "Coverage of OpenClaw surfaces",
                     _coverage_lines(findings, ascii_only=True))
+    # F-165: TARGET coverage ("were all N plugins vetted, all M trajectory files
+    # read") — a different question from the surface-coverage block just above.
+    # Optional and additive: `coverage_page=None` (every pre-existing caller) draws
+    # nothing, via `_pipeline_block`'s own empty-lines no-op.
+    from .coverage import coverage_page_lines as _coverage_page_lines  # noqa: PLC0415
+    _pipeline_block(flow, "Coverage page",
+                    _coverage_page_lines(coverage_page or {}, ascii_only=True))
     _pipeline_block(flow, "Worth a glance", _worth_a_glance_lines(findings, ascii_only=True))
 
     flow.finish()

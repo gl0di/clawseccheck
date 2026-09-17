@@ -89,14 +89,37 @@ _B71_INEFFECTIVE_RE = re.compile(r"[ *|&;/]|--")
 
 
 # B55: filesystem-write tool names. Matched as substrings so write_file / writeFile
-# variants of the same capability count. B-395: NONE of these are real OpenClaw tool
-# ids in the current dist (grounded: CORE_TOOL_DEFINITIONS names write/edit/apply_patch;
-# "fs_write" appears only inside two legacy deny constants, never as a grantable id) —
-# kept as a legacy-alias union (not the primary detection path any more, see
-# _B55_FS_WRITE_TOOLS / check_fs_write_exposure below) purely so old-style configs and
-# this project's own pre-existing fixtures/tests, which already use "fs_write" as their
-# token, keep matching.
+# variants of the same capability count. B-735 correction: the claim this comment used
+# to make — "NONE of these are real OpenClaw tool ids" — was wrong, and being believed
+# is exactly why fs_delete/fs_move went unmodelled for as long as they did (a name
+# believed fake is not a name anyone extends). Grounded against the installed 2026.9.4
+# dist: "fs_write" (plus "fs_delete"/"fs_move", added below) sits in the vendor's OWN
+# dangerous/fs tool family in two independent lists — DEFAULT_GATEWAY_HTTP_TOOL_DENY
+# (dangerous-tools-*.mjs) and ACP_UNSUPPORTED_INHERITED_TOOL_DENY
+# (subagent-capabilities-*.mjs), both grouping it with write/edit/apply_patch/exec. It
+# IS a real, dispatchable tool id — kept as a legacy-alias union (not the primary
+# detection path, see _B55_FS_WRITE_TOOLS / check_fs_write_exposure below) because this
+# project's own pre-existing fixtures/tests already use "fs_write" as their token and
+# because raw-token hint matching is what actually catches an EXPLICIT
+# tools.allow/alsoAllow grant of a tool _B68_FS_TOOLS' canonical resolution does not
+# enumerate (fs_delete/fs_move are not in _B68_FS_TOOLS — see that tuple's own comment).
+#
+# B-735: fs_delete / fs_move are the two other real fs-write-family tool ids the same
+# two vendor lists name (grouped with fs_write, not with the non-fs dangerous tools in
+# the same lists like terminal/portal/sessions_spawn) -- but deliberately NOT added to
+# the substring tuple above. C-135 adversarial review found "fs_delete"/"fs_move" as
+# SUBSTRINGS collide with plausible real tool names: "refs_delete"/"refs_move" (a git-
+# refs tool) and "prefs_delete"/"prefs_move" (a preferences tool) both end in "fs"
+# immediately before "_delete"/"_move" and would substring-match -- the identical B-395
+# false-positive shape bare "write"/"edit" caused, not the "fs_write"/"write_file"
+# shape (genuinely safe as a substring: no realistic tool name contains that exact
+# multi-segment sequence by accident). Matched by EXACT canonical-name membership
+# instead, the same treatment B-395 already gives "write"/"edit" for the same reason.
 _FS_WRITE_TOOL_HINTS = ("fs_write", "write_file", "writefile", "apply_patch")
+
+# The exact-match companion to _FS_WRITE_TOOL_HINTS -- see that tuple's B-735 comment
+# for why fs_delete/fs_move are matched here (exact) rather than there (substring).
+_FS_WRITE_TOOL_EXACT = frozenset({"fs_delete", "fs_move"})
 
 # F-169: _B55_FS_WRITE_TOOLS now lives in ._shared (A1 asks the same question).
 
@@ -594,6 +617,28 @@ def _b68_fs_workspace_only_scopes(cfg: dict) -> list[tuple[str, object]]:
 # (audit.nondeep.runtime-C3y1Q5Fi.js:583-588).
 _B68_FS_TOOLS = ("read", "write", "edit", "apply_patch")
 
+# B-736: `write` IMPLIES `apply_patch` (dist `tool-policy-match-DS7InkLt.js:24`,
+# `createToolPolicyMatcher`'s `writeAllowsApplyPatch` parameter, default `true` --
+# toolgrant.py's own module docstring "ALIAS TABLE"/implication section is the grounding
+# citation; reused here rather than re-derived). A policy whose allow list names `write`
+# but not `apply_patch` still lets `apply_patch` through THAT policy -- and, evaluated
+# per policy inside the vendor's AND, a policy that DENIES `write` does NOT deny
+# `apply_patch`: they are separate tokens at the deny layer, and the implication only
+# ever adds on the allow side. `_tool_policy_view` (this module) modelled neither
+# direction ("NOT modelled, deliberately" in its own docstring, before this fix) --
+# `toolgrant.py` already modelled it correctly for the PER-AGENT scopes `_b68_fs_tools_
+# granted` consults (B-668/S3's `scoped` set below), so the accumulator's GLOBAL layer
+# was the one place a hardened `deny:["write"]` config still silently kept apply_patch
+# reachable and told the operator otherwise. Grounded to be the ONLY such implication in
+# the dist: `createToolPolicyMatcher` special-cases exactly this one pair, and
+# toolgrant.py's own dist-executed grounding (tests/test_toolgrant_dist_grounding.py)
+# has never found a second. Fixed LOCALLY in `_b68_fs_tools_granted` (not in
+# `_tool_policy_view` itself, which B44 also reads for an unrelated self-report
+# cross-check that has no vetted reason to inherit this) -- the narrower of the two
+# options the task weighed, matching every other consumer of `_tool_policy_view` staying
+# byte-identical to before.
+_B68_WRITE_IMPLIES = "apply_patch"
+
 
 class _ToolPolicyView(NamedTuple):
     """One resolution of the GLOBAL tools.* layer, shared by B44/B55/B68/B84.
@@ -902,6 +947,18 @@ def _b68_fs_tools_granted(cfg: dict) -> tuple[list[str], bool]:
     if not view.enumerable and not widenings and not scoped:
         return [], False
 
+    # B-736: the write=>apply_patch implication (see _B68_WRITE_IMPLIES above), applied
+    # ONCE here after every source that can grant "write" has already unioned in --
+    # named/grants_all/group:fs/profile/widenings all reach this point through `granted`,
+    # so this one line covers all of them instead of repeating the check at each site.
+    # Deliberately BEFORE the deny subtraction below, mirroring the vendor's own order
+    # (createToolPolicyMatcher checks deny first for the LITERAL token being tested, then
+    # allow, then the implication) -- so a config that ALSO explicitly denies
+    # "apply_patch" itself (not just "write") still has it removed at that step, exactly
+    # as it should.
+    if "write" in granted:
+        granted.add(_B68_WRITE_IMPLIES)
+
     # `view.denied` is the GLOBAL deny list and is applied only to the globally-derived set.
     # `scoped` already came from the vendor predicate, which applies every deny layer itself
     # (verified: global `deny:["write"]` with a per-agent `allow:["write"]` resolves to
@@ -922,12 +979,35 @@ def _b55_write_tools_granted(
 
     Delegates to `_b68_fs_tools_granted` (the canonical write/edit/apply_patch/
     group:fs/profile/widening resolution B55/B68/B84 already share) and unions in
-    B55's OWN legacy-alias fallback -- `_FS_WRITE_TOOL_HINTS` ("fs_write",
-    "write_file", "writefile", "apply_patch") matched against the raw allow/
-    alsoAllow tokens, because these are not real OpenClaw tool ids and
-    `_b68_fs_tools_granted` only recognizes the canonical `_B68_FS_TOOLS` names (see
-    check_fs_write_exposure's B-395 docstring section for why that union exists --
-    real fixtures, e.g. bad_b55_fs_write_broad, still use the legacy alias).
+    B55's OWN legacy-alias/raw-token fallback against the raw allow/alsoAllow tokens:
+    `_FS_WRITE_TOOL_HINTS` ("fs_write", "write_file", "writefile", "apply_patch"),
+    substring-matched, plus `_FS_WRITE_TOOL_EXACT` ("fs_delete", "fs_move"),
+    exact-canonical-match (C-135: as substrings they collide with plausible real tool
+    names like "refs_delete"/"prefs_move" -- see `_FS_WRITE_TOOL_HINTS`'s own B-735
+    comment). These ARE real OpenClaw tool ids (B-735 correction: this docstring used
+    to claim otherwise, which is exactly why fs_delete/fs_move went unmodelled for as
+    long as they did) -- the union exists because `_b68_fs_tools_granted` only
+    enumerates the canonical `_B68_FS_TOOLS` names via profile/group:fs/widening
+    resolution, and fs_write/fs_delete/fs_move are not in that tuple, so an EXPLICIT
+    `tools.allow`/`alsoAllow` grant of one of them is only caught by matching the raw
+    token directly (see check_fs_write_exposure's B-395 docstring section for the fuller
+    history -- real fixtures, e.g. bad_b55_fs_write_broad/bad_b55_fs_delete_broad/
+    bad_b55_fs_move_broad, use these tokens).
+
+    KNOWN GAP (B-735, disclosed rather than silently left, same shape as
+    check_fs_write_exposure's own documented gap #1): because fs_write/fs_delete/
+    fs_move are not in `_B68_FS_TOOLS`, they are recognized ONLY via a literal raw
+    token in `tools.allow`/`alsoAllow` -- never via `tools.profile="full"`, a bare
+    wildcard `"*"` allow, or `group:fs`, the way write/edit/apply_patch already are
+    through `_b68_fs_tools_granted`'s canonical resolution. A real OpenClaw `"*"`
+    allowlist grants fs_delete/fs_move too (they are ordinary tools, not a separate
+    permission), so `{"tools": {"allow": ["*"], "deny": ["write","edit","apply_patch"]}}`
+    reads as NO write tool granted here even though the runtime still grants
+    fs_delete/fs_move under the wildcard. Widening `_B68_FS_TOOLS` itself would close
+    this but also changes B68's workspace-confinement verdict and B84's grant model for
+    the SAME tuple -- a materially larger, differently-scoped change than this task
+    asked for (see the task's own "decide whether the whole deny set or only its fs
+    members" framing). Left as a follow-up, not fixed here.
 
     Returns ``(write_tools, enumerable, view, legacy_write)``: `write_tools` is the
     sorted write-capable subset (`_B55_FS_WRITE_TOOLS`) actually granted;
@@ -943,7 +1023,7 @@ def _b55_write_tools_granted(
     legacy_write = {
         canon
         for canon, raw in zip(view.named, view.raw_named)
-        if _hint([raw], _FS_WRITE_TOOL_HINTS)
+        if _hint([raw], _FS_WRITE_TOOL_HINTS) or canon in _FS_WRITE_TOOL_EXACT
     } - view.denied
     write_tools = sorted((set(granted) & _B55_FS_WRITE_TOOLS) | legacy_write)
     return write_tools, enumerable, view, legacy_write
@@ -1177,9 +1257,10 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
 
     B-395: grant resolution is delegated to `_b68_fs_tools_granted` (the same helper
     B68 already uses for this identical tool family) rather than re-derived here — the
-    prior independent accumulator only matched the LEGACY, non-canonical alias names in
-    `_FS_WRITE_TOOL_HINTS` ("fs_write" is not a real OpenClaw tool id) against a raw
-    `tools.allow` LIST only, so it produced a confident PASS on every real-world grant
+    prior independent accumulator only matched the names in `_FS_WRITE_TOOL_HINTS`
+    (real OpenClaw tool ids not enumerated by `_b68_fs_tools_granted`'s own canonical
+    `_B68_FS_TOOLS` resolution — B-735 correction, this used to wrongly call them fake)
+    against a raw `tools.allow` LIST only, so it produced a confident PASS on every real-world grant
     shape: the canonical tool ids (write/edit/apply_patch), group:fs, a wildcard "*"
     allowlist, tools.profile, and tools.alsoAllow all went undetected. The legacy alias
     list is kept as an additional union (see `write_tools` below) so old-style configs
@@ -1378,12 +1459,41 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # the root there too (the widening now intersects with a real global allowlist
     # instead of granting wholesale), but this clause is fixed to match `legacy_write`'s
     # existing pattern regardless, so it can't become a landmine for the next change.
+    # B-736: "write" named in tools.allow drives the write=>apply_patch implication in
+    # `_b68_fs_tools_granted` (see `_B68_WRITE_IMPLIES` there) — and naming "write" in
+    # allow at ALL is an explicit operator action, never an implicit-wildcard artifact,
+    # regardless of whether the literal "write" token itself survives the deny
+    # subtraction. Without this disjunct, `tools.allow: ["write"], tools.deny:
+    # ["write"]` reached `explicit_write_grant=False` even though write_tools is
+    # ["apply_patch"] (a real, deny-surviving grant) — falling into the
+    # "the only write-tool grant signal is tools.alsoAllow's implicit wildcard" WARN
+    # branch below and reporting a FACTUALLY WRONG mechanism (tools.allow was not
+    # absent). Guarded by `_B68_WRITE_IMPLIES not in view.denied` so it doesn't claim
+    # explicitness for a config where apply_patch itself is ALSO explicitly denied —
+    # symmetric with every other disjunct here already being deny-aware.
+    #
+    # `not widenings`: deliberately does NOT escalate when a per-agent tools.profile
+    # widening is ALSO in play (B-409 C-135 round 2's confirmed false-FAIL territory —
+    # test_b409_c135_exact_repro_no_longer_fails / _multi_token_deny_variant). That
+    # round found the true effective grant under a widening carries MORE uncertainty
+    # than the bare global layer alone: seven still-unread narrowing layers (per-agent
+    # allow/deny, channel/group, toolsBySender, byProvider) could remove it for that
+    # agent unseen by this static check, so it stays the "traces to a per-agent
+    # tools.profile" WARN below rather than jumping straight to FAIL. This disjunct is
+    # scoped to the BARE GLOBAL case B-736's own repro is ("no agents at all... so no
+    # per-agent resolution is involved") — exactly where no such extra layer exists to
+    # be wrong about.
     explicit_write_grant = bool(
         (set(view.named) & _B55_FS_WRITE_TOOLS) - view.denied
         or legacy_write
         or "*" in view.named
         or "group:fs" in view.named
         or (view.profile is not None and _profile_is_powerful(view.profile))
+        or (
+            not widenings
+            and "write" in view.named
+            and _B68_WRITE_IMPLIES not in view.denied
+        )
     )
 
     label = ", ".join(write_tools)
@@ -2588,4 +2698,208 @@ def check_exec_path_prepend(ctx: Context) -> Finding:
         f"{_key_advice(ctx, 'agents.list', 'agents.entries')} too: an agent's own entry "
         "replaces the global one.",
         evidence=sorted(risky)[:8] or None,
+    )
+
+
+def _b378_normalize_path_for_compare(raw: str, home: Path) -> str:
+    """Light textual normalization for comparing two DECLARED path strings.
+
+    NOT a port of ``resolveUserPath`` — it only expands a leading ``~`` against *home*
+    and runs :func:`os.path.normpath`. Good enough to prove two config strings denote
+    the same directory (the one thing ``check_agent_cwd_relocation`` uses it for); never
+    used to derive a path that was not itself explicitly written into the config — see
+    that check's own docstring for why the implicit workspace default is deliberately
+    not reconstructed.
+    """
+    s = raw.strip()
+    if s == "~" or s.startswith("~/") or s.startswith("~\\"):
+        s = str(home) + s[1:]
+    return os.path.normpath(s)
+
+
+def check_agent_cwd_relocation(ctx: Context) -> Finding:
+    """B378: ``agents.defaults.cwd`` / ``agents.entries.<id>.cwd``
+    relocate an agent's task/exec working directory away from its workspace.
+
+    New surface in OpenClaw 2026.9.1. Grounded directly against the installed
+    2026.9.4 dist, not the descriptions map: the zod schema (``zod-schema-*.mjs``)
+    carries ``cwd: string().optional()`` as a plain sibling of ``workspace`` on BOTH
+    ``AgentDefaultsSchema`` and ``AgentEntryBaseSchema`` (the record-keyed
+    ``agents.entries.<id>`` / legacy array ``agents.list[]`` entry shape). Resolution
+    is ``resolveAgentRunCwd(cfg, agentId)`` (``agent-scope-config-*.mjs``):
+    ``normalizeOptionalString(resolveAgentEntry(cfg, agentId)?.cwd) ??
+    normalizeOptionalString(cfg.agents?.defaults?.cwd)`` — an agent's own ``cwd`` wins,
+    the global default applies only when it is unset, and there is no containment
+    check against the workspace at config-read time.
+
+    Why it is worth a finding: ``resolveAttemptWorkspaceSandbox``
+    (``workspace-sandbox-*.mjs``) throws *"cwd override is not supported for sandboxed
+    embedded agent runs"* whenever ``sandbox?.enabled && requestedCwd && requestedCwd
+    !== resolvedWorkspace`` — the identical guard (different wording) also covers
+    compaction (``compact-*.mjs``) and subagent/visible-session runs
+    (``sessions-spawn-tool-*.mjs``). So a configured ``cwd`` that differs from the
+    workspace is a two-fact signal, not one: the run is necessarily UNSANDBOXED for
+    that mismatch to succeed at all, AND the agent's exec/bash surface defaults to an
+    arbitrary directory that neither B4 (sandbox) nor B-666/``toolpolicy.py``'s
+    workspace-confinement reach model ever considers — both assume "the workspace" is
+    where a run's tools actually operate.
+
+    Deliberately narrow about what counts as a PROVEN no-op: a configured ``cwd`` is
+    cleared only when it is textually equal (after ``~``-expansion) to that SAME
+    scope's own EXPLICITLY declared ``workspace``. For the bare ``agents.defaults``
+    scope (no roster declared at all — the single implicit agent), that workspace
+    falls back to ``agents.defaults.workspace`` when none is set closer, which is
+    sound: there is only one agent, and its real implicit workspace IS
+    ``agents.defaults.workspace``.
+
+    C-135 (independent, post-commit): a PER-AGENT roster entry with no ``workspace``
+    of its own used to credit the same bare ``agents.defaults.workspace`` fallback —
+    reasoned as "a non-default agent's real implicit workspace is
+    ``join(agents.defaults.workspace, id)``, which would essentially never
+    coincidentally equal a hand-written ``cwd``". Reproduced that this reasoning was
+    wrong: an admin who wants a named agent to run in the shared project root
+    naturally sets its ``cwd`` to the SAME string as ``agents.defaults.workspace`` —
+    not a coincidence, a common intent — and that is exactly a relocation away from
+    the agent's own (id-suffixed) implicit workspace. The check then falsely PASSed
+    the one config shape it exists to catch. There is no reliable, non-fabricated way
+    from config alone to tell "this roster entry IS the implicit default agent,
+    explicitly listed" apart from "this is a genuinely different named agent", so a
+    roster entry's proof target is now its OWN explicit ``workspace`` only — never the
+    bare default. This check does NOT reconstruct OpenClaw's full
+    ``resolveAgentWorkspaceDir`` fallback chain (the ``join(...)`` itself, or the
+    unconfigured-implicit-directory case) to decide those cases either — porting that
+    wrong would fabricate a comparison target rather than merely miss one, the exact
+    failure mode the sibling ``agent_roster()`` / ``toolpolicy.py`` ports guard against
+    with differential testing. Every other case WARNs instead: the field's own schema
+    description ("Also used as the working directory when agents.defaults.cwd is
+    unset") exists specifically so the two CAN differ, so a WARN default with one
+    narrow, provable exemption (the bare-default-scope case above) is the reading that
+    stays sound in the quiet direction, not a coin flip that risks a false PASS.
+
+    UNKNOWN        — the config could not be read.
+    not_applicable — no ``cwd`` is declared anywhere (the overwhelming majority of
+                     configs today; the surface is brand new). When ``agents.list`` /
+                     ``agents.entries`` is not declared at all, ``agents.defaults.cwd``
+                     still applies to the single implicit agent (``resolveAgentEntry``
+                     returns nothing for it, so resolution falls straight through to
+                     the default) and is evaluated as that one scope.
+    PASS           — every scope with a configured ``cwd`` has it textually equal to
+                     that scope's own explicit ``workspace``.
+    WARN           — at least one scope configures ``cwd`` with no proof it matches
+                     its workspace. scored=True.
+
+    Deliberately not double-counted: when a roster (``agents.list``/``agents.entries``)
+    IS declared, ``agents.defaults.cwd`` is evaluated only through the specific roster
+    entries that actually inherit it (those with no ``cwd`` of their own) — never also
+    as a bare top-level scope, which would flag ``agents.defaults.cwd`` even when every
+    declared agent overrides it with its own ``cwd`` and the default is genuinely dead
+    config nothing resolves to.
+    """
+    unreadable = _config_unreadable("B378", ctx)
+    if unreadable is not None:
+        return unreadable
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B378",
+            UNKNOWN,
+            "No config was read, so agents.*.cwd relocation could not be assessed.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+
+    def _clean(v):
+        return v.strip() if isinstance(v, str) and v.strip() else None
+
+    default_cwd = _clean(dig(cfg, "agents.defaults.cwd"))
+    default_workspace = _clean(dig(cfg, "agents.defaults.workspace"))
+    roster = agent_roster(cfg)
+
+    scopes: list[tuple[str, str, "str | None"]] = []
+    if not roster:
+        # No agents.list / agents.entries declared at all: exactly one implicit agent
+        # runs, resolveAgentEntry() returns nothing for it regardless of id, and
+        # resolveAgentRunCwd falls straight through to agents.defaults.cwd.
+        if default_cwd is not None:
+            scopes.append(("agents.defaults.cwd", default_cwd, default_workspace))
+    else:
+        for agent in roster:
+            entry = agent.entry
+            own_cwd = _clean(entry.get("cwd"))
+            effective_cwd = own_cwd if own_cwd is not None else default_cwd
+            if effective_cwd is None:
+                continue
+            own_workspace = _clean(entry.get("workspace"))
+            # C-135 (independent, post-commit): this used to also credit bare
+            # agents.defaults.workspace as a proof target for a roster entry with no
+            # workspace of its own, reasoned as "a non-default agent's real implicit
+            # workspace is join(agents.defaults.workspace, id), which would essentially
+            # never coincidentally equal a hand-written cwd". Reproduced that this is
+            # false: an admin who wants an agent to run in the shared project root
+            # naturally sets cwd to the SAME string as agents.defaults.workspace, and
+            # that is exactly a relocation away from the agent's own (id-suffixed)
+            # implicit workspace -- the coarse comparison then falsely PASSed the one
+            # config shape this check exists to catch. There is no reliable way from
+            # config alone to tell "this roster entry IS the implicit default agent,
+            # explicitly listed" apart from "this is a genuinely different named agent"
+            # (this codebase's own rule elsewhere: never fabricate a comparison target),
+            # so only this entry's OWN explicit workspace is a sound proof target now.
+            # A roster entry declaring neither cwd nor workspace of its own now WARNs
+            # instead of PASSing -- the safe direction for a WARN-only check.
+            workspace_for_proof = own_workspace
+            name = entry.get("name") or agent.id or agent.index
+            scopes.append((f"{agent.labelled(name)}.cwd", effective_cwd, workspace_for_proof))
+
+    if not scopes:
+        return _finding(
+            "B378",
+            UNKNOWN,
+            "No agents.defaults.cwd or per-agent cwd is configured.",
+            "—",
+            not_applicable=True,
+        )
+
+    relocated: list[str] = []
+    for label, cwd_val, workspace_val in scopes:
+        if workspace_val is not None and (
+            _b378_normalize_path_for_compare(cwd_val, ctx.home)
+            == _b378_normalize_path_for_compare(workspace_val, ctx.home)
+        ):
+            continue  # proven no-op: cwd is that same scope's own declared workspace
+        note = (
+            f"workspace={workspace_val!r}" if workspace_val
+            else "no explicit workspace declared for this scope"
+        )
+        relocated.append(f"{label}={cwd_val!r} ({note})")
+
+    if not relocated:
+        return _finding(
+            "B378",
+            PASS,
+            "Every configured agents.*.cwd matches that scope's own declared "
+            "workspace — no relocation.",
+            "Keep cwd in sync with workspace, or drop it if it was never meant to "
+            "differ.",
+            config_field_paths=frozenset(
+                {"agents.defaults.cwd", "agents.defaults.workspace"}
+            ),
+        )
+
+    return _finding(
+        "B378",
+        WARN,
+        "agents.*.cwd relocates the task/exec working directory away from the "
+        f"agent's own workspace for: {'; '.join(relocated)}. OpenClaw itself rejects "
+        "a sandboxed run whose cwd differs from its workspace (\"cwd override is not "
+        "supported for sandboxed ... runs\"), so this configuration either runs "
+        "unsandboxed with an arbitrary exec/bash working directory outside the "
+        "workspace, or fails at runtime.",
+        "Confirm the relocation is intentional and that the agent is meant to run "
+        "unsandboxed. If it should stay confined, remove cwd (or set it equal to "
+        "workspace) instead of relying on the sandbox guard to catch a mismatch at "
+        "runtime.",
+        evidence=relocated,
+        config_field_paths=frozenset(
+            {"agents.defaults.cwd", "agents.defaults.workspace"}
+        ),
     )

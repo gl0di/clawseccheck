@@ -128,8 +128,41 @@ _BIDI_MARK_SRC = (
     "\u200e-\u200f"   # LRM, RLM
     "\u061c"          # Arabic Letter Mark
 )
+# B-646: a fourth, DELIBERATELY SEPARATE source -- stripped by the same
+# normalizer as the Tier 1 class above, but never folded into
+# _ZERO_WIDTH_CLASS_SRC, because it must NOT feed the unconditional Tier-1
+# signal (see _has_dense_vs_supplement_channel below for why, and
+# docs/research/ for the corpus measurement this range is grounded against):
+#   U+FE00-FE0D  : variation selectors 1-14 -- EXCLUDING FE0E/FE0F (U+FE0E/
+#                  U+FE0F), the two presentation selectors that are
+#                  legitimate and PERVASIVE in ordinary emoji-using text (see
+#                  the Tier 2 comment inside obfuscation_signals). FE00-FE0D
+#                  have no comparable everyday use.
+#   U+E0100-E01EF: Variation Selectors Supplement -- a 240-symbol invisible
+#                  alphabet (~8 bits/code point) dense enough to carry a real
+#                  payload, published and in live use (a real skill encodes
+#                  Cashu tokens through it). Below the Unicode Tag block
+#                  (U+E0000-E007F) this project already handles separately,
+#                  so it needs its own range, not a raised _TAG_BLOCK_HI.
+#   U+3164, U+FFA0: HANGUL FILLER / HALFWIDTH HANGUL FILLER -- legitimate as
+#                  Hangul jamo composition placeholders in real Korean text
+#                  (same Tier 2 candidates named in obfuscation_signals),
+#                  included here because they are as capable of carrying a
+#                  presence/absence bit as any other member of this class.
+# Measured across 338,751 real third-party skill files: stripping this whole
+# set costs ZERO new findings (nothing downstream keys on whether these
+# specific characters survive normalization to produce one) -- the asymmetry
+# that makes stripping unconditionally sound while signalling on it is not
+# (see _has_dense_vs_supplement_channel).
+_VS_SUPPLEMENT_CLASS_SRC = (
+    "\ufe00-\ufe0d"          # variation selectors 1-14 (NOT FE0E/FE0F)
+    "\U000e0100-\U000e01ef"  # Variation Selectors Supplement
+    "\u3164"                 # Hangul Filler
+    "\uffa0"                 # Halfwidth Hangul Filler
+)
 _INVISIBLE_RE = re.compile(
-    "[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + _BIDI_MARK_SRC + "]"
+    "[" + _ZERO_WIDTH_CLASS_SRC + _BIDI_CLASS_SRC + _BIDI_MARK_SRC
+    + _VS_SUPPLEMENT_CLASS_SRC + "]"
 )
 
 # B-766: stripping a bidi control (above) removes the CHARACTER, not the character-order
@@ -424,6 +457,81 @@ def _is_zwj_between_emoji(chars: list[str], idx: int) -> bool:
     )
 
 
+# The Mongolian Unicode block (U+1800-U+18AF) — the letters/digits/punctuation
+# a flanking character must fall inside, PLUS a general-category allowlist so
+# a flanking character must be a genuinely spacing/visible glyph. Built as an
+# allowlist rather than "anything in range" or "anything not U+180E", because
+# an allowlist's failure mode is the safe one (an unrecognised category is
+# simply not Mongolian enough, so the WARN still fires) where a denylist's
+# failure mode is silence (see the adversarial-finding note below for why
+# "not U+180E" alone was not enough).
+_MONGOLIAN_BLOCK_LO = 0x1800
+_MONGOLIAN_BLOCK_HI = 0x18AF
+_MONGOLIAN_VISIBLE_CATEGORIES = frozenset({
+    "Lo",  # letters (the bulk of the block)
+    "Lm",  # modifier letter (U+1843 MONGOLIAN LETTER TODO LONG VOWEL SIGN)
+    "Nd",  # digits (U+1810-1819)
+    "Po",  # punctuation (birga, comma, colon, ellipsis, …)
+    "Pd",  # dash punctuation (U+1806 MONGOLIAN TODO SOFT HYPHEN)
+})
+
+
+def _is_mongolian_flanked_180e(chars: list[str], idx: int) -> bool:
+    """True when the MONGOLIAN VOWEL SEPARATOR (U+180E) at *chars[idx]* sits
+    directly between two Mongolian-block (U+1800-U+18AF) LETTER/PUNCTUATION
+    characters -- i.e. it is doing its one honest job, separating a
+    word-final consonant from a suffix vowel inside a literal Mongolian text
+    run -- rather than being an invisible-channel character spliced into
+    unrelated content (B-647).
+
+    A flanking character must be in the Mongolian block AND carry one of the
+    "visible glyph" general categories above (`unicodedata.category`) — TWO
+    independent adversarial findings against earlier drafts of this
+    function, both closed by tightening what counts as a flanking character
+    rather than by special-casing one more code point (a lesson repeated
+    elsewhere in this codebase: an enumerated denylist is fragile in exactly
+    this way):
+
+      1. Plain "in [0x1800, 0x18AF]" let U+180E itself count as a flanking
+         character -- it is inside that range. A RUN of consecutive U+180E
+         characters padded by one real Mongolian letter on each OUTER edge
+         then exempted every character in the run: an unbounded invisible
+         channel armoured by two letters, cheaper than the emoji-ZWJ
+         precedent's bypass cost (which needs a real, individually-
+         recognisable emoji on every side of every ZWJ, not just the ends).
+      2. Narrowing to "in-block AND not U+180E" was still not enough: the
+         three Mongolian Free Variation Selectors (U+180B-180D, category
+         Mn -- combining marks, invisible in normal rendering, NOT swept by
+         the Cf-only zero-width class above so never flagged themselves)
+         are in-block and not U+180E, so alternating U+180E/FVS needed no
+         outer padding at all -- every interior U+180E had an FVS neighbour
+         on both sides. The category allowlist excludes Mn (and Cf, Cn, and
+         everything else that is not a spacing glyph) directly, closing
+         this without an FVS-specific special case, and closes the same
+         class of gap for any future invisible/combining Mongolian-block
+         addition without another patch.
+
+    Immediate-neighbour check, unlike *_is_zwj_between_emoji*'s
+    modifier-skipping walk: U+180E's own comment names no adjacent
+    "modifier" class to skip over, and the vowel separator's actual function
+    puts it directly between two letters with no intervening character, so
+    there is nothing to walk past. Both neighbours must exist and both must
+    qualify; U+180E at the very start or end of a string is never exempt
+    (same "never exempt at a string boundary" rule *_is_zwj_between_emoji*
+    uses).
+    """
+    if idx <= 0 or idx >= len(chars) - 1:
+        return False  # at a string boundary — never exempt
+
+    def _is_visible_mongolian(ch: str) -> bool:
+        cp = ord(ch)
+        return (_MONGOLIAN_BLOCK_LO <= cp <= _MONGOLIAN_BLOCK_HI
+                and unicodedata.category(ch) in _MONGOLIAN_VISIBLE_CATEGORIES)
+
+    return (_is_visible_mongolian(chars[idx - 1])
+            and _is_visible_mongolian(chars[idx + 1]))
+
+
 # ---------------------------------------------------------------------------
 # Module-level, content-keyed memo for normalize_for_scan on large blobs. The
 # same multi-megabyte skill/bootstrap blobs get re-normalized call after call
@@ -542,15 +650,24 @@ def normalize_for_scan(text: str) -> str:
 
 def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> bool:
     """True when *text* contains a zero-width / invisible char that is NOT
-    explained away as part of a legitimate emoji ZWJ sequence (B-088 / A3).
+    explained away as part of a legitimate emoji ZWJ sequence (B-088 / A3) or
+    a literal Mongolian text run (B-647).
 
     Every code point *zero_width_re* matches is unconditionally suspicious --
     see the class comment above ``_ZERO_WIDTH_RE`` in *obfuscation_signals* for
     the full, curated list (B-450) and why each member has no honest use in
-    agent-facing text -- with exactly ONE exception: U+200D (ZWJ) is suspicious
-    UNLESS it sits between two emoji code points (see *_is_zwj_between_emoji*),
-    in which case it is a normal emoji ZWJ sequence (e.g. 🧑‍⚖️) and must
-    not be flagged.
+    agent-facing text -- with exactly TWO exceptions:
+
+      - U+200D (ZWJ) is suspicious UNLESS it sits between two emoji code
+        points (see *_is_zwj_between_emoji*), in which case it is a normal
+        emoji ZWJ sequence (e.g. 🧑‍⚖️) and must not be flagged.
+      - U+180E (MONGOLIAN VOWEL SEPARATOR) is suspicious UNLESS it sits
+        directly between two Mongolian-block characters (see
+        *_is_mongolian_flanked_180e*), in which case it is doing its one
+        honest job inside literal Mongolian text and must not be flagged.
+        B-647: the class comment above named this exact exemption ("no
+        honest reason to appear outside literal Mongolian text runs") and
+        shipped without it, false-WARNing on a real Mongolian-language skill.
 
     Iterates over Python ``str`` code points directly (each element of a
     Python 3 ``str`` is already a full code point, astral chars included —
@@ -561,14 +678,61 @@ def _has_suspicious_zero_width(text: str, zero_width_re: "re.Pattern[str]") -> b
         return False
 
     chars = list(text)
-    # Re-scan by code-point index so ZWJ neighbours can be inspected.
+    # Re-scan by code-point index so a flagged char's neighbours can be inspected.
     for idx, ch in enumerate(chars):
         if not zero_width_re.match(ch):
             continue
-        if ord(ch) == 0x200D and _is_zwj_between_emoji(chars, idx):
+        cp = ord(ch)
+        if cp == 0x200D and _is_zwj_between_emoji(chars, idx):
             continue  # legitimate emoji ZWJ sequence — not suspicious
+        if cp == 0x180E and _is_mongolian_flanked_180e(chars, idx):
+            continue  # literal Mongolian text run — not suspicious
         return True
     return False
+
+
+_VS_SUPPLEMENT_RE = re.compile("[" + _VS_SUPPLEMENT_CLASS_SRC + "]")
+
+# B-646: grounded against a direct probe of the same 338,751-file real skill
+# corpus the class above cites. An UNGATED signal over this class touches a
+# small number of files (a handful of stray, single-digit occurrences —
+# scraped web content, a minifier artifact, decode noise off a mislabeled
+# binary file), none anywhere near the density a real encoded payload needs;
+# the corpus's one genuine positive (a published skill encoding Cashu tokens
+# through the Supplement range) carries 384 code points behind one emoji.
+# 32 sits comfortably above every measured noise sample (max 20) and matches
+# the threshold C038's OWN "run of >= 4 or a total of >= 32" invisible-count
+# gate already uses elsewhere in this codebase (checks/_mcp.py) — not a fresh
+# number, a second application of one this project already trusted.
+_VS_SUPPLEMENT_SIGNAL_MIN_COUNT = 32
+
+
+def _has_dense_vs_supplement_channel(text: str) -> bool:
+    """True when *text* carries enough Variation-Selector-Supplement-class
+    characters (see `_VS_SUPPLEMENT_CLASS_SRC`) to look like a deliberate
+    invisible-alphabet channel rather than one or two incidental occurrences
+    (B-646).
+
+    Deliberately COUNT-gated rather than unconditional like the Tier 1 zero-
+    width class: this class's two most common members in real text —
+    U+3164/U+FFA0 (Hangul fillers) and, had they been included, U+FE0E/
+    U+FE0F (the ordinary emoji-presentation selectors, kept OUT of this class
+    entirely) — have honest, common uses, so a bare-presence signal here
+    would WARN on ordinary Korean or emoji-heavy content. A real encoded
+    payload needs many symbols (roughly 8 bits/code point across this class),
+    so requiring a real count catches the channel while a stray one or two
+    stays quiet — the same reasoning the pre-existing C038 invisible-count
+    gate already applies one check up the stack, generalised to this
+    specific class rather than reused directly (C038's own counter combines
+    a DIFFERENT class — see its own module comment for why the two must not
+    be merged).
+
+    No per-character exemption (unlike U+200D/U+180E above): the payload
+    here lives in WHICH selector is chosen, not in where one sits relative
+    to its neighbours, so a flanking check would answer a question this
+    channel does not ask.
+    """
+    return len(_VS_SUPPLEMENT_RE.findall(text)) >= _VS_SUPPLEMENT_SIGNAL_MIN_COUNT
 
 
 def obfuscation_signals(text: str) -> list[str]:
@@ -580,6 +744,10 @@ def obfuscation_signals(text: str) -> list[str]:
       - "bidi-override / embedding controls found" — bidi controls stripped
       - "Unicode Tag-block characters found" — Tag-block (U+E0000-E007F) run present,
         not explained away as a legitimate flag-subdivision emoji sequence (B-232)
+      - "dense variation-selector / invisible-alphabet channel found" — enough
+        Variation-Selectors-Supplement-class characters (U+FE00-FE0D minus
+        FE0E/FE0F, U+E0100-E01EF, U+3164, U+FFA0) to look like a deliberate
+        encoded channel rather than an incidental occurrence (B-646)
       - "confusable characters folded to ASCII" — confusable map applied
     """
     signals: list[str] = []
@@ -618,31 +786,58 @@ def obfuscation_signals(text: str) -> list[str]:
     #   U+180E      : MONGOLIAN VOWEL SEPARATOR -- category Cf (format,
     #                 invisible) since Unicode 10.0; no honest reason to appear
     #                 outside literal Mongolian text runs, and never in an MCP
-    #                 tool description or install-time target.
+    #                 tool description or install-time target. B-647: unlike
+    #                 the other Tier 1 members above, this ONE has a per-
+    #                 character exemption, same shape as U+200D below --
+    #                 flanked directly by two Mongolian-block characters
+    #                 (see `_is_mongolian_flanked_180e`) means it is doing its
+    #                 actual job inside literal Mongolian text, not splicing
+    #                 unrelated content. Measured false-WARN before this
+    #                 exemption existed: a real Mongolian-language skill's
+    #                 own prose.
     #
     # TIER 2 -- DELIBERATELY DEFERRED, NOT IN THIS CLASS (record only; do not
     # add without the per-character discriminator described below):
-    #   U+FE00-FE0F : variation selectors. Legitimate and PERVASIVE here --
-    #                 U+FE0F alone is what turns a base glyph into emoji
-    #                 presentation (an emoji heart, warning sign or check mark
-    #                 each carry it), so a bare presence signal would false-fire
-    #                 on ordinary emoji-using prose across the whole engine
-    #                 (B58, the content ring, C-038).
+    #   U+FE0E, U+FE0F : the two emoji-presentation variation selectors.
+    #                 Legitimate and PERVASIVE -- U+FE0F alone is what turns a
+    #                 base glyph into emoji presentation (an emoji heart,
+    #                 warning sign or check mark each carry it), so a bare
+    #                 presence signal would false-fire on ordinary emoji-using
+    #                 prose across the whole engine (B58, the content ring,
+    #                 C-038). Measured (B-646): U+FE0F alone appears in 10.7%
+    #                 of a 338,751-file real skill corpus.
     #   U+2800      : BRAILLE PATTERN BLANK -- legitimate whenever real Braille
     #                 text is present (a blank cell inside a Braille run),
     #                 indistinguishable from an invisible-channel member without
     #                 knowing whether it sits among other Braille Patterns code
     #                 points (U+2800-28FF).
-    #   U+3164, U+FFA0 : HANGUL FILLER / HALFWIDTH HANGUL FILLER -- legitimate
-    #                 as Hangul jamo composition placeholders in real Korean
-    #                 text.
     #   Sound direction for a future Tier 2: count the code point, but excuse it
     #   per character when it sits among genuinely related script/emoji context
     #   -- not a bare presence class. `_is_emoji_codepoint` (above) and
     #   `_is_zwj_between_emoji`'s flanking-character check are the existing
     #   precedent for that shape; adding Tier 2 to this class without one would
     #   just move the false-positive class B-450 was scoped to avoid (punishing
-    #   an ordinary emoji/Korean/Braille user) onto these code points instead.
+    #   an ordinary emoji/Braille user) onto these code points instead.
+    #
+    # TIER 3 (B-646) -- a separate, COUNT-GATED signal, not folded into the
+    # unconditional Tier 1 class above:
+    #   U+FE00-FE0D (NOT FE0E/FE0F), U+E0100-E01EF (Variation Selectors
+    #   Supplement -- a 240-symbol invisible alphabet, an order of magnitude
+    #   denser than the Tier 1 ZWSP/ZWJ-style channels, published and in live
+    #   use by a real skill to encode Cashu tokens behind a single emoji),
+    #   U+3164, U+FFA0 (Hangul fillers). Stripped unconditionally by
+    #   _INVISIBLE_RE (see _VS_SUPPLEMENT_CLASS_SRC's own comment for why that
+    #   is safe -- measured zero new findings across the same 338,751-file
+    #   corpus) but signalled only above _VS_SUPPLEMENT_SIGNAL_MIN_COUNT
+    #   occurrences (see _has_dense_vs_supplement_channel): unlike Tier 1,
+    #   this class's most common real-world members (the Hangul fillers) have
+    #   an honest single-occurrence use, and the payload this class exists to
+    #   catch needs many symbols to carry anything, so a count gate is the
+    #   sound direction the paragraph above asks for -- applied at the class
+    #   level here rather than per-character, because the position/effect
+    #   predicates that per-character exemption uses do not apply: the
+    #   payload lives in WHICH selector is chosen, not in a split, so
+    #   stripping it reveals nothing to check for.
     # ------------------------------------------------------------------------
     # B-490: both bodies now come from the module-level sources above, so the
     # signal and the stripper cannot drift apart again (they did, for 14 members).
@@ -662,6 +857,8 @@ def obfuscation_signals(text: str) -> list[str]:
         signals.append("bidi-override / embedding controls found")
     if _has_suspicious_tag_run(text):
         signals.append("Unicode Tag-block characters found")
+    if _has_dense_vs_supplement_channel(text):
+        signals.append("dense variation-selector / invisible-alphabet channel found")
 
     # Check whether confusable folding would change the NFKC-normalized text.
     nfkc = unicodedata.normalize("NFKC", _INVISIBLE_RE.sub("", text))

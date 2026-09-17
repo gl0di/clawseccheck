@@ -61,6 +61,40 @@ def test_judged_bucket_with_no_verdicts_key_at_all_is_also_not_submitted():
     assert "secondOpinion" not in p.data
 
 
+def test_empty_judged_bucket_never_reaches_the_parse_verdicts_diagnostic(capsys):
+    """C-509: this same {"judged": {}} shape used to also print a stderr note --
+    "verdicts payload produced no usable entries -- it has no 'verdicts' array" --
+    because the call site only excluded None, so a vacuous {} still reached
+    _parse_verdicts and tripped B-330's malformed-payload diagnostic. That
+    contradicts this very function's own comment, which already claims {} "must
+    read as 'nothing submitted' -- exactly like no bundle at all", and no bundle
+    at all is silent. Confirmed via subprocess repro before the fix landed."""
+    ctx = collect(FIXTURES / "home_vuln")
+    from clawseccheck.checks import run_all
+    findings = run_all(ctx)
+    pl.run_adjudication(ctx, findings, bundle={"judged": {}})
+    assert capsys.readouterr().err.strip() == ""
+
+
+def test_non_dict_judged_shapes_still_reach_the_diagnostic(capsys):
+    """C-135 (independent, post-commit): the C-509 fix's own guard was a bare
+    truthiness check on bundle.get("judged"), which silently swallowed every OTHER
+    JSON-falsy "judged" shape too -- [], "", 0, False -- not just the intended {}.
+    These are malformed inputs (the B-597 confusion of a caller misplacing
+    "verdicts" at the wrong nesting level: {"judged": []} instead of
+    {"judged": {"verdicts": []}}), and must still reach _parse_verdicts' own
+    "top-level value is not a JSON object" diagnostic -- only the vacuous {} shape
+    is meant to be silent."""
+    ctx = collect(FIXTURES / "home_vuln")
+    from clawseccheck.checks import run_all
+    findings = run_all(ctx)
+    for judged_value in ([], "", 0, False):
+        p = pl.run_adjudication(ctx, findings, bundle={"judged": judged_value})
+        assert p.data["verdictsSubmitted"] is False
+        err = capsys.readouterr().err
+        assert "no usable entries" in err, (judged_value, err)
+
+
 def test_one_real_verdict_is_reported_as_submitted():
     """A genuinely non-empty, usable verdicts array must still take the old path:
     verdictsSubmitted True and the "1 of N ... judged" wording."""

@@ -188,6 +188,56 @@ def _unicode_ok() -> bool:
         return False
 
 
+# C-510 item 2: a plain audit can spend up to ~3 minutes on hostile
+# content (checks/__init__.py's own per-check budget allows several slow checks in a
+# row) with nothing printed the whole time -- indistinguishable from a hang to a user
+# watching the terminal, and killing what looks like a stuck process mid-write is
+# exactly the condition that produces the corrupt monitor/baseline state this tool
+# guards against elsewhere. `checks.run_all`'s `on_check_done` hook (threaded through
+# `audit(progress_cb=...)`) exists for exactly this, but is a no-op by default so every
+# non-CLI caller (every test in this suite) is unaffected -- only this default-audit
+# CLI path installs one.
+#
+# Interactive-only, deliberately: piped/redirected output (`--json`, a cron job, a
+# script capturing stdout) gets nothing, matching `should_color`'s own isatty gate
+# (ansi.py) rather than inventing a second interactivity test. `--quiet` also
+# suppresses it -- it asked for a quiet run. Throttled to at most once per ~2 seconds
+# (not once per check) so a fast host isn't spammed by a sub-millisecond check loop;
+# the count is still exact on the FINAL call (done == total always fires) so the last
+# line printed never undercounts. Written with `\r` + no trailing newline so it
+# overwrites in place rather than scrolling the terminal, and a bare `\r` + spaces
+# clears it on the last call so it doesn't linger under the report that follows.
+def _default_audit_progress_cb(args):
+    """Build the interactive stderr progress callback for the default audit path, or
+    None when progress feedback would not help (non-TTY stderr, `--quiet`, `--json`)."""
+    if getattr(args, "quiet", False) or getattr(args, "json", False):
+        return None
+    try:
+        interactive = sys.stderr.isatty()
+    except Exception:
+        interactive = False
+    if not interactive:
+        return None
+
+    import time  # noqa: PLC0415 — only this rarely-taken interactive branch needs it
+
+    state = {"last": 0.0}
+
+    def _cb(done: int, total: int) -> None:
+        now = time.monotonic()
+        finished = done >= total
+        if not finished and now - state["last"] < 2.0:
+            return
+        state["last"] = now
+        line = f"\rScanning... {done}/{total} checks"
+        if finished:
+            print(line + " " * 10 + "\r", end="", file=sys.stderr, flush=True)
+        else:
+            print(line, end="", file=sys.stderr, flush=True)
+
+    return _cb
+
+
 # B-351: when set, every _emit() line is also appended here. The appended --full
 # sections are printed as they are produced — the skill sweep in particular narrates
 # per-target because progress feedback matters on a run that can take minutes — so a
@@ -1350,11 +1400,23 @@ def _percentile_line(score, ascii_only: bool, history_path=None) -> str:
         opened = _missing_layers_sentence(score)
         row = _last_complete_history_row(history_path)
         if row is None:
+            # B-759: this used to say `Run '{command_prefix()} --full' to complete
+            # one` — a promise `--full` cannot keep on its own. `--full` alone can
+            # only ever close installed_sweep/logs_trajectories/static; self_report
+            # needs a real `--attest <file>` and live_behaviour needs a real
+            # `--judged-bundle <file>` (docs/USAGE.md's own layer-5 note: the active
+            # self-test flags are standalone modes that do not combine with an audit
+            # run, so producing that bundle is a separate, multi-step act this tool
+            # cannot do in one invocation). Naming the real constraint, not a command
+            # that reads as copy-pasteable but silently cannot complete a run.
             text = (
                 f"{opened} No rank yet — a percentile compares a score against a "
                 "reference profile of complete audits, and no complete check has been "
-                f"recorded here yet. Run '{command_prefix()} --full' to complete one, then "
-                "'--percentile' to rank it."
+                f"recorded here yet. '{command_prefix()} --full' alone will not "
+                "produce one: self-report and live-behaviour need their own inputs "
+                "too (a real --attest file and a real --judged-bundle file — see "
+                "docs/USAGE.md's layer-5 self-test recipe for how those are made). "
+                "Once a run completes all five layers, '--percentile' will rank it."
             )
         else:
             when = row.get("date") or row.get("ts") or "an earlier run"
@@ -1853,6 +1915,11 @@ _MODE_HONORS = {
     "incident_open": frozenset({"json"}),
     "incident_mark": frozenset({"json"}),
     "incident_show": frozenset({"json"}),
+    # F-171 follow-up: bare `--brief` always returned 0 regardless of content, forcing a
+    # host agent to parse prose to learn whether there was anything to relay. Same
+    # opt-in convention as --monitor's own exit_code/fail_on (a bare invocation must stay
+    # 0 forever, or a published session-start recipe breaks under `set -e` on upgrade).
+    "brief": frozenset({"exit_code"}),
 }
 
 # Primary modes that run AFTER the --attest block in main()'s cascade: their ctx and
@@ -2165,7 +2232,8 @@ _MODE_ORDER = [attr for attr, _flag, _kind in _PRIMARY_MODES]
 _MODE_FLAG = {attr: flag for attr, flag, _kind in _PRIMARY_MODES}
 
 
-def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit) -> None:
+def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit, *,
+                                  coverage_page: dict | None = None) -> None:
     """B-586: write `--badge`/`--html`/`--sarif` as side outputs of a `--dashboard` run.
 
     These three used to WIN the mode race against `--dashboard`, run their own bare
@@ -2191,7 +2259,8 @@ def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit)
     for value, label, render in (
         (getattr(args, "badge", None), "badge", lambda: render_svg(score, findings)),
         (getattr(args, "html", None), "HTML report",
-         lambda: render_html(findings, score, native=ctx.native, ctx=ctx)),
+         lambda: render_html(findings, score, native=ctx.native, ctx=ctx,
+                             coverage_page=coverage_page)),
         (getattr(args, "sarif", None), "SARIF",
          lambda: render_sarif(findings, score, __version__, ctx=ctx)),
     ):
@@ -2962,9 +3031,15 @@ def main(argv=None) -> int:
 
     Any unexpected error inside the audit/render pipeline becomes a clean one-line
     stderr message (stdout stays clean for --json/--sarif). The full traceback is
-    shown only under --debug. KeyboardInterrupt / SystemExit propagate untouched —
-    they derive from BaseException, not Exception. Only the exception *type* is
-    named, never its message, so a path or config value can't leak (§8, B-076).
+    shown only under --debug. Only the exception *type* is named, never its message,
+    so a path or config value can't leak (§8, B-076).
+
+    KeyboardInterrupt gets its own arm (C-509) rather than falling
+    through to the generic one below: it derives from BaseException, not Exception,
+    so it was never caught by that arm at all, and a raw traceback on an ordinary
+    Ctrl+C mid-`--full` broke this very docstring's promise. SystemExit still
+    propagates untouched -- it is argparse's own well-formed exit, not a crash to
+    report on.
 
     ``ScanBudgetExceeded`` also derives from BaseException (B-352), so it needs its
     own arm to stay inside that no-raw-traceback contract. Reaching here at all means
@@ -3003,6 +3078,25 @@ def main(argv=None) -> int:
         return 1
     try:
         return _main(argv)
+    except KeyboardInterrupt:
+        # C-509: Ctrl+C mid-scan is a normal, expected user action on a
+        # `--full` run that can take minutes -- not a bug -- but this docstring's own
+        # promise is "never dump a raw traceback at users", and KeyboardInterrupt
+        # deriving from BaseException (so it is not caught by the generic `Exception`
+        # arm below) meant it did exactly that until now. Same one-line-message,
+        # --debug-reraises, exit-1 contract as every other arm here (1 is already the
+        # right code for "the tool itself did not finish" under both exit-code
+        # schemes -- see this function's own docstring), just without the "unexpected
+        # internal error" framing, which would be actively wrong for a user-initiated
+        # interrupt.
+        raw = list(sys.argv[1:] if argv is None else argv)
+        if "--debug" in raw:
+            raise
+        print(
+            "clawseccheck: interrupted; no verdict from this run is reliable.",
+            file=sys.stderr,
+        )
+        return 1
     except ScanBudgetExceeded:
         raw = list(sys.argv[1:] if argv is None else argv)
         if "--debug" in raw:
@@ -3530,7 +3624,14 @@ def _main(argv=None) -> int:
                         "finding still counts). Gates on findings the way --exit-code does, at a "
                         "chosen severity floor instead of any FAIL")
     p.add_argument("--exit-code", action="store_true",
-                   help="exit 1 if any unsuppressed FAIL finding exists")
+                   help="exit 1 if any unsuppressed FAIL finding exists. DIFFERENT "
+                        "contract with --monitor: exit 3 if any alert at HIGH severity "
+                        "or above was persisted this run (--fail-on moves that floor), "
+                        "exit 1 only if the monitor's local store could not be written, "
+                        "exit 0 otherwise -- 0 by default, opt-in, off unless this flag "
+                        "or --fail-on is also given. Exit 2 is argparse's own reserved "
+                        "code for a usage error on either path, never emitted by this "
+                        "flag itself.")
     # I-038: purely additive and opt-in. `binary` (the default) is BYTE-FOR-BYTE what
     # `--fail-on`/`--exit-code` have always done, on every path that calls
     # `_findings_exit_gate` — a real threshold-tripping FAIL and a run that could not
@@ -4301,8 +4402,16 @@ def _main(argv=None) -> int:
             _hist = history_load(args.history)
         except OSError:
             _hist = []
-        _emit(render_brief(_state if isinstance(_state, dict) else None, _events, _hist,
-                           state_mtime_iso=_mtime, ascii_only=ascii_only))
+        _brief_out = render_brief(_state if isinstance(_state, dict) else None, _events, _hist,
+                                  state_mtime_iso=_mtime, ascii_only=ascii_only)
+        _emit(_brief_out)
+        # Opt-in machine contract, same convention as --monitor's exit_code/fail_on: a
+        # bare `--brief` always returns 0 (a published session-start recipe must not
+        # start failing under `set -e` the day this gained a meaningful exit code).
+        # With --exit-code, "say nothing unless rc != 0" replaces "relay these lines
+        # verbatim" as the host agent's contract — a healthy, silent run is rc 0.
+        if bool(getattr(args, "exit_code", False)) and _brief_out.strip():
+            return 1
         return 0
 
     if _mode == "cron_recipe":
@@ -4789,7 +4898,8 @@ def _main(argv=None) -> int:
                                      include_deptree=not args.no_deptree,
                                      include_dist=not args.no_dist,
                                      attestation=attestation,
-                                     exhaustive=args.exhaustive)
+                                     exhaustive=args.exhaustive,
+                                     progress_cb=_default_audit_progress_cb(args))
     except (PermissionError, OSError) as exc:
         _emit(f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}")
         _emit("Fix the permissions (or run as the owning user) and re-run the audit.")
@@ -4896,7 +5006,14 @@ def _main(argv=None) -> int:
             _record_history_point(score, args, _live_signal, findings)
             return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
-            _emit(f"(could not write badge: {exc})")
+            # C-449: on stderr, matching the success note above and the tool's own
+            # `note:`-goes-to-stderr convention — a CI watching stderr for problems
+            # must not see silence on a failed export. Named against the REQUESTED
+            # path (`_path_problem_text`, B-562), not the atomic-write temp file the
+            # raw exception names, which the user never typed and cannot match.
+            print(f"(could not write badge: "
+                  f"{_path_problem_text(args.badge, exc, what='badge file')})",
+                  file=sys.stderr)
             return 1
 
     if _mode == "html":
@@ -4910,7 +5027,11 @@ def _main(argv=None) -> int:
             _record_history_point(score, args, _live_signal, findings)
             return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
-            _emit(f"(could not write HTML report: {exc})")
+            # C-449: see the badge branch above for why this is stderr + the
+            # requested path rather than stdout + the atomic-write temp file.
+            print(f"(could not write HTML report: "
+                  f"{_path_problem_text(args.html, exc, what='HTML report file')})",
+                  file=sys.stderr)
             return 1
 
     if _mode == "sarif":
@@ -4921,7 +5042,11 @@ def _main(argv=None) -> int:
             _record_history_point(score, args, _live_signal, findings)
             return _findings_exit_gate(args, findings, ctx, score=score)
         except OSError as exc:
-            _emit(f"(could not write SARIF: {exc})")
+            # C-449: see the badge branch above for why this is stderr + the
+            # requested path rather than stdout + the atomic-write temp file.
+            print(f"(could not write SARIF: "
+                  f"{_path_problem_text(args.sarif, exc, what='SARIF file')})",
+                  file=sys.stderr)
             return 1
 
     # C-373: `--dashboard --pdf <path>` is the chat delivery PAIR — the card is the
@@ -5174,7 +5299,14 @@ def _main(argv=None) -> int:
             # re-elects when `--dashboard` is present, so `_mode == "pdf"` implies no
             # dashboard was asked for.
             if _mode == "pdf":
-                _emit(f"(could not write PDF report: {exc})")
+                # C-449: bare `--pdf` is the whole deliverable, same as badge/HTML/SARIF
+                # above — stderr, and named against the requested path, not the
+                # atomic-write temp file. The `_pdf_side_output` inline-substitution
+                # branch below is untouched: rc 0 there is B-459's own deliberate fix,
+                # and its stdout placement is part of that fix (see its own comment).
+                print(f"(could not write PDF report: "
+                      f"{_path_problem_text(args.pdf, exc, what='PDF report file')})",
+                      file=sys.stderr)
                 return 1
             _emit(f"(could not write PDF report: {exc} — showing the full report inline)")
         if not args.dashboard:
@@ -5273,6 +5405,10 @@ def _main(argv=None) -> int:
         _chain_status = history_verify(args.history)
         _emit(render_trend(rows, ascii_only, chain_status=_chain_status,
                           window=None if args.all else DEFAULT_TREND_WINDOW))
+        # B-697: render_trend's own return value ends with no trailing blank line (its
+        # output is also consumed elsewhere, so that stays untouched) -- the separator
+        # belongs here, between the two SEPARATE _emit calls, not inside the renderer.
+        _emit("")
         _emit(_percentile_line(score, ascii_only, args.history))
         return 0
 
@@ -5436,9 +5572,27 @@ def _main(argv=None) -> int:
                         complete=False, section=False,
                         detail=(f"the skill sweep could not complete ({_sanitize(str(_exc))})"
                                 " — no skill verdict below can be relied on."))
+        # B-768: `_behavioral_absent` follows the SAME "default to the --fast reading,
+        # narrow it once we know better" shape `_plugin_absent`/`_skill_absent` above
+        # already use — and, unlike this branch's earlier `behavioral_phase = None`
+        # (which this replaces), it is NEVER left as a bare `None` that a later `if`
+        # could skip adding to the ledger. `to_ledger`'s own contract (see its
+        # docstring) is that `logs_trajectories` STARTS `ran` and PHASE_BEHAVIORAL can
+        # only make it WORSE *when present in `self.phases`* — a phase silently absent
+        # from the ledger is indistinguishable from one that ran clean, which is
+        # exactly how `--dashboard --full --fast` under-reported `missing_layers` by
+        # one entry against the identical `--full --fast --json` run: `run_pipeline`'s
+        # own P8 (three-way fast/budget/ran branch, mirrored below) never has this gap,
+        # because it always `result.add()`s something for PHASE_BEHAVIORAL.
+        _behavioral_absent = _pipeline._skipped(
+            _pipeline.PHASE_BEHAVIORAL, "skipped — --fast was given.", section=False)
         behavioral_phase = None
-        if not args.fast and not budget_exceeded(full_deadline):
-            behavioral_phase = _pipeline.run_behavioral(ctx, ascii_only=ascii_only)
+        if not args.fast:
+            if budget_exceeded(full_deadline):
+                _behavioral_absent = _pipeline._not_reached(
+                    _pipeline.PHASE_BEHAVIORAL, DEFAULT_FULL_BUDGET_S)
+            else:
+                behavioral_phase = _pipeline.run_behavioral(ctx, ascii_only=ascii_only)
         # B-723: the ledger this branch scores against is now projected from the phases
         # that ACTUALLY ran, not from `_resolve_runtime_caps`'s pre-sweep promise. Built
         # here rather than from a `run_pipeline` call because this branch runs its phases
@@ -5452,8 +5606,8 @@ def _main(argv=None) -> int:
                               if skill_sweep is not None else _skill_absent)
         _dashboard_phases.add(_pipeline.record_plugin_sweep(plugin_sweep,
                                                             absent=_plugin_absent))
-        if behavioral_phase is not None:
-            _dashboard_phases.add(behavioral_phase)
+        _dashboard_phases.add(behavioral_phase
+                              if behavioral_phase is not None else _behavioral_absent)
         _ledger = _dashboard_phases.to_ledger(
             findings, degraded_count=score.degraded_count, attestation=attestation,
             live_test_bucket=_live_test_bucket, behavioral_analysis=_behavioral_analysis,
@@ -5461,8 +5615,23 @@ def _main(argv=None) -> int:
         score = compute(findings, ctx, live_test_vulnerable=_live_signal.hit,
                         live_test_reason=_live_signal.reason,
                         behavioral_fired_ids=_behavioral_fired_ids, ledger=_ledger)
+        # F-165: the per-subject "was everything looked at" page. `_dashboard_phases`
+        # is this branch's own hand-rolled `PipelineResult` (see the comment above it
+        # for why there is no `run_pipeline()` call to inherit one from) — same shape
+        # `run_pipeline` builds its own `coverage_page` from (pipeline.py's
+        # `off_check_findings`), so it is derived the identical way here.
+        from .coverage import build_coverage_page as _build_coverage_page  # noqa: PLC0415
+        _dashboard_off_check_findings = [
+            f for phase in _dashboard_phases.phases for f in phase.evaluated_findings
+        ]
+        _dashboard_coverage_page = _build_coverage_page(
+            ctx, findings, skill_sweep=skill_sweep, plugin_sweep=plugin_sweep,
+            extra_findings=_dashboard_off_check_findings,
+            sweep_skip_reason=("not scanned this run (--fast drops the sweep phases)"
+                               if args.fast else None))
         # B-586 + B-723: written only now, against the score the completed phases earned.
-        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit)
+        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit,
+                                      coverage_page=_dashboard_coverage_page)
         # P9 (adjudication) is deliberately NOT gated on --fast or the budget, same as
         # --full's own P9: it re-runs no check, so there is no expense to skip.
         _dashboard_vet_targets = (
@@ -5480,7 +5649,8 @@ def _main(argv=None) -> int:
                 secure_write_bytes(_pdf_dest, render_pdf(
                     findings, score, native=ctx.native, ctx=ctx,
                     plugin_sweep=plugin_sweep, risk=paths,
-                    behavioral=behavioral_phase, adjudication=adjudication_phase))
+                    behavioral=behavioral_phase, adjudication=adjudication_phase,
+                    coverage_page=_dashboard_coverage_page))
                 pdf_written = str(_pdf_dest)
             except OSError as exc:
                 # B-459: the PDF is the DELIVERY of this audit, not the audit. Failing to
@@ -5493,7 +5663,7 @@ def _main(argv=None) -> int:
                 findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
                 risk=paths, plugin_sweep=plugin_sweep, behavioral=behavioral_phase,
                 adjudication=adjudication_phase, compact=args.compact,
-                pdf_path=pdf_written,
+                pdf_path=pdf_written, coverage_page=_dashboard_coverage_page,
                 # Reserve what _with_next_actions is about to append, so the card's own
                 # severity-ordered ladder absorbs it rather than the cap being exceeded.
                 compact_reserve=len(_COMPACT_NEXT_POINTER) if args.compact else 0),
@@ -6293,7 +6463,8 @@ def _main(argv=None) -> int:
                            live_test_vulnerable=live_signal.hit,
                            live_test_reason=live_signal.reason,
                            behavioral_fired_ids=behavioral_fired_ids,
-                           ledger=layer_ledger)
+                           ledger=layer_ledger,
+                           version=__version__)
         if full_pipeline is not None:
             # Additive merge, done here rather than by widening render_json's signature:
             # these keys belong to the pipeline, not to the audit payload, and every
@@ -6311,6 +6482,33 @@ def _main(argv=None) -> int:
             _doc = json.loads(body)
             _doc.update(full_pipeline.to_json(score=score))
             body = json.dumps(_doc, ensure_ascii=True, indent=2)
+        # B-778 Gap 3 (second half): a grade-bearing JSON run used to emit zero bytes
+        # on stderr, so an agent that read its grade from THIS payload — the natural
+        # way to read one under --json — got no instruction to produce the human
+        # deliverable. A live session hit exactly this: it ran all five layers, got a
+        # real grade, and replied with a bare prose line, because nothing told it to
+        # do anything else. `--dashboard` already carries this contract
+        # (`_emit_paste_instruction`/`_emit_attach_instruction` above); this reaches
+        # the other branch that can also finish a grade.
+        #
+        # Gated on `score.graded` rather than on `args.full` alone: only a `--full
+        # --json` run can ever set it (the installed-skill/plugin sweep that closes
+        # the last layer only runs under `--full`), and an UNgraded one has nothing
+        # finished to hand back yet — pointing at `--dashboard` here would just repeat
+        # what `missing_layers` in the payload already told the agent.
+        if score.graded:
+            print(
+                "note: this JSON payload carries a finished grade (\"graded\": true) — "
+                "it is a machine payload for a program to parse, not something to paste "
+                "or summarise for the user. To hand the user a result, re-run the "
+                "combined command and relay ITS output instead:\n"
+                f"      {command_prefix()} --dashboard --full --attest <file> "
+                "--judged-bundle <file> --pdf <path>\n"
+                "      Paste the card it prints verbatim, attach the PDF (see the "
+                "MEDIA: directive that command prints on stderr), and re-render "
+                "SKILL.md Step 4's next menu — do not compose your own summary "
+                "from this JSON.",
+                file=sys.stderr)
     elif args.card:
         body = render_card(score, findings, ascii_only)
     else:

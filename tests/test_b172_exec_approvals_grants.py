@@ -176,6 +176,112 @@ def test_multiple_agents_evidence_names_each():
 
 
 # ---------------------------------------------------------------------------
+# C-430: binary-wide vs argument-restricted entry-shape disclosure
+# ---------------------------------------------------------------------------
+#
+# Grounded against the installed dist: OpenClaw's own argPattern builders
+# (buildArgPatternFromArgv / buildScriptArgPatternFromArgv) return `undefined` on
+# every non-Windows platform BY DESIGN, so a POSIX "always allow" click persists a
+# path-only entry with no `argPattern` key -- and the runtime's matcher
+# (exec-command-resolution*.js) reads a missing `argPattern` as a wildcard over argv.
+# One click therefore grants the binary with ANY arguments, durably -- materially
+# different from an entry that DOES carry an argPattern. B172's evidence line now
+# says which kind a reader is looking at.
+
+def test_bad_path_only_entry_reads_as_binary_wide_any_arguments():
+    """The existing 'bad' fixture is already 100% path-only (no argPattern anywhere)
+    -- its evidence must name that shape explicitly, not just a bare count."""
+    r = check_exec_approvals_grants(collect(FIXTURES / "bad_b172_exec_approvals_allow_always"))
+    assert r.status == WARN
+    assert any("binary-wide" in e and "any arguments" in e for e in r.evidence)
+    assert not any("argument-restricted" in e for e in r.evidence)
+
+
+def test_clean_argpattern_entry_reads_as_argument_restricted_only(tmp_path):
+    """An allow-always entry that DOES carry a real argPattern must be named
+    argument-restricted, and must NOT pick up the binary-wide/any-arguments wording
+    that belongs to the other shape."""
+    home = _home_with_config(tmp_path)
+    (home / "exec-approvals.json").write_text(json.dumps({
+        "version": 1,
+        "defaults": {},
+        "agents": {
+            "main": {
+                "security": "full",
+                "ask": "off",
+                "allowlist": [
+                    {"pattern": "/usr/bin/rg", "argPattern": "^--\\S+$",
+                     "source": "allow-always"},
+                ],
+            },
+        },
+    }))
+    r = check_exec_approvals_grants(collect(home))
+    assert r.status == WARN
+    assert any("argument-restricted" in e for e in r.evidence)
+    assert not any("binary-wide" in e or "any arguments" in e for e in r.evidence)
+
+
+def test_mixed_fixture_names_both_shapes_in_one_evidence_line():
+    """The fixture the task itself asked for: one agent, one path-only entry AND one
+    argPattern entry -- a single evidence line must disclose both counts correctly,
+    not collapse them into one bare total the way the pre-C-430 evidence did."""
+    r = check_exec_approvals_grants(
+        collect(FIXTURES / "bad_b172_exec_approvals_mixed_argpattern"))
+    assert r.status == WARN
+    line = next(e for e in r.evidence if "main" in e)
+    assert "2 allow-always pattern" in line
+    assert "1 binary-wide: any arguments" in line
+    assert "1 argument-restricted" in line
+
+
+def test_falsy_argpattern_counts_as_binary_wide(tmp_path):
+    """C-135: the runtime's own gate is `if (!entry.argPattern)` -- JS falsy, not mere
+    key-presence. An empty-string argPattern (however it got there) must read the same
+    as a missing one: binary-wide, any arguments -- never silently read as
+    argument-restricted just because the key happens to exist."""
+    home = _home_with_config(tmp_path)
+    (home / "exec-approvals.json").write_text(json.dumps({
+        "version": 1,
+        "defaults": {},
+        "agents": {
+            "main": {
+                "allowlist": [
+                    {"pattern": "/usr/bin/git", "argPattern": "",
+                     "source": "allow-always"},
+                ],
+            },
+        },
+    }))
+    r = check_exec_approvals_grants(collect(home))
+    assert r.status == WARN
+    assert any("1 binary-wide: any arguments" in e for e in r.evidence)
+    assert not any("argument-restricted" in e for e in r.evidence)
+
+
+def test_shape_split_never_moves_the_verdict_or_score():
+    """The entry-shape disclosure is a wording change on already-WARN output, never a
+    new severity axis: WARN-only and unscored must hold on both shapes and on the
+    mixed fixture alike (pins the task's own 'no FAIL variant in this task' rule)."""
+    for fixture in (
+        "bad_b172_exec_approvals_allow_always",
+        "bad_b172_exec_approvals_mixed_argpattern",
+    ):
+        r = check_exec_approvals_grants(collect(FIXTURES / fixture))
+        assert r.status == WARN
+        assert r.status != FAIL
+    assert BY_ID["B172"].scored is False
+
+
+def test_collector_populates_the_shape_split_counts():
+    ctx = collect(FIXTURES / "bad_b172_exec_approvals_mixed_argpattern")
+    grant = ctx.exec_approvals_grants[0]
+    assert grant["allow_always_count"] == 2
+    assert grant["binary_wide_count"] == 1
+    assert grant["arg_restricted_count"] == 1
+
+
+# ---------------------------------------------------------------------------
 # Collector-level shape check
 # ---------------------------------------------------------------------------
 

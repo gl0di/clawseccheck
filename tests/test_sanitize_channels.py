@@ -206,3 +206,102 @@ def test_html_strips_ansi_and_osc52():
 
     assert _ESC not in out, "render_html output contains raw ESC byte"
     assert _BEL not in out, "render_html output contains BEL byte from OSC-52"
+
+
+# ---------------------------------------------------------------------------
+# B-770: the three Unicode line-boundary characters str.splitlines() honours but
+# the old _sanitize() did not fold (\x85 NEL, \u2028 LINE SEPARATOR,
+# PARAGRAPH SEPARATOR) — a consumer that re-splits already-"sanitized" text line by
+# line (pipeline.py::run_behavioral does exactly this) could still have one of these
+# forge an extra, attacker-authored line/section. Every channel below shares the
+# same `_sanitize` choke point, so one regression test per channel pins that the fix
+# reaches all of them, not just the one it was found through.
+# ---------------------------------------------------------------------------
+
+_NEL = "\x85"
+_LSEP = "\u2028"
+_PSEP = "\u2029"
+
+
+def _line_forging_finding() -> Finding:
+    """A FAIL Finding whose title/detail/fix embed all three line-boundary characters
+    around a fake section marker — the shape a forged report section would take."""
+    hostile = (
+        "benign-prefix" + _NEL + "[SECTION] FAKE" + _LSEP + "still-forged" + _PSEP
+    )
+    return Finding(
+        id="B2",
+        title="Line-forging title " + hostile,
+        severity=HIGH,
+        status=FAIL,
+        detail="Hostile detail " + hostile,
+        fix="Hostile fix " + hostile,
+        framework="Test",
+        scored=True,
+        evidence=[],
+        suppressed=False,
+    )
+
+
+def test_sanitize_folds_nel_and_unicode_line_separators():
+    """Direct unit check on the shared choke point itself."""
+    from clawseccheck.report import _sanitize
+
+    out = _sanitize("a" + _NEL + "b" + _LSEP + "c" + _PSEP + "d")
+    assert _NEL not in out
+    assert _LSEP not in out
+    assert _PSEP not in out
+    # str.splitlines() must see this as ONE line after sanitizing, or a caller that
+    # re-splits already-sanitized text (pipeline.py's own P8 behavioural-replay
+    # renderer) still forges extra entries from it.
+    assert out.splitlines() == [out]
+
+
+def test_sanitize_folds_every_splitlines_boundary_character():
+    """C-135 (independent, post-commit): the test above pins the three characters
+    the B-770 finding was actually found through, but never enumerated the FULL
+    boundary set `str.splitlines()` recognizes: \\n \\r \\r\\n \\v \\f \\x1c \\x1d
+    \\x1e \\x85 \\u2028 \\u2029. `\\v`/`\\f`/`\\x1c`/`\\x1d`/`\\x1e` are structurally
+    covered by the same `_BAD_CHARS_RE`'s `\\x0b-\\x1f` range as every other control
+    character, but nothing pinned that explicitly — this closes the gap so a future
+    narrowing of that range can't silently reopen a forging vector `splitlines()`
+    still treats as a line boundary."""
+    from clawseccheck.report import _sanitize
+
+    boundary_chars = ("\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e",
+                       "\x85", " ", " ")
+    for ch in boundary_chars:
+        out = _sanitize(f"before{ch}after")
+        assert out.splitlines() == [out], (ch, out)
+        assert ch not in out, (ch, out)
+
+
+def test_dashboard_no_standalone_forged_line_from_unicode_line_separators():
+    f = _line_forging_finding()
+    out = render_dashboard([f], _score([f]))
+    for line in out.splitlines():
+        assert not line.strip().startswith("[SECTION]"), (
+            f"a Unicode line-boundary char forged a standalone section line: {line!r}"
+        )
+    assert "benign-prefix" in out and "still-forged" in out
+
+
+def test_html_no_standalone_forged_line_from_unicode_line_separators():
+    """Defense in depth: even though behavioral findings do not reach render_html
+    today, the shared _sanitize() call it already makes (B-770) must neutralize the
+    same three characters here too, matching every other channel."""
+    f = _line_forging_finding()
+    score_obj = type("ScoreResult", (), {
+        "score": 50,
+        "grade": "D",
+        "capped": False,
+        "raw_score": 50,
+        "failed_critical": 0,
+        "failed_high": 1,
+    })()
+    out = render_html([f], score_obj)
+    assert _NEL not in out and _LSEP not in out and _PSEP not in out
+    for line in out.splitlines():
+        assert not line.strip().startswith("[SECTION]"), (
+            f"a Unicode line-boundary char forged a standalone section line: {line!r}"
+        )

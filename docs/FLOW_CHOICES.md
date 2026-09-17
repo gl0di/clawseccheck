@@ -190,6 +190,13 @@ python3 {baseDir}/audit.py --attest answers.json     # auditable file (preferred
 python3 {baseDir}/audit.py --attest -                # or pipe the JSON via stdin
 ```
 
+**This command alone never earns a letter grade.** Layers are per-process: a bare `--attest`
+run has no `--full` sweep behind it, so it can only ever answer B43/B44 (Step 5 below), not
+produce a Dashboard grade. That is the right, complete answer when the user's question was
+capability/blast-radius on its own — mid-conversation, on an older result, or refreshing
+self-report data. If instead you reached this section because a run came back with **no
+grade**, this file is not the finish line: after Step 5, continue to **Step 6** below.
+
 **Step 5 — report B43/B44** in plain language. Both are `ATTESTED` confidence (a self-report is
 weaker than a config fact — advisory, and it never overrides one):
 - **B43 — Capability blast-radius.** Only reversible verbs (search/get/draft/label) → PASS:
@@ -201,6 +208,21 @@ weaker than a config fact — advisory, and it never overrides one):
 
 Boundary: this is introspection only. **Never perform a side-effectful action to "test" a capability**
 (do not actually send, forward, delete, or exec). Report what you hold; do not exercise it.
+
+**Step 6 — if you came here for a grade, feed it back and re-render.** Skip this step if the
+user only wanted the capability check on its own (Step 5 already answered that). Otherwise
+this self-report is layer 4 of 5 — on its own it is not a grade, only an ingredient. Re-run
+[`SKILL.md`](../SKILL.md) Step 3's combined command, passing the SAME `--attest` file (or `-`)
+you just built:
+```
+python3 {baseDir}/audit.py --dashboard --full --attest <same file or -> --judged-bundle <verdicts-path-or- -> --pdf
+```
+Omit `--judged-bundle` only when Step 2's judge panel had nothing to feed back (an empty
+`judgePacket`). Then follow Step 3's own delivery rules exactly — do not improvise a shorter
+close: paste the new card verbatim, reproduce the `MEDIA:<path>` line for the PDF alone on its
+own line outside any code fence, and re-render Step 4's next menu. A grade you only stated in
+a sentence, with no card pasted, no PDF attached and no menu shown, is not this flow's answer —
+it is the exact gap this step exists to close.
 
 ## Choice: monitoring / "keep watching" / "alert me if something changes" / "ongoing protection"
 
@@ -218,13 +240,34 @@ Wait for the user to confirm. Only then run:
 python3 {baseDir}/audit.py --monitor
 ```
 
-First run saves a baseline; later runs report only what changed — a new/modified skill, a drifted
-`SOUL.md`, a dropped score, **a newly connected MCP server, a new channel, the gateway becoming
-network-exposed, or a host monitor disappearing** — each tagged by severity. Every run also appends
-the changes to a private local journal (`~/.clawseccheck/events.jsonl`, owner-only, never uploaded);
-show the timeline with `--watch-log`. If the user wants it to run automatically, suggest scheduling
-it via the OpenClaw heartbeat or an hourly cron — but do NOT set up any schedule yourself without
-explicit confirmation.
+First run saves a baseline; later runs report only what changed, each tagged by severity. Group
+the families this way rather than reciting all of them flatly — lead with what a user would most
+want to know before agreeing to a baseline:
+
+- **Your skills** — a new or modified installed skill, and a skill's own install provenance
+  moving (updated, or drifted from what ClawHub recorded) without the user doing it themselves.
+- **What your agent is allowed to do** — a plugin newly allowed to load (including an allowlist
+  quietly bypassed on an OpenClaw upgrade), the resolved shell-command policy widening, and a
+  new or replaced entry in the credential store.
+- **Your agent's identity and config** — drift in `SOUL.md`/`AGENTS.md`/bootstrap files, the
+  resolved config file, and any file appearing, changing or disappearing under
+  `<workspace>/memory/` (INFO by default — OpenClaw's own pre-compaction flush writes there too).
+- **Where your agent talks to the world** — a newly connected MCP server or one whose config or
+  observed tool description changed, a new channel, and the gateway becoming network-exposed.
+- **The machine underneath it** — a host monitor disappearing, and (best-effort) this
+  machine's own startup/scheduling surface — systemd units/timers, shell rc files, cron —
+  moving.
+- **The scan itself** — the installed OpenClaw package's own digests moving (supply-chain), the
+  built-in native `openclaw security audit`'s own issue count moving, a dropped security score,
+  an individual check's verdict changing (e.g. leaving PASS), a newly appeared pattern from
+  replaying the agent's own recorded activity, and — this is the watch reporting its own blind
+  spots — anything it could not compare this run (an unread credential store, an unscanned
+  host-persistence surface, a truncated skill scan).
+
+Every run also appends the changes to a private local journal (`~/.clawseccheck/events.jsonl`,
+owner-only, never uploaded); show the timeline with `--watch-log`. If the user wants it to run
+automatically, suggest scheduling it via the OpenClaw heartbeat or an hourly cron — but do NOT
+set up any schedule yourself without explicit confirmation.
 
 ## Choice: live test / "test it" / "try an attack" / "see if I'm vulnerable to injection"
 
@@ -254,6 +297,25 @@ And optionally the full red-team suite:
 ```
 python3 {baseDir}/audit.py --redteam
 ```
+
+**Feed the verdicts back and re-render — do not stop at the verdict line.** Each harness's own
+last line already names the next command (`--dashboard --full --judged-bundle <file> --pdf`),
+but reporting RESISTANT/VULNERABLE to the user in chat is not the same as submitting it: a
+verdict never fed back never reaches the grade. Build (or extend) a `--judged-bundle` JSON
+with a `liveTest` bucket — shape, `id` rules and the `--seed` recordability rule are in
+[`SKILL.md`](../SKILL.md) Step 3 ("Section 6") and
+[`docs/OUTPUT_SCHEMA.md`](OUTPUT_SCHEMA.md) §12: one verdict entry per scenario you actually
+evaluated, `id` the real scenario id the harness printed (never the bare tool name), and pass
+the SAME `--seed` you gave the harness or the verdict caps this one report but is excluded
+from history/trend/monitor. Then re-run Step 3's combined command from `SKILL.md`, passing
+this bundle as `--judged-bundle` (together with any `--attest` file already in play from the
+capability check above, if you ran that too):
+```
+python3 {baseDir}/audit.py --dashboard --full --attest <file-or- -, if any> --judged-bundle <this bundle> --pdf
+```
+Follow Step 3's own delivery rules exactly: paste the new card verbatim, reproduce the
+`MEDIA:<path>` line for the PDF alone on its own line outside any code fence, and re-render
+Step 4's next menu.
 
 ## Choice: trend / "am I getting better" / "show my history"
 

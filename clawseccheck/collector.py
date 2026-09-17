@@ -163,6 +163,11 @@ _MAX_CRON_RUN_LOGS = 500
 _MAX_EXEC_APPROVALS_BYTES = _MAX_CONFIG_BYTES
 _MAX_EXEC_APPROVALS_AGENTS = 200
 
+# F-192: `update_runs` is one row per self-update attempt (chat/control-ui/cli/campaign/
+# mac-app/api triggered) -- a far rarer event than a cron tick, so a generous cap that
+# never truncates a real machine while still bounding a hostile/corrupt store.
+_MAX_UPDATE_RUNS = 50
+
 # B-725: the shared skill-library surface in the state DB (skill_library_entries,
 # skill_uploads) -- bounded the same way as the row-scanning readers above. A hostile
 # or padded DB must not turn this into an unbounded scan; the consuming check needs
@@ -638,6 +643,14 @@ class Context:
     dotenv_sources: dict = field(default_factory=dict)
     dotenv_files: list = field(default_factory=list)  # global dotenv files found and read
     dotenv_found: bool = False                        # at least one global dotenv exists
+    # B-657 (C-135 round 2): a global dotenv file WAS read but hit the collector's byte
+    # cap, so a key past the cut is present-but-unread, not absent. Distinct from
+    # LIMIT_DOMAIN_ENV's shared `limit_hits_for()` signal, which also fires on a
+    # truncated systemd unit that `dotenv_override()`'s callers never read at all
+    # (dotenv_override touches only dotenv_values/os.environ, never unit_env_values) —
+    # a consumer of dotenv_override needs THIS flag, not the domain-wide one, the same
+    # split `audit_events_truncated` already uses for its own narrower callers.
+    dotenv_truncated: bool = False
     # B-289/B-290 (ENV-3/ENV-4): the environment the OpenClaw *service* actually runs
     # with, read off disk from OpenClaw-related systemd user units — `Environment=` lines
     # plus any file named by `EnvironmentFile=`. This is the artifact that matters: the
@@ -702,7 +715,11 @@ class Context:
     # dict: id, name, enabled, delete_after_run, trigger_script, payload_kind,
     # payload_message — the same shape regardless of which backing store it came from,
     # and (B-709) regardless of which of the two observed cron_jobs COLUMN shapes the
-    # SQLite table itself has (see _collect_cron's docstring).
+    # SQLite table itself has (see _collect_cron's docstring). B-819:
+    # payload_message_dormant is a SEPARATE, scan-only field -- non-None only from the
+    # JSON-file-store branch, when a lenient/case-insensitive reading of a dormant
+    # payload finds content the strict payload_message extraction does not (see
+    # _dormant_cron_payload_text's docstring). Always present, always None elsewhere.
     cron_jobs: list = field(default_factory=list)
     cron_found: bool = False        # a cron store (JSON or SQLite) was found and read
     cron_parse_error: bool = False  # a cron store was found but could not be parsed/read
@@ -742,6 +759,27 @@ class Context:
     config_machine_state_read: bool = False
     config_machine_state_unparsed: set = field(default_factory=set)
     cron_store_shadowed: bool = False
+    # B-749: presence-only signal for `config_machine_state["authProfiles.store"]` -- the
+    # machine-owned auth-profile SECRETS row, deliberately excluded from
+    # CONFIG_MACHINE_STATE_KEYS/config_machine_state above because its value can be a live
+    # OAuth/API-key payload. `_read` False means undetermined (no DB, or a DB predating the
+    # table); True with `_length` None means the row does not exist (never written); True
+    # with an int means "looked, found a row this many bytes long" -- never the bytes
+    # themselves. See `_collect_auth_profile_store_presence`.
+    auth_profile_store_read: bool = False
+    auth_profile_store_length: int | None = None
+    # F-192: OpenClaw's own self-update ledger (`update_runs` in the state DB, new at
+    # 2026.9.2). Three fields, same "could not look" / "looked, nothing there" /
+    # "looked, found data" distinction as `config_machine_state` / `_read` / its error
+    # sibling -- collapsing them would let an unreadable ledger read as "no self-updates
+    # ever ran". Each entry is a plain dict of the SAFE scalar columns only (run_id,
+    # trigger, phase, status, reason, created_at_ms, updated_at_ms, finished_at_ms,
+    # downtime_ms) -- see `_collect_update_runs` for why the *_json blob columns are
+    # never read at all (field-select, not digest).
+    update_runs: list = field(default_factory=list)
+    update_runs_read: bool = False        # the table was present and queried at all
+    update_runs_parse_error: bool = False  # table present but the read genuinely failed
+    update_runs_truncated: bool = False   # the _MAX_UPDATE_RUNS row cap was hit
     # B-294: the cron EXECUTION trail (cron_run_logs in ~/.openclaw/state/openclaw.sqlite,
     # OR (B-709) its task_runs successor on a database that has run the migration -- see
     # _collect_cron_run_logs's docstring, and note it selects on the OBSERVED TABLES, not
@@ -758,6 +796,18 @@ class Context:
     cron_run_logs: list = field(default_factory=list)
     cron_run_logs_found: bool = False        # the cron_run_logs table was present and read
     cron_run_logs_parse_error: bool = False  # table present but could not be read
+    # C-488: WHICH of the two shapes `cron_run_logs_found` actually resolved to -- discarded
+    # before this field existed, forcing every consumer (B189) to name both tables in its
+    # UNKNOWN wording even though at most one is ever the relevant fact on a given machine.
+    # "cron_run_logs" | "task_runs" | None (neither present, or the read genuinely failed
+    # before a shape was determined -- see cron_run_logs_parse_error). Never derived from an
+    # OpenClaw version: the state-consolidation-v13 migration does not map onto one release,
+    # which is why the collector branches on table presence in the first place.
+    cron_run_logs_table: "str | None" = None
+    # A mid-migration database can hold BOTH tables -- the collector already prefers the
+    # legacy one in that case (unchanged behaviour), but which table was PREFERRED must not
+    # collapse the distinct fact that the other one also existed.
+    cron_run_logs_both_tables_present: bool = False
     # B-295 (DISK-4): debug-proxy traffic-capture METADATA from the same state DB. Row
     # COUNTS only -- capture_events.headers_json holds bearer tokens and .data_text holds
     # request bodies, so no captured content is ever read (§8). See _collect_capture_state.
@@ -3904,14 +3954,146 @@ def skill_load_roots(
     return out
 
 
+def _cron_payload_extras(payload_obj, payload_kind) -> dict:
+    """C-476: the payload-kind-specific field groups the legacy ``trigger_script``/
+    ``payload_message`` parity model (B-709) does not carry -- grounded against the
+    installed dist's ``CronPayload`` union (``plugin-entry-*.d.ts``, ``CronJobBase``
+    region): ``command``'s ``argv``/``cwd``/``env``/``input``, ``script``'s
+    ``toolBudget``, ``agentTurn``'s ``allowUnsafeExternalContent``/
+    ``externalContentSource``, and
+    ``toolsAllow`` -- present on EVERY payload kind via the ``CronPayloadToolAllow``
+    intersection type, not agentTurn-only, so it is the one field below never gated on
+    ``payload_kind``.
+
+    Kind-gated like the sibling ``trigger_script``/``payload_message`` extraction in the
+    two call sites below -- a same-named key on the WRONG kind is never read as a genuine
+    declaration (B-378 idiom): the vendor's own type is a tagged union, so a `.script` on
+    an ``agentTurn`` payload is not something any real client writes, and reading it
+    anyway would invent a fact the schema does not tie to that variant.
+
+    Returns every key regardless of kind (unmatched ones are ``None``), so a consuming
+    check gets one uniform shape whichever store/branch produced ``payload_obj``.
+    """
+    if not isinstance(payload_obj, dict):
+        payload_obj = {}
+    argv = payload_obj.get("argv") if payload_kind == "command" else None
+    cwd = payload_obj.get("cwd") if payload_kind == "command" else None
+    env = payload_obj.get("env") if payload_kind == "command" else None
+    # C-135: the argv vector alone can look innocuous (e.g. ["bash"], ["python3", "-"])
+    # while the actual payload rides in `input` -- the process's stdin, per the real
+    # execution path (runCronCommandJob -> runCommandWithTimeout(argv, {input, ...})).
+    # Same content-injection risk as argv/script and must be captured/scanned alongside
+    # them, not treated as a lesser field.
+    cmd_input = payload_obj.get("input") if payload_kind == "command" else None
+    script = payload_obj.get("script") if payload_kind == "script" else None
+    tool_budget = payload_obj.get("toolBudget") if payload_kind == "script" else None
+    allow_unsafe = (
+        payload_obj.get("allowUnsafeExternalContent") if payload_kind == "agentTurn" else None
+    )
+    ext_source = (
+        payload_obj.get("externalContentSource") if payload_kind == "agentTurn" else None
+    )
+    tools_allow = payload_obj.get("toolsAllow")
+    return {
+        "payload_argv": argv if isinstance(argv, list) else None,
+        "payload_cwd": cwd if isinstance(cwd, str) else None,
+        "payload_env": env if isinstance(env, dict) else None,
+        "payload_input": cmd_input if isinstance(cmd_input, str) else None,
+        "payload_script": script if isinstance(script, str) else None,
+        "payload_tool_budget": tool_budget if isinstance(tool_budget, (int, float)) else None,
+        "payload_allow_unsafe_external_content": (
+            allow_unsafe if isinstance(allow_unsafe, bool) else None
+        ),
+        "payload_external_content_source": (
+            ext_source if isinstance(ext_source, str) else None
+        ),
+        "payload_tools_allow": tools_allow if isinstance(tools_allow, list) else None,
+    }
+
+
+def _dormant_cron_payload_text(job: dict) -> "str | None":
+    """B-819: scan-only companion to the JSON-file store's canonical ``payload_message``
+    extraction. ``~/.openclaw/cron/jobs.json`` is not read by the live execution path
+    (``loadCronJobsStoreWithConfigJobs`` -> ``loadMutableCronStore`` ->
+    ``loadCronStoreFromDatabase`` reads only the SQLite ``cron_jobs`` table,
+    store-D_NHWaCW.mjs:266-269) -- but it is NOT inert forever. The installed dist ships
+    a doctor/repair import path (``store-migration-DyyVNWF7.mjs``, openclaw@2026.9.4)
+    that migrates a legacy-shaped job into a live SQLite row, preserving its content:
+
+    * ``normalizePayloadKind`` (:594) matches ``payload.kind`` case-INSENSITIVELY
+      (``"systemevent"``/``"agentturn"`` -> canonical casing) -- the canonical
+      extraction above is deliberately strict/exact-case (it must mirror the CURRENT
+      runtime, which this is not), so a wrong-case kind here reads as "no kind" to it.
+    * a kind-inference step (:1185-1194) fills a genuinely MISSING ``payload.kind`` from
+      the payload's own content: ``.message`` present -> ``agentTurn``, else ``.text``
+      present -> ``systemEvent``.
+    * a systemEvent migration (:1197-1204) copies ``.message`` into ``.text`` when
+      ``.text`` is absent -- the exact shape the canonical extraction's kind-branch
+      cannot see (a systemEvent-kind payload's real content sitting in the wrong key).
+    * ``inferPayloadIfMissing`` (:612), reached only when ``payload`` itself is absent/
+      not an object at all (not merely kind-less), reads legacy TOP-LEVEL job fields
+      instead: ``.message`` -> agentTurn, else ``.text`` -> systemEvent, else
+      ``.command`` -> systemEvent(text=command). These three keys are exactly the ones
+      the same file's ``hadLegacyTopLevelPayloadFields`` probe (:1207) treats as
+      legacy-only migration debris -- a current, schema-valid job never carries them,
+      so their presence is itself the dormant-legacy signal.
+
+    So a hostile job shaped like ``{"kind": "systemevent", "message": "<payload>"}`` (or
+    ``{"message": "<payload>"}`` with no ``payload`` object at all) draws zero signal from
+    the canonical extraction today, yet would be silently reactivated -- content intact --
+    by a future ``openclaw doctor`` run. Returns the lenient/reactivation-candidate text,
+    or ``None`` when there is nothing beyond what the canonical extraction already covers.
+    Deliberately mirrors the vendor's own leniency rather than widening it: e.g. when a
+    systemEvent's ``.text`` IS present, its ``.message`` is left unread here exactly as
+    the doctor leaves it unread (the migration only fires when ``.text`` is absent) --
+    that stray key is genuinely inert, never migrated in, so scanning it would be a
+    fact this scan-only path does not have license to invent.
+
+    Never conflate this with the canonical fields: ``payload_kind``/``trigger_script``/
+    ``payload_message`` etc. must keep reporting the DECLARED (strict) shape -- this is
+    a second, clearly-separated signal for a check to scan, not a replacement value.
+    """
+    payload = job.get("payload")
+    if isinstance(payload, dict):
+        raw_kind = payload.get("kind")
+        lc_kind = raw_kind.strip().lower() if isinstance(raw_kind, str) else ""
+        if lc_kind == "agentturn":
+            candidate = payload.get("message")
+        elif lc_kind == "systemevent":
+            candidate = payload.get("text")
+            if not (isinstance(candidate, str) and candidate.strip()):
+                candidate = payload.get("message")
+        elif not raw_kind:
+            msg = payload.get("message")
+            txt = payload.get("text")
+            candidate = msg if isinstance(msg, str) and msg.strip() else txt
+        else:
+            candidate = None  # a real, differently-kinded payload (command/script/...)
+    else:
+        # No payload object at all -- inferPayloadIfMissing's own top-level fallback.
+        msg = job.get("message")
+        txt = job.get("text")
+        cmd = job.get("command")
+        if isinstance(msg, str) and msg.strip():
+            candidate = msg
+        elif isinstance(txt, str) and txt.strip():
+            candidate = txt
+        else:
+            candidate = cmd
+    return candidate if isinstance(candidate, str) and candidate.strip() else None
+
+
 def _collect_cron(home: Path, ctx: Context) -> None:
     """B-231 sub-item 1: read-only, symlink-safe, size/entry-capped collection of the
     OpenClaw cron job store into ``ctx.cron_jobs``.
 
     Two backing stores exist (grounded against the openclaw dist): the legacy JSON file
     ``~/.openclaw/cron/jobs.json`` (``{"version": 1, "jobs": [CronJobSchema, ...]}``,
-    each job's ``payload``/``trigger`` sub-objects carrying ``message``/``script``), and
-    the SQLite-backed ``cron_jobs`` table in ``~/.openclaw/state/openclaw.sqlite``. The
+    each job's ``trigger`` sub-object carrying ``script``, and its ``payload`` sub-object
+    carrying ``message`` when ``payload.kind == "agentTurn"`` or ``text`` when
+    ``payload.kind == "systemEvent"`` -- kind-branched the same way as the modern-SQLite
+    ``job_json`` shape below), and the SQLite-backed ``cron_jobs`` table in
+    ``~/.openclaw/state/openclaw.sqlite``. The
     JSON file is preferred when present; the SQLite table is a read-only fallback. Neither
     present leaves ``ctx.cron_found`` False, so a consuming check reports UNKNOWN, never a
     fake PASS.
@@ -3975,14 +4157,38 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     continue
                 payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
                 trigger = job.get("trigger") if isinstance(job.get("trigger"), dict) else {}
+                payload_kind = payload.get("kind")
+                # Kind-branched the same way the modern-SQLite branch below already is
+                # (job_json.payload.message for agentTurn, .text for systemEvent) --
+                # before this fix every JSON-file-store job unconditionally read
+                # `.message`, so a systemEvent job's real content (`.text`, per the
+                # dist's CronPayload union) was never captured and never content-scanned
+                # by B168. The SQLite branch was correct; this one was not kind-branched
+                # at all.
+                if payload_kind == "agentTurn":
+                    payload_message = payload.get("message")
+                elif payload_kind == "systemEvent":
+                    payload_message = payload.get("text")
+                else:
+                    payload_message = None
+                # B-819: scan-only fallback, JSON-file store ONLY -- this file is not
+                # the live execution path (see _dormant_cron_payload_text's docstring),
+                # so content shaped for it is dormant, not declared. Kept as a SEPARATE
+                # key: payload_kind/payload_message above must stay the strict, declared
+                # shape, never blended with a lenient reactivation-candidate guess.
+                dormant = _dormant_cron_payload_text(job)
                 ctx.cron_jobs.append({
                     "id": job.get("id"),
                     "name": job.get("name"),
                     "enabled": job.get("enabled"),
                     "delete_after_run": job.get("deleteAfterRun"),
                     "trigger_script": trigger.get("script"),
-                    "payload_kind": payload.get("kind"),
-                    "payload_message": payload.get("message"),
+                    "payload_kind": payload_kind,
+                    "payload_message": payload_message,
+                    "payload_message_dormant": (
+                        dormant if dormant and dormant != payload_message else None
+                    ),
+                    **_cron_payload_extras(payload, payload_kind),
                 })
             if len(jobs) > _MAX_CRON_JOBS:
                 ctx.cron_jobs_truncated = True
@@ -4151,6 +4357,12 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     "trigger_script": trigger_script,
                     "payload_kind": payload_kind,
                     "payload_message": payload_message,
+                    # B-819: the dormant/reactivation-candidate heuristic is meaningful
+                    # only for the JSON-file store (see _dormant_cron_payload_text) --
+                    # this IS the live-executing store, so there is nothing "dormant"
+                    # about a row already here. Explicit None for the uniform job shape.
+                    "payload_message_dormant": None,
+                    **_cron_payload_extras(payload_obj, payload_kind),
                 })
         else:
             for job_id, name, enabled, delete_after_run, trigger_script, payload_kind, payload_message in rows:
@@ -4162,6 +4374,15 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     "trigger_script": trigger_script,
                     "payload_kind": payload_kind,
                     "payload_message": payload_message,
+                    # B-819: same reasoning as the modern-SQLite branch above -- this IS
+                    # the live store, so no dormant/reactivation-candidate signal applies.
+                    "payload_message_dormant": None,
+                    # C-476: this LEGACY flat-column shape has no payload sub-object at
+                    # all -- these fields are structurally unavailable here, not merely
+                    # absent on this job. Explicit None (never omitted) so a consuming
+                    # check reads one uniform dict shape regardless of which store
+                    # branch produced it, matching the JSON/modern-SQLite branches above.
+                    **_cron_payload_extras({}, None),
                 })
         ctx.cron_store_empty = not ctx.cron_jobs  # B-294: read, but nothing to scan
     except sqlite3.Error as exc:
@@ -4389,6 +4610,14 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
     ``_collect_plugin_trust`` uses on this exact database. Neither table present leaves
     ``cron_run_logs_found`` False — UNKNOWN downstream, never a fake PASS (Golden Rule #4).
+
+    C-488: ``ctx.cron_run_logs_table`` records WHICH of the two shapes was actually read
+    (``"cron_run_logs"`` | ``"task_runs"`` | ``None``) — previously only decided in the
+    local ``modern`` variable and then discarded, forcing every consumer (B189) to name
+    BOTH tables in its UNKNOWN wording even though at most one is ever the relevant fact
+    on a given machine. ``ctx.cron_run_logs_both_tables_present`` separately preserves the
+    mid-migration fact above (both tables existed) without collapsing it into which one
+    was preferred.
     """
     state_dir = home / "state"
     sqlite_candidates = (
@@ -4416,6 +4645,10 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
             # `scripts/state_db_drift_gate.py`'s SELECT/FROM extractor as a third table
             # this reader expects to exist.
             legacy_present = bool(list(conn.execute("PRAGMA table_info(cron_run_logs)")))
+            # C-488: probed EAGERLY (not lazily inside an `elif`) so a mid-migration DB
+            # holding both tables can be recorded as such even though only one is read --
+            # this is the fact `ctx.cron_run_logs_both_tables_present` exists to preserve.
+            modern_present = bool(list(conn.execute("PRAGMA table_info(task_runs)")))
             if legacy_present:
                 # LEGACY table -- unchanged from before B-709. Preferred even when
                 # task_runs also exists (a mid-migration DB): this is the table the
@@ -4430,7 +4663,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
                 )
                 rows = cur.fetchall()
                 modern = False
-            elif list(conn.execute("PRAGMA table_info(task_runs)")):
+            elif modern_present:
                 # MODERN successor (OpenClaw 2026.8.2+). Filtered to runtime='cron' so a
                 # non-cron task_runs row (e.g. runtime='subagent') is never mistaken for a
                 # cron execution -- that would invent cron history that never happened.
@@ -4456,6 +4689,8 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
         return
 
     ctx.cron_run_logs_found = True
+    ctx.cron_run_logs_table = "task_runs" if modern else "cron_run_logs"
+    ctx.cron_run_logs_both_tables_present = legacy_present and modern_present
     run_logs_truncated = len(rows) > _MAX_CRON_RUN_LOGS
     rows = rows[:_MAX_CRON_RUN_LOGS]  # discard the probe row; the scanned set stays capped
     if modern:
@@ -4509,6 +4744,95 @@ CONFIG_MACHINE_STATE_KEYS = (
     "cron.store",                 # JSON-encoded string: where the real cron store lives
     "hooks.internal.installs",    # the record shape the old config key held
 )
+
+# B-749: the ONE `config_machine_state` key this file ever asks about without the
+# allowlist above -- deliberately, since its value can be a live OAuth/API-key payload.
+# `_collect_auth_profile_store_presence` binds this literal into a `LENGTH(value_json)`
+# query and never selects `value_json` itself, so the secret payload is never read.
+_AUTH_PROFILE_STORE_KEY = "authProfiles.store"
+# Grounded by reading the installed dist (2026.9.4: sqlite-CzDV0dcE.mjs,
+# store-BxRoDWvl.mjs, legacy-source-diagnostic-D-_lsE4x.mjs), not inferred: the FIRST
+# save OpenClaw ever makes to this row -- even with zero configured profiles -- writes
+# exactly `{"version":1,"profiles":{}}`. `buildPersistedAuthProfileSecretsStore` returns
+# that shape whenever `store.profiles` is empty (`saveAuthProfileStoreInTransaction` ->
+# `credentialsChanged = !isDeepStrictEqual(existingRaw, payload)`, true on the very first
+# save since `existingRaw` starts `null`), and `preserveLegacyOAuthRefsOnSave` iterates
+# `payload.profiles` and returns `payload` unchanged when it is empty. Python's
+# `json.dumps({"version": 1, "profiles": {}}, separators=(",", ":"))` reproduces the same
+# 27 bytes Node's `JSON.stringify` writes -- a row at or under that length is the
+# vendor's own "initialized, still empty" shape, not evidence of a real credential.
+_AUTH_PROFILE_STORE_EMPTY_BYTES = 27
+
+
+def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
+    """B-749: does the machine-owned auth-profile store hold more than an empty shell?
+
+    A1's sensitive-data leg used to look only at `<home>/credentials`
+    (`_credential_store_state`, B-666). On a machine where OpenClaw keeps its real auth
+    material in `config_machine_state["authProfiles.store"]` instead, that directory can
+    read clean while the state DB holds live auth material -- measured on the fleet
+    machine, 2026-09-06: `secret_files=[]`, `incomplete=False` (a confident "looked,
+    nothing there"), while `authProfiles.store` held a non-trivial row.
+
+    This function does NOT decide any leg or verdict. It only answers "how many bytes",
+    via `ctx.auth_profile_store_length` -- the CALLER decides what a length above
+    `_AUTH_PROFILE_STORE_EMPTY_BYTES` means, so the threshold lives in exactly one place
+    and no consumer ever needs the parsed value to use this signal.
+
+    Same three-state disclosure as every sibling reader on this database (see
+    `_collect_config_machine_state`, `_collect_update_runs`): `auth_profile_store_read`
+    False means undetermined (no DB, or a DB predating the table); True with
+    `auth_profile_store_length` None means the row does not exist at all; True with an
+    int means "looked, found a row this many bytes long".
+
+    Opened READ-ONLY (`file:...?mode=ro` + `PRAGMA query_only = 1`), the same pattern as
+    every reader on this database. Re-locates `state/openclaw.sqlite` independently
+    rather than sharing `_collect_config_machine_state`'s connection, matching this
+    file's own one-reader-per-concern idiom (`_collect_update_runs`,
+    `_collect_capture_state`, ...).
+    """
+    state_dir = home / "state"
+    capped: list = []
+    candidates = (
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        # Same disclosure discipline as `_collect_config_machine_state`: a capped walk
+        # that never reached the DB is not the same fact as "no state store" (GR#4).
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the auth-profile store presence was not read"
+            )
+        return
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = 1")
+            # LENGTH(value_json), never value_json itself: the secret payload is never
+            # fetched into this process, only its byte count. One literal key is bound,
+            # never interpolated, and there is no SELECT *.
+            row = conn.execute(
+                "SELECT LENGTH(value_json) FROM config_machine_state WHERE state_key = ?",
+                (_AUTH_PROFILE_STORE_KEY,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # A state DB predating the table is not a corrupt store -- same honest
+        # UNDETERMINED as every sibling reader here.
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(
+                f"could not read auth-profile store presence from {db_path}: {exc}"
+            )
+        return
+
+    ctx.auth_profile_store_read = True
+    if row is not None and row[0] is not None:
+        ctx.auth_profile_store_length = int(row[0])
 
 
 def _collect_config_machine_state(home: Path, ctx: Context) -> None:
@@ -4596,6 +4920,130 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
             # Present but unreadable. Recording it as absent would let a consumer answer
             # "not set" about a row that exists.
             ctx.config_machine_state_unparsed.add(state_key)
+
+
+def _collect_update_runs(home: Path, ctx: Context) -> None:
+    """F-192: read-only collection of OpenClaw's OWN self-update ledger (`update_runs` in
+    the shared state database), new at OpenClaw 2026.9.2 (state schema `PRAGMA user_version`
+    15).
+
+    Grounded against the installed dist's `OPENCLAW_STATE_SCHEMA_SQL` literal (verbatim,
+    task description) -- located by SYMBOL across
+    `openclaw-state-db-cache-*.js` / `openclaw-state-db-contract-*.js` /
+    `update-run-ledger-*.js`, never by a hash-suffixed filename, since the hashes rotate
+    every release:
+
+        CREATE TABLE IF NOT EXISTS update_runs (
+          run_id TEXT PRIMARY KEY NOT NULL, created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          trigger TEXT NOT NULL CHECK (trigger IN
+              ('chat','control-ui','cli','campaign','mac-app','api')),
+          phase   TEXT NOT NULL CHECK (phase IN ('requested','staging','validating',
+              'repairing','activating','restarting','verifying','finished')),
+          status  TEXT NOT NULL CHECK (status IN
+              ('running','succeeded','failed','rolled-back','skipped')),
+          reason TEXT, origin_json TEXT NOT NULL, target_json TEXT NOT NULL,
+          before_json TEXT NOT NULL, after_json TEXT NOT NULL, steps_json TEXT NOT NULL,
+          verification_json TEXT NOT NULL, repair_json TEXT NOT NULL,
+          confirmed_at_ms INTEGER, finished_at_ms INTEGER, downtime_ms INTEGER, ...
+        ) STRICT;
+
+    Why it matters: `trigger = 'chat'` is first-class self-modification evidence -- an
+    OpenClaw self-update initiated FROM a conversation turn -- that `checks/_lifecycle.py`
+    and `openclawdist.py` can currently only INFER from bytes that changed on disk; they see
+    that the install moved, never who moved it, from what, to what, or whether it rolled
+    back. And a row stuck at `status = 'running'` is the exact shape of the known "UI update
+    leaves gateway down" failure (`update.run` rewrites dist under the running updater;
+    ENOENT aborts the restart) -- a signal this tool could not see at all before this reader.
+
+    FIELD-SELECT, not a digest, and never a wildcard select: the same database holds live
+    OAuth tokens under `authProfiles.store` / `auth.sharedStore` (§8), so only an explicit
+    column list is bound into the query. The seven `*_json` blob columns
+    (origin/target/before/after/steps/verification/repair) are bounded (<=16KB each by the
+    schema's own CHECK) but MAY name filesystem paths belonging to the machine's update
+    history -- this reader does not read them at all, so there is nothing to redact or
+    render home-relative downstream. Only the nine scalar columns that answer "who
+    triggered a self-update, what phase/status did it reach, when" are selected.
+
+    Three ``ctx`` fields (`update_runs` / `update_runs_read` / `update_runs_parse_error`),
+    the same "could not look" vs "looked, nothing there" vs "looked, found data" split
+    `config_machine_state` uses: `update_runs_read` False means the table could not be
+    consulted at all (UNDETERMINED downstream, never a fake "no self-updates ran" PASS,
+    Golden Rule #4). A declared table is not an existing table either -- 13 of the
+    `skill_library_*` family are absent from a real live DB despite their own
+    `CREATE TABLE IF NOT EXISTS` (B-725's docstring), so table absence is probed via
+    `PRAGMA table_info`, not inferred from an OpenClaw version string: the state schema is
+    versioned on its own line and one state version does not map onto one OpenClaw release.
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
+    every other reader on this database uses.
+    """
+    state_dir = home / "state"
+    capped: list = []
+    candidates = (
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        # Same disclosure discipline as `_collect_config_machine_state`: a capped walk
+        # that never reached the DB is not the same fact as "no state store", and must not
+        # be reported as if it were (GR#4).
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the self-update ledger was not read"
+            )
+        return
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = 1")
+            # Presence-by-metadata, not exception-driven fallback: `PRAGMA table_info` on a
+            # missing table returns zero rows without raising, so it cannot be confused with
+            # a genuine read failure (a locked db, a corrupt page) the way catching
+            # `sqlite3.OperationalError: no such table` can.
+            if not list(conn.execute("PRAGMA table_info(update_runs)")):
+                return  # declared in the schema, absent from THIS db -> stays UNDETERMINED
+            cur = conn.execute(
+                "SELECT run_id, trigger, phase, status, reason, created_at_ms, "
+                "updated_at_ms, finished_at_ms, downtime_ms FROM update_runs "
+                "ORDER BY created_at_ms DESC LIMIT ?",
+                # Off-by-one truncation probe, same idiom as the cron readers: one extra
+                # row over the cap tells a table holding exactly the cap apart from one
+                # holding more, without a second query.
+                (_MAX_UPDATE_RUNS + 1,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # A state DB predating this table is not a corrupt store -- same honest
+        # UNDETERMINED as "table absent" above (mirrors every other reader here).
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(f"could not read update_runs from {db_path}: {exc}")
+            ctx.update_runs_read = True
+            ctx.update_runs_parse_error = True
+        return
+
+    ctx.update_runs_read = True
+    if len(rows) > _MAX_UPDATE_RUNS:
+        ctx.update_runs_truncated = True
+        rows = rows[:_MAX_UPDATE_RUNS]  # discard the probe row; the scanned set stays capped
+    for (run_id, trigger, phase, status, reason, created_at_ms, updated_at_ms,
+         finished_at_ms, downtime_ms) in rows:
+        ctx.update_runs.append({
+            "run_id": run_id,
+            "trigger": trigger,
+            "phase": phase,
+            "status": status,
+            "reason": reason,
+            "created_at_ms": created_at_ms,
+            "updated_at_ms": updated_at_ms,
+            "finished_at_ms": finished_at_ms,
+            "downtime_ms": downtime_ms,
+        })
 
 
 def _collect_capture_state(home: Path, ctx: Context) -> None:
@@ -4820,16 +5268,44 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
         if not isinstance(agents, dict):
             agents = {}
         ctx.exec_approvals_found = True
+        # B-657: this cap had NO disclosure at all -- unlike the byte-size cap seven
+        # lines up, a store under the byte cap but with more than
+        # _MAX_EXEC_APPROVALS_AGENTS agents parsed fine, and every agent past the cap
+        # was silently never scanned for a standing "allow-always" grant.
+        if len(agents) > _MAX_EXEC_APPROVALS_AGENTS:
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_APPROVALS,
+                f"exec-approvals store '{target}' has {len(agents)} agent(s) — only the "
+                f"first {_MAX_EXEC_APPROVALS_AGENTS} were scanned for standing grants",
+            )
         for agent_id, agent in list(agents.items())[:_MAX_EXEC_APPROVALS_AGENTS]:
             if not isinstance(agent, dict):
                 continue
             allowlist = agent.get("allowlist")
             allow_always_count = 0
+            # C-430: split the count by entry SHAPE, not just tallied. Grounded against
+            # the installed dist (exec-approvals-allowlist*.js's buildArgPatternFromArgv/
+            # buildScriptArgPatternFromArgv): both return `undefined` on every non-Windows
+            # platform BY DESIGN, so a POSIX "always allow" click persists an entry with no
+            # `argPattern` key at all — and the matcher (exec-command-resolution*.js) reads
+            # a missing `argPattern` as a wildcard over argv. That is a materially different
+            # standing grant from one WITH an `argPattern` (Windows, or a future OpenClaw
+            # release) — "any arguments to this binary, forever" vs "this exact argv only" —
+            # and the old single tally could not tell a reader which they were looking at.
+            # A present-but-falsy `argPattern` (`""`/`null`) is treated the same as absent:
+            # the matcher's own check is `if (!entry.argPattern)`, so JS falsy is the real
+            # boundary, not merely "is the key present".
+            binary_wide_count = 0
+            arg_restricted_count = 0
             if isinstance(allowlist, list):
-                allow_always_count = sum(
-                    1 for e in allowlist
-                    if isinstance(e, dict) and e.get("source") == "allow-always"
-                )
+                for e in allowlist:
+                    if not (isinstance(e, dict) and e.get("source") == "allow-always"):
+                        continue
+                    allow_always_count += 1
+                    if e.get("argPattern"):
+                        arg_restricted_count += 1
+                    else:
+                        binary_wide_count += 1
             security = agent.get("security")
             ask = agent.get("ask")
             ctx.exec_approvals_grants.append({
@@ -4837,6 +5313,8 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
                 "security": security if isinstance(security, str) else None,
                 "ask": ask if isinstance(ask, str) else None,
                 "allow_always_count": allow_always_count,
+                "binary_wide_count": binary_wide_count,
+                "arg_restricted_count": arg_restricted_count,
             })
     except (OSError, ValueError) as exc:
         ctx.errors.append(f"could not parse {target}: {exc}")
@@ -6334,6 +6812,7 @@ def _collect_global_dotenv(home: Path, ctx: Context) -> None:
         ctx.dotenv_found = True
         ctx.dotenv_files.append(str(path))
         if truncated:
+            ctx.dotenv_truncated = True
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_ENV,
                 f"dotenv file '{path}' exceeded the {_MAX_DOTENV_BYTES // 1000}KB cap — "
@@ -6561,6 +7040,11 @@ def _read_environment_file(spec: str, unit_path: Path, home: Path, ctx: Context)
         )
     for key, value in _parse_environment_file(raw.decode("utf-8", errors="replace")):
         if key not in ctx.unit_env_values and len(ctx.unit_env_values) >= _MAX_UNIT_ENV_ENTRIES:
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_ENV,
+                f"more than {_MAX_UNIT_ENV_ENTRIES} systemd-unit environment entries were "
+                "found — entries past the cap were NOT recorded",
+            )
             break
         # File values override inline ones, matching the dist's merge order
         # (systemd-B4Oq2owH.js:294-297). The inline map is NOT updated, so a caller can
@@ -6591,16 +7075,29 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
     if not units_dir_is_dir:
         return
     try:
-        unit_files = sorted(
+        all_units = sorted(
             p for p in units_dir.iterdir()
             if p.is_file() and not p.is_symlink() and p.suffix == ".service"
-        )[:_MAX_UNIT_FILES]
+        )
     except OSError as exc:
         ctx.errors.append(f"could not list {units_dir}: {exc}")
         ctx.unit_env_unreadable = True
         return
+    unit_files = all_units[:_MAX_UNIT_FILES]
+    if len(all_units) > _MAX_UNIT_FILES:
+        # B-657 (C-135 round 2): previously undisclosed, the same gap f748869 closed for
+        # _MAX_EXEC_APPROVALS_AGENTS -- units past the cap (sorted by name) are never
+        # read at all, so a consumer needs to know this claim is over an incomplete set.
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_ENV,
+            f"more than {_MAX_UNIT_FILES} systemd user unit files exist in {units_dir} — "
+            "only the first "
+            f"{_MAX_UNIT_FILES} (sorted by name) were read",
+        )
 
     pending_files: "list[tuple[str, Path]]" = []
+    entries_capped = False
+    files_capped = False
     for unit_path in unit_files:
         try:
             with open(unit_path, "rb") as fp:
@@ -6609,12 +7106,6 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
             ctx.unit_env_unreadable = True
             continue
         text = raw.decode("utf-8", errors="replace")
-        if truncated:
-            note_limit(
-                ctx.limit_hits, LIMIT_DOMAIN_ENV,
-                f"systemd unit '{unit_path.name}' exceeded the "
-                f"{_MAX_UNIT_BYTES // 1000}KB cap — content beyond the cap was NOT scanned",
-            )
 
         exec_start = ""
         env_lines: "list[str]" = []
@@ -6631,13 +7122,32 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
                 spec = stripped[len("EnvironmentFile="):].strip()
                 if spec:
                     file_specs.append(spec)
+        # B-657 (C-135 round 2, A1): the relatedness gate below decides whether THIS
+        # unit's bytes ever reach ctx.unit_env_values at all -- an oversized but
+        # UNRELATED unit (any other systemd user service on the same host) must not
+        # taint LIMIT_DOMAIN_ENV, or every consumer added for the env-truncation fix
+        # would degrade on a file they never read a byte of. Moved below the `continue`
+        # so the disclosure only fires for a unit whose content actually feeds a check.
         if not systemd_unit_is_openclaw_related(unit_path.name, exec_start):
             continue
+        if truncated:
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_ENV,
+                f"systemd unit '{unit_path.name}' exceeded the "
+                f"{_MAX_UNIT_BYTES // 1000}KB cap — content beyond the cap was NOT scanned",
+            )
 
         ctx.unit_env_found = True
         ctx.unit_env_files.append(str(unit_path))
         for raw_line in env_lines:
             if len(ctx.unit_env_values) >= _MAX_UNIT_ENV_ENTRIES:
+                if not entries_capped:
+                    entries_capped = True
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_ENV,
+                        f"more than {_MAX_UNIT_ENV_ENTRIES} systemd-unit environment "
+                        "entries were found — entries past the cap were NOT recorded",
+                    )
                 break
             for key, value in parse_systemd_env_assignments(raw_line):
                 ctx.unit_env_values[key] = value
@@ -6646,6 +7156,14 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
         for spec in file_specs:
             for token in _split_preserving_quotes(spec):
                 if len(pending_files) >= _MAX_ENV_FILES:
+                    if not files_capped:
+                        files_capped = True
+                        note_limit(
+                            ctx.limit_hits, LIMIT_DOMAIN_ENV,
+                            f"more than {_MAX_ENV_FILES} EnvironmentFile= specs were found "
+                            "across OpenClaw-related units — files past the cap were NOT "
+                            "read",
+                        )
                     break
                 pending_files.append((token, unit_path))
 
@@ -7000,10 +7518,12 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_systemd_unit_env(home, ctx)
     # F-183: before _collect_cron -- its cron.store shadow check reads this.
     _collect_config_machine_state(home, ctx)
+    _collect_auth_profile_store_presence(home, ctx)  # B-749: length-only, never the value
     _collect_cron(home, ctx)
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)
     _collect_capture_state(home, ctx)  # B-295: debug-proxy capture row counts (metadata only)
+    _collect_update_runs(home, ctx)    # F-192: OpenClaw's own self-update ledger
     _collect_skill_library_state(home, ctx)  # B-725: shared skill-library reachability/integrity
     _collect_subagent_runs(home, ctx)  # B-296: subagent-spawn registry disclosure for B18
     _collect_audit_events(home, ctx)   # F-134 (DISK-1): runtime audit_events trail, --behavioral only

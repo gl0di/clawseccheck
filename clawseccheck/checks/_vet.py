@@ -863,6 +863,48 @@ _CRON_PERSIST_RE = re.compile(
     re.I | re.VERBOSE,
 )
 
+# KNOWN RESIDUAL (B-534 -- NARROWED, NOT CLOSED). Three of the eleven alternatives above
+# are bare PATH mentions with no install/enable verb requirement -- Library/LaunchAgents,
+# /etc/cron.*, and the per-user systemd unit path -- unlike every other alternative, which
+# anchors on a verb (crontab -e, systemctl enable, launchctl load, @reboot). A path that is
+# only being READ (a backup script copying plists OUT of ~/Library/LaunchAgents/, a bare
+# `ls`, a `tar -c` archiving it) convicts identically to a genuine install.
+#
+# Two fix attempts were built and RETRACTED on C-135 grounds -- real shell semantics beat
+# this false positive every time they were tried, and opened a real false negative every
+# time:
+#   Attempt 1 (path-position heuristic: "the last path token on a cp/mv/rsync line is the
+#   destination, so an earlier one is being read"). Killed by `2>/dev/null` (the token
+#   regex does not treat `>` as a separator, so the redirect became "the destination" and
+#   silenced a genuine install), by GNU `cp -t DEST src` (destination comes FIRST, backwards
+#   from the heuristic's premise), and by a quoted destination containing a space.
+#   Attempt 2 (real shlex tokenisation + a read/write direction predicate, two rounds).
+#   Closed every attempt-1 hole, then died to a universal attacker-controlled bypass: its
+#   own `--target-directory` flag scan ran BEFORE verb resolution, so a bare `-t` was read
+#   as "target directory" for ANY verb, recognised or not (`frobnicate -t x p.plist
+#   ~/Library/LaunchAgents/e.plist` went silent) -- plus a 13.5x cost blowup that pushed
+#   large skills over the scan budget (fail-open), plus new false positives on ordinary
+#   markdown code fences and common English words ("do", "then", "watch").
+#
+# tests/test_b534_persistence_direction_residual.py pins both sides: the accepted false
+# positive, and the eight genuine install shapes (including the four that killed attempt 2)
+# a future attempt must never silence.
+#
+# Accepted 2026-09-05 (Dave, backlog sweep ruling) per CLAUDE.md Golden Rule #5 / SS2.5.
+# Condition (d) -- route the mitigation to disclosure, never another regex iteration -- is
+# satisfied in `check_installed_skills`'s HIGH-bucket fix text (below): a B13 FAIL never
+# reaches the judge packet (`adjudication._is_borderline` admits only WARN/UNKNOWN), so the
+# limitation is disclosed in `fix`, never `detail` (`baseline.fingerprint()` hashes
+# `detail`), whenever one of these three bare-path alternatives is what fired.
+_CRON_BARE_PATH_RE = re.compile(
+    r"""(?:
+        /etc/cron\.(?:d|daily|weekly|monthly|hourly)|
+        Library/LaunchAgents                        |
+        \.config/systemd/user/\S+\.(?:service|timer)\b
+    )""",
+    re.I | re.VERBOSE,
+)
+
 
 # Backgrounding / daemonize — lower confidence (WARN, not FAIL).
 # nohup CMD &, disown, setsid CMD — detaches a process from the session.
@@ -963,8 +1005,16 @@ def _cron_persistence_hits(
     blob: str,
     fence_ranges: list[tuple[int, int]],
     coverage: list[str] | None = None,
+    bare_path_sink: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """B-144/B-203: split cron/startup-persistence matches into (high_hits, warn_hits).
+
+    B-534: *bare_path_sink*, an optional append-only sink mirroring *coverage*'s idiom
+    (never a third return value -- same arity-stability reason as *coverage*'s own
+    docstring gives). Appended to whenever a match that reaches ``high_hits`` came from
+    one of the three bare-path-only alternatives in ``_CRON_PERSIST_RE`` (see the
+    KNOWN RESIDUAL comment above it) -- the caller uses a non-empty sink to route the
+    accepted-residual disclosure into the HIGH finding's `fix` text.
 
     B-203: evaluates EVERY distinct match (not just the first) — the original loop
     `break`d after the first match, so a reputable `systemctl enable tor` appearing
@@ -1067,6 +1117,11 @@ def _cron_persistence_hits(
             continue
         if label not in high_hits:
             high_hits.append(label)
+        # B-534: this specific match, not the deduplicated label, is what tells us
+        # whether a bare-path-only alternative fired -- check every contributing match,
+        # not just the first one appended to high_hits.
+        if bare_path_sink is not None and _CRON_BARE_PATH_RE.fullmatch(m.group(0)):
+            bare_path_sink.append(m.group(0))
         # B-203: was `break` — evaluate every distinct match, not just the first.
     else:
         # Loop no longer breaks, so this runs unconditionally; the guard replicates the
@@ -4065,6 +4120,16 @@ def _js_warn_sub_signals(rules: set, contributing_skills: set) -> set:
     return named or {_B13_WINNER_SUBSIGNAL["warns_js"]}
 
 
+# B-634: the reserved `_signal_buckets` key `check_installed_skills` uses to smuggle
+# agent-config-persistence hits (a list of `[status, text]` pairs, NOT plain evidence
+# strings) through to `_b13_verdict` below, regardless of which of its ~28 return sites
+# ends up winning the cascade. A named constant rather than a literal at both ends so a
+# typo at either site fails loudly (KeyError / silently-empty-list) rather than quietly
+# desyncing — a plain string literal duplicated at two call sites is exactly the kind of
+# drift this module's own comments elsewhere warn about.
+_B13_PERSISTENCE_AXIS_KEY = "_persistence_axis_reasons"
+
+
 def _b13_verdict(
     severity: str,
     status: str,
@@ -4124,14 +4189,33 @@ def _b13_verdict(
     # letting it in there would leak "we declined to look" into a field that means
     # "something else also fired"). This is what keeps a fence disclosure off the
     # install gate: `status` is decided before we get here and is never revised.
-    _coverage = [n for key, bucket in signal_buckets.items() if key.startswith("_")
-                 for n in bucket]
+    #
+    # B-634: `_B13_PERSISTENCE_AXIS_KEY` is excluded here on purpose — its entries are
+    # `[status, text]` PAIRS for `.axis_reasons`, not plain evidence strings, so folding
+    # it through this loop the way every other "_"-prefixed bucket is would append raw
+    # lists into `fx.evidence` instead of strings. Handled separately, below.
+    _coverage = [
+        n for key, bucket in signal_buckets.items()
+        if key.startswith("_") and key != _B13_PERSISTENCE_AXIS_KEY
+        for n in bucket
+    ]
     fx.evidence = fx.evidence + _coverage + [NPM_DEPTREE_SKILL_COVERAGE_NOTE]
     fx.corroborating_buckets = [
         name
         for name, bucket in signal_buckets.items()
         if bucket and name != winner and not name.startswith("_")
     ]
+    # B-634: B13 is a hard "danger"-only entry in dossier._AXIS_BY_ID — axis_for() never
+    # even looks at .axis_reasons for it — so this is a SECOND, additive axis on top of
+    # the primary danger bucketing, not a substitute for it (dossier.py routes it there
+    # explicitly; see the B-634 comment in build_profile's bucketing loop). Every one of
+    # this function's ~28 callers passes signal_buckets, so an agent-config-persistence
+    # hit reaches the Persistence axis regardless of which bucket actually won the
+    # cascade — the fact that a skill writes to a live agent-context file does not
+    # become less true because a louder, unrelated signal also fired.
+    _persistence_reasons = signal_buckets.get(_B13_PERSISTENCE_AXIS_KEY) or []
+    if _persistence_reasons:
+        fx.axis_reasons = {"persistence": _persistence_reasons}
     return fx
 
 
@@ -4189,6 +4273,22 @@ def check_installed_skills(ctx: Context) -> Finding:
         [],
         [],
     )
+    # B-534: accumulates across every skill scanned below, mirroring `high`'s own scope --
+    # non-empty iff at least one HIGH cron/persistence hit came from a bare-path-only
+    # alternative (the accepted residual). Read at the `if high:` branch to route the
+    # SS2.5(d) disclosure into that finding's `fix` text.
+    _cron_bare_path_hits: list[str] = []
+    # B-634: agent-config persistence hits (writes to an agent-context file such as
+    # ~/.bashrc/CLAUDE.md/AGENTS.md — _agent_config_write_hits below), collected eagerly
+    # across every skill regardless of which cascade branch below ends up winning the
+    # B13 verdict. Every one of B13's ~28 `_b13_verdict(...)` returns folds this into the
+    # winning Finding's `.axis_reasons["persistence"]` (see `_b13_verdict`'s own comment)
+    # — B13 is a hard "danger"-only entry in `dossier._AXIS_BY_ID`, so without this the
+    # Persistence axis never sees the fact at all: it stays an empty bucket and prints
+    # its default clean "no dormant or staged code detected", one line under the same
+    # evidence admitting a live config write. Each entry is `[status, evidence_text]`,
+    # the shape `dossier._route_axis_reasons` already expects (same idiom B339 uses).
+    _persistence_axis_reasons: list = []
     warns_timebomb: list[str] = []
     warns_host_exfil: list[str] = []  # C-203: host/machine-identity info -> outbound sink
     warns_telemetry_undisclosed: list[str] = []  # B-342: undisclosed excessive telemetry
@@ -4784,7 +4884,9 @@ def check_installed_skills(ctx: Context) -> Finding:
         # B-144: cron/startup persistence — dual-use, disclosure-aware (see
         # _cron_persistence_hits docstring). A disclosed watchdog/monitoring job
         # down-ranks to WARN instead of HIGH.
-        _cron_high, _cron_warn = _cron_persistence_hits(blob, _fr, coverage_fence)
+        _cron_high, _cron_warn = _cron_persistence_hits(
+            blob, _fr, coverage_fence, _cron_bare_path_hits
+        )
         for h in _cron_high:
             high.append(f"{name}: {h}")
         for h in _cron_warn:
@@ -4828,8 +4930,12 @@ def check_installed_skills(ctx: Context) -> Finding:
                 and not _config_write_carries_dangerous_payload(blob)
             ):
                 _persist_warn.append(f"{evidence} (skill's own declared purpose)")
+                # B-634: same severity as the crit/high cascade would give this exact
+                # hit if nothing else had already fired for this skill.
+                _persistence_axis_reasons.append([WARN, f"{evidence} (skill's own declared purpose)"])
             else:
                 high.append(evidence)
+                _persistence_axis_reasons.append([FAIL, evidence])
 
         # C-199 (SkillTrustBench T09): insecure temp-file handling — hardcoded/
         # predictable /tmp path opened for write. WARN regardless of exfil/other
@@ -5034,6 +5140,30 @@ def check_installed_skills(ctx: Context) -> Finding:
         for name, entries in sorted(ctx.skill_coverage_gaps.items())
         for entry in entries
     ]
+    # B-745: same carve-out as `_skill_read_gaps` above (the B-552 precedent) — a
+    # bundled native executable is a fact worth keeping even when an earlier bucket
+    # (e.g. `warns_js`) wins the cascade below and the `warnings` bucket — computed
+    # later, at its own point in the cascade — is never reached. Registered eagerly
+    # under a "_"-prefixed key so it rides into `fx.evidence` on EVERY branch (C-358
+    # contract) without ever becoming a corroborating signal or winning the ladder
+    # itself. The `warnings` bucket further down still carries the same fact for when
+    # IT is the winner, so that branch's detail text is unchanged (no regression) —
+    # this only rescues the fact for every OTHER winner.
+    #
+    # Deliberately NOT the same string as the `warnings` bucket's alarm text below:
+    # that text is the SIGNAL ("here is a bundled binary"); this is the COVERAGE half
+    # — no check in this tool reads compiled code, so those bytes were never examined
+    # — which is what makes it a coverage note under C-358's own definition rather
+    # than a second copy of the same alarm.
+    _stowaway_note = (
+        [
+            "coverage: native executable(s) bundled in the skill, not analyzed by any "
+            "check here (compiled code is opaque to this scanner): "
+            + ", ".join(ctx.stowaway_files[:4])
+        ]
+        if getattr(ctx, "stowaway_files", None)
+        else []
+    )
     _signal_buckets: dict[str, list] = {
         "crit": crit,
         "high": high,
@@ -5063,7 +5193,24 @@ def check_installed_skills(ctx: Context) -> Finding:
         "_h6_advisory": h6_advisory,
         # B-552: same carve-out — see _skill_read_gaps' declaration above.
         "_skill_read_gaps": _skill_read_gaps,
+        # B-745: same carve-out — see _stowaway_note's declaration above.
+        "_stowaway_note": _stowaway_note,
+        # B-634: NOT a coverage-string bucket like its underscore-prefixed siblings above
+        # — see _B13_PERSISTENCE_AXIS_KEY's and _b13_verdict's own comments. Registered
+        # under the shared constant so `_b13_verdict` reads exactly what is written here.
+        _B13_PERSISTENCE_AXIS_KEY: _persistence_axis_reasons,
     }
+    # B-754: computed here — before every coverage-arm branch below (parse_error_paths /
+    # skill_limit_hits / the unreadable-file sub-branch) — rather than at its own point in
+    # the cascade (where it used to sit, just above its own `if _path_traversal:` check),
+    # so a coverage arm that wins the cascade can still see whether a CONFIRMED archive
+    # escape was ALSO found in whatever WAS read. Registered into `_signal_buckets` here
+    # too so `corroborating_buckets` reflects it regardless of which arm wins (unchanged
+    # contract — see `_b13_verdict`). This does not move where `_path_traversal` is ACTED
+    # on for severity/status purposes: that stays at the traversal arm's own place in the
+    # cascade, still ranked below crit/high and below the coverage arms, per B-746.
+    _path_traversal = getattr(ctx, "path_traversal_violations", None) or []
+    _signal_buckets["path_traversal"] = _path_traversal
     if crit:
         extra = f" (+{len(crit) - 6} more)" if len(crit) > 6 else ""
         # B-555, accepted §2.5 residual: when a paste/transfer host is what convicted,
@@ -5119,12 +5266,31 @@ def check_installed_skills(ctx: Context) -> Finding:
             destination_hosts=_sole_contributor(crit_hosts_by_skill, crit_skills),
         )
     if high:
+        fix = (
+            "Review the flagged skills' source before trusting them; prefer pinned, "
+            "signed, VirusTotal-clean releases."
+        )
+        if _cron_bare_path_hits:
+            # B-534, SS2.5(d) routing: a bare mention of one of three persistence paths
+            # (Library/LaunchAgents, /etc/cron.*, a per-user systemd unit) convicts
+            # identically whether the skill is installing persistence or merely reading/
+            # backing up that path -- an accepted, C-135-tested residual (two sound fix
+            # attempts retracted; see the comment above _CRON_PERSIST_RE). Disclosed here,
+            # not in `detail` (baseline.fingerprint() hashes it), because a B13 FAIL never
+            # reaches --judge-packet adjudication to catch it there instead.
+            fix += (
+                " One or more of the cron/startup-persistence hits above matched only a "
+                "bare path mention (~/Library/LaunchAgents, /etc/cron.*, or a per-user "
+                "systemd unit file) with no install/enable verb — a known, accepted "
+                "detection limit: a skill that merely reads or backs up that path convicts "
+                "identically to one that installs into it. If you authored this skill or "
+                "already trust its source, confirm the flagged line is a read, not a write."
+            )
         return _b13_verdict(
             HIGH,
             FAIL,
             "Suspicious patterns in installed skill(s): " + "; ".join(high[:6]),
-            "Review the flagged skills' source before trusting them; prefer pinned, "
-            "signed, VirusTotal-clean releases.",
+            fix,
             high,
             _signal_buckets,
             "high",
@@ -5198,16 +5364,48 @@ def check_installed_skills(ctx: Context) -> Finding:
         # check from FAIL to "no malware signature or known-bad indicator").
         unreadable = list(getattr(ctx, "unreadable_files", None) or [])
         if unreadable:
-            return _b13_verdict(
-                HIGH,
-                UNKNOWN,
+            _detail = (
                 "Part of this skill could not be READ, so it was not scanned — coverage "
-                f"is incomplete ({len(unreadable)} path(s)): " + "; ".join(unreadable[:6]),
+                f"is incomplete ({len(unreadable)} path(s)): " + "; ".join(unreadable[:6])
+            )
+            _fix = (
                 "These paths are present but unopenable (permissions, a dangling link, or "
                 "an I/O error), so nothing can be concluded about what they contain. Make "
                 "them readable and re-run, or inspect them manually before trusting this "
                 "skill — an unreadable path is not an absent one. An entry marked "
-                "'(directory not entered)' hides an unbounded subtree, not a single file.",
+                "'(directory not entered)' hides an unbounded subtree, not a single file."
+            )
+            # B-754: the coverage gap above still WINS this verdict (status/severity/winner
+            # below are unchanged — see the B-746 ordering comment at the traversal arm's
+            # own place in the cascade), but a confirmed archive escape found in whatever
+            # COULD be read must not go unmentioned just because an unrelated file elsewhere
+            # in the skill happened to be unreadable. Named here, in `detail` — not `fix` —
+            # because `detail` is the one field every rendered surface (the dossier's Danger
+            # row, the audit report's per-skill summary line, and the JSON `detail`/`reason`
+            # fields) unconditionally shows; `fix` only ever reaches a reader through the
+            # single "Fix (top)" slot, which a co-occurring WARN (e.g. B88) can and does win
+            # instead (collector.py's `unreadable_manifests` comment documents that same
+            # slot-contention for a different pair of findings). This DOES change this
+            # finding's `detail`-keyed baseline fingerprint when a traversal is present
+            # alongside an unreadable file — deliberately: an existing
+            # `.clawseccheckignore` entry for "coverage incomplete" must not go on silently
+            # matching once the situation is no longer just an incomplete read but a
+            # confirmed escape underneath it.
+            if _path_traversal:
+                _detail += (
+                    " — separately, a confirmed archive path traversal was ALSO found in "
+                    "what could be read: " + "; ".join(_path_traversal[:6])
+                )
+                _fix += (
+                    " Separately: this skill also contains a confirmed archive path "
+                    "traversal (see detail) — treat it as dangerous regardless of what the "
+                    "unreadable path turns out to hold."
+                )
+            return _b13_verdict(
+                HIGH,
+                UNKNOWN,
+                _detail,
+                _fix,
                 unreadable,
                 _signal_buckets,
                 "skill_limit_hits",
@@ -5286,11 +5484,17 @@ def check_installed_skills(ctx: Context) -> Finding:
     # `skill_limit_hits` / the unreadable-file branch answer "the scan could not see
     # everything", and they carry `engine_degraded`, which caps the audit score. Measured
     # on a home holding BOTH an unreadable file and a traversal archive: the coverage arm
-    # wins and the finding keeps engine_degraded=True. Promoting a rank-3 arm above them
-    # would trade a capped, honest UNKNOWN for a confident FAIL that hides the gap — a
-    # worse trade than the one being fixed here.
-    _path_traversal = getattr(ctx, "path_traversal_violations", None) or []
-    _signal_buckets["path_traversal"] = _path_traversal
+    # STILL wins here and the finding keeps engine_degraded=True — that ordering requirement
+    # is unchanged. Promoting a rank-3 arm above them would trade a capped, honest UNKNOWN
+    # for a confident FAIL that hides the gap — a worse trade than the one being fixed here.
+    #
+    # B-754: what WAS wrong is narrower than the ordering above — the coverage arm winning
+    # used to mean the traversal, which the scan DID find, was never MENTIONED anywhere in
+    # the finding (`_path_traversal` was computed and checked only here, past the coverage
+    # arms' own early returns). `_path_traversal` is now computed earlier (see the comment
+    # at its computation above) precisely so the unreadable-file branch can name a
+    # confirmed escape in its own `detail` — status/severity there is untouched, so the
+    # VERDICT still degrades to UNKNOWN/CAUTION exactly as before; only the SILENCE is fixed.
     if _path_traversal:
         _fix = "Ensure archives inside skills do not attempt path traversal."
         # B-747 (§2.5(d)): a member name shaped like a Windows drive reference is convicted
@@ -5892,159 +6096,184 @@ def _run_content_ring(
     # this exists and the two prior attempts (retracted, then landed by a different
     # route) it follows.
     crashed: list[str] = []
+    # B-724: the last ring index this loop has FULLY accounted for — appended to
+    # `skipped`/`crashed`, folded into `ring_coverage`, or added to `out` — never an
+    # index that is merely "in flight" inside a check. `last_done_idx = idx` is placed
+    # as the LAST statement on every path through the loop body, immediately before
+    # that path's `continue` (or, on the final normal-completion path, immediately
+    # before falling through to the next iteration). See the outer `except
+    # ScanBudgetExceeded` below for why this is what makes that handler's accounting
+    # correct on every CPython version, not just the one it was measured on.
+    last_done_idx = -1
     with check_deadline(target_budget_s) as own_frame:
-        for idx, check in enumerate(SKILL_CONTENT_RING):
-            try:
-                # B-394: `name = getattr(...)` and `cpu_exceeded(deadline)` used to sit
-                # OUTSIDE this try, guarded by nothing — a SIGALRM landing on either
-                # line (the signal can fire on any bytecode boundary, not just inside
-                # `check(ctx)`; see memory reference_python_signal_mask_not_atomic) threw
-                # ScanBudgetExceeded straight out of this function. Since B-352 made
-                # that type a BaseException specifically so nothing swallows it by
-                # accident, nothing up the stack caught it either — it escaped
-                # `_run_content_ring` entirely instead of being handled by the
-                # `owned_by(...)` logic below. Moving both lines inside the try changes
-                # nothing about their normal-path behavior (no exception, same skip/
-                # continue as before) and closes the window that produced the OBSERVED
-                # 10/30 CI failure rate under load (B-394's own measurement).
-                #
-                # NOT fully closed (C-135 round 2, confirmed by disassembling this
-                # function and reading co_exceptiontable): the `continue` right after
-                # `skipped.append(name)` compiles, in CPython 3.11+'s zero-cost
-                # exception model, to a jump instruction covered by the enclosing
-                # `with check_deadline(...)` block's OWN exception-table entry, not this
-                # try's — a signal landing on exactly that jump still bypasses
-                # `owned_by(...)` and escapes uncaught. This is a residual, not a
-                # regression: it is a narrower version of the SAME landing-spot class
-                # this fix closes, reachable only by a signal arriving during one
-                # specific ~1-instruction transition rather than across two whole
-                # unguarded lines.
-                #
-                # B-688: it HAS now been seen for real, and this paragraph used to say it
-                # had not. Until 2026-08-29 it had only ever been produced by
-                # `sys.settrace`-timed signal injection forcing the landing spot, and it
-                # was described here as "not observed under real load". On that date a
-                # full-suite run (17,710 tests, ~39 minutes) failed once with
-                # ScanBudgetExceeded escaping this function, and the traceback named the
-                # `continue` below — this exact jump. Attribution was checked before the
-                # claim was changed: the failing test touches nothing the same day's
-                # commits altered, it passed 8/8 in isolation (3 clean, 5 under eight CPU
-                # burners), the immediate re-run of the whole suite was green, and the
-                # competing hypothesis (a DeadlineFrame leaked onto scanbudget._STACK by
-                # an earlier test) is covered by _Deadline.__del__, whose own docstring
-                # names that window.
-                #
-                # So: real, and rare enough that a synthetic 8-way CPU load over five runs
-                # did not reproduce it while one long suite did. The residual STAYS
-                # accepted and the analysis above is unchanged — eliminating it would mean
-                # never using `continue`/`break` inside a try guarding a signal-based
-                # exception anywhere a loop needs to skip an iteration, which is not
-                # achievable by restructuring THIS loop alone (the loop-back jump has to
-                # land somewhere). What changed is only the frequency claim, because the
-                # next person to hit this needs to recognise it rather than conclude their
-                # own change broke something. Do NOT widen the `except` below to swallow an
-                # exception this frame does not own: `owned_by` exists so an outer
-                # deadline's expiry is not stolen by an inner frame, and scanbudget's own
-                # note records that raising an unattributed exception there would turn a
-                # healthy check into a spurious UNKNOWN.
-                name = getattr(check, "__name__", "ring check")
-                if cpu_exceeded(deadline):
-                    skipped.append(name)
+        try:
+            for idx, check in enumerate(SKILL_CONTENT_RING):
+                try:
+                    # B-394: `name = getattr(...)` and `cpu_exceeded(deadline)` used to sit
+                    # OUTSIDE this try, guarded by nothing — a SIGALRM landing on either
+                    # line (the signal can fire on any bytecode boundary, not just inside
+                    # `check(ctx)`; see memory reference_python_signal_mask_not_atomic) threw
+                    # ScanBudgetExceeded straight out of this function. Since B-352 made
+                    # that type a BaseException specifically so nothing swallows it by
+                    # accident, nothing up the stack caught it either — it escaped
+                    # `_run_content_ring` entirely instead of being handled by the
+                    # `owned_by(...)` logic below. Moving both lines inside the try changes
+                    # nothing about their normal-path behavior (no exception, same skip/
+                    # continue as before) and closes the window that produced the OBSERVED
+                    # 10/30 CI failure rate under load (B-394's own measurement).
+                    #
+                    # B-688 / B-724: the `continue` right after `skipped.append(name)` (and,
+                    # equally, the loop's own normal iteration advance) used to be able to
+                    # escape uncaught: in CPython 3.11+'s zero-cost exception model, the jump
+                    # instruction implementing `continue` inside a `try` is covered by the
+                    # ENCLOSING block's exception-table entry, not this inner `try`'s, so a
+                    # SIGALRM landing on exactly that jump bypassed `owned_by(...)` below and
+                    # escaped the function entirely. Confirmed for real on 2026-08-29 (a
+                    # full-suite run, 17,710 tests, ~39 minutes, failed once with the
+                    # traceback naming this exact `continue`) after being reproducible only
+                    # via `sys.settrace`-timed signal injection before that.
+                    #
+                    # B-724 closes it with a SECOND, identically-gated `except
+                    # ScanBudgetExceeded` wrapping the whole `for` loop below (still inside
+                    # this same `with check_deadline(...) as own_frame:`, so `owned_by(exc,
+                    # own_frame)` is exactly as strict there as it is here — an outer
+                    # caller's own deadline still re-raises untouched). The outer handler
+                    # only had one real risk: knowing which checks it must still report as
+                    # `skipped` without either double-counting a check the inner handler (or
+                    # the loop body) already accounted for, or dropping one that never ran.
+                    # That could have meant reasoning about exactly which bytecode offset a
+                    # signal lands on — the CPython 3.11+ zero-cost model and 3.9's older
+                    # SETUP_FINALLY/POP_BLOCK model draw the covered ranges differently, so a
+                    # conclusion measured on one is not evidence for the other. `last_done_idx`
+                    # (declared above the `with`) sidesteps that entirely: it is source-level
+                    # bookkeeping, set as the LAST statement of every path through this body,
+                    # so by the time ANY loop-back instruction executes for iteration `idx` —
+                    # on any CPython version, whatever the exception table looks like — Python
+                    # has already finished running every statement lexically before it,
+                    # `last_done_idx = idx` included. The outer handler's correctness follows
+                    # from ordinary statement-execution order, not from where a signal can
+                    # land, so no version-specific bytecode audit is needed to trust it.
+                    name = getattr(check, "__name__", "ring check")
+                    if cpu_exceeded(deadline):
+                        skipped.append(name)
+                        last_done_idx = idx
+                        continue
+                    fx = check(ctx)
+                except ScanBudgetExceeded as exc:
+                    if not owned_by(exc, own_frame):
+                        raise
+                    # Our OWN hard deadline fired mid-check: this check and everything
+                    # after it never got a verdict this call, so all of them count as
+                    # skipped for the coverage-gap message below. (No `last_done_idx`
+                    # update here: `break` ends the loop, so the outer handler below can
+                    # never fire again in this call — there is nothing left for it to
+                    # double-count against.)
+                    own_deadline_hit = True
+                    skipped.extend(
+                        getattr(c, "__name__", "ring check") for c in SKILL_CONTENT_RING[idx:]
+                    )
+                    break
+                except Exception:  # noqa: BLE001 — a ring check must never break --vet
+                    # B-485 (R1, closed): this used to `continue` with no `note_limit`, no
+                    # `skipped` entry and no finding at all — an EMPTY bucket, not an UNKNOWN
+                    # one, so no predicate over the bucket (however it was keyed) could ever
+                    # see that anything had gone wrong. `dossier._danger_coverage_gap` only
+                    # inspects the *danger* bucket, and this loop's ring checks span every
+                    # axis, so a crashed `check_persona_jailbreak` (behavior) or
+                    # `check_overt_secret_exfil` (behavior/connections) left no trace for it
+                    # to read regardless of which leg it used. The one NATURAL trigger this
+                    # project has (`skillast.ScriptProseCoverageIncomplete` on an unparseable
+                    # `.py` file) happened to be safe in practice — `check_installed_skills`
+                    # parses the same source via `analyze_python`, whose `except` clause is a
+                    # strict superset of this exception's, so B13 (danger) independently
+                    # floors the same target — but that was luck, not a guarantee: any check
+                    # added to this ring that raises something `analyze_python` does not also
+                    # catch reopens the exact "--vet said INSTALL over a crash" bug B-485 was
+                    # filed for, and a hand-built minimal ring check (`RuntimeError` — no
+                    # parse involved at all) proves the pool is empty and the verdict reads
+                    # INSTALL/PASS today even where the flag never has a chance to fire.
+                    #
+                    # Fixed by reusing the SAME kind of disclosure the two handlers above
+                    # already use — not a second predicate, not a second `note_limit` idiom —
+                    # but a DISTINCT finding id from `coverage_gap_finding()`'s `VET-COVERAGE`
+                    # (see the `if crashed:` block after the loop). That distinction matters
+                    # and is not decoration: `dossier.build_profile`'s `scan_truncated` flag
+                    # (guarding "no dormant/staged code" on persistence/connections) keys
+                    # SPECIFICALLY on the `VET-COVERAGE` id, on purpose — C-135 already found
+                    # that keying it on `engine_degraded` alone was "too WIDE" (B13's own
+                    # per-file parse error, on a scan that otherwise COMPLETED, wrongly read
+                    # "the scan was cut short"). A single ring check crashing on one file is
+                    # the exact same shape: OTHER checks and OTHER files still got read, so it
+                    # must floor *danger* (this check answered nothing) without also claiming
+                    # persistence/connections were "cut short" — they were never fed by this
+                    # check to begin with. `tests/test_b628_plugin_code_measurable.py::
+                    # test_i_a_single_unparseable_file_does_not_read_as_a_truncated_scan` is
+                    # the existing pin for exactly this distinction; reusing `VET-COVERAGE`
+                    # broke it (measured while building this fix). `crashed` is recorded
+                    # separately from `skipped` for that reason, not merely for the message
+                    # wording.
+                    #
+                    # First attempted 2026-08-08 (`f3c7025`) as a five-line `note_limit()` call
+                    # and RETRACTED: at the time, `_danger_coverage_gap` had only two legs —
+                    # `ctx.limit_hits` and a literal `"coverage is incomplete"` string match —
+                    # so ANY disclosure here tripped the cap unconditionally, and a benign
+                    # skill using a `match` statement (3.10+) read INSTALL on 3.12 but CAUTION
+                    # on the 3.9 CI floor: "no narrow variant exists" (that commit's own words)
+                    # because there was no way to tell "unparseable because hostile" apart from
+                    # "unparseable because newer than the scanner" from inside the handler.
+                    # That objection is about the CONSEQUENCE (any gap here forces CAUTION),
+                    # not about routing through `note_limit()` itself — and the consequence
+                    # changed under it, not because of this fix: `3fe2554` (2026-08-14) closed
+                    # B13's own parse-error instance of the identical version-skew shape the
+                    # same way, and it did NOT try to avoid the skew — it accepted it as
+                    # BOUNDED (`tests/test_b485_vet_coverage_gap.py::
+                    # test_version_skew_on_a_modern_syntax_skill_is_bounded`): the gap can only
+                    # withhold a clean verdict (CAUTION), never manufacture DO-NOT-INSTALL, so
+                    # a benign modern-syntax skill on the 3.9 floor gets an honest "we could
+                    # not read this on this interpreter", never a false accusation. This fix
+                    # produces exactly that same bounded shape for a ring-check crash —
+                    # UNKNOWN-only severity, same bound — so the 2026-08-08 objection is
+                    # superseded by the precedent the project has since accepted for the
+                    # identical underlying phenomenon, not re-litigated.
+                    crashed.append(name)
+                    last_done_idx = idx
                     continue
-                fx = check(ctx)
-            except ScanBudgetExceeded as exc:
-                if not owned_by(exc, own_frame):
-                    raise
-                # Our OWN hard deadline fired mid-check: this check and everything
-                # after it never got a verdict this call, so all of them count as
-                # skipped for the coverage-gap message below.
-                own_deadline_hit = True
-                skipped.extend(
-                    getattr(c, "__name__", "ring check") for c in SKILL_CONTENT_RING[idx:]
-                )
-                break
-            except Exception:  # noqa: BLE001 — a ring check must never break --vet
-                # B-485 (R1, closed): this used to `continue` with no `note_limit`, no
-                # `skipped` entry and no finding at all — an EMPTY bucket, not an UNKNOWN
-                # one, so no predicate over the bucket (however it was keyed) could ever
-                # see that anything had gone wrong. `dossier._danger_coverage_gap` only
-                # inspects the *danger* bucket, and this loop's ring checks span every
-                # axis, so a crashed `check_persona_jailbreak` (behavior) or
-                # `check_overt_secret_exfil` (behavior/connections) left no trace for it
-                # to read regardless of which leg it used. The one NATURAL trigger this
-                # project has (`skillast.ScriptProseCoverageIncomplete` on an unparseable
-                # `.py` file) happened to be safe in practice — `check_installed_skills`
-                # parses the same source via `analyze_python`, whose `except` clause is a
-                # strict superset of this exception's, so B13 (danger) independently
-                # floors the same target — but that was luck, not a guarantee: any check
-                # added to this ring that raises something `analyze_python` does not also
-                # catch reopens the exact "--vet said INSTALL over a crash" bug B-485 was
-                # filed for, and a hand-built minimal ring check (`RuntimeError` — no
-                # parse involved at all) proves the pool is empty and the verdict reads
-                # INSTALL/PASS today even where the flag never has a chance to fire.
-                #
-                # Fixed by reusing the SAME kind of disclosure the two handlers above
-                # already use — not a second predicate, not a second `note_limit` idiom —
-                # but a DISTINCT finding id from `coverage_gap_finding()`'s `VET-COVERAGE`
-                # (see the `if crashed:` block after the loop). That distinction matters
-                # and is not decoration: `dossier.build_profile`'s `scan_truncated` flag
-                # (guarding "no dormant/staged code" on persistence/connections) keys
-                # SPECIFICALLY on the `VET-COVERAGE` id, on purpose — C-135 already found
-                # that keying it on `engine_degraded` alone was "too WIDE" (B13's own
-                # per-file parse error, on a scan that otherwise COMPLETED, wrongly read
-                # "the scan was cut short"). A single ring check crashing on one file is
-                # the exact same shape: OTHER checks and OTHER files still got read, so it
-                # must floor *danger* (this check answered nothing) without also claiming
-                # persistence/connections were "cut short" — they were never fed by this
-                # check to begin with. `tests/test_b628_plugin_code_measurable.py::
-                # test_i_a_single_unparseable_file_does_not_read_as_a_truncated_scan` is
-                # the existing pin for exactly this distinction; reusing `VET-COVERAGE`
-                # broke it (measured while building this fix). `crashed` is recorded
-                # separately from `skipped` for that reason, not merely for the message
-                # wording.
-                #
-                # First attempted 2026-08-08 (`f3c7025`) as a five-line `note_limit()` call
-                # and RETRACTED: at the time, `_danger_coverage_gap` had only two legs —
-                # `ctx.limit_hits` and a literal `"coverage is incomplete"` string match —
-                # so ANY disclosure here tripped the cap unconditionally, and a benign
-                # skill using a `match` statement (3.10+) read INSTALL on 3.12 but CAUTION
-                # on the 3.9 CI floor: "no narrow variant exists" (that commit's own words)
-                # because there was no way to tell "unparseable because hostile" apart from
-                # "unparseable because newer than the scanner" from inside the handler.
-                # That objection is about the CONSEQUENCE (any gap here forces CAUTION),
-                # not about routing through `note_limit()` itself — and the consequence
-                # changed under it, not because of this fix: `3fe2554` (2026-08-14) closed
-                # B13's own parse-error instance of the identical version-skew shape the
-                # same way, and it did NOT try to avoid the skew — it accepted it as
-                # BOUNDED (`tests/test_b485_vet_coverage_gap.py::
-                # test_version_skew_on_a_modern_syntax_skill_is_bounded`): the gap can only
-                # withhold a clean verdict (CAUTION), never manufacture DO-NOT-INSTALL, so
-                # a benign modern-syntax skill on the 3.9 floor gets an honest "we could
-                # not read this on this interpreter", never a false accusation. This fix
-                # produces exactly that same bounded shape for a ring-check crash —
-                # UNKNOWN-only severity, same bound — so the 2026-08-08 objection is
-                # superseded by the precedent the project has since accepted for the
-                # identical underlying phenomenon, not re-litigated.
-                crashed.append(name)
-                continue
-            if fx.status not in (FAIL, WARN):
-                # B-526: the finding is dropped, its COVERAGE is not. The drop rule
-                # exists because "an UNKNOWN would wrongly outrank a clean PASS" (see
-                # this function's docstring) — that is about the finding's STATUS, and a
-                # coverage note has none. B343 is the case that made this visible: a
-                # model reference reachable only inside a bare fence leaves B343 UNKNOWN,
-                # so without this the disclosure died here and --vet reported a clean
-                # skill with nothing said about the part it never read. The notes are
-                # collected and handed to the surviving primary by vet_skill.
-                ring_coverage.extend(
-                    e for e in (fx.evidence or []) if e.startswith("coverage: ")
-                )
-                continue
-            key = (fx.id, fx.detail)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(fx)
+                if fx.status not in (FAIL, WARN):
+                    # B-526: the finding is dropped, its COVERAGE is not. The drop rule
+                    # exists because "an UNKNOWN would wrongly outrank a clean PASS" (see
+                    # this function's docstring) — that is about the finding's STATUS, and a
+                    # coverage note has none. B343 is the case that made this visible: a
+                    # model reference reachable only inside a bare fence leaves B343 UNKNOWN,
+                    # so without this the disclosure died here and --vet reported a clean
+                    # skill with nothing said about the part it never read. The notes are
+                    # collected and handed to the surviving primary by vet_skill.
+                    ring_coverage.extend(
+                        e for e in (fx.evidence or []) if e.startswith("coverage: ")
+                    )
+                    last_done_idx = idx
+                    continue
+                key = (fx.id, fx.detail)
+                if key in seen:
+                    last_done_idx = idx
+                    continue
+                seen.add(key)
+                out.append(fx)
+                last_done_idx = idx
+        except ScanBudgetExceeded as exc:
+            if not owned_by(exc, own_frame):
+                raise
+            # B-724: the residual landing spot the comment above describes — a signal
+            # attributed to OUR OWN deadline, arriving somewhere the inner `try` does not
+            # cover (a `continue`'s loop-back jump, the loop's own normal iteration
+            # advance, or the `for` header itself). `last_done_idx` names exactly which
+            # checks are already accounted for regardless of which of those it was, so the
+            # slice below can never double-count (an accounted check is never re-listed)
+            # or under-count (an unaccounted one is never skipped over).
+            own_deadline_hit = True
+            skipped.extend(
+                getattr(c, "__name__", "ring check")
+                for c in SKILL_CONTENT_RING[last_done_idx + 1:]
+            )
     if skipped:
         reason = (
             f"the ring's own {target_budget_s:g}s hard scan deadline fired mid-check"

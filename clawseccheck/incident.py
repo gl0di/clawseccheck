@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import trajectory as _trajectory
+from . import trajectorystore as _trajectorystore
 from .catalog import ACTIONABLE_STATUSES
 from .checks import SECRET_PATTERNS, _pattern_hits_real_secret, _secret_paths
 from .incidentstore import DEFAULT_INCIDENTS, _incident_to_dict, create_incident
@@ -166,6 +167,32 @@ def render_incident_record(record: dict, *, timeline: "list | None" = None,
 _MAX_TRAJECTORY_BYTES = 8_000_000  # mirrors trajectory.py's own per-file scan cap
 
 
+def _hash_trajectory_file(home: Path, path: Path, kind: str) -> "dict | None":
+    """One entry of the shape :func:`_trajectory_hash_entries` returns, for a single
+    file — shared by both the JSONL sidecar sweep and the SQLite database sweep so the
+    byte-cap/truncation discipline can never diverge between the two containers.
+    ``kind`` distinguishes which container the path came from (``"jsonl"`` or
+    ``"sqlite_db"``); a raw whole-file hash either way — for the SQLite path this is a
+    hash of the .sqlite file's own bytes, never a read of any row inside it (B-815: no
+    ``event_json``, no ``sqlite3`` use here at all — see the module's own §8 doctrine,
+    already enforced by trajectorystore.py, which this function never bypasses).
+    """
+    try:
+        raw = path.read_bytes()
+        rel = path.relative_to(home)
+    except (OSError, ValueError):
+        return None
+    truncated = len(raw) > _MAX_TRAJECTORY_BYTES
+    data = raw[:_MAX_TRAJECTORY_BYTES] if truncated else raw
+    return {
+        "path": str(rel),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "bytes": len(data),
+        "truncated": truncated,
+        "kind": kind,
+    }
+
+
 def _trajectory_hash_entries(home, *, max_files: int | None = None) -> list[dict]:
     """Hash each trajectory sidecar file's raw bytes — never parses/reads call
     content. A hash lets an investigator later prove a file wasn't altered
@@ -182,25 +209,26 @@ def _trajectory_hash_entries(home, *, max_files: int | None = None) -> list[dict
     (F-164 out of scope — deliberately not widened by --exhaustive). ``max_files``
     (F-164, optional) widens only the FILE-COUNT cap under --exhaustive; ``None``
     reproduces today's default (``trajectory._MAX_FILES``).
+
+    B-815: on a SQLite-era install the JSONL locator alone returns nothing to hash even
+    though real trajectory evidence exists — so this also hashes every per-agent SQLite
+    trajectory *database file* (``trajectorystore.sqlite_db_paths(home)``), whole-file,
+    same byte-cap/truncation discipline, never opened/read as a database (no ``sqlite3``
+    import here, no ``event_json``). Each entry now carries ``"kind"``
+    (``"jsonl"``/``"sqlite_db"``) so a consumer can tell the two containers apart.
     """
     if not isinstance(home, Path):
         return []
     entries: list[dict] = []
     kwargs = {} if max_files is None else {"max_files": max_files}
     for path in _trajectory.find_trajectory_files(home, **kwargs):
-        try:
-            raw = path.read_bytes()
-            rel = path.relative_to(home)
-        except (OSError, ValueError):
-            continue
-        truncated = len(raw) > _MAX_TRAJECTORY_BYTES
-        data = raw[:_MAX_TRAJECTORY_BYTES] if truncated else raw
-        entries.append({
-            "path": str(rel),
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "bytes": len(data),
-            "truncated": truncated,
-        })
+        entry = _hash_trajectory_file(home, path, "jsonl")
+        if entry is not None:
+            entries.append(entry)
+    for path in _trajectorystore.sqlite_db_paths(home):
+        entry = _hash_trajectory_file(home, path, "sqlite_db")
+        if entry is not None:
+            entries.append(entry)
     return entries
 
 
@@ -290,6 +318,9 @@ def build_incident(ctx, findings, score, *, when: str | None = None,
     if when is None:
         when = datetime.now().isoformat(timespec="seconds")
     events_path = DEFAULT_EVENTS if events is None else events
+    # B-815: computed once, up front, same as events_path above -- consumed only by
+    # "trajectory_corroboration" below.
+    corro = _trajectorystore.corroborate(ctx.home) if isinstance(ctx.home, Path) else None
 
     return {
         # C-241: a machine-readable tool identifier (matches the CLI binary/package
@@ -333,6 +364,17 @@ def build_incident(ctx, findings, score, *, when: str | None = None,
         "sbom": build_sbom(ctx),
         "trajectory_hashes": _trajectory_hash_entries(
             ctx.home, max_files=limits_for(ctx).traj_max_files),
+        # B-815: always present, null when there is nothing to say (the same idiom
+        # "score"/"grade" above already use for an ungraded run) -- names WHICH
+        # container the trajectory evidence actually lives in (trajectorystore.py's
+        # STATUS_LIVE/STATUS_LOCATOR_STALE/STATUS_NO_RESIDUE) so a responder reading an
+        # empty `trajectory_hashes` on a SQLite-era install is told why, rather than
+        # silently concluding there is nothing to preserve.
+        "trajectory_corroboration": (
+            {"status": corro.status, "evidence": list(corro.evidence)}
+            if corro is not None
+            else None
+        ),
         "credential_rotation_list": _credential_rotation_list(ctx, findings),
         "monitor_events": load_events(events_path),
         # B-277: provenance. An evidence pack that quotes a journal must say WHICH

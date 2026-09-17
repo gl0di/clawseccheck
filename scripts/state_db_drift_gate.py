@@ -68,6 +68,17 @@ from pathlib import Path
 
 # SELECT ... FROM <table>. DOTALL because a literal may span lines.
 _SELECT_RE = re.compile(r"SELECT\s+(.+?)\s+FROM\s+([A-Za-z_][A-Za-z0-9_]*)", re.I | re.S)
+# SQLite reserves the entire `sqlite_%` name prefix for its own internal catalog
+# objects (`sqlite_master`, `sqlite_sequence`, ...) -- never a real application table
+# any vendor's schema (or migration/retirement list) could ever declare, and not even
+# creatable via CREATE TABLE ("object name reserved for internal use"). B-811 (round 2,
+# 2026-09-15) added trajectorystore.py's own sqlite_master lookups (_table_kind's
+# schema-verification queries, unrelated to OpenClaw's state DB this gate models), and
+# this gate's blanket per-package `.execute()` scan is not file-scoped -- it has no way
+# to tell that those queries target a DIFFERENT SQLite file (the per-agent trajectory
+# database) than the one this gate is about. Same exemption reasoning as
+# tests/test_state_schema_grounding.py's `_SQLITE_BUILTIN_CATALOG_TABLES`.
+_SQLITE_RESERVED_TABLE_PREFIX = "sqlite_"
 # Bare identifiers inside the column list, minus SQL noise words.
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SQL_NOISE = {
@@ -159,6 +170,8 @@ def expected_reads(pkg_root: Path) -> dict[str, list]:
             continue
         for match in _SELECT_RE.finditer(text):
             collist, table = match.group(1), match.group(2)
+            if table.lower().startswith(_SQLITE_RESERVED_TABLE_PREFIX):
+                continue
             columns = set()
             if "*" not in collist:
                 columns = {i for i in _IDENT_RE.findall(collist)

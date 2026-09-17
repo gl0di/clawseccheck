@@ -196,13 +196,25 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
     #
     # Three keys or none, and only on a graded row. Each is load-bearing:
     #   raw_score  the figure itself.
-    #   raw_scope  WHICH checks were in its denominator. That set grows with every release,
-    #              so two rows straddling an upgrade hold different denominators with
-    #              nothing on disk changed -- measured on a real home, two new WARN checks
-    #              alone fell raw 83 -> 82 while the capped score held.
-    #   raw_ver    the build. The scope hash is over check IDs and raw_score is severity-
-    #              WEIGHTED, so a severity re-tune moves the figure with the hash
-    #              byte-identical; a hash alone cannot see that.
+    #   raw_scope  WHICH checks were in its denominator, AND (since C-469) at what WEIGHT
+    #              each one counted. That set grows with every release, so two rows
+    #              straddling an upgrade hold different denominators with nothing on disk
+    #              changed -- measured on a real home, two new WARN checks alone fell raw
+    #              83 -> 82 while the capped score held. The weight half closes a second,
+    #              subtler hole an adversarial pass found in this task's first attempt: an
+    #              id-only hash cannot see a single check's SEVERITY re-tune between two
+    #              runs (data-dependent for some checks, e.g. B171) even though the tuned
+    #              figure moves -- see `_raw_score_scope` (monitordims/_score.py) for the
+    #              concrete repro.
+    #   raw_ver    the build, kept as a second, independent witness alongside the weighted
+    #              scope hash rather than replaced by it.
+    #
+    # C-469 added two more, `raw_earned`/`raw_total` -- `ScoreResult.earned`/`.total`
+    # (B-505), the exact figures `raw_score` is ROUNDED from. `raw_score` alone cannot show
+    # a fall smaller than its own rounding (about 4 of ~407 weight units on a real
+    # machine); `raw_backstop` (monitordims/_shared.py) reads these two to catch one, and
+    # is sound doing so only because the scope hash above now also pins per-check weight —
+    # see that function's own docstring.
     #
     # `assessable` is not decoration: `compute([])` returns `assessable=False, raw_score=0,
     # graded=True`, so a run that found nothing would otherwise publish `raw 0` as a
@@ -213,6 +225,8 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
     # caller that cannot supply `findings` or `version` writes no triple at all, and the
     # row is simply not comparable -- which is the honest outcome, not a silent zero.
     _raw = getattr(score, "raw_score", None)
+    _earned = getattr(score, "earned", None)
+    _total = getattr(score, "total", None)
     raw_fields = {}
     if (graded and getattr(score, "assessable", True) and findings is not None
             and version and isinstance(_raw, int) and not isinstance(_raw, bool)):
@@ -221,6 +235,14 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
             "raw_scope": _raw_score_scope(findings),
             "raw_ver": str(version),
         }
+        # C-469: independently gated. A caller that supplies findings/version but records
+        # through a score object with no `.earned`/`.total` (the same 13 duck-typed test
+        # call sites the paragraph above names) still gets the classic triple; it just
+        # cannot refine the comparison this run. Same bool exclusion as `_raw`'s own check.
+        if (isinstance(_earned, (int, float)) and not isinstance(_earned, bool)
+                and isinstance(_total, (int, float)) and not isinstance(_total, bool)):
+            raw_fields["raw_earned"] = _earned
+            raw_fields["raw_total"] = _total
     # TAIL position, after `_schema` and the ungraded marker: the seven-key graded prefix
     # stays byte-identical, and `_rotate_journal` re-emits each parsed row in its own
     # insertion order, so the position survives every rotation. Inside the hashed payload
@@ -378,6 +400,11 @@ def load_with_problem(path: str = DEFAULT_HISTORY) -> "tuple[HistoryRows, OSErro
             row["raw_score"] = obj.get("raw_score")
             row["raw_scope"] = obj.get("raw_scope")
             row["raw_ver"] = obj.get("raw_ver")
+            # C-469: same carried-through, never-defaulted idiom as the triple above --
+            # absent on a row this build did not write (or one whose score object had no
+            # `.earned`/`.total`) simply means `raw_backstop` cannot refine that pair.
+            row["raw_earned"] = obj.get("raw_earned")
+            row["raw_total"] = obj.get("raw_total")
             rows.append(row)
     except OSError as exc:
         return HistoryRows(), exc
@@ -591,10 +618,11 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
             # `state.json` is single-slot and pinned to one subject by `--state`; a
             # `history.jsonl` is an append-only timeline behind ONE default path for every
             # `--home`, so two rows can describe different machines. Hence `home` and
-            # `raw_ver` on top of the scope hash: the hash is over check IDs while
-            # raw_score is severity-WEIGHTED, so a severity re-tune moves the figure with
-            # the hash byte-identical. `source` keeps a `test`-tagged row -- the suite
-            # appends thousands into the real store -- from corroborating a real one.
+            # `raw_ver` on top of the scope hash, kept as an independent second witness
+            # even though the hash itself is now weight-aware (C-469: `id:weight` pairs,
+            # not just `id` -- see `_raw_score_scope`, monitordims/_score.py). `source`
+            # keeps a `test`-tagged row -- the suite appends thousands into the real store
+            # -- from corroborating a real one.
             #
             # Presence BEFORE equality, and a legacy row (no figure at all) counts as not
             # comparable rather than as agreement: inventing a baseline from `score` would
@@ -610,8 +638,12 @@ def render_trend(rows: list[dict], ascii_only: bool = False,
                     and _prev.get("source") in ("audit", "view")
                     and _curr.get("source") in ("audit", "view")
                 )
+                # C-469: the extra pair lets the backstop see a fall smaller than
+                # raw_score's own rounding -- sound here for the identical reason it is
+                # sound in the monitor: the scope hash above now pins per-check weight, so
+                # equal scope already proves equal `total`. See `raw_backstop`'s docstring.
                 _verdict, _p_raw, _c_raw = raw_backstop(
-                    _prev, _curr, "raw_scope", "raw_score")
+                    _prev, _curr, "raw_scope", "raw_score", "raw_earned", "raw_total")
                 if _same_subject and _verdict == RAW_DEGRADED:
                     # Stated ONLY on a fall. RAW_HELD is deliberately not rendered as
                     # "unchanged": raw_score is a rounded percentage over ~407 weight

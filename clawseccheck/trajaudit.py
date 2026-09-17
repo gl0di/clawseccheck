@@ -125,7 +125,7 @@ import json
 import re
 from pathlib import Path
 
-from . import canary, multiturn
+from . import canary, multiturn, trajectorystore
 from .checks import _CRED_RE, _EXFIL_RE, _SECRET_PATH_RE, correlation_indicators
 from .ledger import load_ledger
 from .logsafe import redact
@@ -832,6 +832,12 @@ def self_test_corroboration(home, *, explicit_path: str | None = None,
     * ``present`` — any trajectory sidecar found (same shape as ``analyze()``'s meta).
     * ``files_scanned`` / ``unknown_version`` / ``truncated`` / ``files_total`` /
       ``files_capped`` — same meaning as ``analyze()``'s meta.
+    * ``trajectory_locator_stale`` / ``trajectory_corroboration_evidence`` (F-187/B-816) —
+      set only when ``present`` is False, the ordinary home-wide glob was used (no
+      ``explicit_path``), and ``trajectorystore.corroborate()`` finds real trajectory
+      evidence in a container the classic JSONL locator does not glob (SQLite rows, a
+      dangling pointer target, an import-archive entry) — same two keys, same meaning, as
+      ``behavioral.analyze()``'s result carries for the identical situation.
     * ``sources`` — ``{"canary": {...}, "multiturn": {...}}``, each:
         - ``administered`` (LOW-FP leg) — the source's token prefix appeared in at least
           one ``prompt.submitted.data.prompt`` — local evidence the payload was actually
@@ -892,6 +898,14 @@ def self_test_corroboration(home, *, explicit_path: str | None = None,
         result["files_total"] = stats.get("files_total", 0)
         result["files_capped"] = stats.get("files_capped", False)
     if not files:
+        # F-187/B-816: same corroboration `analyze()`/`render_trajectory_analysis` already
+        # run for the "nothing found" case — only meaningful for the ordinary home-wide
+        # glob (an explicit --analyze-trajectory --path names one file; B-683/B-686 already
+        # own reporting why THAT path could not be read).
+        if not explicit_path and isinstance(home, Path):
+            corro = trajectorystore.corroborate(home)
+            result["trajectory_locator_stale"] = corro.locator_stale
+            result["trajectory_corroboration_evidence"] = corro.evidence
         return result
     result["present"] = True
 
@@ -959,10 +973,25 @@ def render_self_test_corroboration(home, *, explicit_path: str | None = None,
         "not close it:",
     ]
     if not r["present"]:
-        lines.append(
-            f"  {q} The local ledger shows a self-test capability was run, but no "
-            "trajectory sidecar was found to corroborate it — UNKNOWN, not an all-clear."
-        )
+        if r.get("trajectory_locator_stale"):
+            # F-187/B-816: real evidence elsewhere (SQLite rows, a dangling pointer
+            # target, an import-archive entry) — a stale locator, not an agent that
+            # never ran, so this stays a WARN rather than the neutral "no sidecar" note.
+            evidence = r.get("trajectory_corroboration_evidence") or ()
+            lines.append(
+                f"  {warn} The local ledger shows a self-test capability was run, but no "
+                "trajectory sidecar was found at the current locator path "
+                "(agents/*/sessions/*.trajectory.jsonl) — however, this agent's "
+                "trajectory history exists elsewhere: " + "; ".join(evidence) + ". This "
+                "corroborator needs the live sidecar format and cannot read these "
+                "containers yet — the locator is stale, not this agent having never "
+                "run; corroboration remains UNKNOWN, not an all-clear."
+            )
+        else:
+            lines.append(
+                f"  {q} The local ledger shows a self-test capability was run, but no "
+                "trajectory sidecar was found to corroborate it — UNKNOWN, not an all-clear."
+            )
         return lines
 
     if r["unknown_version"]:
@@ -1061,9 +1090,30 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
                          "named — not about this host, and not evidence that the file is "
                          "empty.")
         else:
-            lines.append(f"  {q} No trajectory sidecars found "
-                         "(agents/*/sessions/*.trajectory.jsonl). Nothing to analyze — run on a "
-                         "host where an OpenClaw agent has produced session trajectories.")
+            # F-187/B-816: "no trajectory sidecars found" is the same observation whether
+            # this agent never ran a session, or whether its trajectory history moved to a
+            # container this locator does not glob (OpenClaw's JSONL-to-SQLite migration).
+            # Only meaningful for the ordinary home-wide glob — an explicit_path problem
+            # (handled above) is the USER's own path, not the host's, and trajectorystore's
+            # home-wide corroboration does not apply to it (same guard behavioral.py uses).
+            corro = None
+            if not explicit_path:
+                _home = getattr(ctx, "home", None)
+                if isinstance(_home, Path):
+                    corro = trajectorystore.corroborate(_home)
+            if corro is not None and corro.status == trajectorystore.STATUS_LOCATOR_STALE:
+                lines.append(
+                    f"  {warn} No trajectory sidecars found at the current locator path "
+                    "(agents/*/sessions/*.trajectory.jsonl), but this agent's trajectory "
+                    "history exists elsewhere: " + "; ".join(corro.evidence) + ". This "
+                    "analyzer needs the live sidecar format and cannot read these "
+                    "containers yet — this tool's locator is stale, not this agent having "
+                    "never run."
+                )
+            else:
+                lines.append(f"  {q} No trajectory sidecars found "
+                             "(agents/*/sessions/*.trajectory.jsonl). Nothing to analyze — run on a "
+                             "host where an OpenClaw agent has produced session trajectories.")
         lines.extend(render_self_test_corroboration(
             getattr(ctx, "home", None), explicit_path=explicit_path, ascii_only=ascii_only,
             ledger_home=ledger_home, ledger_path=ledger_path, ctx=ctx))

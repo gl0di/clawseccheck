@@ -649,7 +649,28 @@ _AUTH_PROFILE_TABLES_DIFFERENT_DB = (
     "never reaches it (see that test file's own module docstring), but there is no vendor "
     "comparison possible for it within this file's scope."
 )
-
+_TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB = (
+    "trajectory_runtime_events (F-187) lives in the PER-AGENT database "
+    "(agents/<agent>/agent/openclaw-agent.sqlite), never in the state database "
+    "(state/openclaw.sqlite) this snapshot/registry classifies -- same reasoning as "
+    "_AUTH_PROFILE_TABLES_DIFFERENT_DB, for the table that database actually holds "
+    "trajectory evidence in. The original declaration "
+    "(tests/test_f187_trajectory_sqlite_corroborator.py:83) is an f-string "
+    "(f\"CREATE TABLE {table} (...)\"), so the AST-constant extractor above does not see "
+    "it -- these two are plain string-literal copies (B-810/B-811/B-813), each pinned to "
+    "the exact column shape trajectorystore.TRAJECTORY_TABLE_NAME / "
+    "_SELECT_TRAJECTORY_ROWS actually reads, matching test_f187's own DDL verbatim."
+)
+_CRON_JOBS_NO_CONSTRAINTS_LEGACY = (
+    "C-476: same 15 column NAMES/types/order as the real cron_jobs (store_key, job_id, "
+    "declaration_key, owner_agent_id, name, description, enabled, agent_id, payload_kind, "
+    "job_json, state_json, runtime_updated_at_ms, schedule_identity, sort_order, "
+    "updated_at), but with NOT NULL and the composite PRIMARY KEY(store_key, job_id) "
+    "dropped from every column the vendor constrains. The fixture's own author named the "
+    "constant `_MODERN_DDL`, but this guard's strict (name,type,notnull,pk) tuple "
+    "comparison makes it LEGACY_COLS: identical column count to the vendor, so not a "
+    "proper subset either -- the name is aspirational, not a vendor match."
+)
 _REGISTRY: "dict[str, _Entry]" = {
     # ---- fixtures/clean_b188_state_db/state/openclaw.sqlite -- the binary fixture no
     # source scanner sees. Pinned by a full fingerprint row at
@@ -661,7 +682,12 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_b168_cron_job_content.py:279": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b168_cron_job_content.py:301": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b294_cron_run_logs.py:45": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
-    "tests/test_b294_cron_run_logs.py:585": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
+    # B-813 shifted this site's line 585 -> 664; 2026-09-16 commits e308d73/46e16b1 added
+    # more lines above it, shifting it again to 727 -- same _CRON_JOBS_PARTITIONED_DDL
+    # constant, same classification, key renamed to match.
+    "tests/test_b294_cron_run_logs.py:727": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
+    "tests/test_b168_truncation_gates_pass.py:31": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
+    "tests/test_b819_cron_dormant_payload.py:250": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b709_cron_state_db_shapes.py:43": _Entry(
         LEGACY_COLS,
         "an intermediate cron_jobs shape (store_key/job_id/declaration_key/owner_agent_id/"
@@ -721,8 +747,11 @@ _REGISTRY: "dict[str, _Entry]" = {
         "exercise the 'neither generation matches' negative path -- never meant to "
         "resolve against any real subagent_runs shape.",
     ),
-    "tests/test_b709_cron_run_logs_shapes.py:238": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
-    "tests/test_b709_cron_state_db_shapes.py:280": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
+    # Both keys below shifted (238 -> 248, 280 -> 296) when later commits added lines
+    # earlier in each file -- same single `unrelated_table (x TEXT)` decoy, key renamed
+    # to match; verified exactly one such site remains in each file.
+    "tests/test_b709_cron_run_logs_shapes.py:248": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
+    "tests/test_b709_cron_state_db_shapes.py:296": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
     "tests/test_b709_subagent_runs_shapes.py:274": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
 
     # ---- task_runs (B709) ----
@@ -733,11 +762,59 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_b354_b725_skill_library_reachability.py:46": _Entry(MODERN),
 
     # ---- auth_profile_store / auth_profile_state (F-187, per-agent DB, different file) ----
-    "tests/test_f187_trajectory_sqlite_corroborator.py:94": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:101": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # B-811 (Option A) shifted both lines below (94->102, 101->109) by extending
+    # _add_agent_db()'s docstring/loop above them -- same DDL, keys renamed to match.
+    "tests/test_f187_trajectory_sqlite_corroborator.py:102": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:109": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # B-811 (Option A): a second auth_profile_store fixture, this one in
+    # _write_agent_sqlite_db()'s own `auth_secret=` branch (the isolation test for the
+    # new event_json-reading reader) -- same per-agent-DB reasoning as the two above.
+    "tests/test_b185_compiled_tool_poisoning.py:114": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # B-811 (adversarial review, 2026-09-15): two more, each a standalone fixture (not
+    # via _add_agent_db) in a test proving _table_kind refuses a VIEW named
+    # trajectory_runtime_events that reads FROM this table -- same per-agent-DB
+    # reasoning as every other entry in this section.
+    "tests/test_f187_trajectory_sqlite_corroborator.py:470": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:796": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # B-811 round 3/4 (2026-09-15): `_plant_generated_column_bypass`'s own standalone
+    # fixture -- the GENERATED ALWAYS AS bypass the round-3 review found (a real table,
+    # not a VIEW/virtual table, so a different attack shape but the same per-agent-DB
+    # isolation reasoning as every other entry in this section).
+    "tests/test_f187_trajectory_sqlite_corroborator.py:514": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # B-811 round 4 (2026-09-15): `test_compiled_tool_reader_refuses_a_rootpage_
+    # aliased_table`'s own standalone fixture -- round 2's rootpage-uniqueness check,
+    # given real `PRAGMA writable_schema` behavioural coverage for the first time
+    # (round 4's own adversarial review found it had none).
+    "tests/test_f187_trajectory_sqlite_corroborator.py:619": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # B-811 round 3/4 (2026-09-15): the same generated-column bypass fixture, built
+    # standalone (not via _plant_generated_column_bypass, which lives in the sibling
+    # test file) for the CHECK-level end-to-end test.
+    "tests/test_b185_compiled_tool_poisoning.py:513": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+
+    # ---- trajectory_runtime_events (F-187, per-agent DB, different file) ----
+    # B-813/B-811: plain-string-literal copies of test_f187's own f-string DDL (invisible
+    # to the AST extractor -- see _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB's own comment).
+    "tests/test_b294_cron_run_logs.py:62": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    # B-811 (Option A) shifted this line (91->101) by extending _write_agent_sqlite_db()
+    # to accept a real event dict per row -- same DDL, key renamed to match.
+    "tests/test_b185_compiled_tool_poisoning.py:101": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    # B-811 (adversarial review, 2026-09-15): two standalone fixtures (not via
+    # _add_agent_db) in the DoS-bound regression tests -- same DDL, same reasoning.
+    "tests/test_f187_trajectory_sqlite_corroborator.py:920": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:970": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+
+    # ---- cron_jobs (C-476 payload-extras fixture -- vendor column set, no constraints) ----
+    "tests/test_c476_cron_payload_extras.py:58": _Entry(LEGACY_COLS, _CRON_JOBS_NO_CONSTRAINTS_LEGACY),
+
+    # ---- update_runs (F-192, real vendor table, snapshot not yet re-baselined) ----
+    # 2026-09-17: re-baselined the snapshot (was last regenerated 2026-09-12, commit
+    # 28322d5, four days before this fixture landed 2026-09-16, commit b9898b0) --
+    # update_runs is a real, current vendor table (state schema v15+, 2026.9.2) that
+    # genuinely matches the vendor shape now that the snapshot actually carries it.
+    "tests/test_f192_update_runs.py:30": _Entry(MODERN),
 }
 
-assert len(_REGISTRY) == 40, f"registry has {len(_REGISTRY)} entries, expected 40"
+assert len(_REGISTRY) == 54, f"registry has {len(_REGISTRY)} entries, expected 54"
 
 
 # ========================================================================================
@@ -1126,6 +1203,17 @@ _RETIRED_TABLES_STILL_READ = {
     "installed_plugin_index": _INSTALLED_PLUGIN_INDEX_RETIRED,
 }
 
+# B-811: a SEPARATE, honestly-named exemption from _RETIRED_TABLES_STILL_READ, not a
+# member of it -- `sqlite_master` was never a vendor APPLICATION table to begin with,
+# so calling it "retired" would be a false claim about something that was never true.
+# It is SQLite's own built-in system catalog, present unconditionally in every SQLite
+# file the engine has ever produced, completely independent of what
+# OPENCLAW_STATE_SCHEMA_SQL declares in any version. trajectorystore.py's
+# `_table_kind()` (added 2026-09-15, adversarial review of B-811) queries it to
+# distinguish a real TABLE from a VIEW before trusting a name -- see that function's
+# own docstring for why the check exists.
+_SQLITE_BUILTIN_CATALOG_TABLES = {"sqlite_master"}
+
 _VENDOR_TABLES_HEADER = """\
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
@@ -1257,11 +1345,16 @@ def test_every_state_table_clawseccheck_reads_is_declared_by_the_vendor():
     for their fixtures.
     """
     _, names = _read_vendor_table_baseline()
-    unknown = sorted(_clawseccheck_read_tables() - set(names) - set(_RETIRED_TABLES_STILL_READ))
+    unknown = sorted(
+        _clawseccheck_read_tables() - set(names) - set(_RETIRED_TABLES_STILL_READ)
+        - _SQLITE_BUILTIN_CATALOG_TABLES
+    )
     assert not unknown, (
         f"clawseccheck/ SELECTs from table(s) the vendor schema does not declare: "
         f"{unknown}. Either the vendor retired them -- register them in "
-        f"_RETIRED_TABLES_STILL_READ with the evidence -- or the reader is misspelled."
+        f"_RETIRED_TABLES_STILL_READ with the evidence -- or it is a SQLite built-in "
+        f"system table (register it in _SQLITE_BUILTIN_CATALOG_TABLES instead) -- or "
+        f"the reader is misspelled."
     )
 
 

@@ -505,7 +505,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - config: `browser.extraArgs` - remove --remote-allow-origins; keep browser.cdpUrl and every profile cdpUrl on loopback
 
-### B321 - browser.executablePath / profiles.*.executablePath / mcpCommand
+### B321 - browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs
 
 - Severity: HIGH
 - Block: hardening
@@ -513,7 +513,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: yes
 - Confidence: HIGH
 - OWASP: none
-- What it checks: browser.executablePath / profiles.*.executablePath / mcpCommand
+- What it checks: browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs
 - Remediation:
   - none
 
@@ -1875,6 +1875,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B381 - Secret-shaped value at an OpenClaw-redactor-blind config path
+
+- Severity: MEDIUM
+- Block: advisory
+- Framework: Secrets / Redaction Blind Spot
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Secret-shaped value at an OpenClaw-redactor-blind config path
+- Remediation:
+  - none
+
 ### C047 - Non-local MCP server endpoint (manual review)
 
 - Severity: LOW
@@ -1968,6 +1980,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: MEDIUM
 - OWASP: LLM06 Excessive Agency, LLM10 Unbounded Consumption
 - What it checks: Systemd user-unit Restart=always persistence (OpenClaw-related)
+- Remediation:
+  - none
+
+### B379 - Host-level scheduled persistence (cron/systemd timer) naming OpenClaw
+
+- Severity: LOW
+- Block: advisory
+- Framework: Persistence / Host Watch
+- Scored: no
+- Confidence: MEDIUM
+- OWASP: none
+- What it checks: Host-level scheduled persistence (cron/systemd timer) naming OpenClaw
 - Remediation:
   - none
 
@@ -2080,6 +2104,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: none
 - What it checks: Hooks enable-toggle attack-surface inventory (hooks.enabled / hooks.internal.load.extraDirs)
+- Remediation:
+  - none
+
+### B380 - hooks.mappings[].transform.module — config-loaded code run on messages
+
+- Severity: LOW
+- Block: advisory
+- Framework: Persistence / Supply-Chain Tamper
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: hooks.mappings[].transform.module — config-loaded code run on messages
 - Remediation:
   - none
 
@@ -2683,6 +2719,20 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
+### B378 - agents.*.cwd relocates the task/exec working directory outside the workspace
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Sandbox
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: agents.*.cwd relocates the task/exec working directory outside the workspace
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.
@@ -2933,7 +2983,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
   Set channels.<provider>.contextVisibility (or channels.defaults) to 'allowlist' or
   'allowlist_quote', and set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false
   with an explicit browser.ssrfPolicy.allowedHostnames (OpenClaw 2026.8.1 and later;
-  browser.ssrfPolicy.hostnameAllowlist before it). Breaking either leg breaks the chain.
+  browser.ssrfPolicy.hostnameAllowlist before it)... Breaking either leg breaks the chain.
 
 ### RISK-16 - Sandbox host-reach + plaintext gateway credential = control-plane takeover
 

@@ -631,7 +631,7 @@ CATALOG: list[CheckMeta] = [
     # trigger surface never independently verified this session.
     CheckMeta(
         "B321",
-        "browser.executablePath / profiles.*.executablePath / mcpCommand",
+        "browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs",
         HIGH,
         "hardening",
         "Browser / SSRF",
@@ -1274,11 +1274,16 @@ CATALOG: list[CheckMeta] = [
     # lying-PASS); B-236's own adversarial review REFUTED that: OpenClaw computes the
     # effective exec policy as minSecurity(tools.exec.security, execApprovals.security)
     # + maxAsk(tools.exec.ask, execApprovals.ask) (bash-tools*.js:581-582;
-    # exec-approvals-BIKWP8_V.js:1126-1140), so a standing grant can only TIGHTEN the
-    # gate, never loosen it -- B8/B22/B23/B48's PASS was already correct. This check is
-    # therefore a pure visibility/inventory advisory (WARN-only, never FAIL, scored=False):
-    # it surfaces a standing grant the user may have forgotten about, it does not claim
-    # the grant defeats any other check's verdict.
+    # exec-approvals-BIKWP8_V.js:1126-1140) -- on those two TIER knobs (security/ask), a
+    # standing grant can only TIGHTEN the gate, never loosen it, so B8/B22/B23/B48's PASS
+    # was already correct. That refutation is scoped to the tier knobs ONLY (C-430): the
+    # allowlist entry's own CONTENTS are a separate axis -- an allow-always entry exists
+    # precisely to WIDEN what auto-approves, and a path-only entry (no argPattern -- the
+    # default on every non-Windows OpenClaw build, per buildArgPatternFromArgv) widens it
+    # to the WHOLE BINARY, any arguments. This check is therefore a pure visibility/
+    # inventory advisory (WARN-only, never FAIL, scored=False): it surfaces a standing
+    # grant the user may have forgotten about, it does not claim the grant defeats any
+    # other check's verdict.
     CheckMeta(
         "B172",
         "Standing exec-approvals.json allow-always grant (uninventoried persisted authority)",
@@ -2106,6 +2111,26 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="secrets",
     ),
+    # B381 (C-405): a secret-shaped value sits at a config path neither OpenClaw's own
+    # redactor nor SECRET_KEY_RE/_secret_paths (B1's own detector) recognizes --
+    # measured directly (see check_redactor_blind_secret_paths's own docstring):
+    # Authorization/bearer/bare-key key names, and a "tokens" array (SECRET_KEY_RE
+    # matches the key, but _secret_paths' own recursion loses the key/value pairing
+    # once it descends into a list). Deliberately a NEW, narrowly ANCHORED check
+    # rather than widening the shared SECRET_KEY_RE in place -- that regex also feeds
+    # B1 (scored, FAIL-capable) and logsafe.redact()'s live output path, and a bare
+    # "key" alternative there would match ordinary field names like "primaryKey"/
+    # "sortKey" as a substring. WARN-only, unscored, never FAIL.
+    CheckMeta(
+        "B381",
+        "Secret-shaped value at an OpenClaw-redactor-blind config path",
+        MEDIUM,
+        "advisory",
+        "Secrets / Redaction Blind Spot",
+        scored=False,
+        confidence="MEDIUM",
+        surface="secrets",
+    ),
     CheckMeta(
         "C047",
         "Non-local MCP server endpoint (manual review)",
@@ -2214,6 +2239,24 @@ CATALOG: list[CheckMeta] = [
     CheckMeta(
         "B150",
         "Systemd user-unit Restart=always persistence (OpenClaw-related)",
+        LOW,
+        "advisory",
+        "Persistence / Host Watch",
+        scored=False,
+        confidence="MEDIUM",
+        surface="host",
+    ),
+    # B379 (F-178): host-level scheduled persistence (systemd user *.timer / world-
+    # readable system cron) that names OpenClaw, outside openclaw.json's own `cron`
+    # block (C048 covers only that). See check_host_scheduled_persistence
+    # (checks/_host.py) for the full three-way scoping (why .service/shell_rc are
+    # excluded, why the signal is a name/content match rather than bare existence).
+    # Advisory, never FAIL — matches B150's precedent one entry up (a real host
+    # scheduling surface, legitimate infrastructure that also happens to be a
+    # persistence substrate worth disclosing).
+    CheckMeta(
+        "B379",
+        "Host-level scheduled persistence (cron/systemd timer) naming OpenClaw",
         LOW,
         "advisory",
         "Persistence / Host Watch",
@@ -2373,6 +2416,26 @@ CATALOG: list[CheckMeta] = [
         LOW,
         "advisory",
         "Attack Surface / Hook Exposure",
+        scored=False,
+        confidence="HIGH",
+        surface="hooks",
+    ),
+    # B380 (C-406): hooks.mappings[].transform.module -- a config-loaded module path
+    # OpenClaw dynamically imports and invokes on every matching message, before the
+    # agent (or any other check) ever sees it. Never FAIL: both the module path and
+    # hooks.transformsDir itself are CONFINED (resolveContainedPath/
+    # resolveOptionalContainedPath, re-verified against the installed 2026.9.4 dist --
+    # see check_hook_transform_modules's own docstring for the symbol-level
+    # grounding), so there is no path-escape vector to FAIL on. Advisory disclosure,
+    # same shape as its sibling B179 immediately above (also hooks-surface, also
+    # advisory/LOW/scored=False), escalated to MEDIUM only when the resolved
+    # transforms directory is also group/world-writable.
+    CheckMeta(
+        "B380",
+        "hooks.mappings[].transform.module — config-loaded code run on messages",
+        LOW,
+        "advisory",
+        "Persistence / Supply-Chain Tamper",
         scored=False,
         confidence="HIGH",
         surface="hooks",
@@ -3276,6 +3339,24 @@ CATALOG: list[CheckMeta] = [
         scored=False,
         confidence="MEDIUM",
         surface="skills",
+    ),
+    # B378: agents.defaults.cwd / agents.entries.<id>.cwd — new
+    # in OpenClaw 2026.9.1, grounded against the installed 2026.9.4 dist's zod schema
+    # (AgentDefaultsSchema / AgentEntryBaseSchema both carry a plain `cwd:
+    # string().optional()` sibling to `workspace`). See
+    # check_agent_cwd_relocation (checks/_capability.py) for the full
+    # resolveAgentRunCwd / resolveAttemptWorkspaceSandbox grounding. MEDIUM severity,
+    # hardening/scored — a real reach-widening signal, not merely informative, but
+    # the WARN-only design (never FAIL) reflects that the check cannot prove
+    # relocation against OpenClaw's full implicit-workspace fallback chain, only
+    # against an EXPLICITLY declared workspace (see the check's own docstring).
+    CheckMeta(
+        "B378",
+        "agents.*.cwd relocates the task/exec working directory outside the workspace",
+        MEDIUM,
+        "hardening",
+        "Least Privilege / Sandbox",
+        surface="agents",
     ),
 ]
 

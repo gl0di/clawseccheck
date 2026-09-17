@@ -222,6 +222,11 @@ def _num(snap: dict, key: str, default: int = 0) -> "int | float":
 # would be making the same false claim this function exists to stop, one resolution step
 # down. A fall is sound in the other direction: same scope and same weights means the same
 # denominator, so raw fell only if earned fell.
+#
+# C-469 closed that resolution floor rather than just documenting it, by comparing the
+# exact `earned` figure (not the rounded `raw_score` percentage) when both records hold
+# it — see `raw_backstop`'s own docstring for the mechanism, and `_raw_score_scope` in
+# `monitordims/_score.py` for the scope-hash change that is what makes it sound.
 RAW_DEGRADED = "raw_degraded"
 RAW_HELD = "raw_held"
 RAW_NO_SCOPE = "raw_no_scope"
@@ -229,19 +234,73 @@ RAW_SCOPE_MOVED = "raw_scope_moved"
 RAW_NO_FIGURE = "raw_no_figure"
 
 
-def raw_backstop(prev: dict, curr: dict, scope_key: str,
-                 score_key: str) -> "tuple[str, object, object]":
+def raw_backstop(prev: dict, curr: dict, scope_key: str, score_key: str,
+                 earned_key: str, total_key: str) -> "tuple[str, object, object]":
     """``(verdict, prev_raw, curr_raw)`` — see the RAW_* constants above.
 
     The key names are REQUIRED POSITIONAL arguments, with no defaults, for two reasons. The
     two stores spell them differently and neither spelling is worth migrating — the
-    monitor's snapshot has said `raw_score_scope` since C-135, and `history.jsonl` is an
-    append-only hash-chained file whose existing rows cannot be rewritten. And a default
-    would hide the key from `tests/test_c417_snapshot_enablers.py`, which derives the set of
-    snapshot keys this subsystem reads by finding literals AT THE CALL SITE: a default is a
-    read the manifest guard cannot see, which is exactly the blindness that guard exists to
-    prevent. Naming the spelling where the call is made keeps it visible to the guard and to
-    the next reader at the same time.
+    monitor's snapshot has said `raw_score_scope`/`raw_score_earned`/`raw_score_total` since
+    C-135/C-469, and `history.jsonl` is an append-only hash-chained file whose existing rows
+    cannot be rewritten (it spells the same triple `raw_scope`/`raw_earned`/`raw_total`).
+    And a default would hide the key from `tests/test_c417_snapshot_enablers.py`, which
+    derives the set of snapshot keys this subsystem reads by finding literals AT THE CALL
+    SITE: a default is a read the manifest guard cannot see, which is exactly the blindness
+    that guard exists to prevent. Naming the spelling where the call is made keeps it
+    visible to the guard and to the next reader at the same time.
+
+    C-469: `prev`/`curr` under `earned_key`/`total_key` refine, never override, the rounded
+    `score_key` comparison — `p_raw`/`c_raw` in the return are ALWAYS the `score_key`
+    figures (what callers already render), and the two extra keys can only turn a rounded
+    RAW_HELD into a RAW_DEGRADED, never the reverse. That asymmetry is deliberate: the
+    rounded comparison is never wrong when it already says DEGRADED (a percentage that fell
+    reflects a real earned fall), it can only fail to notice one that rounded away.
+
+    The refinement fires only when ALL of these hold, and skips (falls back to the rounded
+    comparison) otherwise — the same self-healing, absent-is-a-no-op idiom as the scope
+    check above, never a fabricated figure:
+
+    * both records carry a real number under `earned_key` and under `total_key`
+      (`_num_or_none`, so a corrupted or duck-typed record cannot compare as if it held one);
+    * the two `total_key` figures are EXACTLY equal. This is a second, cheap witness of what
+      the scope-hash equality above already implies (see `_raw_score_scope`'s C-469 update:
+      the hash is now over `id:weight` pairs, so identical scope PROVES identical per-check
+      weight and therefore identical `total`) — kept as a belt-and-suspenders check rather
+      than trusted on faith, since it costs one float comparison and the alternative is
+      trusting a 16-hex-char hash never collided;
+    * `total_key`'s figure is `> 0` (an empty denominator has no ratio to compare).
+
+    Given all three, `earned_key` falling IS a genuine posture regression: pinned equal
+    weights per check means a fallen numerator can only come from a check's own status
+    moving (PASS->WARN, WARN->FAIL, PASS->FAIL), never from a re-tuned severity — which is
+    exactly the class of false positive an independent adversarial pass found in this
+    task's first attempt, when the scope hash was still id-only and `earned` was compared
+    with only `total` equality (not also weight-per-check equality) as its guard. See the
+    C-469 comment on `_raw_score_scope` for the concrete two-check repro that broke that
+    version.
+
+    C-135 (independent, post-commit): this refinement's own "additive, never the reverse"
+    guarantee is LOCAL — it holds only once the scope check above has already agreed the
+    two runs are comparable. It is NOT a soundness claim about the function as a whole. The
+    id:weight scope hash (this function's own precondition) can itself now return
+    RAW_SCOPE_MOVED for a run where a real regression also happened to occur, whenever an
+    unrelated check's weight was ALSO retuned in the same window — e.g. check A goes
+    MEDIUM->LOW (unrelated, stays PASS) while check B genuinely regresses PASS->FAIL (weight
+    unchanged): raw_score itself falls (100 -> 50 in a constructed two-check repro), but
+    because A's weight changed, the scope hash differs and this function returns
+    RAW_SCOPE_MOVED before ever comparing `score_key` — the real fall is never reported, not
+    merely reported at reduced confidence. This is not new: RAW_SCOPE_MOVED already meant
+    "an unrelated denominator change means the comparison cannot be trusted" for every
+    check-SET change before C-469 (see the RAW_* docstring above — "it grows with every
+    release, ... two new WARN checks alone fell raw 83 -> 82 with nothing on disk changed").
+    C-469 only widened which changes count as "the denominator moved" to include a
+    per-check WEIGHT change, not only its ID set — and reopening that comparison instead
+    would reopen the exact false-DEGRADED bug C-469 exists to close, since a raw_score fall
+    that partly (or wholly) traces to a legitimate retune cannot be told apart from one that
+    doesn't without re-deriving which portion of the delta each cause explains. Accepted as
+    the same fail-toward-silence tradeoff this whole function already makes elsewhere, not
+    a defect — recorded here so it is not mistaken for a soundness gap in THIS refinement
+    specifically.
     """
     p_scope, c_scope = prev.get(scope_key), curr.get(scope_key)
     if not (isinstance(p_scope, str) and isinstance(c_scope, str)):
@@ -252,4 +311,13 @@ def raw_backstop(prev: dict, curr: dict, scope_key: str,
     c_raw = _num_or_none(curr, score_key)
     if p_raw is None or c_raw is None:
         return RAW_NO_FIGURE, p_raw, c_raw
-    return (RAW_DEGRADED if c_raw < p_raw else RAW_HELD), p_raw, c_raw
+    degraded = c_raw < p_raw
+    if not degraded:
+        p_earned, c_earned = _num_or_none(prev, earned_key), _num_or_none(curr, earned_key)
+        p_total, c_total = _num_or_none(prev, total_key), _num_or_none(curr, total_key)
+        if (p_earned is not None and c_earned is not None
+                and p_total is not None and c_total is not None
+                and p_total == c_total and p_total > 0
+                and c_earned < p_earned):
+            degraded = True
+    return (RAW_DEGRADED if degraded else RAW_HELD), p_raw, c_raw

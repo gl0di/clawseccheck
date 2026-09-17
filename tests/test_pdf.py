@@ -237,6 +237,68 @@ def test_non_ascii_detail_never_crashes_and_is_transliterated():
         assert "evil" in text
 
 
+def _bare_flow():
+    """A minimal `_PageFlow`, built the same way `render_pdf` itself builds one — for a
+    DIRECT unit test of `.line()`, which every existing caller reaches only through
+    `_finding_block`/`wrapped()`/etc, and every one of those callers already
+    pre-sanitizes its text before calling `.line()` (see e.g. `_finding_block`'s own
+    `_sanitize(f.title)` ahead of `flow.line(...)`). That means a test driving hostile
+    content through any real caller cannot tell whether `.line()`'s OWN
+    sanitize -> ascii-safe step is load-bearing, or just redundant with the caller's —
+    which is exactly how B-771 found `.line()` uncovered: mutating it away left the
+    whole suite green. Calling `.line()` directly removes that confound."""
+    from clawseccheck import pdf as pdf_module
+
+    doc = pdf_module._PdfDoc()
+    font_helv = doc.add_object(
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+    font_bold = doc.add_object(
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>")
+    return pdf_module, pdf_module._PageFlow(doc, font_helv, font_bold)
+
+
+def test_line_sanitises_a_hostile_string_directly():
+    """B-771: `_PageFlow.line()`'s docstring claims the same sanitize -> ascii-safe ->
+    pdf-literal-escape pipeline `text_abs()` uses (both true), but unlike `text_abs()` —
+    covered by tests/test_b560_self_exclusion_on_every_surface.py's hostile-skill-name
+    guard — nothing exercised `.line()`'s own copy of that pipeline directly. ESC/BEL
+    are the same two control bytes that guard measured leaking through the OTHER
+    (previously unguarded) path, chosen here for direct comparability.
+    """
+    _pdf_module, flow = _bare_flow()
+    # Space-delimited around each control byte: `_sanitize`'s ANSI/OSC stripper treats
+    # an unrecognised ESC as "ESC + one following character" (a generic two-byte escape
+    # sequence, not just the CSI/OSC shapes) and removes BOTH -- so ESC glued directly
+    # onto "RED" would eat the leading R and make the non-vacuity check below fragile
+    # for the wrong reason. This still carries the same two hostile bytes B-560's own
+    # probe measured leaking through the other (previously unguarded) path.
+    hostile = "evil \x1b RED \x07 skill"  # ESC, BEL
+    flow.line(hostile, size=10)
+    drawn = "\n".join(flow._page_ops)
+
+    assert "\x1b" not in drawn and "\x07" not in drawn, (
+        f"line() drew a raw control character into the content stream: {drawn!r}")
+    # Non-vacuity: the safe remainder was really drawn, not silently dropped -- an
+    # empty/broken render must not pass this test by having nothing to search.
+    assert "evil" in drawn and "RED" in drawn and "skill" in drawn, drawn
+
+    # Mutation control (this repo's own "a control that cannot fail controls nothing"
+    # standard): reproduce line()'s content-stream append with the
+    # sanitize -> ascii-safe step removed -- pdf-literal-escape is kept, because that
+    # part is a PDF SYNTAX requirement (unescaped parens corrupt the stream), not a
+    # security control -- and confirm the SAME assertion above would have caught it.
+    pdf_module, unsanitised_flow = _bare_flow()
+    safe = pdf_module._pdf_literal(hostile)
+    unsanitised_flow._page_ops.append(
+        f"BT /F1 10 Tf 0.000 0.000 0.000 rg "
+        f"1 0 0 1 {pdf_module._MARGIN:.2f} {unsanitised_flow.y:.2f} Tm ({safe}) Tj ET"
+    )
+    mutated_drawn = "\n".join(unsanitised_flow._page_ops)
+    assert "\x1b" in mutated_drawn and "\x07" in mutated_drawn, (
+        "mutation control failed to reproduce the leak -- this test would pass even "
+        "with line()'s own sanitisation removed, so it proves nothing")
+
+
 def test_long_unbroken_token_is_hard_split_not_dropped():
     long_token = "x" * 500  # e.g. a very long path/URL with no spaces to wrap on
     f = _finding("B1", WARN, detail=f"see {long_token} for details")
@@ -288,6 +350,7 @@ _CARD_TO_PDF_BLOCK = {
     "RISK Chains": "RISK chains",
     "Behavioural": "Behavioural",
     "Second opinion (advisory)": "Second opinion (advisory)",
+    "Coverage page": "Coverage page",
     "Worth a glance": "Worth a glance",
 }
 # Card-only sections: the chat card's own furniture, never PDF pipeline blocks.
@@ -352,3 +415,41 @@ def test_coverage_block_header_is_not_drawn_twice():
     findings = [_finding("B1", FAIL)]
     text = _content_text(render_pdf(findings, compute(findings)))
     assert text.count("Coverage of OpenClaw surfaces") == 1
+
+
+# ---------------------------------------------------------------------------
+# B-761: the PDF discloses what it omits, rather than silently dropping it
+# ---------------------------------------------------------------------------
+
+def test_standalone_pdf_discloses_it_omits_risk_chains_and_next_actions():
+    """A bare `--pdf` (no `risk=` supplied) renders no RISK-chains/next-actions/
+    capability-graph section at all — proven by today's code before this fix: the
+    document said nothing about the gap. It must now say so on its own first page."""
+    findings = [_finding("B1", FAIL)]
+    text = _content_text(render_pdf(findings, compute(findings)))
+    assert "findings-only view" in text
+    assert "Highest-risk paths" in text
+    assert "capability graph" in text
+    # Word-wrapped across two Tj text-showing ops at this string's fixed length — a
+    # contiguous "What you can do next" substring would not survive the wrap, so
+    # assert on the half either side of the break instead.
+    assert '"What you' in text
+    assert 'can do next" recommendations' in text
+
+
+def test_full_pdf_with_risk_still_discloses_the_still_missing_sections():
+    """The richer `--dashboard --full --pdf` document (RISK chains included via
+    `risk=`) never renders a capability graph or next-actions section — it must
+    still disclose THOSE, but must not call itself a bare findings-only view once
+    RISK chains are actually present (that would be a false claim about a document
+    that carries them)."""
+    class _RiskPath:
+        id, severity = "RISK-01", CRITICAL
+        title, why = "chain title", "chain why"
+        chain = ["untrusted input", "exec"]
+
+    findings = [_finding("B1", FAIL)]
+    text = _content_text(render_pdf(findings, compute(findings), risk=[_RiskPath()]))
+    assert "capability graph" in text
+    assert "What you can do next" in text
+    assert "findings-only view" not in text

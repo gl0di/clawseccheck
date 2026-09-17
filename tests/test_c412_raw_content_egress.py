@@ -45,6 +45,7 @@ def _ctx(cfg: dict, parse_error: bool = False) -> Context:
     c = Context(home=Path("/nonexistent"))
     c.config = cfg
     c.config_parse_error = parse_error
+    c.config_found = True  # B-661: `cfg` stands for a real, found config
     return c
 
 

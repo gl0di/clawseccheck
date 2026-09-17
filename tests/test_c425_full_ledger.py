@@ -36,6 +36,7 @@ from clawseccheck import audit, cli
 from clawseccheck import pipeline as pl
 from clawseccheck.catalog import LOW, PASS, Finding
 from clawseccheck.layers import (
+    COVERAGE_PARTIAL,
     LAYER_INSTALLED_SWEEP,
     LAYER_LIVE_BEHAVIOUR,
     LAYER_LOGS_TRAJECTORIES,
@@ -188,6 +189,61 @@ class TestLogsTrajectoriesLayer:
         assert _empty_pipeline().to_ledger([]).states[LAYER_LOGS_TRAJECTORIES].not_reached == ()
         clean = [_b164("4 log/transcript sink(s) scanned; no corroborated threat signal.")]
         assert _empty_pipeline().to_ledger(clean).states[LAYER_LOGS_TRAJECTORIES].not_reached == ()
+
+    # ---------------------------------------------------------- CLAWSECCHECK-B-817
+    def test_b164_sqlite_unscanned_not_reached_parsed_from_findings(self):
+        """B164's SQLite-trajectory disclosure (checks/_egress.py) uses different
+        wording from the JSONL "not scanned" sentence above — _b164_not_reached must
+        parse it too, additively (the JSONL leg is untouched — see the sibling test
+        above)."""
+        findings = [_b164(
+            "3 log/transcript sink(s) scanned; no corroborated threat signal. "
+            "trajectory evidence exists in a SQLite-backed store this content scan "
+            "cannot read (agents/*/agent/openclaw-agent.sqlite; event_json is never "
+            "opened, by design) — 5 row(s) across 2 session(s) unexamined."
+        )]
+        ledger = _empty_pipeline().to_ledger(findings)
+        assert ledger.states[LAYER_LOGS_TRAJECTORIES].not_reached == (
+            "5 SQLite trajectory row(s) across 2 session(s) unexamined "
+            "(agents/*/agent/openclaw-agent.sqlite)",
+        )
+
+    def test_b164_sqlite_unscanned_flows_into_logs_coverage_partial(self):
+        """The SQLite disclosure must actually MOVE `logs_coverage`, not just be
+        parsed and discarded — the same PARTIAL treatment the JSONL "not scanned"
+        figure already gets once the behavioral replay ran."""
+        findings = [_b164(
+            "2 log/transcript sink(s) scanned; no corroborated threat signal. "
+            "trajectory evidence exists in a SQLite-backed store this content scan "
+            "cannot read (agents/*/agent/openclaw-agent.sqlite; event_json is never "
+            "opened, by design) — 5 row(s) across 2 session(s) unexamined."
+        )]
+        result = _empty_pipeline()
+        result.add(pl.PhaseResult(name=pl.PHASE_BEHAVIORAL, status=STATUS_RAN))
+        ledger = result.to_ledger(findings)
+        assert ledger.states[LAYER_LOGS_TRAJECTORIES].coverage == COVERAGE_PARTIAL
+        assert (
+            "5 SQLite trajectory row(s) across 2 session(s) unexamined "
+            "(agents/*/agent/openclaw-agent.sqlite)"
+        ) in ledger.states[LAYER_LOGS_TRAJECTORIES].not_reached
+
+    def test_both_b164_legs_combine_additively(self):
+        """A run that skipped JSONL sinks for time AND has unscanned SQLite evidence
+        must carry both lines — neither leg suppresses the other."""
+        findings = [_b164(
+            "3 log/transcript sinks not scanned (scan budget reached; the oldest "
+            "are left out first) — re-run with --exhaustive to include them. "
+            "trajectory evidence exists in a SQLite-backed store this content scan "
+            "cannot read (agents/*/agent/openclaw-agent.sqlite; event_json is never "
+            "opened, by design) — 5 row(s) across 2 session(s) unexamined."
+        )]
+        ledger = _empty_pipeline().to_ledger(findings)
+        not_reached = ledger.states[LAYER_LOGS_TRAJECTORIES].not_reached
+        assert "3 log/transcript sink(s) not scanned" in not_reached
+        assert (
+            "5 SQLite trajectory row(s) across 2 session(s) unexamined "
+            "(agents/*/agent/openclaw-agent.sqlite)"
+        ) in not_reached
 
 
 class TestSelfReportLayer:
@@ -467,3 +523,26 @@ class TestB164WordingIsPinnedToTheCheckThatEmitsIt:
             )
             m = pl._B164_NOT_SCANNED_RE.search(sentence)
             assert m and m.group(1) == str(n), sentence
+
+
+class TestB164SqliteWordingIsPinnedToTheCheckThatEmitsIt:
+    """CLAWSECCHECK-B-817: same pinning discipline as the JSONL sentence above, for
+    the SQLite-trajectory disclosure — _B164_SQLITE_UNSCANNED_RE parses prose that
+    checks/_egress.py's check_log_threat_hunt actually emits, so a reword of one
+    without the other must fail loudly here rather than silently going quiet."""
+
+    def test_regex_matches_the_sentence_egress_actually_emits(self):
+        egress = (
+            Path(pl.__file__).resolve().parent / "checks" / "_egress.py"
+        ).read_text(encoding="utf-8")
+        assert "row(s) across" in egress and "session(s) unexamined" in egress, (
+            "B164's SQLite-trajectory disclosure moved or was reworded — "
+            "_B164_SQLITE_UNSCANNED_RE in pipeline.py parses it, so update both together"
+        )
+        sentence = (
+            " trajectory evidence exists in a SQLite-backed store this content scan "
+            "cannot read (agents/*/agent/openclaw-agent.sqlite; event_json is never "
+            "opened, by design) — 12 row(s) across 4 session(s) unexamined."
+        )
+        m = pl._B164_SQLITE_UNSCANNED_RE.search(sentence)
+        assert m and m.group(1) == "12" and m.group(2) == "4", sentence

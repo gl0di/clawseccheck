@@ -42,6 +42,7 @@ from clawseccheck.collector import Context
 def _ctx(cfg: dict) -> Context:
     c = Context(home=Path("/nonexistent"))
     c.config = cfg
+    c.config_found = True  # B-661: `cfg` stands for a real, found config
     return c
 
 

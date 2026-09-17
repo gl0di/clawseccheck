@@ -270,37 +270,72 @@ class TestLogThreatHuntCumulativeBudget:
         assert "not scanned" in f.detail or "sink(s) scanned" in f.detail
 
     def test_exhaustive_widens_the_cumulative_budget_so_nothing_is_skipped(self, tmp_path):
-        """F-164 SC-3: real wall-clock timing is CPU-speed dependent, so this pins the
-        behavior deterministically by monkeypatching the two named ScanLimits bundles
-        limits_for(ctx) reads from — DEFAULT_LIMITS gets an artificially tiny cumulative
-        budget (forces a real skip after the first sink, regardless of machine speed),
-        EXHAUSTIVE_LIMITS keeps real generous values (already proven sufficient for 6
-        sinks by test_many_large_sinks_still_finish_within_the_check_budget above)."""
-        import dataclasses
-
-        from clawseccheck import scanbudget
+        """F-164 SC-3 / B-772: pins the cumulative-skip behavior with a scripted clock
+        instead of racing a real one. `checks/_egress.py` has exactly one `time.*` call
+        in the whole module — `time.monotonic()` at the top of check_log_threat_hunt's
+        sink loop, reading how much of the cumulative budget is left — confirmed by grep,
+        not assumed. The old version monkeypatched log_check_budget_s down to 1ms and
+        relied on that margin surviving the real gap between computing check_deadline and
+        the loop reaching sink 0's first remaining-check: a genuine wall-clock race a
+        loaded CI box could lose (landing ALL 6 sinks in the "none readable" UNKNOWN
+        branch instead of the "not scanned" cumulative-skip branch this test targets —
+        the exact failure this task was filed for). Patching `_egress`'s own `time` name
+        to a tiny scripted clock makes the outcome a fact about CALL COUNT, not elapsed
+        time: its first `monotonic()` call reports the budget intact (sink 0 is admitted
+        and scanned for real, on its own REAL per-sink deadline — already proven
+        sufficient for a sink this size by
+        test_many_large_sinks_still_finish_within_the_check_budget above), every later
+        call reports it blown (sinks 1-5 are skipped unconditionally) — true on any
+        machine at any load, independent of how long sink 0's real scan actually takes."""
+        from clawseccheck.checks import _egress
 
         home = tmp_path / ".openclaw"
         home.mkdir()
         sinks = self._sinks(tmp_path, n=6, lines_per_sink=20000)
 
-        # audit_deadline(0.0) disables the cap entirely (falsy check) rather than
-        # expiring it immediately, and a budget too close to 0 skips every sink
-        # (including the first) into the DIFFERENT "none were readable" UNKNOWN path —
-        # 1ms is enough for the deadline check ahead of sink 0 to still pass, but is
-        # blown by the time sink 0's real scan (thousands of lines) finishes, so sinks
-        # 1-5 land in the actual "not scanned" cumulative-skip path this test targets.
-        tiny_default = dataclasses.replace(
-            scanbudget.DEFAULT_LIMITS, log_check_budget_s=0.001, log_per_file_budget_s=0.001)
+        class _ScriptedClock:
+            """Stands in for `_egress`'s `time` module reference. `monotonic()` reports
+            the cumulative budget intact on its first call and blown forever after (call
+            count, not a clock); every other attribute passes through to the real `time`
+            module, so anything else this module might ever read stays real."""
+
+            def __init__(self, intact_at: float, blown_at: float) -> None:
+                self._values = (intact_at, blown_at)
+                self._calls = 0
+
+            def monotonic(self) -> float:
+                value = self._values[min(self._calls, len(self._values) - 1)]
+                self._calls += 1
+                return value
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+        # check_deadline itself is still computed by the REAL scanbudget.audit_deadline
+        # (scanbudget.py's own `time` reference is untouched by this patch, since only
+        # `_egress`'s name binding is replaced), so it is always >= `now` captured here.
+        # Reporting the loop's first read as `now` guarantees
+        # `remaining = check_deadline - now >= log_check_budget_s > 0` for sink 0
+        # regardless of real elapsed time; reporting every later read as far in the
+        # future guarantees `remaining` is negative for sinks 1-5, regardless of how fast
+        # sink 0's real scan ran.
+        now = time.monotonic()
+        clock = _ScriptedClock(intact_at=now, blown_at=now + 10_000.0)
 
         with mock.patch("clawseccheck.logdiscovery.discover_log_sinks", return_value=sinks), \
-             mock.patch.object(scanbudget, "DEFAULT_LIMITS", tiny_default):
+             mock.patch.object(_egress, "time", clock):
             ctx = Context(home=home)
             ctx.config = {}
             ctx.installed_skills = {}
             ctx.exhaustive = False
             f_default = check_log_threat_hunt(ctx)
 
+        # EXHAUSTIVE_LIMITS' real budgets (60s cumulative, 30s/sink) are already proven
+        # sufficient for 6 large sinks by
+        # test_many_large_sinks_still_finish_within_the_check_budget (which finishes in
+        # well under 7s on DEFAULT_LIMITS' smaller real budgets) — no clock control
+        # needed here, the real clock genuinely will not exhaust it.
+        with mock.patch("clawseccheck.logdiscovery.discover_log_sinks", return_value=sinks):
             ctx2 = Context(home=home)
             ctx2.config = {}
             ctx2.installed_skills = {}

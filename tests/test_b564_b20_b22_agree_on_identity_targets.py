@@ -118,6 +118,25 @@ def test_attested_path_never_renders_an_absolute_path(tmp_path, restore_modes):
     assert "SOUL.md [attested]" in got["B22"].detail, got["B22"].detail
 
 
+def test_b652_b20_attested_path_never_renders_an_absolute_path(tmp_path, restore_modes):
+    """CLAWSECCHECK-B-652 (FU-3): B20 itself had the identical defect this file's own
+    B22 fix (test_attested_path_never_renders_an_absolute_path above) already closed
+    -- `_classify_file(p, f"{p} [attested]", ...)` labelled the FULL absolute
+    attested path, which flows straight into rendered Finding evidence
+    (world_write/group_write), carrying the user's login name (§8). Fixed to label
+    by basename, mirroring B22's identical fix a few hundred lines up in the same
+    file."""
+    hidden = tmp_path / "hidden"
+    home = _write_home(tmp_path)
+    soul = _soul(hidden, 0o666)
+    restore_modes(soul)
+
+    got = _statuses(home, attestation={"paths": {"bootstrap": [str(soul)]}})
+    assert got["B20"].status == "FAIL", got["B20"].detail
+    assert str(hidden) not in got["B20"].detail, got["B20"].detail
+    assert "SOUL.md [attested]" in got["B20"].detail, got["B20"].detail
+
+
 def test_default_workspace_is_unchanged(tmp_path, restore_modes):
     """Control: the path that already worked before this change still works."""
     home = _write_home(tmp_path)

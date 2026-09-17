@@ -50,6 +50,57 @@ that cannot. ``agents.defaults.tools`` is deliberately NOT a scope — ``resolve
 returns ``tools: entry.tools`` from the ``agents.list`` entry and never merges the defaults
 block, so treating it as one would invent a confinement the runtime does not apply.
 
+CHANNELS ARE NOT A SCOPE HERE, AND THAT IS NOT A DISPROOF (executed against the installed
+openclaw@2026.9.4, 2026-09-16). A raised schema-walk depth cap recovered six paths this
+module has no scope for: ``channels.<provider>.accounts.<id>.guilds.<id>.channels.<id>.
+tools.{allow,alsoAllow,deny}`` and the matching ``toolsBySender.<id>.*``. The question —
+does a per-channel/per-group ``tools``/``toolsBySender`` block reach the runtime's real
+tool-gating decision for a message — was answered BY EXECUTION, not inferred from the
+schema. It does. Traced by symbol through the installed dist:
+``resolveRequesterToolPolicies`` (``agent-tools.policy-*.mjs``) resolves ``groupPolicy``
+via ``resolveGroupToolPolicy`` — which tries a channel PLUGIN's own
+``plugin.groups.resolveToolPolicy`` hook first (Discord's ``guilds.<id>.channels.<id>``
+nesting is exactly this kind of plugin-specific shape; that hook was not located and
+examined — it lives in a per-provider plugin bundle, not the core dist files this module
+already cites) and falls back to the generic ``resolveChannelGroupToolsPolicy``
+(``channels.<channel>.groups.<id>.tools``/``.toolsBySender``, ``group-policy-*.mjs``) —
+and the resolved ``groupPolicy``, alongside a separately-resolved ``senderPolicy``
+(``resolveSenderToolPolicy``, ``sender-tool-policy-*.mjs`` — note: THIS one only ever reads
+agent-level/global ``tools.toolsBySender``, not the channel-nested one), is threaded into
+``buildDefaultToolPolicyPipelineSteps``/``applyToolPolicyPipeline``
+(``tool-policy-pipeline-*.mjs``) as two MORE sequential AND-ed filter steps layered on top
+of every policy ``resolveConfiguredToolPolicies`` already models — confirmed by reading
+``ra=[profilePolicy,providerProfilePolicy,globalPolicy,globalProviderPolicy,agentPolicy,
+agentProviderPolicy,groupPolicy,senderPolicy,...]`` feeding that pipeline in the live
+message-handling call site.
+
+So this is NOT the "add channel key names to a list" fix first suspected and rejected (see
+the task) — it is also not simply "extend the scope enumeration" the task's own DoD
+offered as the likely shape, because a channel is not an independent scope PARALLEL to an
+agent the way ``agents.list`` entries are: it is a NARROWING FILTER that applies only to
+messages a given agent receives THROUGH that specific channel/account/guild/sender
+combination. ``confined_scopes``/``_sandbox_confines`` answer a per-AGENT confinement
+question that has no channel-shaped analogue (a channel is not separately sandboxed), and
+attributing a channel's narrowing to the right agent scope — rather than crediting an
+agent with a channel it never actually receives traffic through — needs an agent-channel
+ROUTING model this tool does not have and the schema recon does not establish. A `scopes`
+list that just appended one entry per declared channel would silently answer a DIFFERENT,
+unsound question ("does ANY channel anywhere narrow write") instead of the one this module
+actually needs ("does THIS agent's effective policy get narrowed").
+
+Left undone, deliberately, rather than shipped as a partial fix that reads as complete:
+porting the plugin-hook shape (Discord's ``guilds``/``channels`` nesting specifically)
+without first finding and reading its own resolver would be exactly the kind of
+schema-inferred, unexecuted guess this task's own instructions forbid. This needs its own
+scoped follow-up: (a) locate and read the channel-plugin ``groups.resolveToolPolicy`` hook
+for at least Discord (the provider C-484's recovered paths named) to ground the
+guild/channel-nesting shape rather than inferring it from ``resolveChannelGroupToolsPolicy``
+alone; (b) design an agent-channel attribution model sound enough that a channel's
+narrowing is only ever credited to a scope it can actually gate; (c) differential-validate
+against the dist the way B-666/B-670 were. ``_OPAQUE_NARROWING_KEYS`` is unchanged — the
+gap is the scope enumeration lacking a channel dimension at all, not a key this module
+already visits and mishandles, exactly as the task's own developer comment concluded.
+
 Verified against the vendor: this module's answer was compared with a real
 ``resolveEffectiveToolFsRootExpansionAllowed`` call over all 581 local corpus configs
 plus a hand-built edge table — see ``tests/test_b666_read_reach.py``.

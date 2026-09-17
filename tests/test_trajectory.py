@@ -231,7 +231,11 @@ def test_find_trajectory_files_stats_missing_home(tmp_path):
     stats: dict = {}
     files = find_trajectory_files(tmp_path / "nope", stats=stats)
     assert files == []
-    assert stats == {"files_total": 0, "files_capped": False}
+    assert stats == {
+        "files_total": 0, "files_capped": False,
+        "pointer_targets_missing": 0, "pointer_out_of_home": 0, "pointer_invalid": 0,
+        "pointer_scan_capped": False,
+    }
 
 
 def test_find_trajectory_files_stats_not_capped_at_max(tmp_path):
@@ -496,3 +500,322 @@ def test_parse_session_origin_c135_near_misses_do_not_bucket_as_external():
     for key in near_misses:
         kind, _ = parse_session_origin(key)
         assert kind not in EXTERNAL_ORIGIN_KINDS, key
+
+
+# ---------------------------------------------------------------------------
+# B-732: OpenClaw locates a trajectory sidecar through a POINTER file
+# (<session>.trajectory-path.json), not only by the agents/*/sessions/*.trajectory.jsonl
+# glob above. find_trajectory_files must union the two, confine a pointer's runtimeFile
+# to the audited home (refuse+disclose an escape, never follow it), and disclose a
+# pointer whose target is missing or invalid rather than silently reading as "no
+# sidecars".
+# ---------------------------------------------------------------------------
+
+def _write_pointer(
+    home: Path, agent: str, session: str, runtime_file, *, session_id=None,
+    trace_schema="openclaw-trajectory-pointer", schema_version=1,
+) -> Path:
+    """Write one *.trajectory-path.json pointer, matching the vendor's own shape.
+    ``session_id`` defaults to *session* (the common real-world case: the pointer's
+    filename stem IS the sessionId, verified against a real pointer on this machine)."""
+    d = home / "agents" / agent / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "traceSchema": trace_schema,
+        "schemaVersion": schema_version,
+        "sessionId": session_id if session_id is not None else session,
+        "runtimeFile": str(runtime_file),
+    }
+    p = d / f"{session}.trajectory-path.json"
+    p.write_text(json.dumps(rec), encoding="utf-8")
+    return p
+
+
+def test_pointer_naming_a_globbed_file_is_found_once_not_twice(tmp_path):
+    """Dedup: a session with BOTH a runtime file the glob already found AND a pointer
+    naming that same file must not be counted twice."""
+    paths = _write_many(tmp_path, "main", 1)
+    _write_pointer(tmp_path, "main", "s0", paths[0])
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, stats=stats)
+    assert len(files) == 1
+    assert files[0] in (paths[0], paths[0].resolve())
+    assert stats["files_total"] == 1
+    assert stats["pointer_targets_missing"] == 0
+    assert stats["pointer_out_of_home"] == 0
+    assert stats["pointer_invalid"] == 0
+
+
+def test_pointer_naming_an_unglobbed_file_is_found_via_the_pointer_alone(tmp_path):
+    """The additive case the glob alone misses: a real trajectory sidecar (correctly
+    suffixed) sitting in a NESTED location the flat agents/*/sessions/*.trajectory.jsonl
+    glob pattern does not reach, findable only by following the pointer. Must still end
+    in .trajectory.jsonl (C-135: an arbitrary in-home filename is refused -- see
+    test_pointer_target_not_shaped_like_a_trajectory_file_is_rejected)."""
+    d = tmp_path / "agents" / "main" / "sessions" / "archive"
+    d.mkdir(parents=True, exist_ok=True)
+    nested = d / "s0.trajectory.jsonl"
+    nested.write_text(json.dumps(_call("bash", {})) + "\n", encoding="utf-8")
+    _write_pointer(tmp_path, "main", "s0", nested)
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, stats=stats)
+    assert nested.resolve() in files
+    assert stats["pointer_invalid"] == 0
+
+
+def test_pointer_target_not_shaped_like_a_trajectory_file_is_rejected(tmp_path):
+    """C-135: confinement to home is not enough on its own -- a pointer naming an
+    arbitrary in-home file (not ending in .trajectory.jsonl) must be refused, not
+    followed, even though it is genuinely inside home and genuinely exists."""
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    decoy = tmp_path / "credentials" / "store.json"
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text('{"secret": "not-a-trajectory-file"}', encoding="utf-8")
+    _write_pointer(tmp_path, "main", "s0", decoy)
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, stats=stats)
+    assert files == []
+    assert decoy.resolve() not in files
+    assert stats["pointer_invalid"] == 1
+    assert stats["files_total"] == 0
+
+
+def test_pointer_target_symlinked_to_a_non_trajectory_file_is_rejected(tmp_path):
+    """C-135 round 4 (independent, post-commit): the shape check must run on the
+    RESOLVED path, not the raw pre-resolution string -- Path.resolve() follows a
+    symlink in the FINAL path component too. An attacker who can write into
+    agents/*/sessions/ (the threat model _resolve_pointer_target already assumes) could
+    otherwise create a symlink named *.trajectory.jsonl pointing at a real, non-
+    trajectory in-home file (e.g. a credentials store) and have a pointer's runtimeFile
+    name the symlink itself -- passing a raw-string suffix check while resolving to an
+    arbitrary in-home target, exactly the bypass
+    test_pointer_target_not_shaped_like_a_trajectory_file_is_rejected (above) exists to
+    prevent for a DIRECT reference, but which that test never exercises for an
+    indirect (symlinked) one."""
+    # Nested, like test_pointer_naming_an_unglobbed_file_is_found_via_the_pointer_alone
+    # above -- deliberately OUTSIDE the flat agents/*/sessions/*.trajectory.jsonl glob's
+    # own reach, so this isolates the POINTER path's shape check specifically. (A
+    # same-named symlink sitting directly in agents/*/sessions/ would ALSO be picked up
+    # by the plain glob on its literal name, which is a separate, pre-existing question
+    # about the glob branch's own symlink handling -- not this function's C-135 round 4
+    # fix, and not what this test is pinning.)
+    d = tmp_path / "agents" / "main" / "sessions" / "archive"
+    d.mkdir(parents=True, exist_ok=True)
+    decoy = tmp_path / "credentials" / "store.json"
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text('{"secret": "not-a-trajectory-file"}', encoding="utf-8")
+    symlink = d / "innocuous.trajectory.jsonl"
+    symlink.symlink_to(decoy)
+    _write_pointer(tmp_path, "main", "s0", symlink)
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, stats=stats)
+    assert files == []
+    assert decoy.resolve() not in files
+    assert stats["pointer_invalid"] == 1
+    assert stats["files_total"] == 0
+
+
+def test_a_fifo_named_as_a_pointer_is_never_opened(tmp_path):
+    """C-135: the B-549 precedent (collector.py) -- a FIFO glob-matched as a pointer
+    file must never be read_bytes()'d, since a FIFO with no writer blocks forever.
+    is_file() (a stat, not an open) must reject it before any read is attempted. This
+    test itself would hang the whole suite if the fix regressed."""
+    import os
+
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    fifo_path = d / "s0.trajectory-path.json"
+    os.mkfifo(fifo_path)  # POSIX-only, matching this project's POSIX-only scope
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, stats=stats)  # must return promptly
+    assert files == []
+    assert stats["pointer_invalid"] == 1
+
+
+def test_out_of_home_pointer_target_is_refused_not_followed(tmp_path):
+    """The core security property: a pointer's runtimeFile resolving OUTSIDE the
+    audited home must never be opened, and the refusal must be disclosed, not silent."""
+    outside = tmp_path.parent / f"outside-{tmp_path.name}.trajectory.jsonl"
+    outside.write_text(json.dumps(_call("bash", {})) + "\n", encoding="utf-8")
+    try:
+        _write_pointer(tmp_path, "main", "s0", outside)
+        stats: dict = {}
+        files = find_trajectory_files(tmp_path, stats=stats)
+        assert outside.resolve() not in files
+        assert files == []
+        assert stats["pointer_out_of_home"] == 1
+        assert stats["pointer_targets_missing"] == 0
+        assert stats["pointer_invalid"] == 0
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_pointer_failing_vendor_validation_is_ignored_and_disclosed(tmp_path):
+    """schemaVersion/traceSchema/sessionId mismatches are exactly the vendor's own
+    validation -- a pointer failing any of them is not ours to follow, but the fact
+    that an unreadable/invalid pointer exists must still be counted, not silenced."""
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    target = d / "real.trajectory.jsonl"
+    target.write_text(json.dumps(_call("bash", {})) + "\n", encoding="utf-8")
+
+    _write_pointer(tmp_path, "main", "bad-schema", target, trace_schema="something-else")
+    _write_pointer(tmp_path, "main", "bad-version", target, schema_version=2)
+    _write_pointer(tmp_path, "main", "bad-sessionid", target, session_id="a-different-session")
+    (d / "not-json.trajectory-path.json").write_text("{not valid json", encoding="utf-8")
+
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, stats=stats)
+    # `target` is real and glob-matched regardless (it ends in .trajectory.jsonl); the
+    # point of this test is that NONE of the four bad pointers contributes anything,
+    # and each is counted as invalid rather than silently dropped.
+    assert files == [target.resolve()] or files == [target]
+    assert stats["pointer_invalid"] == 4
+    assert stats["pointer_targets_missing"] == 0
+    assert stats["pointer_out_of_home"] == 0
+
+
+def test_pointer_with_missing_target_is_disclosed_not_folded_into_no_sidecars(tmp_path):
+    """The exact asymmetry measured live on a real machine (135 pointers, 0 runtime
+    files -- since explained by trajectorystore.corroborate() as the 8.1-era SQLite
+    migration archiving the JSONL away): a valid, in-home pointer whose target does not
+    exist must surface as pointer_targets_missing, never read as "no trajectory
+    sidecars" the way an empty glob alone would."""
+    missing_target = tmp_path / "agents" / "main" / "sessions" / "gone.trajectory.jsonl"
+    _write_pointer(tmp_path, "main", "s0", missing_target)
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, stats=stats)
+    assert files == []
+    assert stats["pointer_targets_missing"] == 1
+    assert stats["pointer_out_of_home"] == 0
+    assert stats["pointer_invalid"] == 0
+
+
+def test_runtime_file_with_no_pointer_is_still_found(tmp_path):
+    """Regression guard: the glob path must not regress when a session has a runtime
+    file and genuinely no pointer at all (still the common case on most installs)."""
+    paths = _write_many(tmp_path, "main", 3)
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, stats=stats)
+    assert len(files) == 3
+    for p in paths:
+        assert p in files or p.resolve() in files
+    assert stats["files_total"] == 3
+    assert stats["pointer_targets_missing"] == 0
+
+
+def test_meta_dicts_carry_the_new_pointer_keys(tmp_path):
+    """read_proven_tools/read_events/read_compiled_tool_descriptions all delegate to
+    find_trajectory_files and must surface its new stats, not just files_total/
+    files_capped, so a downstream consumer can eventually report them."""
+    from clawseccheck.trajectory import read_compiled_tool_descriptions
+
+    missing_target = tmp_path / "agents" / "main" / "sessions" / "gone.trajectory.jsonl"
+    _write_pointer(tmp_path, "main", "s0", missing_target)
+    for reader in (read_proven_tools, read_events, read_compiled_tool_descriptions):
+        _, meta = reader(tmp_path)
+        assert meta["pointer_targets_missing"] == 1, reader.__name__
+        assert meta["pointer_out_of_home"] == 0, reader.__name__
+        assert meta["pointer_invalid"] == 0, reader.__name__
+        assert meta["pointer_scan_capped"] is False, reader.__name__
+
+
+def test_pointer_scan_is_capped_and_disclosed(tmp_path):
+    """C-135: an unbounded pointer count is a DoS surface (real I/O per pointer before
+    max_files ever trims the union) -- mirrors trajectorystore.py's own independent
+    _MAX_POINTER_SCAN=500 cap. Uses a small monkeypatched cap so the test itself stays
+    fast rather than actually writing 501 files."""
+    import clawseccheck.trajectory as trajectory_mod
+
+    d = tmp_path / "agents" / "main" / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    old_cap = trajectory_mod._MAX_POINTER_SCAN
+    trajectory_mod._MAX_POINTER_SCAN = 3
+    try:
+        for i in range(5):
+            missing = d / f"gone{i}.trajectory.jsonl"
+            _write_pointer(tmp_path, "main", f"s{i}", missing)
+        stats: dict = {}
+        find_trajectory_files(tmp_path, stats=stats)
+        assert stats["pointer_scan_capped"] is True
+        # Only the first 3 (the cap) were ever opened/counted -- not all 5.
+        assert stats["pointer_targets_missing"] == 3
+    finally:
+        trajectory_mod._MAX_POINTER_SCAN = old_cap
+
+
+def test_pointer_scan_interrupted_by_oserror_is_also_disclosed(tmp_path):
+    """C-135: a directory going unreadable MID-enumeration (permission change,
+    concurrent removal) must be disclosed the same way hitting the count cap is --
+    not silently treated as 'the scan was clean and found nothing more'."""
+    missing = tmp_path / "agents" / "main" / "sessions" / "gone.trajectory.jsonl"
+    _write_pointer(tmp_path, "main", "s0", missing)
+
+    real_glob = Path.glob
+
+    def _raising_glob(self, pattern):
+        if pattern.endswith(".trajectory-path.json"):
+            def _gen():
+                yield from real_glob(self, pattern)
+                raise OSError("simulated mid-scan failure")
+            return _gen()
+        return real_glob(self, pattern)
+
+    import unittest.mock
+
+    with unittest.mock.patch.object(Path, "glob", _raising_glob):
+        stats: dict = {}
+        files = find_trajectory_files(tmp_path, stats=stats)
+    assert files == []
+    assert stats["pointer_scan_capped"] is True
+    assert stats["pointer_targets_missing"] == 1  # the one pointer seen before the raise
+
+
+def test_safe_trajectory_session_file_name_matches_the_installed_dist():
+    """Local-only differential: executes the REAL vendor function (paths-*.mjs,
+    safeTrajectorySessionFileName) if OpenClaw is installed, over the same 8 cases the
+    in-source port was verified against, so the port cannot silently drift from a future
+    dist without this test noticing."""
+    import shutil
+    import subprocess
+
+    import pytest
+
+    from clawseccheck.trajectory import _safe_trajectory_session_file_name
+
+    exe = shutil.which("openclaw")
+    if not exe:
+        pytest.skip("no installed OpenClaw — differential is local-only")
+    here = Path(os.path.realpath(exe)).parent
+    root = None
+    for candidate in (here, *here.parents):
+        if (candidate / "dist").is_dir():
+            root = candidate
+            break
+    if root is None:
+        pytest.skip("could not locate the OpenClaw dist root")
+    bundles = list((root / "dist").glob("paths-*.mjs")) + list((root / "dist").glob("paths-*.js"))
+    matches = [p for p in bundles if "TRAJECTORY_POINTER_FILE_MAX_BYTES" in
+               p.read_text(encoding="utf-8", errors="replace")]
+    if not matches:
+        pytest.skip("no paths-*.mjs bundle declares TRAJECTORY_POINTER_FILE_MAX_BYTES "
+                     "— renamed, re-locate before trusting this citation")
+    cases = [
+        "02258d00-eaa3-4586-b23b-885df1e714ba", "", "!!!", "a" * 200,
+        "héllo wörld", "../../etc/passwd", "session with spaces", "UPPER_lower-123",
+    ]
+    script = """
+const mod = await import(process.env.OC_MOD);
+const fn = mod.s ?? mod.safeTrajectorySessionFileName;
+const cases = JSON.parse(process.env.OC_CASES);
+console.log(JSON.stringify(cases.map(fn)));
+"""
+    env = dict(os.environ, OC_MOD=str(matches[0]), OC_CASES=json.dumps(cases))
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                           capture_output=True, text=True, timeout=60, env=env)
+    if proc.returncode != 0:
+        pytest.skip(f"could not execute the dist module: {proc.stderr.strip()[:200]}")
+    expected = json.loads(proc.stdout)
+    actual = [_safe_trajectory_session_file_name(c) for c in cases]
+    assert actual == expected, list(zip(cases, actual, expected, strict=True))

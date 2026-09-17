@@ -55,25 +55,31 @@ def _run(tmp_path, extra, *, failing_writer=True, writer="secure_write_bytes"):
     draft of this file patched only the bytes writer and asserted an exit code for the text
     flags — so those runs never failed at all, succeeded normally, and the assertion was
     measuring nothing. A test that cannot fail for the reason it names is worse than absent.
+
+    Returns ``(rc, stdout, stderr)`` — C-449 moved the standalone `(could not write ...)`
+    diagnostics to stderr, so a caller that only cares about the artifact stream still reads
+    ``out`` and a caller checking the diagnostic itself now reads ``err``.
     """
     home = _home(tmp_path)
     argv = list(extra) + ["--home", str(home),
                           "--data-dir", str(tmp_path / "data"),
                           "--no-history", "--ascii"]
-    buf = io.StringIO()
+    out_buf, err_buf = io.StringIO(), io.StringIO()
     ctx = (mock.patch.object(cli, writer, side_effect=OSError("disk on fire"))
            if failing_writer else contextlib.nullcontext())
     with ctx:
-        with contextlib.redirect_stdout(buf):
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
             rc = cli.main(argv)
-    return rc, buf.getvalue()
+    return rc, out_buf.getvalue(), err_buf.getvalue()
 
 
 def test_dashboard_pdf_renders_the_audit_when_the_write_fails(tmp_path):
     """The defect itself: the user loses the audit because a file could not be written."""
     out_pdf = tmp_path / "out" / "r.pdf"
-    rc, out = _run(tmp_path, ["--dashboard", "--pdf", str(out_pdf)])
+    rc, out, _err = _run(tmp_path, ["--dashboard", "--pdf", str(out_pdf)])
     assert rc == 0, "a failed delivery must not fail the run that produced the analysis"
+    # `--dashboard --pdf`'s inline-substitution note is B-459's, deliberately left on
+    # stdout (C-449 did not touch this branch — see its own comment in cli.py).
     assert "could not write PDF report" in out
     assert "showing the full report inline" in out
     # The audit itself, not just an apology. Pre-fix this was 59 bytes.
@@ -85,12 +91,17 @@ def test_dashboard_pdf_renders_the_audit_when_the_write_fails(tmp_path):
 def test_bare_pdf_still_exits_nonzero_when_the_write_fails(tmp_path):
     """The contract that must NOT change. With no dashboard asked for, the PDF is the whole
     deliverable — a run that produced nothing the user asked for has failed, and callers
-    scripting `--pdf out.pdf || handle` depend on that."""
+    scripting `--pdf out.pdf || handle` depend on that.
+
+    C-449: bare `--pdf`'s diagnostic moved to stderr (matching the success note and the
+    other standalone artifact flags below) — stdout must stay clean of it.
+    """
     out_pdf = tmp_path / "out" / "r.pdf"
-    rc, out = _run(tmp_path, ["--pdf", str(out_pdf)])
+    rc, out, err = _run(tmp_path, ["--pdf", str(out_pdf)])
     assert rc == 1
-    assert "could not write PDF report" in out
-    assert "showing the full report inline" not in out
+    assert "could not write PDF report" not in out
+    assert "could not write PDF report" in err
+    assert "showing the full report inline" not in err
 
 
 def test_a_rider_says_nothing_about_a_pdf_that_was_never_written(tmp_path):
@@ -104,7 +115,7 @@ def test_a_rider_says_nothing_about_a_pdf_that_was_never_written(tmp_path):
     None; the note did not.
     """
     out_pdf = tmp_path / "out" / "r.pdf"
-    rc, out = _run(tmp_path, ["--dashboard", "--pdf", str(out_pdf), "--trend", "--full"])
+    rc, out, _err = _run(tmp_path, ["--dashboard", "--pdf", str(out_pdf), "--trend", "--full"])
     assert rc == 0
     assert "carries the findings only" not in out
     assert "states this on its own first page" not in out
@@ -114,10 +125,11 @@ def test_a_rider_says_nothing_about_a_pdf_that_was_never_written(tmp_path):
 def test_the_successful_path_is_unchanged(tmp_path):
     """A guard against fixing the failure case by breaking the success case."""
     out_pdf = tmp_path / "out" / "r.pdf"
-    rc, out = _run(tmp_path, ["--dashboard", "--pdf", str(out_pdf)], failing_writer=False)
+    rc, out, err = _run(tmp_path, ["--dashboard", "--pdf", str(out_pdf)], failing_writer=False)
     assert rc == 0
     assert out_pdf.exists() and out_pdf.stat().st_size > 0
     assert "could not write PDF report" not in out
+    assert "could not write PDF report" not in err
 
 
 @pytest.mark.parametrize("flag", ["--html", "--sarif", "--save", "--badge"])
@@ -128,8 +140,14 @@ def test_other_standalone_artifact_flags_keep_their_exit_contract(tmp_path, flag
 
     Patched at `secure_write_text` — these four do not go through the bytes writer the PDF
     uses, and patching the wrong one makes this assertion vacuous rather than red.
+
+    C-449: `--save`'s diagnostic is untouched (still stdout, out of this task's scope); the
+    other three moved to stderr, matching bare `--pdf` above. Checking the union of both
+    streams keeps this one assertion valid for all four without hard-coding which stream
+    each uses — that split is pinned precisely by C-449's own tests instead.
     """
     dest = tmp_path / "out" / "artifact"
-    rc, out = _run(tmp_path, [flag, str(dest)], writer="secure_write_text")
+    rc, out, err = _run(tmp_path, [flag, str(dest)], writer="secure_write_text")
     assert rc == 1
-    assert "could not" in out.lower(), "a failed write must say so, not just exit nonzero"
+    assert "could not" in (out + err).lower(), \
+        "a failed write must say so, not just exit nonzero"

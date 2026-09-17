@@ -23,15 +23,28 @@ Offline, read-only outside tmp_path, stdlib only.
 """
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
+
+import pytest
 
 from _pdftext import shown_strings
 
 from clawseccheck import audit, render_json, render_pdf, render_report, render_sarif
-from clawseccheck.checks import _shared, _username_safe_path, check_codex_project_trust, check_path_safety
+from clawseccheck.checks import (
+    _shared,
+    _username_safe_path,
+    check_codex_project_trust,
+    check_orphaned_plugin_caches,
+    check_path_safety,
+    check_symlink_escape,
+    check_undeclared_plugin_load_path,
+)
 from clawseccheck.collector import Context
 from clawseccheck.report import render_html
+
+posix_only = pytest.mark.skipif(os.name != "posix", reason="symlinks are POSIX-only")
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -158,6 +171,170 @@ def test_b136_warn_detail_never_carries_the_home_prefix(monkeypatch, tmp_path):
     assert str(home) not in f.detail, f.detail
     assert all(str(home) not in e for e in f.evidence), f.evidence
     assert "~/workspace/my-project" in f.detail, f.detail
+
+
+# ---------------------------------------------------------------------------
+# B87 -- symlink escape into a sensitive/host path (C-456 follow-up, CLAWSECCHECK-C-456)
+# ---------------------------------------------------------------------------
+
+def _mk_skill(root, name="demo"):
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(f"---\nname: {name}\n---\nhello\n", encoding="utf-8")
+    return d
+
+
+@posix_only
+def test_b87_fail_detail_never_carries_the_home_prefix(monkeypatch, tmp_path):
+    """A symlink resolving into the OPERATOR'S real account home's ~/.ssh -- not into
+    ctx.home, which in --vet mode is the unrelated vetted skill dir, so `_detail_path`
+    (relative to ctx.home) would miss this entirely. `_username_safe_path` collapses
+    Path.home() instead, the right frame for a target that can point anywhere."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    ssh_key = home / ".ssh" / "id_rsa"
+    ssh_key.parent.mkdir(parents=True)
+    ssh_key.write_text("x", encoding="utf-8")
+    skill = _mk_skill(home / "downloads" / "suspicious-skill")
+    os.symlink(ssh_key, skill / "data")
+
+    f = check_symlink_escape(Context(home=skill))
+
+    assert f.status == "FAIL"
+    assert str(home) not in f.detail, f.detail
+    assert all(str(home) not in e for e in f.evidence), f.evidence
+    assert "~/.ssh/id_rsa" in f.detail, f.detail
+
+
+@posix_only
+def test_b87_warn_escape_detail_never_carries_the_home_prefix(monkeypatch, tmp_path):
+    """Same leak shape on the WARN (non-sensitive escape) branch, not just FAIL."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    target = home / "elsewhere" / "notes.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("x", encoding="utf-8")
+    skill = _mk_skill(home / "downloads" / "some-skill")
+    os.symlink(target, skill / "ext")
+
+    f = check_symlink_escape(Context(home=skill))
+
+    assert f.status == "WARN"
+    assert str(home) not in f.detail, f.detail
+    assert all(str(home) not in e for e in f.evidence), f.evidence
+    assert "~/elsewhere/notes.txt" in f.detail, f.detail
+
+
+@posix_only
+def test_b87_warn_in_tree_sensitive_detail_never_carries_the_home_prefix(monkeypatch, tmp_path):
+    """The `sclass and in_tree` WARN branch (sensitive-named target that stays INSIDE the
+    audited tree, e.g. a monorepo `apps/web/.env -> apps/api/.env`) -- a distinct code path
+    from the FAIL and escape-WARN branches above; a partial fix could redact those two and
+    miss this one (C-135 adversarial review caught this gap)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    skill = _mk_skill(home / "downloads" / "monorepo-skill")
+    real_env = skill / "apps" / "api" / ".env"
+    real_env.parent.mkdir(parents=True)
+    real_env.write_text("SECRET=1", encoding="utf-8")
+    link = skill / "apps" / "web" / ".env"
+    link.parent.mkdir(parents=True)
+    os.symlink(real_env, link)
+
+    f = check_symlink_escape(Context(home=skill))
+
+    assert f.status == "WARN"
+    assert str(home) not in f.detail, f.detail
+    assert all(str(home) not in e for e in f.evidence), f.evidence
+    assert "~/downloads/monorepo-skill/demo/apps/api/.env" in f.detail, f.detail
+
+
+@posix_only
+def test_b87_unknown_dangling_link_never_carries_the_home_prefix(monkeypatch, tmp_path):
+    """The broken/dangling branch renders the literal on-disk symlink text (`raw`), not
+    the resolved target -- a skill author can write that text as an absolute path too."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    skill = _mk_skill(home / "downloads" / "another-skill")
+    absent = home / "scratch" / "gone.txt"  # deliberately never created, not sensitive-named
+    os.symlink(absent, skill / "broken")
+
+    f = check_symlink_escape(Context(home=skill))
+
+    assert f.status == "UNKNOWN"
+    assert str(home) not in f.detail, f.detail
+    assert "~/scratch/gone.txt" in f.detail, f.detail
+
+
+# ---------------------------------------------------------------------------
+# B152 -- orphaned plugin cache (C-456 follow-up, CLAWSECCHECK-B-819)
+# ---------------------------------------------------------------------------
+
+def test_b152_warn_detail_never_carries_the_home_prefix(monkeypatch, tmp_path):
+    """B152 only fires in full-audit mode, where ctx.home really IS the audited OpenClaw
+    home -- unlike B87's symlink target (which can point anywhere on the host and needed
+    _username_safe_path), the leaked value here is always ctx.home-relative by
+    construction, so _detail_path is the right helper."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    openclaw_home = home / ".openclaw"
+    (openclaw_home / "agents" / "main" / "agent" / "plugins" / "nvidia").mkdir(parents=True)
+    ctx = Context(home=openclaw_home)
+    ctx.config = {"plugins": {"entries": {}}}
+
+    f = check_orphaned_plugin_caches(ctx)
+
+    assert f.status == "WARN"
+    assert str(home) not in f.detail, f.detail
+    assert all(str(home) not in e for e in f.evidence), f.evidence
+    assert any("agents/main/agent/plugins/nvidia" in e for e in f.evidence), f.evidence
+
+
+# ---------------------------------------------------------------------------
+# B348 -- undeclared plugins.load.paths entry (C-456 follow-up, CLAWSECCHECK-B-819)
+# ---------------------------------------------------------------------------
+
+def test_b348_warn_detail_never_carries_the_home_prefix(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    openclaw_home = home / ".openclaw"
+    openclaw_home.mkdir(parents=True)
+    plugin_dir = openclaw_home / "dev-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "openclaw.plugin.json").write_text(
+        '{"id": "dev-plugin"}', encoding="utf-8"
+    )
+
+    ctx = Context(home=openclaw_home)
+    ctx.config_found = True
+    ctx.config = {
+        "plugins": {"load": {"paths": [str(plugin_dir)]}, "entries": {}},
+    }
+
+    f = check_undeclared_plugin_load_path(ctx)
+
+    assert f.status == "WARN"
+    assert str(home) not in f.detail, f.detail
+    assert all(str(home) not in e for e in f.evidence), f.evidence
+    assert "dev-plugin" in f.detail, f.detail
 
 
 # ---------------------------------------------------------------------------

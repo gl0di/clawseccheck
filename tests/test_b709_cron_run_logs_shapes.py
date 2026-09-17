@@ -128,6 +128,9 @@ def test_legacy_table_unchanged_behaviour(tmp_path):
         "run_at_ms": 1_700_000_000_000,
         "ts": 1_700_000_000_500,
     }]
+    # C-488: the legacy shape is recorded, and no second table was present.
+    assert ctx.cron_run_logs_table == "cron_run_logs"
+    assert ctx.cron_run_logs_both_tables_present is False
 
 
 # ---------------------------------------------------------------------------------
@@ -164,6 +167,9 @@ def test_modern_task_runs_cron_rows_mapped(tmp_path):
         "run_at_ms": 1_700_000_000_000,
         "ts": 1_700_000_000_500,
     }]
+    # C-488: the modern shape is recorded, and no legacy table was present.
+    assert ctx.cron_run_logs_table == "task_runs"
+    assert ctx.cron_run_logs_both_tables_present is False
 
 
 # ---------------------------------------------------------------------------------
@@ -225,6 +231,10 @@ def test_both_tables_present_legacy_wins(tmp_path):
     assert ctx.cron_run_logs_found is True
     assert len(ctx.cron_run_logs) == 1
     assert ctx.cron_run_logs[0]["job_id"] == "legacy-job"
+    # C-488: the mid-migration fact (both tables exist) must survive even though the
+    # legacy one is the one actually preferred and read.
+    assert ctx.cron_run_logs_table == "cron_run_logs"
+    assert ctx.cron_run_logs_both_tables_present is True
 
 
 # ---------------------------------------------------------------------------------
@@ -244,6 +254,9 @@ def test_neither_table_present_found_stays_false(tmp_path):
     assert ctx.cron_run_logs_found is False
     assert ctx.cron_run_logs_parse_error is False
     assert ctx.cron_run_logs == []
+    # C-488: "could not look" must not fabricate a shape.
+    assert ctx.cron_run_logs_table is None
+    assert ctx.cron_run_logs_both_tables_present is False
 
 
 def test_no_state_db_at_all_found_stays_false(tmp_path):
@@ -252,6 +265,7 @@ def test_no_state_db_at_all_found_stays_false(tmp_path):
     ctx = _run(home)
     assert ctx.cron_run_logs_found is False
     assert ctx.cron_run_logs == []
+    assert ctx.cron_run_logs_table is None
 
 
 # ---------------------------------------------------------------------------------

@@ -250,6 +250,42 @@ def test_risk05_ssrf_no_secrets_no_fire():
     assert not any(p.id == "RISK-05" for p in paths)
 
 
+def test_risk05_legacy_allow_private_network_alias_plus_secrets():
+    # C-135, 2026-09-16: the legacy flat allowPrivateNetwork alias ORs into
+    # dangerouslyAllowPrivateNetwork at runtime (resolveBrowserSsrFPolicy) -- must drive
+    # RISK-05 the same as the canonical key.
+    cfg = {
+        "browser": {"ssrfPolicy": {"allowPrivateNetwork": True}},
+        "gateway": {"auth": {"password": "mysecret"}},
+    }
+    paths = _paths(cfg)
+    assert any(p.id == "RISK-05" for p in paths), [p.id for p in paths]
+
+
+def test_risk05_legacy_allow_private_network_truthy_nonbool_string_no_fire():
+    cfg = {
+        "browser": {"ssrfPolicy": {"allowPrivateNetwork": "true"}},
+        "gateway": {"auth": {"password": "mysecret"}},
+    }
+    paths = _paths(cfg)
+    assert not any(p.id == "RISK-05" for p in paths), [p.id for p in paths]
+
+
+def test_risk05_ssrf_truthy_nonbool_string_no_fire():
+    # CLAWSECCHECK-C-135-B722-followup: the installed 2026.9.4 dist types
+    # dangerouslyAllowPrivateNetwork as a plain boolean() with no coercion, and
+    # its actual bypass gate is a strict `=== true` check (isPrivateNetworkAllowedByPolicy,
+    # src/infra/net/ssrf.ts) -- a truthy non-bool value never enables private-network
+    # access, matching B38's own `is True` gate (checks/_egress.py). RISK-05's docstring
+    # claims zero-FP; a truthy-string read here would break that claim.
+    cfg = {
+        "browser": {"ssrfPolicy": {"dangerouslyAllowPrivateNetwork": "true"}},
+        "gateway": {"auth": {"password": "mysecret"}},
+    }
+    paths = _paths(cfg)
+    assert not any(p.id == "RISK-05" for p in paths), [p.id for p in paths]
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Rule RISK-06: control plane reachable from open surface  -> CRITICAL
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1041,6 +1077,31 @@ def test_risk15_no_ssrf_flag_no_fire():
 
 def test_risk15_empty_config_no_fire():
     assert not any(p.id == "RISK-15" for p in _paths({}))
+
+
+def test_risk15_legacy_allow_private_network_alias_fires():
+    # C-135, 2026-09-16: same legacy-alias grounding as RISK-05.
+    cfg = _risk15_cfg(ssrf=False)
+    cfg["browser"] = {"ssrfPolicy": {"allowPrivateNetwork": True}}
+    paths = _paths(cfg)
+    assert any(p.id == "RISK-15" for p in paths), [p.id for p in paths]
+
+
+def test_risk15_legacy_allow_private_network_truthy_nonbool_string_no_fire():
+    cfg = _risk15_cfg(ssrf=False)
+    cfg["browser"] = {"ssrfPolicy": {"allowPrivateNetwork": "true"}}
+    paths = _paths(cfg)
+    assert not any(p.id == "RISK-15" for p in paths), [p.id for p in paths]
+
+
+def test_risk15_truthy_nonbool_string_no_fire():
+    # Same grounding as test_risk05_ssrf_truthy_nonbool_string_no_fire: a truthy
+    # non-bool dangerouslyAllowPrivateNetwork never enables the runtime's private-network
+    # bypass, so it must not drive RISK-15 either.
+    cfg = _risk15_cfg()
+    cfg["browser"]["ssrfPolicy"]["dangerouslyAllowPrivateNetwork"] = "true"
+    paths = _paths(cfg)
+    assert not any(p.id == "RISK-15" for p in paths), [p.id for p in paths]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

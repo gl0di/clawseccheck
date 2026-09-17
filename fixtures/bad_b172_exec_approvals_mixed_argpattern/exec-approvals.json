@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "defaults": {},
+  "agents": {
+    "main": {
+      "security": "full",
+      "ask": "off",
+      "allowlist": [
+        {
+          "id": "c4301230-0000-4000-8000-000000000001",
+          "pattern": "/usr/bin/git",
+          "source": "allow-always"
+        },
+        {
+          "id": "c4301230-0000-4000-8000-000000000002",
+          "pattern": "/usr/bin/rg",
+          "argPattern": "^-- (\\S+)$",
+          "source": "allow-always"
+        }
+      ]
+    }
+  }
+}

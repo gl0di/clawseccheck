@@ -6,13 +6,16 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import ipaddress
 import os
+import re
 from pathlib import Path
 from .. import attest as _attest
+from .. import openclawdist as _openclawdist
 from .. import sockets as _sockets
 from ..catalog import (
     CRITICAL,
     FAIL,
     HIGH,
+    MEDIUM,
     PASS,
     UNKNOWN,
     WARN,
@@ -21,11 +24,14 @@ from ..catalog import (
 from ..collector import (
     BOOTSTRAP_FILES,
     LIMIT_DOMAIN_CONFIG,
+    LIMIT_DOMAIN_ENV,
     SKILL_DIRS,
     Context,
+    _AUTH_PROFILE_STORE_EMPTY_BYTES,  # B-749
     agent_roster,
     dig,
     env_evidence_readable,
+    limit_hits_for,
     persistent_env_evidence,
 )
 from ..safeio import walk_dir_safely
@@ -52,6 +58,7 @@ from ._shared import (
     _channels,
     _config_unreadable,
     _credential_store_state,
+    _detail_path,
     _dir_replaceable_by_others,
     _DM_POLICY_NESTED_ONLY_CHANNELS,
     _enabled_tools,
@@ -69,7 +76,9 @@ from ._shared import (
     _mcp_leg_contributions,
     _node_commands,
     _norm_group_policy,
+    _numeric_version,
     _open_channels,
+    _bind_mentions_docker_sock,
     _openclaw_generation,
     OUTBOUND_TOOL_HINTS,
     parse_bind_host,
@@ -81,7 +90,9 @@ from ._shared import (
     _resolve_sandbox_scope,
     _resolved_channel_nodes,
     _resolved_default_input_channels,
+    _sandbox_docker_binds,
     _secret_paths,
+    SECRET_KEY_RE,
     SECRET_PATTERNS,
     SENSITIVE_TOOL_HINTS,
     _substituted_dm_policy_channels,
@@ -92,29 +103,6 @@ from ._shared import (
     _web_fetch_enabled,
 )
 from ..invocation import command_prefix
-
-
-def _detail_path(value, home) -> str:
-    """Render *value* for a ``Finding.detail``: relative to the audited home when it lies
-    inside it, with a single ``..`` segment when it lies under the home's parent (the
-    ``~`` slot of a real OpenClaw home, where ``.config/...`` lives). Anything else is
-    returned unchanged. A composite string that merely *starts* with such a path is
-    rewritten the same way, so a source label like ``<unit> (Environment=)`` still works.
-
-    ``baseline.fingerprint()`` hashes ``Finding.detail``, and a user's
-    ``.clawseccheckignore`` keys a per-finding suppression on that hash — so an absolute
-    scan-root path baked into a detail silently orphans that suppression the moment the
-    workspace or the scanned skill moves, and it leaks the reporter's directory layout
-    into any report they share. The audited root is printed once in the report header
-    instead. A path the CONFIG itself declares in absolute form is deliberately left
-    verbatim: that string is a function of the audited subject, so it belongs in the
-    finding's identity (and in the text, since it is what the owner has to go fix).
-    """
-    text = str(value)
-    for base, prefix in ((str(home), ""), (str(Path(home).parent), ".." + os.sep)):
-        if base and base != os.sep and text.startswith(base + os.sep):
-            return prefix + text[len(base) + 1:]
-    return text
 
 
 CLOUD_PROVIDERS = (
@@ -204,11 +192,6 @@ _DANGER_FIXED = [
         True,
     ),
     (
-        "gateway.controlUi.dangerouslyDisableDeviceAuth",
-        "control-plane: Control-UI device identity auth disabled",
-        True,
-    ),
-    (
         "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback",
         "control-plane: Host-header origin fallback (CSRF/origin-bypass surface)",
         False,
@@ -216,6 +199,26 @@ _DANGER_FIXED = [
     (
         "gateway.controlUi.allowExternalEmbedUrls",
         "control-plane: external embed URLs allowed (SSRF / clickjacking)",
+        False,
+    ),
+    (
+        # C-507: grounded 2026-09-06 against the installed dist (openclaw@2026.9.2,
+        # re-confirmed on 2026.9.4) — schema description, verbatim: "Allow user-
+        # installed plugins to execute native JavaScript in the Control UI (default:
+        # false). Bundled plugin views remain available. Custom UI shares the
+        # signed-in operator's Gateway permissions; enable only for trusted plugins."
+        # Runtime gate (dist/github-user-identity-*.js, isControlUiPluginAllowed):
+        # `plugin.origin === "bundled" || ...customPlugins === true` — with the flag
+        # on, a NON-bundled, user-installed plugin runs native JS in the Control UI at
+        # the signed-in operator's own Gateway authority. WARN, not FAIL, matching the
+        # sibling allowExternalEmbedUrls row directly above: opt-in, defaults false, so
+        # a config setting it true is a deliberate operator act (same shape, same
+        # severity) — the flag alone is not yet an attack, it needs an untrusted
+        # installed plugin to combine with (tracked separately, not modelled as a
+        # RISK-* chain here — see C-507's own comment for why).
+        "gateway.controlUi.experimental.customPlugins",
+        "control-plane: user-installed plugins may run native JS in the Control UI "
+        "with the signed-in operator's Gateway permissions",
         False,
     ),
     (
@@ -286,6 +289,52 @@ _DANGER_FIXED_2026_8_1 = [
         "web_fetch may reach private/internal targets (SSRF via a model-selected URL)",
     ),
 ]
+
+
+# B-795: the build that made gateway.controlUi.dangerouslyDisableDeviceAuth RETIRED and
+# IGNORED rather than merely defaulted off. Grounded against the installed dist
+# (openclaw@2026.9.3, legacy-*.mjs): a `defineLegacyConfigMigration` entry named
+# "dangerouslyDisableDeviceAuth" whose message reads "gateway.controlUi.
+# dangerouslyDisableDeviceAuth is retired and ignored. Control UI browsers pair through
+# the normal device flow; run \"openclaw doctor --fix\" to remove the legacy key." —
+# re-confirmed present, unchanged, on the installed 2026.9.4 dist. Setting the key no
+# longer disables Control-UI device-identity auth or does anything else; the old
+# unconditional FAIL/HIGH row named a live security exposure that does not exist on
+# these builds.
+#
+# Same shape and same source order as `_workshop_symlink_knob` (B-783): only
+# `installed_dist_version` decides outright (it is the build that reads or ignores the
+# key right now); `meta.lastTouchedVersion` is consulted only once it already lands at
+# or after the retirement release, because a stale stamp proves nothing about what is
+# installed now. Not folded into `_openclaw_generation`'s modern/legacy split — that
+# threshold is pinned to 2026.8.1 and is compared at two dozen other call sites; a wrong
+# answer for THIS key must not move any of them.
+#
+# Caveat, recorded rather than hidden: 2026.9.3 is the first release this was actually
+# grounded against, not independently proven to be the release that introduced the
+# retirement — 2026.9.1/9.2 were not checked. If the real cutover lands earlier, this
+# constant is too conservative in the safe direction (it still treats those builds as
+# "honoured" and keeps the original FAIL), the same direction B-783 chose when it had
+# the identical gap.
+_DEVICE_AUTH_KNOB_RETIRED_MIN = (2026, 9, 3)
+
+
+def _device_auth_knob(ctx) -> str:
+    """Does the reader's OpenClaw still HONOUR gateway.controlUi.dangerouslyDisableDeviceAuth?
+
+    ``"retired"`` / ``"honoured"`` / ``"unknown"`` — three answers for the same reason
+    ``_workshop_symlink_knob`` has three: "we could not see the build" is not "the build
+    still reads it", and collapsing them manufactures a claim. Only ``"retired"`` may
+    silence the FAIL below; the other two both preserve today's behavior exactly.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        return "retired" if installed >= _DEVICE_AUTH_KNOB_RETIRED_MIN else "honoured"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _DEVICE_AUTH_KNOB_RETIRED_MIN:
+        return "retired"
+    return "unknown"
 
 
 # B-231: wildcard-authority detection for commands.ownerAllowFrom (FAIL/CRITICAL, above
@@ -894,11 +943,34 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
         #    Importing a RISK-12-shaped helper into a general sandbox check was a category
         #    error. tests/test_b673_peragent_bind_scope.py pins the read-only case as
         #    REPORTED so nobody re-adds the narrowing.
-        binds = docker.get("binds")
-        if binds and _scope != "shared":
+        # C-454: normalization via the shared `_sandbox_docker_binds` (checks/_shared.py)
+        # rather than this function's own dict-lookup-plus-isinstance chain -- same
+        # divergence class B-673 already fixed for `_resolve_sandbox_scope` above, one
+        # field over. `sb` (not `docker`, which was already coerced to `{}` above) is
+        # passed so a malformed `sandbox.docker` shape normalizes to `None`.
+        #
+        # C-135 (independent, post-commit): the comment that used to sit here claimed
+        # this branch "never fail-closed on that shape... before this extraction" --
+        # false, reproduced directly against bf31513^: the pre-extraction code read
+        # a direct dict lookup of the raw `binds` key, gated on bare Python truthiness, so ANY truthy value
+        # (a dict, a non-empty string, a nonzero int) fired the evidence, same as a
+        # well-formed list. `_sandbox_docker_binds` narrows that to string/list only and
+        # returns `None` for anything else -- silently treating "malformed" the same as
+        # "absent" here regressed a real FAIL to UNKNOWN (agents.defaults.sandbox.docker.
+        # binds={"src": "/etc", "dst": "/etc"} verified FAIL on bf31513^, UNKNOWN on
+        # bf31513). Fail closed on `None` instead, matching `_sandbox_has_writable_bind`'s
+        # own `None -> True` treatment and the pre-extraction behavior this was supposed
+        # to preserve.
+        binds = _sandbox_docker_binds(sb)
+        if binds is None and _scope != "shared":
+            out.append(
+                f"agent '{name}': sandbox.docker.binds is present but not a recognizable "
+                "shape (expected a bind-spec string or a list of them) — cannot rule out "
+                "a host-path bind"
+            )
+        elif binds and _scope != "shared":
             out.append(f"agent '{name}': sandbox.docker.binds exposes host paths")
-            binds_str = " ".join(str(b) for b in binds) if isinstance(binds, list) else str(binds)
-            if "docker.sock" in binds_str:
+            if _bind_mentions_docker_sock(binds):
                 out.append(
                     f"agent '{name}': sandbox.docker.binds mounts docker.sock "
                     "(grants host control to the sandbox — container escape)"
@@ -1242,7 +1314,13 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
               — one compromise's blast radius spans every listed provider.
     PASS    — credentials exist but the ingress+outbound combination is not
               present — blast radius is not broadly reachable.
-    UNKNOWN — no auth.profiles and no gateway.auth.token found to assess.
+    UNKNOWN — no auth.profiles and no gateway.auth.token found to assess. When the ONLY
+              reason none was found is that a systemd unit or global dotenv file the
+              collector read was truncated by its byte cap
+              (``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``) — so an env-supplied
+              OPENCLAW_GATEWAY_TOKEN/_PASSWORD could sit past the cut — this UNKNOWN is
+              ``engine_degraded=True`` (B-657): the credential surface this
+              check inventories may be non-empty and simply unread, not genuinely absent.
 
     PRIVACY: provider names only are included in findings.  The account/email
     portion of profile keys (after ":") and any token values are NEVER emitted.
@@ -1275,6 +1353,27 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
     has_credentials = bool(providers) or has_gateway_token or has_env_gateway_token
 
     if not has_credentials:
+        # B-657: "no credentials" is a claim that the env-sourced leg
+        # (has_env_gateway_token, via _gateway_env_credential -> persistent_env_evidence)
+        # was read to completion. A systemd unit or global dotenv file the collector DID
+        # read but truncated at its byte cap can hide a real OPENCLAW_GATEWAY_TOKEN/
+        # _PASSWORD past the cut, so this is present-but-unread, not genuinely absent —
+        # the exact contrast catalog.py's Finding.engine_degraded exists for, same
+        # DEGRADED_CHECK_CAP consequence as the B6/B172 fix (f748869).
+        if limit_hits_for(ctx, LIMIT_DOMAIN_ENV):
+            return _finding(
+                "B41",
+                "UNKNOWN",
+                "No auth.profiles or gateway.auth.token found in the config, and no "
+                "environment-supplied gateway credential was found in the systemd unit(s) "
+                "or global dotenv file(s) that were read — but at least one of them "
+                "exceeded the collector's byte cap, so a credential past the cut would not "
+                "have been seen. The credential surface cannot be ruled empty.",
+                "Keep OpenClaw's systemd unit files and global dotenv files "
+                "(~/.openclaw/.env, ~/.config/openclaw/gateway.env) under the collector's "
+                "size cap, then re-run the audit.",
+                engine_degraded=True,
+            )
         return _finding(
             "B41",
             "UNKNOWN",
@@ -1531,6 +1630,19 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B48", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so every dig() below would silently degrade to "absent" and fall through
+    # to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B48",
+            UNKNOWN,
+            "No config was read, so whether any dangerously*/allowUnsafe* break-glass "
+            "override is active could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     fails: list[str] = []
     warns: list[str] = []
@@ -1543,6 +1655,26 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
     for path, label, is_fail in _DANGER_FIXED:
         if dig(cfg, path):
             (fails if is_fail else warns).append(f"{path} — {label}")
+
+    # B-795: pulled out of _DANGER_FIXED's flat unconditional table because, unlike
+    # every other row there, whether this one means anything at all depends on the
+    # build — see `_device_auth_knob`. A build we could not identify keeps the
+    # original FAIL (Golden Rule #4 — do not drop a real finding for a build we did
+    # not see).
+    device_auth_note = ""
+    if dig(cfg, "gateway.controlUi.dangerouslyDisableDeviceAuth"):
+        if _device_auth_knob(ctx) == "retired":
+            device_auth_note = (
+                " NOTE: gateway.controlUi.dangerouslyDisableDeviceAuth is present in "
+                "the config, but OpenClaw 2026.9.3+ retired the key — it is ignored "
+                "and grants nothing; Control UI browsers pair through the normal "
+                "device flow instead. `openclaw doctor --fix` removes the stale line."
+            )
+        else:
+            fails.append(
+                "gateway.controlUi.dangerouslyDisableDeviceAuth — control-plane: "
+                "Control-UI device identity auth disabled"
+            )
 
     for path, label in _DANGER_FIXED_2026_8_1:
         node = cfg
@@ -1645,7 +1777,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "B48",
             FAIL,
             "Wildcard-authority override(s) grant owner command authority or device "
-            "auto-pairing to ANY sender/IP (see evidence).",
+            "auto-pairing to ANY sender/IP (see evidence)." + device_auth_note,
             "Replace the wildcard with an explicit, scoped allowlist — e.g. "
             "commands.ownerAllowFrom to your own channel-native ID(s), or "
             "gateway.nodes.pairing.autoApproveCidrs to a specific host/private range. "
@@ -1658,7 +1790,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "B48",
             FAIL,
             "Dangerous break-glass override(s) that enable sandbox escape or control-plane "
-            "auth bypass are active (see evidence).",
+            "auth bypass are active (see evidence)." + device_auth_note,
             "Disable these unless a specific, temporary break-glass need requires one — each "
             "opens sandbox escape or control-plane authentication bypass. Restore the safe "
             "default (set to false / remove).",
@@ -1668,7 +1800,8 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         return _finding(
             "B48",
             WARN,
-            "One or more dangerous break-glass override flag(s) are enabled (see evidence).",
+            "One or more dangerous break-glass override flag(s) are enabled (see "
+            "evidence)." + device_auth_note,
             "Review each — OpenClaw documents these as 'keep disabled' break-glass toggles. "
             "Turn off any you do not actively need.",
             evidence=warns,
@@ -1677,7 +1810,8 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         "B48",
         PASS,
         "None of the break-glass override flags checked here are enabled (browser "
-        "SSRF's dangerouslyAllowPrivateNetwork is B38's subject, not B48's -- see B38).",
+        "SSRF's dangerouslyAllowPrivateNetwork is B38's subject, not B48's -- see "
+        "B38)." + device_auth_note,
         "Keep these break-glass toggles off unless an incident temporarily requires one.",
         pass_confidence="verified",
     )
@@ -1862,6 +1996,19 @@ def check_privileged_commands_exposure(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B171", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so every commands.* dig() below would silently degrade to "absent" and
+    # fall through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B171",
+            UNKNOWN,
+            "No config was read, so whether any commands.bash/config/mcp/plugins "
+            "privileged in-chat command surface is enabled could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
 
     # Literal dig() calls (not an f-string in a loop) so the §4 schema-grounding AST
@@ -2084,6 +2231,20 @@ def check_audit_suppressions(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B173", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(cfg, "security.audit.suppressions")` would silently resolve to
+    # None and fall through to the (previously `pass_confidence="verified"`) PASS
+    # about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B173",
+            UNKNOWN,
+            "No config was read, so whether security.audit.suppressions silences any "
+            "native-audit finding could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     suppressions = dig(cfg, "security.audit.suppressions")
     if not isinstance(suppressions, list) or not suppressions:
@@ -2178,6 +2339,19 @@ def check_hook_template_content(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B169", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(cfg, "hooks.mappings")` would silently resolve to None and fall
+    # through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B169",
+            UNKNOWN,
+            "No config was read, so whether any hooks.mappings[] messageTemplate/"
+            "textTemplate carries an embedded directive could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     mappings = dig(cfg, "hooks.mappings")
     fail_ev: list[str] = []
@@ -2279,6 +2453,155 @@ def check_hook_template_content(ctx: Context) -> Finding:
     )
 
 
+def check_hook_transform_modules(ctx: Context) -> Finding:
+    """B380 (C-406) — hooks.mappings[].transform.module: config-loaded code run on
+    every matching message/event.
+
+    A configured hook transform is a relative module path OpenClaw dynamically
+    imports and invokes on every matching message, BEFORE the agent (or any other
+    check in this audit) ever sees the message -- `loadTransform` ->
+    `importFileModule`/`resolveFunctionModuleExport`. Grounded against the installed
+    OpenClaw dist (2026.9.4), by SYMBOL rather than bundle filename -- bundle names
+    are content-hashed and rename every release (this task's own 2026-09-02
+    re-grounding comment already caught one rename; `hooks-CwxdiIeO.mjs` today,
+    `hooks-4_CM-Biu.js` on 2026.8.2, `hooks-Bjrm8pWp.js` originally):
+      loadTransform / resolveContainedPath / resolveOptionalContainedPath
+                                        hooks-CwxdiIeO.mjs
+      importFileModule / resolveFunctionModuleExport
+                                        module-loader-BF97Ap2W.mjs (stable across all
+                                        three releases checked)
+    Schema descriptions (schema-DbKC3IUo.mjs), quoted verbatim -- OpenClaw's OWN docs
+    already flag this as a code-review surface:
+      hooks.transformsDir: "Base directory for hook transform modules referenced by
+        mapping transform.module paths. Use a controlled repo directory so dynamic
+        imports remain reviewable and predictable."
+      hooks.mappings[].transform.module: "Relative transform module path loaded from
+        hooks.transformsDir to rewrite incoming payloads before delivery. Keep
+        modules local, reviewed, and free of path traversal patterns."
+
+    Never FAIL, deliberately -- re-verified against the installed dist before writing
+    this check (not assumed from the task's own citations, which were themselves
+    already stale once): BOTH the module path and `hooks.transformsDir` itself are
+    CONFINED (`resolveContainedPath` requires the resolved path to stay inside its
+    base directory, checked via `isPathInside` on both the nominal AND the
+    realpath-resolved form; `resolveOptionalContainedPath` resolves a configured
+    `hooks.transformsDir` AS A SUBDIRECTORY of `<configDir>/hooks/transforms`, not as
+    an arbitrary path). So there is no `../`-escape or arbitrary-absolute-path vector
+    to FAIL on -- this is disclosure only, the same advisory shape as B150/B171/B341.
+
+    WARN    — a transform module is configured AND the resolved transforms directory
+              is group- or world-writable (`_dir_replaceable_by_others`) -- another
+              local account could plant or replace a transform module that then runs
+              on the next matching message, unrelated to the confinement above (which
+              only bounds WHERE the path resolves, not WHO can write there).
+    WARN    — a transform module is configured but the directory is not writable by
+              others (or its permissions could not be determined) -- still disclosed,
+              since this is config-loaded local code executing on live messages
+              regardless of directory permissions; MEDIUM only escalates when the
+              writability exposure is also present.
+    UNKNOWN — openclaw.json present but unparseable/unreadable, or not read at all.
+    PASS    — no hooks.mappings[] declares a transform.module.
+    """
+    unreadable = _config_unreadable("B380", ctx)
+    if unreadable is not None:
+        return unreadable
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B380",
+            UNKNOWN,
+            "No config was read, so whether any hooks.mappings[] declares a "
+            "transform.module could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    cfg = ctx.config
+    mappings = dig(cfg, "hooks.mappings")
+    modules: list[str] = []
+    if isinstance(mappings, list):
+        for i, m in enumerate(mappings):
+            if not isinstance(m, dict):
+                continue
+            transform = m.get("transform")
+            if not isinstance(transform, dict):
+                continue
+            mod = transform.get("module")
+            if isinstance(mod, str) and mod.strip():
+                modules.append(f"hooks.mappings[{i}].transform.module={mod.strip()!r}")
+
+    if not modules:
+        return _finding(
+            "B380",
+            PASS,
+            "No hooks.mappings[] declares a transform.module.",
+            "No action needed unless a hook transform is added later.",
+        )
+
+    # Best-effort resolution of the confined transforms directory, for a WRITABILITY
+    # check only -- NOT a re-implementation of resolveContainedPath's own path-escape
+    # validation (already re-verified above; irrelevant to "who can write here").
+    # Mirrors the vendor's own base (`path.join(configDir, "hooks", "transforms")`,
+    # configDir == ctx.home here) and its own resolution of a configured
+    # transformsDir AS A SUBDIRECTORY of that base, not of configDir directly.
+    transforms_dir = ctx.home / "hooks" / "transforms"
+    custom = dig(cfg, "hooks.transformsDir")
+    if isinstance(custom, str) and custom.strip():
+        custom_clean = custom.strip()
+        # C-135 (independent, post-commit): `Path.__truediv__` (`/`) discards the LEFT
+        # operand entirely when the right one is absolute -- `base / "/tmp"` is "/tmp",
+        # not "base/tmp". Node's `path.join`, which the comment above claims to mirror,
+        # does the opposite: it treats every segment as a component to APPEND, so
+        # `path.join(base, "/tmp")` is "base/tmp" (verified by executing the installed
+        # node). An absolute `hooks.transformsDir` therefore used to point this check's
+        # writability probe at an ENTIRELY DIFFERENT, uncontained directory than the one
+        # OpenClaw's own resolveContainedPath actually confines writes to -- reproduced
+        # both a false MEDIUM escalation (the naive absolute path happened to be
+        # writable while the real confined directory was private) and a false negative
+        # (the reverse: the real confined directory was world-writable, the naive path
+        # was not, and the exposure was never inspected). Stripping any leading
+        # separator/drive-letter component before the join mirrors Node's append-only
+        # behavior for exactly this case, matching the vendor semantics the comment
+        # already claims to follow.
+        if Path(custom_clean).is_absolute():
+            custom_clean = custom_clean.lstrip("/\\")
+            # A bare Windows drive letter ("C:\foo" -> stripped to "C:foo") would still
+            # be treated as a drive-relative root by pathlib on that platform; drop it
+            # too so the whole string is an ordinary path component to append.
+            if len(custom_clean) >= 2 and custom_clean[1] == ":":
+                custom_clean = custom_clean[2:].lstrip("/\\")
+        transforms_dir = transforms_dir / custom_clean if custom_clean else transforms_dir
+    why = _dir_replaceable_by_others(transforms_dir)
+
+    label = "; ".join(modules[:6])
+    extra = f" (+{len(modules) - 6} more)" if len(modules) > 6 else ""
+    if why:
+        return _finding(
+            "B380",
+            WARN,
+            f"{len(modules)} hooks.mappings[] transform.module(s) configured — "
+            "config-loaded local code that runs on every matching message/event, "
+            f"before the agent sees it — and the resolved transforms directory "
+            f"({transforms_dir}) is {why}, so another local account could plant or "
+            "replace a transform module: " + label + extra,
+            "Restrict the transforms directory to owner-only (chmod 700), or move "
+            "it out of a shared/group-writable location. Review each configured "
+            "transform module's source either way.",
+            evidence=modules,
+            severity=MEDIUM,
+        )
+    return _finding(
+        "B380",
+        WARN,
+        f"{len(modules)} hooks.mappings[] transform.module(s) configured — "
+        "config-loaded local code that runs on every matching message/event, "
+        "before the agent sees it: " + label + extra,
+        "Review each transform module's source. The module path is confined to "
+        "hooks.transformsDir and cannot escape it via '../', but a reviewed, "
+        "version-controlled transforms directory is still the safer setup.",
+        evidence=modules,
+        confidence="HIGH",
+    )
+
+
 def check_hooks_enable_toggles(ctx: Context) -> Finding:
     """B179 (B-250): inventory of hooks.enabled / hooks.internal(.load.extraDirs)
     enable-toggles.
@@ -2324,6 +2647,19 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B179", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so every hooks.* dig() below would silently degrade to "absent" and fall
+    # through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B179",
+            UNKNOWN,
+            "No config was read, so whether any hooks.enabled / hooks.internal "
+            "enable-toggle is configured could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     evidence: list[str] = []
     extra_dirs_hit = False
@@ -2716,7 +3052,12 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
               readable to check for an environment-supplied credential, on a
               non-loopback bind — cannot tell whether the gateway is genuinely
               unauthenticated or env-authenticated, so this must not default to a
-              fabricated PASS.
+              fabricated PASS. Also UNKNOWN, ``engine_degraded=True``
+              (B-657), when a persistent artifact WAS read but the
+              collector's byte cap truncated it (``limit_hits_for(ctx,
+              LIMIT_DOMAIN_ENV)``) — an env-supplied credential could sit past the cut,
+              so "no usable credential" is a claim about text that was never scanned,
+              not a verified absence.
 
     B-310: this check used to read ONLY `gateway.auth.mode` from config, so a gateway
     authenticated by an environment-supplied credential (OPENCLAW_GATEWAY_TOKEN/
@@ -2747,6 +3088,19 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
     unreadable = _config_unreadable("B80", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(cfg, "gateway.bind", "")`'s `""` default lands in LOOPBACK below
+    # and an unread config would be reported as a PROVEN loopback bind.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B80",
+            UNKNOWN,
+            "No config was read, so whether the gateway auth endpoint is exposed to "
+            "remote brute-force could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     cfg = ctx.config
     bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
     # Loopback is checked before mode/credential resolution: a loopback bind is not
@@ -2776,6 +3130,28 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
             if _env_cred is not None and len(_env_cred.strip()) >= 24:
                 mode = "token"
                 cred_src = f"an environment-supplied credential ({_env_cred_src})"
+            elif _env_cred is None and limit_hits_for(ctx, LIMIT_DOMAIN_ENV):
+                # B-657: truncation implies the file WAS found and opened
+                # (ctx.dotenv_found/unit_env_found are set before the byte-cap check
+                # fires), so env_evidence_readable(ctx) is already True here and the
+                # "not readable at all" branch below can never catch this case. A
+                # credential past the cut is present-but-unread, not genuinely absent —
+                # same DEGRADED_CHECK_CAP consequence as the B6/B172 fix (f748869).
+                return _finding(
+                    "B80",
+                    UNKNOWN,
+                    "gateway.auth.mode is not set in config, the bind is non-loopback, and no "
+                    "usable environment-supplied gateway credential was found in the systemd "
+                    "unit(s) or global dotenv file(s) that were read — but at least one of "
+                    "them exceeded the collector's byte cap, so a credential past the cut "
+                    "would not have been seen. Cannot determine whether the auth endpoint is "
+                    "brute-forceable.",
+                    "Keep OpenClaw's systemd unit files and global dotenv files "
+                    "(~/.openclaw/.env, ~/.config/openclaw/gateway.env) under the collector's "
+                    "size cap, or set gateway.auth.mode explicitly, then re-run the audit.",
+                    config_field_paths={"gateway.auth.mode"},
+                    engine_degraded=True,
+                )
             elif _env_cred is None and not env_evidence_readable(ctx):
                 return _finding(
                     "B80",
@@ -2788,8 +3164,8 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
                     "global dotenv files, or set gateway.auth.mode explicitly.",
                     config_field_paths={"gateway.auth.mode"},
                 )
-            # else: env evidence was readable and carried nothing usable (absent, or a
-            # sub-24-char value not treated as authenticating) -> mode stays None,
+            # else: env evidence was readable IN FULL and carried nothing usable (absent,
+            # or a sub-24-char value not treated as authenticating) -> mode stays None,
             # falls through to the ordinary "not token/password" PASS below, exactly as
             # before B-310 for a truly-unauthenticated gateway.
         # else: a config token IS present but below the 24-char bar. B2 already FAILs
@@ -2893,7 +3269,19 @@ def check_least_privilege(ctx: Context) -> Finding:
     # declared-but-clean surface (small allowFrom, minimal profile, allow-listed plugins,
     # a recognized tools.allow entry) still PASSes. _capabilities_attested is redundant
     # with the tail of _meaningful_tool_surface but kept for self-documenting intent.
-    surface_undeclared = (
+    #
+    # C-135 (independent, post-commit, B-803 sibling gap): the original gate let
+    # `_capabilities_attested(ctx)` alone clear `surface_undeclared` to False even on
+    # a config-blind run (no openclaw.json read at all) — an --attest roster then
+    # walked this straight through to the unconditional PASS below, a confident
+    # "no over-broad elevated-tool grant... in config" claim over a config that was
+    # never read. Reproduced directly: config_found=False + a real --attest roster ->
+    # PASS. Same root cause B-803 fixed for A1 (check_trifecta): an attestation only
+    # speaks to the agent's own declared tools, not the rest of the config surface a
+    # blind run never read. `config_blind` forces UNKNOWN here too, regardless of
+    # attestation.
+    config_blind = not getattr(ctx, "config_found", False) and not ctx.config
+    surface_undeclared = config_blind or (
         dig(cfg, "tools.elevated.allowFrom") is None
         and dig(cfg, "tools.profile") is None
         and not _plugins(cfg)
@@ -2901,15 +3289,29 @@ def check_least_privilege(ctx: Context) -> Finding:
         and not _capabilities_attested(ctx)
     )
     if surface_undeclared:
-        return _finding(
-            "B3",
-            UNKNOWN,
+        detail = (
+            "Least-privilege posture cannot be determined: no OpenClaw config was found "
+            "to read at all — an attestation only speaks to the agent's own declared "
+            "tools, not the rest of the config surface (tools.profile, plugins, "
+            "elevated-tool allowlists) a config-blind run never read."
+            if config_blind else
             "Least-privilege posture is indeterminate: the config declares no elevated-tool "
             "grant, tool profile, plugins, or recognized tool surface (runtime-granted tools "
             "are not visible to a static config audit), so there is nothing to verify as "
-            "constrained.",
+            "constrained."
+        )
+        fix = (
+            "Run the audit against the real openclaw.json (or a --home pointing at it) so "
+            "least privilege can be assessed against actual config."
+            if config_blind else
             "Declare the agent's tool surface (tools.profile / tools.allow / "
-            "tools.elevated.allowFrom) or pass --attest so least privilege can be assessed.",
+            "tools.elevated.allowFrom) or pass --attest so least privilege can be assessed."
+        )
+        return _finding(
+            "B3",
+            UNKNOWN,
+            detail,
+            fix,
         )
     # B-042: PASS verifies a CONFIG-level least-privilege posture only (no over-broad
     # elevated grant, no profile/plugin escalation). It must NOT claim runtime "tool
@@ -2953,6 +3355,19 @@ def check_proxy_header_forging(ctx: Context) -> Finding:
     unreadable = _config_unreadable("C032", ctx)
     if unreadable is not None:
         return unreadable
+    # B-661: `_config_unreadable` only covers "present but unparseable" — on a host
+    # with no openclaw.json at all, config_parse_error is False and ctx.config is
+    # `{}`, so `dig(ctx.config, "gateway.allowRealIpFallback")` would silently
+    # resolve to None and fall through to the PASS about a config nobody read.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "C032",
+            UNKNOWN,
+            "No config was read, so whether gateway.allowRealIpFallback broadly trusts "
+            "proxied source headers could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
     fallback = dig(ctx.config, "gateway.allowRealIpFallback")
     if not fallback:
         return _finding(
@@ -2997,16 +3412,35 @@ def check_sandbox(ctx: Context) -> Finding:
     docker_network = dig(cfg, "agents.defaults.sandbox.docker.network")
     if docker_network == "host":
         ev.append("agents.defaults.sandbox.docker.network=host (no network isolation)")
-    # Real path: agents.defaults.sandbox.docker.binds (not sandbox.bind_mount)
-    binds = dig(cfg, "agents.defaults.sandbox.docker.binds")
-    if binds:
+    # Real path: agents.defaults.sandbox.docker.binds (not sandbox.bind_mount). C-454:
+    # extraction via the shared `_sandbox_docker_binds` (checks/_shared.py) rather than
+    # this function's own isinstance chain. NOT `dig(cfg, "agents.defaults.sandbox")`:
+    # that is a bare NON-LEAF object read, which test_schema_grounding.py's manifest
+    # guard cannot verify by construction (same reasoning `_peragent_sandbox_evidence`
+    # already documents for the identical problem) — plain dict traversal instead.
+    #
+    # C-135 (independent, post-commit): reproduced a real regression here directly
+    # against bf31513^ -- the pre-extraction code was `dig(cfg, "...binds")` gated on
+    # bare truthiness, so a malformed-but-truthy shape (e.g. a dict instead of a
+    # string/list) still fired this evidence; `_sandbox_docker_binds` narrows that to
+    # string/list and returns `None` otherwise, and treating `None` the same as `[]`
+    # (ordinary absence) turned that case from FAIL into UNKNOWN. Fail closed on
+    # `None`, matching `_sandbox_has_writable_bind`'s own `None -> True` treatment.
+    _agents_node = cfg.get("agents") if isinstance(cfg, dict) else None
+    _defaults_node = _agents_node.get("defaults") if isinstance(_agents_node, dict) else None
+    default_sandbox = _defaults_node.get("sandbox") if isinstance(_defaults_node, dict) else None
+    default_sandbox = default_sandbox if isinstance(default_sandbox, dict) else {}
+    binds = _sandbox_docker_binds(default_sandbox)
+    if binds is None:
+        ev.append(
+            "agents.defaults.sandbox.docker.binds is present but not a recognizable "
+            "shape (expected a bind-spec string or a list of them) — cannot rule out "
+            "a host-path bind"
+        )
+    elif binds:
         ev.append("agents.defaults.sandbox.docker.binds exposes host paths")
         # docker.sock bind hands full host control to the sandbox (container escape vector)
-        if isinstance(binds, list):
-            binds_str = " ".join(str(b) for b in binds)
-        else:
-            binds_str = str(binds)
-        if "docker.sock" in binds_str:
+        if _bind_mentions_docker_sock(binds):
             ev.append(
                 "agents.defaults.sandbox.docker.binds mounts docker.sock — "
                 "grants host control to the sandbox (container escape)"
@@ -3075,11 +3509,7 @@ def check_sandbox(ctx: Context) -> Finding:
         if docker_network == "host":
             fixes.append("Set agents.defaults.sandbox.docker.network to 'bridge' (not 'host')")
         if binds:
-            if isinstance(binds, list):
-                binds_str = " ".join(str(b) for b in binds)
-            else:
-                binds_str = str(binds)
-            if "docker.sock" in binds_str:
+            if _bind_mentions_docker_sock(binds):
                 fixes.append(
                     "Remove the docker.sock bind from docker.binds (it grants host control to the sandbox)"
                 )
@@ -3147,13 +3577,19 @@ def check_secrets(ctx: Context) -> Finding:
         if _pattern_hits_real_secret(SECRET_PATTERNS, text):
             ev.append(f"secret-like string in {fname}")
     if ev:
+        # B-759: named against the audited home, not a hardcoded `~/.openclaw` — the
+        # config path this run actually read (`ctx.config_path`, falling back to the
+        # conventional filename under `ctx.home` for the rare case it was never
+        # resolved) so the copy-pasted chmod acts on the config this run diagnosed,
+        # not a different home on a machine that has several.
+        _b1_cfg = ctx.config_path or (ctx.home / "openclaw.json")
         return _finding(
             "B1",
             FAIL,
             "; ".join(ev),
             "Move secrets to `openclaw secrets configure` / env vars, never into "
-            "bootstrap files; `chmod 600 ~/.openclaw/openclaw.json` and `chmod 700 "
-            "~/.openclaw` so config-stored tokens are not readable by others.",
+            f"bootstrap files; `chmod 600 {_b1_cfg}` and `chmod 700 {ctx.home}` so "
+            "config-stored tokens are not readable by others.",
             ev,
         )
     # B-228: openclaw.json present but unparseable/unreadable — bootstrap-file secrets
@@ -3183,6 +3619,24 @@ def check_secrets(ctx: Context) -> Finding:
             "Check why the audit could not stat() openclaw.json (see the run's errors) "
             "and re-run; in the meantime, manually confirm `chmod 600 "
             "~/.openclaw/openclaw.json`.",
+        )
+    # B-661: the two guards above ("present but unparseable" / "parsed but
+    # unstattable") do not cover "no openclaw.json at all" — bootstrap-file secrets
+    # (checked unconditionally above) still legitimately FAIL either way, but the
+    # PASS wording below says "No exposed plaintext secrets", which conflates
+    # "checked the config and found none" with "never checked the config at all".
+    # secret_paths is necessarily empty here whenever config_found is False (it is
+    # derived from an empty ctx.config), so this cannot mask a real config-content
+    # finding — it only stops the terminal sentence from overclaiming.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B1",
+            UNKNOWN,
+            "No config was read, so whether openclaw.json itself carries a plaintext "
+            "secret could not be determined. No secret-like string was found in the "
+            "readable bootstrap files.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     note = ""
     pc = "verified"
@@ -3289,6 +3743,161 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
     )
 
 
+# ---------- C-405: secrets stored at OpenClaw-redactor-blind config paths ----------
+#
+# MEASURED FIRST, per this task's own instruction, before writing anything here — both
+# real consumers, not just the underlying patterns: `_secret_paths(cfg)` (B1's own
+# detector) and `_c015_has_secret(text)` (C015's own detector) were run directly against
+# five representative configs. Four missed; the positive control (an ordinary `apiKey`)
+# was caught:
+#   {"headers": {"Authorization": "Bearer <token>"}}     -> MISSED by both
+#   {"auth": {"bearer": "<token>"}}                       -> MISSED by both
+#   {"auth": {"tokens": ["<token>", "<token>"]}}          -> MISSED by both
+#   {"encryption": {"key": "<token>"}}                    -> MISSED by both
+#   {"tools": {"apiKey": "<token>"}}                      -> caught (control)
+#
+# Two DISTINCT reasons, not one:
+#   1. `SECRET_KEY_RE` (checks/_shared.py) is `password|secret|token|api[_-]?key|
+#      apikey|bottoken` -- "Authorization", "bearer", and bare "key" match none of
+#      those alternatives at all, so `_secret_paths`'s key-name test never even
+#      reaches the value.
+#   2. `_secret_paths`'s own recursion only tests `SECRET_KEY_RE.search(k)` when a
+#      dict value is a bare STRING; once it descends into a LIST (the `elif
+#      isinstance(obj, list)` branch), each element is recursed into with no key at
+#      all, so a `"tokens": ["<a>", "<b>"]` array is invisible even though "tokens"
+#      itself matches `SECRET_KEY_RE` fine -- the key/value pairing is lost, not the
+#      keyword.
+#
+# `logsafe.py`'s own redactor was also checked (this task's "separate, quick
+# self-audit" ask): it imports this SAME `SECRET_KEY_RE` from `checks/_shared.py`
+# rather than keeping a second copy, so gap #1 above is identical for our own log
+# redaction -- widening the marker set below closes both at once, deliberately, rather
+# than as a side effect.
+#
+# Deliberately a NEW, narrowly-scoped helper rather than widening the SHARED
+# `SECRET_KEY_RE`/`_secret_paths` in place: `_secret_paths` feeds B1, a SCORED,
+# FAIL-capable check, and `SECRET_KEY_RE` also feeds `logsafe.redact()`'s live output
+# path. Adding a bare "key" alternative to that shared, UNANCHORED substring regex
+# would match "primaryKey"/"foreignKey"/"sortKey"/"keyword" -- ordinary, non-secret
+# field names that contain "key" as a substring -- and widen a scored FAIL surface on
+# a false positive none of those deserve. This check's own key match
+# (`_REDACTOR_BLIND_KEY_RE`) is anchored to the WHOLE key segment instead
+# (`^(authorization|bearer|key)$`, case-insensitive) so "primaryKey" cannot collide,
+# and it feeds only THIS new, unscored, WARN-only, never-FAIL check -- never B1.
+_REDACTOR_BLIND_KEY_RE = re.compile(r"^(authorization|bearer|key)$", re.I)
+
+# C-135 (independent, post-commit): a bare "key" segment is the broadest of the three
+# alternatives above -- unlike "authorization"/"bearer", which are credential-typed by
+# NAME alone, "key" is also the ordinary field name for a cloud resource identifier
+# (a KMS key ARN, a Vault key ID) that is >=16 chars, not a SecretRef, and genuinely
+# not a secret VALUE. Concrete false positive found and reproduced:
+# {"encryption": {"key": "arn:aws:kms:us-west-2:123456789012:key/1234abcd-..."}}. This
+# gate excludes values shaped like a structured resource identifier -- an ARN
+# (`arn:<partition>:...`), a URI with a scheme (`scheme://...`), or a bare UUID --
+# applied ONLY to the "key" alternative, never to "authorization"/"bearer": a Bearer
+# token or an Authorization header value is never legitimately ARN/URI/UUID-shaped, so
+# narrowing those two would only open a false negative for no matching benefit.
+_REDACTOR_BLIND_STRUCTURED_ID_RE = re.compile(
+    r"^arn:[a-z0-9-]+:|^[a-z][a-z0-9+.-]*://"
+    r"|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.I,
+)
+
+
+def _redactor_blind_secret_paths(obj, prefix: str = "", depth: int = 0) -> list:
+    """Dotted paths of a secret-shaped value sitting at a key name neither OpenClaw's
+    own config-value redactor nor our own `_secret_paths`/`SECRET_KEY_RE` recognizes
+    -- see the module comment above for the measurement and the two distinct gaps
+    this closes. Mirrors `_secret_paths`'s own walk shape (same depth bound, same
+    16-char / `_is_secret_reference` value gate) so the two stay easy to compare.
+    """
+    found: list = []
+    if depth >= 100:  # mirrors _shared._MAX_WALK_DEPTH
+        return found
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            path = f"{prefix}.{k}" if prefix else k
+            if (
+                isinstance(v, str)
+                and len(v) >= 16
+                and not _is_secret_reference(v)
+                and _REDACTOR_BLIND_KEY_RE.match(k)
+                and not (
+                    k.strip().lower() == "key"
+                    and _REDACTOR_BLIND_STRUCTURED_ID_RE.match(v.strip())
+                )
+            ):
+                found.append(path)
+                continue
+            if isinstance(v, list) and SECRET_KEY_RE.search(k):
+                for i, item in enumerate(v):
+                    if (
+                        isinstance(item, str)
+                        and len(item) >= 16
+                        and not _is_secret_reference(item)
+                    ):
+                        found.append(f"{path}[{i}]")
+            found.extend(_redactor_blind_secret_paths(v, path, depth + 1))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            found.extend(_redactor_blind_secret_paths(v, f"{prefix}[{i}]", depth + 1))
+    return found
+
+
+def check_redactor_blind_secret_paths(ctx: Context) -> Finding:
+    """B381 (C-405) — a secret-shaped value sits at a config path neither OpenClaw's
+    own redactor nor this tool's own SECRET_KEY_RE-based detection recognizes (see the
+    module comment above `_redactor_blind_secret_paths` for the measurement).
+
+    Unlike B1, this is NOT gated on file permissions: the threat this check names is
+    OpenClaw's own runtime echoing the value back through `config get` output,
+    trajectory logs, or a message channel relay — a leak that happens regardless of
+    who else can read openclaw.json on disk. Never FAIL: a false positive here costs
+    a WARN, not a hard-capped grade, and this is a narrow, hand-anchored key-name
+    match (see `_REDACTOR_BLIND_KEY_RE`'s own comment for why it is anchored rather
+    than a substring test) rather than the exhaustively-vetted `SECRET_KEY_RE`.
+
+    WARN    — a redactor-blind path holds a secret-shaped value.
+    UNKNOWN — openclaw.json present but unparseable/unreadable, or not read at all.
+    PASS    — no such path found.
+    """
+    unreadable = _config_unreadable("B381", ctx)
+    if unreadable is not None:
+        return unreadable
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B381",
+            UNKNOWN,
+            "No config was read, so whether a secret-shaped value sits at a "
+            "redactor-blind path could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    paths = _redactor_blind_secret_paths(ctx.config)
+    if not paths:
+        return _finding(
+            "B381",
+            PASS,
+            "No secret-shaped value found at a config path OpenClaw's own redactor "
+            "does not recognize (Authorization/bearer/key/plural-tokens-as-a-list).",
+            "No action needed.",
+        )
+    label = ", ".join(paths[:6])
+    extra = f" (+{len(paths) - 6} more)" if len(paths) > 6 else ""
+    return _finding(
+        "B381",
+        WARN,
+        f"{len(paths)} secret-shaped value(s) at a config path OpenClaw's own "
+        "redactor does not recognize, so it will not be masked in config-get "
+        f"output, trajectory logs, or a relayed message channel: {label}{extra}",
+        "Move the value to `openclaw secrets configure` (a SecretRef indirection), "
+        "or to a path OpenClaw's redactor does recognize (a key name containing "
+        "password/secret/token/apiKey) — never a bare Authorization/bearer/key field "
+        "or a plural token array.",
+        evidence=paths,
+    )
+
+
 def check_tls(ctx: Context) -> Finding:
     cfg = ctx.config
     bind = parse_bind_host(dig(cfg, "gateway.bind", ""))
@@ -3305,12 +3914,15 @@ def check_tls(ctx: Context) -> Finding:
             f"openclaw.json is group/world-readable ({oct(ctx.config_mode)[-3:]}) — at-rest risk"
         )
     if ev:
+        # B-759: see B1's own comment above — named against the audited home, not a
+        # hardcoded `~/.openclaw`.
+        _b11_cfg = ctx.config_path or (ctx.home / "openclaw.json")
         return _finding(
             "B11",
             WARN,
             "; ".join(ev),
             "Terminate TLS (reverse proxy / tailscale) for any non-loopback bind; "
-            "`chmod 600 ~/.openclaw/openclaw.json` and `chmod 700 ~/.openclaw`.",
+            f"`chmod 600 {_b11_cfg}` and `chmod 700 {ctx.home}`.",
             ev,
         )
     # B-228: guard the terminal PASS only — _perms_loose(ctx) above is a real, config-
@@ -3342,6 +3954,23 @@ def check_tls(ctx: Context) -> Finding:
             "Check why the audit could not stat() openclaw.json (see the run's errors) "
             "and re-run; in the meantime, manually confirm `chmod 600 "
             "~/.openclaw/openclaw.json`.",
+        )
+    # B-661: the two guards above only cover "openclaw.json present but unparseable"
+    # (_config_unreadable) and "parsed but unstattable" — on a host with NO
+    # openclaw.json at all, config_found is False, config_parse_error is False, and
+    # ctx.config is `{}`. `bind`/`tls` above then silently read as "absent" and this
+    # PASS would assert a proven-safe transport about a config nobody read. The
+    # `_perms_loose`-only WARN path above this stays reachable on a genuinely
+    # unparseable config (a real, content-independent file-mode signal); only this
+    # terminal "everything is fine" claim needs the config to have actually loaded.
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B11",
+            UNKNOWN,
+            "No config was read, so whether the gateway transport is loopback/TLS "
+            "could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     return _finding(
         "B11",
@@ -3402,16 +4031,34 @@ def check_trifecta(ctx: Context) -> Finding:
             evidence=active,
         )
 
+    # B-803: a run that never found openclaw.json at all leaves ctx.config == {} —
+    # exactly the same shape as a genuinely empty, fully-read config (B-166's own note
+    # at the top of this function). `_capabilities_attested`/`_meaningful_tool_surface`
+    # below treat an attested roster as license to trust every OFF leg they gate, but an
+    # attestation only speaks to the AGENT's own declared tools — it says nothing about
+    # channels/dmPolicy or the rest of the config surface this run never read at all. A
+    # config-blind run therefore let an attested roster silence every hedge and reach a
+    # confident PASS on the flagship CRITICAL check, which is strictly worse than the
+    # honest "Cannot determine" WARN a blind run gets without one (measured: PASS
+    # 'Active legs 1/3' vs the correct WARN once attested tools are added to an
+    # otherwise-empty home). `not ctx.config`, not just `not ctx.config_found`, so a
+    # hand-built test Context that sets a real config dict without also setting
+    # config_found=True (this file's own convention — see e.g. test_checks.py's `_a1`)
+    # stays inert; only an ACTUALLY empty config participates.
+    config_blind = not getattr(ctx, "config_found", False) and not ctx.config
+
     # Thin-surface guard (B-033): runtime tools granted at session start (message,
     # exec_command, web_*, memory_*) are NOT written to openclaw.json, so an
     # input/outbound leg that looks OFF can still be live. We only trust an OFF leg
     # when the user has attested the agent's real tool inventory (--attest). An
     # unrelated tools.allow entry must NOT silence this — a no-op name was previously
-    # enough to flip WARN→PASS without changing real exposure.
+    # enough to flip WARN→PASS without changing real exposure. A config-blind run
+    # (B-803) can never trust the attestation to stand in for the config it never saw,
+    # so it forces this hedge regardless of what `_meaningful_tool_surface` says.
     runtime_unknown = [
         k for k, v in legs.items() if not v and k in ("untrusted input", "outbound actions")
     ]
-    if runtime_unknown and not _meaningful_tool_surface(ctx):
+    if runtime_unknown and (config_blind or not _meaningful_tool_surface(ctx)):
         return _finding(
             "A1",
             WARN,
@@ -3492,10 +4139,33 @@ def check_trifecta(ctx: Context) -> Finding:
     # `write`/`apply_patch`) — "read" cannot simply be added to a substring hint list
     # without matching "thread"/"spreadsheet". Tracked separately; not widened here,
     # because raising a leg is FAIL-capable movement and this change adds no FAIL.
-    if not legs["sensitive data"] and not _capabilities_attested(ctx):
+    # B-803: same reasoning as the config_blind guard above, for the one leg this
+    # thin-surface family doesn't already cover. `config_blind` forces this hedge too
+    # (`or` below) — an attestation cannot single-handedly clear the sensitive-data leg
+    # on a run that never read the config it would need to corroborate that with.
+    if not legs["sensitive data"] and (config_blind or not _capabilities_attested(ctx)):
         reach = scopes_reaching_outside_workspace(ctx.config)
         store = _credential_store_state(getattr(ctx, "home", None))
-        if reach or store["incomplete"]:
+        # B-749: the on-disk credentials/ scan above can read clean while OpenClaw's
+        # machine-owned auth-profile store (config_machine_state["authProfiles.store"])
+        # holds real material — measured on the fleet machine, 2026-09-06:
+        # secret_files=[], incomplete=False (a confident "looked, nothing there"), while
+        # the state DB held a non-trivial authProfiles.store row. Length-only (see
+        # collector._collect_auth_profile_store_presence): a row longer than the
+        # vendor's own empty-store shape ({"version":1,"profiles":{}}, 27 bytes,
+        # grounded against the installed dist) means something is actually stored
+        # there, without this check ever reading it. Deliberately a HEDGE here, not a
+        # leg-raising signal: whether a non-empty row always means a USABLE credential
+        # (vs. an expired/revoked profile) is unresolved, so asserting the leg is ON
+        # would risk a new false-positive FAIL on the CRITICAL check that grade-caps
+        # the whole audit — the same care B-730 already took in the other direction.
+        auth_store_length = getattr(ctx, "auth_profile_store_length", None)
+        auth_store_present = (
+            getattr(ctx, "auth_profile_store_read", False)
+            and auth_store_length is not None
+            and auth_store_length > _AUTH_PROFILE_STORE_EMPTY_BYTES
+        )
+        if reach or store["incomplete"] or config_blind or auth_store_present:
             why = []
             if reach:
                 # B-712: when one of these scopes is `sandbox.mode: "non-main"`, whether it
@@ -3517,6 +4187,20 @@ def check_trifecta(ctx: Context) -> Finding:
                     f" ({store['reason']}), so nothing found in it means 'not found',"
                     " not 'not there'"
                 )
+            if auth_store_present:
+                why.append(
+                    "the machine's own auth-profile store holds more than an empty"
+                    f" shell ({auth_store_length} bytes in"
+                    " config_machine_state['authProfiles.store'], vs. OpenClaw's own"
+                    f" {_AUTH_PROFILE_STORE_EMPTY_BYTES}-byte empty-store shape), and"
+                    " this scan only looked at the credentials/ directory on disk"
+                )
+            if config_blind:
+                why.append(
+                    "no OpenClaw config was found on this host at all, so nothing about"
+                    " this leg was actually read — an attested roster speaks only to the"
+                    " agent's own tools, not to channels or the rest of the config surface"
+                )
             return _finding(
                 "A1",
                 WARN,
@@ -3524,13 +4208,22 @@ def check_trifecta(ctx: Context) -> Finding:
                 + " Cannot determine from config: sensitive data. The leg is reported"
                 f" off because no data tool is named in the config, but {'; and '.join(why)}.",
                 (
-                    "Set tools.fs.workspaceOnly=true, or narrow tools.profile to"
+                    "Run this audit against a host where openclaw.json exists, or attest"
+                    " the full picture (tools, credential exposure) so this leg can be"
+                    " resolved instead of left undetermined."
+                    if config_blind
+                    else "Set tools.fs.workspaceOnly=true, or narrow tools.profile to"
                     " 'minimal' or 'messaging' (or add 'read' to tools.deny), so file"
                     " tools cannot reach credentials outside the workspace."
                     if reach
                     else "Make the credential store readable to this audit (it is"
                     " normally mode 0700 and owned by you) and re-run, so the leg can"
                     " be established rather than left undetermined."
+                    if store["incomplete"]
+                    else "Check whether config_machine_state['authProfiles.store'] on"
+                    " this host holds a real, usable credential (this audit only sees"
+                    " its byte length, never its value) and treat this leg as ON if"
+                    " it does."
                 ),
                 evidence=active,
             )
@@ -4493,7 +5186,13 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
               instruct users to set it. A FAIL would punish following the vendor's manual.
     PASS    — a global dotenv file exists and none of the toggles are on in it.
     UNKNOWN — no global dotenv file exists AND the audited home is not this user's own, so
-              there is nothing to have read.
+              there is nothing to have read. Also UNKNOWN, ``engine_degraded=True``
+              (B-657), when a global dotenv file WAS read but exceeded the collector's
+              byte cap (``ctx.dotenv_truncated``) — a toggle past the cut would silently
+              disable a protection with no disclosure. Not gated on the shared
+              ``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``: this check's only evidence source
+              (``dotenv_override``) never reads a systemd unit's environment, and that
+              domain also covers unit-file truncation this check never touches.
 
     **Scope, stated exactly.** A variable exported in the shell that launched an
     already-running agent leaves no on-disk trace and is not detectable from here — that
@@ -4527,6 +5226,26 @@ def check_env_breakglass_toggles(ctx: Context) -> Finding:
             "permanently, record why — a persistent break-glass is a standing exception, "
             "not a default.",
             evidence=hits,
+        )
+
+    if ctx.dotenv_found and ctx.dotenv_truncated:
+        # B-657 (C-135 round 2): "none of the toggles are on" is a claim about a
+        # COMPLETED read of every global dotenv file. A file the collector DID read but
+        # cut at its byte cap can hide a real OPENCLAW_ALLOW_INSECURE_PRIVATE_WS/
+        # OPENCLAW_LOAD_SHELL_ENV past the cut -- present-but-unread, not genuinely
+        # absent, the same DEGRADED_CHECK_CAP consequence as the B6/B172 fix (f748869).
+        return _finding(
+            "B192",
+            UNKNOWN,
+            "No break-glass environment toggle was found in the global dotenv file(s) "
+            "that were read, but at least one of them exceeded the collector's byte cap "
+            "("
+            + ", ".join(_detail_path(p, ctx.home) for p in ctx.dotenv_files)
+            + ") — a toggle past the cut would not have been seen.",
+            "Keep OpenClaw's global dotenv files (~/.openclaw/.env, "
+            "~/.config/openclaw/gateway.env) under the collector's size cap, then "
+            "re-run the audit.",
+            engine_degraded=True,
         )
 
     if ctx.dotenv_found:

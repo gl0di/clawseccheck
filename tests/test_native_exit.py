@@ -8,6 +8,9 @@ from clawseccheck.native import run_native_audit
 
 def _mock_run(monkeypatch, stdout, stderr="", returncode=0):
     monkeypatch.setattr(native.shutil, "which", lambda *_a, **_k: "/usr/bin/openclaw")
+    # B-774: the exec-trust guard now fails CLOSED on a stat it cannot perform, and
+    # this fixed path need not exist on the machine running the suite.
+    monkeypatch.setattr(native, "_untrusted_exec_reason", lambda _exe: None)
 
     def fake_run(args, **kwargs):
         return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=stderr)
