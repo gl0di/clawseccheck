@@ -679,7 +679,8 @@ def _has_mutable_identity(findings: list[Finding], cfg: dict) -> bool:
 
 
 def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
-    """True when B38 FAILs OR browser.ssrfPolicy.dangerouslyAllowPrivateNetwork is set.
+    """True when B38 FAILs OR browser.ssrfPolicy.dangerouslyAllowPrivateNetwork (or the
+    legacy allowPrivateNetwork alias) is set.
 
     "Set" means the literal boolean `True`, matching B38's own `is True` gate
     (checks/_egress.py) and the installed runtime's actual bypass predicate. Verified
@@ -700,10 +701,30 @@ def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
     previously fired RISK-05/RISK-15 on values (a non-empty string, `1`, a non-empty
     list, ...) that the real runtime never treats as enabling the private-network
     bypass -- a false positive on rules whose own docstrings claim zero-FP.
+
+    C-135 adversarial pass, 2026-09-16: B38 itself now ORs in the legacy flat
+    `allowPrivateNetwork` alias (checks/_egress.py) -- resolveBrowserSsrFPolicy
+    (config-Dc3xLSSD.mjs:117-130) folds it into dangerouslyAllowPrivateNetwork before the
+    browser ever uses the policy. The canonical schema rejects the legacy key outright,
+    but the real boot path auto-repairs an invalid config IN MEMORY on every startup
+    (resolveStartupConfigSnapshot, wired at pre-bootstrap-Da_13P9b.mjs:255) via the same
+    migration `openclaw doctor` uses, WITHOUT writing the fix back to disk -- so a raw
+    config setting ONLY the legacy key is a live, silent bypass on every boot, not
+    something gated behind a doctor run the operator may never have done. See B38's own
+    grounding comment (checks/_egress.py) for the full chain. Mirrored here so a raw
+    config setting ONLY the legacy key still drives RISK-05/RISK-15, not just B38. A
+    nested `network.allowPrivateNetwork`/
+    `network.dangerouslyAllowPrivateNetwork` shape also exists in the installed dist
+    (isPrivateNetworkOptInEnabled, ssrf-policy-CFLWuj1r.mjs) but is CHANNEL-scoped only
+    (channels.<provider>.network.*) and does not apply to browser.ssrfPolicy -- see B38's
+    own grounding comment -- so it is deliberately not read here either.
     """
     if _finding_status(findings, "B38") == FAIL:
         return True
-    return dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
+    return (
+        dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
+        or dig(cfg, "browser.ssrfPolicy.allowPrivateNetwork") is True
+    )
 
 
 def _control_plane_exposed(findings: list[Finding], cfg: dict) -> bool:
@@ -1467,11 +1488,16 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
     if not _browser_ssrf(findings, cfg):
         return None
     # B-722: _browser_ssrf() is true on "B38 FAILs" OR "the flag is set" -- and B38 can
-    # FAIL on browser.noSandbox alone, with dangerouslyAllowPrivateNetwork never set. The
+    # FAIL on browser.noSandbox alone, with neither private-network flag ever set. The
     # blockedHostnames caveat below is about that flag specifically; gate it on the real
     # config value so it never appears pointed at a flag this config never enabled (C-135,
     # independent adversarial pass, found this unconditional in the first draft).
-    allow_private = dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
+    # 2026-09-16 C-135 follow-up: OR in the legacy flat allowPrivateNetwork alias too --
+    # same grounding as _browser_ssrf() above.
+    allow_private = (
+        dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
+        or dig(cfg, "browser.ssrfPolicy.allowPrivateNetwork") is True
+    )
     return RiskPath(
         id="RISK-15",
         severity=HIGH,

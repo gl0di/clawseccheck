@@ -330,7 +330,8 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     """B38 — Browser control / cookie & SSRF exposure.
 
     FAIL    — browser is configured AND (dangerouslyAllowPrivateNetwork == true
-              OR noSandbox == true). Either flag is a CRITICAL-class primitive:
+              OR the legacy browser.ssrfPolicy.allowPrivateNetwork alias == true
+              OR noSandbox == true). Either private-network flag is a CRITICAL-class primitive:
               private-network access enables cloud-metadata credential theft;
               no-sandbox means the headless browser can escape OS isolation.
     WARN    — browser is configured but ssrfPolicy.allowedHostnames /
@@ -369,7 +370,43 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         )
 
     ssrf_policy = browser.get("ssrfPolicy") if isinstance(browser.get("ssrfPolicy"), dict) else {}
-    allow_private = ssrf_policy.get("dangerouslyAllowPrivateNetwork")
+    # C-135 adversarial pass, 2026-09-16, grounded against the installed 2026.9.4 dist:
+    # the browser's own config resolver, resolveBrowserSsrFPolicy (config-Dc3xLSSD.mjs:
+    # 117-130), ORs a LEGACY flat `allowPrivateNetwork` alias into
+    # `dangerouslyAllowPrivateNetwork` before the browser ever uses the policy --
+    # `dangerouslyAllowPrivateNetwork = allowPrivateNetwork === true ||
+    # dangerouslyAllowPrivateNetwork === true`. The canonical schema is `.strict()` and
+    # rejects the legacy key outright, so a config carrying it fails validation at
+    # startup -- but that does NOT make it safe-by-rejection: `resolveStartupConfigSnapshot`
+    # (automatic-startup-config-repair-Dwz3nno7.mjs:56-59, wired into the real boot path at
+    # pre-bootstrap-Da_13P9b.mjs:255) auto-repairs an invalid snapshot IN MEMORY via the
+    # same migration doctor uses (applyLegacyDoctorMigrations, which folds
+    # normalizeLegacyBrowserConfig from doctor-config-flow-BoTzHMKN.mjs:216-229) and boots
+    # with the repaired config -- silently, on EVERY startup, with no explicit
+    # "openclaw doctor" invocation needed. The disk WRITE-back of that repair, however,
+    # only happens through the separate `doctor` command flow
+    # (doctor-config-preflight-BOxHQnVM.mjs), which pre-bootstrap does not call. So the
+    # raw config file this check reads can show the legacy key indefinitely while the
+    # running daemon already granted private-network access on every boot -- a config
+    # setting ONLY the legacy key is a live, silent bypass, not a theoretical one, and
+    # was previously invisible to this check (dangerouslyAllowPrivateNetwork alone).
+    # Read both, `is True` on each -- not a truthy check, matching the coercion-proof
+    # gate below and risk.py's own C-135-B722-followup note.
+    #
+    # Two OTHER candidate keys were checked and do NOT apply here, so they are
+    # deliberately NOT read: OpenClaw's isPrivateNetworkOptInEnabled
+    # (ssrf-policy-CFLWuj1r.mjs) also reads a nested `network.allowPrivateNetwork` /
+    # `network.dangerouslyAllowPrivateNetwork` shape, but that shape belongs to CHANNEL
+    # configs only (channels.<provider>.network.*; its own migration in
+    # legacy-private-network-migration-BOjQqQum.mjs is scoped to `channels.<channelKey>`,
+    # never to `browser`). The canonical browser/tools.web.fetch schema,
+    # SsrFPolicyConfigSchema (zod-schema.core-mVpnhNqD.mjs:70-77, a `.strict()` object),
+    # has exactly 5 fields and no `network` member, and resolveBrowserSsrFPolicy never
+    # reads `cfg?.ssrfPolicy?.network`. Reading it here would fabricate a field path that
+    # does not exist for this subsystem (Golden Rule #4).
+    dangerously_allow_private = ssrf_policy.get("dangerouslyAllowPrivateNetwork")
+    legacy_allow_private = ssrf_policy.get("allowPrivateNetwork")
+    allow_private = dangerously_allow_private is True or legacy_allow_private is True
     no_sandbox = browser.get("noSandbox")
     # B-515: the installed dist honours TWO sibling allowlist keys and merges them at
     # runtime -- allowedHostnames (current) and hostnameAllowlist (legacy/alternate).
@@ -382,9 +419,14 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     )
 
     fail_ev: list[str] = []
-    if allow_private is True:
+    if allow_private:
+        trigger_keys = []
+        if dangerously_allow_private is True:
+            trigger_keys.append("dangerouslyAllowPrivateNetwork")
+        if legacy_allow_private is True:
+            trigger_keys.append("allowPrivateNetwork (legacy alias)")
         fail_ev.append(
-            "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork=true — "
+            f"browser.ssrfPolicy.{'/'.join(trigger_keys)}=true — "
             "agent browser can reach internal/metadata IPs (169.254.169.254 cloud-credential theft)"
         )
     if no_sandbox is True:
@@ -401,14 +443,22 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             "(or the legacy browser.ssrfPolicy.hostnameAllowlist) to restrict which "
             "hosts the browser may reach."
         )
-        # B-722: only add the blockedHostnames lever when dangerouslyAllowPrivateNetwork
+        if legacy_allow_private is True:
+            fix += (
+                " browser.ssrfPolicy.allowPrivateNetwork is the retired alias for the "
+                "same flag — OpenClaw ORs it into dangerouslyAllowPrivateNetwork before "
+                "the browser ever uses the policy, so dangerouslyAllowPrivateNetwork=false "
+                "alone will not close this while allowPrivateNetwork stays true. Set it to "
+                "false too, or remove it and run 'openclaw doctor --fix' to migrate it."
+            )
+        # B-722: only add the blockedHostnames lever when the private-network flag
         # is the (or one of the) actual triggers -- B38 can also FAIL on noSandbox alone,
-        # with the flag never set, and advice about "if the flag cannot be turned off"
+        # with neither flag ever set, and advice about "if the flag cannot be turned off"
         # would be confusing noise pointed at a flag this config never enabled. C-135
         # (independent adversarial pass) found this unconditional in the first draft.
-        if allow_private is True:
+        if allow_private:
             fix += (
-                " If dangerouslyAllowPrivateNetwork cannot be turned off, an "
+                " If the private-network flag cannot be turned off, an "
                 "allowedHostnames/hostnameAllowlist entry alone does not close this: on "
                 "OpenClaw 2026.9.1 and later, also add browser.ssrfPolicy.blockedHostnames "
                 "naming at least the cloud-metadata addresses — 169.254.169.254, "

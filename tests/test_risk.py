@@ -250,6 +250,27 @@ def test_risk05_ssrf_no_secrets_no_fire():
     assert not any(p.id == "RISK-05" for p in paths)
 
 
+def test_risk05_legacy_allow_private_network_alias_plus_secrets():
+    # C-135, 2026-09-16: the legacy flat allowPrivateNetwork alias ORs into
+    # dangerouslyAllowPrivateNetwork at runtime (resolveBrowserSsrFPolicy) -- must drive
+    # RISK-05 the same as the canonical key.
+    cfg = {
+        "browser": {"ssrfPolicy": {"allowPrivateNetwork": True}},
+        "gateway": {"auth": {"password": "mysecret"}},
+    }
+    paths = _paths(cfg)
+    assert any(p.id == "RISK-05" for p in paths), [p.id for p in paths]
+
+
+def test_risk05_legacy_allow_private_network_truthy_nonbool_string_no_fire():
+    cfg = {
+        "browser": {"ssrfPolicy": {"allowPrivateNetwork": "true"}},
+        "gateway": {"auth": {"password": "mysecret"}},
+    }
+    paths = _paths(cfg)
+    assert not any(p.id == "RISK-05" for p in paths), [p.id for p in paths]
+
+
 def test_risk05_ssrf_truthy_nonbool_string_no_fire():
     # CLAWSECCHECK-C-135-B722-followup: the installed 2026.9.4 dist types
     # dangerouslyAllowPrivateNetwork as a plain boolean() with no coercion, and
@@ -1056,6 +1077,21 @@ def test_risk15_no_ssrf_flag_no_fire():
 
 def test_risk15_empty_config_no_fire():
     assert not any(p.id == "RISK-15" for p in _paths({}))
+
+
+def test_risk15_legacy_allow_private_network_alias_fires():
+    # C-135, 2026-09-16: same legacy-alias grounding as RISK-05.
+    cfg = _risk15_cfg(ssrf=False)
+    cfg["browser"] = {"ssrfPolicy": {"allowPrivateNetwork": True}}
+    paths = _paths(cfg)
+    assert any(p.id == "RISK-15" for p in paths), [p.id for p in paths]
+
+
+def test_risk15_legacy_allow_private_network_truthy_nonbool_string_no_fire():
+    cfg = _risk15_cfg(ssrf=False)
+    cfg["browser"] = {"ssrfPolicy": {"allowPrivateNetwork": "true"}}
+    paths = _paths(cfg)
+    assert not any(p.id == "RISK-15" for p in paths), [p.id for p in paths]
 
 
 def test_risk15_truthy_nonbool_string_no_fire():

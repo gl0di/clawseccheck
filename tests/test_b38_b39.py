@@ -65,6 +65,88 @@ def test_b38_private_network_false_does_not_fail():
     assert f.status == PASS
 
 
+# --- FAIL: legacy allowPrivateNetwork alias == true (C-135, 2026-09-16) ---
+# resolveBrowserSsrFPolicy (installed 2026.9.4 dist, config-Dc3xLSSD.mjs:117-130) ORs
+# this flat legacy key into dangerouslyAllowPrivateNetwork before the browser ever
+# uses the policy; OpenClaw's own doctor migration confirms the same key by name.
+# A raw config setting ONLY this key was previously invisible to B38.
+
+def test_b38_legacy_allow_private_network_alone_fails():
+    cfg = {"browser": {
+        "ssrfPolicy": {"allowPrivateNetwork": True},
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == FAIL
+    assert "allowPrivateNetwork" in f.detail
+    assert len(f.evidence) >= 1
+
+
+def test_b38_legacy_allow_private_network_overrides_dangerously_false():
+    # OpenClaw ORs the two keys -- dangerouslyAllowPrivateNetwork=false does not
+    # neutralize a legacy allowPrivateNetwork=true sibling.
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "allowPrivateNetwork": True,
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == FAIL
+
+
+def test_b38_legacy_allow_private_network_false_does_not_fail():
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "allowPrivateNetwork": False,
+            "dangerouslyAllowPrivateNetwork": False,
+            "hostnameAllowlist": ["example.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == PASS
+
+
+def test_b38_legacy_allow_private_network_truthy_nonbool_string_does_not_fail():
+    # Same coercion-proof gate as dangerouslyAllowPrivateNetwork -- `is True`, not truthy.
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "allowPrivateNetwork": "true",
+            "hostnameAllowlist": ["example.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status != FAIL, f.detail
+
+
+def test_b38_legacy_allow_private_network_fix_mentions_both_keys():
+    cfg = {"browser": {
+        "ssrfPolicy": {"allowPrivateNetwork": True},
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == FAIL
+    assert "allowPrivateNetwork" in f.fix
+    assert "doctor --fix" in f.fix
+
+
+# --- Grounded non-applicability: nested network.* shape is channel-scoped, not browser
+# (isPrivateNetworkOptInEnabled, ssrf-policy-CFLWuj1r.mjs, reads it for CHANNEL config;
+# browser.ssrfPolicy's own canonical schema, SsrFPolicyConfigSchema, has no `network`
+# member and resolveBrowserSsrFPolicy never reads cfg?.ssrfPolicy?.network). Pins that
+# B38 does not treat this shape as a bypass -- guards against a future regression that
+# adds it back without re-grounding.
+
+def test_b38_nested_network_shape_is_not_read():
+    cfg = {"browser": {
+        "ssrfPolicy": {
+            "dangerouslyAllowPrivateNetwork": False,
+            "network": {"dangerouslyAllowPrivateNetwork": True, "allowPrivateNetwork": True},
+            "hostnameAllowlist": ["example.com"],
+        },
+    }}
+    f = check_browser_ssrf(_ctx(cfg))
+    assert f.status == PASS, f.detail
+
+
 def test_b38_private_network_truthy_nonbool_string_does_not_fail():
     # CLAWSECCHECK-C-135-B722-followup: the installed 2026.9.4 dist types this field as
     # a plain boolean() (no coercion) inside a strictObject, and the runtime's own bypass
@@ -647,6 +729,14 @@ RELIABILITY = Path(__file__).resolve().parent.parent / "fixtures" / "reliability
 
 def test_b38_bad_fixture_fails():
     _, findings, _ = audit(RELIABILITY / "bad_b38_private_network")
+    by_id = {f.id: f for f in findings}
+    assert by_id["B38"].status == FAIL
+
+
+def test_b38_bad_fixture_legacy_alias_fails():
+    # C-135, 2026-09-16: legacy browser.ssrfPolicy.allowPrivateNetwork alone, no
+    # dangerouslyAllowPrivateNetwork -- end-to-end through the real audit() entry point.
+    _, findings, _ = audit(RELIABILITY / "bad_b38_private_network_legacy_alias")
     by_id = {f.id: f for f in findings}
     assert by_id["B38"].status == FAIL
 
