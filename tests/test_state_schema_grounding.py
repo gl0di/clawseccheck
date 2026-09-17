@@ -671,19 +671,6 @@ _CRON_JOBS_NO_CONSTRAINTS_LEGACY = (
     "comparison makes it LEGACY_COLS: identical column count to the vendor, so not a "
     "proper subset either -- the name is aspirational, not a vendor match."
 )
-_UPDATE_RUNS_SNAPSHOT_STALE = (
-    "update_runs (F-192) is a REAL, current vendor table -- state schema v15+ (2026.9.2), "
-    "still present in the installed 2026.9.4 dist this very snapshot was generated from. "
-    "It reads LEGACY_TABLE here only because the shipped snapshot was last regenerated "
-    "2026-09-12 (commit 28322d5), before tests/test_f192_update_runs.py was added "
-    "2026-09-16 (commit b9898b0) -- update_runs was not yet part of the declared/read "
-    "target-table projection _write_state_snapshot() computes, so it was never written "
-    "into state_schema_snapshot.sql. Not a retired table: re-running "
-    "--write-state-snapshot on a machine with OpenClaw installed should reclassify this "
-    "MODERN. Until then this guard's shipped-snapshot comparison correctly reads it as "
-    "absent."
-)
-
 _REGISTRY: "dict[str, _Entry]" = {
     # ---- fixtures/clean_b188_state_db/state/openclaw.sqlite -- the binary fixture no
     # source scanner sees. Pinned by a full fingerprint row at
@@ -820,7 +807,11 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_c476_cron_payload_extras.py:58": _Entry(LEGACY_COLS, _CRON_JOBS_NO_CONSTRAINTS_LEGACY),
 
     # ---- update_runs (F-192, real vendor table, snapshot not yet re-baselined) ----
-    "tests/test_f192_update_runs.py:30": _Entry(LEGACY_TABLE, _UPDATE_RUNS_SNAPSHOT_STALE),
+    # 2026-09-17: re-baselined the snapshot (was last regenerated 2026-09-12, commit
+    # 28322d5, four days before this fixture landed 2026-09-16, commit b9898b0) --
+    # update_runs is a real, current vendor table (state schema v15+, 2026.9.2) that
+    # genuinely matches the vendor shape now that the snapshot actually carries it.
+    "tests/test_f192_update_runs.py:30": _Entry(MODERN),
 }
 
 assert len(_REGISTRY) == 54, f"registry has {len(_REGISTRY)} entries, expected 54"
