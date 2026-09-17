@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import html as _html
 import json
+import os
 import subprocess
 import sys
+
+from _realhome import REAL_HOME
 
 _BAD_CONFIG = {
     # `groups: {"*": {}}` is here to make ONE finding in this probe deliberately hedged
@@ -43,10 +46,25 @@ def _render(tmp_path, config):
     (home / "openclaw.json").write_text(json.dumps(config), encoding="utf-8")
     out_html = tmp_path / "out.html"
     common = ["--home", str(home), "--data-dir", str(tmp_path / "d"), "--no-history"]
+    # C-135 (independent, post-commit): the suite's own session-scoped $HOME redirect
+    # (conftest.py's _isolate_local_store) is inherited by these subprocesses unless
+    # overridden. C5 ("Native binary PATH safety") stats REAL machine paths (e.g. this
+    # box's actual ~/.npm-global install) and renders them home-relative via
+    # checks._shared._username_safe_path, which collapses against Path.home() --
+    # i.e. $HOME, not the account's real home. Left redirected, that produces an
+    # evidence string whose tilde-collapse silently fails (the real absolute path
+    # doesn't start with the fake $HOME), while a SEPARATE part of the JSON pipeline
+    # independently resolves the real home some other way and DOES collapse it --
+    # the same finding rendering two different ways depending only on which output
+    # format asked. Restoring REAL_HOME for these subprocesses (same convention
+    # tests/_realhome.py already established for tests that must read real machine
+    # state) makes both paths agree, matching actual production behaviour, where
+    # $HOME always equals the real account home.
+    env = {**os.environ, "HOME": str(REAL_HOME), "USERPROFILE": str(REAL_HOME)}
     subprocess.run([sys.executable, "-m", "clawseccheck", *common, "--html", str(out_html)],
-                   capture_output=True, text=True, check=False)
+                   capture_output=True, text=True, check=False, env=env)
     payload = subprocess.run([sys.executable, "-m", "clawseccheck", *common, "--json"],
-                             capture_output=True, text=True, check=False).stdout
+                             capture_output=True, text=True, check=False, env=env).stdout
     return out_html.read_text(encoding="utf-8"), json.loads(payload)
 
 
