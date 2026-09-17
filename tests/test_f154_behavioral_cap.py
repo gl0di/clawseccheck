@@ -887,7 +887,10 @@ class TestCliEndToEnd:
         """`home_safe` (no trajectory sidecar — so EVERY audit_events session_id
         "diverges" by construction) plus a real state DB carrying *rows*. Reproduces
         the C-135 Finding 2 scenario: 'home_safe drops from 98/A to 89/B under --full'
-        on bare divergence alone."""
+        on bare divergence alone. (Historical quote, kept verbatim — home_safe's own
+        uncapped baseline moved 98 -> 97 on 2026-09-16 under 6c11585, unrelated to
+        this scenario; the 89/B CAP CEILING this test asserts, line ~383, is
+        independent of that baseline and unaffected.)"""
         home = tmp_path / "home"
         shutil.copytree(SAFE, home)
         state = home / "state"
