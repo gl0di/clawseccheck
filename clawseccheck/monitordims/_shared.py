@@ -278,6 +278,29 @@ def raw_backstop(prev: dict, curr: dict, scope_key: str, score_key: str,
     with only `total` equality (not also weight-per-check equality) as its guard. See the
     C-469 comment on `_raw_score_scope` for the concrete two-check repro that broke that
     version.
+
+    C-135 (independent, post-commit): this refinement's own "additive, never the reverse"
+    guarantee is LOCAL — it holds only once the scope check above has already agreed the
+    two runs are comparable. It is NOT a soundness claim about the function as a whole. The
+    id:weight scope hash (this function's own precondition) can itself now return
+    RAW_SCOPE_MOVED for a run where a real regression also happened to occur, whenever an
+    unrelated check's weight was ALSO retuned in the same window — e.g. check A goes
+    MEDIUM->LOW (unrelated, stays PASS) while check B genuinely regresses PASS->FAIL (weight
+    unchanged): raw_score itself falls (100 -> 50 in a constructed two-check repro), but
+    because A's weight changed, the scope hash differs and this function returns
+    RAW_SCOPE_MOVED before ever comparing `score_key` — the real fall is never reported, not
+    merely reported at reduced confidence. This is not new: RAW_SCOPE_MOVED already meant
+    "an unrelated denominator change means the comparison cannot be trusted" for every
+    check-SET change before C-469 (see the RAW_* docstring above — "it grows with every
+    release, ... two new WARN checks alone fell raw 83 -> 82 with nothing on disk changed").
+    C-469 only widened which changes count as "the denominator moved" to include a
+    per-check WEIGHT change, not only its ID set — and reopening that comparison instead
+    would reopen the exact false-DEGRADED bug C-469 exists to close, since a raw_score fall
+    that partly (or wholly) traces to a legitimate retune cannot be told apart from one that
+    doesn't without re-deriving which portion of the delta each cause explains. Accepted as
+    the same fail-toward-silence tradeoff this whole function already makes elsewhere, not
+    a defect — recorded here so it is not mistaken for a soundness gap in THIS refinement
+    specifically.
     """
     p_scope, c_scope = prev.get(scope_key), curr.get(scope_key)
     if not (isinstance(p_scope, str) and isinstance(c_scope, str)):

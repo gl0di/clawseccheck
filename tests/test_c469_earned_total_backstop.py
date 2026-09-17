@@ -190,6 +190,57 @@ def test_offsetting_severity_retune_moves_the_scope_hash_not_a_false_degraded():
     assert notes, "a scope-moved run must still say it could not compare"
 
 
+def test_a_real_regression_coinciding_with_an_unrelated_retune_reads_scope_moved():
+    """C-135 (independent, post-commit): a documented, ACCEPTED consequence of the fix
+    above, not a new defect — pinned so it is never mistaken for one.
+
+    Check A goes MEDIUM(3)->LOW(1), status PASS in both runs (an unrelated, legitimate
+    retune). Check B genuinely regresses PASS->FAIL, weight fixed at LOW(1) (a real
+    posture fall). `total` moves 4->2 and the ROUNDED raw_score genuinely falls
+    100->50 -- a real regression by any measure. But because A's weight changed, the
+    id:weight scope hash differs, and `raw_backstop` returns RAW_SCOPE_MOVED before it
+    ever compares `score_key` -- the real fall goes unreported this run, not merely
+    reported at reduced confidence.
+
+    This is not new: RAW_SCOPE_MOVED already meant 'the denominator moved for reasons
+    unrelated to any single check's status, so the comparison cannot be trusted' for
+    every check-SET change before C-469 (see the RAW_* docstring in
+    monitordims/_shared.py). C-469 widened what counts as 'the denominator moved' to
+    include a per-check WEIGHT change too -- trading a known false-DEGRADED bug for a
+    known blind spot in this compound case, the same fail-toward-silence direction the
+    function already took. Comparing `score_key` anyway would reopen the exact
+    false-DEGRADED bug C-469 fixed, since a raw_score fall that partly traces to a
+    legitimate retune cannot be told apart from one that doesn't without re-deriving
+    which portion of the delta each cause explains."""
+    prev = [_f("A", "MEDIUM", "PASS"), _f("B", "LOW", "PASS")]
+    curr = [_f("A", "LOW", "PASS"), _f("B", "LOW", "FAIL")]
+
+    prev_total = sum(WEIGHT[f.severity] for f in prev)
+    curr_total = sum(WEIGHT[f.severity] for f in curr)
+    assert (prev_total, curr_total) == (4, 2), "the premise: total itself moves"
+
+    prev_earned = sum(WEIGHT[f.severity] for f in prev if f.status == "PASS")
+    curr_earned = sum(WEIGHT[f.severity] for f in curr if f.status == "PASS")
+    prev_raw = round(100 * prev_earned / prev_total)
+    curr_raw = round(100 * curr_earned / curr_total)
+    assert (prev_raw, curr_raw) == (100, 50), "the premise: raw_score genuinely falls"
+
+    prev_scope = _raw_score_scope(prev)
+    curr_scope = _raw_score_scope(curr)
+    assert prev_scope != curr_scope, "the premise: the id:weight hash moves"
+
+    verdict, _p, _c = raw_backstop(
+        {"raw_score_scope": prev_scope, "raw_score": prev_raw,
+         "raw_score_earned": prev_earned, "raw_score_total": prev_total},
+        {"raw_score_scope": curr_scope, "raw_score": curr_raw,
+         "raw_score_earned": curr_earned, "raw_score_total": curr_total},
+        "raw_score_scope", "raw_score", "raw_score_earned", "raw_score_total",
+    )
+    assert verdict == RAW_SCOPE_MOVED, (
+        "documented, accepted trade-off: a real regression coinciding with an "
+        f"unrelated weight retune reads as 'cannot compare', not DEGRADED — got {verdict}")
+
+
 def test_an_unchanged_severity_set_still_catches_a_real_regression():
     """The mirror of the case above, and the reason the fix must not simply widen the
     scope hash into silence: identical severities, a genuine WARN -> FAIL, must still be
