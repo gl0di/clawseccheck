@@ -38,6 +38,7 @@ agents.list
 agents.subagents
 audit.enabled
 auth.profiles
+browser.ssrfPolicy.allowPrivateNetwork
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
 channels
 channels.defaults.contextVisibility
