@@ -505,7 +505,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - config: `browser.extraArgs` - remove --remote-allow-origins; keep browser.cdpUrl and every profile cdpUrl on loopback
 
-### B321 - browser.executablePath / profiles.*.executablePath / mcpCommand
+### B321 - browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs
 
 - Severity: HIGH
 - Block: hardening
@@ -513,7 +513,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: yes
 - Confidence: HIGH
 - OWASP: none
-- What it checks: browser.executablePath / profiles.*.executablePath / mcpCommand
+- What it checks: browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs
 - Remediation:
   - none
 
@@ -2983,7 +2983,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
   Set channels.<provider>.contextVisibility (or channels.defaults) to 'allowlist' or
   'allowlist_quote', and set browser.ssrfPolicy.dangerouslyAllowPrivateNetwork to false
   with an explicit browser.ssrfPolicy.allowedHostnames (OpenClaw 2026.8.1 and later;
-  browser.ssrfPolicy.hostnameAllowlist before it). Breaking either leg breaks the chain.
+  browser.ssrfPolicy.hostnameAllowlist before it)... Breaking either leg breaks the chain.
 
 ### RISK-16 - Sandbox host-reach + plaintext gateway credential = control-plane takeover
 
