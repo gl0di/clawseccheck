@@ -661,6 +661,28 @@ _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB = (
     "the exact column shape trajectorystore.TRAJECTORY_TABLE_NAME / "
     "_SELECT_TRAJECTORY_ROWS actually reads, matching test_f187's own DDL verbatim."
 )
+_CRON_JOBS_NO_CONSTRAINTS_LEGACY = (
+    "C-476: same 15 column NAMES/types/order as the real cron_jobs (store_key, job_id, "
+    "declaration_key, owner_agent_id, name, description, enabled, agent_id, payload_kind, "
+    "job_json, state_json, runtime_updated_at_ms, schedule_identity, sort_order, "
+    "updated_at), but with NOT NULL and the composite PRIMARY KEY(store_key, job_id) "
+    "dropped from every column the vendor constrains. The fixture's own author named the "
+    "constant `_MODERN_DDL`, but this guard's strict (name,type,notnull,pk) tuple "
+    "comparison makes it LEGACY_COLS: identical column count to the vendor, so not a "
+    "proper subset either -- the name is aspirational, not a vendor match."
+)
+_UPDATE_RUNS_SNAPSHOT_STALE = (
+    "update_runs (F-192) is a REAL, current vendor table -- state schema v15+ (2026.9.2), "
+    "still present in the installed 2026.9.4 dist this very snapshot was generated from. "
+    "It reads LEGACY_TABLE here only because the shipped snapshot was last regenerated "
+    "2026-09-12 (commit 28322d5), before tests/test_f192_update_runs.py was added "
+    "2026-09-16 (commit b9898b0) -- update_runs was not yet part of the declared/read "
+    "target-table projection _write_state_snapshot() computes, so it was never written "
+    "into state_schema_snapshot.sql. Not a retired table: re-running "
+    "--write-state-snapshot on a machine with OpenClaw installed should reclassify this "
+    "MODERN. Until then this guard's shipped-snapshot comparison correctly reads it as "
+    "absent."
+)
 
 _REGISTRY: "dict[str, _Entry]" = {
     # ---- fixtures/clean_b188_state_db/state/openclaw.sqlite -- the binary fixture no
@@ -673,9 +695,12 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_b168_cron_job_content.py:279": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b168_cron_job_content.py:301": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b294_cron_run_logs.py:45": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
-    # B-813 shifted this site's line (585 -> 664) by inserting the trajectory_runtime_events
-    # fixture above it -- same DDL, same classification, key renamed to match.
-    "tests/test_b294_cron_run_logs.py:664": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
+    # B-813 shifted this site's line 585 -> 664; 2026-09-16 commits e308d73/46e16b1 added
+    # more lines above it, shifting it again to 727 -- same _CRON_JOBS_PARTITIONED_DDL
+    # constant, same classification, key renamed to match.
+    "tests/test_b294_cron_run_logs.py:727": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
+    "tests/test_b168_truncation_gates_pass.py:31": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
+    "tests/test_b819_cron_dormant_payload.py:250": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b709_cron_state_db_shapes.py:43": _Entry(
         LEGACY_COLS,
         "an intermediate cron_jobs shape (store_key/job_id/declaration_key/owner_agent_id/"
@@ -735,8 +760,11 @@ _REGISTRY: "dict[str, _Entry]" = {
         "exercise the 'neither generation matches' negative path -- never meant to "
         "resolve against any real subagent_runs shape.",
     ),
-    "tests/test_b709_cron_run_logs_shapes.py:238": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
-    "tests/test_b709_cron_state_db_shapes.py:280": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
+    # Both keys below shifted (238 -> 248, 280 -> 296) when later commits added lines
+    # earlier in each file -- same single `unrelated_table (x TEXT)` decoy, key renamed
+    # to match; verified exactly one such site remains in each file.
+    "tests/test_b709_cron_run_logs_shapes.py:248": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
+    "tests/test_b709_cron_state_db_shapes.py:296": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
     "tests/test_b709_subagent_runs_shapes.py:274": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
 
     # ---- task_runs (B709) ----
@@ -787,9 +815,15 @@ _REGISTRY: "dict[str, _Entry]" = {
     # _add_agent_db) in the DoS-bound regression tests -- same DDL, same reasoning.
     "tests/test_f187_trajectory_sqlite_corroborator.py:920": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
     "tests/test_f187_trajectory_sqlite_corroborator.py:970": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+
+    # ---- cron_jobs (C-476 payload-extras fixture -- vendor column set, no constraints) ----
+    "tests/test_c476_cron_payload_extras.py:58": _Entry(LEGACY_COLS, _CRON_JOBS_NO_CONSTRAINTS_LEGACY),
+
+    # ---- update_runs (F-192, real vendor table, snapshot not yet re-baselined) ----
+    "tests/test_f192_update_runs.py:30": _Entry(LEGACY_TABLE, _UPDATE_RUNS_SNAPSHOT_STALE),
 }
 
-assert len(_REGISTRY) == 50, f"registry has {len(_REGISTRY)} entries, expected 50"
+assert len(_REGISTRY) == 54, f"registry has {len(_REGISTRY)} entries, expected 54"
 
 
 # ========================================================================================
