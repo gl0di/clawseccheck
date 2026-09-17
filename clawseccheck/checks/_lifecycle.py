@@ -5554,7 +5554,12 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
               enterprise mirror is legitimate and disclosed.
     PASS    — every endpoint observed is the public ClawHub.
     UNKNOWN — nothing recorded the endpoint and no override was observable, so the issuer of
-              those verdicts cannot be determined either way (Golden Rule #4).
+              those verdicts cannot be determined either way (Golden Rule #4). Also
+              UNKNOWN, ``engine_degraded=True`` (B-657), when a global dotenv file WAS
+              read but exceeded the collector's byte cap (``ctx.dotenv_truncated``) — a
+              registry/codeload override past the cut would not have been seen, so a PASS
+              built only from lock.json's settled, past-tense provenance would overclaim
+              that the NEXT install/update is safe from repointing too.
 
     Evidence is taken in the order of how well it describes the AUDITED subject:
 
@@ -5641,6 +5646,35 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
             "host served anything malicious, which would need a network lookup this tool "
             "deliberately never makes.",
             evidence=items[:6],
+        )
+
+    if ctx.dotenv_truncated:
+        # B-657 (C-135 round 2, adversarial review): `observed_canonical` mixes lock.json
+        # records (settled, past-tense provenance for ALREADY-installed skills) with
+        # THIS run's env-var check (whether a CURRENT override would repoint the NEXT
+        # install/update). A global dotenv file the collector read but truncated at its
+        # byte cap can hide a non-canonical OPENCLAW_REGISTRY_URL/_CODELOAD_URL past the
+        # cut while lock.json records alone still make `observed_canonical` truthy — so a
+        # PASS below would claim the registry question is settled when the env leg was
+        # never actually resolved, present-but-unread rather than genuinely clean.
+        return _finding(
+            "B184",
+            UNKNOWN,
+            "A persistent endpoint override could not be fully checked: a global dotenv "
+            "file OpenClaw loads at startup was read but exceeded the collector's byte "
+            "cap, so a ClawHub registry or GitHub codeload override past the cut would "
+            "not have been seen. Whether the next skill install/update would be repointed "
+            "away from the public registry cannot be determined"
+            + (
+                f" (recorded provenance for {observed_canonical} existing "
+                "record(s)/setting(s) is still the public registry)"
+                if observed_canonical else ""
+            )
+            + ".",
+            "Keep OpenClaw's global dotenv files (~/.openclaw/.env, "
+            "~/.config/openclaw/gateway.env) under the collector's size cap, then "
+            "re-run the audit.",
+            engine_degraded=True,
         )
 
     if observed_canonical:

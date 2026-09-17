@@ -2031,6 +2031,14 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
       so the config verdict is the correct one. No heuristic guessing.
     * nothing observed, a global dotenv exists, and the audited home is not this user's own
       → **UNKNOWN** rather than an affirmative all-clear (Golden Rule #4).
+    * nothing observed, a global dotenv exists, and it exceeded the collector's byte cap
+      (``ctx.dotenv_truncated``) → **UNKNOWN**, ``engine_degraded=True`` (B-657):
+      OPENCLAW_CACHE_TRACE could sit past the cut, so ``None`` here would let a caller's
+      config-derived PASS stand over content that was never scanned. Gated on
+      ``ctx.dotenv_truncated``, NOT the shared ``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``
+      (C-135 round 2, A2): ``dotenv_override`` never reads ``ctx.unit_env_values``, so the
+      domain-wide signal — which also fires on a truncated systemd unit this function
+      never touches — would degrade this check over a file it never opened.
 
     A variable exported in the shell of an already-running agent leaves no on-disk trace
     and is not detectable here — a process boundary, not something a wider read could fix.
@@ -2082,6 +2090,33 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
             "Run the audit on the machine and account the agent runs as, with no --home "
             "argument, so the environment that actually applies can be read.",
             evidence=[f"global dotenv present: {', '.join(ctx.dotenv_files)}"],
+        )
+    # B-657: on the common audited-home-is-own path (the branch above only
+    # guards the OTHER-home case), `raw is None` can mean OPENCLAW_CACHE_TRACE sits past
+    # the collector's global-dotenv byte cap, not that it is genuinely unset. Every
+    # caller of this function treats `None` as "no override" and lets a config-derived
+    # PASS stand — which would then claim a clean bill of health over content that was
+    # never scanned.
+    #
+    # C-135 round 2 (A2): gated on ctx.dotenv_truncated, NOT limit_hits_for(ctx,
+    # LIMIT_DOMAIN_ENV) — that domain is shared with systemd-unit truncation, which this
+    # function's only evidence source (dotenv_override, dotenv_values/os.environ only,
+    # never unit_env_values) never reads. Using the domain-wide signal would degrade this
+    # check over a systemd unit it never opened a byte of.
+    if ctx.dotenv_truncated:
+        return _finding(
+            "B82",
+            UNKNOWN,
+            "The config does not switch cache-trace diagnostics on, and no "
+            "OPENCLAW_CACHE_TRACE override was found in the global dotenv file(s) that "
+            "were read — but at least one of them exceeded the collector's byte cap, so "
+            "an override past the cut would not have been seen. A clean bill of health "
+            "cannot be given over content that was never scanned.",
+            "Keep OpenClaw's global dotenv files (~/.openclaw/.env, "
+            "~/.config/openclaw/gateway.env) under the collector's size cap, then "
+            "re-run the audit.",
+            evidence=[f"global dotenv present: {', '.join(ctx.dotenv_files)}"],
+            engine_degraded=True,
         )
     return None
 

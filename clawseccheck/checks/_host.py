@@ -21,10 +21,12 @@ from ..catalog import (
 )
 from ..collector import (
     LIMIT_DOMAIN_CONFIG,
+    LIMIT_DOMAIN_ENV,
     Context,
     bundled_root_overrides,
     dig,
     env_evidence_readable,
+    limit_hits_for,
     systemd_unit_is_openclaw_related as _systemd_unit_is_openclaw_related_impl,
 )
 
@@ -1259,10 +1261,37 @@ def check_bundled_root_override(ctx: Context) -> Finding:
               comment above this function) — never "verified": the ambient-shell delivery
               channel leaves nothing on disk for ANY read to see, no matter how complete.
     UNKNOWN — no persistent artifact was even present to read (no systemd unit, no global
-              dotenv). There is no evidence to build a PASS on at all.
+              dotenv). There is no evidence to build a PASS on at all. Also UNKNOWN,
+              ``engine_degraded=True`` (B-657), when a persistent artifact WAS
+              present and read but the collector's byte cap truncated it
+              (``limit_hits_for(ctx, LIMIT_DOMAIN_ENV)``) — the override this check exists
+              to catch could sit past the cut, and "no override" is then a claim about text
+              that was never scanned, not a verified absence. Same shape as B6/B172
+              (f748869): checked before the no_signal PASS below, which is only reachable
+              once truncation has been ruled out.
     """
     overrides = bundled_root_overrides(ctx)
     if not overrides:
+        if limit_hits_for(ctx, LIMIT_DOMAIN_ENV):
+            return _finding(
+                "B186",
+                UNKNOWN,
+                "No OPENCLAW_BUNDLED_SKILLS_DIR / OPENCLAW_BUNDLED_HOOKS_DIR relocation was "
+                "found in the systemd user unit(s) and global dotenv file(s) that WERE read, "
+                "but at least one of them exceeded the collector's byte cap — content past "
+                "the cap was never scanned, so a clean bill of health cannot be given: an "
+                "override sitting in the truncated portion would relocate the code-load root "
+                "an agent executes skills/hooks from and this check would never see it.",
+                "Keep OpenClaw's systemd unit files and global dotenv files "
+                "(~/.openclaw/.env, ~/.config/openclaw/gateway.env) under the collector's "
+                "size cap, then re-run the audit.",
+                # C-135: present-but-unread content (a real file the collector's own cap cut
+                # short), not genuinely absent — catalog.py's Finding.engine_degraded doc
+                # names this exact contrast and this exact consequence (the
+                # DEGRADED_CHECK_CAP "cannot rule out a CRITICAL" treatment). Matches the
+                # B6/B172 ordering (f748869): checked ahead of the no_signal PASS below.
+                engine_degraded=True,
+            )
         if env_evidence_readable(ctx):
             where = "the systemd user unit(s) and global dotenv file(s) that were readable"
             return _finding(

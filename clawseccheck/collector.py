@@ -643,6 +643,14 @@ class Context:
     dotenv_sources: dict = field(default_factory=dict)
     dotenv_files: list = field(default_factory=list)  # global dotenv files found and read
     dotenv_found: bool = False                        # at least one global dotenv exists
+    # B-657 (C-135 round 2): a global dotenv file WAS read but hit the collector's byte
+    # cap, so a key past the cut is present-but-unread, not absent. Distinct from
+    # LIMIT_DOMAIN_ENV's shared `limit_hits_for()` signal, which also fires on a
+    # truncated systemd unit that `dotenv_override()`'s callers never read at all
+    # (dotenv_override touches only dotenv_values/os.environ, never unit_env_values) —
+    # a consumer of dotenv_override needs THIS flag, not the domain-wide one, the same
+    # split `audit_events_truncated` already uses for its own narrower callers.
+    dotenv_truncated: bool = False
     # B-289/B-290 (ENV-3/ENV-4): the environment the OpenClaw *service* actually runs
     # with, read off disk from OpenClaw-related systemd user units — `Environment=` lines
     # plus any file named by `EnvironmentFile=`. This is the artifact that matters: the
@@ -6706,6 +6714,7 @@ def _collect_global_dotenv(home: Path, ctx: Context) -> None:
         ctx.dotenv_found = True
         ctx.dotenv_files.append(str(path))
         if truncated:
+            ctx.dotenv_truncated = True
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_ENV,
                 f"dotenv file '{path}' exceeded the {_MAX_DOTENV_BYTES // 1000}KB cap — "
@@ -6933,6 +6942,11 @@ def _read_environment_file(spec: str, unit_path: Path, home: Path, ctx: Context)
         )
     for key, value in _parse_environment_file(raw.decode("utf-8", errors="replace")):
         if key not in ctx.unit_env_values and len(ctx.unit_env_values) >= _MAX_UNIT_ENV_ENTRIES:
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_ENV,
+                f"more than {_MAX_UNIT_ENV_ENTRIES} systemd-unit environment entries were "
+                "found — entries past the cap were NOT recorded",
+            )
             break
         # File values override inline ones, matching the dist's merge order
         # (systemd-B4Oq2owH.js:294-297). The inline map is NOT updated, so a caller can
@@ -6963,16 +6977,29 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
     if not units_dir_is_dir:
         return
     try:
-        unit_files = sorted(
+        all_units = sorted(
             p for p in units_dir.iterdir()
             if p.is_file() and not p.is_symlink() and p.suffix == ".service"
-        )[:_MAX_UNIT_FILES]
+        )
     except OSError as exc:
         ctx.errors.append(f"could not list {units_dir}: {exc}")
         ctx.unit_env_unreadable = True
         return
+    unit_files = all_units[:_MAX_UNIT_FILES]
+    if len(all_units) > _MAX_UNIT_FILES:
+        # B-657 (C-135 round 2): previously undisclosed, the same gap f748869 closed for
+        # _MAX_EXEC_APPROVALS_AGENTS -- units past the cap (sorted by name) are never
+        # read at all, so a consumer needs to know this claim is over an incomplete set.
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_ENV,
+            f"more than {_MAX_UNIT_FILES} systemd user unit files exist in {units_dir} — "
+            "only the first "
+            f"{_MAX_UNIT_FILES} (sorted by name) were read",
+        )
 
     pending_files: "list[tuple[str, Path]]" = []
+    entries_capped = False
+    files_capped = False
     for unit_path in unit_files:
         try:
             with open(unit_path, "rb") as fp:
@@ -6981,12 +7008,6 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
             ctx.unit_env_unreadable = True
             continue
         text = raw.decode("utf-8", errors="replace")
-        if truncated:
-            note_limit(
-                ctx.limit_hits, LIMIT_DOMAIN_ENV,
-                f"systemd unit '{unit_path.name}' exceeded the "
-                f"{_MAX_UNIT_BYTES // 1000}KB cap — content beyond the cap was NOT scanned",
-            )
 
         exec_start = ""
         env_lines: "list[str]" = []
@@ -7003,13 +7024,32 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
                 spec = stripped[len("EnvironmentFile="):].strip()
                 if spec:
                     file_specs.append(spec)
+        # B-657 (C-135 round 2, A1): the relatedness gate below decides whether THIS
+        # unit's bytes ever reach ctx.unit_env_values at all -- an oversized but
+        # UNRELATED unit (any other systemd user service on the same host) must not
+        # taint LIMIT_DOMAIN_ENV, or every consumer added for the env-truncation fix
+        # would degrade on a file they never read a byte of. Moved below the `continue`
+        # so the disclosure only fires for a unit whose content actually feeds a check.
         if not systemd_unit_is_openclaw_related(unit_path.name, exec_start):
             continue
+        if truncated:
+            note_limit(
+                ctx.limit_hits, LIMIT_DOMAIN_ENV,
+                f"systemd unit '{unit_path.name}' exceeded the "
+                f"{_MAX_UNIT_BYTES // 1000}KB cap — content beyond the cap was NOT scanned",
+            )
 
         ctx.unit_env_found = True
         ctx.unit_env_files.append(str(unit_path))
         for raw_line in env_lines:
             if len(ctx.unit_env_values) >= _MAX_UNIT_ENV_ENTRIES:
+                if not entries_capped:
+                    entries_capped = True
+                    note_limit(
+                        ctx.limit_hits, LIMIT_DOMAIN_ENV,
+                        f"more than {_MAX_UNIT_ENV_ENTRIES} systemd-unit environment "
+                        "entries were found — entries past the cap were NOT recorded",
+                    )
                 break
             for key, value in parse_systemd_env_assignments(raw_line):
                 ctx.unit_env_values[key] = value
@@ -7018,6 +7058,14 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
         for spec in file_specs:
             for token in _split_preserving_quotes(spec):
                 if len(pending_files) >= _MAX_ENV_FILES:
+                    if not files_capped:
+                        files_capped = True
+                        note_limit(
+                            ctx.limit_hits, LIMIT_DOMAIN_ENV,
+                            f"more than {_MAX_ENV_FILES} EnvironmentFile= specs were found "
+                            "across OpenClaw-related units — files past the cap were NOT "
+                            "read",
+                        )
                     break
                 pending_files.append((token, unit_path))
 
