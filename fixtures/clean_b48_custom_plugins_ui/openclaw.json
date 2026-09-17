@@ -24,5 +24,8 @@
     "main": {
       "provider": "ollama/llama3"
     }
+  },
+  "session": {
+    "dmScope": "per-peer"
   }
 }

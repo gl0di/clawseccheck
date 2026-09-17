@@ -15,5 +15,6 @@
     ]
   },
   "logging": { "redactSensitive": "tools" },
-  "models": { "main": { "provider": "ollama/llama3" } }
+  "models": { "main": { "provider": "ollama/llama3" } },
+  "session": { "dmScope": "per-peer" }
 }

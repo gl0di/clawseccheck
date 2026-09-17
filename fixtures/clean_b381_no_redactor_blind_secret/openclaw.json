@@ -6,5 +6,6 @@
   "channels": { "telegram": { "dmPolicy": "allowlist", "groupPolicy": "allowlist" } },
   "tools": { "profile": "minimal", "apiKey": "sk-ant-not-a-real-key-1234567890" },
   "logging": { "redactSensitive": "tools" },
-  "models": { "main": { "provider": "ollama/llama3" } }
+  "models": { "main": { "provider": "ollama/llama3" } },
+  "session": { "dmScope": "per-peer" }
 }
