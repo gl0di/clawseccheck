@@ -17,6 +17,28 @@ WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "clawhub-publish.yml"
 SKILL_PATH = REPO_ROOT / "SKILL.md"
 README_PATH = REPO_ROOT / "README.md"
 
+# A real, trimmed GET /api/v1/skills/clawseccheck/versions/4.1.0 response, captured
+# 2026-09-18. It exists because the stubbed bodies below were previously hand-written
+# in a FLAT shape the API never served, which made clawhub-version-live.sh's signal 1
+# unsatisfiable while every test around it stayed green (B-827) — both the script and
+# its fixtures shared one wrong model. Deriving the stub shape from a captured response
+# is the same discipline tests/dist_verified_paths.txt applies to the OpenClaw schema:
+# ground the shape in evidence, don't retype it from a description.
+CLAWHUB_VERSION_RESPONSE = REPO_ROOT / "tests" / "clawhub_version_response.json"
+
+
+def _versions_body(version: str, files: list) -> dict:
+    """Build a versions-endpoint body in the REAL nested shape.
+
+    Everything the discriminator reads lives under the top-level `version` object;
+    there is no top-level `files`. Starting from the captured response keeps the
+    surrounding structure honest even though only these two keys are asserted on.
+    """
+    captured = json.loads(CLAWHUB_VERSION_RESPONSE.read_text(encoding="utf-8"))
+    captured["version"]["version"] = version
+    captured["version"]["files"] = files
+    return captured
+
 # Every shipped markdown file that links out to other repo paths. All of them are read by
 # users of an installed skill, so a relative link the bundle does not carry is a 404 on
 # every ClawHub install.
@@ -1346,7 +1368,7 @@ def test_helper_script_requires_both_signals() -> None:
         (
             "live",
             "200",
-            {"version": "9.9.9", "files": ["a.py"]},
+            _versions_body("9.9.9", files=[{"path": "a.py", "size": 1}]),
             {"latestVersion": {"version": "9.9.9"}},
             True,
         ),
@@ -1360,22 +1382,33 @@ def test_helper_script_requires_both_signals() -> None:
         (
             "hollow-200-no-files",
             "200",
-            {"version": "9.9.9", "files": []},
+            _versions_body("9.9.9", files=[]),
             {"latestVersion": {"version": "9.9.9"}},
             False,
         ),
         (
             "stale-latest-version",
             "200",
-            {"version": "9.9.9", "files": ["a.py"]},
+            _versions_body("9.9.9", files=[{"path": "a.py", "size": 1}]),
             {"latestVersion": {"version": "9.9.8"}},
             False,
         ),
         (
             "null-latest-version-mid-reindex",
             "200",
-            {"version": "9.9.9", "files": ["a.py"]},
+            _versions_body("9.9.9", files=[{"path": "a.py", "size": 1}]),
             {"latestVersion": None},
+            False,
+        ),
+        (
+            # B-827 positive control: the FLAT shape these fixtures used to assert
+            # (version and files at the top level) is not what the API serves. If a
+            # future edit goes back to reading it, this case starts passing and the
+            # suite says so.
+            "flat-legacy-shape-is-not-live",
+            "200",
+            {"version": "9.9.9", "files": [{"path": "a.py", "size": 1}]},
+            {"latestVersion": {"version": "9.9.9"}},
             False,
         ),
     ],
@@ -1385,12 +1418,17 @@ def test_clawhub_version_live_two_signal_discriminator(
 ) -> None:
     """The helper script executed for real, offline, against a stubbed `curl`.
 
-    A successful publish answers 200 with a matching `version` + non-empty `files`
-    on the versions endpoint, AND `latestVersion.version` equal to it on the skill
-    endpoint (task description ground truth). The #3349 ghost-orphan fails signal 1
-    (404). A hollow 200 with no files (the v3.54.0 accepted-but-invisible shape) and
-    a stale or null latestVersion must each independently fail the discriminator —
-    this is what stops either signal alone from being trusted.
+    A successful publish answers 200 whose nested `version` object carries a matching
+    `version` + non-empty `files`, AND `latestVersion.version` equal to it on the
+    skill endpoint. Both shapes are taken from a captured live response
+    (tests/clawhub_version_response.json), not from a description — the earlier
+    fixtures were hand-written flat and agreed with a script that read the same wrong
+    keys, so the pair was self-consistently wrong and green (B-827).
+
+    The #3349 ghost-orphan fails signal 1 (404). A hollow 200 with no files (the
+    v3.54.0 accepted-but-invisible shape), a stale or null latestVersion, and the
+    flat legacy shape must each independently fail the discriminator — this is what
+    stops either signal alone, or a regression to the old parse, from being trusted.
     """
     assert HELPER_SCRIPT.exists(), "clawhub-version-live.sh is missing."
 

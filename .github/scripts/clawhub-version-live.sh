@@ -7,10 +7,13 @@
 # "already exists" for a version that either published fine seconds later, or never
 # really landed at all) reads as live:
 #
-#   signal 1 — GET /skills/<slug>/versions/<version> answers 200, the body's own
-#              `version` field equals <version>, and `files` is a non-empty array.
-#              Rejects both the #3349 orphan's 404 and a hollow 200 with no files
-#              (the same shape v3.54.0's accepted-but-invisible release had).
+#   signal 1 — GET /skills/<slug>/versions/<version> answers 200, and the body's
+#              nested `version` OBJECT carries a `version` equal to <version> plus
+#              a non-empty `files` array. Rejects both the #3349 orphan's 404 and a
+#              hollow 200 with no files (the same shape v3.54.0's
+#              accepted-but-invisible release had). The nesting is not incidental —
+#              reading these two keys at the top level is B-827, and made this
+#              signal unsatisfiable.
 #   signal 2 — GET /skills/<slug> reports `latestVersion.version == <version>`.
 #              Rejects a STALE response describing a version that used to be
 #              current, and — together with signal 1 — the permanent orphan.
@@ -52,10 +55,22 @@ try:
         data = json.load(f)
 except Exception:
     data = {}
-files = data.get("files") or []
+# The payload nests everything under "version": {"skill": {...}, "version":
+# {"version": "4.1.0", "files": [...], "security": {...}}}. Reading `version`
+# and `files` at the TOP level — as this did until B-827 — makes signal 1
+# impossible to satisfy: top-level `version` is a dict (never equal to the
+# version string) and there is no top-level `files` at all. That silently
+# inverted C-368's whole purpose, turning a false "already exists" on a
+# version that really published into GENUINE_FAILURE. The shape is captured
+# from the live API in tests/clawhub_version_response.json rather than
+# asserted here, so a future change re-grounds against evidence.
+version = data.get("version")
+if not isinstance(version, dict):
+    version = {}
+files = version.get("files") or []
 live = (
     code == "200"
-    and data.get("version") == os.environ["VER"]
+    and version.get("version") == os.environ["VER"]
     and isinstance(files, list)
     and len(files) > 0
 )
