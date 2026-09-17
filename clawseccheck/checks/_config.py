@@ -3245,7 +3245,19 @@ def check_least_privilege(ctx: Context) -> Finding:
     # declared-but-clean surface (small allowFrom, minimal profile, allow-listed plugins,
     # a recognized tools.allow entry) still PASSes. _capabilities_attested is redundant
     # with the tail of _meaningful_tool_surface but kept for self-documenting intent.
-    surface_undeclared = (
+    #
+    # C-135 (independent, post-commit, B-803 sibling gap): the original gate let
+    # `_capabilities_attested(ctx)` alone clear `surface_undeclared` to False even on
+    # a config-blind run (no openclaw.json read at all) — an --attest roster then
+    # walked this straight through to the unconditional PASS below, a confident
+    # "no over-broad elevated-tool grant... in config" claim over a config that was
+    # never read. Reproduced directly: config_found=False + a real --attest roster ->
+    # PASS. Same root cause B-803 fixed for A1 (check_trifecta): an attestation only
+    # speaks to the agent's own declared tools, not the rest of the config surface a
+    # blind run never read. `config_blind` forces UNKNOWN here too, regardless of
+    # attestation.
+    config_blind = not getattr(ctx, "config_found", False) and not ctx.config
+    surface_undeclared = config_blind or (
         dig(cfg, "tools.elevated.allowFrom") is None
         and dig(cfg, "tools.profile") is None
         and not _plugins(cfg)
@@ -3253,15 +3265,29 @@ def check_least_privilege(ctx: Context) -> Finding:
         and not _capabilities_attested(ctx)
     )
     if surface_undeclared:
-        return _finding(
-            "B3",
-            UNKNOWN,
+        detail = (
+            "Least-privilege posture cannot be determined: no OpenClaw config was found "
+            "to read at all — an attestation only speaks to the agent's own declared "
+            "tools, not the rest of the config surface (tools.profile, plugins, "
+            "elevated-tool allowlists) a config-blind run never read."
+            if config_blind else
             "Least-privilege posture is indeterminate: the config declares no elevated-tool "
             "grant, tool profile, plugins, or recognized tool surface (runtime-granted tools "
             "are not visible to a static config audit), so there is nothing to verify as "
-            "constrained.",
+            "constrained."
+        )
+        fix = (
+            "Run the audit against the real openclaw.json (or a --home pointing at it) so "
+            "least privilege can be assessed against actual config."
+            if config_blind else
             "Declare the agent's tool surface (tools.profile / tools.allow / "
-            "tools.elevated.allowFrom) or pass --attest so least privilege can be assessed.",
+            "tools.elevated.allowFrom) or pass --attest so least privilege can be assessed."
+        )
+        return _finding(
+            "B3",
+            UNKNOWN,
+            detail,
+            fix,
         )
     # B-042: PASS verifies a CONFIG-level least-privilege posture only (no over-broad
     # elevated grant, no profile/plugin escalation). It must NOT claim runtime "tool
