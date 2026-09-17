@@ -210,11 +210,16 @@ def test_render_vet_json_verdict_is_worst_status():
 
 
 def test_render_vet_json_empty_is_unknown():
+    """C-135 (independent, post-commit): B-764 (2026-09-16) gave a genuinely empty
+    pool its own honest word. `build_profile`'s "Degenerate: nothing was produced"
+    branch explicitly calls `verdict_for(UNKNOWN, not_applicable=True)` for an empty
+    findings list -- "N/A" ("nothing to assess"), not "CAUTION" ("something is
+    uncertain here"). This test previously asserted the pre-B-764 behaviour and
+    predates that change; updated to match the current, deliberate distinction."""
     profile = build_profile([], "x", "skill")
     assert profile.overall_status == "UNKNOWN"
     out = json.loads(render_vet_json(profile, mode="vet", version="1.1.0"))
-    # C427: not assessable reads CAUTION -- never a green light -- for an UNKNOWN status.
-    assert out["verdict"] == "CAUTION"
+    assert out["verdict"] == "N/A"
     assert out["findings"] == []
 
 
