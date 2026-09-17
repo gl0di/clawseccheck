@@ -759,6 +759,15 @@ class Context:
     config_machine_state_read: bool = False
     config_machine_state_unparsed: set = field(default_factory=set)
     cron_store_shadowed: bool = False
+    # B-749: presence-only signal for `config_machine_state["authProfiles.store"]` -- the
+    # machine-owned auth-profile SECRETS row, deliberately excluded from
+    # CONFIG_MACHINE_STATE_KEYS/config_machine_state above because its value can be a live
+    # OAuth/API-key payload. `_read` False means undetermined (no DB, or a DB predating the
+    # table); True with `_length` None means the row does not exist (never written); True
+    # with an int means "looked, found a row this many bytes long" -- never the bytes
+    # themselves. See `_collect_auth_profile_store_presence`.
+    auth_profile_store_read: bool = False
+    auth_profile_store_length: int | None = None
     # F-192: OpenClaw's own self-update ledger (`update_runs` in the state DB, new at
     # 2026.9.2). Three fields, same "could not look" / "looked, nothing there" /
     # "looked, found data" distinction as `config_machine_state` / `_read` / its error
@@ -4736,6 +4745,95 @@ CONFIG_MACHINE_STATE_KEYS = (
     "hooks.internal.installs",    # the record shape the old config key held
 )
 
+# B-749: the ONE `config_machine_state` key this file ever asks about without the
+# allowlist above -- deliberately, since its value can be a live OAuth/API-key payload.
+# `_collect_auth_profile_store_presence` binds this literal into a `LENGTH(value_json)`
+# query and never selects `value_json` itself, so the secret payload is never read.
+_AUTH_PROFILE_STORE_KEY = "authProfiles.store"
+# Grounded by reading the installed dist (2026.9.4: sqlite-CzDV0dcE.mjs,
+# store-BxRoDWvl.mjs, legacy-source-diagnostic-D-_lsE4x.mjs), not inferred: the FIRST
+# save OpenClaw ever makes to this row -- even with zero configured profiles -- writes
+# exactly `{"version":1,"profiles":{}}`. `buildPersistedAuthProfileSecretsStore` returns
+# that shape whenever `store.profiles` is empty (`saveAuthProfileStoreInTransaction` ->
+# `credentialsChanged = !isDeepStrictEqual(existingRaw, payload)`, true on the very first
+# save since `existingRaw` starts `null`), and `preserveLegacyOAuthRefsOnSave` iterates
+# `payload.profiles` and returns `payload` unchanged when it is empty. Python's
+# `json.dumps({"version": 1, "profiles": {}}, separators=(",", ":"))` reproduces the same
+# 27 bytes Node's `JSON.stringify` writes -- a row at or under that length is the
+# vendor's own "initialized, still empty" shape, not evidence of a real credential.
+_AUTH_PROFILE_STORE_EMPTY_BYTES = 27
+
+
+def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
+    """B-749: does the machine-owned auth-profile store hold more than an empty shell?
+
+    A1's sensitive-data leg used to look only at `<home>/credentials`
+    (`_credential_store_state`, B-666). On a machine where OpenClaw keeps its real auth
+    material in `config_machine_state["authProfiles.store"]` instead, that directory can
+    read clean while the state DB holds live auth material -- measured on the fleet
+    machine, 2026-09-06: `secret_files=[]`, `incomplete=False` (a confident "looked,
+    nothing there"), while `authProfiles.store` held a non-trivial row.
+
+    This function does NOT decide any leg or verdict. It only answers "how many bytes",
+    via `ctx.auth_profile_store_length` -- the CALLER decides what a length above
+    `_AUTH_PROFILE_STORE_EMPTY_BYTES` means, so the threshold lives in exactly one place
+    and no consumer ever needs the parsed value to use this signal.
+
+    Same three-state disclosure as every sibling reader on this database (see
+    `_collect_config_machine_state`, `_collect_update_runs`): `auth_profile_store_read`
+    False means undetermined (no DB, or a DB predating the table); True with
+    `auth_profile_store_length` None means the row does not exist at all; True with an
+    int means "looked, found a row this many bytes long".
+
+    Opened READ-ONLY (`file:...?mode=ro` + `PRAGMA query_only = 1`), the same pattern as
+    every reader on this database. Re-locates `state/openclaw.sqlite` independently
+    rather than sharing `_collect_config_machine_state`'s connection, matching this
+    file's own one-reader-per-concern idiom (`_collect_update_runs`,
+    `_collect_capture_state`, ...).
+    """
+    state_dir = home / "state"
+    capped: list = []
+    candidates = (
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        # Same disclosure discipline as `_collect_config_machine_state`: a capped walk
+        # that never reached the DB is not the same fact as "no state store" (GR#4).
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the auth-profile store presence was not read"
+            )
+        return
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = 1")
+            # LENGTH(value_json), never value_json itself: the secret payload is never
+            # fetched into this process, only its byte count. One literal key is bound,
+            # never interpolated, and there is no SELECT *.
+            row = conn.execute(
+                "SELECT LENGTH(value_json) FROM config_machine_state WHERE state_key = ?",
+                (_AUTH_PROFILE_STORE_KEY,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # A state DB predating the table is not a corrupt store -- same honest
+        # UNDETERMINED as every sibling reader here.
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(
+                f"could not read auth-profile store presence from {db_path}: {exc}"
+            )
+        return
+
+    ctx.auth_profile_store_read = True
+    if row is not None and row[0] is not None:
+        ctx.auth_profile_store_length = int(row[0])
+
 
 def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     """Read the allowlisted rows of ``config_machine_state`` into ``ctx``.
@@ -7420,6 +7518,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_systemd_unit_env(home, ctx)
     # F-183: before _collect_cron -- its cron.store shadow check reads this.
     _collect_config_machine_state(home, ctx)
+    _collect_auth_profile_store_presence(home, ctx)  # B-749: length-only, never the value
     _collect_cron(home, ctx)
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)

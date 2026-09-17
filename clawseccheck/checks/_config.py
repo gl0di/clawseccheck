@@ -27,6 +27,7 @@ from ..collector import (
     LIMIT_DOMAIN_ENV,
     SKILL_DIRS,
     Context,
+    _AUTH_PROFILE_STORE_EMPTY_BYTES,  # B-749
     agent_roster,
     dig,
     env_evidence_readable,
@@ -4124,7 +4125,26 @@ def check_trifecta(ctx: Context) -> Finding:
     if not legs["sensitive data"] and (config_blind or not _capabilities_attested(ctx)):
         reach = scopes_reaching_outside_workspace(ctx.config)
         store = _credential_store_state(getattr(ctx, "home", None))
-        if reach or store["incomplete"] or config_blind:
+        # B-749: the on-disk credentials/ scan above can read clean while OpenClaw's
+        # machine-owned auth-profile store (config_machine_state["authProfiles.store"])
+        # holds real material — measured on the fleet machine, 2026-09-06:
+        # secret_files=[], incomplete=False (a confident "looked, nothing there"), while
+        # the state DB held a non-trivial authProfiles.store row. Length-only (see
+        # collector._collect_auth_profile_store_presence): a row longer than the
+        # vendor's own empty-store shape ({"version":1,"profiles":{}}, 27 bytes,
+        # grounded against the installed dist) means something is actually stored
+        # there, without this check ever reading it. Deliberately a HEDGE here, not a
+        # leg-raising signal: whether a non-empty row always means a USABLE credential
+        # (vs. an expired/revoked profile) is unresolved, so asserting the leg is ON
+        # would risk a new false-positive FAIL on the CRITICAL check that grade-caps
+        # the whole audit — the same care B-730 already took in the other direction.
+        auth_store_length = getattr(ctx, "auth_profile_store_length", None)
+        auth_store_present = (
+            getattr(ctx, "auth_profile_store_read", False)
+            and auth_store_length is not None
+            and auth_store_length > _AUTH_PROFILE_STORE_EMPTY_BYTES
+        )
+        if reach or store["incomplete"] or config_blind or auth_store_present:
             why = []
             if reach:
                 # B-712: when one of these scopes is `sandbox.mode: "non-main"`, whether it
@@ -4145,6 +4165,14 @@ def check_trifecta(ctx: Context) -> Finding:
                     "the credential store could not be read in full"
                     f" ({store['reason']}), so nothing found in it means 'not found',"
                     " not 'not there'"
+                )
+            if auth_store_present:
+                why.append(
+                    "the machine's own auth-profile store holds more than an empty"
+                    f" shell ({auth_store_length} bytes in"
+                    " config_machine_state['authProfiles.store'], vs. OpenClaw's own"
+                    f" {_AUTH_PROFILE_STORE_EMPTY_BYTES}-byte empty-store shape), and"
+                    " this scan only looked at the credentials/ directory on disk"
                 )
             if config_blind:
                 why.append(
@@ -4170,6 +4198,11 @@ def check_trifecta(ctx: Context) -> Finding:
                     else "Make the credential store readable to this audit (it is"
                     " normally mode 0700 and owned by you) and re-run, so the leg can"
                     " be established rather than left undetermined."
+                    if store["incomplete"]
+                    else "Check whether config_machine_state['authProfiles.store'] on"
+                    " this host holds a real, usable credential (this audit only sees"
+                    " its byte length, never its value) and treat this leg as ON if"
+                    " it does."
                 ),
                 evidence=active,
             )
