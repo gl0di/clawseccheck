@@ -2746,23 +2746,35 @@ def check_agent_cwd_relocation(ctx: Context) -> Finding:
 
     Deliberately narrow about what counts as a PROVEN no-op: a configured ``cwd`` is
     cleared only when it is textually equal (after ``~``-expansion) to that SAME
-    scope's own EXPLICITLY declared ``workspace`` — falling back to
-    ``agents.defaults.workspace`` when the scope declares no ``workspace`` of its own,
-    which is sound for ANY scope (not just the implicit default agent): a non-default
-    agent's real implicit workspace is ``join(agents.defaults.workspace, id)``, an
-    id-suffixed string that would essentially never coincidentally equal a hand-written
-    ``cwd``, so crediting the coarser comparison costs no realistic false PASS while it
-    clears the common "single default agent, cwd and workspace both set only at
-    agents.defaults" shape. This check does NOT go further and reconstruct OpenClaw's
-    full ``resolveAgentWorkspaceDir`` fallback chain (the ``join(...)`` itself, or the
-    unconfigured-implicit-directory case) to decide those cases — porting that wrong
-    would fabricate a comparison target rather than merely miss one, the exact failure
-    mode the sibling ``agent_roster()`` / ``toolpolicy.py`` ports guard against with
-    differential testing. Every other case WARNs instead: the field's own schema
+    scope's own EXPLICITLY declared ``workspace``. For the bare ``agents.defaults``
+    scope (no roster declared at all — the single implicit agent), that workspace
+    falls back to ``agents.defaults.workspace`` when none is set closer, which is
+    sound: there is only one agent, and its real implicit workspace IS
+    ``agents.defaults.workspace``.
+
+    C-135 (independent, post-commit): a PER-AGENT roster entry with no ``workspace``
+    of its own used to credit the same bare ``agents.defaults.workspace`` fallback —
+    reasoned as "a non-default agent's real implicit workspace is
+    ``join(agents.defaults.workspace, id)``, which would essentially never
+    coincidentally equal a hand-written ``cwd``". Reproduced that this reasoning was
+    wrong: an admin who wants a named agent to run in the shared project root
+    naturally sets its ``cwd`` to the SAME string as ``agents.defaults.workspace`` —
+    not a coincidence, a common intent — and that is exactly a relocation away from
+    the agent's own (id-suffixed) implicit workspace. The check then falsely PASSed
+    the one config shape it exists to catch. There is no reliable, non-fabricated way
+    from config alone to tell "this roster entry IS the implicit default agent,
+    explicitly listed" apart from "this is a genuinely different named agent", so a
+    roster entry's proof target is now its OWN explicit ``workspace`` only — never the
+    bare default. This check does NOT reconstruct OpenClaw's full
+    ``resolveAgentWorkspaceDir`` fallback chain (the ``join(...)`` itself, or the
+    unconfigured-implicit-directory case) to decide those cases either — porting that
+    wrong would fabricate a comparison target rather than merely miss one, the exact
+    failure mode the sibling ``agent_roster()`` / ``toolpolicy.py`` ports guard against
+    with differential testing. Every other case WARNs instead: the field's own schema
     description ("Also used as the working directory when agents.defaults.cwd is
     unset") exists specifically so the two CAN differ, so a WARN default with one
-    narrow, provable exemption is the reading that stays sound in the quiet direction,
-    not a coin flip that risks a false PASS.
+    narrow, provable exemption (the bare-default-scope case above) is the reading that
+    stays sound in the quiet direction, not a coin flip that risks a false PASS.
 
     UNKNOWN        — the config could not be read.
     not_applicable — no ``cwd`` is declared anywhere (the overwhelming majority of
@@ -2818,17 +2830,23 @@ def check_agent_cwd_relocation(ctx: Context) -> Finding:
             if effective_cwd is None:
                 continue
             own_workspace = _clean(entry.get("workspace"))
-            # When this entry declares no workspace of its own, agents.defaults.workspace
-            # is also a SOUND no-op proof target, not just own_workspace: OpenClaw's own
-            # resolveAgentWorkspaceDir falls the DEFAULT agent back to exactly
-            # agents.defaults.workspace, and for a NON-default agent the real fallback is
-            # join(agents.defaults.workspace, id) -- a different, id-suffixed string that
-            # would essentially never coincidentally equal a hand-written cwd, so crediting
-            # the coarser comparison here costs no realistic false PASS while it does clear
-            # the extremely common "single default agent, cwd and workspace both set only
-            # at agents.defaults" shape that a roster entry (e.g. an empty
-            # agents.entries.main: {}) would otherwise falsely WARN on.
-            workspace_for_proof = own_workspace if own_workspace is not None else default_workspace
+            # C-135 (independent, post-commit): this used to also credit bare
+            # agents.defaults.workspace as a proof target for a roster entry with no
+            # workspace of its own, reasoned as "a non-default agent's real implicit
+            # workspace is join(agents.defaults.workspace, id), which would essentially
+            # never coincidentally equal a hand-written cwd". Reproduced that this is
+            # false: an admin who wants an agent to run in the shared project root
+            # naturally sets cwd to the SAME string as agents.defaults.workspace, and
+            # that is exactly a relocation away from the agent's own (id-suffixed)
+            # implicit workspace -- the coarse comparison then falsely PASSed the one
+            # config shape this check exists to catch. There is no reliable way from
+            # config alone to tell "this roster entry IS the implicit default agent,
+            # explicitly listed" apart from "this is a genuinely different named agent"
+            # (this codebase's own rule elsewhere: never fabricate a comparison target),
+            # so only this entry's OWN explicit workspace is a sound proof target now.
+            # A roster entry declaring neither cwd nor workspace of its own now WARNs
+            # instead of PASSing -- the safe direction for a WARN-only check.
+            workspace_for_proof = own_workspace
             name = entry.get("name") or agent.id or agent.index
             scopes.append((f"{agent.labelled(name)}.cwd", effective_cwd, workspace_for_proof))
 

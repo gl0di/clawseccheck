@@ -102,11 +102,15 @@ def test_roster_entry_own_cwd_equals_own_workspace_passes():
     assert f.status == PASS
 
 
-def test_roster_entry_with_no_own_workspace_proves_against_default_workspace():
-    # A roster entry declaring neither cwd nor workspace of its own still inherits
-    # BOTH from agents.defaults — and when those two agree, that is a real no-op,
-    # not merely an unproven one. This is the common "converted an implicit default
-    # agent into an explicit (near-empty) roster entry" shape.
+def test_roster_entry_with_no_own_workspace_no_longer_proves_against_default_workspace():
+    # C-135 (independent, post-commit): this used to PASS, crediting bare
+    # agents.defaults.workspace as a proof target for a roster entry with no
+    # workspace of its own. That is unsound for a genuinely non-default agent (see
+    # test_named_agent_cwd_equal_to_bare_default_workspace_warns_not_passes below,
+    # the real false-PASS this exposed) and there is no reliable way to tell "this
+    # entry IS the implicit default agent, explicitly listed" apart from "this is a
+    # different named agent" without fabricating a comparison target -- so this now
+    # WARNs, the safe direction for a WARN-only check.
     cfg = {
         "agents": {
             "defaults": {"cwd": "/home/testuser/ws", "workspace": "/home/testuser/ws"},
@@ -114,7 +118,26 @@ def test_roster_entry_with_no_own_workspace_proves_against_default_workspace():
         }
     }
     f = _finding_direct(cfg)
-    assert f.status == PASS
+    assert f.status == WARN
+
+
+def test_named_agent_cwd_equal_to_bare_default_workspace_warns_not_passes():
+    """C-135: the real false-PASS this fix closes. Agent "web" declares no workspace
+    of its own; its cwd is set to the SAME string as agents.defaults.workspace -- a
+    plausible, deliberate admin choice ("run this agent in the shared project root"),
+    not a coincidence. That is exactly a relocation away from "web"'s own real
+    implicit workspace (join(agents.defaults.workspace, "web")), which the old bare-
+    default-workspace fallback could never prove one way or the other -- it must WARN,
+    not PASS."""
+    cfg = {
+        "agents": {
+            "defaults": {"workspace": "/home/user/ws"},
+            "entries": {"web": {"cwd": "/home/user/ws"}},
+        }
+    }
+    f = _finding_direct(cfg, home="/home/user")
+    assert f.status == WARN
+    assert "agents.entries.web.cwd" in " ".join(f.evidence)
 
 
 # ---- WARN: relocation, or no proof of equality ----
