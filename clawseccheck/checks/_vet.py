@@ -863,6 +863,48 @@ _CRON_PERSIST_RE = re.compile(
     re.I | re.VERBOSE,
 )
 
+# KNOWN RESIDUAL (B-534 -- NARROWED, NOT CLOSED). Three of the eleven alternatives above
+# are bare PATH mentions with no install/enable verb requirement -- Library/LaunchAgents,
+# /etc/cron.*, and the per-user systemd unit path -- unlike every other alternative, which
+# anchors on a verb (crontab -e, systemctl enable, launchctl load, @reboot). A path that is
+# only being READ (a backup script copying plists OUT of ~/Library/LaunchAgents/, a bare
+# `ls`, a `tar -c` archiving it) convicts identically to a genuine install.
+#
+# Two fix attempts were built and RETRACTED on C-135 grounds -- real shell semantics beat
+# this false positive every time they were tried, and opened a real false negative every
+# time:
+#   Attempt 1 (path-position heuristic: "the last path token on a cp/mv/rsync line is the
+#   destination, so an earlier one is being read"). Killed by `2>/dev/null` (the token
+#   regex does not treat `>` as a separator, so the redirect became "the destination" and
+#   silenced a genuine install), by GNU `cp -t DEST src` (destination comes FIRST, backwards
+#   from the heuristic's premise), and by a quoted destination containing a space.
+#   Attempt 2 (real shlex tokenisation + a read/write direction predicate, two rounds).
+#   Closed every attempt-1 hole, then died to a universal attacker-controlled bypass: its
+#   own `--target-directory` flag scan ran BEFORE verb resolution, so a bare `-t` was read
+#   as "target directory" for ANY verb, recognised or not (`frobnicate -t x p.plist
+#   ~/Library/LaunchAgents/e.plist` went silent) -- plus a 13.5x cost blowup that pushed
+#   large skills over the scan budget (fail-open), plus new false positives on ordinary
+#   markdown code fences and common English words ("do", "then", "watch").
+#
+# tests/test_b534_persistence_direction_residual.py pins both sides: the accepted false
+# positive, and the eight genuine install shapes (including the four that killed attempt 2)
+# a future attempt must never silence.
+#
+# Accepted 2026-09-05 (Dave, backlog sweep ruling) per CLAUDE.md Golden Rule #5 / SS2.5.
+# Condition (d) -- route the mitigation to disclosure, never another regex iteration -- is
+# satisfied in `check_installed_skills`'s HIGH-bucket fix text (below): a B13 FAIL never
+# reaches the judge packet (`adjudication._is_borderline` admits only WARN/UNKNOWN), so the
+# limitation is disclosed in `fix`, never `detail` (`baseline.fingerprint()` hashes
+# `detail`), whenever one of these three bare-path alternatives is what fired.
+_CRON_BARE_PATH_RE = re.compile(
+    r"""(?:
+        /etc/cron\.(?:d|daily|weekly|monthly|hourly)|
+        Library/LaunchAgents                        |
+        \.config/systemd/user/\S+\.(?:service|timer)\b
+    )""",
+    re.I | re.VERBOSE,
+)
+
 
 # Backgrounding / daemonize — lower confidence (WARN, not FAIL).
 # nohup CMD &, disown, setsid CMD — detaches a process from the session.
@@ -963,8 +1005,16 @@ def _cron_persistence_hits(
     blob: str,
     fence_ranges: list[tuple[int, int]],
     coverage: list[str] | None = None,
+    bare_path_sink: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """B-144/B-203: split cron/startup-persistence matches into (high_hits, warn_hits).
+
+    B-534: *bare_path_sink*, an optional append-only sink mirroring *coverage*'s idiom
+    (never a third return value -- same arity-stability reason as *coverage*'s own
+    docstring gives). Appended to whenever a match that reaches ``high_hits`` came from
+    one of the three bare-path-only alternatives in ``_CRON_PERSIST_RE`` (see the
+    KNOWN RESIDUAL comment above it) -- the caller uses a non-empty sink to route the
+    accepted-residual disclosure into the HIGH finding's `fix` text.
 
     B-203: evaluates EVERY distinct match (not just the first) — the original loop
     `break`d after the first match, so a reputable `systemctl enable tor` appearing
@@ -1067,6 +1117,11 @@ def _cron_persistence_hits(
             continue
         if label not in high_hits:
             high_hits.append(label)
+        # B-534: this specific match, not the deduplicated label, is what tells us
+        # whether a bare-path-only alternative fired -- check every contributing match,
+        # not just the first one appended to high_hits.
+        if bare_path_sink is not None and _CRON_BARE_PATH_RE.fullmatch(m.group(0)):
+            bare_path_sink.append(m.group(0))
         # B-203: was `break` — evaluate every distinct match, not just the first.
     else:
         # Loop no longer breaks, so this runs unconditionally; the guard replicates the
@@ -4218,6 +4273,11 @@ def check_installed_skills(ctx: Context) -> Finding:
         [],
         [],
     )
+    # B-534: accumulates across every skill scanned below, mirroring `high`'s own scope --
+    # non-empty iff at least one HIGH cron/persistence hit came from a bare-path-only
+    # alternative (the accepted residual). Read at the `if high:` branch to route the
+    # SS2.5(d) disclosure into that finding's `fix` text.
+    _cron_bare_path_hits: list[str] = []
     # B-634: agent-config persistence hits (writes to an agent-context file such as
     # ~/.bashrc/CLAUDE.md/AGENTS.md — _agent_config_write_hits below), collected eagerly
     # across every skill regardless of which cascade branch below ends up winning the
@@ -4824,7 +4884,9 @@ def check_installed_skills(ctx: Context) -> Finding:
         # B-144: cron/startup persistence — dual-use, disclosure-aware (see
         # _cron_persistence_hits docstring). A disclosed watchdog/monitoring job
         # down-ranks to WARN instead of HIGH.
-        _cron_high, _cron_warn = _cron_persistence_hits(blob, _fr, coverage_fence)
+        _cron_high, _cron_warn = _cron_persistence_hits(
+            blob, _fr, coverage_fence, _cron_bare_path_hits
+        )
         for h in _cron_high:
             high.append(f"{name}: {h}")
         for h in _cron_warn:
@@ -5204,12 +5266,31 @@ def check_installed_skills(ctx: Context) -> Finding:
             destination_hosts=_sole_contributor(crit_hosts_by_skill, crit_skills),
         )
     if high:
+        fix = (
+            "Review the flagged skills' source before trusting them; prefer pinned, "
+            "signed, VirusTotal-clean releases."
+        )
+        if _cron_bare_path_hits:
+            # B-534, SS2.5(d) routing: a bare mention of one of three persistence paths
+            # (Library/LaunchAgents, /etc/cron.*, a per-user systemd unit) convicts
+            # identically whether the skill is installing persistence or merely reading/
+            # backing up that path -- an accepted, C-135-tested residual (two sound fix
+            # attempts retracted; see the comment above _CRON_PERSIST_RE). Disclosed here,
+            # not in `detail` (baseline.fingerprint() hashes it), because a B13 FAIL never
+            # reaches --judge-packet adjudication to catch it there instead.
+            fix += (
+                " One or more of the cron/startup-persistence hits above matched only a "
+                "bare path mention (~/Library/LaunchAgents, /etc/cron.*, or a per-user "
+                "systemd unit file) with no install/enable verb — a known, accepted "
+                "detection limit: a skill that merely reads or backs up that path convicts "
+                "identically to one that installs into it. If you authored this skill or "
+                "already trust its source, confirm the flagged line is a read, not a write."
+            )
         return _b13_verdict(
             HIGH,
             FAIL,
             "Suspicious patterns in installed skill(s): " + "; ".join(high[:6]),
-            "Review the flagged skills' source before trusting them; prefer pinned, "
-            "signed, VirusTotal-clean releases.",
+            fix,
             high,
             _signal_buckets,
             "high",
