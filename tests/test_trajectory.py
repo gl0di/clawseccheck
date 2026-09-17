@@ -581,6 +581,41 @@ def test_pointer_target_not_shaped_like_a_trajectory_file_is_rejected(tmp_path):
     assert stats["files_total"] == 0
 
 
+def test_pointer_target_symlinked_to_a_non_trajectory_file_is_rejected(tmp_path):
+    """C-135 round 4 (independent, post-commit): the shape check must run on the
+    RESOLVED path, not the raw pre-resolution string -- Path.resolve() follows a
+    symlink in the FINAL path component too. An attacker who can write into
+    agents/*/sessions/ (the threat model _resolve_pointer_target already assumes) could
+    otherwise create a symlink named *.trajectory.jsonl pointing at a real, non-
+    trajectory in-home file (e.g. a credentials store) and have a pointer's runtimeFile
+    name the symlink itself -- passing a raw-string suffix check while resolving to an
+    arbitrary in-home target, exactly the bypass
+    test_pointer_target_not_shaped_like_a_trajectory_file_is_rejected (above) exists to
+    prevent for a DIRECT reference, but which that test never exercises for an
+    indirect (symlinked) one."""
+    # Nested, like test_pointer_naming_an_unglobbed_file_is_found_via_the_pointer_alone
+    # above -- deliberately OUTSIDE the flat agents/*/sessions/*.trajectory.jsonl glob's
+    # own reach, so this isolates the POINTER path's shape check specifically. (A
+    # same-named symlink sitting directly in agents/*/sessions/ would ALSO be picked up
+    # by the plain glob on its literal name, which is a separate, pre-existing question
+    # about the glob branch's own symlink handling -- not this function's C-135 round 4
+    # fix, and not what this test is pinning.)
+    d = tmp_path / "agents" / "main" / "sessions" / "archive"
+    d.mkdir(parents=True, exist_ok=True)
+    decoy = tmp_path / "credentials" / "store.json"
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text('{"secret": "not-a-trajectory-file"}', encoding="utf-8")
+    symlink = d / "innocuous.trajectory.jsonl"
+    symlink.symlink_to(decoy)
+    _write_pointer(tmp_path, "main", "s0", symlink)
+    stats: dict = {}
+    files = find_trajectory_files(tmp_path, stats=stats)
+    assert files == []
+    assert decoy.resolve() not in files
+    assert stats["pointer_invalid"] == 1
+    assert stats["files_total"] == 0
+
+
 def test_a_fifo_named_as_a_pointer_is_never_opened(tmp_path):
     """C-135: the B-549 precedent (collector.py) -- a FIFO glob-matched as a pointer
     file must never be read_bytes()'d, since a FIFO with no writer blocks forever.

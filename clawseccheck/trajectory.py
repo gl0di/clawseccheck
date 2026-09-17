@@ -110,19 +110,25 @@ def _resolve_pointer_target(pointer_path: Path, home_resolved: Path) -> "tuple[s
                          without this, a pointer could redirect the scan onto ANY
                          in-home file, e.g. a credentials store, which is then opened
                          and read line-by-line by every caller, not merely path-listed).
+                         The shape check runs on the RESOLVED path's name, not the raw
+                         pre-resolution string (C-135 round 4: `Path.resolve()` follows a
+                         symlink in the FINAL path component too, so a symlink named
+                         `decoy.trajectory.jsonl` pointing at a real credentials file
+                         passed a raw-string check but not this one -- the resolved
+                         basename is what every caller actually opens).
                          ``path`` is None. Real disk evidence a session existed, but not
                          ours to follow -- never counted as "missing" (that would claim
                          a real target is gone when we could not even read the claim).
 
     C-135, disclosed rather than silently accepted: this validates confinement and shape
     at DISCOVERY time, not at the moment a caller actually opens the file — a pointer
-    naming an in-home, correctly-suffixed path that is (or is later replaced by) a
-    symlink to something outside home could still be followed at open() time by a
-    caller that does not itself re-check. Closing that fully needs every caller of the
-    returned paths to open with O_NOFOLLOW/re-verify, which is a larger change than this
-    task's own scope (a locator, not every reader); the local-attacker model here is
-    the same one this whole module already accepts (an attacker able to write into
-    agents/*/sessions/ can already forge a trajectory sidecar's CONTENT there directly).
+    naming an in-home, correctly-suffixed path that currently resolves cleanly could still
+    be REPLACED by a symlink to something outside home between this check and a caller's
+    open() (TOCTOU). Closing that fully needs every caller of the returned paths to open
+    with O_NOFOLLOW/re-verify, which is a larger change than this task's own scope (a
+    locator, not every reader); the local-attacker model here is the same one this whole
+    module already accepts (an attacker able to write into agents/*/sessions/ can already
+    forge a trajectory sidecar's CONTENT there directly).
     """
     # B-549 precedent (collector.py): a FIFO/socket/device node glob-matched as
     # `*.trajectory-path.json` would `read_bytes()` and block forever (a FIFO with no
@@ -177,11 +183,22 @@ def _resolve_pointer_target(pointer_path: Path, home_resolved: Path) -> "tuple[s
     target = rec.get("runtimeFile")
     if not isinstance(target, str) or not target.strip():
         return "invalid", None
-    if not target.endswith(".trajectory.jsonl"):
-        return "invalid", None
+    # C-135 round 4 (independent, post-commit): the shape check used to run on this raw,
+    # PRE-resolution string, which `Path.resolve()` below does not preserve -- `resolve()`
+    # follows a symlink in ANY path component, including the final one. An attacker able to
+    # write into agents/*/sessions/ (the threat model this whole function already assumes)
+    # could name a symlink `decoy.trajectory.jsonl` -> `../../../credentials/store.json`:
+    # the raw string passes this check, `resolve()` then follows the symlink to the real
+    # (non-trajectory) target, which still lands `in_home` -- so the file this function's
+    # own docstring says the shape check exists to keep out (opened and read line-by-line
+    # by every caller) got through anyway. Checking the RESOLVED name closes it: a symlink
+    # can point ANYWHERE, but resolve() always returns the real target's own basename, and
+    # that is what every caller actually opens.
     try:
         resolved = Path(target).expanduser().resolve()
     except (OSError, ValueError, RuntimeError):
+        return "invalid", None
+    if not resolved.name.endswith(".trajectory.jsonl"):
         return "invalid", None
     try:
         in_home = resolved.is_relative_to(home_resolved)
