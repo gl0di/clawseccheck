@@ -980,9 +980,25 @@ _B452_MANDATORY_RE = re.compile(
     r"|\bbefore\s+(?:you\s+)?respond(?:ing)?\b",
     re.I,
 )
+#
+# C-135 (independent, post-commit): the bare-verb alternative below used to match on
+# ITS OWN, with no requirement that what follows look like an invocation target — so
+# "you must" alone (from `_B452_MANDATORY_RE`) plus an ordinary UX sentence like "this
+# is their first run of the onboarding wizard" satisfied BOTH regexes off the single
+# word "run", with no script execution anywhere. `_B452_MANDATORY_RE`'s own "first run"
+# alternative and the bare-verb branch here also overlapped on the identical two words.
+# Fixed by requiring the verb to be immediately followed by something that actually
+# LOOKS like an invocation — a quote/backtick, an interpreter name, or a token
+# containing `/` or `.` (a path) — the same discipline the interpreter alternative
+# already applied to itself. Every real corpus case and every test in
+# tests/test_b452_keyword_gated_trigger_judge_item.py quotes its script target in
+# backticks or names a path, so recall on the shape this function exists to catch is
+# unaffected; only bare prose uses of "run"/"call"/etc. with no invocation-shaped
+# continuation are excluded.
+_B452_INVOCATION_TARGET_LA = r"(?=\s+(?:[`'\"]|(?:python3?|node|bash|sh|zsh|ruby|perl)\b|\S*[./]\S*))"
 _B452_EXEC_VERB_RE = re.compile(
-    r"\b(?:run|execute|invoke|call|launch|exec|source)\b"
-    r"|(?<![\w./-])(?:python3?|node|bash|sh|zsh|ruby|perl)(?=\s+[`'\"./~$\w-])",
+    r"\b(?:run|execute|invoke|call|launch|exec|source)\b" + _B452_INVOCATION_TARGET_LA
+    + r"|(?<![\w./-])(?:python3?|node|bash|sh|zsh|ruby|perl)(?=\s+[`'\"./~$\w-])",
     re.I,
 )
 # A sentence-ending period/!/? followed by whitespace-then-capital or end-of-string —

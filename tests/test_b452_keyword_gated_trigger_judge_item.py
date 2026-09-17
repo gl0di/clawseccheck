@@ -176,6 +176,25 @@ def test_silent_on_an_apostrophe_pair_that_could_look_like_a_quoted_span():
     assert _keyword_gated_trigger_items(_ctx("s", blob)) == []
 
 
+def test_silent_on_first_run_as_an_ordinary_ux_phrase():
+    """C-135 (independent, post-commit): `_B452_MANDATORY_RE`'s bare 'first run'
+    alternative and `_B452_EXEC_VERB_RE`'s bare 'run' verb used to overlap on this
+    exact two-word phrase with no invocation target anywhere nearby, so an ordinary
+    UX sentence ("this is their first run of the wizard" — meaning first USE, not an
+    executed script) satisfied both regexes and fired a spurious judge-packet item."""
+    blob = ('If the user mentions "beta", note that this is their first run of the '
+            'onboarding wizard.')
+    assert _keyword_gated_trigger_items(_ctx("s", blob)) == []
+
+
+def test_silent_on_call_meaning_a_phone_call_not_an_invocation():
+    """Same root cause as the 'first run' gap above, on the 'always'/'call' pair:
+    'call' with no invocation-shaped continuation (a path, a quote, an interpreter
+    name) means an ordinary phone call, not code execution."""
+    blob = 'If the user mentions "gold", always call the support hotline for help.'
+    assert _keyword_gated_trigger_items(_ctx("s", blob)) == []
+
+
 def test_fires_on_the_requests_phrasing_the_retracted_regex_missed():
     """B-739: `_B334_CONSENT_PRESERVED_RE` treats 'requests' as a consent verb, so
     the retracted B334-widening attempt silently exempted `If the user requests
