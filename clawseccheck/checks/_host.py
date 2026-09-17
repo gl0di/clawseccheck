@@ -1094,6 +1094,21 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
               OpenClaw. Disclosure only, like B150/B193 — a legitimate scheduled
               housekeeping task reads identically to a planted one from a static
               scan; both are worth a human look, so this never FAILs.
+    UNKNOWN (host scanning disabled) — `ctx.include_host` is False (`audit()`'s
+              default, matching every other real-host-reading check in this module —
+              `--no-host` on the CLI). `_ETC_CRON_LOCATIONS` is a hardcoded absolute
+              path list (`/etc/crontab`, `/etc/cron.d`, …), read unconditionally by
+              `hostpersist.scan()` regardless of which `home` is passed — unlike the
+              systemd-user leg, it is NOT scoped to the audited home at all, so
+              without this gate every hermetic (default, test-suite) audit call would
+              read the REAL machine's `/etc/cron.*` inventory, which differs by
+              distro and by platform (a bare macOS host has none of these paths at
+              all) and made this check's own finding text — and so its
+              `baseline.fingerprint()` — a function of whatever real host happened to
+              run the audit, not of the fixture/config under test (found via a
+              macOS-only CI failure, 2026-09-17: a fixture unrelated to this check
+              picked up a different B379 fingerprint purely from running on a
+              runner with no `/etc/cron.*` surface at all).
 
     C-135 (independent, post-commit): systemd's own idiom keeps the schedule in the
     `.timer` unit and the payload (`ExecStart=`) in a SEPARATELY-named `.service` unit
@@ -1122,6 +1137,16 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
     PASS    — every location hostpersist.scan() looked at was actually read (nothing
               in `scan.unreadable`) and none of it names OpenClaw.
     """
+    if not getattr(ctx, "include_host", False):
+        return _finding(
+            "B379",
+            UNKNOWN,
+            "Host-level scheduled persistence (systemd user timers, world-readable "
+            "system cron) was not checked because host-filesystem scanning is "
+            "disabled (--no-host).",
+            "Re-run without --no-host to check for an OpenClaw-named systemd timer "
+            "or system-cron entry.",
+        )
     home = ctx.home.parent  # the ACCOUNT home, never ctx.home (~/.openclaw) — see
     # hostpersist.py's own module docstring: passing ctx.home there once silently
     # returned 23 entries instead of 36, every home-rooted family missing, no error.

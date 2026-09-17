@@ -21,9 +21,10 @@ from clawseccheck.checks import check_host_scheduled_persistence
 from clawseccheck.collector import Context
 
 
-def _ctx(home: Path) -> Context:
+def _ctx(home: Path, *, include_host: bool = True) -> Context:
     c = Context(home=home / ".openclaw")
     c.config = {}
+    c.include_host = include_host
     return c
 
 
@@ -216,3 +217,25 @@ def test_never_fails(monkeypatch, tmp_path):
     unit_dir.mkdir(parents=True)
     (unit_dir / "openclaw-healthcheck.timer").write_text("[Timer]\n", encoding="utf-8")
     assert check_host_scheduled_persistence(_ctx(tmp_path)).status != FAIL
+
+
+def test_disabled_host_scanning_is_unknown_not_a_hermetic_pass(tmp_path):
+    """2026-09-17: `hostpersist.scan()`'s system-cron leg reads hardcoded absolute
+    paths (`/etc/crontab`, `/etc/cron.d`, ...) regardless of the `home` passed to it —
+    unlike the systemd-user leg, it is NOT scoped to the audited home at all. Without
+    this gate, every hermetic `audit()` call (the default; every fixture-based test,
+    including `test_finding_fingerprint_manifest.py`) read the REAL host's own
+    `/etc/cron.*` inventory, which differs by machine and by platform — a bare macOS
+    runner has none of these paths at all — and made this check's finding text (and so
+    its fingerprint) a function of whatever machine happened to run the audit rather
+    than of the fixture/config under test. Caught by a macOS-only CI failure on a
+    fixture unrelated to this check. `include_host` defaults to False specifically to
+    keep the engine hermetic for tests (see `audit()`'s own docstring); this check must
+    honor that the same way B328/the B-capability and B-egress `include_host` gates
+    already do."""
+    unit_dir = tmp_path / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True)
+    (unit_dir / "openclaw-healthcheck.timer").write_text("[Timer]\n", encoding="utf-8")
+    f = check_host_scheduled_persistence(_ctx(tmp_path, include_host=False))
+    assert f.status == UNKNOWN, f.detail
+    assert f.not_applicable is not True
