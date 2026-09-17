@@ -103,8 +103,29 @@ _NON_HOME_ABS_PATH_RE = re.compile(
 
 
 def _basename_only(match: "re.Match[str]") -> str:
-    """`re.sub` replacement: reduce one matched absolute-path token to its basename."""
+    """`re.sub` replacement: reduce one matched absolute-path token to its basename.
+
+    2026-09-17: on macOS, `/home` is a live autofs trigger (`auto_master` ->
+    `auto_home`), so `collector.py`'s `Path(...).resolve()` on a `/home/<user>/...`
+    workspace value can come back PREFIXED rather than untouched -- e.g.
+    `/System/Volumes/Data/home/testuser/.cache/x` -- something this repo already
+    measured once for a different function (`_username_safe_path`, e185271). When that
+    happens, `_redact_home_paths` still finds and folds the `/home/<user>` SEGMENT, but
+    since it is no longer the string's leading token, the fold lands mid-string:
+    `/System/Volumes/Data~/.cache/x`. That is one single `_NON_HOME_ABS_PATH_RE`
+    match (the "/" at index 0 starts a token) starting BEFORE the fold, so a bare
+    basename reduction swallowed the `~/...` remainder along with the outer prefix --
+    caught only by the macOS CI leg, since every other producer either resolves under
+    the real $HOME (folds at index 0) or genuinely falls outside every $HOME shape (no
+    embedded "~" to lose). If the match contains a later "~/", the fold is real and
+    worth keeping: return from that point on rather than reducing further -- still
+    strictly lossier than the fold alone, since the prefix ahead of the "~" is dropped
+    too, matching this function's whole purpose.
+    """
     raw = match.group(0).rstrip("/\\")
+    tilde_slash = raw.rfind("~/")
+    if tilde_slash > 0:
+        return raw[tilde_slash:]
     tail = re.split(r"[\\/]", raw)[-1]
     return tail or match.group(0)
 

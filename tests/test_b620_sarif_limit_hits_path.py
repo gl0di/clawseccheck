@@ -248,6 +248,38 @@ def test_render_sarif_reduces_a_non_home_path_to_its_basename_unit_level():
     assert got[1] == "custom workspace 'z' resolves outside the audited --home (~/.cache/z)", got[1]
 
 
+def test_render_sarif_preserves_a_home_fold_that_is_not_the_leading_token():
+    """2026-09-17, caught only by macOS CI (never reproduced on Linux): `/home` is a
+    live autofs trigger there (`auto_master` -> `auto_home`), so `collector.py`'s
+    `Path(...).resolve()` on a `/home/<user>/...` workspace value can come back
+    PREFIXED rather than untouched, e.g. `/System/Volumes/Data/home/testuser/...` --
+    the same class of divergence already measured once for a different function
+    (`_username_safe_path`, e185271). `_redact_home_paths` still finds and folds the
+    `/home/<user>` segment, but since it is no longer the string's leading token, the
+    fold lands mid-string (`/System/Volumes/Data~/.cache/x`) -- one single
+    `_NON_HOME_ABS_PATH_RE` match starting before the fold, so a naive basename
+    reduction swallowed the `~/...` remainder along with the outer prefix, undoing
+    the fold `_redact_home_paths` had just done. This is the unit-level regression the
+    subprocess-based end-to-end test could not pin on a Linux runner."""
+    from clawseccheck.collector import Context
+    from clawseccheck.sarif import render_sarif
+
+    entry = (
+        "custom workspace 'csc-b620-ws' resolves outside the audited --home "
+        "(/System/Volumes/Data/home/testuser/.cache/csc-b620-ws) — bootstrap/skills "
+        "read from there are outside the scoped audit"
+    )
+    ctx = Context(home=Path("/tmp"))
+    ctx.limit_hits = [entry]
+
+    doc = json.loads(render_sarif([], ctx=ctx))
+    got = doc["runs"][0]["properties"]["analysis_completeness"]["limit_hits"]
+
+    assert "/System/Volumes/Data" not in got[0], got[0]
+    assert "/home/testuser" not in got[0], got[0]
+    assert "~/.cache/csc-b620-ws" in got[0], got[0]
+
+
 def test_render_sarif_limit_hit_basename_reduction_does_not_mangle_ordinary_slash_prose():
     """Adversarial case found while implementing B-633, not by a later review pass: a
     naive "reduce anything starting with /" regex also matched the "/skills" in ordinary
