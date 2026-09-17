@@ -1094,6 +1094,20 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
               OpenClaw. Disclosure only, like B150/B193 — a legitimate scheduled
               housekeeping task reads identically to a planted one from a static
               scan; both are worth a human look, so this never FAILs.
+
+    C-135 (independent, post-commit): systemd's own idiom keeps the schedule in the
+    `.timer` unit and the payload (`ExecStart=`) in a SEPARATELY-named `.service` unit
+    that shares its basename and is triggered implicitly — a `.timer` file is typically
+    just `[Timer]\\nOnCalendar=...` with no command in it at all. Checking only the
+    `.timer` file's own name+content (as this check originally did) missed that: a
+    generically-named timer+service pair (`backup-sync.timer` / `backup-sync.service`,
+    the latter's `ExecStart=` invoking openclaw) evaded BOTH this check (wrong file) and
+    B150 (a timer-triggered service is normally `Type=oneshot`, not `Restart=always`).
+    Fixed by additionally checking each `.timer` entry's PAIRED `.service` file (same
+    basename, already present in `scan.entries` — `hostpersist.scan()` walks the whole
+    systemd-user directory regardless of extension, this check just used to discard
+    everything but `.timer`) — never a new file read, only a second look at content this
+    check already had in hand.
     UNKNOWN — no OpenClaw-named entry found, and hostpersist.scan() could not read
               something in this surface — overwhelmingly the account's own crontab
               spool, which is mode 1730 root:crontab and unreadable by its own owner
@@ -1113,6 +1127,16 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
     # returned 23 entries instead of 36, every home-rooted family missing, no error.
     scan = _hostpersist.scan(home=home)
 
+    # C-135: a lookup of every systemd-user entry BY PATH, built once, so a `.timer`
+    # entry can find its paired `.service` unit (same basename) without a second
+    # filesystem walk — `scan.entries` already has it, this check used to just throw
+    # it away below.
+    systemd_by_path = {
+        entry.path: entry
+        for entry in scan.entries
+        if entry.family == _hostpersist.FAMILY_SYSTEMD
+    }
+
     hits: list[str] = []
     for entry in scan.entries:
         if entry.family == _hostpersist.FAMILY_SYSTEMD and not entry.path.endswith(".timer"):
@@ -1121,9 +1145,20 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
             continue  # shell_rc is B324's concern (env.shellEnv.enabled), not this one's
         name = Path(entry.path).name
         content = _bounded_read_text(_host_entry_abs_path(entry.path, home)) or ""
-        if _systemd_unit_is_openclaw_related(name, content):
+        matched = _systemd_unit_is_openclaw_related(name, content)
+        via_service = False
+        if not matched and entry.family == _hostpersist.FAMILY_SYSTEMD:
+            paired_path = entry.path[: -len(".timer")] + ".service"
+            paired = systemd_by_path.get(paired_path)
+            if paired is not None:
+                paired_content = _bounded_read_text(_host_entry_abs_path(paired.path, home)) or ""
+                if _systemd_unit_is_openclaw_related(Path(paired.path).name, paired_content):
+                    matched = True
+                    via_service = True
+        if matched:
             label = _hostpersist.FAMILY_LABELS.get(entry.family, entry.family)
-            hits.append(f"{label}: {entry.path}")
+            suffix = " (via its paired .service unit's ExecStart)" if via_service else ""
+            hits.append(f"{label}: {entry.path}{suffix}")
 
     if hits:
         return _finding(

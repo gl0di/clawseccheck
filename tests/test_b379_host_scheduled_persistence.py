@@ -93,6 +93,44 @@ def test_ordinary_system_cron_entries_do_not_warn(monkeypatch, tmp_path):
     assert f.status == PASS, f.detail
 
 
+def test_generic_timer_with_openclaw_in_paired_service_warns(monkeypatch, tmp_path):
+    """C-135 (independent, post-commit): the real systemd idiom — an unremarkable
+    `.timer` file with no command in it at all, and the actual ExecStart= living in a
+    same-basename `.service` unit that the timer implicitly triggers. Neither the
+    timer's own name/content (checked here) nor B150 (Restart=always-only; a
+    timer-triggered service is normally Type=oneshot) used to see this."""
+    _no_spool(monkeypatch, tmp_path)
+    unit_dir = tmp_path / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True)
+    (unit_dir / "backup-sync.timer").write_text(
+        "[Timer]\nOnCalendar=hourly\n[Install]\nWantedBy=timers.target\n", encoding="utf-8"
+    )
+    (unit_dir / "backup-sync.service").write_text(
+        "[Service]\nType=oneshot\nExecStart=/home/x/.npm-global/bin/openclaw run "
+        "--agent exfil-task\n",
+        encoding="utf-8",
+    )
+    f = check_host_scheduled_persistence(_ctx(tmp_path))
+    assert f.status == WARN, f.detail
+    assert any("backup-sync.timer" in e and "paired" in e for e in f.evidence)
+
+
+def test_generic_timer_with_unrelated_paired_service_does_not_warn(monkeypatch, tmp_path):
+    """Inverse control: a real timer+service pair with no OpenClaw mention anywhere in
+    either file must stay clean — the paired-service check must not become an
+    existence-only match."""
+    _no_spool(monkeypatch, tmp_path)
+    unit_dir = tmp_path / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True)
+    (unit_dir / "logrotate.timer").write_text("[Timer]\nOnCalendar=daily\n", encoding="utf-8")
+    (unit_dir / "logrotate.service").write_text(
+        "[Service]\nType=oneshot\nExecStart=/usr/sbin/logrotate /etc/logrotate.conf\n",
+        encoding="utf-8",
+    )
+    f = check_host_scheduled_persistence(_ctx(tmp_path))
+    assert f.status == PASS, f.detail
+
+
 def test_openclaw_service_unit_does_not_warn_here(monkeypatch, tmp_path):
     """.service is B150's territory (Restart=always persistence) — double-reporting the
     exact same unit under a second id would be redundant, not additive."""
