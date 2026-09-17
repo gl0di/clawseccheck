@@ -1576,6 +1576,16 @@ def check_cron_job_content(ctx: Context) -> Finding:
         # process's stdin. Same content-injection risk as argv/script; scanned the
         # same way.
         _scan_field(f"{job_label}.payload.input", job.get("payload_input"))
+        # C-135 (independent, post-commit): `payload_cwd`/`payload_env` are collected
+        # by collector._cron_payload_extras (same call as argv/script/input above) but
+        # deliberately NOT content-scanned here yet, unlike toolsAllow/agentTurn's
+        # allowUnsafeExternalContent/externalContentSource, whose deferral this task
+        # already states explicitly. Making that the same here: a poisoned env value
+        # (an injected LD_PRELOAD path, an attacker-controlled interpreter flag riding
+        # in an env var a spawned process trusts) is a real, distinct execution-time
+        # risk from argv/script/input content, but widening this FAIL-capable check's
+        # scan surface needs its own C-135 pass and fixtures, not a same-commit
+        # add-on — tracked as CLAWSECCHECK-B-824 rather than left silently unscanned.
 
         # C-476: `script`-kind is an execution surface exactly like `command`-kind (an
         # arbitrary script body vs. an argv vector) and was missing from this flag —
