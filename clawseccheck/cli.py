@@ -6482,6 +6482,33 @@ def _main(argv=None) -> int:
             _doc = json.loads(body)
             _doc.update(full_pipeline.to_json(score=score))
             body = json.dumps(_doc, ensure_ascii=True, indent=2)
+        # B-778 Gap 3 (second half): a grade-bearing JSON run used to emit zero bytes
+        # on stderr, so an agent that read its grade from THIS payload — the natural
+        # way to read one under --json — got no instruction to produce the human
+        # deliverable. A live session hit exactly this: it ran all five layers, got a
+        # real grade, and replied with a bare prose line, because nothing told it to
+        # do anything else. `--dashboard` already carries this contract
+        # (`_emit_paste_instruction`/`_emit_attach_instruction` above); this reaches
+        # the other branch that can also finish a grade.
+        #
+        # Gated on `score.graded` rather than on `args.full` alone: only a `--full
+        # --json` run can ever set it (the installed-skill/plugin sweep that closes
+        # the last layer only runs under `--full`), and an UNgraded one has nothing
+        # finished to hand back yet — pointing at `--dashboard` here would just repeat
+        # what `missing_layers` in the payload already told the agent.
+        if score.graded:
+            print(
+                "note: this JSON payload carries a finished grade (\"graded\": true) — "
+                "it is a machine payload for a program to parse, not something to paste "
+                "or summarise for the user. To hand the user a result, re-run the "
+                "combined command and relay ITS output instead:\n"
+                f"      {command_prefix()} --dashboard --full --attest <file> "
+                "--judged-bundle <file> --pdf <path>\n"
+                "      Paste the card it prints verbatim, attach the PDF (see the "
+                "MEDIA: directive that command prints on stderr), and re-render "
+                "SKILL.md Step 4's next menu — do not compose your own summary "
+                "from this JSON.",
+                file=sys.stderr)
     elif args.card:
         body = render_card(score, findings, ascii_only)
     else:

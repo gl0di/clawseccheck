@@ -19,18 +19,26 @@ Three gaps, three fixes:
   dynamically via `invocation.command_prefix()` so it matches however the tool was
   actually invoked -- tested below against the real renderers, not the doc.
 
-**Scope note:** Gap 3's OTHER half -- a grade-bearing `--full --json` run emitting the
-same deliverable note on stderr -- needs a change to `cli.py`/`report.py`. Both files
-carried substantial *uncommitted* changes from another in-flight session at the time this
-landed (unrelated to this bug), and this sweep's own file-ownership rule is to leave a
-file with an unexpected uncommitted diff alone rather than risk mixing an unrelated
-in-flight change into this commit. Tracked as follow-up, not silently dropped.
+Gap 3's other half -- a grade-bearing `--full --json` run emitting the same deliverable
+note on stderr -- landed later, once `cli.py`/`report.py` were clear of the unrelated
+in-flight session that blocked it at the time (both files carried substantial
+*uncommitted* changes from another session; this sweep's own file-ownership rule is to
+leave such a file alone rather than risk mixing an unrelated in-flight change into this
+commit). `cli.py`'s `_main` now prints the note on stderr, right after the JSON `body` is
+assembled, gated on `score.graded` (only a `--full --json` run that actually reached all
+five layers has a finished result worth handing back -- see the comment beside the `if
+score.graded:` block in `cli.py`). Tested below by driving the real CLI as a subprocess,
+over both a graded and an ungraded `--full --json` run.
 
-Offline; reads only the bundled doc and the three harness modules' own pure renderers.
+Offline; reads only the bundled doc, the three harness modules' own pure renderers, and
+drives the packaged CLI as a subprocess against the bundled `fixtures/home_safe`.
 """
 from __future__ import annotations
 
+import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from clawseccheck.canary import make_canary, render_canary
@@ -39,6 +47,12 @@ from clawseccheck.redteam import make_suite, render_suite
 
 _REPO = Path(__file__).resolve().parent.parent
 _FLOW_CHOICES = _REPO / "docs" / "FLOW_CHOICES.md"
+_SAFE_HOME = str(_REPO / "fixtures" / "home_safe")
+
+# Same minimal shapes tests/test_b586_graded_artifacts.py uses to reach all five layers.
+_ATTEST = '{"schema": "clawseccheck-attest/1", "tools": ["read"], "network": "none"}'
+_BUNDLE = ('{"liveTest": {"verdicts": [{"tool": "canary", '
+           '"id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}}')
 
 
 def _choice_section(text: str, heading_substring: str) -> str:
@@ -142,3 +156,47 @@ def test_feedback_command_survives_ascii_mode():
     out = render_canary(make_canary("t"), ascii_only=True)
     assert "§" not in out
     assert "--judged-bundle" in out
+
+
+# ─────────────────────────────────────── Gap 3 (json half): a grade-bearing --full --json
+
+def _run_full_json(tmp_path: Path, *extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "clawseccheck", "--home", _SAFE_HOME, "--full", "--json",
+         "--data-dir", str(tmp_path / "state"), "--no-history", *extra],
+        cwd=_REPO, capture_output=True, text=True, timeout=600)
+
+
+def test_a_graded_full_json_run_emits_the_deliverable_note_on_stderr(tmp_path):
+    """The headline case from the real session: an agent runs `--full --json`, reaches a
+    real grade, and used to get nothing on stderr telling it to produce a card/PDF/menu.
+    """
+    attest = tmp_path / "a.json"
+    attest.write_text(_ATTEST, encoding="utf-8")
+    bundle = tmp_path / "b.json"
+    bundle.write_text(_BUNDLE, encoding="utf-8")
+    proc = _run_full_json(tmp_path, "--attest", str(attest), "--judged-bundle", str(bundle))
+    payload = json.loads(proc.stdout)
+    assert payload["graded"] is True, (
+        "fixture must actually reach a grade (non-vacuity)", proc.stderr[-500:])
+
+    assert "this JSON payload carries a finished grade" in proc.stderr
+    assert "--dashboard" in proc.stderr and "--full" in proc.stderr and "--pdf" in proc.stderr
+    assert "--attest" in proc.stderr and "--judged-bundle" in proc.stderr
+    assert "MEDIA" in proc.stderr, "must repeat the PDF delivery rule, not just the command"
+    assert "Step 4" in proc.stderr, "must send the agent back to the menu"
+    # Named dynamically, the same way canary/dryrun/redteam's own closing line is (Gap 3's
+    # other half) -- not hardcoded to one invocation form.
+    assert proc.stderr.count("--dashboard --full --attest") == 1
+
+
+def test_an_ungraded_full_json_run_emits_no_deliverable_note(tmp_path):
+    """Control for the test above: a bare `--full --json` run (no --attest/--judged-bundle,
+    so 2 of 5 layers never ran) must print nothing -- the note is gated on `score.graded`,
+    not on `--full --json` alone, and there is no finished result yet to hand back."""
+    proc = _run_full_json(tmp_path)
+    payload = json.loads(proc.stdout)
+    assert payload["graded"] is False, (
+        "fixture must actually be ungraded (non-vacuity)", proc.stderr[-500:])
+
+    assert "this JSON payload carries a finished grade" not in proc.stderr
