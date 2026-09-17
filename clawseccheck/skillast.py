@@ -4754,6 +4754,56 @@ def _decode_signal_is_only_artifact_relative_reads(
     return found_any
 
 
+def _exec_sink_taint_is_only_artifact_relative_decode(
+    arg_node: ast.AST,
+    tainted: "set[str]",
+    scope: ast.AST,
+    relpath: str = "",
+    path_aliases: "tuple | None" = None,
+) -> bool:
+    """True when every TAINTED NAME `_call_args_tainted` would match inside
+    *arg_node* is explained by a decode-shaped, provably artifact-relative file
+    read (`_decode_call_reads_artifact_relative_file`) -- and nothing else.
+
+    B-752 (TT5 follow-up). `_external_tainted_names` treats ANY `open()`/`.read()`
+    call as an external source -- right for TT5's general case, since a file
+    genuinely read from outside the artifact IS external input, and df4d7b1
+    correctly closed a real gap by propagating that taint through `with`/`for`
+    bindings, not just assignment. But it has no exception for a skill reading
+    its own bundled sibling file, so the canonical `setup.py` idiom --
+    `with open(join(dirname(__file__), "v.py")) as fh: exec(fh.read().decode())`
+    -- taints `fh` exactly like a network response would, and TT5_CMD_INJECTION
+    escalated to crit on code that reads and execs nothing but its own artifact.
+
+    Reuses `_decode_signal_is_only_artifact_relative_reads` -- the SAME predicate
+    OBFUSCATED_EXEC already trusts for this idiom -- but that predicate only
+    examines decode-SHAPED calls; it says nothing about a genuinely tainted name
+    riding along elsewhere in the same expression, e.g.
+    `exec(fh.read().decode() + attacker_supplied)`. So the tainted names this
+    argument actually contributes are compared against only the names the
+    decode call's OWN receiver resolves to -- a name tainted for any other
+    reason is not in that covered set, and the caller keeps convicting.
+    """
+    tainted_here = _names_in(arg_node) & tainted
+    if not tainted_here:
+        return False
+    if not _subtree_has_decode(arg_node):
+        return False
+    if not _decode_signal_is_only_artifact_relative_reads(
+        arg_node, scope, relpath, path_aliases
+    ):
+        return False
+    covered: "set[str]" = set()
+    for n in ast.walk(arg_node):
+        if not _is_decode_call(n) or _is_path_join_call(n, path_aliases):
+            continue
+        nf = n.func
+        if isinstance(nf, ast.Attribute) and nf.attr == "de" + "code":
+            if _decode_call_reads_artifact_relative_file(n, scope, relpath):
+                covered |= _names_in(nf.value)
+    return tainted_here <= covered
+
+
 # F-177/B375: sitecustomize.py/usercustomize.py + PYTHONSTARTUP auto-execution
 # persistence INSTALL, resolved at AST function-scope precision — the persistence-
 # axis-feeding twin of checks/_content.py's check_python_runtime_persist_install
@@ -5519,6 +5569,26 @@ def analyze_python(
                 )
                 any_t, direct = _call_args_tainted(node, ext_visible)
                 if any_t:
+                    # B-752: a decode-shaped, provably artifact-relative file read (the
+                    # setup.py idiom) is not external input merely because open()/.read()
+                    # unconditionally count as an external source for TT5's general case.
+                    # Exempt ONLY when every tainted name this call's own arguments reach
+                    # is explained by exactly that pattern; any other tainted name
+                    # reaching the sink -- a mixed expression, a real decode primitive
+                    # layered on top -- still convicts below.
+                    _all_args = list(node.args) + [kw.value for kw in node.keywords]
+                    if _all_args and all(
+                        not (_names_in(_a) & ext_visible)
+                        or _exec_sink_taint_is_only_artifact_relative_decode(
+                            _a,
+                            ext_visible,
+                            owner_map.get(node, tree),
+                            filename,
+                            _path_module_aliases(tree),
+                        )
+                        for _a in _all_args
+                    ):
+                        continue
                     # A subprocess argv-list call (shell=False, fixed program) is only
                     # argument injection, not command injection — do not escalate to crit.
                     # B-413 layer 2: also downgraded when EVERY intra-file call site to

