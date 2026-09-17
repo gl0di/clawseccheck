@@ -455,6 +455,7 @@ def read_proven_tools_by_origin(
     *,
     max_files: int = _MAX_FILES,
     max_bytes_per_file: int = _MAX_BYTES_PER_FILE,
+    explicit_path: str | None = None,
 ) -> tuple[dict, dict]:
     """Return ``(by_origin, meta)`` — proven tool verbs BUCKETED by session origin.
 
@@ -475,6 +476,12 @@ def read_proven_tools_by_origin(
     §8: the bucket key carries the origin KIND and the channel id only. The
     ``sessionKey``'s peer-id segment (real PII) is never read into it — see
     ``parse_session_origin``. Per-verb payloads are still never touched.
+
+    ``explicit_path`` (B-770) scans a single given ``.trajectory.jsonl`` file instead of
+    globbing *home* — mirrors ``read_events``'s own parameter of the same name, so T3
+    (``behavioral.check_capability_drift``, the sole caller of ``read_proven_tools`` that
+    takes a ``--behavioral PATH``) can be confined to exactly the file the user named
+    instead of silently falling back to a home-wide scan.
     """
     by_origin: dict = {}
     meta = {
@@ -483,15 +490,20 @@ def read_proven_tools_by_origin(
         "files_total": 0, "files_capped": False,
         "pointer_targets_missing": 0, "pointer_out_of_home": 0, "pointer_invalid": 0,
         "pointer_scan_capped": False,
+        "path_unreadable": False,
     }
-    stats: dict = {}
-    files = find_trajectory_files(home, max_files=max_files, stats=stats)
-    meta["files_total"] = stats.get("files_total", 0)
-    meta["files_capped"] = stats.get("files_capped", False)
-    meta["pointer_targets_missing"] = stats.get("pointer_targets_missing", 0)
-    meta["pointer_out_of_home"] = stats.get("pointer_out_of_home", 0)
-    meta["pointer_invalid"] = stats.get("pointer_invalid", 0)
-    meta["pointer_scan_capped"] = stats.get("pointer_scan_capped", False)
+    if explicit_path:
+        files, meta["path_unreadable"] = resolve_explicit_file(explicit_path)
+        meta["files_total"] = len(files)
+    else:
+        stats: dict = {}
+        files = find_trajectory_files(home, max_files=max_files, stats=stats)
+        meta["files_total"] = stats.get("files_total", 0)
+        meta["files_capped"] = stats.get("files_capped", False)
+        meta["pointer_targets_missing"] = stats.get("pointer_targets_missing", 0)
+        meta["pointer_out_of_home"] = stats.get("pointer_out_of_home", 0)
+        meta["pointer_invalid"] = stats.get("pointer_invalid", 0)
+        meta["pointer_scan_capped"] = stats.get("pointer_scan_capped", False)
     if not files:
         return by_origin, meta
     meta["present"] = True
@@ -545,6 +557,7 @@ def read_proven_tools(
     *,
     max_files: int = _MAX_FILES,
     max_bytes_per_file: int = _MAX_BYTES_PER_FILE,
+    explicit_path: str | None = None,
 ) -> tuple[set[str], dict]:
     """Return ``(verbs, meta)`` for tool verbs observed in trajectory sidecars under *home*.
 
@@ -563,9 +576,13 @@ def read_proven_tools(
     rather than a second copy of the same scan loop. Deliberately a union, not a
     re-scan — the flat set every existing caller (B84, T3) reads is unchanged by
     construction, and there is one place where a parsing/version rule can drift.
+
+    ``explicit_path`` (B-770) — see ``read_proven_tools_by_origin``, which this forwards
+    it to unchanged.
     """
     by_origin, meta = read_proven_tools_by_origin(
-        home, max_files=max_files, max_bytes_per_file=max_bytes_per_file
+        home, max_files=max_files, max_bytes_per_file=max_bytes_per_file,
+        explicit_path=explicit_path,
     )
     verbs: set[str] = set()
     for names in by_origin.values():

@@ -820,10 +820,21 @@ def _t3_declared(ctx) -> tuple[set, bool, bool]:
     return literals, unbounded, has_allow_bound
 
 
-def check_capability_drift(ctx) -> object:
-    """T3 — a proven high-blast verb never declared in config / attestation."""
+def check_capability_drift(ctx, *, explicit_path: str | None = None) -> object:
+    """T3 — a proven high-blast verb never declared in config / attestation.
+
+    ``explicit_path`` (B-770) confines the proven-verb read to exactly the trajectory
+    file the caller named (a ``--behavioral PATH``), mirroring ``read_events``'s own
+    parameter. Before this, T3 unconditionally globbed *home* regardless of an explicit
+    target — an operator who ran ``--behavioral`` against one captured, quarantined
+    trajectory file had T3 silently assessed against their live default home instead,
+    answering a question about the wrong subject.
+    """
     home = getattr(ctx, "home", None)
-    if not isinstance(home, Path):
+    # With an explicit path, `home` is only used for the config-drift comparison below
+    # (ctx.config / ctx.attestation), never to locate a trajectory file — so an absent
+    # or non-Path `home` does not block this branch the way it blocks the home-wide scan.
+    if not isinstance(home, Path) and not explicit_path:
         return _finding(
             "T3",
             UNKNOWN,
@@ -832,15 +843,22 @@ def check_capability_drift(ctx) -> object:
         )
     lim = limits_for(ctx)
     observed, meta = read_proven_tools(home, max_files=lim.traj_max_files,
-                                        max_bytes_per_file=lim.traj_max_bytes_per_file)
+                                        max_bytes_per_file=lim.traj_max_bytes_per_file,
+                                        explicit_path=explicit_path)
     if not meta.get("present"):
-        return _finding(
-            "T3",
-            UNKNOWN,
-            "No trajectory sidecars found (agents/*/sessions/*.trajectory.jsonl) — no proven "
-            "tool use to compare against the declared grant.",
-            "Run on a host where an OpenClaw agent has produced session trajectories.",
-        )
+        if explicit_path:
+            detail = (
+                f"{explicit_path}: no proven tool use (tool.call records) could be read "
+                "from this trajectory file — nothing to compare against the declared grant."
+            )
+            fix = "Check that the named file is a trajectory sidecar containing tool.call records."
+        else:
+            detail = (
+                "No trajectory sidecars found (agents/*/sessions/*.trajectory.jsonl) — no proven "
+                "tool use to compare against the declared grant."
+            )
+            fix = "Run on a host where an OpenClaw agent has produced session trajectories."
+        return _finding("T3", UNKNOWN, detail, fix)
     if meta.get("unknown_schema"):
         # B-716: mirrors the unknown_version branch just below -- a mixed-schema file
         # (the normal shape of an upgrade landing mid-session) silently dropped some
@@ -1106,7 +1124,9 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
     result["findings"] = [
         check_behavioral_trifecta(groups, untrusted_origin_channels, incomplete=incomplete),
         check_outcome_anomaly(groups, incomplete=incomplete),
-        check_capability_drift(ctx),
+        # B-770: confine T3 to the same target `read_events` above just used, so a
+        # `--behavioral PATH` run assesses drift against the named file, not home-wide.
+        check_capability_drift(ctx, explicit_path=explicit_path),
         b191,
     ]
     return result
@@ -1377,18 +1397,34 @@ def render_behavioral_analysis(ctx, *, explicit_path: str | None = None,
             lines.append(f"  {ok} Scanned all {r['files_total']} of {r['files_total']} "
                          "trajectory file(s).")
 
+    # B-770: `detail`/`fix` on T1/T2/T3/B191 findings are built (directly or via
+    # `analysis_incompleteness`'s unclassified-verb-name listing) from trajectory-
+    # sourced text -- tool-call verb names in particular, which are attacker-
+    # influenced (a compromised/malicious MCP server names its own tool). Rendered
+    # unescaped, an embedded newline/ANSI-escape/box-drawing character in one lets
+    # the trajectory author inject arbitrary lines into this report -- including
+    # something shaped like a section header or a verdict. `report._sanitize` is
+    # this project's one shared choke point for exactly that class of untrusted
+    # text (ANSI/OSC strip, bidi/zero-width strip, every str.splitlines() boundary
+    # folded to a space -- see its own docstring) and every other renderer already
+    # routes Finding text through it before display; this was the one that did not.
+    from .report import _sanitize  # noqa: PLC0415 -- avoids importing report.py's
+                                    # full renderer stack at module load; mirrors
+                                    # history.py's own lazy import of the same name.
+
     any_warn = False
     for f in r["findings"]:
+        detail = _sanitize(f.detail)
         if f.status == WARN:
             any_warn = True
-            lines.append(f"  {warn} {f.id} — {f.detail}")
-            lines.append(f"      fix: {f.fix}")
+            lines.append(f"  {warn} {f.id} — {detail}")
+            lines.append(f"      fix: {_sanitize(f.fix)}")
         elif f.status == UNKNOWN:
             # An advisory non-state (e.g. T3 with no explicit allow-list) — mark it as
             # UNKNOWN, never a ✓, so it doesn't read as a clean pass.
-            lines.append(f"  {q} {f.id} — {f.detail}")
+            lines.append(f"  {q} {f.id} — {detail}")
         else:
-            lines.append(f"  {ok} {f.id} — {f.detail}")
+            lines.append(f"  {ok} {f.id} — {detail}")
 
     if not any_warn:
         # B-462: the rule is already stated ten lines up for an individual finding —

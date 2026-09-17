@@ -65,7 +65,17 @@ def _sanitize(s: str) -> str:
     if not s:
         return s
     s = _BAD_CHARS_RE.sub("", _ANSI_OSC_RE.sub("", s))
-    for c in "\r\n\t":
+    # B-770 (C-135): the fold used to cover only \r/\n/\t. _BAD_CHARS_RE just above
+    # already removes \x0b/\x0c/\x1c-\x1e and \r (all inside its \x0b-\x1f range), but
+    # three more characters Python's OWN `str.splitlines()` treats as a line boundary
+    # were left unfolded: \x85 NEL, \u2028 LINE SEPARATOR, \u2029 PARAGRAPH SEPARATOR
+    # -- the same set `_breaks_the_line_it_is_printed_on` names for --vet-plan's
+    # command blocks (B-577). `pipeline.py::run_behavioral`'s own `rendered.
+    # splitlines()` re-split treats every one of them as a boundary too, so an
+    # unfolded one here forges an extra `PhaseResult.lines` entry out of a single
+    # string this function had already "sanitized" -- letting attacker-influenced
+    # trajectory text (e.g. a tool-call verb name) forge a fake report line/section.
+    for c in "\r\n\t\x85\u2028\u2029":
         s = s.replace(c, " ")
     # Lazy import avoids the report -> logsafe -> checks import cycle during package
     # initialisation. Every renderer shares this boundary, so secret redaction cannot be
