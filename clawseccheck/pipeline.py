@@ -853,9 +853,17 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
     # this contract's own "e.g. {}" equivalence still printed a loud stderr complaint
     # about nothing. A bare truthiness check treats {} exactly like the absent-key
     # case below it, which is what the comment above already claims happens.
+    # C-135 (independent, post-commit): a bare truthiness check on `bundle.get
+    # ("judged")` swallowed every OTHER JSON-falsy "judged" shape too -- `[]`, `""`,
+    # `0`, `False` -- not just the intended `{}`. Those are malformed inputs (the
+    # exact B-597 confusion of a caller misplacing "verdicts" at the wrong nesting
+    # level), and pre-fix they correctly reached `_parse_verdicts`, which prints its
+    # own "top-level value is not a JSON object" diagnostic -- silently dropping that
+    # feedback was never the intent, only the vacuous `{}` case was. `!= {}` narrows
+    # the exemption back to exactly that one shape.
     verdicts_map = (
         _parse_verdicts(json.dumps(bundle["judged"]))
-        if bundle and bundle.get("judged")
+        if bundle and bundle.get("judged") is not None and bundle.get("judged") != {}
         else {}
     )
     if verdicts_map:

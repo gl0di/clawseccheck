@@ -76,6 +76,25 @@ def test_empty_judged_bucket_never_reaches_the_parse_verdicts_diagnostic(capsys)
     assert capsys.readouterr().err.strip() == ""
 
 
+def test_non_dict_judged_shapes_still_reach_the_diagnostic(capsys):
+    """C-135 (independent, post-commit): the C-509 fix's own guard was a bare
+    truthiness check on bundle.get("judged"), which silently swallowed every OTHER
+    JSON-falsy "judged" shape too -- [], "", 0, False -- not just the intended {}.
+    These are malformed inputs (the B-597 confusion of a caller misplacing
+    "verdicts" at the wrong nesting level: {"judged": []} instead of
+    {"judged": {"verdicts": []}}), and must still reach _parse_verdicts' own
+    "top-level value is not a JSON object" diagnostic -- only the vacuous {} shape
+    is meant to be silent."""
+    ctx = collect(FIXTURES / "home_vuln")
+    from clawseccheck.checks import run_all
+    findings = run_all(ctx)
+    for judged_value in ([], "", 0, False):
+        p = pl.run_adjudication(ctx, findings, bundle={"judged": judged_value})
+        assert p.data["verdictsSubmitted"] is False
+        err = capsys.readouterr().err
+        assert "no usable entries" in err, (judged_value, err)
+
+
 def test_one_real_verdict_is_reported_as_submitted():
     """A genuinely non-empty, usable verdicts array must still take the old path:
     verdictsSubmitted True and the "1 of N ... judged" wording."""
