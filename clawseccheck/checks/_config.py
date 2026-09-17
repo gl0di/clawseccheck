@@ -3786,6 +3786,23 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
 # and it feeds only THIS new, unscored, WARN-only, never-FAIL check -- never B1.
 _REDACTOR_BLIND_KEY_RE = re.compile(r"^(authorization|bearer|key)$", re.I)
 
+# C-135 (independent, post-commit): a bare "key" segment is the broadest of the three
+# alternatives above -- unlike "authorization"/"bearer", which are credential-typed by
+# NAME alone, "key" is also the ordinary field name for a cloud resource identifier
+# (a KMS key ARN, a Vault key ID) that is >=16 chars, not a SecretRef, and genuinely
+# not a secret VALUE. Concrete false positive found and reproduced:
+# {"encryption": {"key": "arn:aws:kms:us-west-2:123456789012:key/1234abcd-..."}}. This
+# gate excludes values shaped like a structured resource identifier -- an ARN
+# (`arn:<partition>:...`), a URI with a scheme (`scheme://...`), or a bare UUID --
+# applied ONLY to the "key" alternative, never to "authorization"/"bearer": a Bearer
+# token or an Authorization header value is never legitimately ARN/URI/UUID-shaped, so
+# narrowing those two would only open a false negative for no matching benefit.
+_REDACTOR_BLIND_STRUCTURED_ID_RE = re.compile(
+    r"^arn:[a-z0-9-]+:|^[a-z][a-z0-9+.-]*://"
+    r"|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.I,
+)
+
 
 def _redactor_blind_secret_paths(obj, prefix: str = "", depth: int = 0) -> list:
     """Dotted paths of a secret-shaped value sitting at a key name neither OpenClaw's
@@ -3805,6 +3822,10 @@ def _redactor_blind_secret_paths(obj, prefix: str = "", depth: int = 0) -> list:
                 and len(v) >= 16
                 and not _is_secret_reference(v)
                 and _REDACTOR_BLIND_KEY_RE.match(k)
+                and not (
+                    k.strip().lower() == "key"
+                    and _REDACTOR_BLIND_STRUCTURED_ID_RE.match(v.strip())
+                )
             ):
                 found.append(path)
                 continue

@@ -146,6 +146,54 @@ def test_secret_reference_indirection_does_not_warn():
     assert r.status == PASS
 
 
+# ---------------------------------------------------------------------------
+# C-135 (independent, post-commit): a bare "key" field is the ordinary name for a
+# non-secret structured resource identifier too (a KMS/Vault key ARN, an S3 object
+# key, a UUID) -- these must not WARN. Applied only to the "key" alternative, never
+# to "authorization"/"bearer", which stay narrow: a Bearer token/Authorization header
+# holding an ARN/URI/UUID would itself be suspicious, not benign.
+# ---------------------------------------------------------------------------
+
+def test_kms_key_arn_under_bare_key_field_does_not_warn():
+    r = check_redactor_blind_secret_paths(_ctx({"encryption": {
+        "key": "arn:aws:kms:us-west-2:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+    }}))
+    assert r.status == PASS, r.detail
+
+
+def test_s3_uri_under_bare_key_field_does_not_warn():
+    r = check_redactor_blind_secret_paths(_ctx({"store": {
+        "key": "s3://my-bucket/objects/some-long-object-name.bin",
+    }}))
+    assert r.status == PASS, r.detail
+
+
+def test_uuid_under_bare_key_field_does_not_warn():
+    r = check_redactor_blind_secret_paths(_ctx({"cache": {
+        "key": "550e8400-e29b-41d4-a716-446655440000",
+    }}))
+    assert r.status == PASS, r.detail
+
+
+def test_an_opaque_value_under_bare_key_field_still_warns():
+    """The structured-identifier exclusion must not swallow a genuine secret that
+    happens to sit under a plain "key" field name."""
+    r = check_redactor_blind_secret_paths(_ctx({"encryption": {"key": TOKEN}}))
+    assert r.status == WARN
+    assert any("encryption.key" in e for e in r.evidence)
+
+
+def test_arn_shaped_value_under_bearer_still_warns():
+    """The structured-identifier gate is scoped to the "key" alternative only --
+    an ARN-shaped value under "bearer"/"authorization" is itself suspicious, not a
+    benign resource identifier, and must not be exempted."""
+    r = check_redactor_blind_secret_paths(_ctx({"auth": {
+        "bearer": "arn:aws:kms:us-west-2:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+    }}))
+    assert r.status == WARN
+    assert any("auth.bearer" in e for e in r.evidence)
+
+
 def test_short_value_does_not_warn():
     r = check_redactor_blind_secret_paths(_ctx({"headers": {"Authorization": "short"}}))
     assert r.status == PASS
