@@ -88,7 +88,7 @@ _EXEMPT = {
     # says it is not alone — `checks/_mcp.py` sits at 97% of its own tolerance, and five
     # more modules are past 70%. That whole table needs a restate-and-reconsider pass, not
     # one entry at a time as each next commit trips it.
-    "checks/_lifecycle.py": "~6,779 lines (restated 2026-09-12, C-413 — was ~6,172) — the "
+    "checks/_lifecycle.py": "~7,329 lines (restated 2026-09-17 — was ~6,779) — the "
                             "approval / update-pinning / self-modification / supply-chain "
                             "topic (17 checks + helpers); topic-faithful and over budget "
                             "by design. A finer split is a later cycle.",
@@ -276,7 +276,8 @@ _EXEMPT = {
                   "where the genuinely shared locals live and the one place a mistake "
                   "FABRICATES alerts rather than losing them. That is a data-flow question, not "
                   "a file move, and it is deliberately not bundled with this one.",
-    "risk.py": "~2,421 lines — the combinational attack-chain engine (one _rule_* per chain "
+    "risk.py": "~2,937 lines (restated 2026-09-17 — was ~2,421) — the combinational "
+               "attack-chain engine (one _rule_* per chain "
                "plus the shared leg predicates they compose). Crossed the 1,200-line ceiling "
                "with B-283 (c), which taught _channels_with_visibility_all the account -> "
                "channel -> default precedence the dist resolver uses; that helper MUST stay "
@@ -338,7 +339,8 @@ _EXEMPT = {
                   "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~6,951 lines — the read-only collection layer (config / bootstrap / skill "
+    "collector.py": "~7,542 lines (restated 2026-09-17 — was ~6,951) — the read-only "
+                    "collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
                     "+ .pyc/.wasm sniffing), grew again with B-610 (deriving the workspace "
