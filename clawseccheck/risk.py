@@ -684,8 +684,8 @@ def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
 
     "Set" means the literal boolean `True`, matching B38's own `is True` gate
     (checks/_egress.py) and the installed runtime's actual bypass predicate. Verified
-    2026-09-16 (CLAWSECCHECK-C-135-B722-followup, independently re-derived by a second
-    adversarial pass) against the installed 2026.9.4 dist: the zod schema types the
+    2026-09-16 (an independent C-135 adversarial pass, re-derived a second time)
+    against the installed 2026.9.4 dist: the zod schema types the
     field as a plain `boolean().optional()` (zod-schema.core, SsrFPolicyConfigSchema)
     with no coercion -- but the coercion-proof ground truth is the RUNTIME gate itself,
     not schema rejection: `resolveBrowserSsrFPolicy` (config-Dc3xLSSD.mjs:117-130)

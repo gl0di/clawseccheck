@@ -1585,7 +1585,8 @@ def check_cron_job_content(ctx: Context) -> Finding:
         # in an env var a spawned process trusts) is a real, distinct execution-time
         # risk from argv/script/input content, but widening this FAIL-capable check's
         # scan surface needs its own C-135 pass and fixtures, not a same-commit
-        # add-on — tracked as CLAWSECCHECK-B-824 rather than left silently unscanned.
+        # add-on — tracked separately (internal task tracker) rather than left
+        # silently unscanned.
 
         # C-476: `script`-kind is an execution surface exactly like `command`-kind (an
         # arbitrary script body vs. an argv vector) and was missing from this flag —
