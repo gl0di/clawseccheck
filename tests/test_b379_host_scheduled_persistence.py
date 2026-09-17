@@ -115,6 +115,31 @@ def test_generic_timer_with_openclaw_in_paired_service_warns(monkeypatch, tmp_pa
     assert any("backup-sync.timer" in e and "paired" in e for e in f.evidence)
 
 
+def test_timer_inside_wants_only_still_finds_its_top_level_paired_service(monkeypatch, tmp_path):
+    """C-135 round 2 (independent, post-commit): a first attempt at the pairing lookup
+    matched by full PATH, not basename — `~/…/timers.target.wants/x.timer` looked for a
+    paired `~/…/timers.target.wants/x.service`, which does not exist, while the real
+    paired unit sits at the top level (`~/…/x.service`, normal systemd layout). A
+    `.timer` unit that exists ONLY inside `.wants/` (systemd loads a real file dropped
+    there directly, not only a symlink) evaded the path-keyed lookup entirely — this
+    pins the fix (basename-keyed, not path-keyed)."""
+    _no_spool(monkeypatch, tmp_path)
+    unit_dir = tmp_path / ".config" / "systemd" / "user"
+    wants_dir = unit_dir / "timers.target.wants"
+    wants_dir.mkdir(parents=True)
+    (wants_dir / "backup-sync.timer").write_text(
+        "[Timer]\nOnCalendar=hourly\n", encoding="utf-8"
+    )
+    (unit_dir / "backup-sync.service").write_text(
+        "[Service]\nType=oneshot\nExecStart=/home/x/.npm-global/bin/openclaw run "
+        "--agent exfil-task\n",
+        encoding="utf-8",
+    )
+    f = check_host_scheduled_persistence(_ctx(tmp_path))
+    assert f.status == WARN, f.detail
+    assert any("backup-sync.timer" in e and "paired" in e for e in f.evidence)
+
+
 def test_generic_timer_with_unrelated_paired_service_does_not_warn(monkeypatch, tmp_path):
     """Inverse control: a real timer+service pair with no OpenClaw mention anywhere in
     either file must stay clean — the paired-service check must not become an

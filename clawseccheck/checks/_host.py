@@ -1127,15 +1127,26 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
     # returned 23 entries instead of 36, every home-rooted family missing, no error.
     scan = _hostpersist.scan(home=home)
 
-    # C-135: a lookup of every systemd-user entry BY PATH, built once, so a `.timer`
-    # entry can find its paired `.service` unit (same basename) without a second
-    # filesystem walk — `scan.entries` already has it, this check used to just throw
-    # it away below.
-    systemd_by_path = {
-        entry.path: entry
-        for entry in scan.entries
-        if entry.family == _hostpersist.FAMILY_SYSTEMD
-    }
+    # C-135 (independent, two rounds): a lookup of every systemd-user entry BY
+    # BASENAME, built once, so a `.timer` entry can find its paired `.service` unit
+    # without a second filesystem walk — `scan.entries` already has it, this check
+    # used to just throw it away below. Keyed by basename, not by full relative path:
+    # a first attempt keyed by path (`entry.path[:-len(".timer")] + ".service"`) missed
+    # a `.timer` unit that exists ONLY inside `timers.target.wants/` with no top-level
+    # counterpart — systemd loads a unit dropped there directly, not only a symlink to
+    # one, and `hostpersist.scan()` enumerates it under that subdirectory's own path
+    # (`~/.config/systemd/user/timers.target.wants/x.timer`), never suffix-matching a
+    # sibling `.service` that (normally) sits at the top level
+    # (`~/.config/systemd/user/x.service`) instead. A basename lookup finds it
+    # regardless of which of the two directories either file happens to live in.
+    # Grouped as a list (not overwritten) because BOTH a top-level unit file and its
+    # `.wants/` enable-symlink legitimately share one basename and both get their own
+    # entry — collapsing to one would silently drop a second same-named file whose
+    # content actually differs (a real if unusual host-tampering shape).
+    systemd_by_basename: dict[str, list] = {}
+    for entry in scan.entries:
+        if entry.family == _hostpersist.FAMILY_SYSTEMD:
+            systemd_by_basename.setdefault(Path(entry.path).name, []).append(entry)
 
     hits: list[str] = []
     for entry in scan.entries:
@@ -1148,13 +1159,13 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
         matched = _systemd_unit_is_openclaw_related(name, content)
         via_service = False
         if not matched and entry.family == _hostpersist.FAMILY_SYSTEMD:
-            paired_path = entry.path[: -len(".timer")] + ".service"
-            paired = systemd_by_path.get(paired_path)
-            if paired is not None:
+            paired_name = name[: -len(".timer")] + ".service"
+            for paired in systemd_by_basename.get(paired_name, ()):
                 paired_content = _bounded_read_text(_host_entry_abs_path(paired.path, home)) or ""
-                if _systemd_unit_is_openclaw_related(Path(paired.path).name, paired_content):
+                if _systemd_unit_is_openclaw_related(paired_name, paired_content):
                     matched = True
                     via_service = True
+                    break
         if matched:
             label = _hostpersist.FAMILY_LABELS.get(entry.family, entry.family)
             suffix = " (via its paired .service unit's ExecStart)" if via_service else ""
