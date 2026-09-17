@@ -257,6 +257,25 @@ def test_sanitize_folds_nel_and_unicode_line_separators():
     assert out.splitlines() == [out]
 
 
+def test_sanitize_folds_every_splitlines_boundary_character():
+    """C-135 (independent, post-commit): the test above pins the three characters
+    the B-770 finding was actually found through, but never enumerated the FULL
+    boundary set `str.splitlines()` recognizes: \\n \\r \\r\\n \\v \\f \\x1c \\x1d
+    \\x1e \\x85 \\u2028 \\u2029. `\\v`/`\\f`/`\\x1c`/`\\x1d`/`\\x1e` are structurally
+    covered by the same `_BAD_CHARS_RE`'s `\\x0b-\\x1f` range as every other control
+    character, but nothing pinned that explicitly — this closes the gap so a future
+    narrowing of that range can't silently reopen a forging vector `splitlines()`
+    still treats as a line boundary."""
+    from clawseccheck.report import _sanitize
+
+    boundary_chars = ("\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e",
+                       "\x85", " ", " ")
+    for ch in boundary_chars:
+        out = _sanitize(f"before{ch}after")
+        assert out.splitlines() == [out], (ch, out)
+        assert ch not in out, (ch, out)
+
+
 def test_dashboard_no_standalone_forged_line_from_unicode_line_separators():
     f = _line_forging_finding()
     out = render_dashboard([f], _score([f]))
