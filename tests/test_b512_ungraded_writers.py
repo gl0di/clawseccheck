@@ -120,7 +120,7 @@ def _forbidden(score) -> list[str]:
 
 
 def _searchable(artifact) -> str:
-    """The artifact as text, with any compressed stream inflated alongside it.
+    """The artifact as text, with any compressed stream inflated IN PLACE OF its raw bytes.
 
     B-531: `render_pdf` emits its text inside a FlateDecode content stream, so this
     module's whole premise — "treat the artifact as an opaque byte string and assert
@@ -128,19 +128,32 @@ def _searchable(artifact) -> str:
     byte search sailed past every string the PDF actually shows the reader, which is why
     the sweep did not catch the ungated cap line. Inflating first is what makes the PDF
     surface as searchable as the text ones already were.
+
+    The first version of this fix APPENDED the inflated text after the still-compressed
+    raw bytes rather than replacing them, so the raw FlateDecode payload — high-entropy
+    binary — stayed in the searched text too. A version bump that only changes the
+    `__version__` string baked into the content stream (clawseccheck/pdf.py) shifts that
+    compressed payload's bytes, and a 2-byte token like "9%" has real odds of turning up
+    by coincidence somewhere in ~9KB of compressed binary — which is exactly what made
+    this module fail on a release with no real leak (found the hard way: v4.2.0's compressed
+    bytes happened to contain the literal bytes for "9%", v4.1.1's didn't). Substituting
+    each stream's raw bytes with its decompressed text, instead of keeping both, removes
+    that binary from the search entirely rather than just adding real text alongside it.
     """
-    text = artifact.decode("latin-1") if isinstance(artifact, bytes) else artifact
-    if not isinstance(artifact, bytes) or b"FlateDecode" not in artifact:
-        return text
+    if not isinstance(artifact, bytes):
+        return artifact
+    if b"FlateDecode" not in artifact:
+        return artifact.decode("latin-1")
     import re
     import zlib
 
-    for match in re.finditer(rb"stream\r?\n(.*?)endstream", artifact, re.S):
+    def _inflate(match: re.Match) -> bytes:
         try:
-            text += zlib.decompress(match.group(1)).decode("latin-1")
+            return zlib.decompress(match.group(1))
         except Exception:  # not every stream is deflate, and a bad one proves nothing
-            continue
-    return text
+            return match.group(0)
+
+    return re.sub(rb"stream\r?\n(.*?)endstream", _inflate, artifact, flags=re.S).decode("latin-1")
 
 
 def _assert_clean(artifact, score, surface: str) -> None:
