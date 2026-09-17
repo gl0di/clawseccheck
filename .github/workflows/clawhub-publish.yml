@@ -425,7 +425,14 @@ jobs:
           VER: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+          # --retry matches the file's two other curl sites so a transient blip doesn't
+          # end a release. What this site deliberately does NOT copy from them is their
+          # `|| CODE="000"` fallback: they can treat an unreachable registry as "not
+          # confirmed" and carry on, because their own logic re-decides afterwards. Here
+          # an unknown answer must never read as "not published" — that is precisely the
+          # state this step exists to rule out — so an exhausted retry stays fatal under
+          # `set -e` and blocks the release instead of guessing.
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-delay 2 \
             "https://clawhub.ai/api/v1/skills/clawseccheck/versions/${VER}")"
           if [ "$CODE" = "200" ]; then
             echo "::error::Version ${VER} is already published on ClawHub — nothing to do."
