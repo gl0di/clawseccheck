@@ -845,9 +845,17 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
     # 'verdicts': [] IS 'no verdicts submitted'"). This call site used to set
     # verdictsSubmitted=True whenever the RAW "judged" key was merely present,
     # regardless of whether anything actually parsed out of it.
+    #
+    # C-509: an empty {} bucket must also never REACH _parse_verdicts in the first
+    # place. `is not None` let a vacuous {} through, and _parse_verdicts' own "no
+    # usable entries" diagnostic (B-330) has no way to tell that apart from a
+    # genuinely malformed bucket a caller meant to fill in — so a bundle following
+    # this contract's own "e.g. {}" equivalence still printed a loud stderr complaint
+    # about nothing. A bare truthiness check treats {} exactly like the absent-key
+    # case below it, which is what the comment above already claims happens.
     verdicts_map = (
         _parse_verdicts(json.dumps(bundle["judged"]))
-        if bundle and bundle.get("judged") is not None
+        if bundle and bundle.get("judged")
         else {}
     )
     if verdicts_map:
