@@ -45,11 +45,15 @@ def test_record_and_load_three_entries(tmp_path):
     # everything it does not name, so a key the writer records but this projection forgets
     # would be invisible to `render_trend`; only an exact assertion can see that.
     #
-    # All three read None here because this test records through a duck-typed score with
+    # All five read None here because this test records through a duck-typed score with
     # no `raw_score` and passes no `findings`/`version` — which is itself the pinned
     # behaviour: a caller that cannot supply them writes no figure at all rather than a
     # fabricated zero, and the 13 test modules that record this way keep working.
-    _blank_raw = {"raw_score": None, "raw_scope": None, "raw_ver": None}
+    # C-469 added `raw_earned`/`raw_total` to the same carried-through, never-defaulted
+    # projection — this `_score()` stand-in has no `.earned`/`.total` either, so both stay
+    # None for the identical reason the original three do.
+    _blank_raw = {"raw_score": None, "raw_scope": None, "raw_ver": None,
+                  "raw_earned": None, "raw_total": None}
     assert rows[0] == {"date": "2026-06-15", "score": 72, "grade": "C", "graded": True,
                         "ts": "2026-06-15T00:00:00", "home": None, "source": "audit",
                         **_blank_raw}
