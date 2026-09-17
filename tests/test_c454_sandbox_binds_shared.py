@@ -164,3 +164,26 @@ def test_malformed_docker_shape_fails_closed_for_risk12():
         "mode": "all", "workspaceAccess": "ro", "docker": "not-a-dict",
     }}}}
     assert _risk12_fires(cfg) is True
+
+
+# ---------------------------------------------------------------------------
+# 4. Independent C-135 regression (2026-09-17): B4's two call sites treated
+#    `_sandbox_docker_binds`'s `None` (malformed `binds`, e.g. a dict instead of a
+#    string/list) the same as `[]` (genuinely absent), silently. Reproduced directly
+#    against bf31513^ (this task's own parent commit): the pre-extraction code read
+#    the raw value and gated on bare truthiness, so a malformed-but-truthy shape
+#    fired the evidence exactly like a well-formed one — this extraction narrowed
+#    that to string/list only, turning a real FAIL into a silent UNKNOWN. The
+#    implementer's own self-review (no independent Agent-dispatch tool was available)
+#    asserted the opposite — that this branch "never fail-closed on that shape" even
+#    before the extraction — which a real before/after run disproved.
+# ---------------------------------------------------------------------------
+
+def test_malformed_binds_shape_at_defaults_still_fails_b4():
+    cfg = {"agents": {"defaults": {"sandbox": {"docker": {"binds": {"src": "/etc", "dst": "/etc"}}}}}}
+    assert _b4_status(cfg) == FAIL
+
+
+def test_malformed_binds_shape_at_per_agent_still_fails_b4():
+    cfg = {"agents": {"entries": {"worker": {"sandbox": {"docker": {"binds": 42}}}}}}
+    assert _b4_status(cfg) == FAIL

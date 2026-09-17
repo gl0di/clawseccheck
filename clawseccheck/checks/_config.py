@@ -946,12 +946,28 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
         # rather than this function's own dict-lookup-plus-isinstance chain -- same
         # divergence class B-673 already fixed for `_resolve_sandbox_scope` above, one
         # field over. `sb` (not `docker`, which was already coerced to `{}` above) is
-        # passed so a malformed `sandbox.docker` shape normalizes to `None` here exactly
-        # as it did before this extraction (falsy, so `if binds` still skips it silently
-        # -- this per-agent branch never fail-closed on that shape, unlike
-        # `_sandbox_has_writable_bind`, and this refactor does not change that).
+        # passed so a malformed `sandbox.docker` shape normalizes to `None`.
+        #
+        # C-135 (independent, post-commit): the comment that used to sit here claimed
+        # this branch "never fail-closed on that shape... before this extraction" --
+        # false, reproduced directly against bf31513^: the pre-extraction code read
+        # a direct dict lookup of the raw `binds` key, gated on bare Python truthiness, so ANY truthy value
+        # (a dict, a non-empty string, a nonzero int) fired the evidence, same as a
+        # well-formed list. `_sandbox_docker_binds` narrows that to string/list only and
+        # returns `None` for anything else -- silently treating "malformed" the same as
+        # "absent" here regressed a real FAIL to UNKNOWN (agents.defaults.sandbox.docker.
+        # binds={"src": "/etc", "dst": "/etc"} verified FAIL on bf31513^, UNKNOWN on
+        # bf31513). Fail closed on `None` instead, matching `_sandbox_has_writable_bind`'s
+        # own `None -> True` treatment and the pre-extraction behavior this was supposed
+        # to preserve.
         binds = _sandbox_docker_binds(sb)
-        if binds and _scope != "shared":
+        if binds is None and _scope != "shared":
+            out.append(
+                f"agent '{name}': sandbox.docker.binds is present but not a recognizable "
+                "shape (expected a bind-spec string or a list of them) — cannot rule out "
+                "a host-path bind"
+            )
+        elif binds and _scope != "shared":
             out.append(f"agent '{name}': sandbox.docker.binds exposes host paths")
             if _bind_mentions_docker_sock(binds):
                 out.append(
@@ -3352,12 +3368,26 @@ def check_sandbox(ctx: Context) -> Finding:
     # that is a bare NON-LEAF object read, which test_schema_grounding.py's manifest
     # guard cannot verify by construction (same reasoning `_peragent_sandbox_evidence`
     # already documents for the identical problem) — plain dict traversal instead.
+    #
+    # C-135 (independent, post-commit): reproduced a real regression here directly
+    # against bf31513^ -- the pre-extraction code was `dig(cfg, "...binds")` gated on
+    # bare truthiness, so a malformed-but-truthy shape (e.g. a dict instead of a
+    # string/list) still fired this evidence; `_sandbox_docker_binds` narrows that to
+    # string/list and returns `None` otherwise, and treating `None` the same as `[]`
+    # (ordinary absence) turned that case from FAIL into UNKNOWN. Fail closed on
+    # `None`, matching `_sandbox_has_writable_bind`'s own `None -> True` treatment.
     _agents_node = cfg.get("agents") if isinstance(cfg, dict) else None
     _defaults_node = _agents_node.get("defaults") if isinstance(_agents_node, dict) else None
     default_sandbox = _defaults_node.get("sandbox") if isinstance(_defaults_node, dict) else None
     default_sandbox = default_sandbox if isinstance(default_sandbox, dict) else {}
     binds = _sandbox_docker_binds(default_sandbox)
-    if binds:
+    if binds is None:
+        ev.append(
+            "agents.defaults.sandbox.docker.binds is present but not a recognizable "
+            "shape (expected a bind-spec string or a list of them) — cannot rule out "
+            "a host-path bind"
+        )
+    elif binds:
         ev.append("agents.defaults.sandbox.docker.binds exposes host paths")
         # docker.sock bind hands full host control to the sandbox (container escape vector)
         if _bind_mentions_docker_sock(binds):
