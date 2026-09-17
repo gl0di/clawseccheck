@@ -163,3 +163,48 @@ def test_custom_transforms_dir_resolved_as_subdirectory(tmp_path):
     r = check_hook_transform_modules(_ctx(cfg, home=tmp_path))
     assert r.status == WARN
     assert r.severity == "MEDIUM"
+
+
+def test_absolute_custom_transforms_dir_stays_confined_under_the_base(tmp_path):
+    """C-135 (independent, post-commit): `base / "/abs"` discards `base` entirely
+    (pathlib), while the vendor's real `path.join` this check claims to mirror always
+    APPENDS -- verified by executing the installed node. An absolute
+    hooks.transformsDir used to point this check's writability probe at an entirely
+    different, uncontained directory. Real, vendor-confined subdirectory
+    (<home>/hooks/transforms/priv) is world-writable; the NAIVE absolute path
+    (/priv) is a private directory that must never even be consulted."""
+    # An absolute transformsDir value ("/priv") whose segments, once appended under the
+    # base (Node's actual path.join semantics), land at <home>/hooks/transforms/priv.
+    real_confined = tmp_path / "hooks" / "transforms" / "priv"
+    real_confined.mkdir(parents=True)
+    real_confined.chmod(0o777)
+    naive_absolute = Path("/priv")  # what the pre-fix bug would have inspected instead
+    cfg = _cfg_with_module("a.mjs")
+    cfg["hooks"]["transformsDir"] = "/priv"
+    r = check_hook_transform_modules(_ctx(cfg, home=tmp_path))
+    assert r.status == WARN
+    assert r.severity == "MEDIUM", (
+        f"expected MEDIUM from the real confined (world-writable) directory, got "
+        f"{r.severity!r} -- {r.detail}"
+    )
+    # The resolved (correct) path legitimately ends in the same "/priv" suffix, so
+    # assert the DIRECTORY the check actually inspected is the confined one, not that
+    # the substring "/priv" is absent from the message entirely.
+    assert str(real_confined) in r.detail or str(real_confined) in " ".join(r.evidence)
+    assert f"({naive_absolute}) is" not in r.detail  # the bare, un-confined path itself
+
+
+def test_absolute_custom_transforms_dir_does_not_false_escalate(tmp_path):
+    """Inverse control: the real confined directory is private (0700); a coincidentally
+    writable directory sitting at the naive (bugged) absolute path must NOT cause a
+    MEDIUM escalation now that the naive path is never consulted."""
+    real_confined = tmp_path / "hooks" / "transforms" / "prod"
+    real_confined.mkdir(parents=True)
+    real_confined.chmod(0o700)
+    coincidental = Path("/prod")  # what the pre-fix bug would have inspected instead
+    cfg = _cfg_with_module("a.mjs")
+    cfg["hooks"]["transformsDir"] = "/prod"
+    r = check_hook_transform_modules(_ctx(cfg, home=tmp_path))
+    assert r.severity != "MEDIUM", (
+        f"escalated to MEDIUM off the un-consulted naive path {coincidental} -- {r.detail}"
+    )

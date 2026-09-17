@@ -2544,7 +2544,30 @@ def check_hook_transform_modules(ctx: Context) -> Finding:
     transforms_dir = ctx.home / "hooks" / "transforms"
     custom = dig(cfg, "hooks.transformsDir")
     if isinstance(custom, str) and custom.strip():
-        transforms_dir = transforms_dir / custom.strip()
+        custom_clean = custom.strip()
+        # C-135 (independent, post-commit): `Path.__truediv__` (`/`) discards the LEFT
+        # operand entirely when the right one is absolute -- `base / "/tmp"` is "/tmp",
+        # not "base/tmp". Node's `path.join`, which the comment above claims to mirror,
+        # does the opposite: it treats every segment as a component to APPEND, so
+        # `path.join(base, "/tmp")` is "base/tmp" (verified by executing the installed
+        # node). An absolute `hooks.transformsDir` therefore used to point this check's
+        # writability probe at an ENTIRELY DIFFERENT, uncontained directory than the one
+        # OpenClaw's own resolveContainedPath actually confines writes to -- reproduced
+        # both a false MEDIUM escalation (the naive absolute path happened to be
+        # writable while the real confined directory was private) and a false negative
+        # (the reverse: the real confined directory was world-writable, the naive path
+        # was not, and the exposure was never inspected). Stripping any leading
+        # separator/drive-letter component before the join mirrors Node's append-only
+        # behavior for exactly this case, matching the vendor semantics the comment
+        # already claims to follow.
+        if Path(custom_clean).is_absolute():
+            custom_clean = custom_clean.lstrip("/\\")
+            # A bare Windows drive letter ("C:\foo" -> stripped to "C:foo") would still
+            # be treated as a drive-relative root by pathlib on that platform; drop it
+            # too so the whole string is an ordinary path component to append.
+            if len(custom_clean) >= 2 and custom_clean[1] == ":":
+                custom_clean = custom_clean[2:].lstrip("/\\")
+        transforms_dir = transforms_dir / custom_clean if custom_clean else transforms_dir
     why = _dir_replaceable_by_others(transforms_dir)
 
     label = "; ".join(modules[:6])
