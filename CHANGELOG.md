@@ -10,9 +10,10 @@ the 4.1.0 corroborator didn't reach.** That release added a runtime corroborator
 the JSONL-to-SQLite trajectory migration in one path; this release finishes the job
 across every check and flag that reads trajectory evidence, so "no record" only ever
 means the agent genuinely never ran. It also ships four new checks, closes a real
-taint-tracking false positive in the exec/eval detector, continues hardening the
-publish pipeline from 4.1.1, and carries a large sweep of verdict-honesty, redaction,
-and detection-accuracy fixes gathered from ongoing adversarial review.
+taint-tracking false positive in the exec/eval detector, makes `--brief` stay silent
+on a healthy setup, hardens the publish pipeline, and carries a large sweep of
+verdict-honesty, redaction, and detection-accuracy fixes gathered from ongoing
+adversarial review.
 
 ### Added — four new checks (B378-B381)
 
@@ -57,11 +58,37 @@ laying groundwork for future self-modification checks (no check consumes it yet)
   path is now exempted; taint is also correctly propagated through `with`/`for`
   statement bindings, and TT5's call-site resolution for variadic subprocess wrappers
   was corrected.
-- **Publish-pipeline hardening continues from 4.1.1.** CI retry, timeout, and
-  shell-strictness follow-ups were added to `clawhub-publish.yml`; a false ClawHub
-  "already exists" exit no longer silently drops the GitHub Release step; and
-  `bump.py --suggest` now resolves its release base against `main` rather than
-  whatever `HEAD` happens to be.
+- **The publish pipeline stopped reporting outcomes it had not established.** Its
+  post-publish surfaced-check inherited the default `success()` condition, so it was
+  skipped exactly when the `Publish skill` step failed — the one scenario it exists to
+  detect, and a failure class that had already cost this project three releases their
+  cosign bundles. It now runs with `if: ${{ !cancelled() }}`. The `Create GitHub
+  Release` step's gate was too permissive in the other direction: a red smoke gate
+  skipped cosign signing entirely, yet the step still fired on a tag push and would
+  have published a public, assetless Release for a broken build — it now also requires
+  the signing step's own success. A false ClawHub "already exists" exit no longer
+  silently drops the Release step. The `workflow_dispatch` version input was
+  interpolated straight into a shell body twice inside the job that holds the release
+  token, and is now passed through `env:`; `$GITHUB_OUTPUT` was written before the
+  version was validated against `SKILL.md`, and validation now runs first. New
+  preflights confirm the version about to be published is not already live, and that
+  the previous release actually surfaced. Retry, job timeout and shell-strictness
+  follow-ups landed across the file, and `bump.py --suggest` now resolves its release
+  base against `main` rather than whatever `HEAD` happens to be.
+- **`--brief` stopped restating "Last drift check: Xh ago." on a healthy setup.** That
+  line carried zero signal — every session paid its cost even when nothing was wrong.
+  A healthy, recently-checked setup with nothing notable in the journal now prints
+  nothing at all; detection (the staleness ladder, journal-event carry-forward) is
+  unaffected. `--brief` also gained an opt-in `--exit-code` contract, the same
+  convention `--monitor` already uses: a bare invocation still always returns 0, but
+  `--brief --exit-code` returns non-zero exactly when there is something to relay — so
+  a host agent can check `rc` instead of parsing prose. `SKILL.md`'s session-start row
+  previously said "run this without asking" with nothing in the document connecting
+  that to the pre-scan menu's "Do NOT auto-run the scan" two sections above; both now
+  name the exception explicitly and tie it to `--brief`'s narrower read scope (its own
+  local store, never the OpenClaw config the consent gate is about).
+  `SECURITY_MODEL.md` gained a section describing this instructed, unprompted
+  host-agent behavior, which the document previously omitted entirely.
 - **A cluster of verdicts stopped reporting PASS on evidence the engine never actually
   read.** Roughly 25 checks were found reporting PASS on a config nobody had read;
   B6/B172 now gate their PASS on collector truncation and disclose the exec-approvals
@@ -86,7 +113,12 @@ laying groundwork for future self-modification checks (no check consumes it yet)
   asks/requests keyword trigger; B65 no longer lets a negated Red-Lines bullet
   corroborate an unrelated trigger; an agent-config-persistence hit now routes onto
   the Persistence risk axis; and a keyword-gated hidden-trigger shape now reaches the
-  judge packet instead of being dropped.
+  judge packet instead of being dropped. B321 reads `browser.profiles.*.mcpArgs`; B48
+  flags `gateway.controlUi.experimental.customPlugins` as a break-glass override; B168
+  captures and scans cron `command`/`script`/`agentTurn` payload fields, including
+  dormant and legacy `jobs.json` shapes; B172 distinguishes a binary-wide grant from an
+  argument-restricted one; and the outbound trifecta leg matches write tools by exact id
+  rather than by prefix.
 - **Reporting and CLI polish**, gathered from ongoing use: the scan receipt is now
   bound to check id/status/title/fix text and its status is canonicalized before
   hashing; HTML and PDF exports disclose what they omit relative to the text report;
@@ -94,73 +126,30 @@ laying groundwork for future self-modification checks (no check consumes it yet)
   a capped score on the shareable badge; export write-failures now print to stderr
   instead of stdout; `Ctrl+C` no longer prints a raw traceback; and the
   behavioural phase is no longer dropped from the dashboard's layer ledger.
+- **The coverage page is rendered, not just computed.** `--dashboard --full`, `--html`
+  and `--pdf` showed nothing for it; it now appears as its own section in all three.
 
 ### Changed
 
 - **Docs and test-count claims re-stamped for this cycle (§6.2/C-125).** Exact test
-  and fixture-file counts were restated (23,228 -> 24,372 tests, 801 -> 861 files); the
+  and fixture-file counts were restated (23,228 -> 24,370 tests, 801 -> 861 files); the
   dist citation baseline was re-recorded against installed OpenClaw 2026.9.4; the
   state-schema snapshot was re-baselined to register the new `update_runs` table
   (9 -> 10 tables); and several stale docstring/module size-exemption claims flagged
   by the doc-freshness guards were corrected.
-
-## [4.1.1] — 2026-09-15
-
-**The v4.1.0 release day surfaced a real defect in the publish pipeline itself: CI
-reported a red job for a publish that had actually succeeded, because the one step that
-exists to catch that outcome sat downstream of the very failure it was meant to detect.**
-This release closes that pipeline gap, makes `--brief` stay silent on a healthy setup
-instead of printing an unconditional line every session, and brings the shipped docs
-back up to date with what the tool actually does.
-
-### Fixed
-
-- **Publish-pipeline defects (A1-A5).** `.github/workflows/clawhub-publish.yml`'s
-  post-publish surfaced-check inherited the default `success()` condition, so it was
-  skipped exactly when the `Publish skill` step failed — the one scenario it exists to
-  detect (this project already lost cosign bundles to the same failure class once,
-  2026-08-06). It now runs with `if: ${{ !cancelled() }}`. The `Create GitHub Release`
-  step's `!cancelled()` gate was too permissive: a red smoke gate (tests/ruff) skipped
-  cosign signing entirely, yet the step still fired on a tag push and would have
-  published a public, assetless GitHub Release for a broken build — it now also
-  requires the signing step's own `outcome == 'success'`. The `workflow_dispatch`
-  version input was interpolated directly into a shell body twice, in a job holding the
-  release token — now passed through `env:` like the workflow's other input.
-  `$GITHUB_OUTPUT` was written before the version was validated against `SKILL.md`'s
-  frontmatter — validation now runs first. A new preflight guard confirms the version
-  about to be published isn't already live on ClawHub before spending the approval
-  click and running the dry-run, since `clawhub publish` only rejects a duplicate after
-  both have already happened.
-- **`--brief` stopped restating "Last drift check: Xh ago." on a healthy setup.** That
-  line carried zero signal — every session paid its cost even when nothing was wrong.
-  A healthy, recently-checked setup with nothing notable in the journal now prints
-  nothing at all; detection (the staleness ladder, journal-event carry-forward) is
-  unaffected. `--brief` also gained an opt-in `--exit-code` contract, the same
-  convention `--monitor` already uses: a bare invocation still always returns 0, but
-  `--brief --exit-code` returns non-zero exactly when there is something to relay — so
-  a host agent can check `rc` instead of parsing prose. `SKILL.md`'s session-start row
-  previously said "run this without asking" with nothing in the document connecting
-  that to the pre-scan menu's "Do NOT auto-run the scan" two sections above; both now
-  name the exception explicitly and tie it to `--brief`'s narrower read scope (its own
-  local store, never the OpenClaw config the consent gate is about).
-  `SECURITY_MODEL.md` gained a section describing this instructed, unprompted
-  host-agent behavior, which the document previously omitted entirely.
-
-### Changed
-
-- **Shipped docs brought up to v4.1.0 (§6.2/C-125).** `README.md`'s "B · Watch" section
-  documented only `--monitor` under the name the real, continuous `--watch` flag (C-517)
-  now owns; both are now named and distinguished. README's CLI/CI section was a release
-  behind the features its own CHANGELOG headline already advertised — `--explain`/
-  `--retest`, `--save-run`/`--diff`, the `--incident-*` lifecycle, `--judge-packet`,
-  `--save-sbom-run`/`--sbom-diff`, and `--exit-code-scheme` are now illustrated there.
-  `--sbom-diff` had no documentation anywhere outside `references/cli-flags.md` —
-  `docs/USAGE.md` explained how to write the SBOM-run store but never named the flag
-  that reads it back; it now has a section parallel to `--save-run`/`--diff`'s.
-  `docs/OUTPUT_SCHEMA.md` carried 9 stale illustrative version stamps across its JSON
-  skeletons — brought current with this release. `--no-dist` and `--recursive` (an
-  undocumented alias for `--vet-all`) existed in the CLI with no mention in any shipped
-  doc — added to `references/cli-flags.md` and `docs/USAGE.md`.
+- **Shipped docs brought up to date with what the tool actually does.** `README.md`'s
+  "B · Watch" section documented only `--monitor` under the name the real, continuous
+  `--watch` flag (C-517) now owns; both are named and distinguished. README's CLI/CI
+  section was a release behind the features its own changelog headline already
+  advertised — `--explain`/`--retest`, `--save-run`/`--diff`, the `--incident-*`
+  lifecycle, `--judge-packet`, `--save-sbom-run`/`--sbom-diff`, and
+  `--exit-code-scheme` are now illustrated there. `--sbom-diff` had no documentation
+  anywhere outside `references/cli-flags.md`: `docs/USAGE.md` explained how to write
+  the SBOM-run store but never named the flag that reads it back, and now has a
+  section parallel to `--save-run`/`--diff`'s. `docs/OUTPUT_SCHEMA.md`'s illustrative
+  version stamps were brought current. `--no-dist` and `--recursive` (an undocumented
+  alias for `--vet-all`) existed in the CLI with no mention in any shipped doc — added
+  to `references/cli-flags.md` and `docs/USAGE.md`.
 
 ## [4.1.0] — 2026-09-14
 

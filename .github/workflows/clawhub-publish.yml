@@ -95,6 +95,108 @@ jobs:
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
+      - name: Gate — the commit being published must be on main with green CI
+        # C-544. Branch protection defends `main` with six required contexts; the tag-push
+        # path that actually ships to users consulted none of them. This job's own smoke
+        # gate is strictly weaker than that protection — Python 3.12 only, no 3.9, no
+        # macOS, no gitleaks, no markdownlint, no commit-integrity — so a regression those
+        # catch could reach ClawHub while `main` would have rejected it. The 3.9 gap is not
+        # theoretical: on 3.9 `ipaddress` reports 0.0.0.0/0 as private, which once made
+        # B2/B70 accept a world-open trustedProxies and emit the exact lying PASS the check
+        # existed to prevent; it was caught on a tag only because a human was watching CI.
+        #
+        # Reading the SHA's own check-runs is far cheaper than duplicating the 3.9/macOS
+        # matrix into this job, and pulls gitleaks, markdownlint and commit-integrity onto
+        # the release path for free. The list below IS a second copy of branch protection's
+        # required contexts — there is no API-free way to avoid that — so it is kept honest
+        # from the other end: tests/test_ci_workflow.py asserts it equals the set of ci.yml
+        # jobs that run on a push to main, so both narrowing this list and adding a new
+        # protected job fail the build.
+        #
+        # Paired with ci.yml no longer running on tag pushes (C-543): these contexts come
+        # from the push to `main` that preceded the tag, so nothing is re-run to satisfy
+        # this. §6 already requires main's CI to be green BEFORE tagging, so the poll is a
+        # lag absorber, not a substitute for that — but it is sized to cover a full run
+        # (measured: 23m36s for c26a8ba, the 3.9 leg alone 23m32s) because a tag pushed a
+        # minute early would otherwise kill the job AND spend the release approval, which
+        # is granted before any step runs and would have to be granted again on the re-run.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # A literal block (|), not a folded one (>-): folding joins these with spaces,
+          # and a context name is matched against the check-run name exactly, so a stray
+          # space would make every lookup miss and the gate would report all six missing.
+          REQUIRED_CONTEXTS: |
+            test (ubuntu-latest, 3.9)
+            test (ubuntu-latest, 3.12)
+            test (macos-latest, 3.12)
+            markdownlint
+            secret-scan
+            commit-integrity
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${GITHUB_SHA} is not an ancestor of origin/main. Only code that" \
+                 "reached main through its required checks may be published; tag pushes are" \
+                 "not covered by branch protection, so this is the only thing standing" \
+                 "between an arbitrary commit and a release."
+            exit 1
+          fi
+          echo "OK: ${GITHUB_SHA} is on main."
+
+          # An empty list would make every loop below find nothing and the gate would
+          # announce success having checked nothing — the one way this step can fail OPEN,
+          # so the shell refuses it directly rather than relying on a test to notice.
+          # (Unset already dies under `set -u`; empty did not.)
+          if [ -z "${REQUIRED_CONTEXTS//[[:space:]]/}" ]; then
+            echo "::error::REQUIRED_CONTEXTS is empty — the gate would pass vacuously."
+            exit 1
+          fi
+
+          # A never-run context is indistinguishable from a deleted one here, so absence is
+          # a failure, not a skip: this gate exists precisely for the case where nothing ran.
+          for attempt in $(seq 1 30); do
+            # app.id 15368 is GitHub Actions, which is what branch protection pins each of
+            # these contexts to — without the filter any app could satisfy a required name.
+            RUNS="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+                      --paginate --jq '.check_runs[] | select(.app.id == 15368)
+                                       | [.name, .status, (.conclusion // "")] | @tsv')"
+            PENDING=""; FAILED=""; MISSING=""
+            while IFS= read -r ctx; do
+              [ -n "$ctx" ] || continue
+              # One name can appear more than once on a SHA — measured on c26a8ba, each of
+              # the six appears TWICE, from two check-suites (a PR suite and a push suite),
+              # because the endpoint's `latest` filter does not dedupe across suites. Taking
+              # the first row would make the verdict depend on the API's undocumented
+              # ordering, and a green copy listed before a failed one would pass the gate.
+              # So every matching row is folded and the WORST outcome wins.
+              ROWS="$(printf '%s\n' "$RUNS" | awk -F'\t' -v c="$ctx" '$1==c')"
+              if [ -z "$ROWS" ]; then MISSING="${MISSING}${ctx}; "; continue; fi
+              if printf '%s\n' "$ROWS" | awk -F'\t' '$2!="completed"' | grep -q .; then
+                PENDING="${PENDING}${ctx}; "
+              elif BAD="$(printf '%s\n' "$ROWS" | awk -F'\t' '$3!="success" {print $3; exit}')" \
+                   && [ -n "$BAD" ]; then
+                FAILED="${FAILED}${ctx}=${BAD}; "
+              fi
+            done <<< "$REQUIRED_CONTEXTS"
+
+            if [ -n "$FAILED" ]; then
+              echo "::error::Required checks did not pass on ${GITHUB_SHA}: ${FAILED}"
+              exit 1
+            fi
+            if [ -z "$PENDING" ] && [ -z "$MISSING" ]; then
+              echo "OK: all required checks are green on ${GITHUB_SHA}."
+              exit 0
+            fi
+            echo "waiting (${attempt}/30) — pending: ${PENDING:-none}; missing: ${MISSING:-none}"
+            if [ "$attempt" -lt 30 ]; then sleep 60; fi
+          done
+
+          echo "::error::Required checks never completed on ${GITHUB_SHA} — pending:" \
+               "${PENDING:-none}; missing: ${MISSING:-none}. A missing context means CI" \
+               "never ran for this commit, which is exactly what this gate exists to catch."
+          exit 1
+
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
@@ -214,8 +316,18 @@ jobs:
         # tags by default, and tests/test_version_coherence.py already pins the changelog's
         # top entry to __version__, so the second entry is the previous release by
         # construction.
+        #
+        # "By construction" holds only if every changelogged version was actually released,
+        # and on 2026-09-17 that broke: 4.1.1 was bumped and changelogged, never published
+        # (the work sat unpushed and grew into 4.2.0), and its entry stayed behind. This
+        # step then curled for a release that never existed, got 404, and blocked v4.2.0
+        # while reporting "published but never surfaced" — sending the operator to
+        # investigate a publishing incident that had not happened. A 404 alone cannot tell
+        # the two apart, so the tag is consulted before the verdict is written: no tag means
+        # we never attempted to publish it, which is a wrong CHANGELOG, not a lost release.
         env:
           SKIP_CHECK: ${{ inputs.skip_previous_release_check }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "${SKIP_CHECK:-false}" = "true" ]; then
@@ -242,10 +354,30 @@ jobs:
             exit 0
           fi
 
-          echo "::error::Previous release ${PREV} is NOT on ClawHub (HTTP ${CODE}). It was" \
-               "published but never surfaced — publishing another version on top of it will" \
-               "bury the problem. Investigate first, or re-run with" \
-               "skip_previous_release_check=true to proceed deliberately."
+          # Was PREV ever actually released? A tag is this repo's record of the attempt —
+          # §6 tags first, then the tag push triggers this workflow — so no tag means no
+          # publish was ever tried, and a 404 is then expected rather than alarming.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${PREV}" >/dev/null 2>&1; then
+            PREV_TAGGED=true
+          else
+            PREV_TAGGED=false
+          fi
+
+          if [ "$PREV_TAGGED" = "false" ]; then
+            echo "::error::CHANGELOG.md's previous entry is ${PREV}, but no tag v${PREV}" \
+                 "exists — that version was never released, so its 404 on ClawHub is" \
+                 "expected, not an incident. The CHANGELOG is what is wrong: fold the" \
+                 "${PREV} entry into the release that actually ships its content, or" \
+                 "release ${PREV} first. Do NOT reach for skip_previous_release_check" \
+                 "here — it would publish on top of a changelog that describes a release" \
+                 "that does not exist."
+            exit 1
+          fi
+
+          echo "::error::Previous release ${PREV} is NOT on ClawHub (HTTP ${CODE}), and" \
+               "v${PREV} IS tagged — so it was published and never surfaced. Publishing" \
+               "another version on top of it will bury the problem. Investigate first, or" \
+               "re-run with skip_previous_release_check=true to proceed deliberately."
 
           # Auto-diagnose so nobody has to repeat the manual investigation. A stalled scan
           # shows up as null scanner outputs (~5 bytes) next to a populated static-analysis
@@ -425,7 +557,14 @@ jobs:
           VER: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+          # --retry matches the file's two other curl sites so a transient blip doesn't
+          # end a release. What this site deliberately does NOT copy from them is their
+          # `|| CODE="000"` fallback: they can treat an unreachable registry as "not
+          # confirmed" and carry on, because their own logic re-decides afterwards. Here
+          # an unknown answer must never read as "not published" — that is precisely the
+          # state this step exists to rule out — so an exhausted retry stays fatal under
+          # `set -e` and blocks the release instead of guessing.
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-delay 2 \
             "https://clawhub.ai/api/v1/skills/clawseccheck/versions/${VER}")"
           if [ "$CODE" = "200" ]; then
             echo "::error::Version ${VER} is already published on ClawHub — nothing to do."

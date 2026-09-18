@@ -1,0 +1,58 @@
+{
+  "skill": {
+    "displayName": "ClawSecCheck \u2014 OpenClaw Security Self-Audit",
+    "slug": "clawseccheck"
+  },
+  "version": {
+    "changelog": "Release 4.1.0 (246974ec34b4fe04bde79ddc4878a587176c4e6b)",
+    "changelogSource": "user",
+    "createdAt": 1789421881372,
+    "files": [
+      {
+        "contentType": "text/markdown",
+        "path": "CHANGELOG.md",
+        "sha256": "93fd4a4f407619966a05ee5bfc102bdd2e7325ed3cfa1be0b5c32f4c5c0b97de",
+        "size": 79679
+      },
+      {
+        "contentType": "application/octet-stream",
+        "path": "LICENSE",
+        "sha256": "952f719c3ee70f7c8a6758594d79acd468f0ce1857b09f6ac7f4cd1b07988262",
+        "size": 1069
+      }
+    ],
+    "license": "MIT-0",
+    "security": {
+      "checkedAt": 1789552592705,
+      "hasScanResult": true,
+      "hasWarnings": true,
+      "model": null,
+      "scanners": {
+        "llm": {
+          "agenticRiskFindings": null,
+          "checkedAt": 1789552592705,
+          "confidence": "high",
+          "model": null,
+          "normalizedStatus": "clean",
+          "riskSummary": null,
+          "status": "clean",
+          "verdict": "benign"
+        },
+        "skillspector": {
+          "checkedAt": 1789552592705,
+          "issueCount": 696,
+          "normalizedStatus": "suspicious",
+          "recommendation": "DO_NOT_INSTALL",
+          "score": 100,
+          "severity": "CRITICAL",
+          "status": "suspicious"
+        },
+        "vt": null
+      },
+      "sha256hash": "d5eec6b89852b3491c671eb6517dc6fc38262ccde60d9453d34d2e5880e97e4f",
+      "status": "clean",
+      "virustotalUrl": "https://www.virustotal.com/gui/file/d5eec6b89852b3491c671eb6517dc6fc38262ccde60d9453d34d2e5880e97e4f"
+    },
+    "version": "4.1.0"
+  }
+}

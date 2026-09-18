@@ -135,8 +135,9 @@ def _searchable(artifact) -> str:
     `__version__` string baked into the content stream (clawseccheck/pdf.py) shifts that
     compressed payload's bytes, and a 2-byte token like "9%" has real odds of turning up
     by coincidence somewhere in ~9KB of compressed binary — which is exactly what made
-    this module fail on a release with no real leak (found the hard way: v4.2.0's compressed
-    bytes happened to contain the literal bytes for "9%", v4.1.1's didn't). Substituting
+    this module fail on a build with no real leak (found the hard way: the 4.1.1 -> 4.2.0
+    version bump shifted the compressed bytes into containing the literal bytes for "9%",
+    where the previous bump's had not; 4.1.1 itself was never released). Substituting
     each stream's raw bytes with its decompressed text, instead of keeping both, removes
     that binary from the search entirely rather than just adding real text alongside it.
     """

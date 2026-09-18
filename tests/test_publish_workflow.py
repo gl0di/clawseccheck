@@ -17,6 +17,28 @@ WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "clawhub-publish.yml"
 SKILL_PATH = REPO_ROOT / "SKILL.md"
 README_PATH = REPO_ROOT / "README.md"
 
+# A real, trimmed GET /api/v1/skills/clawseccheck/versions/4.1.0 response, captured
+# 2026-09-18. It exists because the stubbed bodies below were previously hand-written
+# in a FLAT shape the API never served, which made clawhub-version-live.sh's signal 1
+# unsatisfiable while every test around it stayed green (B-827) — both the script and
+# its fixtures shared one wrong model. Deriving the stub shape from a captured response
+# is the same discipline tests/dist_verified_paths.txt applies to the OpenClaw schema:
+# ground the shape in evidence, don't retype it from a description.
+CLAWHUB_VERSION_RESPONSE = REPO_ROOT / "tests" / "clawhub_version_response.json"
+
+
+def _versions_body(version: str, files: list) -> dict:
+    """Build a versions-endpoint body in the REAL nested shape.
+
+    Everything the discriminator reads lives under the top-level `version` object;
+    there is no top-level `files`. Starting from the captured response keeps the
+    surrounding structure honest even though only these two keys are asserted on.
+    """
+    captured = json.loads(CLAWHUB_VERSION_RESPONSE.read_text(encoding="utf-8"))
+    captured["version"]["version"] = version
+    captured["version"]["files"] = files
+    return captured
+
 # Every shipped markdown file that links out to other repo paths. All of them are read by
 # users of an installed skill, so a relative link the bundle does not carry is a 404 on
 # every ClawHub install.
@@ -916,6 +938,73 @@ def test_publish_workflow_verifies_previous_release_surfaced() -> None:
     )
 
 
+def test_helper_heredoc_bodies_carry_no_apostrophe() -> None:
+    """A lone `'` inside a heredoc nested in `$( )` breaks the script on macOS only.
+
+    bash 3.2 — still `/bin/bash` on GitHub's macOS runners — does not treat a heredoc
+    body as literal while scanning a command substitution for its closing paren, so an
+    apostrophe opens a quote it never closes and the script dies with "unexpected EOF
+    while looking for matching `'`", exit 2. Linux bash 5.x parses the same file
+    correctly, which is why `bash -n` here cannot catch it and why this is a text rule
+    rather than a syntax check: a single possessive added to an explanatory comment
+    (`C-368's`) reddened the macOS leg while both Ubuntu legs stayed green.
+    """
+    text = HELPER_SCRIPT.read_text(encoding="utf-8")
+    bodies = re.findall(r"<<'(\w+)'\n(.*?)\n\1\n", text, re.S)
+    assert bodies, "No quoted heredoc found in the helper — has its shape changed?"
+
+    offenders = []
+    for delim, body in bodies:
+        for i, line in enumerate(body.splitlines(), 1):
+            if "'" in line:
+                offenders.append(f"<<{delim} line {i}: {line.strip()}")
+    assert not offenders, (
+        "Apostrophes inside a heredoc body nested in $( ) break bash 3.2 on macOS:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_previous_release_gate_separates_never_released_from_never_surfaced() -> None:
+    """A 404 on the previous version has two causes, and they need different answers.
+
+    On 2026-09-17 this gate blocked v4.2.0 and reported that 4.1.1 "was published but
+    never surfaced". 4.1.1 had never been published at all: it was bumped and
+    changelogged, the work sat unpushed and grew into 4.2.0, and only its CHANGELOG
+    entry stayed behind. The gate derives the previous version from that entry, so it
+    curled for a release that never existed — and its verdict sent the operator to
+    investigate a publishing incident that had not happened.
+
+    A 404 cannot separate the two on its own. The tag can: §6 tags before publishing, so
+    no tag means no attempt was ever made, and the fault is a wrong CHANGELOG rather
+    than a lost release. The gate must therefore consult the tag BEFORE writing the
+    "never surfaced" verdict, and must not send a never-released version down the
+    skip-the-check path — that would publish on top of a changelog describing a release
+    that does not exist.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "git/ref/tags/v${PREV}" in text, (
+        "The previous-release gate must check whether v<PREV> was ever tagged before "
+        "concluding a 404 means the release was published and then lost."
+    )
+
+    tag_check = text.index("git/ref/tags/v${PREV}")
+    surfaced_verdict = text.index("was published and never surfaced")
+    assert tag_check < surfaced_verdict, (
+        "The tag must be consulted before the 'published and never surfaced' verdict is "
+        "written, or the gate misdiagnoses a version that was never released at all."
+    )
+
+    # The never-released branch must refuse the override rather than recommend it: the
+    # fix there is to correct the CHANGELOG, not to publish past it.
+    never_released = text.index("was never released")
+    between = text[never_released:surfaced_verdict]
+    assert "Do NOT reach for skip_previous_release_check" in between, (
+        "The never-released branch must tell the operator not to skip the check — "
+        "skipping publishes on top of a CHANGELOG that describes a phantom release."
+    )
+
+
 def test_publish_workflow_post_publish_check_is_warn_only() -> None:
     """The post-publish visibility poll must warn, never fail the build.
 
@@ -1346,7 +1435,7 @@ def test_helper_script_requires_both_signals() -> None:
         (
             "live",
             "200",
-            {"version": "9.9.9", "files": ["a.py"]},
+            _versions_body("9.9.9", files=[{"path": "a.py", "size": 1}]),
             {"latestVersion": {"version": "9.9.9"}},
             True,
         ),
@@ -1360,22 +1449,33 @@ def test_helper_script_requires_both_signals() -> None:
         (
             "hollow-200-no-files",
             "200",
-            {"version": "9.9.9", "files": []},
+            _versions_body("9.9.9", files=[]),
             {"latestVersion": {"version": "9.9.9"}},
             False,
         ),
         (
             "stale-latest-version",
             "200",
-            {"version": "9.9.9", "files": ["a.py"]},
+            _versions_body("9.9.9", files=[{"path": "a.py", "size": 1}]),
             {"latestVersion": {"version": "9.9.8"}},
             False,
         ),
         (
             "null-latest-version-mid-reindex",
             "200",
-            {"version": "9.9.9", "files": ["a.py"]},
+            _versions_body("9.9.9", files=[{"path": "a.py", "size": 1}]),
             {"latestVersion": None},
+            False,
+        ),
+        (
+            # B-827 positive control: the FLAT shape these fixtures used to assert
+            # (version and files at the top level) is not what the API serves. If a
+            # future edit goes back to reading it, this case starts passing and the
+            # suite says so.
+            "flat-legacy-shape-is-not-live",
+            "200",
+            {"version": "9.9.9", "files": [{"path": "a.py", "size": 1}]},
+            {"latestVersion": {"version": "9.9.9"}},
             False,
         ),
     ],
@@ -1385,12 +1485,17 @@ def test_clawhub_version_live_two_signal_discriminator(
 ) -> None:
     """The helper script executed for real, offline, against a stubbed `curl`.
 
-    A successful publish answers 200 with a matching `version` + non-empty `files`
-    on the versions endpoint, AND `latestVersion.version` equal to it on the skill
-    endpoint (task description ground truth). The #3349 ghost-orphan fails signal 1
-    (404). A hollow 200 with no files (the v3.54.0 accepted-but-invisible shape) and
-    a stale or null latestVersion must each independently fail the discriminator —
-    this is what stops either signal alone from being trusted.
+    A successful publish answers 200 whose nested `version` object carries a matching
+    `version` + non-empty `files`, AND `latestVersion.version` equal to it on the
+    skill endpoint. Both shapes are taken from a captured live response
+    (tests/clawhub_version_response.json), not from a description — the earlier
+    fixtures were hand-written flat and agreed with a script that read the same wrong
+    keys, so the pair was self-consistently wrong and green (B-827).
+
+    The #3349 ghost-orphan fails signal 1 (404). A hollow 200 with no files (the
+    v3.54.0 accepted-but-invisible shape), a stale or null latestVersion, and the
+    flat legacy shape must each independently fail the discriminator — this is what
+    stops either signal alone, or a regression to the old parse, from being trusted.
     """
     assert HELPER_SCRIPT.exists(), "clawhub-version-live.sh is missing."
 
