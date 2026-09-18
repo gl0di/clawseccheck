@@ -4634,7 +4634,7 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     # longer than that, and `:<39` pads but never truncates — so the box art broke open
     # on exactly the runs the ungraded work introduced. Grow to fit; never shrink below
     # the established 39 so a graded, uncapped card renders byte-identically to before.
-    width = max([39] + [len(ln) for ln in lines]) + 1  # one column of right margin
+    width = max([39] + [len(ln) + 1 for ln in lines])  # widest line keeps one column of margin
     # Mascot header line, once (design-system Foundations); --ascii drops it to
     # stay pure-ASCII, matching render_dashboard's convention.
     header = "" if ascii_only else f"{brand.header()}\n"

@@ -1,6 +1,5 @@
 """Plain-output polish: no literal markdown, card margin, lone-file vet name, did-you-mean."""
 import subprocess
-import sys
 from pathlib import Path
 
 from clawseccheck import report
