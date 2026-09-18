@@ -88,6 +88,7 @@ from ._shared import (
     _profile_is_powerful,
     _real_exec_enabled,
     _resolve_sandbox_scope,
+    _retired_keys_present,
     _resolved_channel_nodes,
     _resolved_default_input_channels,
     _sandbox_docker_binds,
@@ -1614,6 +1615,69 @@ def check_config_externally_managed(ctx: Context) -> Finding:
         "No action needed unless you intend to run OpenClaw under an externally-managed "
         "read-only config (Nix, a container-managed deployment).",
         confidence="HIGH",
+    )
+
+
+def check_retired_config_keys_invalid(ctx: Context) -> Finding:
+    """B382 — openclaw.json still holds a key the installed OpenClaw build removed.
+
+    The claim is deliberately narrow: the build's strict config schema rejects the file, so
+    `openclaw config validate` and CLI commands that load it report it invalid until
+    `openclaw doctor --fix` runs. It asserts nothing about the gateway, about the setting
+    being in force, or about other findings being unreliable. Names are reported, never
+    values. Gated on the INSTALLED build only (see ``_retired_keys_present``).
+
+    WARN    — one or more retired keys are present and the installed build rejects them.
+    UNKNOWN — no config was read (or it was unreadable).
+    PASS    — none present; ``no_signal`` when the installed build could not be determined,
+              because then "not present" was never actually assessable.
+
+    Never FAIL: advisory, unscored (B-315).
+    """
+    unreadable = _config_unreadable("B382", ctx)
+    if unreadable is not None:
+        return unreadable
+    if (not isinstance(ctx.config, dict) or not ctx.config) and not ctx.config_found:
+        return _finding(
+            "B382",
+            UNKNOWN,
+            "No config was read, so whether openclaw.json holds a key the installed "
+            "OpenClaw build removed could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    installed = getattr(ctx, "installed_dist_version", None)
+    if _numeric_version(installed) is None:
+        return _finding(
+            "B382",
+            PASS,
+            "Installed OpenClaw version not determined; retired-key validity not assessed.",
+            "No action needed. Run the audit where OpenClaw is installed (without "
+            "--no-dist) to check the file against that build.",
+            pass_confidence="no_signal",
+        )
+    found = _retired_keys_present(ctx)
+    if not found:
+        return _finding(
+            "B382",
+            PASS,
+            f"The file audited holds no key that OpenClaw {installed} removed.",
+            "No action needed.",
+        )
+    notes = [f"{key} ({'replaced by ' + repl if repl else 'removed'})" for key, repl in found]
+    shown = "; ".join(notes[:6])
+    extra = f" (+{len(notes) - 6} more)" if len(notes) > 6 else ""
+    return _finding(
+        "B382",
+        WARN,
+        f"The file audited still contains {len(found)} key(s) that OpenClaw {installed} "
+        "removed, so its strict config schema rejects the file: `openclaw config validate` "
+        "and CLI commands that load it report it invalid until the keys are migrated. "
+        f"{shown}{extra}",
+        "Run `openclaw doctor --fix` (it migrates or removes them), or delete the keys by "
+        "hand. A config that uses $include may be refused automatic repair, so run the "
+        "command explicitly.",
+        evidence=[key for key, _repl in found],
     )
 
 

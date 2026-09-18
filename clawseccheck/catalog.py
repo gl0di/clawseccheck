@@ -3302,6 +3302,23 @@ CATALOG: list[CheckMeta] = [
         scored=False,
         surface="monitoring",
     ),
+    # B382 (F-184): openclaw.json still holds a key the INSTALLED OpenClaw build removed
+    # from its strict root schema (measured by executing safeParse per key; see the
+    # table in checks/_shared.py). The claim is only that the file fails schema
+    # validation -- `openclaw config validate` and CLI commands that load it report it
+    # invalid until `openclaw doctor --fix` runs -- and makes no gateway claim. Reads the
+    # installed build only, never the last-saved stamp. WARN-only, unscored, never FAIL
+    # (B-315).
+    CheckMeta(
+        "B382",
+        "openclaw.json holds a key the installed OpenClaw build removed",
+        LOW,
+        "advisory",
+        "Config Validity / Update Hygiene",
+        scored=False,
+        confidence="HIGH",
+        surface="update",
+    ),
     # B374 (C-526): cloudWorkers prepared-pool — new in OpenClaw 2026.9.4, grounded
     # against the live installed 9.4 dist. See the module comment above
     # check_cloudworkers_prepared_pool (checks/_config.py) for the full
