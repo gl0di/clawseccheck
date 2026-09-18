@@ -86,7 +86,7 @@ resolver, not an approximation choice.
 
 NOT MODELLED, deliberately, because each is a SEPARATE axis from "is TOOL granted" and
 narrowing this module's own consumer question would need a vetted model of its own (the
-same "don't invent a positive" discipline ``toolpolicy.py``'s ``_tools_may_remove_write``
+same "don't invent a positive" discipline ``toolpolicy.py``'s ``unconfined_write_scopes``
 docstring explains):
 
 * ``sandboxMode`` / ``resolveSandboxToolPolicyForAgent`` — the sandbox-containment layer the

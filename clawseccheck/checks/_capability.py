@@ -984,8 +984,8 @@ def _b55_write_tools_granted(
     substring-matched, plus `_FS_WRITE_TOOL_EXACT` ("fs_delete", "fs_move"),
     exact-canonical-match (C-135: as substrings they collide with plausible real tool
     names like "refs_delete"/"prefs_move" -- see `_FS_WRITE_TOOL_HINTS`'s own B-735
-    comment). These ARE real OpenClaw tool ids (B-735 correction: this docstring used
-    to claim otherwise, which is exactly why fs_delete/fs_move went unmodelled for as
+    comment). These are treated as real tool ids (B-735 correction: this docstring used
+    to claim otherwise; they are named in vendor deny lists, dispatchability is unproven, which is exactly why fs_delete/fs_move went unmodelled for as
     long as they did) -- the union exists because `_b68_fs_tools_granted` only
     enumerates the canonical `_B68_FS_TOOLS` names via profile/group:fs/widening
     resolution, and fs_write/fs_delete/fs_move are not in that tuple, so an EXPLICIT
@@ -1225,7 +1225,7 @@ def check_exec_strict_inline_eval(ctx: Context) -> Finding:
 
 
 def _escaping_scope_label(cfg: dict, name: str) -> str:
-    """B-670: a POSITIONAL label for one name `unconfined_scopes_inheriting_global_tools`
+    """B-670: a POSITIONAL label for one name `unconfined_write_scopes`
     returned — the roster entry's own config path (``agents.list[1]`` /
     ``agents.entries.web``), or ``"global scope"`` for the synthesised default-agent scope
     that has no roster row at all.
@@ -1517,25 +1517,25 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     #    cannot write at all: one whose own `tools.deny` removes the write family, or which
     #    runs `tools.profile: "messaging"` -- an ordinary notifier-bot layout beside a
     #    sandboxed coding agent. No path from untrusted input to an arbitrary write existed.
-    # 2. Answering "can this scope write" inside `toolpolicy` was UNSOUND, and the full suite
-    #    proved it while a scoped run stayed green: that module's profile table and alias
-    #    table are both read-specific, so `fixtures/bad_b55_fs_write_broad` -- whose
-    #    `tools.allow: ["fs_write"]` uses a legacy alias -- resolved to "cannot write" and a
-    #    designed-bad config was DOWNGRADED to WARN. Trading a constructed false FAIL for a
-    #    real suppression is the worse deal, and `confined_scopes` had already documented the
-    #    same trap one tool over (`fs_read`).
+    # 2. Answering "can this scope write" by parametrising the READ stack in `toolpolicy` was
+    #    UNSOUND: its profile and alias tables are read-specific, so
+    #    `fixtures/bad_b55_fs_write_broad` -- `tools.allow: ["fs_write"]`, a legacy alias --
+    #    resolved to "cannot write" and a designed-bad config was DOWNGRADED to WARN.
+    # 3. A token heuristic over each scope's own `tools` block ("could this have removed the
+    #    write family?") was wrong both ways -- it convicted allow:[write] + deny:[write,...]
+    #    and acquitted profile:messaging + alsoAllow:[write] -- because it never resolved the
+    #    grant.
     #
-    # What survives asks only what can be answered soundly here: this check's own vetted
-    # resolver already established that a write tool is granted GLOBALLY, so the open question
-    # is which scopes inherit that grant unchanged AND are unconfined. A scope with no `tools`
-    # key of its own inherits it by the runtime's nullish-coalesce; a scope that sets `tools`
-    # may narrow the write family, and we decline to guess. Conservative in the quiet
-    # direction, but strictly narrower than the global read it replaces -- which missed every
-    # per-agent escape -- and it adds no false positive. The residual gap is F-186's.
+    # F-186: what survives COMPOSES two vendor-validated models instead of guessing.
+    # `toolgrant.granted` resolves the per-scope grant (profile / allow / alsoAllow / deny,
+    # agent replaces global) and `confined_scopes` the per-scope confinement;
+    # `unconfined_write_scopes` is their conjunction, asked with THIS check's own write-tool
+    # list so no third list of names exists. What it still cannot read -- byProvider,
+    # toolsBySender, per-channel tools -- is treated as possible narrowing (quiet direction).
     fs_confined = _fs_reads_are_confined(cfg)
-    # Which unconfined scopes demonstrably inherit this global grant. Consumed at the FAIL
+    # Which unconfined scopes are demonstrably granted a write tool. Consumed at the FAIL
     # escalation below, NOT here: an empty list must never be read as confinement (see there).
-    inheriting = _toolpolicy.unconfined_scopes_inheriting_global_tools(cfg)
+    write_scopes = _toolpolicy.unconfined_write_scopes(cfg, write_tools)
     # DELIBERATE: _open_channels (open-only), NOT _external_input_channels. This feeds the
     # FAIL gate below; a hard FAIL ("arbitrary writes reachable by untrusted senders")
     # requires proven-broad reach — a wildcard sender or a truly-open/public channel. An
@@ -1693,38 +1693,31 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 "is unambiguous, and lock the open channel(s) to 'allowlist'.",
                 evidence=ev,
             )
-        # The unconfined scopes all narrow their OWN tools, so nothing here demonstrably
-        # carries the global write grant out of the workspace. Deliberately NOT expressed by
-        # making `fs_confined` true: a scope that sets `tools` is not a confined scope, and
-        # saying so would fabricate the confinement B-670 exists to stop fabricating -- an
-        # earlier attempt did exactly that, and claimed full confinement for a config where
-        # NOTHING was confined, because its only agent happened to set `tools`.
-        #
-        # This is the same argument the widening branch above already makes and this check
-        # already accepts: the per-agent allow/deny, channel/group, toolsBySender and
-        # byProvider layers can remove a granted tool for one agent, and none of them is
-        # readable here. Resolving it properly needs a vetted write-grant model (F-186);
-        # until then the honest answer is WARN with the reason on screen, not a FAIL whose
-        # premise this check cannot establish.
+        # No unconfined scope is granted a write tool by its resolved policy, so nothing here
+        # demonstrably carries a write out of the workspace. Deliberately NOT expressed by
+        # making `fs_confined` true: a scope that cannot write is still not a confined scope,
+        # and saying so would fabricate the confinement B-670 exists to stop fabricating.
+        # It stays WARN rather than PASS because the layers `toolgrant` does not resolve
+        # (byProvider, toolsBySender, per-channel tools) could only ever REMOVE a grant, and
+        # this branch is reached on a grant the global resolver already established.
         # The sentence below describes the NARROWING TEST, not `widenings`. An earlier version
         # claimed "none of them widens toward the write family" while asserting it from
         # `_agent_profile_widenings`, which is profile-only and cannot see an allow/alsoAllow
         # widening -- so for `tools: {"allow": ["write"]}` the finding printed a claim the code
         # had never checked, about an override that names the write tool outright.
         #
-        # `not widenings` is load-bearing, and the over-correction it repairs was caught by
-        # test_b409_widening_still_applies_when_global_allow_is_a_wildcard: a scope whose own
-        # `tools` is `{"profile": "coding"}` has not NARROWED anything -- that profile is what
-        # GRANTS the write family. "Sets its own tools" is too coarse a proxy for "might have
-        # taken the grant away"; a detected widening is direct evidence of the opposite.
-        # B-712: when a scope is in `inheriting` ONLY because its confinement could not be
+        # `not widenings` used to gate this branch, because "sets its own tools" was too coarse
+        # a proxy for "might have taken the grant away" and a per-agent `profile: coding`
+        # GRANTS the family. The grant is resolved now, so a widened scope simply appears in
+        # `write_scopes` when it can write and is absent when it cannot -- the proxy is gone.
+        # B-712: when a scope is in `write_scopes` ONLY because its confinement could not be
         # resolved -- `sandbox.mode: "non-main"`, whose answer depends on which session runs
         # -- the FAIL below asserts "no write-specific scoping" and "arbitrary file writes"
         # about ground this check did not read. Keeping the scope is right (declining to
         # prove confinement is not proving it), but the evidence has to say which it is, or
         # the verdict fabricates certainty in the direction opposite to the confident `True`
         # the sandbox predicate used to return. Evidence-only: the verdict is unchanged.
-        _undecided = _toolpolicy.undecided_inheriting_scopes(cfg) or []
+        _undecided = _toolpolicy.undecided_write_scopes(cfg, write_tools) or []
         if _undecided:
             ev.append(
                 f"{len(_undecided)} of the unconfined scope(s) are UNDECIDED rather than "
@@ -1733,13 +1726,12 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 "others are not), so the config does not settle whether the write reach is "
                 "real -- it only fails to rule it out"
             )
-        if inheriting is not None and not inheriting and not widenings:
+        if write_scopes is not None and not write_scopes:
             ev.append(
-                "every unconfined scope narrows its own tool policy in a way that could "
-                "remove write/edit/apply_patch (a tools.profile, a tools.allow naming no "
-                "write tool, a tools.deny naming one, or a byProvider/toolsBySender layer "
-                "this static check cannot resolve), so none is shown to inherit this global "
-                "grant"
+                "no unconfined scope is granted a write tool by its resolved tool policy "
+                "(profile, allow, alsoAllow and deny resolved the way OpenClaw resolves "
+                "them, an agent's own policy narrowing the global one), so none is shown "
+                "to carry a write out of the workspace"
             )
             return _finding(
                 "B55",
@@ -1747,19 +1739,20 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 f"Filesystem-write capability ({label}) is reachable by untrusted senders "
                 f"and not confined to the workspace, but every unconfined scope narrows its "
                 f"own tool policy, so broad write reach is not established.",
-                "Confirm the per-agent tools.* narrowing really removes write/edit/"
-                "apply_patch for those agents, and lock the open channel(s) to 'allowlist'.",
+                "Confirm the per-agent tools.* policy really removes write/edit/"
+                "apply_patch for those agents, and lock the open channel(s) to "
+                "'allowlist'.",
                 evidence=ev,
             )
-        if inheriting:
+        if write_scopes:
             # B-670: name WHICH scopes escaped, positionally (never the raw agent id —
             # see _escaping_scope_label). Evidence-only; the FAIL verdict above is
             # unchanged whether or not this appends.
             total_scopes = len(_toolpolicy.confined_scopes(cfg) or [])
-            labels = [_escaping_scope_label(cfg, name) for name in inheriting]
+            labels = [_escaping_scope_label(cfg, name) for name in write_scopes]
             ev.append(
-                f"{len(inheriting)} of {total_scopes} declared scope(s) are unconfined "
-                f"and inherit the global write grant unchanged: {', '.join(labels)}"
+                f"{len(write_scopes)} of {total_scopes} declared scope(s) are unconfined "
+                f"and granted a write tool: {', '.join(labels)}"
             )
         return _finding(
             "B55",

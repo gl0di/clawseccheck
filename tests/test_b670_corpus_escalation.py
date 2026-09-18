@@ -15,8 +15,8 @@ This pair supplies exactly the missing combination: global filesystem confinemen
 a per-agent `tools.fs.workspaceOnly: false` escape, an open-ingress channel, and an
 explicit filesystem-write grant — the four ingredients `check_fs_write_exposure` (B55)
 needs to escalate WARN -> FAIL once a scope is shown to be BOTH unconfined AND
-inheriting the global write grant unchanged (`toolpolicy.
-unconfined_scopes_inheriting_global_tools`).
+granted a write tool by its resolved policy (`toolpolicy.
+unconfined_write_scopes`).
 
 Also the first corpus fixture pair to use the 2026.8.1+ `agents.entries` RECORD roster
 shape rather than the legacy `agents.list` ARRAY (measured: no other shipped fixture
