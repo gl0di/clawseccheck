@@ -24,9 +24,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# checkout and dependency-review need read access only; nothing here writes to the repo.
+permissions:
+  contents: read
+
 jobs:
   # -- L1: lint + test ----------------------------------------------------------
   test:
+    timeout-minutes: 60
     # C-160: SKILL.md advertises os:[darwin,linux,win32]. Add a macOS (darwin) axis so the
     # advertised POSIX platform is actually proven to run + pass, not just assumed. Windows
     # is still advertised for the read-only audit but its local-store hardening degrades
@@ -49,21 +54,15 @@ jobs:
         # pytest/ruff pinned to exact versions (not latest) so a compromised or
         # typosquatted release can't execute in CI — same supply-chain discipline as the
         # pinned markdownlint-cli@ / clawhub@ installs (C-183). Bump these deliberately.
-        run: python -m pip install --upgrade pip && python -m pip install pytest==7.4.4 ruff==0.15.20
+        run: python -m pip install pytest==7.4.4 ruff==0.15.20
       - name: Lint
         run: ruff check .
       - name: Tests
         run: python -m pytest -q
-      - name: Hunt advisory (ClawRange L2)
-        run: |
-          if [ -f "${{ github.workspace }}/../clawrange/hunt.py" ]; then
-            python ../clawrange/hunt.py --all || true
-          else
-            echo "ClawRange hunt.py not available in this CI context (private repo) -- skipped"
-          fi
 
   # -- L2: markdown quality -----------------------------------------------------
   markdownlint:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -82,16 +81,21 @@ jobs:
 
   # -- L3: dependency review (PRs only) ----------------------------------------
   dependency-review:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
+        # The action has no path scoping: a PR adding a fixtures/ manifest pinned to a
+        # vulnerable version will fail this job. That is accepted; the override is the
+        # action's own advisory allow-list, added in that PR with a justification.
         with:
           fail-on-severity: high
 
   # -- L4: secret scan ----------------------------------------------------------
   secret-scan:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -116,25 +120,77 @@ jobs:
 
   # -- L5: commit integrity -----------------------------------------------------
   commit-integrity:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
 
-      - name: No AI-agent co-author in commits
+      - name: Resolve the commit range under inspection
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            RANGE="origin/${{ github.base_ref }}..HEAD"
-          else
-            RANGE="HEAD~1..HEAD"
+          set -euo pipefail
+          resolves() { git rev-parse --verify --quiet "$1^{commit}" >/dev/null; }
+          fallback() {
+            if resolves origin/main; then RANGE="origin/main..$SHA"; else RANGE="$SHA"; fi
+          }
+          case "$EVENT" in
+            pull_request)
+              if ! resolves "origin/$BASE_REF"; then
+                echo "::error::Cannot resolve origin/$BASE_REF; refusing to pass on an unknown range"
+                exit 1
+              fi
+              RANGE="origin/$BASE_REF..HEAD"
+              ;;
+            push)
+              if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+                fallback
+              elif resolves "$BEFORE"; then
+                RANGE="$BEFORE..$SHA"
+              else
+                echo "::warning::Previous tip $BEFORE is not reachable (force push?); inspecting the branch against main"
+                fallback
+              fi
+              ;;
+            *)
+              echo "::error::Unsupported event '$EVENT' for commit-integrity"
+              exit 1
+              ;;
+          esac
+          COUNT=$(git rev-list --count "$RANGE")
+          if [ "$COUNT" -eq 0 ]; then
+            # An empty range (re-run, force push onto main, head == base) would let
+            # the checks below pass without examining anything; inspect the tip.
+            echo "::warning::Range $RANGE is empty; inspecting the tip commit only"
+            RANGE="HEAD^!"
+            COUNT=$(git rev-list --count "$RANGE")
+            if [ "$COUNT" -eq 0 ]; then
+              echo "::error::Nothing to inspect; refusing to pass vacuously"
+              exit 1
+            fi
           fi
-          FOUND=$(git log "$RANGE" --format="%H %B" \
-            | grep -iE "co-authored-by:.*(claude|anthropic|cursor|copilot|aider|codeium)" || true)
-          if [ -n "$FOUND" ]; then
+          echo "Inspecting $COUNT commit(s) in $RANGE"
+          echo "range=$RANGE" >> "$GITHUB_OUTPUT"
+
+      - name: No AI-agent co-author in commits
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+        run: |
+          set -euo pipefail
+          LOG=$(git log "$RANGE" --format="%H %B")
+          if FOUND=$(grep -iE "co-authored-by:.*(claude|anthropic|cursor|copilot|aider|codeium)" <<<"$LOG"); then
             echo "::error::AI co-author tag detected in commit(s):"
             echo "$FOUND"
             exit 1
+          else
+            rc=$?
+            [ "$rc" -eq 1 ] || { echo "::error::grep failed (rc=$rc)"; exit 1; }
           fi
           echo "OK: no AI co-author tags"
 
@@ -154,18 +210,20 @@ jobs:
           echo "OK: no agent config files in git tree"
 
       - name: Author identity check (gl0di only)
+        # Advisory by design: a hard failure on a push to main cannot be fixed without
+        # rewriting history. dependabot[bot] is expected and allowed.
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            RANGE="origin/${{ github.base_ref }}..HEAD"
-          else
-            RANGE="HEAD~1..HEAD"
-          fi
-          OTHERS=$(git log "$RANGE" --format="%an <%ae>" \
-            | grep -v "gl0di" || true)
-          if [ -n "$OTHERS" ]; then
+          set -euo pipefail
+          LOG=$(git log --no-merges "$RANGE" --format="%an <%ae>")
+          OK='^(gl0di|dependabot\[bot\]) <([0-9]+\+)?(gl0di|dependabot\[bot\])@users\.noreply\.github\.com>$'
+          if OTHERS=$(grep -vE "$OK" <<<"$LOG"); then
             echo "::warning::Non-canonical author(s) in this push:"
             echo "$OTHERS"
             echo "Expected: gl0di <gl0di@users.noreply.github.com>"
           else
+            rc=$?
+            [ "$rc" -eq 1 ] || { echo "::error::grep failed (rc=$rc)"; exit 1; }
             echo "OK: author identity canonical (gl0di)"
           fi
