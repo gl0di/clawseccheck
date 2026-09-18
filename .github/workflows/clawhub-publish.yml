@@ -493,29 +493,37 @@ jobs:
         # the threshold there would block ordinary releases for a defect that is gone.
         run: |
           set -euo pipefail
-          # Anchored to two measured facts rather than to a failure bracket:
-          #   * last known-good publish — 5,235,253 bytes (v3.59.0, 2026-08-05, Convex route)
-          #   * ClawHub's documented cap for POST /api/v1/skills — 50MB
-          # 10 MiB is ~2x the former and ~20% of the latter: loose enough that ordinary
-          # growth never trips it, tight enough that accidental bloat still does.
-          MAX_STAGED_BYTES=10485760  # 10 MiB
+          # Anchored to measured facts rather than to a failure bracket:
+          #   * last real publish - 8,092,721 bytes (v4.1.0, replayed from the tag)
+          #   * ClawHub's documented cap for POST /api/v1/skills - 50MB
+          # 16 MiB is 2.07x the former and 32% of the latter. Growth is about 0.5 MB per
+          # release. Caveat: the ceiling is anchored on the DOCUMENTED cap only; the largest
+          # size actually proven to publish is 8.09 MB, and an earlier documented cap turned
+          # out to be far lower in practice (upstream openclaw/clawhub#3375). The suite
+          # measures the real tree against 80% of this constant
+          # (tests/test_publish_workflow.py::test_staged_bundle_is_within_the_publish_guard),
+          # so the squeeze surfaces in CI a release before this guard would fire.
+          MAX_STAGED_BYTES=16777216  # 16 MiB
           # python3, not `du -sb`: -b/--bytes is a GNU coreutils extension, absent from
-          # BSD du (macOS runners in the CI matrix) — `du: invalid option -- b`. python3
+          # BSD du (macOS runners in the CI matrix) - `du: invalid option -- b`. python3
           # is unconditionally on PATH in this job already (the smoke gate above runs
           # pytest) and sums real file bytes the same way -b does (apparent size, not
           # allocated blocks), on every platform this workflow runs on.
           STAGED_BYTES="$(python3 -c 'import pathlib; print(sum(f.stat().st_size for f in pathlib.Path("dist/clawseccheck").rglob("*") if f.is_file()))')"
           if [ "$STAGED_BYTES" -gt "$MAX_STAGED_BYTES" ]; then
             echo "::error::Staged bundle is ${STAGED_BYTES} bytes, over the pre-upload guard" \
-                 "threshold of ${MAX_STAGED_BYTES} bytes (10 MiB). That is far above any" \
-                 "bundle this project has ever published, so treat it as accidental bloat" \
-                 "— check for a stray binary or a re-added docs/assets tree — rather than" \
-                 "as a limit to raise. ClawHub's documented cap is 50MB; if the staged tree" \
-                 "has genuinely grown this much on purpose, re-ground this threshold" \
-                 "against a real publish before pushing a release tag."
+                 "threshold of ${MAX_STAGED_BYTES} bytes (16 MiB). Do not assume bloat:" \
+                 "compare against the previous release first (replay this staging step at" \
+                 "the previous tag, or sum files[].size from" \
+                 "GET /api/v1/skills/clawseccheck/versions/<prev>). Growth of a few hundred" \
+                 "KB per release is normal, new checks land in clawseccheck/. If the delta" \
+                 "is ordinary growth, raise MAX_STAGED_BYTES here and re-ground its comment" \
+                 "(ClawHub's documented cap is 50MB). If it is large and sudden, look for a" \
+                 "stray binary or a re-added docs/assets tree."
+            python3 -c 'import pathlib,collections; d=collections.Counter(); r=pathlib.Path("dist/clawseccheck"); [d.update({f.relative_to(r).parts[0]: f.stat().st_size}) for f in r.rglob("*") if f.is_file()]; [print("  %10d  %s" % (v, k)) for k, v in d.most_common(8)]'
             exit 1
           fi
-          echo "Staged bundle size OK: ${STAGED_BYTES} bytes (guard limit ${MAX_STAGED_BYTES})."
+          echo "Staged bundle size OK: ${STAGED_BYTES} bytes (guard limit ${MAX_STAGED_BYTES}, $((STAGED_BYTES * 100 / MAX_STAGED_BYTES))% used)."
 
       - name: Preflight — verify the staged tree locally
         # Cheap, offline, deterministic checks on the artifact we are about to upload.

@@ -1169,7 +1169,7 @@ def test_size_guard_threshold_clears_the_last_known_good_publish() -> None:
     # Measured from the v3.59.0 tag by replaying the staging step above, not quoted from a
     # `du -sh` figure: du reports allocated blocks, the guard sums real file bytes, and
     # conflating the two is what put the original threshold on the wrong side of this tree.
-    last_known_good_publish = 5_235_253   # v3.59.0, published 2026-08-05 via the Convex route
+    last_known_good_publish = 8_092_721   # v4.1.0, replayed from the tag; published to ClawHub 2026-09
     assert threshold > last_known_good_publish, (
         f"MAX_STAGED_BYTES={threshold} is at or below {last_known_good_publish} bytes — a "
         "staged tree that is known to have published successfully. A guard set below a "
@@ -1249,6 +1249,141 @@ def test_size_guard_passes_on_a_staged_bundle_within_budget(tmp_path) -> None:
     assert "Staged bundle size OK" in proc.stdout, (
         f"Expected the OK confirmation line in stdout.\nstdout: {proc.stdout!r}"
     )
+
+
+def _staging_shell_block() -> str:
+    """Extract the literal `run: |` body of the 'Stage publishable files' step."""
+    lines = _lines()
+    start = next(
+        (
+            i for i, ln in enumerate(lines)
+            if ln.strip().startswith("- name:") and "Stage publishable files" in ln
+        ),
+        None,
+    )
+    assert start is not None, (
+        "No '- name: Stage publishable files' step in the workflow; update this extractor."
+    )
+    run_i = None
+    for i in range(start + 1, len(lines)):
+        if lines[i].strip().startswith("- name:"):
+            break
+        if lines[i].strip() == "run: |":
+            run_i = i
+            break
+    assert run_i is not None, (
+        "The staging step no longer uses a 'run: |' literal block; update this extractor."
+    )
+    indent = len(lines[run_i]) - len(lines[run_i].lstrip())
+    body = []
+    for ln in lines[run_i + 1:]:
+        if ln.strip() and (len(ln) - len(ln.lstrip())) <= indent:
+            break
+        body.append(ln)
+    return textwrap.dedent("\n".join(body))
+
+
+def _replay_staged_tree(tmp_path: Path):
+    """Replay the REAL staging step over the working tree; return (work_dir, total, per_top).
+
+    Copies exactly the paths the step stages (repo-visible files only, so ignored caches
+    stay out) into a scratch dir and runs the workflow's own shell there. The changelog
+    scratch file is redirected into tmp_path so nothing is written outside it.
+    """
+    staged = sorted(_staged_paths(WORKFLOW_PATH.read_text(encoding="utf-8")))
+    assert staged, "No staged root paths derived from the workflow; the parser is vacuous."
+    listed = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", *staged],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    work = tmp_path / "work"
+    work.mkdir()
+    for rel in listed:
+        src = REPO_ROOT / rel
+        if not src.is_file():
+            continue  # deleted-but-still-indexed
+        dst = work / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    block = _staging_shell_block()
+    assert "/tmp/changelog-trimmed.md" in block, (
+        "The staging step no longer uses /tmp/changelog-trimmed.md; update this replay so "
+        "it still redirects the scratch file into tmp_path."
+    )
+    block = block.replace("/tmp/changelog-trimmed.md", str(tmp_path / "changelog-trimmed.md"))
+    proc = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", block],
+        cwd=str(work), capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, (
+        f"Replaying the staging step failed.\nstdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    )
+    root = work / "dist" / "clawseccheck"
+    assert (root / "SKILL.md").is_file(), "Replay staged no SKILL.md; the replay is broken."
+    per_top: dict = {}
+    total = 0
+    for f in root.rglob("*"):
+        if f.is_file():
+            size = f.stat().st_size
+            total += size
+            top = f.relative_to(root).parts[0]
+            per_top[top] = per_top.get(top, 0) + size
+    assert total > 1024 * 1024, "Replayed staged tree is implausibly small; replay is broken."
+    return work, total, per_top
+
+
+def _size_budget_verdict(measured: int, threshold: int, tripwire: float = 0.8):
+    """(within_limit, under_tripwire) for a measured staged size."""
+    return measured <= threshold, measured <= tripwire * threshold
+
+
+def test_size_budget_verdict_has_teeth_at_the_tripwire() -> None:
+    limit = 1_000_000
+    assert _size_budget_verdict(int(limit * 0.79), limit) == (True, True)
+    assert _size_budget_verdict(int(limit * 0.81), limit) == (True, False)
+    assert _size_budget_verdict(int(limit * 1.01), limit) == (False, False)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_staged_bundle_is_within_the_publish_guard(tmp_path) -> None:
+    """Measure the REAL staged tree, so the guard cannot surprise a release.
+
+    The workflow guard only runs after the approval click. This replays the staging step
+    in the suite and fails a release early: over the limit is a hard failure, over 80% of
+    it is the tripwire that gives a release of lead time to respond.
+    """
+    inside = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True,
+    )
+    if inside.returncode != 0:
+        pytest.skip("not a git checkout (source tarball): nothing to replay")
+    threshold = _size_guard_threshold_bytes()
+    work, total, per_top = _replay_staged_tree(tmp_path)
+    within, under_tripwire = _size_budget_verdict(total, threshold)
+    breakdown = ", ".join(
+        f"{k}={v:,}" for k, v in sorted(per_top.items(), key=lambda kv: -kv[1])[:6]
+    )
+    context = (
+        f"Staged bundle is {total:,} bytes = {100 * total / threshold:.1f}% of "
+        f"MAX_STAGED_BYTES={threshold:,}. Largest entries: {breakdown}. Reference: the "
+        "last published bundle (v4.1.0) staged 8,092,721 bytes and growth is about 0.5 MB "
+        "per release, so growth in clawseccheck/ is normal; compare with the previous "
+        "release before assuming bloat. Either raise MAX_STAGED_BYTES in the workflow "
+        "(keep it <= 25 MiB, see test_size_guard_threshold_clears_the_last_known_good_publish) "
+        "and re-ground its comment, or trim the bundle."
+    )
+    assert within, "The release would hard-fail at the size guard AFTER approval. " + context
+    assert under_tripwire, "Over 80% of the guard: tripwire, act one release early. " + context
+
+    # The exact CI guard must also pass on the replayed real tree.
+    script = tmp_path / "guard.sh"
+    script.write_text(_size_guard_shell_block(), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=str(work), capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
 
 
 # ---------------------------------------------------------------------------------
