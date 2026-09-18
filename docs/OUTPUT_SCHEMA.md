@@ -24,7 +24,7 @@ before assuming a nested key is part of the contract; notably, the subject keys 
 
 | Field | Type | Always present | Description |
 |---|---|---|---|
-| `version` | `str` | yes | The ClawSecCheck build that produced this run — `clawseccheck.__version__`, e.g. `"4.1.1"`. Added because this was the one JSON surface with no producer-identity anchor: `--vet --json`, SARIF, `--sbom` and `--judge-packet` all carry a `version` field already (§11, §10, §21, §12), and 4.0.0's `graded`/`missing_layers`/`not_checked` breaking change means an archived audit payload otherwise has no field of its own saying which side of that change produced it (feature-detecting on `graded`'s presence works too, but a version string is the direct answer). A Stable addition (§17) — new optional top-level field, no existing key touched. |
+| `version` | `str` | yes | The ClawSecCheck build that produced this run — `clawseccheck.__version__`, e.g. `"4.2.0"`. Added because this was the one JSON surface with no producer-identity anchor: `--vet --json`, SARIF, `--sbom` and `--judge-packet` all carry a `version` field already (§11, §10, §21, §12), and 4.0.0's `graded`/`missing_layers`/`not_checked` breaking change means an archived audit payload otherwise has no field of its own saying which side of that change produced it (feature-detecting on `graded`'s presence works too, but a version string is the direct answer). A Stable addition (§17) — new optional top-level field, no existing key touched. |
 | `score` | `int \| null` | yes | Overall security score, 0–100. C-423: `null` when `graded` is `false` — no consumer may show a number for a run where a five-layer-ledger layer never ran at all. The key is always present; only its value goes `null`. |
 | `grade` | `str \| null` | yes | Letter grade: `"A"`, `"B"`, `"C"`, `"D"`, or `"F"`. C-423: `null` when `graded` is `false`, same rule as `score`. |
 | `capped` | `bool` | yes | `true` if the score was capped below `raw_score` (e.g. Lethal Trifecta triggered). |
@@ -733,7 +733,7 @@ as a reason string in a full audit's per-skill inventory (§18).
 ```json
 {
   "tool": "clawseccheck",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "mode": "vet",
   "target": "/path/to/skill",
   "target_type": "skill",
@@ -916,7 +916,7 @@ Every string in this envelope crosses one enforcing boundary on the way out (`re
 ```json
 {
   "tool": "clawseccheck",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "judgePacket": [
     {
       "finding_id": "TT4_FILE_NET",
@@ -1088,7 +1088,7 @@ check file-wide via `.clawseccheckignore`'s separate bare-id form.
 ```json
 {
   "tool": "clawseccheck",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "proposedIgnoreEntries": [
     {"entry": "B13:ab12cd34", "finding_id": "B13", "target": "skillx", "votes": {"SAFE": 3}}
   ],
@@ -1531,7 +1531,7 @@ value: `3` (bumped from `2` by B-568 — see the Notes below for what changed).
 | Field | Type | Description |
 |---|---|---|
 | `version` | `int` | This document's own schema version — currently `3`. Bump-on-breaking-change, the same discipline `SBOM_VERSION` in `sbom.py` documents in-source. A consumer pinning a specific version should treat a different value as a potentially incompatible shape. |
-| `generated_by` | `str` | `"clawseccheck v<package version>"`, e.g. `"clawseccheck v4.1.1"` — the tool identity/version that produced this document (distinct from `version` above, which is the document's own schema version). |
+| `generated_by` | `str` | `"clawseccheck v<package version>"`, e.g. `"clawseccheck v4.2.0"` — the tool identity/version that produced this document (distinct from `version` above, which is the document's own schema version). |
 | `scanned_home` | `str \| null` | Absolute path of the home this BOM was built from, or `null` when no home was supplied to the `Context` (library/unit use). Unlike the plugin path fields below, this one is NOT redacted — it echoes the `--home` value the operator themselves typed, and `tests/test_b462_b464_optout_honesty.py` pins the literal value to prove no silent fallback path was substituted. |
 | `config_found` | `bool` | `true` when an `openclaw.json` was present at `scanned_home` (B-463) — lets a consumer distinguish a real setup with zero components from a typo'd `--home` that found nothing at all; both would otherwise serialise as an empty `skills`/`mcp_servers`/`plugins` set. |
 | `self_excluded_skills` | `array[str]` | B-521: names of installed skills withheld from `skills` below because they are ClawSecCheck's OWN content-verified install (B-265, `collector.py` `_is_own_source`/`self_excluded_skills`) — a tool auditing itself is noise, so it is deliberately excluded, but the name(s) are shipped here so a consumer can tell WHICH component is missing rather than only that one is. Empty array (never omitted) when nothing was withheld. Sorted for deterministic output. |
@@ -1581,7 +1581,7 @@ value: `3` (bumped from `2` by B-568 — see the Notes below for what changed).
 ```json
 {
   "version": 3,
-  "generated_by": "clawseccheck v4.1.1",
+  "generated_by": "clawseccheck v4.2.0",
   "scanned_home": "/home/you/.openclaw",
   "config_found": true,
   "self_excluded_skills": [],
@@ -1816,7 +1816,7 @@ retention window (last 50 saved runs) since each row is heavier.
 
 ```json
 {
-  "tool": "clawseccheck", "version": "4.1.1",
+  "tool": "clawseccheck", "version": "4.2.0",
   "run1": "2026-09-10T09:15:23", "run2": "2026-09-12T11:02:07",
   "new": [],
   "fixed": [{"id": "B2", "title": "Gateway exposure & channel authentication",
@@ -1944,7 +1944,7 @@ primitives directly, the same way `runstore.py` does — proven generic across t
 independent stores now). Opt-in: nothing is written unless the flag is given.
 
 ```json
-{"ts": "2026-09-10T13:26:59", "version": "4.1.1", "_schema": 1,
+{"ts": "2026-09-10T13:26:59", "version": "4.2.0", "_schema": 1,
  "sbom": { "...": "the exact §21 native BOM shape" },
  "chain_hash": "..."}
 ```
@@ -1959,7 +1959,7 @@ shape-selector through code that has none today.
 
 ```json
 {
-  "tool": "clawseccheck", "version": "4.1.1",
+  "tool": "clawseccheck", "version": "4.2.0",
   "run1": "2026-09-10T09:15:23", "run2": "2026-09-12T11:02:07",
   "added": [{"kind": "skills", "name": "new-tool", "version": null, "hash": "..."}],
   "removed": [],
@@ -1993,7 +1993,7 @@ invented, same reasoning those two give for their own run ids.
 
 ```json
 {
-  "tool": "clawseccheck", "version": "4.1.1",
+  "tool": "clawseccheck", "version": "4.2.0",
   "id": "2026-09-10T17:41:02",
   "status": "investigating",
   "created_at": "2026-09-10T17:41:02",
