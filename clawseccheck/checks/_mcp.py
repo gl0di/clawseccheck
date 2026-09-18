@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 from .. import attest as _attest
+from .. import harnessruntime as _harnessruntime
 from .. import mcpsurface as _mcpsurface
+from .. import openclawdist as _openclawdist
 from .. import trajectory as _trajectory
 from .. import trajectorystore as _trajectorystore
 from ..catalog import (
@@ -65,6 +67,7 @@ from ._shared import (
     _mcp_has_remote,
     _mcp_servers,
     _mcp_url_is_local,
+    _numeric_version,
     _openclaw_generation,
     _plugins,
     SECRET_KEY_RE,
@@ -3177,9 +3180,16 @@ def _b333_waived_tool_names(
     tool_filter = _mcp_normalize_tool_filter(
         spec.get("toolFilter") if isinstance(spec, dict) else None
     )
+    # A name cut at the ingest cap is a PREFIX of the real one, so a filter that names the
+    # full tool can neither include nor exclude it as far as we can tell. Reproduced before
+    # this rule: a 250-character tool with `toolFilter.include=[full name]` reported zero
+    # waived tools (a false negative), and with `exclude=[full name]` it reported the
+    # excluded tool (a false WARN). Treating it as reachable is the conservative
+    # over-approximation, and the name is marked so the reader can see why.
     return [
-        t.name for t in surface.tools
-        if _mcp_tool_allowed(tool_filter, t.name)
+        (f"{t.name}... (name truncated)" if t.name_truncated else t.name)
+        for t in surface.tools
+        if (t.name_truncated or _mcp_tool_allowed(tool_filter, t.name))
         and not _mcp_codex_requires_approval(mode, _mcp_codex_annotations(t.annotations))
     ]
 
@@ -3239,6 +3249,46 @@ def _b333_modern_surface_verdict(
         return (UNKNOWN, hinted) if (hinted := _b333_hinted_tool_names(surface)) else None
     waived = _b333_waived_tool_names(surface, _mcp_codex_approval_mode(name, spec), spec)
     return (WARN, waived) if waived else None
+
+
+def _harness_build(ctx) -> "tuple | None":
+    """The OpenClaw build to hand the harness determination, or None when it is not known.
+
+    The installed build first (it is what will actually run), then the config's own stamp
+    but ONLY when it is at least the validated floor -- the same asymmetry
+    ``_openclaw_generation`` uses: a stale older stamp proves nothing about what is
+    installed now, so it must not decide anything.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        return installed
+    stamped = _numeric_version(_openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and _harnessruntime.ORACLE_MIN <= stamped[:3] <= _harnessruntime.ORACLE_MAX:
+        return stamped
+    return None
+
+
+def _harness_reach(ctx) -> "_harnessruntime.HarnessReach":
+    return _harnessruntime.codex_harness_reach(getattr(ctx, "config", None), _harness_build(ctx))
+
+
+#: What a ``no`` cannot see. Said in both checks' PASS text, because "no configured model
+#: resolves to the Codex harness" is a statement about ``openclaw.json`` and nothing else.
+_HARNESS_RUNTIME_CAVEAT = (
+    "Only the models written in openclaw.json were read: a model chosen at run time (a "
+    "cron job's own model override, or a /model switch) is not visible here, so this "
+    "stops being true the moment one of those selects a model that runs on Codex."
+)
+
+#: What a ``yes`` cannot rule out.
+_HARNESS_YES_CAVEAT = (
+    "(Read from openclaw.json only: an OPENAI_BASE_URL set in the gateway's own "
+    "environment rather than this one would move an implicit OpenAI model off Codex.)"
+)
+
+
+def _harness_evidence(reach) -> "list[str]":
+    return [f"codex harness: {r}" for r in reach.reasons[:3]]
 
 
 def _mcp_is_per_requester(spec: dict) -> bool:
@@ -3318,13 +3368,18 @@ def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
       other url gets no exemption, which is the half that makes the exclusion safe.
     * a server with ``enabled: false`` never reaches the runtime at all.
 
-    WARN, never FAIL, for a reason expected to change: the whole mechanism is on the Codex
-    app-server path, and this audit does not yet determine whether any configured agent
-    runs that harness (B-708). Asserting a live grant on a setup where the
-    block is inert is exactly the defect that round of C-135 found in B333.
+    WARN, never FAIL: the whole mechanism is on the Codex app-server path, and whether
+    an agent runs that harness is decided by ``harnessruntime.codex_harness_reach`` -- a
+    three-valued, differentially validated determination that answers only where it can
+    prove the answer. Asserting a live grant on a setup where the block is inert is exactly
+    the defect the C-135 round on B333 found, so the three answers split the verdict:
 
-    WARN    -- a non-loopback, enabled server explicitly sets the mode to "approve".
-    PASS    -- servers were inspected and none does.
+    WARN    -- a non-loopback, enabled server explicitly sets the mode to "approve", and
+               either an agent is configured to run Codex (stated as fact) or that could
+               not be determined (stated conditionally, the wording every build below the
+               validated floor keeps unchanged).
+    PASS    -- servers were inspected and none does, OR one does but no configured model
+               resolves to the Codex harness (with the run-time-model caveat said aloud).
     UNKNOWN -- no MCP servers configured under `mcp.servers`.
     """
     # A plain `.get()` walk, not `dig()`, and for the reason B-701 used one in this module:
@@ -3362,6 +3417,37 @@ def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
 
     if hits:
         ev = [f"mcp.servers.{n}.codex.defaultToolsApprovalMode=\"approve\"" for n in hits[:5]]
+        reach = _harness_reach(ctx)
+        if reach.answer == _harnessruntime.YES:
+            return _finding(
+                "B353", WARN,
+                "MCP server(s) are set to pre-approve every tool they expose (" +
+                ", ".join(hits[:5]) + "). Despite the name, \"approve\" does not mean "
+                "\"requires approval\" -- OpenClaw treats every tool on that server as "
+                "already approved, before any per-tool safety annotation is consulted. "
+                "At least one of your agents is configured to run the Codex app-server "
+                "harness, so this setting is in play: wherever OpenClaw itself materializes "
+                "MCP tools (a scheduled run, or a thread whose native tool surface is off) "
+                "the waiver removes the approval a destructive tool would otherwise need. "
+                + _HARNESS_YES_CAVEAT,
+                "If you did not mean to waive approval for every tool on these servers, "
+                "set mcp.servers.<name>.codex.defaultToolsApprovalMode to \"prompt\" "
+                "(always ask) or remove the key (the default, \"auto\", decides per tool "
+                "from the annotations the server declares).",
+                evidence=ev + _harness_evidence(reach),
+            )
+        if reach.answer == _harnessruntime.NO:
+            return _finding(
+                "B353", PASS,
+                "MCP server(s) are set to pre-approve every tool they expose (" +
+                ", ".join(hits[:5]) + "), but no configured model resolves to the Codex "
+                "app-server harness, and that setting only acts on that harness -- so it is "
+                "inert on this setup. " + _HARNESS_RUNTIME_CAVEAT,
+                "No action needed today. If you later route any agent to an OpenAI/Codex "
+                "model, set mcp.servers.<name>.codex.defaultToolsApprovalMode to \"prompt\" "
+                "or remove the key first.",
+                evidence=ev + _harness_evidence(reach),
+            )
         return _finding(
             "B353", WARN,
             "MCP server(s) are set to pre-approve every tool they expose (" +
@@ -3430,7 +3516,13 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
 
     MODERN generation
       WARN    -- a config-embedded tool's own annotations waive its approval gate, on a
-                 server whose tools can actually reach a scheduled run.
+                 server whose tools can actually reach a scheduled run. Whether an agent
+                 runs the Codex harness (``harnessruntime.codex_harness_reach``) splits
+                 the wording: ``yes`` states it as fact, ``unknown`` keeps the conditional
+                 sentence (every build below the validated floor lands here).
+      PASS    -- (harness ``no``) the same tools exist but no configured model resolves to
+                 the Codex harness, so the annotations act on nothing; the run-time-model
+                 caveat is said aloud.
       PASS    -- no tool waives its gate. That covers declaring nothing, declaring
                  destructiveHint, and being out of reach because the server is disabled,
                  filtered, or set to ``prompt``/``approve`` -- so the PASS text says
@@ -3471,6 +3563,37 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
 
     if warn_hits:
         ev = warn_hits[:5]
+        reach = _harness_reach(ctx) if modern else None
+        if reach is not None and reach.answer == _harnessruntime.YES:
+            return _finding(
+                "B333",
+                WARN,
+                "MCP tool(s) declare annotations that ask OpenClaw to waive their own "
+                "approval gate (" + "; ".join(ev) + "). On OpenClaw 2026.8.1 and later "
+                "these are read, not ignored, and at least one of your agents is "
+                "configured to run the Codex app-server harness: wherever OpenClaw itself "
+                "materializes MCP tools (a scheduled run, or a thread whose native tool "
+                "surface is off) a tool whose own declaration waives its gate is kept "
+                "without the approval it would otherwise need, while a tool that declares "
+                "itself destructive is held back. " + _HARNESS_YES_CAVEAT,
+                "If you did not mean to let a server waive its own gate, set "
+                "mcp.servers.<name>.codex.defaultToolsApprovalMode to \"prompt\", which "
+                "is read before any annotation.",
+                evidence=ev + _harness_evidence(reach),
+            )
+        if reach is not None and reach.answer == _harnessruntime.NO:
+            return _finding(
+                "B333",
+                PASS,
+                "MCP tool(s) declare annotations that would waive their own approval gate ("
+                + "; ".join(ev) + "), but no configured model resolves to the Codex "
+                "app-server harness, and those annotations only act on that harness -- so "
+                "they are inert on this setup. " + _HARNESS_RUNTIME_CAVEAT,
+                "No action needed today. If you later route any agent to an OpenAI/Codex "
+                "model, set mcp.servers.<name>.codex.defaultToolsApprovalMode to \"prompt\" "
+                "on these servers first.",
+                evidence=ev + _harness_evidence(reach),
+            )
         if modern:
             return _finding(
                 "B333",

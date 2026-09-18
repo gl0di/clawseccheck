@@ -2695,6 +2695,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B382 - openclaw.json holds a key the installed OpenClaw build removed
+
+- Severity: LOW
+- Block: advisory
+- Framework: Config Validity / Update Hygiene
+- Scored: no
+- Confidence: HIGH
+- OWASP: none
+- What it checks: openclaw.json holds a key the installed OpenClaw build removed
+- Remediation:
+  - none
+
 ### B374 - cloudWorkers prepared-pool default-on warm reserve
 
 - Severity: LOW

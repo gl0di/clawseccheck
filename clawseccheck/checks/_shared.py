@@ -1083,6 +1083,63 @@ def _workshop_symlink_knob(ctx) -> str:
     return "unknown"
 
 
+# B382: keys a newer OpenClaw build REMOVED from its strict root config schema, so a file
+# that still holds one is rejected by `openclaw config validate` and by every CLI command
+# that loads the config, until `openclaw doctor --fix` migrates it.
+#
+# dotted key -> (replacement key or None when removed outright, first build that rejects it).
+# Every entry was MEASURED by executing the installed root schema's `safeParse` (see
+# tests/test_f184_retired_key_config_invalid.py, whose local-only oracle re-asks the vendor,
+# and tests/test_b700_version_aware_advice.py, which owns the 8.1 and 9.3 subsets). A key the
+# vendor still accepts must not be added. Deliberately leaves out the bare `marketplaces`
+# root: only the measured leaves are listed. The min build is per key because retirement is
+# per build -- eleven keys left in 2026.8.1, the ssrf key was measured rejected on 2026.9.1
+# (8.x was not measured, so the gate is not lowered), the symlink knob left in 2026.9.3.
+_RETIRED_CONFIG_KEYS = {
+    "audit.enabled": ("logging.audit.enabled", (2026, 8, 1)),
+    "gateway.nodes.allowCommands": ("gateway.nodes.commands.allow", (2026, 8, 1)),
+    "gateway.nodes.denyCommands": ("gateway.nodes.commands.deny", (2026, 8, 1)),
+    "skills.workshop.autonomous.enabled": ("skills.workshop.autonomous.mode", (2026, 8, 1)),
+    "agents.list": ("agents.entries", (2026, 8, 1)),
+    "logging.redactSensitive": (None, (2026, 8, 1)),
+    "commands.useAccessGroups": (None, (2026, 8, 1)),
+    "gateway.controlUi.allowInsecureAuth": (None, (2026, 8, 1)),
+    "diagnostics.cacheTrace.filePath": (None, (2026, 8, 1)),
+    "marketplaces.feeds": (None, (2026, 8, 1)),
+    "marketplaces.sources": (None, (2026, 8, 1)),
+    "browser.ssrfPolicy.hostnameAllowlist": ("browser.ssrfPolicy.allowedHostnames",
+                                             (2026, 9, 1)),
+    "skills.workshop.allowSymlinkTargetWrites": (None, _SYMLINK_KNOB_RETIRED_MIN),
+}
+
+
+def _has_key_path(cfg, dotted: str) -> bool:
+    """Structural presence of a dotted key: walks dicts with ``in``, any value counts
+    (``false`` and ``null`` included), and a non-dict intermediate ends the walk."""
+    node = cfg
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
+    """Retired keys (with replacement) that the config holds AND the installed build rejects.
+
+    Reads ONLY ``ctx.installed_dist_version``. ``meta.lastTouchedVersion`` is never
+    consulted: it records which build last SAVED the file, and a user who downgraded since
+    would be told the file is invalid on a build that still reads every key. An unknown
+    installed build returns ``[]`` -- silence, not a guess.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    cfg = getattr(ctx, "config", None)
+    if installed is None or not isinstance(cfg, dict):
+        return []
+    return [(key, repl) for key, (repl, min_build) in _RETIRED_CONFIG_KEYS.items()
+            if installed >= min_build and _has_key_path(cfg, key)]
+
+
 def _meta(cid: str):
     return BY_ID[cid]
 
