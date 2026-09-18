@@ -95,6 +95,81 @@ jobs:
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
+      - name: Gate — the commit being published must be on main with green CI
+        # C-544. Branch protection defends `main` with six required contexts; the tag-push
+        # path that actually ships to users consulted none of them. This job's own smoke
+        # gate is strictly weaker than that protection — Python 3.12 only, no 3.9, no
+        # macOS, no gitleaks, no markdownlint, no commit-integrity — so a regression those
+        # catch could reach ClawHub while `main` would have rejected it. The 3.9 gap is not
+        # theoretical: on 3.9 `ipaddress` reports 0.0.0.0/0 as private, which once made
+        # B2/B70 accept a world-open trustedProxies and emit the exact lying PASS the check
+        # existed to prevent; it was caught on a tag only because a human was watching CI.
+        #
+        # Reading the SHA's own check-runs reuses branch protection as the single source of
+        # truth rather than growing a second, drifting copy of the gate list here. It also
+        # pulls gitleaks, markdownlint and commit-integrity onto the release path for free.
+        #
+        # Paired with ci.yml no longer running on tag pushes (C-543): these contexts come
+        # from the push to `main` that preceded the tag, so nothing is re-run to satisfy
+        # this. The poll covers a tag pushed while that run is still finishing.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # A literal block (|), not a folded one (>-): folding joins these with spaces,
+          # and a context name is matched against the check-run name exactly, so a stray
+          # space would make every lookup miss and the gate would report all six missing.
+          REQUIRED_CONTEXTS: |
+            test (ubuntu-latest, 3.9)
+            test (ubuntu-latest, 3.12)
+            test (macos-latest, 3.12)
+            markdownlint
+            secret-scan
+            commit-integrity
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${GITHUB_SHA} is not an ancestor of origin/main. Only code that" \
+                 "reached main through its required checks may be published; tag pushes are" \
+                 "not covered by branch protection, so this is the only thing standing" \
+                 "between an arbitrary commit and a release."
+            exit 1
+          fi
+          echo "OK: ${GITHUB_SHA} is on main."
+
+          # A never-run context is indistinguishable from a deleted one here, so absence is
+          # a failure, not a skip: this gate exists precisely for the case where nothing ran.
+          for attempt in $(seq 1 10); do
+            RUNS="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+                      --paginate --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')"
+            PENDING=""; FAILED=""; MISSING=""
+            while IFS= read -r ctx; do
+              [ -n "$ctx" ] || continue
+              LINE="$(printf '%s\n' "$RUNS" | awk -F'\t' -v c="$ctx" '$1==c {print; exit}')"
+              if [ -z "$LINE" ]; then MISSING="${MISSING}${ctx}; "; continue; fi
+              STATUS="$(printf '%s' "$LINE" | cut -f2)"
+              CONCL="$(printf '%s' "$LINE" | cut -f3)"
+              if [ "$STATUS" != "completed" ]; then PENDING="${PENDING}${ctx}; "
+              elif [ "$CONCL" != "success" ]; then FAILED="${FAILED}${ctx}=${CONCL}; "
+              fi
+            done <<< "$REQUIRED_CONTEXTS"
+
+            if [ -n "$FAILED" ]; then
+              echo "::error::Required checks did not pass on ${GITHUB_SHA}: ${FAILED}"
+              exit 1
+            fi
+            if [ -z "$PENDING" ] && [ -z "$MISSING" ]; then
+              echo "OK: all required checks are green on ${GITHUB_SHA}."
+              exit 0
+            fi
+            echo "waiting (${attempt}/10) — pending: ${PENDING:-none}; missing: ${MISSING:-none}"
+            if [ "$attempt" -lt 10 ]; then sleep 60; fi
+          done
+
+          echo "::error::Required checks never completed on ${GITHUB_SHA} — pending:" \
+               "${PENDING:-none}; missing: ${MISSING:-none}. A missing context means CI" \
+               "never ran for this commit, which is exactly what this gate exists to catch."
+          exit 1
+
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"

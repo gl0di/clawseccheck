@@ -1,8 +1,28 @@
 name: CI
 
+# C-543. Both triggers were unfiltered, so the same tree was validated up to three
+# times per release. Measured on v4.2.0: commit c26a8ba ran the full six-job matrix
+# for the push to `main` (23m32s on the 3.9 leg alone, ~56 runner-minutes for the
+# run) and then ran all of it again 24 minutes later for the tag push — plus a third
+# duplicate earlier, because an unfiltered `push:` and `pull_request:` both fire on a
+# PR branch.
+#
+# Filtering push to main/dev leaves PR branches to the `pull_request` event alone.
+# Omitting `tags:` stops the tag re-run: a tag points at a commit `main` has already
+# proven green, and clawhub-publish.yml now READS those check-runs for the SHA it is
+# publishing rather than waiting on a fresh copy of them — so the two changes only
+# make sense together.
 on:
   push:
+    branches: [main, dev]
   pull_request:
+
+# A superseded run is wasted work, but `main` is the branch a release is cut from and
+# its check-runs are what the publish gate reads — so runs there are never cancelled,
+# even when a newer commit lands while one is in flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # -- L1: lint + test ----------------------------------------------------------
