@@ -214,8 +214,18 @@ jobs:
         # tags by default, and tests/test_version_coherence.py already pins the changelog's
         # top entry to __version__, so the second entry is the previous release by
         # construction.
+        #
+        # "By construction" holds only if every changelogged version was actually released,
+        # and on 2026-09-17 that broke: 4.1.1 was bumped and changelogged, never published
+        # (the work sat unpushed and grew into 4.2.0), and its entry stayed behind. This
+        # step then curled for a release that never existed, got 404, and blocked v4.2.0
+        # while reporting "published but never surfaced" — sending the operator to
+        # investigate a publishing incident that had not happened. A 404 alone cannot tell
+        # the two apart, so the tag is consulted before the verdict is written: no tag means
+        # we never attempted to publish it, which is a wrong CHANGELOG, not a lost release.
         env:
           SKIP_CHECK: ${{ inputs.skip_previous_release_check }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "${SKIP_CHECK:-false}" = "true" ]; then
@@ -242,10 +252,30 @@ jobs:
             exit 0
           fi
 
-          echo "::error::Previous release ${PREV} is NOT on ClawHub (HTTP ${CODE}). It was" \
-               "published but never surfaced — publishing another version on top of it will" \
-               "bury the problem. Investigate first, or re-run with" \
-               "skip_previous_release_check=true to proceed deliberately."
+          # Was PREV ever actually released? A tag is this repo's record of the attempt —
+          # §6 tags first, then the tag push triggers this workflow — so no tag means no
+          # publish was ever tried, and a 404 is then expected rather than alarming.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${PREV}" >/dev/null 2>&1; then
+            PREV_TAGGED=true
+          else
+            PREV_TAGGED=false
+          fi
+
+          if [ "$PREV_TAGGED" = "false" ]; then
+            echo "::error::CHANGELOG.md's previous entry is ${PREV}, but no tag v${PREV}" \
+                 "exists — that version was never released, so its 404 on ClawHub is" \
+                 "expected, not an incident. The CHANGELOG is what is wrong: fold the" \
+                 "${PREV} entry into the release that actually ships its content, or" \
+                 "release ${PREV} first. Do NOT reach for skip_previous_release_check" \
+                 "here — it would publish on top of a changelog that describes a release" \
+                 "that does not exist."
+            exit 1
+          fi
+
+          echo "::error::Previous release ${PREV} is NOT on ClawHub (HTTP ${CODE}), and" \
+               "v${PREV} IS tagged — so it was published and never surfaced. Publishing" \
+               "another version on top of it will bury the problem. Investigate first, or" \
+               "re-run with skip_previous_release_check=true to proceed deliberately."
 
           # Auto-diagnose so nobody has to repeat the manual investigation. A stalled scan
           # shows up as null scanner outputs (~5 bytes) next to a populated static-analysis

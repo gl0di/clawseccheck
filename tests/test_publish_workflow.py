@@ -938,6 +938,47 @@ def test_publish_workflow_verifies_previous_release_surfaced() -> None:
     )
 
 
+def test_previous_release_gate_separates_never_released_from_never_surfaced() -> None:
+    """A 404 on the previous version has two causes, and they need different answers.
+
+    On 2026-09-17 this gate blocked v4.2.0 and reported that 4.1.1 "was published but
+    never surfaced". 4.1.1 had never been published at all: it was bumped and
+    changelogged, the work sat unpushed and grew into 4.2.0, and only its CHANGELOG
+    entry stayed behind. The gate derives the previous version from that entry, so it
+    curled for a release that never existed — and its verdict sent the operator to
+    investigate a publishing incident that had not happened.
+
+    A 404 cannot separate the two on its own. The tag can: §6 tags before publishing, so
+    no tag means no attempt was ever made, and the fault is a wrong CHANGELOG rather
+    than a lost release. The gate must therefore consult the tag BEFORE writing the
+    "never surfaced" verdict, and must not send a never-released version down the
+    skip-the-check path — that would publish on top of a changelog describing a release
+    that does not exist.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "git/ref/tags/v${PREV}" in text, (
+        "The previous-release gate must check whether v<PREV> was ever tagged before "
+        "concluding a 404 means the release was published and then lost."
+    )
+
+    tag_check = text.index("git/ref/tags/v${PREV}")
+    surfaced_verdict = text.index("was published and never surfaced")
+    assert tag_check < surfaced_verdict, (
+        "The tag must be consulted before the 'published and never surfaced' verdict is "
+        "written, or the gate misdiagnoses a version that was never released at all."
+    )
+
+    # The never-released branch must refuse the override rather than recommend it: the
+    # fix there is to correct the CHANGELOG, not to publish past it.
+    never_released = text.index("was never released")
+    between = text[never_released:surfaced_verdict]
+    assert "Do NOT reach for skip_previous_release_check" in between, (
+        "The never-released branch must tell the operator not to skip the check — "
+        "skipping publishes on top of a CHANGELOG that describes a phantom release."
+    )
+
+
 def test_publish_workflow_post_publish_check_is_warn_only() -> None:
     """The post-publish visibility poll must warn, never fail the build.
 
