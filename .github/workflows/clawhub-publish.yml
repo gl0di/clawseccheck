@@ -214,82 +214,6 @@ jobs:
           ruff check .
           python -m compileall clawseccheck
 
-      - name: Generate trusted engine digest (SHA256SUMS.txt)
-        # Reuses clawseccheck/integrity.py's package_digest() — the exact same
-        # sorted "relpath:sha256hex" combine logic that `--verify-self` prints —
-        # so the file a user diffs against is byte-for-byte the same computation,
-        # just produced out-of-band (from this checked-out tag, in CI) instead of
-        # from inside their own possibly-tampered install.
-        #
-        # B-590: the `notes` channel is opted into and its rows are annotated exactly as
-        # `--verify-self` annotates them. A symlink's row is a digest of the LINK (its
-        # name and target), not of any file's bytes, and this listing is cosign-signed —
-        # an unannotated row would be a false statement inside a signed artifact, and the
-        # two listings would silently stop matching, which is what the paragraph above
-        # promises they do. The repo has no symlinked entries today (`git ls-files -s`
-        # shows no 120000 mode), so this changes nothing about what is published; it is
-        # here so that if one ever appears, the signed file says what it is instead of
-        # quietly lying. An unreadable path raises out of package_digest() and fails the
-        # job, which is correct: never sign a digest over a tree we could not fully read.
-        run: |
-          set -euo pipefail
-          python3 - <<'PYEOF'
-          from clawseccheck import __version__
-          from clawseccheck.integrity import (
-              NOTE_PATH_ESCAPE, NOTE_SYMLINK, package_digest,
-          )
-
-          notes = []
-          combined, per_file = package_digest(notes=notes)
-          uncovered = {rel: (kind, detail) for kind, rel, detail in notes
-                       if kind in (NOTE_SYMLINK, NOTE_PATH_ESCAPE)}
-          lines = [
-              f"ClawSecCheck {__version__} — engine source digest (SHA-256)",
-              f"combined : {combined}",
-              "",
-          ]
-          for name, digest in sorted(per_file.items()):
-              note = uncovered.get(name)
-              if note is None:
-                  lines.append(f"  {digest}  {name}")
-              else:
-                  kind, target = note
-                  lines.append(f"  {digest}  {name}  [{kind} -> {target}; "
-                               f"name and target hashed, target contents NOT read]")
-          lines.append("")
-          lines.append(
-              "Compare the 'combined' value against the output of `clawseccheck --verify-self`."
-          )
-          lines.append("Any mismatch means a source file was modified after this release.")
-          with open("SHA256SUMS.txt", "w") as f:
-              f.write("\n".join(lines) + "\n")
-          PYEOF
-          echo "Wrote SHA256SUMS.txt:" && cat SHA256SUMS.txt
-
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
-
-      - name: Sign SHA256SUMS.txt (cosign keyless/OIDC)
-        # Keyless signing: cosign exchanges this job's GitHub Actions OIDC token
-        # (id-token: write, above) for a short-lived cert from Fulcio, signs the
-        # blob, and uploads the entry to the public Rekor transparency log —
-        # no signing key or secret to generate, store, or rotate. Anyone can later
-        # verify SHA256SUMS.txt was produced by *this* repo's release workflow with
-        # `cosign verify-blob --bundle` (exact command published in README/FAQ),
-        # without ever trusting a key we'd have to keep secret.
-        #
-        # Output is a single Sigstore bundle (signature + cert + Rekor proof) rather
-        # than the old detached .sig/.pem pair: cosign v3 (installer v4) flips
-        # --new-bundle-format's default to true, which silently ignores the
-        # --output-signature/--output-certificate flags (C-189). --bundle is the
-        # supported single-file path and round-trips on both cosign v2 and v3.
-        id: sign
-        run: |
-          set -euo pipefail
-          cosign sign-blob --yes \
-            --bundle SHA256SUMS.txt.bundle \
-            SHA256SUMS.txt
-          echo "Signed SHA256SUMS.txt -> SHA256SUMS.txt.bundle"
-
       - name: Log in to ClawHub
         # Token is passed only via env — never echoed or printed.
         run: clawhub login --token "$CLAWHUB_TOKEN"
@@ -493,29 +417,37 @@ jobs:
         # the threshold there would block ordinary releases for a defect that is gone.
         run: |
           set -euo pipefail
-          # Anchored to two measured facts rather than to a failure bracket:
-          #   * last known-good publish — 5,235,253 bytes (v3.59.0, 2026-08-05, Convex route)
-          #   * ClawHub's documented cap for POST /api/v1/skills — 50MB
-          # 10 MiB is ~2x the former and ~20% of the latter: loose enough that ordinary
-          # growth never trips it, tight enough that accidental bloat still does.
-          MAX_STAGED_BYTES=10485760  # 10 MiB
+          # Anchored to measured facts rather than to a failure bracket:
+          #   * last real publish - 8,092,721 bytes (v4.1.0, replayed from the tag)
+          #   * ClawHub's documented cap for POST /api/v1/skills - 50MB
+          # 16 MiB is 2.07x the former and 32% of the latter. Growth is about 0.5 MB per
+          # release. Caveat: the ceiling is anchored on the DOCUMENTED cap only; the largest
+          # size actually proven to publish is 8.09 MB, and an earlier documented cap turned
+          # out to be far lower in practice (upstream openclaw/clawhub#3375). The suite
+          # measures the real tree against 80% of this constant
+          # (tests/test_publish_workflow.py::test_staged_bundle_is_within_the_publish_guard),
+          # so the squeeze surfaces in CI a release before this guard would fire.
+          MAX_STAGED_BYTES=16777216  # 16 MiB
           # python3, not `du -sb`: -b/--bytes is a GNU coreutils extension, absent from
-          # BSD du (macOS runners in the CI matrix) — `du: invalid option -- b`. python3
+          # BSD du (macOS runners in the CI matrix) - `du: invalid option -- b`. python3
           # is unconditionally on PATH in this job already (the smoke gate above runs
           # pytest) and sums real file bytes the same way -b does (apparent size, not
           # allocated blocks), on every platform this workflow runs on.
           STAGED_BYTES="$(python3 -c 'import pathlib; print(sum(f.stat().st_size for f in pathlib.Path("dist/clawseccheck").rglob("*") if f.is_file()))')"
           if [ "$STAGED_BYTES" -gt "$MAX_STAGED_BYTES" ]; then
             echo "::error::Staged bundle is ${STAGED_BYTES} bytes, over the pre-upload guard" \
-                 "threshold of ${MAX_STAGED_BYTES} bytes (10 MiB). That is far above any" \
-                 "bundle this project has ever published, so treat it as accidental bloat" \
-                 "— check for a stray binary or a re-added docs/assets tree — rather than" \
-                 "as a limit to raise. ClawHub's documented cap is 50MB; if the staged tree" \
-                 "has genuinely grown this much on purpose, re-ground this threshold" \
-                 "against a real publish before pushing a release tag."
+                 "threshold of ${MAX_STAGED_BYTES} bytes (16 MiB). Do not assume bloat:" \
+                 "compare against the previous release first (replay this staging step at" \
+                 "the previous tag, or sum files[].size from" \
+                 "GET /api/v1/skills/clawseccheck/versions/<prev>). Growth of a few hundred" \
+                 "KB per release is normal, new checks land in clawseccheck/. If the delta" \
+                 "is ordinary growth, raise MAX_STAGED_BYTES here and re-ground its comment" \
+                 "(ClawHub's documented cap is 50MB). If it is large and sudden, look for a" \
+                 "stray binary or a re-added docs/assets tree."
+            python3 -c 'import pathlib,collections; d=collections.Counter(); r=pathlib.Path("dist/clawseccheck"); [d.update({f.relative_to(r).parts[0]: f.stat().st_size}) for f in r.rglob("*") if f.is_file()]; [print("  %10d  %s" % (v, k)) for k, v in d.most_common(8)]'
             exit 1
           fi
-          echo "Staged bundle size OK: ${STAGED_BYTES} bytes (guard limit ${MAX_STAGED_BYTES})."
+          echo "Staged bundle size OK: ${STAGED_BYTES} bytes (guard limit ${MAX_STAGED_BYTES}, $((STAGED_BYTES * 100 / MAX_STAGED_BYTES))% used)."
 
       - name: Preflight — verify the staged tree locally
         # Cheap, offline, deterministic checks on the artifact we are about to upload.
@@ -610,6 +542,167 @@ jobs:
           --version "${{ steps.ver.outputs.version }}"
           --changelog "Release ${{ steps.ver.outputs.version }} (${{ github.sha }})"
           --dry-run
+
+      - name: Generate trusted engine digest (SHA256SUMS.txt)
+        # Reuses clawseccheck/integrity.py's package_digest() — the exact same
+        # sorted "relpath:sha256hex" combine logic that `--verify-self` prints —
+        # so the file a user diffs against is byte-for-byte the same computation,
+        # just produced out-of-band (from this checked-out tag, in CI) instead of
+        # from inside their own possibly-tampered install.
+        #
+        # B-590: the `notes` channel is opted into and its rows are annotated exactly as
+        # `--verify-self` annotates them. A symlink's row is a digest of the LINK (its
+        # name and target), not of any file's bytes, and this listing is cosign-signed —
+        # an unannotated row would be a false statement inside a signed artifact, and the
+        # two listings would silently stop matching, which is what the paragraph above
+        # promises they do. The repo has no symlinked entries today (`git ls-files -s`
+        # shows no 120000 mode), so this changes nothing about what is published; it is
+        # here so that if one ever appears, the signed file says what it is instead of
+        # quietly lying.
+        #
+        # C-545: this step now runs AFTER "Stage publishable files" and lists a second
+        # section: every file staged beside the engine package (SKILL.md, audit.py,
+        # pyproject.toml, references/, docs/, ...) as it sits in dist/clawseccheck, so the
+        # signature attests what an install actually runs and not just clawseccheck/.
+        # Section 1 and its `combined` value are unchanged, so --verify-self still matches.
+        # Fail closed: with notes=[] package_digest() does NOT raise on an unreadable or
+        # vanished path, it reports it, so this code refuses to sign over a tree it could
+        # not fully read (an earlier comment claimed it raised; it does not).
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import sys
+          from pathlib import Path
+          from clawseccheck import __version__
+          from clawseccheck.integrity import (
+              NOTE_PATH_ESCAPE, NOTE_SYMLINK, NOTE_UNREADABLE, NOTE_VANISHED,
+              package_digest,
+          )
+
+          def fail(msg):
+              print("::error::" + msg)
+              sys.exit(1)
+
+          def refuse_unread(notes, tree):
+              bad = sorted(rel for kind, rel, _ in notes
+                           if kind in (NOTE_UNREADABLE, NOTE_VANISHED))
+              if bad:
+                  fail(f"{tree}: {len(bad)} path(s) could not be read ({', '.join(bad[:3])}); "
+                       "refusing to sign a digest over a tree that was not fully read.")
+
+          def covered(notes):
+              return {rel: (kind, detail) for kind, rel, detail in notes
+                      if kind in (NOTE_SYMLINK, NOTE_PATH_ESCAPE)}
+
+          def row(name, digest, uncovered):
+              note = uncovered.get(name)
+              if note is None:
+                  return f"  {digest}  {name}"
+              kind, target = note
+              return (f"  {digest}  {name}  [{kind} -> {target}; "
+                      f"name and target hashed, target contents NOT read]")
+
+          notes = []
+          combined, per_file = package_digest(notes=notes)
+          refuse_unread(notes, "clawseccheck/")
+          uncovered = covered(notes)
+          lines = [
+              f"ClawSecCheck {__version__} — engine source digest (SHA-256)",
+              f"combined : {combined}",
+              "",
+          ]
+          for name, digest in sorted(per_file.items()):
+              lines.append(row(name, digest, uncovered))
+          lines.append("")
+          lines.append(
+              "Compare the 'combined' value against the output of `clawseccheck --verify-self`."
+          )
+          lines.append("Any mismatch means a source file was modified after this release.")
+
+          # Section 2: the staged bundle. Walk-derived on purpose, so a file added to the
+          # staging step is covered without touching this code.
+          staged = Path("dist/clawseccheck")
+          if not (staged / "SKILL.md").is_file():
+              fail("dist/clawseccheck/SKILL.md is missing: run this after staging.")
+          snotes = []
+          _, smap = package_digest(pkg_dir=staged, notes=snotes)
+          refuse_unread(snotes, "dist/clawseccheck")
+          pkg_prefix = "clawseccheck/"
+          staged_pkg = {k[len(pkg_prefix):]: v for k, v in smap.items()
+                        if k.startswith(pkg_prefix)}
+          if staged_pkg != per_file:
+              fail("the staged clawseccheck/ package differs from the checked-out one "
+                   "that section 1 digests.")
+          extra = {k: v for k, v in smap.items() if not k.startswith(pkg_prefix)}
+          for required in ("SKILL.md", "audit.py"):
+              if required not in extra:
+                  fail(f"{required} is missing from the staged bundle listing.")
+          suncovered = covered(snotes)
+          lines.append("")
+          lines.append(
+              "Bundle files outside the engine package (bytes as staged for the ClawHub "
+              "install; the published CHANGELOG.md is the trimmed copy)"
+          )
+          for name, digest in sorted(extra.items()):
+              lines.append(row(name, digest, suncovered))
+          with open("SHA256SUMS.txt", "w") as f:
+              f.write("\n".join(lines) + "\n")
+          PYEOF
+          echo "Wrote SHA256SUMS.txt:" && cat SHA256SUMS.txt
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Sign SHA256SUMS.txt (cosign keyless/OIDC)
+        # Keyless signing: cosign exchanges this job's GitHub Actions OIDC token
+        # (id-token: write, above) for a short-lived cert from Fulcio, signs the
+        # blob, and uploads the entry to the public Rekor transparency log —
+        # no signing key or secret to generate, store, or rotate. Anyone can later
+        # verify SHA256SUMS.txt was produced by *this* repo's release workflow with
+        # `cosign verify-blob --bundle` (exact command published in README/FAQ),
+        # without ever trusting a key we'd have to keep secret.
+        #
+        # Output is a single Sigstore bundle (signature + cert + Rekor proof) rather
+        # than the old detached .sig/.pem pair: cosign v3 (installer v4) flips
+        # --new-bundle-format's default to true, which silently ignores the
+        # --output-signature/--output-certificate flags (C-189). --bundle is the
+        # supported single-file path and round-trips on both cosign v2 and v3.
+        #
+        # C-545: signs AFTER staging, so the listing covers the staged non-package files
+        # too, and after every side-effect-free preflight, so a run that would die earlier
+        # never burns a public Rekor entry. It still runs strictly before Publish.
+        id: sign
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --bundle SHA256SUMS.txt.bundle \
+            SHA256SUMS.txt
+          echo "Signed SHA256SUMS.txt -> SHA256SUMS.txt.bundle"
+
+      - name: Verify the signed bundle with the documented command
+        # C-545: signing was never verified in CI, so a bundle the README command
+        # rejects could ship. This runs the exact user-facing command against the fresh
+        # bundle. A few attempts absorb TUF/network flake; a genuinely invalid signature
+        # fails every attempt and fails the job.
+        run: |
+          set -euo pipefail
+          ok=0
+          for attempt in 1 2 3; do
+            if cosign verify-blob \
+              --bundle SHA256SUMS.txt.bundle \
+              --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              SHA256SUMS.txt; then
+              ok=1
+              break
+            fi
+            echo "Bundle verification attempt ${attempt} failed."
+            sleep 10
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::SHA256SUMS.txt.bundle does not verify with the documented command."
+            exit 1
+          fi
+          echo "Bundle verified."
 
       - name: Probe pre-publish liveness
         # C-368: classifies (never gates) whether this version was ALREADY live on
@@ -805,15 +898,57 @@ jobs:
           VER="${GITHUB_REF_NAME#v}"
           NOTES="$(awk -v v="## [$VER]" 'index($0,v){f=1;next} /^## \[/{f=0} f' CHANGELOG.md)"
           [ -z "$NOTES" ] && NOTES="Release ${GITHUB_REF_NAME} — see CHANGELOG.md."
-          gh release create "${GITHUB_REF_NAME}" --verify-tag \
-            --title "ClawSecCheck ${GITHUB_REF_NAME}" --notes "$NOTES" \
-            || echo "GitHub Release already exists for ${GITHUB_REF_NAME}"
-          # C-368: --clobber removed — a DUPLICATE verdict must never let this run's
-          # bytes silently overwrite a prior, honestly-signed release's assets.
-          # Tolerate "already attached" instead of failing loudly on a re-run.
-          gh release upload "${GITHUB_REF_NAME}" \
-            SHA256SUMS.txt SHA256SUMS.txt.bundle \
-            || echo "Release assets already attached for ${GITHUB_REF_NAME} (not overwriting)."
+          TAG="${GITHUB_REF_NAME}"
+          ASSETS=(SHA256SUMS.txt SHA256SUMS.txt.bundle)
+          # C-545: an existing release is completed idempotently and the run fails unless
+          # both assets are verifiably attached. Nothing here swallows an error.
+          # Assets go on at create time, which also works when GitHub immutable releases
+          # are enabled. A DUPLICATE verdict must never let this run's bytes overwrite a
+          # prior, honestly-signed release, so nothing is ever force-replaced (C-368).
+          asset_names() {
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
+          }
+          ensure_release() {
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              names="$(asset_names)" || return 1
+              have=0
+              for a in "${ASSETS[@]}"; do
+                if printf '%s\n' "$names" | grep -qxF "$a"; then have=$((have + 1)); fi
+              done
+              if [ "$have" -eq 2 ]; then
+                echo "Release ${TAG} already carries both assets; not touching them."
+                return 0
+              fi
+              if [ "$have" -eq 1 ]; then
+                echo "::error::Release ${TAG} has only one of the two signed assets; a human must resolve the mismatch."
+                exit 1
+              fi
+              gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
+                SHA256SUMS.txt SHA256SUMS.txt.bundle || return 1
+            else
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+                --title "ClawSecCheck ${TAG}" --notes "$NOTES" \
+                SHA256SUMS.txt SHA256SUMS.txt.bundle || return 1
+            fi
+          }
+          done_ok=0
+          for attempt in 1 2 3; do
+            if ensure_release; then done_ok=1; break; fi
+            echo "Release attempt ${attempt} failed."
+            sleep 15
+          done
+          if [ "$done_ok" != 1 ]; then
+            echo "::error::Could not create or complete the GitHub Release for ${TAG}."
+            exit 1
+          fi
+          final="$(asset_names)"
+          for a in "${ASSETS[@]}"; do
+            if ! printf '%s\n' "$final" | grep -qxF "$a"; then
+              echo "::error::Release ${TAG} is missing ${a} after the upload."
+              exit 1
+            fi
+          done
+          echo "Release ${TAG} carries ${ASSETS[*]}."
 
       - name: Finalize job status
         # C-368: the single pass/fail point for this job's publish outcome. Every step
