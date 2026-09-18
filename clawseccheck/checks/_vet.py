@@ -6796,7 +6796,7 @@ def _vet_resolved_skill(p: Path) -> Finding:
             finding = _custom("B13", HIGH, UNKNOWN, f"could not read {p}: {exc}", "—")
             finding.ctx = ctx
             return finding
-        name = p.parent.name or p.stem
+        name = p.name or p.stem
         text = _read_skill_text(p, ctx)
         py_sources = read_skill_python(p, ctx)
         shell_sources = read_skill_shell(p, ctx)
