@@ -354,13 +354,21 @@ jobs:
             exit 0
           fi
 
-          # Was PREV ever actually released? A tag is this repo's record of the attempt —
-          # §6 tags first, then the tag push triggers this workflow — so no tag means no
-          # publish was ever tried, and a 404 is then expected rather than alarming.
+          # A 404 has THREE causes, not two, and they want different answers. The tag says
+          # whether a release was attempted; the GitHub Release says whether that attempt
+          # got as far as producing signed artifacts, which this job only does on the
+          # publish path. v4.2.0 is the worked example of the middle case: tagged, the job
+          # failed at this very step, so nothing was ever uploaded — calling that "lost in
+          # the registry" would send someone hunting for a version ClawHub never saw.
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${PREV}" >/dev/null 2>&1; then
             PREV_TAGGED=true
           else
             PREV_TAGGED=false
+          fi
+          if gh release view "v${PREV}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            PREV_RELEASED=true
+          else
+            PREV_RELEASED=false
           fi
 
           if [ "$PREV_TAGGED" = "false" ]; then
@@ -374,10 +382,21 @@ jobs:
             exit 1
           fi
 
-          echo "::error::Previous release ${PREV} is NOT on ClawHub (HTTP ${CODE}), and" \
-               "v${PREV} IS tagged — so it was published and never surfaced. Publishing" \
-               "another version on top of it will bury the problem. Investigate first, or" \
-               "re-run with skip_previous_release_check=true to proceed deliberately."
+          if [ "$PREV_RELEASED" = "false" ]; then
+            echo "::error::v${PREV} is tagged but has no GitHub Release, so its publish" \
+                 "never completed and ClawHub was never given it — the 404 is expected." \
+                 "Note that release tags are immutable here (the release-tags ruleset" \
+                 "blocks update/delete on refs/tags/v*), so a failed attempt burns its" \
+                 "number: fold the ${PREV} entry into the version that actually ships" \
+                 "this content rather than trying to re-point v${PREV}."
+            exit 1
+          fi
+
+          echo "::error::Previous release ${PREV} is NOT on ClawHub (HTTP ${CODE}), yet" \
+               "v${PREV} is tagged AND has a GitHub Release — so it was published and" \
+               "never surfaced. Publishing another version on top of it will bury the" \
+               "problem. Investigate first, or re-run with" \
+               "skip_previous_release_check=true to proceed deliberately."
 
           # Auto-diagnose so nobody has to repeat the manual investigation. A stalled scan
           # shows up as null scanner outputs (~5 bytes) next to a populated static-analysis
