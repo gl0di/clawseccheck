@@ -664,6 +664,43 @@ def test_release_listing_refuses_to_sign_over_an_unreadable_file(tmp_path, monke
     assert hits, "the injection must actually have taken"
 
 
+@pytest.mark.parametrize("case", ["staged_docs_only", "same_file_in_both_trees"])
+@pytest.mark.parametrize("exc_kind", ["denied", "vanished"])
+def test_refuse_unread_is_the_only_guard_for_these_cases(
+        tmp_path, monkeypatch, capsys, case, exc_kind):
+    """Cases no other guard catches, so only ``refuse_unread`` stands between them and a
+    signed partial listing: a NON-required staged file (docs/x.md is neither SKILL.md nor
+    audit.py, and is outside the package so the staged-vs-checkout comparison never sees
+    it), and one package file unreadable in BOTH trees (both maps lose it, so they still
+    agree). The error must also name the tree that was not fully read. (The generator stops
+    at the first tree that fails, so the second file is not necessarily read.)"""
+    pkg = _pkg(tmp_path)
+    staged = _fake_staged(tmp_path, pkg)
+    if case == "staged_docs_only":
+        targets = {(staged / "docs" / "x.md").resolve()}
+        tree = "dist/clawseccheck"
+    else:
+        targets = {(pkg / "a.py").resolve(), (staged / "clawseccheck" / "a.py").resolve()}
+        tree = "clawseccheck/"
+    real = pathlib.Path.read_bytes
+    hits = []
+
+    def fake(self):
+        if self.resolve() in targets:
+            hits.append(self)
+            if exc_kind == "denied":
+                raise PermissionError(13, "Permission denied", str(self))
+            raise FileNotFoundError(errno.ENOENT, "gone", str(self))
+        return real(self)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", fake)
+    _expect_exit_1(tmp_path, monkeypatch, pkg)
+    assert hits, "the injection must actually have taken"
+    out = capsys.readouterr().out
+    assert "could not be read" in out
+    assert f"::error::{tree}:" in out
+
+
 def test_release_listing_refuses_a_vanished_file(tmp_path, monkeypatch):
     pkg = _pkg(tmp_path)
     _fake_staged(tmp_path, pkg)
