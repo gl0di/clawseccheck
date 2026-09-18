@@ -461,6 +461,12 @@ workflow and hasn't been altered since — not that the CI pipeline itself is un
 This closes the loop against opportunistic tampering of a downloaded copy; it is not a
 guarantee against a targeted adversary who also compromises the CI pipeline.
 
+The same file also lists the files shipped beside the engine package (`SKILL.md`,
+`audit.py`, `pyproject.toml`, `references/cli-flags.md`, `docs/`, …) under a separate,
+labelled section, as they sit in the installed bundle. `--verify-self` covers only the
+package, so compare those with `sha256sum <file>` from the install directory. The
+published `CHANGELOG.md` is the trimmed copy, so its digest is of that copy.
+
 **What the digest covers, and when the command exits non-zero.** The walk hashes every file
 in the package tree at every depth, *except* the contents of the regenerated-artifact
 directories `__pycache__`, `.ruff_cache`, `.mypy_cache`, `.pytest_cache` and `.git` — those

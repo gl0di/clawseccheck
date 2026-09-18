@@ -332,6 +332,12 @@ cosign verify-blob \
 A passing verification proves the reference digest was produced by this repo's
 release workflow and hasn't been altered since.
 
+`SHA256SUMS.txt` also lists the files shipped beside the engine package
+(`SKILL.md`, `audit.py`, `pyproject.toml`, `references/cli-flags.md`, `docs/`, …)
+under a separate, labelled section, as they sit in the installed bundle. Compare
+any of them with `sha256sum <file>` from the install directory. The published
+`CHANGELOG.md` is the trimmed copy, so its digest is of that copy.
+
 </details>
 
 ## 🚩 Why security scanners flag this repo

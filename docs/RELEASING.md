@@ -70,10 +70,12 @@ CHANGELOG prose by hand.
 
 ## 6) Tag and publish
 
-Tag `vX.Y.Z` and push the tag. The publish workflow runs tests again, generates
-`SHA256SUMS.txt`, signs it with keyless cosign, creates the GitHub Release with
-those assets, and publishes to ClawHub. Publishing is deliberately tag-gated —
-there is no auto-release.
+Tag `vX.Y.Z` and push the tag. The publish workflow runs tests again, stages the
+bundle, and only then generates `SHA256SUMS.txt` (the engine package plus every
+staged file beside it), signs it with keyless cosign, and verifies the bundle
+with the documented user command. After publishing to ClawHub it creates the
+GitHub Release with both assets and fails the run unless both are attached.
+Publishing is deliberately tag-gated — there is no auto-release.
 
 ## Release-notes template
 
