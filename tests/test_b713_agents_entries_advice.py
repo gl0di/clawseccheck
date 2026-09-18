@@ -82,6 +82,14 @@ _LABEL_BUILDER_SITES = {
     # built from it always renders the key next to its replacement, agents.entries.
     ("clawseccheck/checks/_shared.py", None, "agents.list"):
         "retired-key table key (the finding pairs it with its replacement)",
+    # Codex-harness determination: the per-entry position label of a model ref read from
+    # the legacy array. Reached only when the config carries agents.list and no agents.entries.
+    ("clawseccheck/harnessruntime.py", "model_refs", "agents.list."):
+        "legacy-array per-entry position label",
+    # The bail reason names the key that IS on disk and is malformed; raised only when the
+    # config carries agents.list and no agents.entries, so it cannot misdirect a modern config.
+    ("clawseccheck/harnessruntime.py", "_analyse", "agents.list is not an array"):
+        "position label of a malformed legacy array",
 }
 
 
