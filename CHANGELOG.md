@@ -113,7 +113,12 @@ laying groundwork for future self-modification checks (no check consumes it yet)
   asks/requests keyword trigger; B65 no longer lets a negated Red-Lines bullet
   corroborate an unrelated trigger; an agent-config-persistence hit now routes onto
   the Persistence risk axis; and a keyword-gated hidden-trigger shape now reaches the
-  judge packet instead of being dropped.
+  judge packet instead of being dropped. B321 reads `browser.profiles.*.mcpArgs`; B48
+  flags `gateway.controlUi.experimental.customPlugins` as a break-glass override; B168
+  captures and scans cron `command`/`script`/`agentTurn` payload fields, including
+  dormant and legacy `jobs.json` shapes; B172 distinguishes a binary-wide grant from an
+  argument-restricted one; and the outbound trifecta leg matches write tools by exact id
+  rather than by prefix.
 - **Reporting and CLI polish**, gathered from ongoing use: the scan receipt is now
   bound to check id/status/title/fix text and its status is canonicalized before
   hashing; HTML and PDF exports disclose what they omit relative to the text report;
@@ -121,11 +126,13 @@ laying groundwork for future self-modification checks (no check consumes it yet)
   a capped score on the shareable badge; export write-failures now print to stderr
   instead of stdout; `Ctrl+C` no longer prints a raw traceback; and the
   behavioural phase is no longer dropped from the dashboard's layer ledger.
+- **The coverage page is rendered, not just computed.** `--dashboard --full`, `--html`
+  and `--pdf` showed nothing for it; it now appears as its own section in all three.
 
 ### Changed
 
 - **Docs and test-count claims re-stamped for this cycle (§6.2/C-125).** Exact test
-  and fixture-file counts were restated (23,228 -> 24,372 tests, 801 -> 861 files); the
+  and fixture-file counts were restated (23,228 -> 24,370 tests, 801 -> 861 files); the
   dist citation baseline was re-recorded against installed OpenClaw 2026.9.4; the
   state-schema snapshot was re-baselined to register the new `update_runs` table
   (9 -> 10 tables); and several stale docstring/module size-exemption claims flagged

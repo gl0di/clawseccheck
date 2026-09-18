@@ -1,34 +1,46 @@
 """Tests for .github/workflows/ci.yml.
 
-This file existed with ~1,300 lines of tests pinning the sibling publish workflow and
-none at all pinning CI — so the gate that actually protects `main` could be narrowed
-silently, while the one that ships to users could not. C-543/C-544 made the two
-workflows depend on each other (the publish job reads the check-runs CI produces), and
-a dependency nothing pins is a dependency that rots.
+~1,300 lines of tests pinned the sibling publish workflow and none pinned CI — so the
+gate that protects `main` could be narrowed silently while the one that ships to users
+could not. C-543/C-544 then made the two workflows depend on each other (the publish job
+reads the check-runs CI produces), and a dependency nothing pins is one that rots.
 
-Read as YAML here rather than as text: these assertions are about structure (triggers,
-concurrency, job names), not about wording.
+Read as TEXT, not via pyyaml, for the reason tests/test_publish_workflow.py states in its
+own docstring: the package is stdlib-only and CI installs exactly `pytest` and `ruff`. A
+first version of this file used `pytest.importorskip("yaml")`, which passed locally (this
+box happens to have pyyaml) and SKIPPED THE ENTIRE MODULE on every CI run — five guards
+reporting green while never executing. That is the failure mode this project's §4 forbids,
+and it was caught only by an independent pre-release review. Do not reintroduce a yaml
+import here: if a future assertion genuinely needs a parser, add pyyaml to ci.yml's install
+line so its absence reddens the build instead of silencing the file.
 """
 import re
 from pathlib import Path
-
-import pytest
-
-yaml = pytest.importorskip("yaml", reason="pyyaml is not a runtime dep; skip where absent")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CI_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 PUBLISH_PATH = REPO_ROOT / ".github" / "workflows" / "clawhub-publish.yml"
 
 
-def _ci() -> dict:
-    return yaml.safe_load(CI_PATH.read_text(encoding="utf-8"))
+def _strip_comments(text: str) -> str:
+    """Drop whole-line comments so prose about a key is never mistaken for the key."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
-def _triggers(doc: dict) -> dict:
-    # PyYAML parses a bare `on:` key as the boolean True (the Norway problem), so accept
-    # either spelling rather than asserting one and silently testing nothing.
-    return doc.get("on") if "on" in doc else doc.get(True)
+def _top_level_block(text: str, key: str) -> str:
+    """Return the lines under a top-level `key:`, up to the next top-level key."""
+    lines = _strip_comments(text).splitlines()
+    out, collecting = [], False
+    for line in lines:
+        if re.match(rf"^{re.escape(key)}:", line):
+            collecting = True
+            out.append(line)
+            continue
+        if collecting:
+            if line and not line[0].isspace():
+                break
+            out.append(line)
+    return "\n".join(out)
 
 
 def test_push_is_filtered_to_the_long_lived_branches() -> None:
@@ -37,30 +49,35 @@ def test_push_is_filtered_to_the_long_lived_branches() -> None:
     Measured on the v4.2.0 release: five CI runs where three would do — the dev push and
     the PR-opened event covered the same tree, and the tag push re-ran everything on a
     commit `main` had proven green 24 minutes earlier (~56 runner-minutes per run, the
-    3.9 leg alone taking 23m32s).
+    3.9 leg alone 23m32s).
     """
-    push = _triggers(_ci())["push"]
-    assert isinstance(push, dict) and "branches" in push, (
+    # PyYAML would read a bare `on:` as the boolean True; reading text sidesteps that
+    # entirely, which is a second reason this module does not want a parser.
+    block = _top_level_block(CI_PATH.read_text(encoding="utf-8"), "on")
+    assert block, "ci.yml has no top-level `on:` block."
+
+    branches = re.search(r"^\s+push:\s*\n\s+branches:\s*\[([^\]]*)\]", block, re.M)
+    assert branches, (
         "ci.yml's `push:` trigger must be filtered by branch — unfiltered, every PR "
-        "branch push runs the matrix a second time on top of the pull_request event."
+        f"branch push runs the matrix a second time on top of the pull_request event.\n"
+        f"Got:\n{block}"
     )
-    assert set(push["branches"]) == {"main", "dev"}, (
-        f"Expected push filtered to main/dev, got {push['branches']!r}."
-    )
+    got = {b.strip().strip("'\"") for b in branches.group(1).split(",") if b.strip()}
+    assert got == {"main", "dev"}, f"Expected push filtered to main/dev, got {sorted(got)}."
 
 
 def test_ci_does_not_run_on_tag_pushes() -> None:
     """A tag points at a commit `main` already validated; re-running is pure duplication.
 
     This is only safe because clawhub-publish.yml reads the SHA's existing check-runs
-    instead of waiting for a fresh run — so the two assertions live together here: if
-    someone removes the publish-side gate, this test's reason for existing is gone and
-    the comment below is where they should land.
+    instead of waiting for a fresh run, so both halves are asserted together: if someone
+    removes the publish-side gate, the test that justifies dropping the tag trigger fails
+    and says why.
     """
-    push = _triggers(_ci())["push"]
-    assert "tags" not in push, (
+    block = _top_level_block(CI_PATH.read_text(encoding="utf-8"), "on")
+    assert not re.search(r"^\s+tags(-ignore)?:", block, re.M), (
         "ci.yml must not run on tag pushes: the tagged commit was already validated on "
-        "main, and the publish workflow consumes those check-runs."
+        f"main, and the publish workflow consumes those check-runs.\nGot:\n{block}"
     )
 
     publish = PUBLISH_PATH.read_text(encoding="utf-8")
@@ -78,72 +95,117 @@ def test_concurrency_never_cancels_a_main_run() -> None:
     commit landed would leave a SHA with an incomplete context set, which that gate
     (correctly) refuses to publish.
     """
-    doc = _ci()
-    conc = doc.get("concurrency")
-    assert isinstance(conc, dict), "ci.yml must declare a `concurrency:` group."
-    assert "${{ github.ref }}" in conc.get("group", ""), (
+    block = _top_level_block(CI_PATH.read_text(encoding="utf-8"), "concurrency")
+    assert block, "ci.yml must declare a top-level `concurrency:` group."
+    assert "${{ github.ref }}" in block, (
         "The concurrency group must be per-ref, or unrelated branches cancel each other."
     )
-    cancel = str(conc.get("cancel-in-progress", ""))
-    assert "refs/heads/main" in cancel and "!=" in cancel, (
+    cancel = re.search(r"cancel-in-progress:\s*(.+)", block)
+    assert cancel, "concurrency must set cancel-in-progress."
+    expr = cancel.group(1).strip()
+    assert "refs/heads/main" in expr and "!=" in expr, (
         "cancel-in-progress must exempt main — a cancelled main run leaves the SHA "
-        f"without the contexts the publish gate requires. Got: {cancel!r}"
+        f"without the contexts the publish gate requires. Got: {expr!r}"
     )
 
 
-def test_required_contexts_exist_as_jobs() -> None:
-    """The publish gate's required-context list must name jobs CI actually produces.
+def _ci_contexts_on_push_to_main() -> set:
+    """The check-run names ci.yml produces for a push to main.
 
-    A context that no job emits can never go green, so the gate would block every
-    release; a job renamed here without updating the gate does the same thing. Pinning
-    both sides against each other is what keeps the rename honest.
+    A matrix job's context is "<job> (<matrix values, comma-joined>)"; a plain job's is
+    its name. Jobs gated on `pull_request` do not run on a push and so cannot be required.
     """
-    doc = _ci()
-    jobs = doc["jobs"]
-
-    # Read the value through YAML rather than by regex: the block is a literal scalar
-    # inside a step's env, and a text scan bounded only by indentation swallows the
-    # `run:` body that follows it.
-    publish_doc = yaml.safe_load(PUBLISH_PATH.read_text(encoding="utf-8"))
-    declared = [
-        (step.get("env") or {}).get("REQUIRED_CONTEXTS")
-        for step in publish_doc["jobs"]["publish"]["steps"]
-    ]
-    raw = next((v for v in declared if v), None)
-    assert raw, "The publish gate must declare REQUIRED_CONTEXTS in its step env."
-    contexts = [line.strip() for line in raw.splitlines() if line.strip()]
-    assert contexts, "REQUIRED_CONTEXTS is empty — the gate would pass vacuously."
-
-    # A matrix job's context is "<job> (<matrix values, comma-joined>)"; a plain job's is
-    # just its name. Derive both shapes from ci.yml rather than hardcoding the six.
+    text = _strip_comments(CI_PATH.read_text(encoding="utf-8"))
+    jobs_block = text.split("\njobs:", 1)[1]
     produced = set()
-    for name, job in jobs.items():
-        include = (job.get("strategy") or {}).get("matrix", {}).get("include")
-        if include:
-            for combo in include:
-                produced.add(f"{name} ({', '.join(str(v) for v in combo.values())})")
+    # Job keys sit at exactly two spaces of indent inside `jobs:`.
+    for m in re.finditer(r"^  ([A-Za-z0-9_-]+):\s*$", jobs_block, re.M):
+        name = m.group(1)
+        start = m.end()
+        nxt = re.search(r"^  [A-Za-z0-9_-]+:\s*$", jobs_block[start:], re.M)
+        body = jobs_block[start:start + nxt.start()] if nxt else jobs_block[start:]
+        if re.search(r"^\s+if:.*pull_request", body, re.M):
+            continue
+        combos = re.findall(r"^\s+- \{([^}]*)\}\s*$", body, re.M)
+        if combos:
+            for combo in combos:
+                values = [p.split(":", 1)[1].strip().strip("'\"") for p in combo.split(",")]
+                produced.add(f"{name} ({', '.join(values)})")
         else:
             produced.add(name)
+    return produced
 
-    missing = [c for c in contexts if c not in produced]
-    assert not missing, (
-        f"The publish gate requires contexts no ci.yml job produces: {missing}. "
-        f"ci.yml produces: {sorted(produced)}"
+
+def _declared_required_contexts() -> list:
+    """The contexts the publish gate requires, read out of its literal YAML block."""
+    text = PUBLISH_PATH.read_text(encoding="utf-8")
+    m = re.search(r"^(\s+)REQUIRED_CONTEXTS:\s*\|\s*$", text, re.M)
+    assert m, "The publish gate must declare REQUIRED_CONTEXTS as a literal (|) block."
+    indent = len(m.group(1))
+    out = []
+    for line in text[m.end():].splitlines()[1:]:
+        if line.strip() and (len(line) - len(line.lstrip())) <= indent:
+            break
+        if line.strip():
+            out.append(line.strip())
+    return out
+
+
+def test_required_contexts_match_the_jobs_ci_runs_on_main() -> None:
+    """The gate's list and ci.yml's push-to-main jobs must be the SAME set, both ways.
+
+    A one-directional check (every required context exists) lets the list be silently
+    narrowed — delete five of six lines and it still passes — and lets a newly protected
+    job be added without the release path ever requiring it. The gate's own comment
+    concedes this list is a second copy of branch protection; equality in both directions
+    is what keeps that copy honest.
+    """
+    contexts = _declared_required_contexts()
+    assert contexts, "REQUIRED_CONTEXTS is empty — the gate would pass vacuously."
+
+    produced = _ci_contexts_on_push_to_main()
+    assert set(contexts) == produced, (
+        "The publish gate's required contexts must equal the jobs ci.yml runs on a push "
+        f"to main.\n  gate requires: {sorted(contexts)}\n  ci.yml produces: {sorted(produced)}\n"
+        f"  only in gate: {sorted(set(contexts) - produced)}\n"
+        f"  only in ci.yml: {sorted(produced - set(contexts))}"
     )
 
 
-def test_every_third_party_action_is_sha_pinned() -> None:
-    """A floating tag can be moved; a SHA cannot.
+def test_the_gate_refuses_an_empty_context_list_in_the_shell() -> None:
+    """The one fail-open path must be closed by the workflow, not only by this file.
 
-    ci.yml runs on every push including PRs from forks, so an action resolved by tag is
-    an arbitrary-code-execution surface that someone else controls.
+    With REQUIRED_CONTEXTS empty the loop reads nothing, so pending/failed/missing all
+    stay empty and the step announces "all required checks are green" having checked
+    none. `set -u` catches unset but not empty, so the shell has to say so itself — a
+    test cannot, because a test that is skipped (as this whole module once was in CI)
+    protects nothing.
     """
-    unpinned = []
-    for lineno, line in enumerate(CI_PATH.read_text(encoding="utf-8").splitlines(), 1):
-        m = re.search(r"uses:\s*([^\s#]+)", line)
-        if not m or m.group(1).startswith("./"):
-            continue
-        ref = m.group(1).split("@")[-1]
-        if not re.fullmatch(r"[0-9a-f]{40}", ref):
-            unpinned.append(f"{lineno}: {m.group(1)}")
-    assert not unpinned, f"Actions must be pinned to a full commit SHA: {unpinned}"
+    text = PUBLISH_PATH.read_text(encoding="utf-8")
+    assert "REQUIRED_CONTEXTS is empty" in text, (
+        "The gate step must fail explicitly on an empty REQUIRED_CONTEXTS."
+    )
+    guard = text.index("REQUIRED_CONTEXTS is empty")
+    loop = text.index("for attempt in $(seq")
+    assert guard < loop, "The empty-list guard must run before the polling loop."
+
+
+def test_duplicate_check_runs_are_folded_worst_first() -> None:
+    """One context name can appear more than once on a SHA, and order is not a contract.
+
+    Measured on c26a8ba: each of the six required names appears twice, from two
+    check-suites, because the endpoint's `latest` filter does not dedupe across suites.
+    Taking the first row makes the verdict depend on the API's undocumented ordering — a
+    green copy listed before a failed one would pass the gate.
+    """
+    text = PUBLISH_PATH.read_text(encoding="utf-8")
+    gate = text[text.index("Gate — the commit being published"):]
+    gate = gate[: gate.index("\n      - name:", 1)]
+    assert "{print; exit}" not in gate, (
+        "The gate must not stop at the first matching check-run: duplicates are real and "
+        "their order is not guaranteed, so every row for a context has to be folded."
+    )
+    assert "select(.app.id ==" in gate, (
+        "The check-run query must select the app branch protection pins these contexts "
+        "to, or a same-named run from any other app could satisfy a required context."
+    )

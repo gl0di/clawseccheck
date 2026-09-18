@@ -105,13 +105,21 @@ jobs:
         # B2/B70 accept a world-open trustedProxies and emit the exact lying PASS the check
         # existed to prevent; it was caught on a tag only because a human was watching CI.
         #
-        # Reading the SHA's own check-runs reuses branch protection as the single source of
-        # truth rather than growing a second, drifting copy of the gate list here. It also
-        # pulls gitleaks, markdownlint and commit-integrity onto the release path for free.
+        # Reading the SHA's own check-runs is far cheaper than duplicating the 3.9/macOS
+        # matrix into this job, and pulls gitleaks, markdownlint and commit-integrity onto
+        # the release path for free. The list below IS a second copy of branch protection's
+        # required contexts — there is no API-free way to avoid that — so it is kept honest
+        # from the other end: tests/test_ci_workflow.py asserts it equals the set of ci.yml
+        # jobs that run on a push to main, so both narrowing this list and adding a new
+        # protected job fail the build.
         #
         # Paired with ci.yml no longer running on tag pushes (C-543): these contexts come
         # from the push to `main` that preceded the tag, so nothing is re-run to satisfy
-        # this. The poll covers a tag pushed while that run is still finishing.
+        # this. §6 already requires main's CI to be green BEFORE tagging, so the poll is a
+        # lag absorber, not a substitute for that — but it is sized to cover a full run
+        # (measured: 23m36s for c26a8ba, the 3.9 leg alone 23m32s) because a tag pushed a
+        # minute early would otherwise kill the job AND spend the release approval, which
+        # is granted before any step runs and would have to be granted again on the re-run.
         env:
           GH_TOKEN: ${{ github.token }}
           # A literal block (|), not a folded one (>-): folding joins these with spaces,
@@ -136,20 +144,39 @@ jobs:
           fi
           echo "OK: ${GITHUB_SHA} is on main."
 
+          # An empty list would make every loop below find nothing and the gate would
+          # announce success having checked nothing — the one way this step can fail OPEN,
+          # so the shell refuses it directly rather than relying on a test to notice.
+          # (Unset already dies under `set -u`; empty did not.)
+          if [ -z "${REQUIRED_CONTEXTS//[[:space:]]/}" ]; then
+            echo "::error::REQUIRED_CONTEXTS is empty — the gate would pass vacuously."
+            exit 1
+          fi
+
           # A never-run context is indistinguishable from a deleted one here, so absence is
           # a failure, not a skip: this gate exists precisely for the case where nothing ran.
-          for attempt in $(seq 1 10); do
+          for attempt in $(seq 1 30); do
+            # app.id 15368 is GitHub Actions, which is what branch protection pins each of
+            # these contexts to — without the filter any app could satisfy a required name.
             RUNS="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
-                      --paginate --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')"
+                      --paginate --jq '.check_runs[] | select(.app.id == 15368)
+                                       | [.name, .status, (.conclusion // "")] | @tsv')"
             PENDING=""; FAILED=""; MISSING=""
             while IFS= read -r ctx; do
               [ -n "$ctx" ] || continue
-              LINE="$(printf '%s\n' "$RUNS" | awk -F'\t' -v c="$ctx" '$1==c {print; exit}')"
-              if [ -z "$LINE" ]; then MISSING="${MISSING}${ctx}; "; continue; fi
-              STATUS="$(printf '%s' "$LINE" | cut -f2)"
-              CONCL="$(printf '%s' "$LINE" | cut -f3)"
-              if [ "$STATUS" != "completed" ]; then PENDING="${PENDING}${ctx}; "
-              elif [ "$CONCL" != "success" ]; then FAILED="${FAILED}${ctx}=${CONCL}; "
+              # One name can appear more than once on a SHA — measured on c26a8ba, each of
+              # the six appears TWICE, from two check-suites (a PR suite and a push suite),
+              # because the endpoint's `latest` filter does not dedupe across suites. Taking
+              # the first row would make the verdict depend on the API's undocumented
+              # ordering, and a green copy listed before a failed one would pass the gate.
+              # So every matching row is folded and the WORST outcome wins.
+              ROWS="$(printf '%s\n' "$RUNS" | awk -F'\t' -v c="$ctx" '$1==c')"
+              if [ -z "$ROWS" ]; then MISSING="${MISSING}${ctx}; "; continue; fi
+              if printf '%s\n' "$ROWS" | awk -F'\t' '$2!="completed"' | grep -q .; then
+                PENDING="${PENDING}${ctx}; "
+              elif BAD="$(printf '%s\n' "$ROWS" | awk -F'\t' '$3!="success" {print $3; exit}')" \
+                   && [ -n "$BAD" ]; then
+                FAILED="${FAILED}${ctx}=${BAD}; "
               fi
             done <<< "$REQUIRED_CONTEXTS"
 
@@ -161,8 +188,8 @@ jobs:
               echo "OK: all required checks are green on ${GITHUB_SHA}."
               exit 0
             fi
-            echo "waiting (${attempt}/10) — pending: ${PENDING:-none}; missing: ${MISSING:-none}"
-            if [ "$attempt" -lt 10 ]; then sleep 60; fi
+            echo "waiting (${attempt}/30) — pending: ${PENDING:-none}; missing: ${MISSING:-none}"
+            if [ "$attempt" -lt 30 ]; then sleep 60; fi
           done
 
           echo "::error::Required checks never completed on ${GITHUB_SHA} — pending:" \

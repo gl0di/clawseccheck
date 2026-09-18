@@ -1912,7 +1912,7 @@ This has no effect on `--sbom-diff` below: that compares the underlying componen
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "clawseccheck-sbom",
   "documentNamespace": "https://clawseccheck.local/sbom/<16-hex digest of scanned_home>",
-  "creationInfo": {"created": "2026-09-10T13:26:59Z", "creators": ["Tool: clawseccheck-4.0.1"]},
+  "creationInfo": {"created": "2026-09-10T13:26:59Z", "creators": ["Tool: clawseccheck-4.2.0"]},
   "packages": [
     {
       "SPDXID": "SPDXRef-skill-pdf-tools",
