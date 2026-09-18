@@ -2116,10 +2116,13 @@ hard false positives on real configs.
   (SkillTrustBench, malicious-class recall). Most misses were attacks *described in prose*
   rather than shipped as code — a blind spot dedicated detectors have since started closing,
   though the fix hasn't been re-measured against the same benchmark yet. Detection patterns
-  are English-word literals plus a narrow hand-authored Chinese/Russian override table for
-  one high-signal family (blanket "ignore previous instructions"-style overrides); other
-  scripts and languages — Japanese, Korean, Arabic, and Russian/Chinese outside that one
-  family — are not covered, so a PASS on non-English/non-covered content proves nothing
+  are English-word literals plus a hand-authored override table covering Chinese, Russian,
+  Japanese and Korean for four families only (B64's blanket "ignore previous
+  instructions"-style override, developer-mode, "no longer bound" and reveal-the-system-prompt
+  phrasings), plus a narrow Russian bare-secrecy phrase list in B63 that reaches WARN at most.
+  B63 (Chinese/Japanese/Korean), B66, B156 and B160 remain English-only, and every other
+  script and language, Arabic included, is not covered, so a PASS on non-English/non-covered
+  content proves nothing
   about it. A PASS tells you what the scanner recognized, not that nothing is wrong.
 - **Does not replace runtime red-teaming.** Static configuration analysis is a starting
   point, not a substitute for adversarial testing against a running agent.
