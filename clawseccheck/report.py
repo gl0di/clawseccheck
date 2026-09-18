@@ -3380,7 +3380,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     _live_tail = ("The live-behaviour result above is what speaks to that."
                   if _live_tested else "Use the live tests above to probe actual resistance.")
     lines.append(
-        "Static audit — this bounds what your agent *can* do, not how it *behaves* under a"
+        "Static audit — this bounds what your agent CAN do, not how it BEHAVES under a"
         " live attack. OpenClaw core has no runtime egress/taint gate, so even a clean"
         f" Lethal Trifecta here can still be chained by prompt-injection at runtime: {_clean_subject}"
         " means \"not statically lethal-capable\", not \"runtime-proof\". " + _live_tail
@@ -4634,7 +4634,7 @@ def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = 
     # longer than that, and `:<39` pads but never truncates — so the box art broke open
     # on exactly the runs the ungraded work introduced. Grow to fit; never shrink below
     # the established 39 so a graded, uncapped card renders byte-identically to before.
-    width = max([39] + [len(ln) for ln in lines])
+    width = max([39] + [len(ln) for ln in lines]) + 1  # one column of right margin
     # Mascot header line, once (design-system Foundations); --ascii drops it to
     # stay pure-ASCII, matching render_dashboard's convention.
     header = "" if ascii_only else f"{brand.header()}\n"
