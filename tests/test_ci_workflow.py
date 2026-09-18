@@ -222,7 +222,8 @@ import textwrap  # noqa: E402
 import pytest  # noqa: E402
 
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
-# Labels known to exist on the repo (checked with `gh label list` on 2026-09-18).
+# Labels dependabot.yml may use. Only "dependencies" is grounded in the repo's
+# label list; the rest are the common GitHub defaults and are not verified here.
 _KNOWN_LABELS = ("dependencies", "bug", "documentation", "enhancement")
 
 
@@ -410,3 +411,20 @@ def test_author_check_allows_canonical_and_dependabot_flags_others(repo) -> None
     _commit(repo, "d", "evil <gl0di@evil.example>")
     r, _ = _chain("Author identity check", "HEAD", repo)
     assert r.returncode == 0 and "::warning::" in r.stdout
+
+
+@needs_bash
+@pytest.mark.parametrize("case", ["push_before_is_sha", "push_force_on_main", "pr_head_is_base"])
+def test_empty_range_falls_back_to_tip_and_still_catches_trailer(repo, case) -> None:
+    _commit(repo, "root")
+    sha = _commit(repo, "tip" + TRAILER)
+    _git(repo, "update-ref", "refs/remotes/origin/main", sha)
+    env = {
+        "push_before_is_sha": dict(EVENT="push", BASE_REF="", BEFORE=sha, SHA=sha),
+        "push_force_on_main": dict(EVENT="push", BASE_REF="", BEFORE="1" * 40, SHA=sha),
+        "pr_head_is_base": dict(EVENT="pull_request", BASE_REF="main", BEFORE="", SHA=sha),
+    }[case]
+    r, rng = _range(repo, **env)
+    assert r.returncode == 0 and "Inspecting 1 commit(s)" in r.stdout, r.stdout + r.stderr
+    r2, _ = _chain("No AI-agent co-author", rng, repo)
+    assert r2.returncode == 1 and "OK: no AI co-author tags" not in r2.stdout

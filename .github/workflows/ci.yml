@@ -164,6 +164,17 @@ jobs:
               ;;
           esac
           COUNT=$(git rev-list --count "$RANGE")
+          if [ "$COUNT" -eq 0 ]; then
+            # An empty range (re-run, force push onto main, head == base) would let
+            # the checks below pass without examining anything; inspect the tip.
+            echo "::warning::Range $RANGE is empty; inspecting the tip commit only"
+            RANGE="HEAD^!"
+            COUNT=$(git rev-list --count "$RANGE")
+            if [ "$COUNT" -eq 0 ]; then
+              echo "::error::Nothing to inspect; refusing to pass vacuously"
+              exit 1
+            fi
+          fi
           echo "Inspecting $COUNT commit(s) in $RANGE"
           echo "range=$RANGE" >> "$GITHUB_OUTPUT"
 
