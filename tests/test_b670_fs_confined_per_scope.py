@@ -23,7 +23,7 @@ its own section below, because the shape of the surviving fix is a direct conseq
 What survives asks only what can be answered soundly at this layer: B55's own vetted
 resolver already established that a write tool is granted GLOBALLY, so the open question is
 which scopes inherit that grant unchanged AND are unconfined.
-`toolpolicy.unconfined_scopes_inheriting_global_tools` answers exactly that.
+`toolpolicy.unconfined_write_scopes` answers exactly that.
 """
 import json
 import os
@@ -37,11 +37,12 @@ from clawseccheck.catalog import FAIL, WARN
 from clawseccheck.collector import collect
 from clawseccheck.toolpolicy import (
     confined_scopes,
-    unconfined_scopes_inheriting_global_tools,
+    unconfined_write_scopes,
 )
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
+_WRITE_TOOLS = ["write", "edit", "apply_patch"]
 _OPEN = {"channels": {"telegram": {"dmPolicy": "open", "groupPolicy": "open"}}}
 _WRITE = {"tools": {"allow": ["write"]}}
 _SANDBOXED = {"sandbox": {"mode": "all"}}
@@ -144,7 +145,7 @@ def test_an_empty_scope_list_is_not_confinement():
     """`all([])` is True, so a predicate written as a bare `all(...)` would report confinement
     for a config it could not read a single scope from — fabricating the very thing this task
     removes, in a new place."""
-    assert unconfined_scopes_inheriting_global_tools({}) is None
+    assert unconfined_write_scopes({}, _WRITE_TOOLS) is None
     assert confined_scopes({}) is None
 
 
@@ -163,7 +164,7 @@ def test_the_non_main_mode_does_not_confine_the_default_agent():
     """
     cfg = {"agents": {"defaults": {"sandbox": {"mode": "non-main"}},
                       "entries": {"main": _MAIN, "w": {}}}}
-    assert "main" in (unconfined_scopes_inheriting_global_tools(cfg) or []), (
+    assert "main" in (unconfined_write_scopes(cfg, _WRITE_TOOLS) or []), (
         "the default agent is unsandboxed under non-main")
 
 
@@ -212,10 +213,8 @@ def test_an_unconfined_scope_that_narrows_its_tools_is_not_a_finding(ops, why): 
     layout, and the operator narrowed the second agent precisely so it could run on the host.
     Gating on confinement alone convicted all three.
 
-    Note what this test does NOT claim. It does not assert that these agents cannot write —
-    establishing that soundly needs a write-grant model this layer does not have (F-186). It
-    asserts the weaker, sound thing: a scope that sets its own `tools` has not been shown to
-    inherit the global write grant, so it cannot carry the FAIL on its own.
+    Since F-186 this is asserted on the resolved grant, not on a token heuristic: none of
+    these scopes is granted a write tool by its own policy, so none can carry the FAIL.
     """
     f = _b55({"defaults": _SANDBOXED, "entries": {"main": _MAIN, "ops": ops}})
     assert f.status == WARN, why
@@ -231,14 +230,18 @@ def test_an_unconfined_scope_that_inherits_the_grant_is_still_a_finding():
 @pytest.mark.parametrize("ops,expected", [
     ({}, []),
     ({"sandbox": {"mode": "off"}}, ["ops"]),
-    ({"sandbox": {"mode": "off"}, "tools": {"deny": ["write"]}}, []),
+    ({"sandbox": {"mode": "off"}, "tools": {"deny": ["write", "edit", "apply_patch"]}}, []),
+    # F-186: denying `write` ALONE leaves apply_patch granted -- the global `allow: [write]`
+    # implies it and a deny of the sibling name does not remove it (vendor-measured).
+    ({"sandbox": {"mode": "off"}, "tools": {"deny": ["write"]}}, ["ops"]),
     ({"sandbox": {"mode": "off"}, "tools": {"profile": "messaging"}}, []),
-], ids=["confined", "escapes-inheriting", "escapes-with-override", "messaging"])
+], ids=["confined", "escapes-inheriting", "escapes-with-override", "deny-write-only",
+     "messaging"])
 def test_the_predicate_names_the_scope_that_escaped(ops, expected):
     """Names rather than booleans, so a caller can say WHICH agent escaped — `confined_scopes`
     returns positional booleans that cannot carry that."""
     cfg = {**_WRITE, "agents": {"defaults": _SANDBOXED, "entries": {"main": _MAIN, "ops": ops}}}
-    assert unconfined_scopes_inheriting_global_tools(cfg) == expected
+    assert unconfined_write_scopes(cfg, _WRITE_TOOLS) == expected
 
 
 # ======================================================================================
@@ -296,7 +299,7 @@ def test_a_narrowed_escape_is_warned_without_claiming_confinement():
     assert f.status == WARN
     assert not any("confined to the workspace" in e for e in (f.evidence or [])), (
         "the WARN must not claim confinement — the escaping scope is not confined")
-    assert any("narrows its own tool policy" in e for e in (f.evidence or [])), (
+    assert any("no unconfined scope is granted a write tool" in e for e in (f.evidence or [])), (
         "the reason for the downgrade must be on screen")
 
 
@@ -343,10 +346,9 @@ def _escape(w_tools, global_allow=("write",)):
     ({"alsoAllow": ["exec"]}, "alsoAllow only ADDS — it is unioned into the allow side"),
     ({"deny": ["exec"]}, "a deny that names nothing in the write family"),
     ({"allow": ["write"]}, "an allow that names the write tool outright"),
-    ({"allow": ["fs_write"]}, "the same via the legacy alias a real fixture uses"),
     (None, "control: no tools key at all — must FAIL, or the cases above prove nothing"),
 ], ids=["empty", "fs-optout", "alsoAllow", "deny-unrelated", "allow-write",
-        "allow-fs_write", "control-no-tools"])
+        "control-no-tools"])
 def test_a_tools_block_that_does_not_touch_writes_is_still_an_escape(w_tools, why):
     """The third retraction. The rule was "the entry carries a `tools` key, so it MIGHT have
     narrowed the write family away" — and an adversarial pass broke it seven ways by EXECUTING
@@ -364,10 +366,19 @@ def test_a_tools_block_that_does_not_touch_writes_is_still_an_escape(w_tools, wh
     ({"deny": ["write", "edit", "apply_patch"]}, "a deny naming the family"),
     ({"profile": "messaging"}, "a profile replaces the tool set wholesale"),
     ({"allow": ["session_status"]}, "an allow naming no write tool"),
+    ({"allow": ["fs_write"]},
+     "F-186: an agent allowlist AND-s with the global one, so `fs_write` alone drops the "
+     "global `write` -- the old heuristic called this an escape because the token looked "
+     "write-shaped"),
+    ({"allow": ["write"], "deny": ["write", "edit", "apply_patch"]},
+     "F-186: the allow names write but the same block denies the family (was a false FAIL)"),
+    ({"allow": ["*"], "deny": ["group:fs"]}, "F-186: wildcard minus the fs group"),
+    ({"profile": "coding", "deny": ["group:fs"]}, "F-186: coding profile minus the fs group"),
     ({"byProvider": {"openai": {"deny": ["write"]}}},
      "a layer this module does not resolve — treated as possible narrowing, the quiet "
      "direction: it can cost a finding, never invent one"),
-], ids=["deny-family", "profile", "narrow-allow", "opaque-byProvider"])
+], ids=["deny-family", "profile", "narrow-allow", "allow-legacy-alias-only", "allow-and-deny",
+        "star-minus-group", "coding-minus-group", "opaque-byProvider"])
 def test_a_tools_block_that_could_remove_writes_still_downgrades(w_tools, why):
     """The other half of the partition. Without these the narrowing test could be deleted
     entirely and every case above would still pass."""
@@ -382,9 +393,10 @@ def test_the_downgrade_evidence_does_not_assert_an_unchecked_widening_claim():
     misinform; this pins the sentence to what is actually tested.
     """
     f = _b55_for(_escape({"profile": "messaging"}))
-    line = next(e for e in (f.evidence or []) if "narrows" in e)
+    line = next(e for e in (f.evidence or [])
+                if "no unconfined scope is granted a write tool" in e)
     assert "widens" not in line
-    assert "tools.profile" in line and "tools.deny" in line
+    assert "resolved" in line
 
 
 @pytest.mark.parametrize("w_tools,expected,why", [
@@ -406,7 +418,7 @@ def test_the_family_moves_as_a_whole_under_a_wildcard_or_group(w_tools, expected
 # 7. Evidence names WHICH scope escaped — positionally, never the raw id (B-670 evidence)
 # ======================================================================================
 #
-# `unconfined_scopes_inheriting_global_tools` has always computed the escaping scope
+# `unconfined_write_scopes` has always computed the escaping scope
 # names (section 4 above already pins that), but until now `check_fs_write_exposure`
 # never put them on screen — the FAIL evidence said only that SOME scope escaped, not
 # which. This section is evidence-only: none of it may change a status already pinned
@@ -429,7 +441,7 @@ def test_the_fail_evidence_names_the_escaping_scope_by_position_not_by_id():
                                {"id": "attackername", "sandbox": {"mode": "off"}}]}}
     f = _b55_for(cfg)
     assert f.status == FAIL
-    line = next(e for e in (f.evidence or []) if "inherit the global write grant" in e)
+    line = next(e for e in (f.evidence or []) if "granted a write tool" in e)
     assert "agents.list[1]" in line
     assert "attackername" not in line
     # And not anywhere else in the evidence either — the id must never reach the report.
@@ -443,7 +455,7 @@ def test_the_fail_evidence_names_an_entries_shape_scope_too():
     """
     f = _b55({"defaults": _SANDBOXED, "entries": {"main": _MAIN, "ops": {"sandbox": {"mode": "off"}}}})
     assert f.status == FAIL
-    line = next(e for e in (f.evidence or []) if "inherit the global write grant" in e)
+    line = next(e for e in (f.evidence or []) if "granted a write tool" in e)
     assert "agents.entries.ops" in line
 
 
@@ -454,7 +466,7 @@ def test_the_fail_evidence_says_global_scope_when_no_roster_row_exists():
     """
     f = _b55_for({**_OPEN, **_WRITE})
     assert f.status == FAIL
-    line = next(e for e in (f.evidence or []) if "inherit the global write grant" in e)
+    line = next(e for e in (f.evidence or []) if "granted a write tool" in e)
     assert "global scope" in line
 
 
@@ -468,4 +480,4 @@ def test_the_evidence_line_is_absent_when_no_scope_is_shown_to_escape():
                           "ops": {"sandbox": {"mode": "off"},
                                   "tools": {"profile": "messaging"}}}})
     assert f.status == WARN
-    assert not any("inherit the global write grant" in e for e in (f.evidence or []))
+    assert not any("unconfined and granted a write tool" in e for e in (f.evidence or []))

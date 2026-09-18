@@ -832,9 +832,12 @@ SENSITIVE_TOOL_IDS = frozenset({"read", "memory_get", "memory_search"})
 
 
 # B-674 decision: keep the bare "fs_read" / "fs_write" substring hints below rather than
-# deleting them, even though neither is a real OpenClaw tool id (grounded against the
-# installed dist's `tool-catalog-*.js` CORE_TOOL_DEFINITIONS, sectionId "fs" — the real
-# ids are `read`/`write`/`edit`/`apply_patch`; see SENSITIVE_TOOL_IDS / OUTBOUND_TOOL_IDS
+# deleting them, even though neither is in CORE_TOOL_DEFINITIONS (installed dist
+# `tool-catalog-*.js`, sectionId "fs" — the core ids are `read`/`write`/`edit`/`apply_patch`).
+# `fs_write` is not absent from the dist altogether: it is named in two vendor deny lists
+# (DEFAULT_GATEWAY_HTTP_TOOL_DENY, ACP_UNSUPPORTED_INHERITED_TOOL_DENY), so whether it is
+# ever dispatchable is UNPROVEN, not disproven — B55's own notes treat it as a real id.
+# See SENSITIVE_TOOL_IDS / OUTBOUND_TOOL_IDS
 # below for the exact-id layer that answers "did the runtime actually grant this"). Two
 # reasons to keep the substring, not one: it still catches a REAL namespaced MCP tool such
 # as `mcp__files__fs_read`, and a bare invented id in a core `tools.allow` still shows the
@@ -4036,8 +4039,10 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     # B-674: the generic hints above cannot see OpenClaw's own write-capable tool ids —
     # see OUTBOUND_TOOL_IDS. Exact match, alias-folded, over the config's grants and over
     # an attested roster, mirroring B-667's SENSITIVE_TOOL_IDS treatment of the inbound
-    # leg exactly (same helpers, same shape, no confinement guard — no vetted per-scope
-    # write-confinement model exists yet, see F-186).
+    # leg exactly (same helpers, same shape). No confinement guard, by decision: a write
+    # confined to the workspace can still tamper SOUL.md / memory / skills, which is what
+    # this leg exists to catch, so the outbound leg does not honour confinement (B55 does,
+    # because it asks a different question — reach outside the workspace).
     outbound.extend(_tool_id_sources(cfg, OUTBOUND_TOOL_IDS))
     outbound.extend(_attested_tool_id_sources(ctx, OUTBOUND_TOOL_IDS))
     if dig(cfg, "tools.elevated.allowFrom"):
