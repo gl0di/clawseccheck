@@ -3,7 +3,7 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
-## [4.2.0] — 2026-09-17
+## [4.2.1] — 2026-09-18
 
 **Trajectory evidence on a current OpenClaw install was still going missing in places
 the 4.1.0 corroborator didn't reach.** That release added a runtime corroborator for

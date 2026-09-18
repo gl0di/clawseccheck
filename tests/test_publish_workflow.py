@@ -987,12 +987,25 @@ def test_previous_release_gate_separates_never_released_from_never_surfaced() ->
         "The previous-release gate must check whether v<PREV> was ever tagged before "
         "concluding a 404 means the release was published and then lost."
     )
+    # Three causes, not two. v4.2.0 is the middle one made real: tagged, then the job
+    # failed at this very step, so ClawHub was never given anything. Release tags are
+    # immutable here (the release-tags ruleset blocks update/delete on refs/tags/v*), so
+    # a failed attempt permanently burns its number and this state is not rare.
+    assert 'gh release view "v${PREV}"' in text, (
+        "The gate must also check for a GitHub Release: a tag proves an attempt, only "
+        "the Release proves the attempt got as far as producing signed artifacts. "
+        "Without it, a tagged-but-failed release is misread as one lost in the registry."
+    )
 
     tag_check = text.index("git/ref/tags/v${PREV}")
-    surfaced_verdict = text.index("was published and never surfaced")
-    assert tag_check < surfaced_verdict, (
-        "The tag must be consulted before the 'published and never surfaced' verdict is "
-        "written, or the gate misdiagnoses a version that was never released at all."
+    release_check = text.index('gh release view "v${PREV}"')
+    # Anchored to a fragment that survives shell line-continuation: the verdict sentence
+    # is wrapped across two `\`-joined strings, so the full phrase never appears
+    # contiguously in the file.
+    surfaced_verdict = text.index("so it was published and")
+    assert tag_check < surfaced_verdict and release_check < surfaced_verdict, (
+        "Both signals must be consulted before the 'published and never surfaced' "
+        "verdict is written, or the gate misdiagnoses a version that never shipped."
     )
 
     # The never-released branch must refuse the override rather than recommend it: the
