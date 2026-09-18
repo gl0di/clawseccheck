@@ -126,7 +126,8 @@ def test_b353_hermetic_run_with_no_known_build_stays_unknown():
 
 def test_a_config_stamp_at_the_floor_counts_but_an_older_one_does_not():
     base = _cfg(_APPROVE, _models())
-    for stamp, expect in (("2026.9.4", PASS), ("2026.9.9", PASS), ("2026.7.1", WARN),
+    # a stamp NEWER than the validated window is not extrapolated from: it degrades to WARN
+    for stamp, expect in (("2026.9.4", PASS), ("2026.9.9", WARN), ("2026.7.1", WARN),
                           ("2026.8.2", WARN)):
         cfg = _cfg(base, {"meta": {"lastTouchedVersion": stamp}})
         home = Path(tempfile.mkdtemp(prefix="b708-"))
@@ -222,9 +223,21 @@ def test_no_precondition_no_plugin_pin():
     assert _ans(_models("anthropic/c", agentRuntime={"id": "codex"})) == hr.UNKNOWN
 
 
-def test_no_precondition_a_known_build_at_the_floor():
+def test_no_precondition_a_known_build_inside_the_validated_window():
     assert hr.codex_harness_reach(_models("anthropic/c"), None).answer == hr.UNKNOWN
     assert hr.codex_harness_reach(_models("anthropic/c"), (2026, 9, 3)).answer == hr.UNKNOWN
+    assert hr.codex_harness_reach(_models("anthropic/c"), (2026, 9, 5)).answer == hr.UNKNOWN
+    assert hr.codex_harness_reach(_models("anthropic/c"), (2027, 1, 1)).answer == hr.UNKNOWN
+
+
+def test_no_precondition_one_provider_spelled_two_ways():
+    """The vendor MERGES two spellings of one provider key, and the merge throws on some
+    shapes, so the port must not answer. Without the bail this config is a definite `no`."""
+    cfg = {**_models("anthropic/c"),
+           "models": {"providers": {"anthropic": {}, " Anthropic ": {}}}}
+    assert _ans(cfg) == hr.UNKNOWN
+    one = {**_models("anthropic/c"), "models": {"providers": {"anthropic": {}}}}
+    assert _ans(one) == hr.NO
 
 
 @pytest.mark.parametrize("cfg", [

@@ -45,7 +45,9 @@ def _version():
 def test_port_is_sound_against_the_live_vendor(live):
     cases, results = live
     _, numeric = _version()
-    version = max(numeric, hr.ORACLE_MIN)
+    # clamp INTO the window: on a build newer than the validated one the port would answer
+    # `unknown` to everything, which is trivially sound and would hide the drift this test is for
+    version = min(max(numeric, hr.ORACLE_MIN), hr.ORACLE_MAX)
     bad = []
     counts = {hr.YES: 0, hr.NO: 0, hr.UNKNOWN: 0}
     for case, res in zip(cases, results):
@@ -60,6 +62,20 @@ def test_port_is_sound_against_the_live_vendor(live):
             bad.append((case["label"], got, res["runtimes"]))
     assert not bad, bad[:10]
     assert counts[hr.YES] and counts[hr.NO] and counts[hr.UNKNOWN], counts
+
+
+def test_the_installed_build_is_inside_the_validated_window():
+    """The drift ALARM. Outside ``ORACLE_MIN..ORACLE_MAX`` the runtime answers `unknown` and
+    the B353 / B333 gate silently goes back to the old WARN -- safe, but a feature that has
+    quietly stopped working. This turns that into a red test on the developer's machine, so
+    the upgrade protocol re-runs the battery and raises ``ORACLE_MAX`` deliberately."""
+    require_dist()
+    ver, numeric = _version()
+    assert hr.ORACLE_MIN <= numeric <= hr.ORACLE_MAX, (
+        f"installed OpenClaw {ver} is outside the window the Codex-harness determination was "
+        f"validated on {hr.ORACLE_MIN}..{hr.ORACLE_MAX}: re-run the live soundness test, "
+        f"regenerate the battery (`python3.12 tests/_harnessoracle.py --write`) and raise "
+        f"ORACLE_MAX -- until then B353/B333 fall back to the pre-gate WARN")
 
 
 def test_pinned_battery_has_not_drifted_from_the_vendor(live):

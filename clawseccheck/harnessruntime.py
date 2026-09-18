@@ -49,9 +49,16 @@ from dataclasses import dataclass
 
 from .collector import agent_roster
 
-#: The first build this port was differentially validated on. Below it, or with no known
-#: build, every answer is ``unknown`` -- the vendor moved this chain between builds before.
+#: The window of builds this port was differentially validated on. Outside it -- older, newer,
+#: or no known build -- every answer is ``unknown``: the vendor moved this chain between
+#: builds before, and a definite ``no`` is the direction that turns a live WARN into a PASS.
+#: The ceiling is deliberate, not a tidy-up: a newer build is exactly "an input this port does
+#: not model", so it degrades to the previous WARN until the battery is re-run against that
+#: build (``python3.12 tests/_harnessoracle.py --write``) and ``ORACLE_MAX`` is raised with it.
+#: Only the first three components are compared, so a correction release of the validated
+#: build (2026.9.4-1) stays inside the window; a new patch or minor does not.
 ORACLE_MIN = (2026, 9, 4)
+ORACLE_MAX = (2026, 9, 4)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 
@@ -424,12 +431,14 @@ def codex_harness_reach(cfg, version, environ=None) -> HarnessReach:
     """Whether a configured agent runs the Codex app-server harness. See the module docstring.
 
     *version* is the installed (or config-stamped) OpenClaw build as a numeric tuple such as
-    ``(2026, 9, 4)``, or None when unknown. Below :data:`ORACLE_MIN` every answer is
-    ``unknown``. *environ* defaults to this process's environment; tests pass their own.
+    ``(2026, 9, 4)``, or None when unknown. Outside ``ORACLE_MIN <= build[:3] <= ORACLE_MAX``
+    every answer is ``unknown``. *environ* defaults to this process's environment; tests
+    pass their own.
     """
-    if not isinstance(version, tuple) or not version or tuple(version) < ORACLE_MIN:
-        return HarnessReach(UNKNOWN, ("the installed OpenClaw build is unknown or older than "
-                                      "the build this determination was validated on",))
+    if not isinstance(version, tuple) or not version or tuple(version) < ORACLE_MIN \
+            or tuple(version)[:3] > ORACLE_MAX:
+        return HarnessReach(UNKNOWN, ("the installed OpenClaw build is unknown, or is not a "
+                                      "build this determination was validated on",))
     env = os.environ if environ is None else environ
     try:
         return _analyse(cfg, env)

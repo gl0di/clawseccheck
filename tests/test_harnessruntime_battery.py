@@ -97,17 +97,29 @@ def test_the_oracle_never_says_no_because_nothing_was_configured():
 
 # ------------------------------------------------------------------ version gate
 
-@pytest.mark.parametrize("version", [None, (), (2026, 9, 3), (2026, 8, 2), (2026, 7, 1, 2)])
-def test_below_the_validated_build_or_unknown_is_always_unknown(version):
+@pytest.mark.parametrize("version", [None, (), (2026, 9, 3), (2026, 8, 2), (2026, 7, 1, 2),
+                                     (2026, 9, 5), (2026, 10, 1), (2027, 1, 1)])
+def test_outside_the_validated_window_or_unknown_is_always_unknown(version):
     for label in ("openai-primary", "anthropic-primary", "pin-provider-codex"):
         row = next(r for r in ROWS if r["label"] == label)
         assert _reach(row, version).answer == hr.UNKNOWN
 
 
-def test_at_and_above_the_validated_build_answers_are_definite():
+def test_inside_the_validated_window_answers_are_definite():
     row = next(r for r in ROWS if r["label"] == "openai-primary")
     assert _reach(row, hr.ORACLE_MIN).answer == hr.YES
-    assert _reach(row, (2026, 10, 1)).answer == hr.YES
+    assert _reach(row, hr.ORACLE_MAX).answer == hr.YES
+    # a correction release of the validated build is the same code family
+    assert _reach(row, (2026, 9, 4, 1)).answer == hr.YES
+
+
+def test_a_newer_build_is_never_definite_until_the_battery_is_rerun():
+    """The dangerous direction is a wrong `no` (a live WARN turned PASS). A build newer than the
+    one the port was validated on is an unmodelled input, so it must degrade, not extrapolate."""
+    for label in ("openai-primary", "anthropic-primary", "pin-provider-codex"):
+        row = next(r for r in ROWS if r["label"] == label)
+        for newer in ((2026, 9, 5), (2026, 10, 1), (2027, 1, 1), (2026, 9, 9)):
+            assert _reach(row, newer).answer == hr.UNKNOWN, (label, newer)
 
 
 def test_reasons_carry_paths_never_values():

@@ -3263,7 +3263,7 @@ def _harness_build(ctx) -> "tuple | None":
     if installed is not None:
         return installed
     stamped = _numeric_version(_openclawdist.self_reported_version(getattr(ctx, "config", None)))
-    if stamped is not None and stamped >= _harnessruntime.ORACLE_MIN:
+    if stamped is not None and _harnessruntime.ORACLE_MIN <= stamped[:3] <= _harnessruntime.ORACLE_MAX:
         return stamped
     return None
 
