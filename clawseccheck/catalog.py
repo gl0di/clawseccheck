@@ -466,13 +466,20 @@ CATALOG: list[CheckMeta] = [
     # The value's NAME reads like the safe one and is the dangerous one, which is why this
     # is a check rather than a documentation line.
     #
-    # WARN, not FAIL, and for a reason that is expected to change: the mechanism lives on
-    # the Codex app-server path only — OpenClaw's own schema calls the block "projection
-    # metadata for Codex app-server threads only" — and this audit does not yet determine
-    # whether any configured agent runs that harness (B-708). A FAIL would
-    # assert a live grant on a setup where the block is inert. Once the harness can be
-    # determined, the confirmed case is FAIL-worthy: it is a break-glass override in the
-    # same family as B48/B171, differing only in that those are unconditionally live.
+    # WARN, not FAIL: the mechanism lives on the Codex app-server path only — OpenClaw's
+    # own schema calls the block "projection metadata for Codex app-server threads only".
+    # Whether any configured agent runs that harness is now decided by
+    # `harnessruntime.codex_harness_reach` (B-708), a three-valued determination validated
+    # by executing the vendor: `yes` states the harness as fact and drops the hedge, `no`
+    # is a PASS that says only openclaw.json was read (a cron model override or a /model
+    # switch is invisible), `unknown` — including every build below the validated floor —
+    # keeps the original conditional wording byte for byte. The confirmed-Codex case is
+    # FAIL-worthy in principle (a break-glass override in the same family as B48/B171,
+    # differing only in that those are unconditionally live), but it stays WARN until a
+    # fleet has been measured and it has had its own adversarial round. Two adjacent
+    # facts are NOT modelled and are tracked separately: the Codex plugin's own
+    # `appServer` posture (approvalPolicy "never" + a danger-full-access sandbox
+    # pre-approves every un-moded server), and provider-level `agentRuntime` pins in B370.
     CheckMeta(
         "B353",
         "MCP server pre-approves every tool for unattended runs",
