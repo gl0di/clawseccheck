@@ -78,6 +78,10 @@ _LABEL_BUILDER_SITES = {
     # legacy array.
     ("clawseccheck/checks/_config.py", "_multi_agent_note", "agents.list"):
         "per-agent sandbox finding's `where` label",
+    # The retired-key table: the KEY being detected. It is data, not advice -- the finding
+    # built from it always renders the key next to its replacement, agents.entries.
+    ("clawseccheck/checks/_shared.py", None, "agents.list"):
+        "retired-key table key (the finding pairs it with its replacement)",
 }
 
 
