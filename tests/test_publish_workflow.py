@@ -938,6 +938,32 @@ def test_publish_workflow_verifies_previous_release_surfaced() -> None:
     )
 
 
+def test_helper_heredoc_bodies_carry_no_apostrophe() -> None:
+    """A lone `'` inside a heredoc nested in `$( )` breaks the script on macOS only.
+
+    bash 3.2 — still `/bin/bash` on GitHub's macOS runners — does not treat a heredoc
+    body as literal while scanning a command substitution for its closing paren, so an
+    apostrophe opens a quote it never closes and the script dies with "unexpected EOF
+    while looking for matching `'`", exit 2. Linux bash 5.x parses the same file
+    correctly, which is why `bash -n` here cannot catch it and why this is a text rule
+    rather than a syntax check: a single possessive added to an explanatory comment
+    (`C-368's`) reddened the macOS leg while both Ubuntu legs stayed green.
+    """
+    text = HELPER_SCRIPT.read_text(encoding="utf-8")
+    bodies = re.findall(r"<<'(\w+)'\n(.*?)\n\1\n", text, re.S)
+    assert bodies, "No quoted heredoc found in the helper — has its shape changed?"
+
+    offenders = []
+    for delim, body in bodies:
+        for i, line in enumerate(body.splitlines(), 1):
+            if "'" in line:
+                offenders.append(f"<<{delim} line {i}: {line.strip()}")
+    assert not offenders, (
+        "Apostrophes inside a heredoc body nested in $( ) break bash 3.2 on macOS:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
 def test_previous_release_gate_separates_never_released_from_never_surfaced() -> None:
     """A 404 on the previous version has two causes, and they need different answers.
 

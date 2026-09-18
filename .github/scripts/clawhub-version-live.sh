@@ -60,10 +60,18 @@ except Exception:
 # and `files` at the TOP level — as this did until B-827 — makes signal 1
 # impossible to satisfy: top-level `version` is a dict (never equal to the
 # version string) and there is no top-level `files` at all. That silently
-# inverted C-368's whole purpose, turning a false "already exists" on a
+# inverted what C-368 exists to do, turning a false "already exists" on a
 # version that really published into GENUINE_FAILURE. The shape is captured
 # from the live API in tests/clawhub_version_response.json rather than
 # asserted here, so a future change re-grounds against evidence.
+#
+# NO APOSTROPHES ANYWHERE IN THIS HEREDOC BODY. bash 3.2 — still the /bin/bash
+# on macOS runners — does not treat a heredoc inside $( ) as literal while it
+# scans for the closing paren, so a lone single-quote character opens a string
+# that is never closed and the whole script dies with "unexpected EOF", exit 2.
+# Linux bash 5.x parses the same file fine, so `bash -n` in CI cannot see it;
+# one possessive in a comment turned the macOS leg red and nothing else did.
+# tests/test_publish_workflow.py enforces this rule.
 version = data.get("version")
 if not isinstance(version, dict):
     version = {}
