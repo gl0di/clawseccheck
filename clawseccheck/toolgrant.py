@@ -347,29 +347,37 @@ def _agent_entry_tools(cfg: dict, agent_id: str):
     return None
 
 
-def _agent_tools(cfg: dict, scope: str):
+def _agent_tools(cfg: dict, scope: str, agent: bool = False):
     """resolveEffectiveToolPolicy's agentTools derivation (dist lines 236-238): the
     resolved roster entry's tools, or -- ONLY when the config declares no roster at all,
-    for ANY scope including GLOBAL_SCOPE -- agents.defaults.tools."""
+    for ANY scope including GLOBAL_SCOPE -- agents.defaults.tools.
+
+    ``agent=True`` says ``scope`` is a DECLARED agent id, so the entry lookup runs even when
+    that id is literally ``"global"`` (a legal id; the vendor treats it like any other)."""
     tools = None
-    if scope != GLOBAL_SCOPE:
+    if agent or scope != GLOBAL_SCOPE:
         tools = _agent_entry_tools(cfg, scope)
     if tools is None and not _has_agent_roster(cfg):
         tools = dig(cfg, "agents.defaults.tools")
     return tools
 
 
-def granted(cfg: dict, tool: str, scope: str = GLOBAL_SCOPE) -> bool:
+def granted(cfg: dict, tool: str, scope: str = GLOBAL_SCOPE, *, agent: bool = False) -> bool:
     """Is ``tool`` granted at ``scope`` ("global", or a declared agent id) by ``cfg``?
 
     The port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies`` — see the
     module docstring for the resolution order, the grounded tables, and what is
     deliberately not modelled (sandboxMode, extraPolicies).
+
+    ``GLOBAL_SCOPE`` is a plain string, so it collides with an agent whose id is literally
+    ``"global"``. A caller that HOLDS a declared agent id (a roster row) passes ``agent=True``
+    so that id is looked up as an agent; the vendor gives ``"global"`` no special meaning
+    (executed: an agent with that id resolves exactly like one named ``w``).
     """
     if not isinstance(cfg, dict) or not cfg:
         return False
 
-    agent_tools = _agent_tools(cfg, scope)
+    agent_tools = _agent_tools(cfg, scope, agent)
     global_tools = cfg.get("tools")
 
     profile = agent_tools.get("profile") if isinstance(agent_tools, dict) else None
