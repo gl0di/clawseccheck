@@ -23,7 +23,11 @@ less than its name suggests is the failure this project keeps removing:
 * `code_sha256` — the executable surface: everything under `dist/` plus the top-level entry
   scripts. This is the one that catches a swapped build with an untouched `package.json` —
   the actual attack — and it is the only one with a real cost. Measured on the real install,
-  newest first: **2026.9.2** — 8,858 files, 157.4 MB, **0.59-0.63 s** over three consecutive
+  newest first: **2026.9.5** — 10,039 files, 199.2 MiB (208,872,930 B), **0.64 s** over three
+  consecutive runs, with one identical digest (`4b78566e15b10135`) for the npm-installed tree
+  and the extracted tarball, so the install step did not alter `dist/`, `bin/` or the entry
+  scripts; **2026.9.4** — 9,249 files, 177.3 MiB, 0.57 s (measured on the tarball);
+  **2026.9.2** — 8,858 files, 157.4 MB, 0.59-0.63 s over three consecutive
   runs; **2026.7.1-2** — 7,716 files, 77.8 MB, 0.27-0.32 s. Against a `--monitor` run of
   roughly 7.8 s that is still affordable; a `node_modules` sweep would not be, which is why
   the tree below stops at the package root's own code. Re-measure on every OpenClaw upgrade:
@@ -50,16 +54,19 @@ from pathlib import Path
 
 from .deptree import find_package_root
 
-# Bounds on the code walk. The "roughly 2.5x the real install" these were set to is no
-# longer what they are: measured against an installed 2026.9.2 (8,858 files / 157.4 MB) the
-# file cap is 2.26x and the byte cap 1.91x, i.e. the install sits at 44.3% and 52.5% of them.
-# Still generous rather than tight — a cap that fires in normal use produces a permanent
-# "could not inspect it all" note, which teaches the reader to ignore the line — but the
-# margin is half what the original figure claims, and the byte side is the tighter one. A
-# capped digest fails safe (it says `code_capped`) and blind: it cannot catch the swapped
-# build it exists for. Re-measure on every upgrade and raise the cap BEFORE it bites.
-MAX_CODE_FILES = 20_000
-MAX_CODE_BYTES = 300 * 1024 * 1024
+# Bounds on the code walk, set to roughly 2.5x the real install. The margin erodes with every
+# release, so it is restored when it has: at 2026.9.2 (8,858 files / 157.4 MB) the old 20,000
+# file / 300 MiB caps sat at 44.3% and 52.5%; at 2026.9.5 (10,039 files / 199.2 MiB) they sat
+# at 50.2% and 66.4%, and the last release step added ~22 MiB, i.e. four to five releases from
+# a `code_capped` digest. The caps were therefore raised on 2026-09-19 to 25,000 files and
+# 500 MiB, which puts 2026.9.5 at 40.2% and 39.8% of them. Still generous rather than tight —
+# a cap that fires in normal use produces a permanent "could not inspect it all" note, which
+# teaches the reader to ignore the line — and the walk stays bounded (~1.6 s at the byte cap).
+# A capped digest fails safe (it says `code_capped`) and blind: it cannot catch the swapped
+# build it exists for. Re-measure on every upgrade and raise the cap BEFORE it bites; the
+# series does not move in one direction only (9.2 shrank), so no single release predicts it.
+MAX_CODE_FILES = 25_000
+MAX_CODE_BYTES = 500 * 1024 * 1024
 
 # The executable surface, in the order it is walked. `dist/` is where the built code lives;
 # the entry scripts are what `npm` wired into PATH. `node_modules/` is deliberately absent —
