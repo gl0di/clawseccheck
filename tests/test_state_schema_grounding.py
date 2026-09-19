@@ -67,18 +67,21 @@ guard writing its own evidence — regenerate it, never patch it by hand.
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
+import os
 import re
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 import pytest
 
-from _distgrounding import _JS_EXTS, _spellings
+from _distgrounding import _JS_EXTS
 from _realhome import REAL_HOME
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -92,9 +95,31 @@ SNAPSHOT_FILE = Path(__file__).resolve().parent / "state_schema_snapshot.sql"
 # B-519: REAL_HOME, not Path.home() — see tests/_realhome.py. Mirrors test_schema_
 # grounding.py's OPENCLAW_DIST exactly (same installed package, same reasoning).
 OPENCLAW_DIST = REAL_HOME / ".npm-global" / "lib" / "node_modules" / "openclaw" / "dist"
-STATE_DB_CONTRACT_GLOB = "openclaw-state-db-contract-*.js"
 SCHEMA_SQL_CONST_MARKER = 'const OPENCLAW_STATE_SCHEMA_SQL = "'
-SCHEMA_VERSION_RE = re.compile(r"OPENCLAW_STATE_SCHEMA_VERSION\s*=\s*(\d+)")
+
+# B-834: how the vendor spells the state-schema VERSION, oldest to newest form. Through
+# 2026.9.4 it was a named constant in `openclaw-state-db-contract-*`; 2026.9.5 removed the
+# constant and inlined the number as a literal at each use, so a reader that looked only for
+# the constant kept returning "not found" and, being reached only by the `--write-state-*`
+# regenerators, no test went red. Each anchor is one place the number is spelled OUT;
+# `_state_schema_version_from` needs at least one to fire and all that fire to agree, so a
+# release that renames every one of them fails loudly instead of stamping a stale number.
+# Two hardenings from the independent review of B-834: the digit capture is terminated
+# (`(?![\w.])`, so `0x11`, `1_7`, `1e1` and `17.5` do not match and reach the loud failure
+# rather than yielding 0, 1, 1 and 17), and the argument span of the two guards is bounded
+# (`{0,200}`; an unbounded `[^)]*` backtracked quadratically on an unterminated call -- 413 s
+# on a 5 MB line).
+_SCHEMA_VERSION_ANCHORS = (
+    ("named constant (<= 2026.9.4)",
+     re.compile(r"\bOPENCLAW_STATE_SCHEMA_VERSION\s*=\s*(\d+)(?![\w.])")),
+    ("content-version guard",
+     re.compile(r"\breadStateSchemaContentVersion\s*\([^)]{0,200}\)\s*!==\s*(\d+)(?![\w.])")),
+    ("migration-version guard",
+     re.compile(r"\breadStateSchemaMigrationVersion\s*\([^)]{0,200}\)\s*!==\s*(\d+)(?![\w.])")),
+    ("newer-schema error",
+     re.compile(r'\bcreateNewerSqliteSchemaVersionError\(\s*"OpenClaw state database"\s*,'
+                r"[^,()]+,[^,()]+,\s*(\d+)\s*\)")),
+)
 
 REGENERATE_CMD = (
     "PYTHONPATH=tests:. python3 tests/test_state_schema_grounding.py --write-state-snapshot"
@@ -154,35 +179,95 @@ def _unescape_js_double_quoted(raw: str) -> str:
     return "".join(out)
 
 
-def _find_state_schema_defining_js(dist_dir: Path) -> Path:
-    """The one dist file that DEFINES `OPENCLAW_STATE_SCHEMA_SQL` as a string literal.
+def _state_schema_defining_files(dist_dir: Path) -> "list[Path]":
+    """Every dist file that DEFINES `OPENCLAW_STATE_SCHEMA_SQL` as a string literal, sorted.
 
     Located by the constant, never by filename: see this module's docstring for why a
-    filename glob broke on 2026.9.1 while still resolving to a real file. Raises loudly on
-    zero or more-than-one match rather than trusting the first hit — the TRAP is
-    `DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL`, an unrelated sidecar schema that also
-    declares a `capture_events` table. The marker names the constant, so that file cannot
-    match it at all.
+    filename glob broke on 2026.9.1 while still resolving to a real file. The TRAP is
+    `DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL`, an unrelated sidecar schema that also declares a
+    `capture_events` table. The marker names the constant, so that file cannot match it.
     """
-    # B-784: the SELECTION is by constant, but the CANDIDATE SET was `*.js` — a filename
+    # B-784: the SELECTION is by constant, but the CANDIDATE SET was `*.js` -- a filename
     # anchor after all, and the half that 2026.9.3 broke by recompiling every chunk as
-    # `.mjs`. It reported "found 0", which this guard's own message reads as the vendor
-    # having changed how it declares the schema; the constant was there the whole time, in
-    # exactly one file. `_JS_EXTS` is imported rather than restated so the two locators
-    # cannot drift apart on the next rename.
-    matches = sorted(
-        p for ext in _JS_EXTS for p in dist_dir.rglob("*" + ext)
-        if SCHEMA_SQL_CONST_MARKER in p.read_text(encoding="utf-8", errors="replace")
-    )
-    if len(matches) != 1:
+    # `.mjs`. `_JS_EXTS` is imported rather than restated so the two locators cannot drift
+    # apart on the next rename.
+    definers = []
+    for ext in _JS_EXTS:
+        for path in dist_dir.rglob("*" + ext):
+            # A directory or a dangling symlink that merely LOOKS like a bundle cannot
+            # define anything; skipping it is right. An unreadable REGULAR file could be the
+            # one that does, so that fails loudly instead of being skipped.
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise AssertionError(
+                    f"cannot read {path} while looking for {SCHEMA_SQL_CONST_MARKER!r}: {exc}. "
+                    "An unreadable bundle could be the one that defines the state schema."
+                ) from exc
+            occurrences = text.count(SCHEMA_SQL_CONST_MARKER)
+            if occurrences > 1:
+                raise AssertionError(
+                    f"{path} contains {SCHEMA_SQL_CONST_MARKER!r} {occurrences} times (a "
+                    "second definition, a continued literal or the marker inside a comment). "
+                    "Only the first would be read; decide which one the runtime uses."
+                )
+            if occurrences:
+                definers.append(path)
+    return sorted(definers)
+
+
+def _find_state_schema_defining_js(dist_dir: Path) -> Path:
+    """The dist file to READ the state schema from -- after proving every definition agrees.
+
+    B-834: 2026.9.5 defines the constant in THREE bundles (the state-db chunk, a copy under
+    `native-hook-relay/`, and `managed-handoff-runtime`) where 2026.9.4 defined it in one.
+    "Exactly one" was a proxy for "unambiguous", and it stopped being true while the schema
+    stayed unambiguous: the three extracted SQL blobs are byte-identical. What the guard is
+    for is that picking a file must not be a coin toss, so it now asserts THAT: any number of
+    definitions is fine when they are the same schema, and it fails loudly, naming the files
+    and their digests, when they are not.
+
+    SCOPE OF THAT PROOF, stated because an independent review found it narrower than the
+    sentence above reads: it covers the definitions spelled `const OPENCLAW_STATE_SCHEMA_SQL
+    = "..."` -- the spelling this module extracts. On every release 8.2 through 9.5 the
+    worker thread (`worker/worker.mjs`) also embeds the constant as a TEMPLATE literal, and
+    `config-doctor/runtime-*.js` reads the SQL from a `.sql` file the package does not ship;
+    neither is compared here. The template copy was diffed against the string copy on all six
+    releases and is byte-equal, so no wrong answer exists today, but a future divergence
+    between those spellings would not be seen by this function.
+
+    Returns the top-level `openclaw-state-db-*` chunk when there is one (the file the
+    runtime's own state module lives in, and the one worth citing in a generated header),
+    else the first in sort order.
+    """
+    matches = _state_schema_defining_files(dist_dir)
+    if not matches:
         raise AssertionError(
-            f"expected exactly one file under {dist_dir} defining "
-            f"{SCHEMA_SQL_CONST_MARKER!r}, found {len(matches)}: {matches}. Zero means the "
-            "vendor changed how it declares the state schema — re-ground before trusting "
-            "anything downstream. More than one means the anchor is no longer unique and "
-            "picking either would be a coin toss."
+            f"expected at least one file under {dist_dir} defining "
+            f"{SCHEMA_SQL_CONST_MARKER!r}, found 0. That means the vendor changed how it "
+            "declares the state schema -- re-ground before trusting anything downstream."
         )
-    return matches[0]
+    by_digest: "dict[str, list[Path]]" = {}
+    for path in matches:
+        sql = _extract_vendor_schema_sql(path.read_text(encoding="utf-8", errors="replace"))
+        # surrogatepass: a lone or escaped-pair surrogate in the SQL must reach the identity
+        # comparison, not crash it with a UnicodeEncodeError that is not an AssertionError.
+        by_digest.setdefault(
+            hashlib.sha256(sql.encode("utf-8", "surrogatepass")).hexdigest()[:12], []).append(path)
+    if len(by_digest) != 1:
+        listing = "; ".join(
+            f"{digest}: {[str(p.relative_to(dist_dir)) for p in paths]}"
+            for digest, paths in sorted(by_digest.items()))
+        raise AssertionError(
+            f"{len(matches)} files under {dist_dir} define {SCHEMA_SQL_CONST_MARKER!r} and "
+            f"their SQL is NOT identical ({listing}). Picking either would be a coin toss: "
+            "decide which definition the runtime actually opens before trusting a snapshot "
+            "taken from one of them."
+        )
+    top = [p for p in matches if p.parent == dist_dir and p.name.startswith("openclaw-state-db-")]
+    return (top or matches)[0]
 
 
 def _extract_vendor_schema_sql(js_text: str) -> str:
@@ -264,15 +349,49 @@ def _installed_openclaw_version() -> str:
     return json.loads(package_json.read_text(encoding="utf-8"))["version"]
 
 
+def _state_schema_version_evidence(dist_dir: Path) -> "dict[str, set[int]]":
+    """anchor name -> the version numbers that anchor spells out, across the state-db files.
+
+    Scans every `openclaw-state-db-*` chunk at any depth plus every file defining the schema
+    SQL, so a chunk moving between directories or being re-split does not lose the anchor.
+    """
+    files = set(_state_schema_defining_files(dist_dir))
+    for ext in _JS_EXTS:
+        files.update(dist_dir.rglob("openclaw-state-db-*" + ext))
+    evidence: "dict[str, set[int]]" = {}
+    for path in sorted(files):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for name, pattern in _SCHEMA_VERSION_ANCHORS:
+            for match in pattern.finditer(text):
+                evidence.setdefault(name, set()).add(int(match.group(1)))
+    return evidence
+
+
+def _state_schema_version_from(dist_dir: Path) -> int:
+    """The vendor's state-schema version (its `PRAGMA user_version` ladder top), or a loud
+    failure. Never a guess: no anchor means UNKNOWN, and anchors that disagree mean one of
+    them is describing something else."""
+    evidence = _state_schema_version_evidence(dist_dir)
+    values = {v for found in evidence.values() for v in found}
+    if not values:
+        raise AssertionError(
+            f"could not read the state-schema version from any {len(_SCHEMA_VERSION_ANCHORS)} "
+            f"known spelling under {dist_dir} ({[n for n, _ in _SCHEMA_VERSION_ANCHORS]}). "
+            "The vendor changed how it writes the number -- re-ground the anchors; do not "
+            "stamp a version you did not read."
+        )
+    if len(values) != 1:
+        raise AssertionError(
+            f"the state-schema version anchors disagree under {dist_dir}: "
+            f"{ {name: sorted(v) for name, v in sorted(evidence.items())} }. One of them is "
+            "describing something other than the schema version -- decide which before "
+            "stamping a number."
+        )
+    return next(iter(values))
+
+
 def _installed_state_schema_version() -> int:
-    spellings = _spellings(STATE_DB_CONTRACT_GLOB)   # B-784 — see _find_state_schema_defining_js
-    for path in sorted({p for s in spellings for p in OPENCLAW_DIST.glob(s)}):
-        m = SCHEMA_VERSION_RE.search(path.read_text(encoding="utf-8"))
-        if m:
-            return int(m.group(1))
-    raise AssertionError(
-        f"OPENCLAW_STATE_SCHEMA_VERSION not found in any {spellings!r} file"
-    )
+    return _state_schema_version_from(OPENCLAW_DIST)
 
 
 def _require_dist() -> Path:
@@ -1052,22 +1171,236 @@ def test_find_state_schema_defining_js_ignores_the_legacy_capture_trap(tmp_path)
 
 
 def test_find_state_schema_defining_js_raises_on_zero_matches(tmp_path):
-    with pytest.raises(AssertionError, match="expected exactly one"):
+    with pytest.raises(AssertionError, match="found 0"):
         _find_state_schema_defining_js(tmp_path)
 
 
-def test_find_state_schema_defining_js_raises_on_multiple_matches(tmp_path):
-    """Two files DEFINING the constant. Both must carry the marker: under the old
-    filename glob this test wrote two same-named files with dummy bodies, which after
-    the 2026-09-03 re-anchoring would have exercised the ZERO-match branch instead and
-    silently become a duplicate of the test above."""
-    for name in ("openclaw-state-db-cache-AAA.js", "openclaw-state-db-readonly-BBB.js"):
+_SAME_SQL = 'const OPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS t (a TEXT);";'
+
+
+def test_find_state_schema_defining_js_accepts_identical_copies_across_bundles(tmp_path):
+    """B-834: 2026.9.5 defines the schema in three bundles (a top-level chunk, a
+    `native-hook-relay/` copy and a runtime chunk) with byte-identical SQL. That is ONE
+    schema; refusing it made both baseline generators unusable on the release."""
+    (tmp_path / "native-hook-relay").mkdir()
+    (tmp_path / "managed-handoff-runtime.mjs").write_text(_SAME_SQL, encoding="utf-8")
+    (tmp_path / "native-hook-relay" / "openclaw-state-db-h6henlHr.mjs").write_text(
+        _SAME_SQL, encoding="utf-8")
+    (tmp_path / "openclaw-state-db-DS2iNFy4.mjs").write_text(_SAME_SQL, encoding="utf-8")
+    found = _find_state_schema_defining_js(tmp_path)
+    # the top-level state-db chunk is the one worth citing, not whichever sorts first
+    assert found == tmp_path / "openclaw-state-db-DS2iNFy4.mjs"
+
+
+def test_find_state_schema_defining_js_falls_back_to_the_first_when_no_chunk_is_named_state_db(tmp_path):
+    (tmp_path / "b.mjs").write_text(_SAME_SQL, encoding="utf-8")
+    (tmp_path / "a.mjs").write_text(_SAME_SQL, encoding="utf-8")
+    assert _find_state_schema_defining_js(tmp_path).name == "a.mjs"
+
+
+def test_find_state_schema_defining_js_raises_loudly_when_definitions_differ(tmp_path):
+    """The guard's actual job: choosing a file must not be a coin toss. Two definitions that
+    are NOT the same schema fail, and the message names both files and their digests."""
+    (tmp_path / "openclaw-state-db-AAA.js").write_text(_SAME_SQL, encoding="utf-8")
+    (tmp_path / "openclaw-state-db-BBB.js").write_text(
+        'const OPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS u (b TEXT);";',
+        encoding="utf-8")
+    with pytest.raises(AssertionError, match="NOT identical") as excinfo:
+        _find_state_schema_defining_js(tmp_path)
+    assert "openclaw-state-db-AAA.js" in str(excinfo.value)
+    assert "openclaw-state-db-BBB.js" in str(excinfo.value)
+
+
+def test_find_state_schema_defining_js_is_not_satisfied_by_the_legacy_capture_trap_alone(tmp_path):
+    """Positive control for the marker: a file that declares ONLY the unrelated sidecar
+    schema must still count as zero definitions, however many copies of it exist."""
+    for name in ("runtime-A.mjs", "runtime-B.mjs"):
         (tmp_path / name).write_text(
-            'const OPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS t (a TEXT);";',
-            encoding="utf-8",
-        )
-    with pytest.raises(AssertionError, match="expected exactly one"):
+            'const DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL = "CREATE TABLE capture_events (b TEXT);";',
+            encoding="utf-8")
+    with pytest.raises(AssertionError, match="found 0"):
         _find_state_schema_defining_js(tmp_path)
+
+
+# ---- B-834: the version reader ---------------------------------------------------------
+
+def _write_dist(root: Path, files: "dict[str, str]") -> Path:
+    for rel, text in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    return root
+
+
+def test_state_schema_version_reads_the_named_constant_of_2026_9_4_and_earlier(tmp_path):
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-contract-C8vwd-Ud.mjs":
+            "const OPENCLAW_STATE_SCHEMA_VERSION = 17;\nconst OPENCLAW_STATE_STRICT_SCHEMA_VERSION = 3;\n",
+    })
+    assert _state_schema_version_from(dist) == 17
+
+
+def test_state_schema_version_reads_the_inlined_literals_of_2026_9_5(tmp_path):
+    """The constant is gone; the number survives as a literal at each use."""
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-DS2iNFy4.mjs":
+            'if (readStateSchemaContentVersion(database) !== 17) throw new Error("x");\n'
+            "const needsRepair = readStateSchemaMigrationVersion(database) !== 17 || y;\n",
+        "openclaw-state-db-schema-version-BWuCSXsd.mjs":
+            'if (contentVersion > 17) throw createNewerSqliteSchemaVersionError('
+            '"OpenClaw state database", pathname, contentVersion, 17);\n',
+    })
+    assert _state_schema_version_from(dist) == 17
+    evidence = _state_schema_version_evidence(dist)
+    assert set(evidence) == {"content-version guard", "migration-version guard", "newer-schema error"}
+
+
+def test_state_schema_version_does_not_confuse_the_strict_or_quarantine_versions(tmp_path):
+    """`OPENCLAW_STATE_STRICT_SCHEMA_VERSION = 3` and the quarantine store's version 2 sit
+    beside the real one; matching them would stamp the wrong number."""
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-contract-X.mjs":
+            "const OPENCLAW_STATE_SCHEMA_VERSION = 16;\nconst OPENCLAW_STATE_STRICT_SCHEMA_VERSION = 3;\n",
+        "openclaw-state-db-cache-Y.mjs": "const OPENCLAW_QUARANTINE_SCHEMA_VERSION = 2;\n",
+    })
+    assert _state_schema_version_from(dist) == 16
+
+
+def test_state_schema_version_finds_the_anchor_in_a_nested_chunk(tmp_path):
+    dist = _write_dist(tmp_path, {
+        "native-hook-relay/openclaw-state-db-h6henlHr.mjs":
+            "if (readStateSchemaMigrationVersion(db) !== 17) return;\n",
+    })
+    assert _state_schema_version_from(dist) == 17
+
+
+def test_state_schema_version_fails_loudly_when_no_anchor_survives(tmp_path):
+    """A release that renames every spelling must FAIL, not stamp a stale number."""
+    dist = _write_dist(tmp_path, {"openclaw-state-db-DS2iNFy4.mjs": "const version = 17;\n"})
+    with pytest.raises(AssertionError, match="could not read the state-schema version"):
+        _state_schema_version_from(dist)
+
+
+def test_state_schema_version_fails_loudly_when_anchors_disagree(tmp_path):
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-contract-X.mjs": "const OPENCLAW_STATE_SCHEMA_VERSION = 16;\n",
+        "openclaw-state-db-DS2iNFy4.mjs":
+            "if (readStateSchemaContentVersion(database) !== 17) throw 1;\n",
+    })
+    with pytest.raises(AssertionError, match="anchors disagree"):
+        _state_schema_version_from(dist)
+
+
+def test_the_version_anchors_are_all_exercised_by_the_shipped_examples():
+    """Guard-the-guard: an anchor no example can reach would rot unnoticed."""
+    samples = {
+        "named constant (<= 2026.9.4)": "const OPENCLAW_STATE_SCHEMA_VERSION = 17;",
+        "content-version guard": "readStateSchemaContentVersion(database) !== 17",
+        "migration-version guard": "readStateSchemaMigrationVersion(db) !== 17",
+        "newer-schema error":
+            'createNewerSqliteSchemaVersionError("OpenClaw state database", pathname, v, 17)',
+    }
+    assert {name for name, _ in _SCHEMA_VERSION_ANCHORS} == set(samples)
+    for name, pattern in _SCHEMA_VERSION_ANCHORS:
+        found = pattern.search(samples[name])
+        assert found and found.group(1) == "17", name
+
+
+# ---- B-834: findings of the independent review, pinned ----------------------------------
+
+@pytest.mark.parametrize("literal", ["0x11", "1_7", "1e1", "17.5", "17abc"])
+def test_a_version_literal_that_is_not_a_plain_integer_does_not_yield_a_number(tmp_path, literal):
+    """The digit capture used to stop at the first non-digit, so `0x11` read as 0, `1_7` and
+    `1e1` as 1 and `17.5` as 17 -- a WRONG number returned silently by a sole anchor. It must
+    reach the loud failure instead."""
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-contract-X.mjs": f"const OPENCLAW_STATE_SCHEMA_VERSION = {literal};\n",
+    })
+    with pytest.raises(AssertionError, match="could not read the state-schema version"):
+        _state_schema_version_from(dist)
+
+
+def test_the_guard_anchors_do_not_backtrack_quadratically_on_an_unterminated_call(tmp_path):
+    """`[^)]*` after the call name backtracked quadratically when no `)` follows: 413 s on a
+    5 MB line. Bounded now; 2 MB must finish in seconds."""
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-x.mjs": "readStateSchemaContentVersion(a," * 60_000,
+    })
+    started = time.monotonic()
+    with pytest.raises(AssertionError, match="could not read the state-schema version"):
+        _state_schema_version_from(dist)
+    assert time.monotonic() - started < 10
+
+
+def test_a_lone_surrogate_in_a_definition_reaches_the_identity_check_instead_of_crashing(tmp_path):
+    sql = 'const OPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS t (a TEXT); -- \\ud800";'
+    (tmp_path / "openclaw-state-db-A.mjs").write_text(sql, encoding="utf-8")
+    (tmp_path / "openclaw-state-db-B.mjs").write_text(sql, encoding="utf-8")
+    assert _find_state_schema_defining_js(tmp_path).name == "openclaw-state-db-A.mjs"
+
+
+def test_entries_that_only_look_like_bundles_are_skipped_not_fatal(tmp_path):
+    """A directory named `vendor.js` and a dangling symlink named `dangling.js` cannot define
+    anything; both used to escape as a raw IsADirectoryError / FileNotFoundError."""
+    (tmp_path / "vendor.js").mkdir()
+    (tmp_path / "dangling.js").symlink_to(tmp_path / "does-not-exist.js")
+    (tmp_path / "openclaw-state-db-A.mjs").write_text(_SAME_SQL, encoding="utf-8")
+    assert _find_state_schema_defining_js(tmp_path).name == "openclaw-state-db-A.mjs"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_an_unreadable_regular_file_fails_loudly_and_names_the_file(tmp_path):
+    """Not skipped silently: an unreadable bundle could be the one that defines the schema."""
+    (tmp_path / "openclaw-state-db-A.mjs").write_text(_SAME_SQL, encoding="utf-8")
+    hidden = tmp_path / "openclaw-state-db-B.mjs"
+    hidden.write_text(_SAME_SQL, encoding="utf-8")
+    hidden.chmod(0)
+    try:
+        with pytest.raises(AssertionError, match="cannot read") as excinfo:
+            _find_state_schema_defining_js(tmp_path)
+        assert "openclaw-state-db-B.mjs" in str(excinfo.value)
+    finally:
+        hidden.chmod(0o600)
+
+
+@pytest.mark.parametrize("text", [
+    # a second definition in the same file: only the first would be read
+    _SAME_SQL + "\n" + 'const OPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS u (b TEXT);";',
+    # the marker inside a comment ahead of the real definition
+    '// const OPENCLAW_STATE_SCHEMA_SQL = "old";\n' + _SAME_SQL,
+])
+def test_a_file_with_the_marker_more_than_once_fails_loudly(tmp_path, text):
+    (tmp_path / "openclaw-state-db-A.mjs").write_text(text, encoding="utf-8")
+    with pytest.raises(AssertionError, match="2 times"):
+        _find_state_schema_defining_js(tmp_path)
+
+
+@pytest.mark.parametrize("variant", [
+    'const OPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS t (a TEXT); ";',       # trailing space
+    'const OPENCLAW_STATE_SCHEMA_SQL = "CREATE  TABLE IF NOT EXISTS t (a TEXT);";',       # inner whitespace
+    'const OPENCLAW_STATE_SCHEMA_SQL = "create table if not exists t (a text);";',        # case only
+])
+def test_definitions_differing_only_in_whitespace_or_case_are_not_identical(tmp_path, variant):
+    """Pins the strictness of the comparison: the generated files are byte-for-byte copies,
+    so a 'helpful' normalisation of the digest must turn this red."""
+    (tmp_path / "openclaw-state-db-A.mjs").write_text(_SAME_SQL, encoding="utf-8")
+    (tmp_path / "openclaw-state-db-B.mjs").write_text(variant, encoding="utf-8")
+    with pytest.raises(AssertionError, match="NOT identical"):
+        _find_state_schema_defining_js(tmp_path)
+
+
+def test_the_stamp_check_is_strict_about_the_whole_line_and_about_duplicates(tmp_path):
+    """`_header_field` reads `17 (stale, was 16)` as `17`; the stamp comparison must not."""
+    dist = _write_dist(tmp_path / "dist", {
+        "openclaw-state-db-DS2iNFy4.mjs":
+            "if (readStateSchemaContentVersion(database) !== 17) throw 1;\n",
+    })
+    stale_note = "-- state-schema-version: 17 (stale, was 16)\n"
+    twice = "-- state-schema-version: 17\n-- state-schema-version: 16\n"
+    in_body = "-- openclaw-version: x\nCREATE TABLE t (a TEXT);\n-- state-schema-version: 17\n"
+    problems = _stamped_schema_version_mismatches(
+        dist, {"note": stale_note, "twice": twice, "body_only_is_fine": in_body})
+    assert [p.split(":")[0] for p in problems] == ["note", "twice"]
 
 
 def test_require_dist_skips_cleanly_when_openclaw_is_not_installed(monkeypatch):
@@ -1148,6 +1481,64 @@ def test_snapshot_matches_installed_dist_and_stamped_version():
         f"OpenClaw is {installed!r} -- a stale/faked stamp used to leave a sibling guard "
         f"green (test_schema_grounding.py's own regression). Regenerate: {REGENERATE_CMD}"
     )
+
+
+_STATE_SCHEMA_STAMP_RE = re.compile(
+    r"^(?:--|#)[ \t]*state-schema-version:[ \t]*(\d+)[ \t]*$", re.MULTILINE)
+
+
+def _stamped_state_schema_versions(text: str) -> "list[str]":
+    """Every `state-schema-version` header line in *text*, strictly: the whole line must be
+    `<marker> state-schema-version: <digits>`. `_header_field` is looser on purpose (it also
+    reads free-text headers), which let `17 (stale, was 16)` pass as `17`."""
+    return _STATE_SCHEMA_STAMP_RE.findall(text)
+
+
+def _stamped_schema_version_mismatches(dist_dir: Path, texts: "dict[str, str]") -> "list[str]":
+    """One line per generated file whose `state-schema-version` stamp is not the version the
+    dist spells out. Exactly ONE strict stamp line per file, no more, no less. Pure over its
+    inputs so the comparison itself is testable offline."""
+    installed = _state_schema_version_from(dist_dir)
+    problems = []
+    for label, text in texts.items():
+        stamps = _stamped_state_schema_versions(text)
+        if stamps != [str(installed)]:
+            problems.append(
+                f"{label}: stamped state-schema-version {stamps!r}, dist says {installed}")
+    return problems
+
+
+def test_stamped_state_schema_version_matches_the_installed_dist():
+    """B-834, LOCAL-ONLY. The version a generated file is stamped with was read back by
+    NOTHING: the one test that compared a stamp compared `openclaw-version`, and the schema
+    version was only ever produced by `_installed_state_schema_version()`, which the
+    `--write-state-*` regenerators alone reach. So when 2026.9.5 removed the constant the
+    reader lost its subject and no test went red. This is the read-back."""
+    dist_dir = _require_dist()
+    problems = _stamped_schema_version_mismatches(dist_dir, {
+        SNAPSHOT_FILE.name: _read_snapshot_sql(),
+        VENDOR_TABLES_FILE.name: _read_vendor_table_baseline()[0],
+    })
+    assert not problems, (
+        "; ".join(problems)
+        + f". Regenerate: {REGENERATE_CMD} and {REGENERATE_TABLES_CMD}"
+    )
+
+
+def test_a_wrong_state_schema_stamp_is_reported_and_a_right_one_is_not(tmp_path):
+    """Positive control for the comparison above, on a synthetic dist."""
+    dist = _write_dist(tmp_path / "dist", {
+        "openclaw-state-db-DS2iNFy4.mjs":
+            "if (readStateSchemaContentVersion(database) !== 17) throw 1;\n",
+    })
+    right = "-- openclaw-version: 2026.9.5\n-- state-schema-version: 17\n"
+    wrong = "# openclaw-version: 2026.9.5\n# state-schema-version: 16\n"
+    missing = "# openclaw-version: 2026.9.5\n"
+    assert _stamped_schema_version_mismatches(dist, {"a.sql": right}) == []
+    problems = _stamped_schema_version_mismatches(
+        dist, {"a.sql": right, "b.txt": wrong, "c.txt": missing})
+    assert [p.split(":")[0] for p in problems] == ["b.txt", "c.txt"]
+    assert "16" in problems[0] and "dist says 17" in problems[0]
 
 
 # ========================================================================================
