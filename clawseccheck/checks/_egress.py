@@ -383,24 +383,24 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     # same migration doctor uses (applyLegacyDoctorMigrations, which folds
     # normalizeLegacyBrowserConfig from doctor-config-flow-BoTzHMKN.mjs:216-229) and boots
     # with the repaired config -- silently, on EVERY startup, with no explicit
-    # "openclaw doctor" invocation needed. The disk WRITE-back of that repair, however,
-    # only happens through the separate `doctor` command flow
-    # (doctor-config-preflight-BOxHQnVM.mjs), which pre-bootstrap does not call. So the
-    # raw config file this check reads can show the legacy key indefinitely while the
-    # running daemon already granted private-network access on every boot -- a config
-    # setting ONLY the legacy key is a live, silent bypass, not a theoretical one, and
-    # was previously invisible to this check (dangerouslyAllowPrivateNetwork alone).
+    # "openclaw doctor" invocation needed. The disk WRITE-back is a separate step,
+    # commitAutomaticConfigRepair, called only from runDoctorConfigPreflight
+    # (doctor-config-preflight-clU90J9x.mjs, 2026.9.5): pre-bootstrap never calls it, but
+    # the CLI config guard does, incl. for `gateway run`, and only for a single-file config
+    # the repair plan admits (re-checked 2026.9.5; an earlier note here said doctor-only).
+    # So the raw file can show the legacy key until that write lands while every boot
+    # honours it: ONLY the legacy key set = live bypass, previously invisible to this check.
     # Read both, `is True` on each -- not a truthy check, matching the coercion-proof
     # gate below and risk.py's own C-135-B722-followup note.
     #
     # Two OTHER candidate keys were checked and do NOT apply here, so they are
     # deliberately NOT read: OpenClaw's isPrivateNetworkOptInEnabled
-    # (ssrf-policy-CFLWuj1r.mjs) also reads a nested `network.allowPrivateNetwork` /
+    # (ssrf-policy-bu9unXwu.mjs) also reads a nested `network.allowPrivateNetwork` /
     # `network.dangerouslyAllowPrivateNetwork` shape, but that shape belongs to CHANNEL
     # configs only (channels.<provider>.network.*; its own migration in
-    # legacy-private-network-migration-BOjQqQum.mjs is scoped to `channels.<channelKey>`,
+    # legacy-private-network-migration-t-YHta0_.mjs is scoped to `channels.<channelKey>`,
     # never to `browser`). The canonical browser/tools.web.fetch schema,
-    # SsrFPolicyConfigSchema (zod-schema.core-mVpnhNqD.mjs:70-77, a `.strict()` object),
+    # SsrFPolicyConfigSchema (zod-schema.core-CZ0zDyHR.mjs:268-274, a `.strict()` object),
     # has exactly 5 fields and no `network` member, and resolveBrowserSsrFPolicy never
     # reads `cfg?.ssrfPolicy?.network`. Reading it here would fabricate a field path that
     # does not exist for this subsystem (Golden Rule #4).
@@ -1605,10 +1605,10 @@ def check_provider_baseurl(ctx: Context) -> Finding:
 def _otel_undeterminable(cid: str, path: str, value: object, expected: str) -> Finding:
     """Shared UNKNOWN shape for B365's malformed-container branches — same reasoning as
     B82's ``_b82_undeterminable`` (this module): ``diagnostics``/``diagnostics.otel`` are
-    declared inside ``.strict()`` zod objects (zod-schema-Q1KXOooO.mjs:1255-1281) with no
-    ``.nullable()`` anywhere, so a malformed shape means the config does not load at all
-    and the real state cannot be determined from this file — UNKNOWN, never an
-    affirmative claim in either direction.
+    declared inside ``.strict()`` zod objects (``DiagnosticsConfigSchema``,
+    zod-schema-DN2u5FdA.mjs:1281-1315) with no ``.nullable()`` anywhere, so a malformed
+    shape means the config does not load at all and the real state cannot be determined
+    from this file — UNKNOWN, never an affirmative claim in either direction.
     """
     return _finding(
         cid,
@@ -1659,9 +1659,9 @@ def check_otel_content_capture_egress(ctx: Context) -> Finding:
     _b178_classify_host) rather than a second copy. Content capture piggybacks on the
     TRACE signal specifically (the gate checks otel.traces, not .metrics/.logs), so the
     destination is tracesEndpoint if set, else the shared endpoint — per-signal-overrides
-    -shared is grounded from the schema descriptions map (schema-DbKC3IUo.mjs:
-    "diagnostics.otel.tracesEndpoint": "... overrides diagnostics.otel.endpoint and
-    OTEL_EXPORTER_OTLP_ENDPOINT for trace export only."). Neither set -> the exporter
+    -shared is grounded from the schema descriptions map (schema-CwAIqZVE.mjs:937,
+    2026.9.5: "diagnostics.otel.tracesEndpoint": "... overrides diagnostics.otel.endpoint
+    and OTEL_EXPORTER_OTLP_ENDPOINT for trace export only."). Neither set -> the exporter
     falls back to the standard OTEL_EXPORTER_OTLP_ENDPOINT environment variable, which
     this config-only audit cannot observe (no on-disk dotenv witness the way
     B82/OPENCLAW_CACHE_TRACE has) — reported as WARN with the gap disclosed, never an

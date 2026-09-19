@@ -6921,7 +6921,8 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     ``trustInstallRecordFields.clawhubTrustDisposition`` can never literally
     contain the string ``"blocked"`` — the one disposition value this check's FAIL
     branch keys on is the one value the builder can never emit. Confirmed one
-    layer up too: ran ``installPluginFromClawHub()`` (``clawhub-Co7qJynn.mjs``)
+    layer up too: ran ``installPluginFromClawHub()`` (``clawhub-Co7qJynn.mjs`` at 2026.9.4;
+    ``clawhub-DSL95cHE.mjs`` in 2026.9.5, same trust gate, re-read not re-run)
     end-to-end with the same mocked malicious response — it returned before ever
     calling ``downloadClawHubPackageArchive`` (observed: the archive-download mock
     was never invoked) and before building its own persisted ``clawhub: {...}``
@@ -6977,7 +6978,8 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     ``clawhubTrustDisposition`` / ``checkClawHubPackageTrust`` /
     ``buildClawHubTrustInstallRecordFields`` turns up exactly two writers (the
     plugin install/update path here, and the structurally identical skill
-    install/update path in ``clawhub-DJyfzTkY.mjs``) and one reader
+    install/update path in ``clawhub-C16RqbVj.mjs`` at 2026.9.5, ``clawhub-DJyfzTkY.mjs``
+    at 2026.9.4; the grep was re-run on 2026.9.5 with the same result) and one reader
     (``capability-summary-<hash>.mjs``) — no periodic, background, or
     ``doctor``-triggered re-scan of an already-installed, untouched plugin exists.
     A disposition — real or config-migrated per (2a) — sits on disk exactly as

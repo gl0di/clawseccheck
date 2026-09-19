@@ -708,14 +708,15 @@ def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
     browser ever uses the policy. The canonical schema rejects the legacy key outright,
     but the real boot path auto-repairs an invalid config IN MEMORY on every startup
     (resolveStartupConfigSnapshot, wired at pre-bootstrap-Da_13P9b.mjs:255) via the same
-    migration `openclaw doctor` uses, WITHOUT writing the fix back to disk -- so a raw
-    config setting ONLY the legacy key is a live, silent bypass on every boot, not
-    something gated behind a doctor run the operator may never have done. See B38's own
-    grounding comment (checks/_egress.py) for the full chain. Mirrored here so a raw
+    migration `openclaw doctor` uses, without writing it back to disk in that step (a
+    later preflight step may, 2026.9.5 -- see B38) -- so a raw config setting ONLY the
+    legacy key is a live, silent bypass on every boot, not something gated behind a
+    doctor run the operator may never have done. See B38's own grounding comment
+    (checks/_egress.py) for the full chain. Mirrored here so a raw
     config setting ONLY the legacy key still drives RISK-05/RISK-15, not just B38. A
     nested `network.allowPrivateNetwork`/
     `network.dangerouslyAllowPrivateNetwork` shape also exists in the installed dist
-    (isPrivateNetworkOptInEnabled, ssrf-policy-CFLWuj1r.mjs) but is CHANNEL-scoped only
+    (isPrivateNetworkOptInEnabled, ssrf-policy-bu9unXwu.mjs) but is CHANNEL-scoped only
     (channels.<provider>.network.*) and does not apply to browser.ssrfPolicy -- see B38's
     own grounding comment -- so it is deliberately not read here either.
     """

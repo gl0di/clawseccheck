@@ -1494,15 +1494,15 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
 # whole write surface, not a single guarded call site.
 #
 # The vendor treats the variable as security-relevant itself: `isBlockedConfigEnvVar`
-# (config-env-vars-CteCTHfF.mjs:43-45) refuses to let `config.env` set
+# (config-env-vars-BeYgbFTQ.mjs:43-45) refuses to let `config.env` set
 # OPENCLAW_CONFIG_READONLY (alongside OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS /
 # OPENCLAW_INCLUDE_ROOTS / the isDangerousHostEnvVarName family) — a config cannot switch
 # off its own read-only protection. It also sits in the path/identity env allowlist
-# (`GATEWAY_CONFIG_SELECTION_ENV_KEYS`, io.read-helpers-C4y9IMNv.mjs:19-36) next to
+# (`GATEWAY_CONFIG_SELECTION_ENV_KEYS`, io.read-helpers-Bj0GwcNP.mjs:23-42) next to
 # OPENCLAW_AGENT_DIR/OPENCLAW_CONFIG_PATH/OPENCLAW_HOME/OPENCLAW_STATE_DIR/
 # OPENCLAW_WORKSPACE_DIR, and daemon installs deliberately PRESERVE it across a service
 # reinstall (`PRESERVED_OPENCLAW_OPERATOR_OPT_IN_ENV_KEYS`, daemon-install-helpers-
-# 0_9NLfzd.mjs:373-377) rather than wiping it like every other OPENCLAW_* key.
+# BQ0CTd58.mjs:375-379) rather than wiping it like every other OPENCLAW_* key.
 #
 # WHY THIS IS DISCLOSURE-ONLY, NEVER A FAIL/WARN (per Golden Rule #5 and the task brief):
 # there is no plausible bad state here. An externally-managed, read-only config is a
@@ -5816,11 +5816,11 @@ def check_chat_completions_endpoint(ctx: Context) -> Finding:
     to cloud metadata endpoints / internal services" — is REFUTED by the runtime, not
     the schema, and was caught before it was ever committed.** The image-URL fetch
     (``extractImageContentFromSource`` → ``fetchWithGuard``, both
-    ``input-files-_8dvEDQG.mjs``) always calls ``fetchWithSsrFGuard``
-    (``fetch-guard-BMnKD1l7.mjs``) with ``policy: {allowPrivateNetwork: false,
+    ``input-files-DS7n4SJk.mjs``) always calls ``fetchWithSsrFGuard``
+    (``fetch-guard-B8Mfb56t.mjs``) with ``policy: {allowPrivateNetwork: false,
     hostnameAllowlist: limits.urlAllowlist}`` — ``allowPrivateNetwork`` is hardcoded
     false regardless of config, and the guard's private-IP predicate
-    (``ssrf-DNi3J6fi.mjs``) imports a dedicated ``isCloudMetadataIpAddress`` alongside
+    (``ssrf-B1sxrDMt.mjs``) imports a dedicated ``isCloudMetadataIpAddress`` alongside
     RFC1918/loopback/link-local/CGNAT checks. The check is DNS-PINNED and re-applied
     on every redirect hop inside the same guarded-fetch loop (defeats DNS rebinding
     and redirect-based bypass), not just on the initial URL. So an absent
@@ -6142,10 +6142,11 @@ def check_cloudworkers_prepared_pool(ctx: Context) -> Finding:
     ``node_worker_prepared_workspaces``, materializing ``workspace_dir``/``home_dir`` on
     disk for a prepared workspace. Verified NOT to apply here: that table lives under
     ``src/node-host/`` (`node-worker-prepared-workspace-store.ts`, bundled into
-    `dist/daemon-DW2kkFGl.mjs`) and is absent from this machine's own
-    ``~/.openclaw/state/openclaw.sqlite`` (confirmed empty/missing on a live gateway that
-    dispatches, but does not itself run as, a cloud worker node) — it materializes on the
-    REMOTE node's own state DB, never the local gateway's. So it never lands in
+    `dist/daemon-G2kqiA9m.mjs` in 2026.9.5) and is absent from this machine's own
+    ``~/.openclaw/state/openclaw.sqlite`` (confirmed absent on 2026.9.4, and again on
+    2026.9.5 on 2026-09-19, on a live gateway that dispatches, but does not itself run as, a
+    cloud worker node) — it
+    materializes on the REMOTE node's own state DB, never the local gateway's. So it never lands in
     ``skillprovenance.py``'s ``WORKSPACE_DIRS`` or the derived-agent-workspace invariant
     ``tests/test_b610_derived_agent_workspaces.py`` pins, and this check has no local
     on-disk row to read; only ``worker_environments`` (local, no workspace_dir/home_dir
