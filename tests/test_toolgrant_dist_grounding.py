@@ -1,5 +1,5 @@
 """``clawseccheck/toolgrant.py`` grounded against the installed OpenClaw dist directly —
-never against a sibling copy in this repo.
+never against a sibling copy in this repo, and never against a literal of our own.
 
 The brief this module answers named the exact failure mode to avoid: a guard that
 compares ``toolpolicy.py``'s alias table against ``checks/_shared.py``'s alias table (or
@@ -9,12 +9,27 @@ carry only ``{"bash": "exec", "apply-patch": "apply_patch"}`` — missing the re
 third entry, ``"cron": "automations"``. Every test below reads the INSTALLED DIST, not
 either of those files.
 
-Local-only: skipped wherever the installed OpenClaw dist is absent (CI, a machine without
-it) — never silently weakened into a false pass. Ground truth is **openclaw@2026.9.2**
-(re-grounded 2026-09-06); a filename cited here rotates on upgrade (content-hashed bundles),
-and so, as 2026.9.2 showed, can the SHAPE of a literal — so
-re-locate a moved symbol with ``grep -rl '<symbolName>' dist/*.js``, not by trusting the
-literal glob below to still resolve.
+THE PROFILE/GROUP GUARD USED TO BE VACUOUS. It asserted five tool ids and ``group:fs``
+against a literal in this same file, and went green on 2026.9.5 while ``toolgrant.py`` was
+wrong about ``gateway`` (now in the minimal, coding AND messaging profiles), ``plugins``
+(coding, ``group:automation``, ``group:openclaw``), ``ls`` (coding, ``group:fs``) and two
+tool ids it had never seen, ``openclaw`` and ``pdf`` — 522 of 6,688 corpus cells. Five ids
+out of ~55 cannot notice a sixth. It is replaced by WHOLE-table equality against a fresh
+execution of the vendor (``tests/_toolgrantoracle.py``): every profile, every group, the
+alias map, and the exact-key lookup semantics of ``resolveCoreToolProfilePolicy``. A table
+entry on either side only, a member on either side only, and an order-only difference are
+each a failure with the entry named; ``test_diff_tables_*`` prove the comparison itself
+fails when one entry differs (a control that cannot fail controls nothing).
+
+Local-only: skipped wherever the installed OpenClaw dist (or node) is absent (CI, a machine
+without it) — never silently weakened into a false pass. The always-on tests at the bottom
+need neither and pin the machinery. Ground truth is **openclaw@2026.9.5** (re-grounded
+2026-09-19); a filename cited here rotates on upgrade (content-hashed bundles), and so, as
+2026.9.2 showed, can the SHAPE of a literal — so re-locate a moved symbol with
+``grep -rl '<symbolName>' dist/*.mjs``, not by trusting the literal glob below to still
+resolve. **On an OpenClaw upgrade:** ``python3.12 tests/_toolgrantoracle.py --check`` says
+whether the pinned battery still matches; ``--tables`` dumps the tables to re-transcribe;
+``--write`` regenerates the battery.
 
 B-728: the locator is ``tests/_distgrounding.py``, shared, and it distinguishes "OpenClaw
 is not installed" (skip) from "installed, and this anchor no longer matches" (fail, naming
@@ -25,12 +40,33 @@ is not cosmetic: ``tool-policy-match-*.js`` matches two bundles on 2026.9.1 and
 """
 from __future__ import annotations
 
+import json
 import re
+import shutil
 
 import pytest
-from _distgrounding import dist_text
+from _distgrounding import dist_text, require_dist
 
+import _toolgrantoracle as oracle
 from clawseccheck import toolgrant
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _oracle_scratch(tmp_path_factory):
+    """Keep the oracle's throwaway directory inside pytest's own tmp tree."""
+    previous = oracle.SCRATCH_ROOT
+    oracle.SCRATCH_ROOT = tmp_path_factory.mktemp("toolgrant-oracle")
+    yield
+    oracle.SCRATCH_ROOT = previous
+
+
+@pytest.fixture(scope="module")
+def vendor() -> dict:
+    """The vendor's tables, from ONE node execution shared by this module's live tests."""
+    require_dist()
+    if not shutil.which("node"):
+        pytest.skip("node is not installed — the whole-table guards execute the vendor")
+    return oracle.vendor_tables()
 
 
 # --------------------------------------------------------------------- alias table (3, not 2)
@@ -85,28 +121,140 @@ def test_dist_profile_enum_matches_the_known_set():
     assert found == set(toolgrant._CORE_TOOL_PROFILES)
 
 
-def test_dist_read_and_write_are_coding_only_and_full_is_wildcard():
-    text = dist_text("tool-catalog-*.js", symbol="CORE_TOOL_DEFINITIONS",
-                     contains="CORE_TOOL_DEFINITIONS")
-    for tool_id in ("read", "write", "edit", "apply_patch", "exec"):
-        entry = re.search(r'id: "%s",(.*?)profiles: \[([^\]]*)\]' % tool_id, text, re.S)
-        assert entry, f"the {tool_id!r} tool entry moved — re-ground CORE_TOOL_PROFILES"
-        named = set(re.findall(r'"([a-z]+)"', entry.group(2)))
-        assert named == {"coding"}, (tool_id, named)
-    automations_entry = re.search(r"profiles: \[\"coding\"\]", text)
-    assert automations_entry, "no coding-only profile entries found at all — pattern rotted"
-    wildcard = re.search(r'full:\s*\{\s*allow:\s*\["\*"\]\s*\}', text)
-    assert wildcard, 'the "full" profile is no longer allow-all — re-ground'
+def _ours_profiles() -> dict:
+    return {key: list(members) for key, members in toolgrant._CORE_TOOL_PROFILES.items()}
 
 
-def test_dist_group_fs_members_match_ours():
-    text = dist_text("tool-catalog-*.js", symbol="CORE_TOOL_DEFINITIONS",
-                     contains="CORE_TOOL_DEFINITIONS")
-    for tool_id in ("read", "write", "edit", "apply_patch"):
-        assert re.search(r'id: "%s",\s*\n\s*description: [^\n]*,\s*\n\s*sectionId: "fs"' % tool_id, text), (
-            f"{tool_id} no longer sits in sectionId \"fs\" — re-ground group:fs"
-        )
-    assert toolgrant._CORE_TOOL_GROUPS["group:fs"] == ["read", "write", "edit", "apply_patch"]
+def test_profile_table_equals_the_vendors_whole(vendor):
+    """Every profile, every member, in order — read through resolveCoreToolProfilePolicy,
+    the function the resolver itself calls, not through a regex over the catalog source."""
+    theirs = {key: policy["allow"] for key, policy in vendor["profiles"].items()}
+    assert not oracle.diff_tables(_ours_profiles(), theirs, "profiles")
+    for key, policy in vendor["profiles"].items():
+        # toolgrant._profile_policy builds {"allow": [...], "deny": None}; a vendor profile
+        # that ever carried a deny list would be invisible to it, so it must be absent.
+        assert set(policy) == {"allow"}, (key, policy)
+        assert isinstance(policy["allow"], list) and policy["allow"], key
+
+
+def test_profile_keys_are_the_vendors_own_profile_options(vendor):
+    """Three views of "which profiles exist" must agree: the object the runtime indexes,
+    the options list the UI offers, and ours."""
+    assert set(vendor["profile_options"]) == set(vendor["profiles"]) == set(toolgrant._CORE_TOOL_PROFILES)
+
+
+@pytest.mark.parametrize("probe", ["", "MINIMAL", " coding ", "readonly", "constructor", "__proto__", "toString"])
+def test_profile_lookup_is_an_exact_key_match_for_every_probe(vendor, probe):
+    """resolveCoreToolProfilePolicy indexes an object: a near-miss, an empty string and the
+    names on Object.prototype all resolve to nothing, and so do they here. An unrecognized
+    profile restricts NOTHING (the permissive end), so getting this backwards inverts a verdict."""
+    assert vendor["profile_probes"][probe] is None
+    assert toolgrant._profile_policy(probe) is None
+
+
+def test_group_table_equals_the_vendors_whole(vendor):
+    """Every group and every member, in order, from the TOOL_GROUPS object expandToolGroups
+    actually reads — and that object must still be a plain copy of CORE_TOOL_GROUPS."""
+    assert vendor["groups"] == vendor["core_groups"]
+    assert not oracle.diff_tables(toolgrant._CORE_TOOL_GROUPS, vendor["groups"], "groups")
+
+
+def test_alias_table_equals_the_vendors_whole(vendor):
+    """The executed Map, not a regex over its declaration (test_dist_tool_name_aliases_...
+    above reads the text; this reads the object the predicate consults)."""
+    assert not oracle.diff_tables(toolgrant._TOOL_NAME_ALIASES, vendor["aliases"], "aliases")
+
+
+def test_no_alias_key_shadows_a_catalog_tool(vendor):
+    """An alias whose key is also a catalog tool would silently redirect that tool; the
+    table equality above cannot see that (it only says both sides agree), this can."""
+    catalog = {t for members in vendor["groups"].values() for t in members}
+    assert not (set(vendor["aliases"]) & catalog), set(vendor["aliases"]) & catalog
+
+
+def test_the_canvas_and_update_plan_expansions_are_outside_the_grant_predicate(vendor):
+    """NOT MODELLED, and pinned so that stays a decision rather than an accident.
+
+    2026.9.5 promotes ``canvas`` -> [canvas, show_widget] and renames ``update_plan`` ->
+    ``progress_card`` in ``expandShippedCoreToolPolicyNames`` (tool-policy bundle). That runs
+    in the tool-CONSTRUCTION pipeline, after ``resolveConfiguredToolPolicies``; the predicate
+    ``granted()`` ports (``isToolAllowedByPolicies`` over that resolver's output) never applies
+    it, and ``TOOL_NAME_ALIASES`` is still the three-entry map. So an ``allow: ["canvas"]``
+    config does NOT grant ``show_widget`` at the layer toolgrant.py answers for — measured
+    below by execution — while the pipeline that builds the tool list would. If a check ever
+    asks ``granted(cfg, "show_widget")`` this is the gap to close, with its own differential."""
+    assert vendor["shipped_family"] == {"canvas": ["show_widget"]}
+    assert vendor["shipped_renames"] == {"update_plan": "progress_card"}
+    cfgs = [
+        ("canvas", {"tools": {"allow": ["canvas"]}}, "show_widget"),
+        ("update_plan", {"tools": {"allow": ["update_plan"]}}, "progress_card"),
+    ]
+    grants = oracle.vendor_grants([(f"probe/{name}", cfg) for name, cfg, _ in cfgs],
+                                  tools=[tool for _, _, tool in cfgs])
+    for (name, cfg, tool), row in zip(cfgs, grants):
+        assert row["results"][tool]["global"] is False, (name, tool)
+        assert toolgrant.granted(cfg, tool) is False, (name, tool)
+
+
+# --------------------------------------------------------------------- the whole-catalog sweep
+
+@pytest.fixture(scope="module")
+def sweep(vendor):
+    """(configs, tools, vendor answers) for every synthetic config x every catalog tool name."""
+    rows = oracle.synthetic_configs(vendor)
+    tools = oracle.all_tool_ids(vendor)
+    return dict(rows), tools, oracle.vendor_grants(rows, tools)
+
+
+def _sweep_mismatches(sweep) -> list:
+    configs, _, grants = sweep
+    wrong = []
+    for row in grants:
+        cfg = configs[row["label"]]
+        for tool, per_scope in row["results"].items():
+            for scope, expected in per_scope.items():
+                if toolgrant.granted(cfg, tool, scope) is not expected:
+                    wrong.append((row["label"], scope, tool, expected))
+    return wrong
+
+
+def test_granted_matches_the_vendor_for_every_catalog_tool_on_synthetic_configs(sweep):
+    """The pinned battery grades eleven tools; this grades ALL of them (every name any group,
+    profile or alias mentions), live, over the configs built to reach every table entry."""
+    _, tools, grants = sweep
+    wrong = _sweep_mismatches(sweep)
+    assert not wrong, f"{len(wrong)} cell(s) disagree with the installed vendor, first: {wrong[:8]}"
+    # non-vacuity: a sweep over a handful of cells, or one that only ever saw one answer,
+    # would pass a port that is wrong everywhere it did not look.
+    cells = sum(len(per) for row in grants for per in row["results"].values())
+    assert len(tools) >= 50 and cells >= 5000, (len(tools), cells)
+    for tool in oracle.BATTERY_TOOLS:
+        seen = {v for row in grants for v in row["results"][tool].values()}
+        assert seen == {True, False}, (tool, seen)
+
+
+def test_the_sweep_fails_when_a_table_entry_is_wrong(sweep, monkeypatch):
+    """Positive control on the sweep itself: dropping ``pdf`` from group:media, or
+    ``gateway`` from the minimal profile, must be seen — and named."""
+    groups = dict(toolgrant._CORE_TOOL_GROUPS)
+    groups["group:media"] = [t for t in groups["group:media"] if t != "pdf"]
+    monkeypatch.setattr(toolgrant, "_CORE_TOOL_GROUPS", groups)
+    assert {tool for *_, tool, _ in _sweep_mismatches(sweep)} == {"pdf"}
+    monkeypatch.undo()
+
+    profiles = dict(toolgrant._CORE_TOOL_PROFILES)
+    profiles["minimal"] = [t for t in profiles["minimal"] if t != "gateway"]
+    monkeypatch.setattr(toolgrant, "_CORE_TOOL_PROFILES", profiles)
+    assert "gateway" in {tool for *_, tool, _ in _sweep_mismatches(sweep)}
+
+
+def test_the_pinned_battery_is_what_the_installed_vendor_answers(vendor):
+    """The upgrade signal. The pinned data was captured on one build; if the INSTALLED vendor
+    now answers any pinned cell differently, the file is stale and ``--write`` is owed.
+    Fixtures added since capture are not a disagreement (``recheck`` re-runs only pinned rows)."""
+    pinned = json.loads(oracle.BATTERY.read_text(encoding="utf-8"))
+    problems = oracle.recheck(pinned)
+    assert not problems, f"{len(problems)} pinned cell(s) moved, first: {problems[:8]}"
 
 
 # --------------------------------------------------------------------- write => apply_patch
@@ -199,3 +347,169 @@ def test_dist_normalize_agent_id_two_branch_shape_is_still_current():
         "normalizeAgentId's shape moved -- re-run the differential capture and re-pin "
         "_AGENT_ID_CASES above"
     )
+
+
+# ------------------------------------------------------------------ always-on: the machinery
+# Everything below needs neither node nor the dist. It pins the parts of the harness that, if
+# they were wrong, would make the live guards above green for the wrong reason.
+
+_TABLE = {"group:a": ["x", "y", "z"], "group:b": ["p"]}
+
+
+def test_diff_tables_accepts_identical_tables_and_names_nothing():
+    assert oracle.diff_tables(_TABLE, json.loads(json.dumps(_TABLE)), "groups") == []
+
+
+@pytest.mark.parametrize("mutate,expect", [
+    (lambda t: t["group:a"].append("w"), "vendor lacks"),          # we carry an extra member
+    (lambda t: t["group:a"].remove("y"), "toolgrant.py lacks"),    # we dropped a member
+    (lambda t: t["group:a"].reverse(), "different order"),         # order only
+    (lambda t: t.pop("group:b"), "not in toolgrant.py"),           # a whole group missing
+    (lambda t: t.update({"group:c": ["q"]}), "not in the vendor"), # a phantom group
+    (lambda t: t.update({"group:b": ["p", "p"]}), "group:b"),      # a duplicated member
+])
+def test_diff_tables_fails_when_one_entry_differs(mutate, expect):
+    """The positive control the whole-table guards rest on: a comparison that cannot fail
+    controls nothing. Each mutation is one entry, and each must be reported and NAMED."""
+    ours = json.loads(json.dumps(_TABLE))
+    mutate(ours)
+    problems = oracle.diff_tables(ours, _TABLE, "groups")
+    assert problems, "a one-entry difference was not reported"
+    assert any(expect in line for line in problems), problems
+
+
+def test_diff_tables_reports_a_changed_scalar():
+    assert oracle.diff_tables({"cron": "automation"}, {"cron": "automations"}, "aliases")
+
+
+def _row(label, **results):
+    return {"label": label, "agents": [], "results": {t: {"global": v} for t, v in results.items()}}
+
+
+def test_diff_battery_names_a_moved_cell_and_ignores_an_unchanged_one():
+    same = [_row("a", read=True, exec=False)]
+    assert oracle.diff_battery(same, [_row("a", read=True, exec=False)]) == []
+    moved = oracle.diff_battery(same, [_row("a", read=True, exec=True)])
+    assert moved == ["a/global/exec: pinned False -> True"]
+    assert oracle.diff_battery(same, [])  # a pinned row that vanished is reported too
+
+
+def test_synthetic_configs_reach_every_group_and_profile_they_are_given():
+    fake = {
+        "profiles": {"minimal": {"allow": ["a"]}, "coding": {"allow": ["b"]}, "full": {"allow": ["*"]}},
+        "groups": {"group:one": ["a"], "group:two": ["b"]},
+    }
+    rows = dict(oracle.synthetic_configs(fake))
+    for group in fake["groups"]:
+        for kind in ("allow", "deny", "minimal-also"):
+            assert f"synthetic/group/{group}/{kind}" in rows, (group, kind)
+    for profile in fake["profiles"]:
+        assert f"synthetic/profile/{profile}" in rows, profile
+    assert list(dict(oracle.synthetic_configs(fake))) == list(rows)  # deterministic order
+    assert all(isinstance(cfg, dict) and cfg for cfg in rows.values())
+
+
+def test_all_tool_ids_includes_names_the_catalog_only_mentions_indirectly():
+    tables = {
+        "groups": {"group:a": ["x"]}, "profiles": {"p": {"allow": ["y", "*"]}},
+        "aliases": {"bash": "exec"}, "shipped_family": {"canvas": ["show_widget"]},
+        "shipped_renames": {"update_plan": "progress_card"},
+    }
+    names = oracle.all_tool_ids(tables)
+    assert names == sorted(set(names))
+    for expected in ("x", "y", "bash", "exec", "canvas", "show_widget", "update_plan",
+                     "progress_card", "nonexistent_tool"):
+        assert expected in names
+    assert "*" not in names
+
+
+_BUNDLE = (
+    'import { a as thing } from "./other-abc.mjs";\n'
+    'import "./side-effect.mjs";\n'
+    "const CORE_TOOL_PROFILES = { full: { allow: [\"*\"] } };\n"
+    "function resolveCoreToolProfilePolicy(p) { return CORE_TOOL_PROFILES[p]; }\n"
+    "export { resolveCoreToolProfilePolicy as a };\n"
+)
+
+
+def test_rewrite_points_imports_at_the_dist_and_exports_the_real_names(tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    bundle = dist / "cat.mjs"
+    bundle.write_text(_BUNDLE, encoding="utf-8")
+    out = oracle._rewrite(bundle, ["CORE_TOOL_PROFILES", "resolveCoreToolProfilePolicy"], dist)
+    assert f'from "file://{dist}/other-abc.mjs"' in out
+    assert f'import "file://{dist}/side-effect.mjs"' in out
+    assert out.rstrip().endswith("export { CORE_TOOL_PROFILES, resolveCoreToolProfilePolicy };")
+    assert "as a }" not in out  # the minified export clause is gone
+    assert "function resolveCoreToolProfilePolicy" in out  # the body is the vendor's, untouched
+
+
+@pytest.mark.parametrize("text,why", [
+    ("const CORE_TOOL_PROFILES = {};\nexport { CORE_TOOL_PROFILES };\n", "no relative import"),
+    (_BUNDLE + "export { thing };\n", "expected one export clause"),
+    (_BUNDLE.replace("const CORE_TOOL_PROFILES", "const RENAMED"), "no longer declares"),
+])
+def test_rewrite_refuses_a_bundle_shape_it_does_not_understand(tmp_path, text, why):
+    """A rewrite that silently half-applied would import something other than the vendor's
+    tables and let the equality guards grade the wrong object. Each shape fails for ITS reason."""
+    bundle = tmp_path / "cat.mjs"
+    bundle.write_text(text, encoding="utf-8")
+    with pytest.raises(AssertionError, match=why):
+        oracle._rewrite(bundle, ["CORE_TOOL_PROFILES"], tmp_path)
+
+
+def _fake_dist(tmp_path, monkeypatch, files):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    for name, text in files.items():
+        (dist / name).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(oracle, "require_dist", lambda: dist)
+    return dist
+
+
+def test_locate_refuses_two_declaring_bundles_instead_of_taking_the_first(tmp_path, monkeypatch):
+    decl = "function resolveConfiguredToolPolicies(params) {}\n"
+    _fake_dist(tmp_path, monkeypatch, {"a.mjs": decl, "b.mjs": decl})
+    with pytest.raises(AssertionError, match="2 bundle"):
+        oracle.locate("policies")
+
+
+def test_locate_refuses_a_symbol_that_moved(tmp_path, monkeypatch):
+    _fake_dist(tmp_path, monkeypatch, {"a.mjs": "function somethingElse() {}\n"})
+    with pytest.raises(AssertionError, match="0 bundle"):
+        oracle.locate("policies")
+
+
+def test_locate_takes_the_bundle_the_resolver_imports_when_the_symbol_is_declared_twice(tmp_path, monkeypatch):
+    """resolveAgentConfig really is declared in two unrelated bundles on 2026.9.5 (a lookup
+    by id, and the per-agent config builder). Declaring it is not enough; the resolver's own
+    import clause says which one it runs."""
+    decl = "function resolveAgentConfig(cfg, id) {}\n"
+    _fake_dist(tmp_path, monkeypatch, {
+        "policies.mjs": (
+            'import { r as resolveAgentConfig } from "./real.mjs";\n'
+            "function resolveConfiguredToolPolicies(params) {}\n"
+        ),
+        "real.mjs": decl,
+        "decoy.mjs": decl,
+    })
+    assert oracle.locate("scope").name == "real.mjs"
+    assert oracle.locate("policies").name == "policies.mjs"
+
+
+def test_locate_refuses_an_import_from_a_bundle_that_no_longer_declares_the_symbol(tmp_path, monkeypatch):
+    _fake_dist(tmp_path, monkeypatch, {
+        "policies.mjs": (
+            'import { r as resolveAgentConfig } from "./shim.mjs";\n'
+            "function resolveConfiguredToolPolicies(params) {}\n"
+        ),
+        "shim.mjs": 'export { resolveAgentConfig } from "./elsewhere.mjs";\n',
+    })
+    with pytest.raises(AssertionError, match="no longer imports"):
+        oracle.locate("scope")
+
+
+def test_the_battery_tool_lists_do_not_overlap():
+    assert not set(oracle.TOOL_FAMILY) & set(oracle.EXTENDED_TOOLS)
+    assert oracle.BATTERY_TOOLS == oracle.TOOL_FAMILY + oracle.EXTENDED_TOOLS

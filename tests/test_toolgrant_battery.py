@@ -6,36 +6,53 @@ get curve-fit to whatever the module already does and stops being an independent
 This file's data was captured by RUNNING the real OpenClaw resolver, with no
 ``clawseccheck.toolgrant`` import anywhere near the generation step.
 
-WHAT IT COVERS. Every ``fixtures/*/openclaw.json`` that parses to a non-empty dict (536 of
-686 fixture directories — 5 declare an empty/blank config, 2 are deliberately unparseable
-JSON used by other tests) × every scope the config declares (the global surface, plus each
-entry of its agent roster) × the tool family ``{read, write, edit, apply_patch, exec,
-automations}`` — **3354** ``(fixture, scope, tool) -> bool`` assertions in total (see
-``test_battery_is_a_real_corpus_sweep`` — that count is derived from the data at import
-time, not hand-typed, so it cannot drift silently). This includes, as a subset, the nine
-``fixtures/toolscope_case1..9`` edge fixtures the S0 precondition task built and
-``tests/test_toolscope_per_scope_grants.py`` already documents (its docstring's vendor
-table matches this battery's rows for those nine labels exactly — spot-checked by hand
-while building this file).
+WHAT IT COVERS. Two populations, both replayed offline from ``tests/data/toolgrant_battery.json``:
 
-HOW IT WAS GENERATED. A one-shot node script imported exactly the symbols
-``tests/test_b666_read_reach.py``'s own oracle already uses —
-``resolveConfiguredToolPolicies`` (dist ``agent-tools.policy-CRukL5lS.js``, the function
-``granted()`` in ``clawseccheck/toolgrant.py`` ports) and ``isToolAllowedByPolicies`` (dist
-``tool-policy-match-DS7InkLt.js``) — plus ``resolveAgentConfig`` / ``listAgentEntries`` /
-``hasAgentRosterProperty`` (dist ``agent-scope-config-CUiGBd59.js``) to resolve
-``agentTools`` exactly the way ``resolveEffectiveToolPolicy`` does (its own lines 236-238),
-then walked every fixture directory, parsed its config, and for each non-empty one called::
+* **the fixture corpus** — every ``fixtures/*/openclaw.json`` that parses as plain JSON to a
+  non-empty dict × every scope the config declares (the global surface, plus each entry of
+  its agent roster) × the tool family ``{read, write, edit, apply_patch, exec, automations}``,
+  one parametrized case per ``(fixture, scope, tool)``. This includes, as a subset, the nine
+  ``fixtures/toolscope_case1..9`` edge fixtures the S0 precondition task built and
+  ``tests/test_toolscope_per_scope_grants.py`` already documents (its docstring's vendor table
+  matches this battery's rows for those nine labels exactly). The case count is derived from
+  the data at import time (``test_battery_is_a_real_corpus_sweep``), never hand-typed.
+* **synthetic configs** (``"synthetic": true`` rows, config embedded in the row) — every
+  ``group:*`` as an allow and a deny, every profile with and without ``alsoAllow``, the alias
+  spellings and both roster shapes. No fixture config names a ``group:*`` entry at all
+  (measured: 0 of 575), so the corpus alone graded a stale group table GREEN: against 2026.9.5,
+  522 of 6,688 cells disagreed and none of them was in the six-tool family the corpus
+  exercises. Group and profile ids are taken from the vendor when the battery is generated,
+  so a new group is swept the day it appears.
 
-    granted(cfg, tool, sandboxMode=null)                       # scope: "global"
-    granted(cfg, agentId, tool, sandboxMode=null)               # scope: each roster id
+TWO TOOL SETS. The six-tool family is parametrized per cell (a failure names one cell).
+``EXTENDED_TOOLS`` — ``gateway``, ``plugins``, ``ls``, ``openclaw``, ``pdf`` — is checked one
+test per tool over every row, and the synthetic rows are checked one test per tool. Making
+those 4,173 further cells parametrized cases would have been the same assertion with a longer
+log, and the suite's test-count claims in the docs (``tests/test_doc_facts.py``) move with
+every case.
+The extended set is what a profile-table re-ground actually changes: ``gateway`` and
+``plugins`` entered default profiles, ``ls`` had drifted, ``openclaw`` and ``pdf`` were
+catalog entries the port had never been asked about.
 
-Grounded on the installed **openclaw@2026.9.1**. Module filenames are content-hashed and
-rotate every release — on a re-ground, relocate the five symbols above by NAME
-(``grep -rl 'resolveConfiguredToolPolicies' dist/*.js`` etc.), not by re-using this
-docstring's filenames blind. The result was written verbatim to
-``tests/data/toolgrant_battery.json`` (sorted for a readable diff) — that file is the
-pinned, offline battery; this module needs neither node nor the dist to run.
+HOW IT IS GENERATED. ``tests/_toolgrantoracle.py`` — committed, deterministic, and runnable::
+
+    python3.12 tests/_toolgrantoracle.py --write    # regenerate (needs node + the installed dist)
+    python3.12 tests/_toolgrantoracle.py --check    # is the pinned data still what the vendor says?
+
+It executes ``resolveConfiguredToolPolicies`` and ``isToolAllowedByPolicies`` from the
+installed dist, and resolves ``agentTools`` the way ``resolveEffectiveToolPolicy`` does (its
+own three lines). The first battery came from a one-shot script that was never kept, so it
+could not be re-run on the next OpenClaw build; that is why this one is a module. Bundle
+filenames are content-hashed and rotate every release, so the generator locates each symbol
+by the line that declares it, not by name (see its docstring).
+
+Grounded on the installed **openclaw@2026.9.5** (regenerated 2026-09-19). Re-running the
+generator's replay over the previous 536-row, 3,354-cell battery against 2026.9.5 changed
+zero cells: the tables moved, the family's verdicts did not. The pinned file keeps the first
+capture's layout (sorted keys, ``indent=1``); only the ROW ORDER changed (now sorted by
+label). The diff is large because rows and tools were ADDED -- five more tools on the 536
+original rows, 39 fixtures added since, and 96 synthetic rows -- not because any of the 3,354
+original cells changed, and not because it was re-serialised.
 
 ``sandboxMode`` IS FIXED TO ``null`` THROUGHOUT. ``granted(cfg, tool, scope)`` answers only
 the declared tool-POLICY question, the same way ``clawseccheck/toolpolicy.py`` keeps
@@ -46,10 +63,9 @@ does not port, so the battery never exercises it.
 
 WHAT THIS FILE DOES NOT DO: it does not adjudicate whether a check's current verdict is
 right (that is ``tests/test_toolscope_per_scope_grants.py``'s documented job for the four
-consumer checks) and it is not itself the module under test's implementation — S2 is a
-separate, later change to ``clawseccheck/toolgrant.py``. Until that module exists (or
-while it disagrees with a row here), the parametrized test below is EXPECTED to fail/error
-— that is the acceptance gate S2 must turn green, not a defect in this file.
+consumer checks), and it does not ground the profile/group/alias TABLES against the
+installed dist — ``tests/test_toolgrant_dist_grounding.py`` does that, whole-table, against a
+fresh execution.
 """
 from __future__ import annotations
 
@@ -62,6 +78,8 @@ FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 DATA = Path(__file__).resolve().parent / "data" / "toolgrant_battery.json"
 
 TOOL_FAMILY = ("read", "write", "edit", "apply_patch", "exec", "automations")
+EXTENDED_TOOLS = ("gateway", "plugins", "ls", "openclaw", "pdf")
+ALL_TOOLS = TOOL_FAMILY + EXTENDED_TOOLS
 
 _EDGE_CASE_LABELS = frozenset({
     "toolscope_case1_empty_default",
@@ -82,17 +100,26 @@ def _load_battery() -> list:
 
 BATTERY = _load_battery()
 
-# One (fixture label, scope, tool, expected bool) tuple per vendor-measured assertion.
+# One (fixture label, scope, tool, expected bool) tuple per vendor-measured assertion of the
+# six-tool family over the FIXTURE corpus. Synthetic rows and the extended tools are asserted
+# in aggregate below (see the module docstring for why).
+CORPUS_ROWS = [row for row in BATTERY if not row.get("synthetic")]
+SYNTHETIC_ROWS = [row for row in BATTERY if row.get("synthetic")]
+
 CASES: list = []
-for _row in BATTERY:
-    for _tool, _per_scope in _row["results"].items():
-        for _scope, _expected in _per_scope.items():
+for _row in CORPUS_ROWS:
+    for _tool in TOOL_FAMILY:
+        for _scope, _expected in _row["results"][_tool].items():
             CASES.append((_row["label"], _scope, _tool, _expected))
 
 
 def _config_cache() -> dict:
+    """Fixture rows are read from ``fixtures/``; synthetic rows carry their config."""
     cache = {}
     for row in BATTERY:
+        if "cfg" in row:
+            cache[row["label"]] = row["cfg"]
+            continue
         path = FIXTURES / row["label"] / "openclaw.json"
         cache[row["label"]] = json.loads(path.read_text(encoding="utf-8"))
     return cache
@@ -108,7 +135,7 @@ _CONFIGS = _config_cache()
 def test_battery_is_a_real_corpus_sweep():
     """Enough rows, enough scopes, and both answers present (a constant function must fail
     this the same way tests/test_b666_read_reach.py polices its own table)."""
-    assert len(BATTERY) >= 500, len(BATTERY)
+    assert len(CORPUS_ROWS) >= 500, len(CORPUS_ROWS)
     assert len(CASES) >= 3000, len(CASES)
     answers = {c[3] for c in CASES}
     assert answers == {True, False}, answers
@@ -129,7 +156,18 @@ def test_every_fixture_row_has_a_readable_non_empty_config():
 
 def test_every_row_covers_the_full_tool_family():
     for row in BATTERY:
-        assert set(row["results"]) == set(TOOL_FAMILY), row["label"]
+        assert set(row["results"]) == set(ALL_TOOLS), row["label"]
+
+
+def test_the_generator_and_this_file_agree_on_the_tool_family():
+    """Two literals for one fact: this file states its expectation independently, and the
+    generator's own constants must equal it, or a regeneration would silently change what is
+    pinned."""
+    import _toolgrantoracle as oracle
+
+    assert oracle.TOOL_FAMILY == TOOL_FAMILY
+    assert oracle.EXTENDED_TOOLS == EXTENDED_TOOLS
+    assert oracle.BATTERY_TOOLS == ALL_TOOLS
 
 
 def test_every_row_declares_the_global_scope():
@@ -168,15 +206,40 @@ def test_edge_case_rows_match_the_documented_vendor_table():
         assert case9["results"][tool] == {"global": True, "main": True}, tool
 
 
-# ------------------------------------------------------------- the acceptance gate (S2)
-# Skipped, not failed, until clawseccheck.toolgrant exists. A module-level
-# ``pytest.importorskip`` would skip the WHOLE FILE's collection (including the
-# data-invariant tests above, which must keep running with no module present) — so the
-# import is guarded by hand and only the parametrized gate below is conditionally skipped.
-try:
-    import clawseccheck.toolgrant as toolgrant
-except ImportError:
-    toolgrant = None
+def test_synthetic_rows_are_present_and_self_contained():
+    assert len(SYNTHETIC_ROWS) >= 60, len(SYNTHETIC_ROWS)
+    for row in SYNTHETIC_ROWS:
+        assert row["label"].startswith("synthetic/"), row["label"]
+        assert isinstance(row["cfg"], dict) and row["cfg"], row["label"]
+        assert not (FIXTURES / row["label"]).exists(), row["label"]
+
+
+def test_synthetic_rows_exercise_both_answers_for_every_tool():
+    """A tool whose pinned answer is constant grades nothing: a port that always said
+    True (or False) for it would pass. Every tool must be seen granted AND refused."""
+    for tool in ALL_TOOLS:
+        answers = {v for row in SYNTHETIC_ROWS for v in row["results"][tool].values()}
+        assert answers == {True, False}, (tool, answers)
+
+
+def test_synthetic_rows_reach_every_group_and_profile_the_port_carries():
+    """The pinned data must track the tables it grades: a group or profile in
+    toolgrant.py with no synthetic row is a table entry no offline test can see."""
+    import clawseccheck.toolgrant as tg
+
+    labels = {row["label"] for row in SYNTHETIC_ROWS}
+    for group in tg._CORE_TOOL_GROUPS:
+        assert f"synthetic/group/{group}/allow" in labels, group
+        assert f"synthetic/group/{group}/deny" in labels, group
+    for profile in tg._CORE_TOOL_PROFILES:
+        assert f"synthetic/profile/{profile}" in labels, profile
+
+
+# ------------------------------------------------------------- the acceptance gate
+# A plain import. This block used to swallow ImportError and skip the gate "until S2 exists";
+# S2 has shipped, and a guard that can turn itself off on a renamed module while the run stays
+# green is exactly the failure this whole file exists to prevent.
+import clawseccheck.toolgrant as toolgrant  # noqa: E402
 
 
 def _case_id(case) -> str:
@@ -184,8 +247,32 @@ def _case_id(case) -> str:
     return f"{label}/{scope}/{tool}={expected}"
 
 
-@pytest.mark.skipif(toolgrant is None, reason="S2 (clawseccheck.toolgrant) not built yet")
+def _mismatches(rows, tool):
+    out = []
+    for row in rows:
+        cfg = _CONFIGS[row["label"]]
+        for scope, expected in row["results"][tool].items():
+            if toolgrant.granted(cfg, tool, scope) is not expected:
+                out.append(f"{row['label']}/{scope}: the vendor says {expected}")
+    return out
+
+
 @pytest.mark.parametrize("label,scope,tool,expected", CASES, ids=[_case_id(c) for c in CASES])
 def test_matches_the_installed_runtime(label, scope, tool, expected):
     cfg = _CONFIGS[label]
     assert toolgrant.granted(cfg, tool, scope) is expected
+
+
+@pytest.mark.parametrize("tool", EXTENDED_TOOLS)
+def test_extended_tool_matches_the_installed_runtime(tool):
+    """gateway/plugins/ls/openclaw/pdf over every fixture AND every synthetic row."""
+    wrong = _mismatches(BATTERY, tool)
+    assert not wrong, f"{len(wrong)} cell(s) disagree for {tool!r}, first: {wrong[:8]}"
+
+
+@pytest.mark.parametrize("tool", TOOL_FAMILY)
+def test_family_tool_matches_the_installed_runtime_on_synthetic_configs(tool):
+    """The per-cell gate above is corpus-only; this is the same claim over the configs built
+    to reach every group, profile and alias."""
+    wrong = _mismatches(SYNTHETIC_ROWS, tool)
+    assert not wrong, f"{len(wrong)} cell(s) disagree for {tool!r}, first: {wrong[:8]}"

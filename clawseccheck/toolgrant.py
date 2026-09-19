@@ -2,11 +2,12 @@
 runtime tool-policy resolver?
 
 A full, faithful port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies``
-(dist ``agent-tools.policy-CRukL5lS.js:97-110`` / ``tool-policy-match-DS7InkLt.js``,
-grounded on the installed **openclaw@2026.9.1**), not the narrower FS-only model
-``checks/_capability.py``'s ``_tool_policy_view`` + ``_agent_profile_widenings`` carry.
-That pair answers "does an fs tool leak" for four specific checks and deliberately
-approximates two things this module does not:
+(the ``agent-tools.policy-*`` and ``tool-policy-match-*`` dist bundles — content-hashed names
+that rotate every release, so they are cited by symbol; ``tests/_toolgrantoracle.py`` locates
+them by declaration; grounded on the installed **openclaw@2026.9.5**, 2026-09-19), not the
+narrower FS-only model ``checks/_capability.py``'s ``_tool_policy_view`` +
+``_agent_profile_widenings`` carry. That pair answers "does an fs tool leak" for four
+specific checks and deliberately approximates two things this module does not:
 
 * it SUPPRESSES the global ``tools.allow``/``alsoAllow`` layer whenever ``tools.profile``
   is set (``_tool_policy_view``'s own docstring, part (a)) — sound for that narrower
@@ -24,8 +25,7 @@ approximates two things this module does not:
   ``tools.alsoAllow: ["write"]`` genuinely widens that agent's write grant, and neither
   ``B55`` nor ``B68`` could see it (measured — see ``tests/test_toolscope_per_scope_grants.py``).
 
-RESOLUTION ORDER (``resolveConfiguredToolPolicies``, dist lines 97-110, reproduced here for
-the citation)::
+RESOLUTION ORDER (``resolveConfiguredToolPolicies``, reproduced here for the citation)::
 
     profile = agentTools?.profile ?? cfg.tools?.profile
     profileAlsoAllow = agentTools?.alsoAllow ?? cfg.tools?.alsoAllow   # independent coalesce
@@ -35,14 +35,14 @@ the citation)::
     #  see "NOT MODELLED" below)
     granted = policies.every(p => isToolAllowedByPolicyName(tool, p))   # deny wins, then allow
 
-``agentTools`` itself is resolved the way ``resolveEffectiveToolPolicy`` resolves it (dist
-lines 236-238): the matching roster entry's own ``tools`` block (``collector.agent_roster``,
-which already reads both the 2026.8.1 ``agents.entries`` record and legacy ``agents.list`` —
-B-699), falling back to ``agents.defaults.tools`` **only when the config declares no roster
-at all** (``hasAgentRosterProperty`` — checked by whether ``agents.entries``/``agents.list``
-is a KEY the config owns, not by whether the roster is non-empty). Verified by executing the
-real function, not by reading it: two things this port might otherwise have gotten wrong from
-reading alone —
+``agentTools`` itself is resolved the way ``resolveEffectiveToolPolicy`` resolves it (its
+``agentTools`` derivation, three lines): the matching roster entry's own ``tools`` block
+(``collector.agent_roster``, which already reads both the 2026.8.1 ``agents.entries`` record
+and legacy ``agents.list`` — B-699), falling back to ``agents.defaults.tools`` **only when
+the config declares no roster at all** (``hasAgentRosterProperty`` — checked by whether
+``agents.entries``/``agents.list`` is a KEY the config owns, not by whether the roster is
+non-empty). Verified by executing the real function, not by reading it: two things this port
+might otherwise have gotten wrong from reading alone —
 
 * the fallback applies to the SCOPE param equally whether it names the default agent
   ("main") or any other id, and equally to the ``GLOBAL_SCOPE`` query (no explicit agent at
@@ -55,27 +55,41 @@ reading alone —
   ``agents.defaults.tools`` is then dead weight (``toolscope_case9``).
 
 GROUNDED TABLES. ``CORE_TOOL_PROFILES`` / ``CORE_TOOL_GROUPS`` below are not hand-transcribed
-off ``CORE_TOOL_DEFINITIONS`` (dist ``tool-catalog-79RBtNnN.js``) — they are the two tables
-that module ITSELF builds (``CORE_TOOL_PROFILES`` object literal; ``CORE_TOOL_GROUPS`` via
-``buildCoreToolGroupMap()``), dumped by executing them against the installed dist so a
-mis-transcription of ~50 tool ids across 11 groups cannot happen. Re-grind by re-running that
-dump on upgrade, not by re-reading the source. Re-ground against openclaw@2026.9.2
-(2026-09-06): both tables were re-dumped by executing the installed dist and compared
-field-for-field against the literals below — 12/12 groups and all four profiles IDENTICAL.
-Only the content-hashed filenames cited here moved.
+off ``CORE_TOOL_DEFINITIONS`` (the ``tool-catalog`` bundle) — they are the two tables that
+module ITSELF builds (the ``CORE_TOOL_PROFILES`` object literal; ``CORE_TOOL_GROUPS`` via
+``buildCoreToolGroupMap()``, spread into ``TOOL_GROUPS`` by ``tool-policy-shared``), dumped by
+executing them against the installed dist so a mis-transcription of ~55 tool ids across 12
+groups cannot happen. Re-grind by re-running the dump on upgrade, not by re-reading the
+source: ``python3.12 tests/_toolgrantoracle.py --tables``.
+
+The upgrade check is now WHOLE-TABLE and executed, not spot-checked. It used to assert five
+tool ids and ``group:fs`` against a literal, which stayed green through 2026.9.5 while the
+tables were wrong about ``gateway``, ``plugins``, ``ls``, ``openclaw`` and ``pdf``
+(``tests/test_toolgrant_dist_grounding.py``). It now compares every profile, every group and
+the alias map with a fresh execution of the vendor, and sweeps ``granted()`` against the vendor
+over every tool name the catalog mentions. Re-ground history: 2026.9.2 (2026-09-06) identical
+to the 2026.9.1 literals; 2026.9.5 (2026-09-19) moved three profiles and four groups — see the
+comments on the two tables — and changed NO verdict for the six-tool family
+``{read, write, edit, apply_patch, exec, automations}`` (0 of 3,354 previously pinned cells;
+0 of 4,266 across the regenerated corpus and synthetic configs). That is why the drift was
+invisible: ``checks/_capability.py`` (B55/B68) asks only about the four fs tools. The other
+caller, the ``alsoAllow`` candidate filter in ``checks/_shared.py``, asks about whatever
+names a user wrote, so it alone can see the moved tables — for ``gateway``, ``plugins``,
+``ls``, ``openclaw`` and ``pdf`` reached through a group-level allow/deny. None of the 8
+``alsoAllow`` entries in the fixture corpus changes its answer.
 
 ALIAS TABLE — THREE ENTRIES, GROUNDED, NOT TWO. ``checks/_shared.py``'s ``_TOOL_NAME_ALIASES``
 and ``toolpolicy.py``'s copy of the same table both carry only ``{"bash": "exec",
-"apply-patch": "apply_patch"}``. The real ``TOOL_NAME_ALIASES`` (dist
-``tool-policy-shared-DIyS0iQC.js:10-14``) has a third: ``"cron": "automations"`` — a
-"permanently accepted alias ... same contract as bash -> exec" per the dist's own comment
-(``automations-tool-name-*.js``). Neither existing copy is wrong for what it covers (bash/
-apply-patch), but a guard comparing them to EACH OTHER (a peer) would stay green while both
-are missing the same third entry — the "anchor a guard on the producer" lesson. This module's
-own three-entry table is grounded against the dist directly in
-``tests/test_toolgrant_dist_grounding.py``, not against either sibling copy.
+"apply-patch": "apply_patch"}``. The real ``TOOL_NAME_ALIASES`` (the ``tool-policy-shared``
+bundle) has a third: ``"cron": "automations"`` — a "permanently accepted alias ... same
+contract as bash -> exec" per the dist's own comment (``automations-tool-name-*``). Neither
+existing copy is wrong for what it covers (bash/apply-patch), but a guard comparing them to
+EACH OTHER (a peer) would stay green while both are missing the same third entry — the
+"anchor a guard on the producer" lesson. This module's own three-entry table is grounded
+against the dist directly in ``tests/test_toolgrant_dist_grounding.py``, not against either
+sibling copy.
 
-``write`` IMPLIES ``apply_patch`` (dist ``tool-policy-match-DS7InkLt.js:24``,
+``write`` IMPLIES ``apply_patch`` (the ``tool-policy-match`` bundle,
 ``createToolPolicyMatcher``'s ``writeAllowsApplyPatch`` parameter, default ``true``): a
 policy whose allow list names ``write`` but not ``apply_patch`` still lets ``apply_patch``
 through THAT policy. It is evaluated per policy, inside the AND — a policy that denies
@@ -98,6 +112,15 @@ docstring explains):
   (``toolsBySender`` / plugin group policy) layers a caller can inject; none of this module's
   two inputs (global ``cfg.tools``, one resolved ``agentTools``) supply them, so they are
   simply absent from the AND, never approximated.
+* the shipped-name expansions in ``expandShippedCoreToolPolicyNames`` (``tool-policy`` bundle,
+  ``SHIPPED_PLUGIN_POLICY_FAMILY_CORE_TOOLS`` / ``SHIPPED_CORE_POLICY_RENAMES``): ``canvas`` ->
+  ``[canvas, show_widget]`` and ``update_plan`` -> ``progress_card``. They run in the tool-
+  CONSTRUCTION pipeline, after the resolver this module ports, so ``isToolAllowedByPolicies``
+  never sees them — measured by execution on 2026.9.5: ``allow: ["canvas"]`` does not grant
+  ``show_widget`` at this layer (``tests/test_toolgrant_dist_grounding.py``). No check asks
+  about either target by name (only the ``alsoAllow`` filter could, with a user-written
+  entry); a consumer that starts to would need this modelled and its own differential (the
+  three-entry alias map above is unaffected — that is a different table).
 * glob patterns other than a bare ``*`` interior wildcard are handled (``_matches`` below is
   the same compiled-regex approach ``toolpolicy.py::_matches`` already carries, grounded
   against ``glob-pattern-DFVWJ-hh.mjs`` — openclaw@2026.9.3) — this is modelled, not
@@ -112,12 +135,14 @@ a config this tool never actually parsed must not read as "everything is granted
 battery only exercises non-empty fixture configs, so this divergence sits outside its scope
 by construction, not as an exception carved out of a disagreement.
 
-Verified against the vendor: ``tests/test_toolgrant_battery.py`` replays 3354
-``(fixture, scope, tool) -> bool`` assertions captured by EXECUTING
-``resolveConfiguredToolPolicies``/``isToolAllowedByPolicies`` over every non-empty
-``fixtures/*/openclaw.json`` (536 configs) plus the nine ``fixtures/toolscope_case*`` edge
-fixtures, pinned offline as data (``tests/data/toolgrant_battery.json``) so the suite needs
-neither node nor the installed dist to run.
+Verified against the vendor: ``tests/test_toolgrant_battery.py`` replays assertions captured
+by EXECUTING ``resolveConfiguredToolPolicies``/``isToolAllowedByPolicies`` — the six-tool
+family one case per ``(fixture, scope, tool)`` over every plain-JSON, non-empty
+``fixtures/*/openclaw.json`` (3,648 cases, including the nine ``fixtures/toolscope_case*`` edge
+fixtures), and ``gateway``/``plugins``/``ls``/``openclaw``/``pdf`` plus 96 synthetic configs
+(every group, profile, alias spelling and roster shape) in aggregate — pinned offline as data
+(``tests/data/toolgrant_battery.json``) so the suite needs neither node nor the installed dist
+to run. ``tests/_toolgrantoracle.py`` is the committed generator (``--write`` / ``--check``).
 """
 
 from __future__ import annotations
@@ -128,72 +153,82 @@ from .collector import agent_roster, dig
 
 GLOBAL_SCOPE = "global"
 
-# TOOL_NAME_ALIASES (dist tool-policy-shared-DIyS0iQC.js:10, grounded against
-# openclaw@2026.9.2 on 2026-09-06). Three entries — see the
-# module docstring's "ALIAS TABLE" section for why this is not a copy of
-# checks/_shared.py's/_toolpolicy.py's two-entry tables. Grounded directly against the dist
+# TOOL_NAME_ALIASES (the tool-policy-shared bundle; a Map since 2026.9.2, its three pairs
+# unchanged through openclaw@2026.9.5 — compared whole against the EXECUTED Map on 2026-09-19).
+# Three entries — see the module docstring's "ALIAS TABLE" section for why this is not a copy
+# of checks/_shared.py's/toolpolicy.py's two-entry tables. Grounded directly against the dist
 # in tests/test_toolgrant_dist_grounding.py, never against either sibling copy.
 _TOOL_NAME_ALIASES = {"bash": "exec", "apply-patch": "apply_patch", "cron": "automations"}
 
-# CORE_TOOL_GROUPS (dist tool-catalog-79RBtNnN.js, buildCoreToolGroupMap() — executed, not
-# transcribed from CORE_TOOL_DEFINITIONS by hand). "group:openclaw" plus one "group:<section>"
-# per CORE_TOOL_SECTION_ORDER entry.
+# CORE_TOOL_GROUPS — the object the vendor's ``expandToolGroups`` actually consults
+# (``TOOL_GROUPS = { ...CORE_TOOL_GROUPS }`` in tool-policy-shared, built by
+# ``buildCoreToolGroupMap()`` in tool-catalog): "group:openclaw" plus one "group:<section>"
+# per CORE_TOOL_SECTION_ORDER entry. Dumped by EXECUTING the installed dist, not transcribed —
+# grounded against openclaw@2026.9.5 on 2026-09-19 (tests/_toolgrantoracle.py --tables), and
+# compared WHOLE against a fresh execution by tests/test_toolgrant_dist_grounding.py. Versus
+# 2026.9.2: group:fs gained "ls"; group:automation gained "plugins" and "openclaw";
+# group:media gained "pdf"; group:openclaw gained "plugins", "openclaw" and "pdf".
 _CORE_TOOL_GROUPS = {
     "group:openclaw": [
         "code_execution", "secrets", "web_search", "web_fetch", "x_search", "memory_search",
         "memory_get", "sessions", "sessions_list", "sessions_history", "sessions_search",
         "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
         "sessions_spawn", "github_identity_status", "github_publish", "agents_wait",
-        "sessions_yield", "subagents", "session_status", "suggest_task", "dismiss_task",
-        "browser", "screen", "dashboard", "terminal", "portal", "show_widget", "message",
-        "heartbeat_respond", "automations", "gateway", "nodes", "computer", "mobile_ui",
+        "sessions_yield", "subagents", "session_status", "suggest_task", "dismiss_task", "browser",
+        "screen", "dashboard", "terminal", "portal", "show_widget", "message", "heartbeat_respond",
+        "automations", "gateway", "plugins", "openclaw", "nodes", "computer", "mobile_ui",
         "agents_list", "get_goal", "create_goal", "update_goal", "progress_card", "ask_user",
-        "skill_workshop", "view_image", "image_generate", "music_generate", "video_generate",
-        "tts",
+        "skill_workshop", "view_image", "image_generate", "music_generate", "video_generate", "tts",
+        "pdf",
     ],
-    "group:fs": ["read", "write", "edit", "apply_patch"],
+    "group:fs": ["ls", "read", "write", "edit", "apply_patch"],
     "group:runtime": ["exec", "process", "code_execution", "secrets"],
     "group:web": ["web_search", "web_fetch", "x_search"],
     "group:memory": ["memory_search", "memory_get"],
     "group:sessions": [
-        "sessions", "sessions_list", "sessions_history", "sessions_search",
-        "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
-        "sessions_spawn", "github_identity_status", "github_publish", "agents_wait",
-        "sessions_yield", "subagents", "session_status", "suggest_task", "dismiss_task",
+        "sessions", "sessions_list", "sessions_history", "sessions_search", "conversations_list",
+        "conversations_send", "conversations_turn", "sessions_send", "sessions_spawn",
+        "github_identity_status", "github_publish", "agents_wait", "sessions_yield", "subagents",
+        "session_status", "suggest_task", "dismiss_task",
     ],
     "group:ui": ["browser", "screen", "dashboard", "terminal", "portal", "canvas", "show_widget"],
     "group:messaging": ["message"],
-    "group:automation": ["heartbeat_respond", "automations", "gateway"],
+    "group:automation": ["heartbeat_respond", "automations", "gateway", "plugins", "openclaw"],
     "group:nodes": ["nodes", "computer", "mobile_ui"],
     "group:agents": [
         "agents_list", "get_goal", "create_goal", "update_goal", "progress_card", "ask_user",
         "skill_workshop",
     ],
-    "group:media": ["view_image", "image_generate", "music_generate", "video_generate", "tts"],
+    "group:media": [
+        "view_image", "image_generate", "music_generate", "video_generate", "tts", "pdf",
+    ],
 }
 
-# CORE_TOOL_PROFILES (dist tool-catalog-79RBtNnN.js, grounded against openclaw@2026.9.2 on
-# 2026-09-06 — the literal object, dumped by calling
-# resolveCoreToolProfilePolicy(profile) for each of the four known profiles against the
-# installed dist). "full" is allow-all; the other three are the exact tool-id lists the
-# runtime grants, not a hand-picked "these are the fs/exec ones" subset.
+# CORE_TOOL_PROFILES — the literal object in tool-catalog, read through
+# ``resolveCoreToolProfilePolicy(profile)`` for each key (an exact, case-sensitive object
+# index). "full" is allow-all; the other three are the exact tool-id lists the runtime grants.
+# Grounded against openclaw@2026.9.5 on 2026-09-19 by execution, and compared WHOLE against a
+# fresh execution by tests/test_toolgrant_dist_grounding.py. Versus 2026.9.2: "gateway" joined
+# minimal, coding AND messaging (the agent-facing gateway tool is now a default grant, which
+# is why a "coding" agent can reach ``gateway``/``plugins`` without any allow entry);
+# "plugins" joined coding; "ls" joined coding (already so on 2026.9.4).
 _CORE_TOOL_PROFILES = {
-    "minimal": ["session_status"],
+    "minimal": ["session_status", "gateway"],
     "coding": [
-        "read", "write", "edit", "apply_patch", "exec", "process", "code_execution",
-        "secrets", "web_search", "web_fetch", "x_search", "memory_search", "memory_get",
-        "sessions", "sessions_list", "sessions_history", "sessions_search",
-        "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
-        "sessions_spawn", "github_identity_status", "github_publish", "agents_wait",
-        "sessions_yield", "subagents", "session_status", "suggest_task", "dismiss_task",
-        "screen", "dashboard", "terminal", "portal", "automations", "get_goal", "create_goal",
-        "update_goal", "progress_card", "ask_user", "skill_workshop", "view_image",
-        "image_generate", "music_generate", "video_generate", "bundle-mcp",
+        "ls", "read", "write", "edit", "apply_patch", "exec", "process", "code_execution",
+        "secrets", "web_search", "web_fetch", "x_search", "memory_search", "memory_get", "sessions",
+        "sessions_list", "sessions_history", "sessions_search", "conversations_list",
+        "conversations_send", "conversations_turn", "sessions_send", "sessions_spawn",
+        "github_identity_status", "github_publish", "agents_wait", "sessions_yield", "subagents",
+        "session_status", "suggest_task", "dismiss_task", "screen", "dashboard", "terminal",
+        "portal", "automations", "gateway", "plugins", "get_goal", "create_goal", "update_goal",
+        "progress_card", "ask_user", "skill_workshop", "view_image", "image_generate",
+        "music_generate", "video_generate", "bundle-mcp",
     ],
     "messaging": [
         "secrets", "sessions", "sessions_list", "sessions_history", "sessions_search",
         "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
-        "sessions_spawn", "sessions_yield", "subagents", "session_status", "message",
+        "sessions_spawn", "sessions_yield", "subagents", "session_status", "message", "gateway",
         "ask_user", "bundle-mcp",
     ],
     "full": ["*"],
@@ -274,8 +309,8 @@ def _policy_allows(name: str, policy) -> bool:
 
 
 def _union_allow(base, extra):
-    """unionAllow (sandbox-tool-policy-G7E6RfNN.js, grounded against openclaw@2026.9.2 on
-    2026-09-06): alsoAllow-only (or onto an empty allow)
+    """unionAllow (the sandbox-tool-policy bundle, re-read against openclaw@2026.9.5 on
+    2026-09-19; behaviour covered by the battery): alsoAllow-only (or onto an empty allow)
     injects an implicit "*"; alsoAllow onto a real non-empty allow just unions in."""
     if not isinstance(extra, list) or not extra:
         return base
@@ -348,7 +383,8 @@ def _agent_entry_tools(cfg: dict, agent_id: str):
 
 
 def _agent_tools(cfg: dict, scope: str):
-    """resolveEffectiveToolPolicy's agentTools derivation (dist lines 236-238): the
+    """resolveEffectiveToolPolicy's agentTools derivation (the `agentTools` lines of
+    agent-tools.policy-*.mjs, as of openclaw@2026.9.5): the
     resolved roster entry's tools, or -- ONLY when the config declares no roster at all,
     for ANY scope including GLOBAL_SCOPE -- agents.defaults.tools."""
     tools = None

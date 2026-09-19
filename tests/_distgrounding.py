@@ -40,8 +40,8 @@ WHAT A GREEN GROUNDING TEST MEANS — read this before citing one as evidence. I
 citation is **live**, not that it is **correct**. These helpers prove a symbol still exists
 where a docstring says it does; nothing here can prove the docstring describes what that
 symbol actually DOES. A claim about vendor BEHAVIOUR is grounded by EXECUTING the vendor
-over a case battery (``test_toolgrant_dist_grounding.py``'s 3,354-case differential,
-``test_b666_read_reach.py``), never by a successful grep. A locator that resolves is the
+over a case battery (``test_toolgrant_battery.py``'s per-cell differential against the
+pinned vendor answers, ``test_b666_read_reach.py``), never by a successful grep. A locator that resolves is the
 precondition for evidence, not the evidence.
 """
 from __future__ import annotations
