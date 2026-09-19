@@ -1,0 +1,293 @@
+"""B363 (re-grounded B-833) — the default of tools.message.crossContext.allowAcrossProviders
+flipped from DENY to ALLOW in OpenClaw 2026.9.5, in code, with the config path and the
+schema's own default/enum unchanged.
+
+    2026.9.4  outbound-policy-*.mjs:122   allowAcrossProviders === true    (unset = deny)
+    2026.9.5  outbound-policy-*.mjs:122   allowAcrossProviders !== false   (unset = allow)
+
+Before this fix B363 PASSed an unset key with "(or is unset, the shipped default)" on every
+build. The tests below pin the three-valued build answer (``deny`` / ``allow`` /
+``unknown``), the resulting verdict matrix, and the two things that must NOT move: the
+explicit-``true`` WARN text (``baseline.fingerprint()`` hashes ``detail``, so changing it
+orphans users' ``.clawseccheckignore`` entries) and the per-agent-wins precedence.
+
+Offline and read-only: no dist is read, the build is injected through
+``Context.installed_dist_version`` or ``meta.lastTouchedVersion``.
+"""
+from __future__ import annotations
+
+import pytest
+
+from clawseccheck.catalog import PASS, UNKNOWN, WARN
+from clawseccheck.checks import (
+    _CROSS_CONTEXT_DEFAULT_ALLOW_MIN,
+    _CROSS_CONTEXT_DENY_MEASURED_MIN,
+    _cross_context_default,
+    check_cross_context_send,
+)
+from clawseccheck.collector import Context
+
+_KEY = "tools.message.crossContext.allowAcrossProviders"
+
+
+def _cc(value):
+    return {"crossContext": {"allowAcrossProviders": value}}
+
+
+def _global(value):
+    return {"tools": {"message": _cc(value)}}
+
+
+def _agent(value=None):
+    """An agent entry with its own value, or with none when *value* is None."""
+    return {} if value is None else {"tools": {"message": _cc(value)}}
+
+
+def _entries(**agents):
+    return {"agents": {"entries": dict(agents)}}
+
+
+def _ctx(cfg, tmp_path, version=None):
+    return Context(home=tmp_path, config=cfg, config_found=True,
+                   installed_dist_version=version)
+
+
+def _stamped(version, cfg=None):
+    out = dict(cfg or {})
+    out["meta"] = {"lastTouchedVersion": version}
+    return out
+
+
+# ----------------------------------------------------------------------------------------
+# the build answer
+class TestCrossContextDefault:
+    @pytest.mark.parametrize("installed, expected", [
+        ("2026.9.4", "deny"),
+        ("2026.9.4-1", "deny"),       # a correction suffix sorts BELOW the next release
+        ("2026.9.3", "deny"),
+        ("2026.8.1", "deny"),
+        ("2026.7.1-2", "deny"),
+        ("2026.6.34", "deny"),        # the extended-stable line, resolver read
+        ("2026.6.9", "deny"),         # the oldest release whose resolver was read
+        ("2026.6.8", "unknown"),      # older than the measured series: never extrapolated
+        ("2026.5.1", "unknown"),
+        ("2025.12.3", "unknown"),
+        ("0.0.0", "unknown"),         # not a calendar release: no confident safe verdict
+        ("2026.9", "unknown"),        # ... nor is a two-part string
+        ("2026.9.5", "allow"),
+        ("2026.9.5-1", "allow"),      # ... and a suffix on the threshold itself sorts at/above it
+        ("2026.9.6", "allow"),
+        ("2026.10.1", "allow"),       # calendar-numeric, not lexicographic
+        ("2027.1.1", "allow"),
+        ("2026.9.5-beta.1", "unknown"),   # a pre-release is unorderable, never assumed
+        ("not a version", "unknown"),
+        ("", "unknown"),
+    ])
+    def test_installed_version_decides_outright(self, tmp_path, installed, expected):
+        assert _cross_context_default(_ctx({}, tmp_path, installed)) == expected
+
+    def test_an_installed_version_beats_a_contradicting_stamp(self, tmp_path):
+        """The installed build's resolver is the one that runs; the stamp only says which
+        build last SAVED the config."""
+        ctx = _ctx(_stamped("2026.9.5"), tmp_path, "2026.9.4")
+        assert _cross_context_default(ctx) == "deny"
+        ctx = _ctx(_stamped("2026.9.4"), tmp_path, "2026.9.5")
+        assert _cross_context_default(ctx) == "allow"
+
+    def test_a_stamp_at_or_after_the_flip_proves_allow(self, tmp_path):
+        assert _cross_context_default(_ctx(_stamped("2026.9.5"), tmp_path)) == "allow"
+        assert _cross_context_default(_ctx(_stamped("2026.9.7"), tmp_path)) == "allow"
+
+    @pytest.mark.parametrize("stamp", ["2026.9.4", "2026.9.3", "2026.7.1-2", "", None])
+    def test_a_stale_stamp_never_proves_deny(self, tmp_path, stamp):
+        """The user may have upgraded five minutes ago without re-saving: a stamp BELOW
+        the threshold proves nothing about what is installed now."""
+        cfg = {} if stamp is None else _stamped(stamp)
+        assert _cross_context_default(_ctx(cfg, tmp_path)) == "unknown"
+
+    def test_no_version_at_all_is_unknown(self, tmp_path):
+        assert _cross_context_default(_ctx({}, tmp_path)) == "unknown"
+
+    def test_the_thresholds_are_the_measured_releases(self):
+        assert _CROSS_CONTEXT_DEFAULT_ALLOW_MIN == (2026, 9, 5)
+        assert _CROSS_CONTEXT_DENY_MEASURED_MIN == (2026, 6, 9)
+
+    def test_an_unplaceable_installed_version_never_yields_a_pass(self, tmp_path):
+        """The C-135 finding: 'deny' is the answer that PASSes, so a version string we
+        cannot place on the measured timeline must not reach it."""
+        for version in ("0.0.0", "2026.9", "2026.6.8", "1.0.0"):
+            f = check_cross_context_send(_ctx({"tools": {}}, tmp_path, version))
+            assert f.status == UNKNOWN, version
+
+
+# ----------------------------------------------------------------------------------------
+# the verdict matrix
+class TestUnsetKey:
+    def test_unset_on_a_denying_build_is_pass(self, tmp_path):
+        f = check_cross_context_send(_ctx({"tools": {}}, tmp_path, "2026.9.4"))
+        assert f.status == PASS
+        assert "before 2026.9.5" in f.detail and "denies" in f.detail
+
+    def test_unset_on_the_flipped_build_warns(self, tmp_path):
+        """THE regression this task exists for: this used to PASS with "the shipped
+        default" while the 9.5 runtime allowed cross-provider sends."""
+        f = check_cross_context_send(_ctx({"tools": {}}, tmp_path, "2026.9.5"))
+        assert f.status == WARN
+        assert "unset" in f.detail and "2026.9.5" in f.detail
+        assert f.evidence and f.evidence[0].startswith(_KEY)
+        # the fix names the key, the value to set and WHY (the default moved)
+        assert "false" in f.fix and "ALLOW" in f.fix
+
+    def test_unset_with_a_correction_release_of_the_flipped_build_warns(self, tmp_path):
+        assert check_cross_context_send(
+            _ctx({"tools": {}}, tmp_path, "2026.9.5-1")).status == WARN
+
+    def test_unset_on_the_prior_line_correction_release_still_passes(self, tmp_path):
+        assert check_cross_context_send(
+            _ctx({"tools": {}}, tmp_path, "2026.9.4-1")).status == PASS
+
+    def test_unset_and_the_build_unknown_is_unknown_not_a_hedged_pass(self, tmp_path):
+        f = check_cross_context_send(_ctx({"tools": {}}, tmp_path))
+        assert f.status == UNKNOWN
+        assert "could not be determined" in f.detail
+        # the fix must not name a default it cannot establish as fact
+        assert "explicitly" in f.fix
+
+    def test_a_prerelease_of_the_flipped_build_is_unknown(self, tmp_path):
+        f = check_cross_context_send(_ctx({"tools": {}}, tmp_path, "2026.9.5-beta.1"))
+        assert f.status == UNKNOWN
+
+    def test_a_stamp_from_the_flipped_build_warns_without_an_install(self, tmp_path):
+        f = check_cross_context_send(_ctx(_stamped("2026.9.5"), tmp_path))
+        assert f.status == WARN
+
+    def test_a_stale_stamp_and_no_install_is_unknown(self, tmp_path):
+        f = check_cross_context_send(_ctx(_stamped("2026.9.4"), tmp_path))
+        assert f.status == UNKNOWN
+
+    def test_an_empty_crossContext_object_is_unset(self, tmp_path):
+        cfg = {"tools": {"message": {"crossContext": {}}}}
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5")).status == WARN
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4")).status == PASS
+
+    @pytest.mark.parametrize("bad", ["false", "true", None, 0, 1, [], {}, ""])
+    def test_a_non_boolean_value_is_treated_as_unset_at_the_global_scope(self, tmp_path, bad):
+        """C-135: the schema declares the key boolean().optional() and OpenClaw refuses to
+        load a config that violates it (InvalidConfigError), so a non-boolean never reaches
+        the resolver. The check reads it as UNSET, the same way at BOTH scopes."""
+        cfg = _global(bad)
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5")).status == WARN
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4")).status == PASS
+        assert check_cross_context_send(_ctx(cfg, tmp_path)).status == UNKNOWN
+
+    @pytest.mark.parametrize("bad", ["false", "true", None, 0, 1, [], {}, ""])
+    def test_a_non_boolean_value_is_treated_as_unset_at_the_agent_scope(self, tmp_path, bad):
+        """The two scopes must AGREE (the C-135 defect): an agent's non-boolean inherits the
+        global value exactly as an agent with no value does."""
+        cfg = {**_global(False), **_entries(w=_agent(bad))}
+        for version in (None, "2026.9.4", "2026.9.5"):
+            assert check_cross_context_send(_ctx(cfg, tmp_path, version)).status == PASS
+        cfg = _entries(w=_agent(bad))
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5")).status == WARN
+
+
+class TestExplicitValues:
+    @pytest.mark.parametrize("version", [None, "2026.9.4", "2026.9.5", "2026.9.5-beta.1"])
+    def test_explicit_false_is_pass_on_every_build(self, tmp_path, version):
+        f = check_cross_context_send(_ctx(_global(False), tmp_path, version))
+        assert f.status == PASS
+        assert "explicitly false" in f.detail
+
+    @pytest.mark.parametrize("version", [None, "2026.9.4", "2026.9.5"])
+    def test_explicit_true_warns_on_every_build(self, tmp_path, version):
+        f = check_cross_context_send(_ctx(_global(True), tmp_path, version))
+        assert f.status == WARN
+
+    def test_explicit_true_text_is_byte_identical_to_the_pre_fix_wording(self, tmp_path):
+        """`baseline.fingerprint()` is sha1(detail): moving this string orphans every
+        `.clawseccheckignore` entry a user already wrote for the B363 WARN. The fix text
+        for a default-allow finding is separate; THIS detail must never move."""
+        f = check_cross_context_send(_ctx(_global(True), tmp_path, "2026.9.4"))
+        assert f.detail == (
+            "1 scope(s) resolve tools.message.crossContext.allowAcrossProviders to "
+            "true: tools.message.crossContext.allowAcrossProviders — the message tool "
+            "can send into a conversation on a different channel provider than the one "
+            "it is currently bound to.")
+        assert f.fix == (
+            "Keep allowAcrossProviders false unless an agent genuinely needs to relay "
+            "across providers; if it does, prefer the per-agent override over the global "
+            "default so unrelated agents stay confined.")
+
+
+class TestPerAgent:
+    """Per-agent keys WIN over the global value, key by key, and an agent that leaves the
+    key unset INHERITS — which on 2026.9.5+ means it inherits ALLOW."""
+
+    def test_global_unset_one_agent_false_another_unset_warns_on_9_5(self, tmp_path):
+        """The vendor executed differential: `other` is DENIED on 9.4 and ALLOWED on 9.5."""
+        cfg = _entries(pub=_agent(False), other=_agent())
+        f = check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5"))
+        assert f.status == WARN
+        assert "unset" in f.detail
+        # ... and passes on the build that denied by default
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4")).status == PASS
+
+    def test_global_false_and_an_agent_that_leaves_it_unset_is_pass_on_9_5(self, tmp_path):
+        cfg = {**_global(False), **_entries(a=_agent())}
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5")).status == PASS
+
+    def test_global_false_and_an_agent_that_widens_it_warns_naming_only_that_agent(self, tmp_path):
+        cfg = {**_global(False), **_entries(safe=_agent(), widened=_agent(True))}
+        for version in ("2026.9.4", "2026.9.5", None):
+            f = check_cross_context_send(_ctx(cfg, tmp_path, version))
+            assert f.status == WARN
+            assert "widened" in f.detail and "safe" not in f.detail
+
+    def test_global_unset_and_every_agent_explicitly_false_still_warns_on_9_5(self, tmp_path):
+        """Deliberate: an unset GLOBAL still applies to any scope with no value of its own
+        (an agent added later, an implicit default agent), and `set the global key to false`
+        is a one-line remediation. Documented rather than hidden."""
+        cfg = _entries(a=_agent(False), b=_agent(False))
+        f = check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5"))
+        assert f.status == WARN
+        assert f.evidence and f.evidence[0].startswith(_KEY)
+
+    def test_an_agent_true_and_an_unset_global_lists_both_scopes_on_9_5(self, tmp_path):
+        cfg = _entries(w=_agent(True))
+        f = check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5"))
+        assert f.status == WARN and len(f.evidence) == 2
+
+    def test_legacy_agents_list_roster_shape_is_read_too(self, tmp_path):
+        """2026.8.1 moved agents.list[] to agents.entries{}; both must be honoured."""
+        cfg = {"agents": {"list": [{"id": "a"}, {"id": "b", **_agent(False)}]}}
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5")).status == WARN
+        cfg = {**_global(False),
+               "agents": {"list": [{"id": "a"}, {"id": "w", **_agent(True)}]}}
+        f = check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5"))
+        assert f.status == WARN and "w" in f.detail
+
+
+class TestUnchangedGuards:
+    def test_an_unread_config_is_unknown_on_every_build(self, tmp_path):
+        for version in (None, "2026.9.4", "2026.9.5"):
+            ctx = Context(home=tmp_path, config={}, config_found=False,
+                          installed_dist_version=version)
+            assert check_cross_context_send(ctx).status == UNKNOWN
+
+    def test_a_malformed_global_node_is_unknown_on_every_build(self, tmp_path):
+        cfg = {"tools": {"message": {"crossContext": "nope"}}}
+        for version in (None, "2026.9.4", "2026.9.5"):
+            assert check_cross_context_send(_ctx(cfg, tmp_path, version)).status == UNKNOWN
+
+    def test_a_malformed_agent_node_is_unknown_when_nothing_else_warns(self, tmp_path):
+        cfg = {**_global(False),
+               "agents": {"entries": {"a": {"tools": {"message": {"crossContext": "nope"}}}}}}
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.5")).status == UNKNOWN
+
+    def test_an_offender_outranks_a_malformed_sibling(self, tmp_path):
+        """Same precedence the check always had: a proven WARN is not downgraded by an
+        unreadable neighbour."""
+        cfg = {"agents": {"entries": {
+            "bad": {"tools": {"message": {"crossContext": "nope"}}},
+            "w": _agent(True)}}}
+        assert check_cross_context_send(_ctx(cfg, tmp_path, "2026.9.4")).status == WARN

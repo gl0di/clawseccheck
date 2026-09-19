@@ -1080,6 +1080,73 @@ def _workshop_symlink_knob(ctx) -> str:
     return "unknown"
 
 
+# B-833: the build that FLIPPED tools.message.crossContext.allowAcrossProviders from
+# default-DENY to default-ALLOW. The config PATH did not move and the schema's own
+# default/enum did not move, so no path diff sees it -- only the resolver line does:
+#
+#   2026.9.4  dist/outbound-policy-*.mjs:122  ...allowAcrossProviders === true   (unset = deny)
+#   2026.9.5  dist/outbound-policy-*.mjs:122  ...allowAcrossProviders !== false  (unset = allow)
+#
+# Both trees were read AND their verbatim ``enforceCrossContextPolicy`` executed in node
+# (unset + bound conversation: DENIED on 9.4, ALLOWED on 9.5). The vendor's own 9.5 help text
+# says "default: true", ``docs/gateway/security/tool-permissions.md`` says "Upgrades adopt
+# this default when the setting is omitted", and there is no migration that pins the old
+# value. 9.4 and 9.5 are CONSECUTIVE releases and both were measured, so -- as with
+# _SYMLINK_KNOB_RETIRED_MIN -- one threshold is honest where the 8.1 split needed two. A
+# correction suffix sorts at or above it: (2026,9,5,1) >= (2026,9,5), (2026,9,4,1) below.
+_CROSS_CONTEXT_DEFAULT_ALLOW_MIN = (2026, 9, 5)
+
+# The oldest release whose resolver was actually READ. The line is `=== true` (unset = deny)
+# in the cached tarballs of 2026.6.9, 6.10, 6.11, 6.34 (extended-stable), 7.1, 7.1-2,
+# 7.2-beta.5, 8.1, 8.2, 9.1, 9.2, 9.3 and 9.4 -- an unbroken series -- and `!== false` only
+# from 9.5. "deny" is the direction that PASSes, so it is the one answer that must not be
+# extrapolated: a build older than this, or an installed-version string that is not a
+# `YYYY.M.P` calendar release ("0.0.0", "2026.9"), answers "unknown", never a confident safe
+# verdict.
+_CROSS_CONTEXT_DENY_MEASURED_MIN = (2026, 6, 9)
+
+
+def _cross_context_default(ctx) -> str:
+    """What does an UNSET tools.message.crossContext.allowAcrossProviders mean on the
+    reader's OpenClaw? ``"deny"`` / ``"allow"`` / ``"unknown"``.
+
+    Three answers for the reason ``_workshop_symlink_knob`` has three: "we could not see the
+    build" is not "the build denies it", and collapsing them is what made B363 report a
+    default-allow install as clean.
+
+    Sources are ``_openclaw_generation``'s, in its order and with its asymmetry.
+    ``installed_dist_version`` decides outright -- the installed build is the one whose
+    resolver runs. ``meta.lastTouchedVersion`` is consulted ONLY when it lands at 2026.9.5 or
+    later: that stamp proves a 9.5 build once SAVED the config, so the default is allow. A
+    stamp BELOW the threshold proves nothing about what is installed now (the user may have
+    upgraded five minutes ago and not re-saved), so it answers ``"unknown"``, never
+    ``"deny"``. Parsing goes through ``_numeric_version`` (not ``_parse_version``, B-264): a
+    pre-release such as 2026.9.5-beta.1 orders as None and lands on ``"unknown"``.
+
+    ``"deny"`` is the one answer that PASSes, so it is only given for an installed version
+    shaped like a calendar release (``YYYY.M.P``, three or more numeric parts) at or after
+    ``_CROSS_CONTEXT_DENY_MEASURED_MIN`` -- the oldest release whose resolver was read.
+    Anything else that sorts below 2026.9.5 ("0.0.0", "2026.9", a build older than the
+    measured series) is ``"unknown"``: a version string we cannot place on the timeline is
+    not evidence of a safe default.
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- that predicate is compared at
+    two dozen sites, most of them ``== "modern"``, and a new member would silently flip them.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if installed >= _CROSS_CONTEXT_DEFAULT_ALLOW_MIN:
+            return "allow"
+        if len(installed) >= 3 and installed >= _CROSS_CONTEXT_DENY_MEASURED_MIN:
+            return "deny"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _CROSS_CONTEXT_DEFAULT_ALLOW_MIN:
+        return "allow"
+    return "unknown"
+
+
 def _meta(cid: str):
     return BY_ID[cid]
 

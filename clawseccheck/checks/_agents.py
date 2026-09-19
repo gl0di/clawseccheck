@@ -33,6 +33,7 @@ from ._shared import (
     _channels,
     _channels_with_context_visibility_all,
     _config_unreadable,
+    _cross_context_default,
     _enabled_tools,
     _external_input_channels,
     _finding,
@@ -1036,27 +1037,38 @@ def check_session_scope_global(ctx: Context) -> Finding:
 
 
 def check_cross_context_send(ctx: Context) -> Finding:
-    """B363 (C-411) — tools.message.crossContext.allowAcrossProviders (+ the
-    per-agent override ``agents.entries.<id>.tools.message.crossContext.
-    allowAcrossProviders``). Grounded on the installed dist (openclaw@2026.9.3):
-    global default false (``schema-C9vBoeg0.mjs``: "Allow sends across different
-    providers (default: false)"). **The per-agent leg is not optional to check**: the
-    runtime merges global and per-agent crossContext with a shallow spread where the
-    agent's own keys win (``outbound-policy-CVmm1s67.mjs:68-70``,
-    ``{...globalConfig?.crossContext, ...agentConfig.crossContext}``), so one agent
-    can widen past a safe global default on its own — reading only the global key
-    would miss that agent entirely. The actual runtime gate this models:
-    ``messageConfig?.crossContext?.allowAcrossProviders === true``
-    (``outbound-policy-CVmm1s67.mjs:122``) lets the message tool send into a
-    conversation on a DIFFERENT provider than the one the agent is currently bound
-    to — a prompt-injected agent's egress path to an attacker-controlled
-    destination on a different channel provider.
+    """B363 (C-411, re-grounded B-833) — tools.message.crossContext.allowAcrossProviders
+    (+ the per-agent override ``agents.entries.<id>.tools.message.crossContext.
+    allowAcrossProviders``). **Its DEFAULT flipped from deny to allow in 2026.9.5, in code,
+    with the path and the schema's own default/enum unchanged** (so no path diff sees it):
+    ``outbound-policy-*.mjs:122`` reads ``=== true`` through 2026.9.4 (unset = deny) and
+    ``!== false`` from 2026.9.5 (unset = allow). The grounding, and the measured release
+    series behind "deny", live with ``_cross_context_default`` in ``_shared.py``, which
+    answers ``deny`` / ``allow`` / ``unknown`` for the reader's build.
 
-    WARN    — the global value is effectively true, or any individual agent's
-              merged value is effectively true (each named in evidence).
-    PASS    — effectively false everywhere (the shipped default).
-    UNKNOWN — the config was not read, or crossContext is present but not an
-              object at the global or an agent scope.
+    **The per-agent leg is not optional**: the runtime merges global and per-agent
+    crossContext with a shallow spread where the agent's own keys win
+    (``outbound-policy-*.mjs:61-85``), so one agent can widen past a safe global value, and
+    on 2026.9.5+ an agent that leaves the key unset inherits ALLOW even when a sibling sets
+    ``false``. The gate lets the message tool send into a conversation on a DIFFERENT
+    provider than the one it is bound to — a prompt-injected agent's egress path.
+
+    The verdict is about the POLICY SETTING, not tool reachability (not decidable from
+    ``tools.profile`` alone; ``toolgrant`` has no validated battery for ``message``). A
+    non-boolean value at either scope reads as UNSET on both alike: the schema is
+    ``boolean().optional()`` and OpenClaw refuses to load a config that violates it. Not
+    modelled, on purpose: a legacy ``allowCrossContextSend: false`` (the 2026.9.5 migration
+    deletes it, so it lands on the allow default = an unset key here) and
+    ``tools.message.actions.allow`` restricting the tool to non-guarded actions.
+
+    WARN    — some scope resolves to true: an explicit ``true`` (any build), or, on a
+              2026.9.5+ build, the global value unset/not-false (an agent with its own
+              explicit ``false`` is exempt; agents with no own value inherit the global).
+    PASS    — effectively false everywhere: explicit ``false`` globally, or unset on a
+              build known to deny.
+    UNKNOWN — the config was not read; crossContext is present but not an object at the
+              global or an agent scope; or the global value is unset and the build (hence
+              the default) could not be determined. NOT a hedged PASS.
     """
     unreadable = _config_unreadable("B363", ctx)
     if unreadable is not None:
@@ -1084,8 +1096,18 @@ def check_cross_context_send(ctx: Context) -> Finding:
             config_field_paths={"tools.message.crossContext"},
         )
     offenders: list[str] = []
-    if dig(cfg, "tools.message.crossContext.allowAcrossProviders") is True:
+    default = _cross_context_default(ctx)
+    global_value = dig(cfg, "tools.message.crossContext.allowAcrossProviders")
+    default_allow_offender = False
+    if global_value is True:
         offenders.append("tools.message.crossContext.allowAcrossProviders")
+    elif default == "allow" and global_value is not False:
+        # Unset (or not a boolean the vendor's `!== false` would read as false) on a build
+        # whose default is ALLOW: every agent that has no value of its own inherits this.
+        default_allow_offender = True
+        offenders.append(
+            "tools.message.crossContext.allowAcrossProviders (unset — defaults to true "
+            "on OpenClaw 2026.9.5 and later)")
     malformed = False
     for agent in agent_roster(cfg):
         agent_node = dig(agent.entry, "tools.message.crossContext")
@@ -1103,9 +1125,19 @@ def check_cross_context_send(ctx: Context) -> Finding:
             f"allowAcrossProviders to true: {'; '.join(offenders[:5])} — the "
             "message tool can send into a conversation on a different channel "
             "provider than the one it is currently bound to.",
-            "Keep allowAcrossProviders false unless an agent genuinely needs to "
-            "relay across providers; if it does, prefer the per-agent override "
-            "over the global default so unrelated agents stay confined.",
+            (
+                "Set tools.message.crossContext.allowAcrossProviders to false (globally, "
+                "or per agent under agents.entries.<id>.tools.message.crossContext) "
+                "unless an agent genuinely needs to relay across providers — OpenClaw "
+                "2026.9.5 and later ALLOW cross-provider sends when it is unset, where "
+                "earlier builds denied them. If an agent does need it, prefer the "
+                "per-agent override over the global value so unrelated agents stay "
+                "confined."
+                if default_allow_offender else
+                "Keep allowAcrossProviders false unless an agent genuinely needs to "
+                "relay across providers; if it does, prefer the per-agent override "
+                "over the global default so unrelated agents stay confined."
+            ),
             evidence=offenders[:8],
             config_field_paths={"tools.message.crossContext.allowAcrossProviders"},
         )
@@ -1120,12 +1152,35 @@ def check_cross_context_send(ctx: Context) -> Finding:
             "openclaw.json, then re-run the audit.",
             config_field_paths={"tools.message.crossContext"},
         )
+    if global_value is not False and default == "unknown":
+        return _finding(
+            "B363",
+            UNKNOWN,
+            "tools.message.crossContext.allowAcrossProviders is not set and the "
+            "OpenClaw build could not be determined, so whether cross-provider message "
+            "sends are allowed could not be established: OpenClaw releases up to 2026.9.4 "
+            "deny them when it is unset, 2026.9.5 and later allow them.",
+            "Set tools.message.crossContext.allowAcrossProviders explicitly (false keeps "
+            "cross-provider sends off, and is right on every build), or run the audit "
+            "where the installed openclaw can be found so the build is known.",
+            config_field_paths={"tools.message.crossContext.allowAcrossProviders"},
+        )
+    if global_value is False:
+        return _finding(
+            "B363",
+            PASS,
+            "tools.message.crossContext.allowAcrossProviders is explicitly false "
+            "globally, and no declared agent overrides it to true.",
+            "Nothing to do.",
+        )
     return _finding(
         "B363",
         PASS,
-        "tools.message.crossContext.allowAcrossProviders resolves to false (or is "
-        "unset, the shipped default) globally and for every declared agent.",
-        "Nothing to do.",
+        "tools.message.crossContext.allowAcrossProviders is unset and this OpenClaw "
+        "build (before 2026.9.5) denies cross-provider sends by default; no declared "
+        "agent overrides it to true.",
+        "Nothing to do on this build. OpenClaw 2026.9.5 changed the unset default to "
+        "allow: set the key to false explicitly before upgrading past it.",
     )
 
 
