@@ -1,8 +1,8 @@
 -- state_schema_snapshot.sql -- GENERATED. Do not hand-edit.
 --
--- openclaw-version: 2026.9.4
+-- openclaw-version: 2026.9.5
 -- state-schema-version: 17
--- generated: 2026-09-17
+-- generated: 2026-09-19
 -- tables: 10
 --
 -- What this is
@@ -11,7 +11,7 @@
 -- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL`, projected to the state-SQLite tables this tree
 -- declares in a test DDL or that clawseccheck/ reads.
 --
--- source-bundle: openclaw-state-db-DoQEJuhr.mjs
+-- source-bundle: openclaw-state-db-DS2iNFy4.mjs
 --   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. The bundle
 --   carrying this constant is build output and its name rotates -- 2026.9.1 moved it from
 --   openclaw-state-db-readonly-*.js to openclaw-state-db-cache-*.js while BOTH files still
@@ -184,6 +184,9 @@ CREATE TABLE IF NOT EXISTS task_runs (
   agent_id TEXT,
   requester_agent_id TEXT,
   run_id TEXT,
+  execution_owner_host TEXT,
+  execution_owner_pid INTEGER,
+  execution_owner_start_identity INTEGER,
   label TEXT,
   task TEXT NOT NULL,
   status TEXT NOT NULL,
