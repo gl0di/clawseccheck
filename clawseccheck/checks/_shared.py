@@ -2256,7 +2256,7 @@ def _agent_tools_widenings(cfg: dict) -> "tuple[list, list]":
         also = entry_tools.get("alsoAllow")
         if isinstance(also, list):
             for t in also:
-                if _toolgrant.granted(cfg, str(t), agent.id):
+                if _toolgrant.granted(cfg, str(t), agent.id, agent=True):
                     also_allow.append((agent.labelled(name), t))
         profile = entry_tools.get("profile")
         if isinstance(profile, str) and profile and _profile_is_powerful(profile):
