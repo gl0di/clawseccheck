@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 
 import pytest
 from _distgrounding import require_dist
@@ -109,3 +110,87 @@ def test_the_bound_symbols_are_still_exported_by_name():
     require_dist()
     assert oracle.run_oracle([{"cfg": {}, "env": {}}]) == [
         {"collect": [], "refs": [], "runtimes": []}]
+
+
+def test_the_legacy_codex_provider_set_equals_the_vendors():
+    """``hr._LEGACY_CODEX_PROVIDERS`` is what stops a ``no`` over ``openai-codex/*``, ``codex/*``
+    and ``codex-cli/*`` refs, which the vendor migrates onto the Codex harness (and which the
+    runtime collector the battery is graded against never sees). TWO vendor tables feed it, so
+    ground the set against BOTH, executed, over spellings on both sides of each boundary:
+    ``isLegacyCodexProviderId`` (codex-route-model-ref) and
+    ``resolveLegacyRuntimeModelProviderAlias`` (legacy-runtime-model-providers) restricted to
+    the aliases whose runtime is ``codex``."""
+    require_dist()
+    from _distgrounding import dist_file
+    a = dist_file("codex-route-model-ref-*.mjs", symbol="isLegacyCodexProviderId",
+                  contains="const LEGACY_CODEX_PROVIDER_IDS")
+    b = dist_file("legacy-*.mjs", symbol="resolveLegacyRuntimeModelProviderAlias",
+                  contains="const LEGACY_RUNTIME_MODEL_PROVIDER_ALIASES")
+    ea, eb = oracle._exports(a), oracle._exports(b)
+    for path, ex, name in ((a, ea, "isLegacyCodexProviderId"),
+                           (b, eb, "resolveLegacyRuntimeModelProviderAlias")):
+        assert name in ex, (f"{path.name} no longer exports {name} -- re-ground; do NOT rebind "
+                            f"by letter. Exports: {sorted(ex)}")
+    probes = ["codex", "openai-codex", "codex-cli", "Codex", " OpenAI-Codex ", "CODEX", " Codex-CLI ",
+              "openai", "openai-compat", "codex-app-server", "openai-codex2", "xcodex",
+              "claude-cli", "google-gemini-cli", "anthropic-cli", "anthropic", "", "  "]
+    script = ("Promise.all([import(process.argv[1]), import(process.argv[2])]).then(([a, b]) => {"
+              " const legacy = a[process.argv[3]]; const alias = b[process.argv[4]];"
+              " const p = JSON.parse(process.argv[5]);"
+              " console.log('@@R@@' + JSON.stringify(p.map(x => Boolean(legacy(x)) || "
+              "(alias(x) || {}).runtime === 'codex'))); });")
+    proc = subprocess.run(
+        ["node", "-e", script, a.as_uri(), b.as_uri(), ea["isLegacyCodexProviderId"],
+         eb["resolveLegacyRuntimeModelProviderAlias"], json.dumps(probes)],
+        capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    line = [ln for ln in proc.stdout.splitlines() if ln.startswith("@@R@@")][-1]
+    vendor = json.loads(line[len("@@R@@"):])
+    port = [hr._trim(p).lower() in hr._LEGACY_CODEX_PROVIDERS for p in probes]
+    assert vendor == port, list(zip(probes, vendor, port))
+    assert any(vendor) and not all(vendor)
+
+
+def test_the_legacy_codex_provider_set_is_every_codex_entry_in_the_vendors_tables():
+    """The probe test above only compares over a hand-written probe list, so a vendor table that
+    GAINS a codex alias not on the list would slip past it. Read both table literals out of the
+    dist source and require the port's set to equal their union (codex runtime only): a new alias
+    the vendor migrates onto Codex turns this red, naming the provider."""
+    import re
+    require_dist()
+    from _distgrounding import dist_file
+    a = dist_file("codex-route-model-ref-*.mjs", symbol="LEGACY_CODEX_PROVIDER_IDS",
+                  contains="const LEGACY_CODEX_PROVIDER_IDS")
+    b = dist_file("legacy-*.mjs", symbol="LEGACY_RUNTIME_MODEL_PROVIDER_ALIASES",
+                  contains="const LEGACY_RUNTIME_MODEL_PROVIDER_ALIASES")
+    text_a = a.read_text(encoding="utf-8", errors="replace")
+    text_b = b.read_text(encoding="utf-8", errors="replace")
+    ids = re.search(r"const LEGACY_CODEX_PROVIDER_IDS\s*=\s*(?:/\*.*?\*/\s*)?new Set\(\[(.*?)\]\)",
+                    text_a, re.S)
+    assert ids, "LEGACY_CODEX_PROVIDER_IDS no longer has the literal shape this test reads"
+    vendor = {v.lower() for v in re.findall(r'"([^"]+)"', ids.group(1))}
+    start = text_b.index("const LEGACY_RUNTIME_MODEL_PROVIDER_ALIASES")
+    table = text_b[start:text_b.index("];", start)]
+    entries = re.findall(r"\{[^{}]*\}", table)
+    assert entries, "LEGACY_RUNTIME_MODEL_PROVIDER_ALIASES no longer has the literal shape read here"
+    for entry in entries:
+        legacy = re.search(r'legacyProvider:\s*"([^"]+)"', entry)
+        runtime = re.search(r'runtime:\s*"([^"]+)"', entry)
+        assert legacy and runtime, entry
+        if runtime.group(1) == "codex":
+            vendor.add(legacy.group(1).lower())
+    assert vendor == set(hr._LEGACY_CODEX_PROVIDERS), (
+        f"the vendor migrates {sorted(vendor)} onto the Codex harness; the port refuses "
+        f"{sorted(hr._LEGACY_CODEX_PROVIDERS)} -- add the missing spelling to "
+        f"harnessruntime._LEGACY_CODEX_PROVIDERS")
+
+
+def test_a_picker_runtime_is_counted_by_the_live_collector_and_never_a_no():
+    """The collector counts ``models[ref].pickerRuntimes`` like a pin; the port declines to
+    answer over one rather than modelling what an OFFERED runtime means."""
+    require_dist()
+    cfg = {"agents": {"defaults": {"model": "anthropic/c",
+                                   "models": {"anthropic/c": {"pickerRuntimes": ["codex"]}}}}}
+    res = oracle.run_oracle([{"cfg": cfg, "env": {}}])[0]
+    assert "codex" in res["runtimes"], res
+    assert hr.codex_harness_reach(cfg, hr.ORACLE_MIN, environ={}).answer == hr.UNKNOWN

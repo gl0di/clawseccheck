@@ -3258,10 +3258,19 @@ def _harness_build(ctx) -> "tuple | None":
     but ONLY when it is at least the validated floor -- the same asymmetry
     ``_openclaw_generation`` uses: a stale older stamp proves nothing about what is
     installed now, so it must not decide anything.
+
+    An installed build that is KNOWN but cannot be ordered (``2026.9.6-beta.1``, a garbled
+    string) never falls through to the stamp: the stamp is what the config remembers a
+    PREVIOUS build to be, and a newer pre-release install would then read as the validated
+    one, walking straight past the ceiling that exists to stop that. Only an installed build
+    that is absent (None or empty) leaves the stamp as the best evidence there is.
     """
-    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    raw = getattr(ctx, "installed_dist_version", None)
+    installed = _numeric_version(raw)
     if installed is not None:
         return installed
+    if raw not in (None, ""):
+        return None
     stamped = _numeric_version(_openclawdist.self_reported_version(getattr(ctx, "config", None)))
     if stamped is not None and _harnessruntime.ORACLE_MIN <= stamped[:3] <= _harnessruntime.ORACLE_MAX:
         return stamped
@@ -3276,7 +3285,8 @@ def _harness_reach(ctx) -> "_harnessruntime.HarnessReach":
 #: resolves to the Codex harness" is a statement about ``openclaw.json`` and nothing else.
 _HARNESS_RUNTIME_CAVEAT = (
     "Only the models written in openclaw.json were read: a model chosen at run time (a "
-    "cron job's own model override, or a /model switch) is not visible here, so this "
+    "cron job's own model override, or a /model switch), or one a third-party plugin "
+    "selects through a setting this audit cannot recognise, is not visible here, so this "
     "stops being true the moment one of those selects a model that runs on Codex."
 )
 

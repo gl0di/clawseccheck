@@ -18,8 +18,10 @@ degrades every input it does not model to ``unknown``:
   present that could change the implicit decision (no pin of any kind, no authored OpenAI
   provider config, no request params, no ``OPENAI_BASE_URL``).
 * ``no``   -- every agent (and the defaults) names an explicit model, EVERY model
-  reference anywhere in the config is on a provider other than ``openai``, and no pin
-  names a plugin runtime. Explicit matters: an agent with no model configured runs
+  reference the vendor enumerates (``model_refs``) is on a provider other than ``openai`` and
+  the legacy Codex spellings, ``stray_model_signal`` finds no Codex-bound reference the vendor
+  does NOT enumerate (bundled-plugin config reads its own keys), and no pin names a plugin
+  runtime. Explicit matters: an agent with no model configured runs
   ``openai/gpt-5.6-sol`` on the validated build, so the vendor's own collector returning
   ``[]`` for such a config is not "no" -- it is the default-model trap.
 * ``unknown`` -- everything else, including any build older than the one this was
@@ -68,6 +70,18 @@ _JS_WS = "\t\n\v\f\r            " \
          "      　﻿"
 
 _DEFAULT_RUNTIMES = (None, "auto", "default")
+
+#: Provider spellings the vendor accepts only at its legacy-migration boundary: a ref like
+#: ``openai-codex/gpt-5.5`` is rewritten to ``openai/gpt-5.5`` on Codex, and the vendor's
+#: ``modelRefUsesCodexRuntime`` answers true for it. TWO vendor tables feed this set, and it
+#: is their union restricted to runtime ``codex``: ``LEGACY_CODEX_PROVIDER_IDS``
+#: (``commands/doctor/shared/codex-route-model-ref``: ``codex``, ``openai-codex``) and
+#: ``LEGACY_RUNTIME_MODEL_PROVIDER_ALIASES`` (``legacy-runtime-model-providers``: ``codex``,
+#: ``codex-cli``). The runtime-collector oracle this port is graded against never sees the
+#: migration, so it calls such a config Codex-free -- which is exactly why a ``no`` may not be
+#: given over one. Matched on the provider alone, after the same trim + lowercase the vendor
+#: applies.
+_LEGACY_CODEX_PROVIDERS = frozenset(("codex", "codex-cli", "openai-codex"))
 
 
 @dataclass(frozen=True)
@@ -235,6 +249,137 @@ class _Bail(Exception):
     """A shape this port does not model. Carries the reason; the answer becomes unknown."""
 
 
+#: Bounds on the whole-config walk below: past either, the answer is ``unknown`` rather than a
+#: partial scan passed off as a complete one. Iterative, so depth costs nothing but a bound.
+_WALK_MAX_NODES = 50000
+_WALK_MAX_DEPTH = 64
+
+#: Where a model-shaped KEY with a value this port cannot resolve (a bare id, or a shape it does
+#: not know) is refused. ``plugins`` is the verified surface (imap ``accounts.<id>.model``,
+#: active-memory ``model``, memory-core dreaming all hand the value to an agent turn); the rest
+#: of the config either is enumerated by ``model_refs`` or is not model-shaped by name.
+_UNRESOLVABLE_MODEL_SCOPE = ("plugins",)
+
+
+def _is_codex_provider_name(value) -> bool:
+    """A BARE provider name that is ``openai`` or a legacy Codex spelling (``defaultProvider:
+    "openai"``, ``{"provider": "openai", "id": ...}``): a plugin can combine it with a model id
+    from elsewhere, and the vendor then routes the result to Codex."""
+    return isinstance(value, str) and (
+        _trim(value).lower() == "openai" or _trim(value).lower() in _LEGACY_CODEX_PROVIDERS)
+
+
+def _has_unresolved_substitution(provider) -> bool:
+    """``${VAR}`` inside the provider half of a ref: the vendor substitutes environment
+    variables into any config string (``resolveConfigEnvVars``), so ``${P}/gpt-5.5`` is
+    ``openai/gpt-5.5`` when ``P=openai`` and this port cannot know what it is."""
+    return "${" in provider
+
+
+def _is_codex_qualified(value) -> bool:
+    """A ``provider/model`` string whose provider is ``openai`` or a legacy Codex spelling."""
+    if not isinstance(value, str):
+        return False
+    parsed = _parse_ref(value)
+    return bool(parsed) and (parsed[0] == "openai" or parsed[0] in _LEGACY_CODEX_PROVIDERS)
+
+
+def _model_value_problem(value):
+    """Why a value under a ``*model`` / ``*models`` key cannot be shown Codex-free, or None.
+
+    ``None``/booleans/numbers cannot be a ref and are ignored. A string must be a
+    ``provider/model`` reference (a bare id resolves through the DEFAULT provider, which on the
+    validated build is OpenAI); a ``{primary, fallbacks}`` record and a list of strings are the
+    two shapes with a known meaning; ANY other shape -- an object naming ``provider`` + ``id``,
+    a map keyed by refs, a list of lists -- is one this port does not read.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return None
+    if isinstance(value, str):
+        if _trim(value):
+            parsed = _parse_ref(value)
+            if parsed is None:
+                return ("is not a provider/model reference, so the provider it resolves to "
+                        "cannot be seen")
+            if _has_unresolved_substitution(parsed[0]):
+                return ("has an environment substitution in its provider, so the provider it "
+                        "resolves to cannot be seen")
+        return None
+    if _is_record(value) and set(value) <= {"primary", "fallbacks"}:
+        refs = _list_refs(value)
+        fb = value.get("fallbacks")
+        if fb is not None and not isinstance(fb, list):
+            return "has a shape this determination does not read"
+        if any(not isinstance(v, str) for v in ([value.get("primary")] if "primary" in value else [])
+               + (fb or [])):
+            return "has a shape this determination does not read"
+        return next((_model_value_problem(r) for r in refs if _model_value_problem(r)), None)
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return next((_model_value_problem(v) for v in value if _model_value_problem(v)), None)
+    return "has a shape this determination does not read"
+
+
+def stray_model_signal(cfg) -> "str | None":
+    """A reason ``no`` cannot be given because of a model reference ``model_refs`` never lists.
+
+    ``model_refs`` mirrors the vendor's own ``collectConfiguredModelRefs``, so the oracle the
+    port is graded against shares its blind spots -- bundled plugins read their OWN config keys
+    (``imap``'s ``accounts.<id>.model``, ``active-memory``'s ``model`` and ``modelFallback``,
+    memory-core dreaming) and hand the value to an agent turn. Two structural rules, deliberately
+    not a list of plugin fields (a plugin's schema is the plugin's, and a third party's is
+    unknowable):
+
+    * anywhere in the config, any string -- a value OR a map key -- that is a
+      ``provider/model`` reference on ``openai`` or a legacy Codex provider is refused, whatever
+      key it sits under;
+    * under ``_UNRESOLVABLE_MODEL_SCOPE``, any key containing ``model`` (any case: ``modelId``,
+      ``model_name``, ``defaultModel``, ``allowedModels``...) whose value is not provably a
+      Codex-free reference is refused (see ``_model_value_problem``), and so is any string that
+      is a BARE ``openai`` / legacy-Codex provider name (``defaultProvider: "openai"``, a
+      ``{"provider": "openai", ...}`` record) -- a plugin can pair it with a model id taken from
+      elsewhere.
+
+    What this cannot see, stated rather than hidden: a third-party plugin that selects a model
+    through a key with no ``model`` in its name and no Codex-bound string in its value. A
+    plugin's configuration space is open-ended, so the ``no`` PASS text says only openclaw.json
+    was read.
+
+    Over-refusing can only turn a ``no`` into ``unknown`` (the old WARN); under-refusing is the
+    lying PASS this exists to prevent. Returns a path-only reason, never a value.
+    """
+    if not _is_record(cfg):
+        return None
+    stack = [("", cfg, 0)]
+    seen = 0
+    while stack:
+        path, node, depth = stack.pop()
+        seen += 1
+        if seen > _WALK_MAX_NODES or depth > _WALK_MAX_DEPTH:
+            raise _Bail("the config is too large or too deep to scan for model references")
+        if _is_record(node):
+            for key, value in node.items():
+                kp = f"{path}.{key}" if path else str(key)
+                if _is_codex_qualified(key):
+                    return f"{kp} is a map key naming a model on a provider that runs the " \
+                           f"Codex harness (or is migrated onto it)"
+                in_scope = kp.split(".", 1)[0] in _UNRESOLVABLE_MODEL_SCOPE
+                if in_scope and isinstance(key, str) and "model" in key.lower():
+                    problem = _model_value_problem(value)
+                    if problem:
+                        return f"{kp} {problem}"
+                stack.append((kp, value, depth + 1))
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                stack.append((f"{path}.{i}", value, depth + 1))
+        elif _is_codex_qualified(node):
+            return (f"{path} names a model on a provider that runs the Codex harness (or is "
+                    f"migrated onto it)")
+        elif path.split(".", 1)[0] in _UNRESOLVABLE_MODEL_SCOPE and _is_codex_provider_name(node):
+            return (f"{path} names a provider that runs the Codex harness (or is migrated onto "
+                    f"it), which a plugin can combine with a model id from elsewhere")
+    return None
+
+
 def _pin(holder, path, pins):
     """Record ``holder.agentRuntime.id`` (normalised) at *path*, or bail on a wrong shape."""
     if not _is_record(holder) or "agentRuntime" not in holder:
@@ -260,6 +405,17 @@ def _model_map_pins(models, path, pins):
     for key, entry in models.items():
         if _is_record(entry):
             _pin(entry, f"{path}.{key}", pins)
+            # ``pickerRuntimes``: the vendor's collector counts each entry exactly like a pin
+            # (``pushModelMapRuntimeIds``). Whether a runtime OFFERED for a model is the one
+            # that runs it is not something this port resolves, so any non-default entry is
+            # a shape it declines to answer over, in either direction.
+            picker = entry.get("pickerRuntimes")
+            if isinstance(picker, list):
+                for value in picker:
+                    rid = _runtime_id(value)
+                    if rid not in _DEFAULT_RUNTIMES and rid != "openclaw":
+                        raise _Bail(f"{path}.{key}.pickerRuntimes offers a runtime this "
+                                    f"determination does not resolve")
 
 
 def _has_params(holder) -> bool:
@@ -424,6 +580,18 @@ def _analyse(cfg, environ) -> HarnessReach:
         if parsed[0] == "openai":
             return HarnessReach(UNKNOWN, (f"{path} is an openai model outside an agent's own "
                                           f"primary/fallback list",))
+        if parsed[0] in _LEGACY_CODEX_PROVIDERS:
+            return HarnessReach(UNKNOWN, (f"{path} uses a legacy Codex provider spelling, which "
+                                          f"the vendor migrates onto the Codex harness",))
+        if _has_unresolved_substitution(parsed[0]):
+            return HarnessReach(UNKNOWN, (f"{path} has an environment substitution in its "
+                                          f"provider, so the provider it resolves to cannot "
+                                          f"be seen",))
+    # Model references the vendor's enumeration above never lists (bundled-plugin config and
+    # any other provider-qualified Codex string): see ``stray_model_signal``.
+    stray = stray_model_signal(cfg)
+    if stray:
+        return HarnessReach(UNKNOWN, (stray,))
     return HarnessReach(NO, tuple(p for p, _ in starts[:5]))
 
 
