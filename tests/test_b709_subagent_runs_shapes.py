@@ -35,6 +35,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from clawseccheck.collector import (
     LIMIT_DOMAIN_AGENTS,
     Context,
@@ -299,3 +301,65 @@ def test_modern_row_cap_truncation_flagged_and_most_recent_kept(tmp_path):
     assert any("row cap" in h for h in hits)
     # And the schema disclosure is present alongside the truncation note.
     assert any("consolidated payload schema" in h for h in hits)
+
+
+# ---------------------------------------------------------------------------------
+# C-553: 2026.9.5 wraps the payload of a "parent"-completion run in {"parentCompletion": ...}.
+# Found by diffing the blob WRITER between 2026.9.4 and 2026.9.5, not by any schema oracle:
+# the DDL is byte-identical, so a reader that only checked columns saw nothing move while
+# model / runTimeoutSeconds / endedReason / execution.outcome silently read back as None.
+# ---------------------------------------------------------------------------------
+
+_PARENT_RECORD = {
+    "completionTarget": "parent", "model": "claude-haiku", "runTimeoutSeconds": 300,
+    "endedReason": "completed", "execution": {"outcome": {"status": "ok"}},
+}
+
+
+def test_parent_completion_wrapper_is_unwrapped_like_the_vendor_does(tmp_path):
+    row = _modern_row("p1", "child-p1", 5000, {"parentCompletion": dict(_PARENT_RECORD)})
+    ctx = _build_home(tmp_path, _MODERN_DDL, [row], insert_columns=_MODERN_COLUMNS)
+    assert ctx.subagent_runs_found is True and ctx.subagent_runs_parse_error is False
+    run = ctx.subagent_runs[0]
+    assert run["model"] == "claude-haiku"
+    assert run["run_timeout_seconds"] == 300
+    assert run["ended_reason"] == "completed"
+    assert run["outcome"] == {"status": "ok"}
+
+
+def test_a_flat_and_a_wrapped_row_are_both_read_in_one_pass(tmp_path):
+    flat = _modern_row("f1", "child-f1", 5001, {"model": "claude-opus", "endedReason": "done"})
+    wrapped = _modern_row("w1", "child-w1", 5002, {"parentCompletion": dict(_PARENT_RECORD)})
+    ctx = _build_home(tmp_path, _MODERN_DDL, [flat, wrapped], insert_columns=_MODERN_COLUMNS)
+    by_key = {r["child_session_key"]: r for r in ctx.subagent_runs}
+    assert len(by_key) == 2
+    assert by_key["child-f1"]["model"] == "claude-opus"
+    assert by_key["child-w1"]["model"] == "claude-haiku"
+
+
+def test_a_flat_record_that_itself_targets_the_parent_is_read_as_flat(tmp_path):
+    """`completionTarget` at the TOP level is a flat record (the 2026.9.4 shape, or a
+    non-wrapped one): nothing to unwrap, and it must still parse."""
+    row = _modern_row("p2", "child-p2", 5003, dict(_PARENT_RECORD))
+    ctx = _build_home(tmp_path, _MODERN_DDL, [row], insert_columns=_MODERN_COLUMNS)
+    assert ctx.subagent_runs[0]["model"] == "claude-haiku"
+
+
+def test_a_wrapper_naming_another_target_is_left_alone_as_the_runtime_leaves_it(tmp_path):
+    """The vendor unwraps only when the inner `completionTarget` is exactly "parent"; a
+    wrapper that names anything else is not a parent-completion record, so its keys are NOT
+    hoisted (hoisting would invent data the runtime would never read)."""
+    inner = dict(_PARENT_RECORD, completionTarget="child")
+    row = _modern_row("p3", "child-p3", 5004, {"parentCompletion": inner})
+    ctx = _build_home(tmp_path, _MODERN_DDL, [row], insert_columns=_MODERN_COLUMNS)
+    run = ctx.subagent_runs[0]
+    assert run["model"] is None and run["run_timeout_seconds"] is None
+    assert run["ended_reason"] is None and run["outcome"] is None
+
+
+@pytest.mark.parametrize("wrapper", ["text", 7, None, ["a"], True])
+def test_a_non_object_parent_completion_value_is_ignored(tmp_path, wrapper):
+    row = _modern_row("p4", "child-p4", 5005, {"model": "claude-opus", "parentCompletion": wrapper})
+    ctx = _build_home(tmp_path, _MODERN_DDL, [row], insert_columns=_MODERN_COLUMNS)
+    assert ctx.subagent_runs[0]["model"] == "claude-opus"
+    assert ctx.subagent_runs_parse_error is False

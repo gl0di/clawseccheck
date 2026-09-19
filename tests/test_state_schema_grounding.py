@@ -853,14 +853,14 @@ _REGISTRY: "dict[str, _Entry]" = {
     # ---- subagent_runs (B296 / B709) ----
     "tests/test_b296_subagent_runs_disclosure.py:44": _Entry(LEGACY_COLS, _SUBAGENT_RUNS_WIDE_LEGACY),
     "tests/test_b296_subagent_runs_disclosure.py:102": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
-    "tests/test_b709_subagent_runs_shapes.py:52": _Entry(MODERN),
-    "tests/test_b709_subagent_runs_shapes.py:61": _Entry(
+    "tests/test_b709_subagent_runs_shapes.py:54": _Entry(MODERN),
+    "tests/test_b709_subagent_runs_shapes.py:63": _Entry(
         LEGACY_COLS,
         "an intermediate 13-column subagent_runs shape (task/cleanup/model/agent_dir/"
         "workspace_dir/outcome_json/ended_reason but no payload_json) -- a B-709 "
         "dual-shape reader fixture between the wide legacy table and the modern blob.",
     ),
-    "tests/test_b709_subagent_runs_shapes.py:69": _Entry(
+    "tests/test_b709_subagent_runs_shapes.py:71": _Entry(
         LEGACY_COLS,
         "a synthetic decoy shape (`foo TEXT, bar TEXT`) named subagent_runs purely to "
         "exercise the 'neither generation matches' negative path -- never meant to "
@@ -871,7 +871,7 @@ _REGISTRY: "dict[str, _Entry]" = {
     # to match; verified exactly one such site remains in each file.
     "tests/test_b709_cron_run_logs_shapes.py:248": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
     "tests/test_b709_cron_state_db_shapes.py:296": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
-    "tests/test_b709_subagent_runs_shapes.py:274": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
+    "tests/test_b709_subagent_runs_shapes.py:276": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
 
     # ---- task_runs (B709) ----
     "tests/test_b709_cron_run_logs_shapes.py:52": _Entry(LEGACY_COLS, _TASK_RUNS_NO_NOTNULL_LEGACY),

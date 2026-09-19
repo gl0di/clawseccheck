@@ -5989,6 +5989,17 @@ def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
     except ValueError:
         return {}, False
     if isinstance(parsed, dict):
+        # OpenClaw 2026.9.5 stores a run whose `completionTarget` is "parent" as
+        # `{"parentCompletion": <record>}` (`bindSubagentRunRecord`), where 2026.9.4 always
+        # wrote the flat record; the vendor's own reader unwraps it first
+        # (`subagentMetadataPayload`, and the guard in `isRecord(stored.parentCompletion) &&
+        # ...completionTarget === "parent"`). Reading the top level of a wrapped row returned
+        # None for model / timeout / outcome / ended_reason with no error and no disclosure
+        # that the shape had moved. The rule below is the vendor's, conjunct for conjunct:
+        # a wrapper naming any OTHER target is left alone, exactly as the runtime leaves it.
+        wrapped = parsed.get("parentCompletion")
+        if isinstance(wrapped, dict) and wrapped.get("completionTarget") == "parent":
+            return wrapped, True
         return parsed, True
     return {}, True
 
