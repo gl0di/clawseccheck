@@ -223,6 +223,285 @@ def test_no_precondition_no_plugin_pin():
     assert _ans(_models("anthropic/c", agentRuntime={"id": "codex"})) == hr.UNKNOWN
 
 
+# A legacy Codex provider spelling is migrated by the vendor's doctor onto the Codex harness:
+# ``LEGACY_CODEX_PROVIDER_IDS`` (``codex``, ``openai-codex``; ``modelRefUsesCodexRuntime`` answers
+# true for them, executed against the installed dist 2026.9.5) and the migration table
+# ``LEGACY_RUNTIME_MODEL_PROVIDER_ALIASES`` (``codex``, ``codex-cli``; ``modelRefUsesCodexRuntime``
+# answers false for ``codex-cli``, so THAT spelling rests on the migration table alone). At run
+# time, before any migration, ``resolveAgentHarnessPolicy`` answers ``auto`` for all of them --
+# so refusing a ``no`` here is a deliberately conservative reading, not a claim that the
+# un-migrated config already runs Codex. The battery's oracle -- the runtime collector -- never
+# sees the migration and calls them Codex-free, so it could not catch a ``no`` here.
+_LEGACY_CODEX_REFS = ["openai-codex/gpt-5.5", "codex/gpt-5.5", "Codex/gpt-5", " OpenAI-Codex/x ",
+                      "openai-codex/gpt-5.5@work", "codex-cli/gpt-5.5", " Codex-CLI/x"]
+
+
+@pytest.mark.parametrize("ref", _LEGACY_CODEX_REFS)
+def test_no_precondition_a_legacy_codex_provider_is_never_a_no(ref):
+    assert _ans(_models(ref)) == hr.UNKNOWN
+    assert _ans(_models("anthropic/c", heartbeat={"model": ref})) == hr.UNKNOWN
+    assert _ans(_models({"primary": "anthropic/c", "fallbacks": [ref]})) == hr.UNKNOWN
+    assert _ans(_models("anthropic/c", models={ref: {}})) == hr.UNKNOWN
+    assert _ans({"agents": {"defaults": {"model": "anthropic/c"},
+                            "entries": {"a": {"model": ref}}}}) == hr.UNKNOWN
+    assert _ans({**_models("anthropic/c"), "channels": {"modelByChannel": {"x": {"y": ref}}}}) \
+        == hr.UNKNOWN
+
+
+def test_a_legacy_codex_provider_control_is_still_a_no_when_the_ref_is_ordinary():
+    """Control for the test above: the same locations with an ordinary provider stay `no`,
+    so the parametrised test bites on the provider and not on the shape."""
+    assert _ans(_models("anthropic/c", heartbeat={"model": "anthropic/d"})) == hr.NO
+    assert _ans(_models({"primary": "anthropic/c", "fallbacks": ["anthropic/d"]})) == hr.NO
+    assert _ans(_models("anthropic/c", models={"anthropic/d": {}})) == hr.NO
+    assert _ans({**_models("anthropic/c"),
+                 "channels": {"modelByChannel": {"x": {"y": "anthropic/d"}}}}) == hr.NO
+    # an openai-LOOKING provider that is not one of the two legacy spellings is not migrated
+    assert _ans(_models("openai-compat/gpt-5")) == hr.NO
+
+
+def test_b353_a_legacy_codex_ref_is_not_an_inert_pass():
+    """The end-to-end shape of the reported bug: an MCP server pre-approving every tool on a
+    config whose only model is a legacy Codex spelling used to read PASS "inert"."""
+    for ref in _LEGACY_CODEX_REFS[:3]:
+        f = _b353(_cfg(_APPROVE, _models(ref)))
+        assert f.status == WARN and "does not determine" in f.detail, ref
+
+
+@pytest.mark.parametrize("picker", [["codex"], ["Codex-App-Server"], ["auto", "codex"], ["foo"]])
+def test_no_precondition_a_picker_runtime_is_not_ignored(picker):
+    """The vendor's collector counts ``models[ref].pickerRuntimes`` like a pin, so a `no`
+    over a config that offers a plugin runtime would disagree with it."""
+    entry = {"pickerRuntimes": picker}
+    assert _ans(_models("anthropic/c", models={"anthropic/c": entry})) == hr.UNKNOWN
+    assert _ans({"agents": {"defaults": {"model": "anthropic/c"},
+                            "entries": {"a": {"models": {"anthropic/c": entry}}}}}) == hr.UNKNOWN
+    assert _ans({"agents": {"defaults": {"model": "anthropic/c"},
+                            "list": [{"id": "a", "models": {"anthropic/c": entry}}]}}) == hr.UNKNOWN
+
+
+@pytest.mark.parametrize("picker", [[], ["auto"], ["default"], ["pi"], ["openclaw"], "codex",
+                                    [7, None]])
+def test_a_picker_runtime_that_names_nothing_the_vendor_would_count_stays_a_no(picker):
+    assert _ans(_models("anthropic/c", models={"anthropic/c": {"pickerRuntimes": picker}})) \
+        == hr.NO
+
+
+def _harness_build(installed, stamp=None):
+    from clawseccheck.checks import _mcp
+
+    class _Ctx:
+        installed_dist_version = installed
+        config = {"meta": {"lastTouchedVersion": stamp}} if stamp else {}
+
+    return _mcp._harness_build(_Ctx())
+
+
+def test_an_unorderable_installed_build_never_falls_through_to_the_stamp():
+    """``2026.9.6-beta.1`` is KNOWN and newer than the validated build; reading the config's
+    old stamp instead would call it the validated one and defeat the ceiling."""
+    for installed in ("2026.9.6-beta.1", "2026.9.6-rc.2", "2026.9.4-beta.1", "garbage", 5):
+        assert _harness_build(installed, stamp=VALIDATED) is None, installed
+    assert hr.codex_harness_reach(_models("anthropic/c"),
+                                  _harness_build("2026.9.6-beta.1", VALIDATED)).answer \
+        == hr.UNKNOWN
+
+
+def test_an_absent_installed_build_still_uses_an_in_window_stamp():
+    for installed in (None, ""):
+        assert _harness_build(installed, stamp=VALIDATED) == (2026, 9, 4)
+        assert _harness_build(installed, stamp="2026.9.9") is None
+        assert _harness_build(installed) is None
+    # a correction release of the validated build is orderable, stays inside the window, and
+    # the (older) stamp plays no part in it
+    assert hr.codex_harness_reach(_models("anthropic/c"),
+                                  _harness_build("2026.9.4-1", stamp="2026.7.1")).answer \
+        == hr.NO
+
+
+# Bundled plugins read their OWN config key and hand the value to an agent turn; the vendor's
+# ``collectConfiguredModelRefs`` never lists those, so neither the port's ``model_refs`` nor the
+# differential oracle sees them. ``imap``'s ``accounts.<id>.model`` (a hook agent turn),
+# ``active-memory``'s ``model`` and ``memory-core``'s dreaming models are the verified ones.
+
+def _plugins(**cfg):
+    return {**_models("anthropic/c"), "plugins": {"entries": cfg}}
+
+
+@pytest.mark.parametrize("plugin_cfg", [
+    {"imap": {"config": {"accounts": {"a": {"model": "openai/gpt-5.5"}}}}},
+    {"active-memory": {"config": {"model": "openai/gpt-5.5"}}},
+    {"active-memory": {"config": {"model": "codex/gpt-5.5"}}},
+    {"memory-core": {"config": {"dreaming": {"light": {"model": "openai-codex/x"}}}}},
+    {"x": {"config": {"defaultModel": "openai/gpt-5"}}},
+    {"x": {"config": {"summaryModel": "codex-cli/x"}}},
+    {"x": {"config": {"model": {"primary": "anthropic/c", "fallbacks": ["openai/gpt-5"]}}}},
+    {"x": {"config": {"models": ["anthropic/c", "openai/gpt-5"]}}},
+    {"x": {"config": {"channels": [{"deep": {"nest": {"embeddingModel": "openai/e"}}}]}}},
+], ids=["imap", "active-memory", "active-memory-legacy", "dreaming", "defaultModel",
+        "summaryModel-cli", "record-fallback", "list", "deep"])
+def test_no_precondition_a_plugin_model_on_a_codex_provider_is_never_a_no(plugin_cfg):
+    assert _ans(_plugins(**plugin_cfg)) == hr.UNKNOWN
+
+
+@pytest.mark.parametrize("model", ["gpt-5.5", "sonnet"])
+def test_no_precondition_a_plugin_model_with_no_provider_cannot_be_seen(model):
+    assert _ans(_plugins(x={"config": {"model": model}})) == hr.UNKNOWN
+
+
+def test_a_plugin_config_with_ordinary_or_no_models_stays_a_no():
+    """Control: the walk only bites on a model-shaped key whose provider is Codex-bound (or
+    unseeable), so ordinary plugin configs keep the definite answer."""
+    assert _ans(_plugins(x={"config": {"model": "anthropic/claude-x"}})) == hr.NO
+    # a URL, a sentence, or a NON-Codex provider name is not a Codex route
+    assert _ans(_plugins(x={"config": {"provider": "anthropic", "url": "https://api.openai.com/v1",
+                                       "note": "route via openai for tts"}})) == hr.NO
+    assert _ans(_plugins(x={"config": {"models": ["anthropic/c", "google/g"]}})) == hr.NO
+    assert _ans(_plugins()) == hr.NO
+    assert _ans({**_models("anthropic/c"), "plugins": {"allow": ["x"]}}) == hr.NO
+
+
+# Round 2: a key-name rule alone is not sound. A reference can sit under ANY key, in any
+# shape, and only the shapes with a known meaning may be waved through.
+
+@pytest.mark.parametrize("plugin_cfg", [
+    {"x": {"config": {"modelRef": "openai/gpt-5.5"}}},
+    {"x": {"config": {"llm": "openai/gpt-5.5", "engine": "codex/x"}}},
+    {"x": {"config": {"modelFallback": "openai/gpt-5.5"}}},
+    {"x": {"config": {"nested": [["openai/gpt-5.5"]]}}},
+    {"x": {"config": {"models": {"openai/gpt-5.5": {}}}}},
+    {"x": {"config": {"picks": {"openai/gpt-5.5": {"weight": 1}}}}},
+    {"x": {"config": {"model": {"provider": "openai", "id": "gpt-5.5"}}}},
+    {"x": {"config": {"model": {"ref": "openai/gpt-5.5"}}}},
+    {"x": {"config": {"models": [{"provider": "openai", "id": "gpt-5.5"}]}}},
+    {"x": {"config": {"models": [["openai/gpt-5.5"]]}}},
+    {"x": {"config": {"model": {"primary": "anthropic/c", "extra": "anthropic/d"}}}},
+    {"x": {"config": {"model": {"primary": 5}}}},
+    {"x": {"config": {"model": {"fallbacks": "anthropic/c"}}}},
+], ids=["modelRef", "llm-engine", "modelFallback", "nested-list", "map-keyed-by-ref",
+        "map-key-other-name", "provider-id-record", "ref-record", "list-of-records",
+        "list-of-lists", "record-extra-key", "non-str-primary", "fallbacks-not-a-list"])
+def test_no_precondition_a_plugin_reference_in_a_shape_we_do_not_read_is_unknown(plugin_cfg):
+    assert _ans(_plugins(**plugin_cfg)) == hr.UNKNOWN
+
+
+def test_no_precondition_a_codex_provider_string_anywhere_outside_plugins_is_unknown():
+    """Rule A is not scoped to ``plugins``: a provider-qualified Codex string under ANY key, or
+    as a map key, refuses ``no`` (e.g. a channel's model, which the vendor collector skips)."""
+    base = _models("anthropic/c")
+    for extra in ({"channels": {"clickclack": {"model": "openai/gpt-5.5"}}},
+                  {"reef": {"guard": {"pinnedModel": "codex/x"}}},
+                  {"channels": {"x": {"accounts": {"a": {"anything": "openai-codex/x"}}}}},
+                  {"skills": {"picks": {"codex-cli/x": True}}}):
+        assert _ans({**base, **extra}) == hr.UNKNOWN, extra
+
+
+@pytest.mark.parametrize("value", [None, True, 5, 5.5, "", "  ", ["anthropic/c"],
+                                   {"primary": "anthropic/c", "fallbacks": ["google/g"]}])
+def test_a_plugin_model_value_with_a_known_codex_free_meaning_stays_a_no(value):
+    assert _ans(_plugins(x={"config": {"model": value}})) == hr.NO
+
+
+# Round 3: an open-ended plugin key space. A plugin can pair a bare provider with a model id
+# taken from elsewhere (``llm-task``'s ``defaultProvider`` + the agent primary's model name is
+# routed by the vendor to Codex when the provider is openai), and any key mentioning "model" can
+# carry an id.
+
+@pytest.mark.parametrize("plugin_cfg", [
+    {"llm-task": {"config": {"defaultProvider": "openai"}}},
+    {"x": {"config": {"provider": " OpenAI "}}},
+    {"x": {"config": {"providers": ["anthropic", "codex"]}}},
+    {"x": {"config": {"llm": {"provider": "openai", "id": "gpt-5"}}}},
+    {"x": {"config": {"engine": {"provider": "openai-codex"}}}},
+    {"x": {"config": {"modelId": "gpt-5.5"}}},
+    {"x": {"config": {"model_id": "gpt-5.5"}}},
+    {"x": {"config": {"modelName": "gpt-5.5"}}},
+    {"x": {"config": {"modelOverride": "gpt-5.5"}}},
+    {"x": {"config": {"DefaultModel": "gpt-5.5"}}},
+    {"llm-task": {"config": {"defaultModel": "gpt-5.5"}}},
+], ids=["defaultProvider", "provider-mixed-case", "provider-in-list", "provider-id-record",
+        "legacy-provider-record", "modelId", "model_id", "modelName", "modelOverride",
+        "DefaultModel-case", "llm-task-defaultModel"])
+def test_no_precondition_a_plugin_that_can_pair_a_codex_provider_with_a_model_is_unknown(
+        plugin_cfg):
+    assert _ans(_plugins(**plugin_cfg)) == hr.UNKNOWN
+
+
+def test_a_plugin_provider_that_is_not_codex_bound_stays_a_no():
+    assert _ans(_plugins(x={"config": {"defaultProvider": "anthropic", "modelId": "anthropic/c"}})) \
+        == hr.NO
+    assert _ans(_plugins(x={"config": {"provider": "google", "modelTimeoutMs": 5000}})) == hr.NO
+
+
+@pytest.mark.parametrize("cfg", [
+    _models("${MODEL_PROVIDER}/gpt-5.5"),
+    _models({"primary": "anthropic/c", "fallbacks": ["${P}/gpt-5.5"]}),
+    _models("anthropic/c", heartbeat={"model": "${P}/gpt-5.5"}),
+    {**_models("anthropic/c"), "hooks": {"mappings": [{"model": "${P}/gpt-5.5"}]}},
+    _plugins(x={"config": {"model": "${P}/gpt-5.5"}}),
+], ids=["primary", "fallback", "heartbeat", "hook", "plugin"])
+def test_no_precondition_an_environment_substitution_in_the_provider_is_unknown(cfg):
+    """``resolveConfigEnvVars`` substitutes ``${VAR}`` into ANY config string, so
+    ``${P}/gpt-5.5`` is ``openai/gpt-5.5`` when ``P=openai``. The provider half is unknowable."""
+    got = hr.codex_harness_reach(cfg, _V, environ={})
+    assert got.answer == hr.UNKNOWN
+    assert "environment substitution" in got.reasons[0]
+
+
+def test_an_environment_substitution_that_is_not_a_provider_stays_a_no():
+    """Control: ``${VAR}`` is everywhere in real configs (tokens, paths); only the provider half
+    of a MODEL reference matters."""
+    cfg = {**_models("anthropic/c"), "gateway": {"auth": {"token": "${OPENCLAW_TOKEN}"}},
+           "skills": {"load": {"extraDirs": ["${HOME}/skills"]}}}
+    assert _ans(cfg) == hr.NO
+    assert _ans(_models("anthropic/${MODEL}")) == hr.NO
+
+
+@pytest.mark.parametrize("value,fragment", [
+    ({"primary": "anthropic/c", "fallbacks": "anthropic/d"}, "has a shape this determination does not read"),
+    ({"fallbacks": {"a": 1}}, "has a shape this determination does not read"),
+    ([True, "anthropic/x"], "has a shape this determination does not read"),
+    ([None], "has a shape this determination does not read"),
+    ({"primary": ["anthropic/c"]}, "has a shape this determination does not read"),
+])
+def test_an_unrecognised_plugin_model_shape_says_why_it_is_unknown(value, fragment):
+    """Pins each shape branch by its REASON, not just the answer: the catch-all at the bottom of
+    ``codex_harness_reach`` would otherwise turn a deleted branch into the same `unknown`."""
+    got = hr.codex_harness_reach(_plugins(x={"config": {"model": value}}), _V, environ={})
+    assert got.answer == hr.UNKNOWN
+    assert fragment in got.reasons[0], got.reasons
+
+
+def test_a_plugin_config_too_large_to_enumerate_is_unknown_not_partial():
+    big = {f"k{i}": {"n": i} for i in range(hr._WALK_MAX_NODES)}
+    got = hr.codex_harness_reach(_plugins(x={"config": big}), _V, environ={})
+    assert got.answer == hr.UNKNOWN and "too large" in got.reasons[0]
+
+
+def test_a_plugin_config_nested_past_the_depth_bound_is_unknown_not_partial():
+    node = {"model": "anthropic/c"}
+    for _ in range(hr._WALK_MAX_DEPTH + 2):
+        node = {"deeper": node}
+    got = hr.codex_harness_reach(_plugins(x={"config": node}), _V, environ={})
+    assert got.answer == hr.UNKNOWN and "too deep" in got.reasons[0]
+
+
+def test_a_bare_plugin_model_id_says_why_it_is_unknown():
+    """Pins the branch by its REASON: the catch-all at the bottom of ``codex_harness_reach``
+    would otherwise turn a deleted branch into the same `unknown` and hide it."""
+    got = hr.codex_harness_reach(_plugins(x={"config": {"model": "gpt-5.5"}}), _V, environ={})
+    assert got.answer == hr.UNKNOWN
+    assert "not a provider/model reference" in got.reasons[0]
+
+
+def test_b353_a_plugin_hook_model_is_not_an_inert_pass():
+    """End to end: an approve-all MCP server on a config whose ONLY Codex route is a plugin's
+    hook-turn model used to read PASS "inert"."""
+    cfg = _cfg(_APPROVE, _plugins(imap={"config": {"accounts": {"a": {"model": "openai/gpt-5.5"}}}}))
+    f = _b353(cfg)
+    assert f.status == WARN and "does not determine" in f.detail
+
+
 def test_no_precondition_a_known_build_inside_the_validated_window():
     assert hr.codex_harness_reach(_models("anthropic/c"), None).answer == hr.UNKNOWN
     assert hr.codex_harness_reach(_models("anthropic/c"), (2026, 9, 3)).answer == hr.UNKNOWN
