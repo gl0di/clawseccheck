@@ -60,6 +60,21 @@ Regenerate ONLY for such a deliberate, announced change, from the repo root:
 That re-derives every line from the real, current ``audit()`` output using the exact
 same helpers this file's tests assert against -- generator and guard can never drift
 apart because they are the same code.
+
+``--write`` ALSO PINS FIXTURE MODES FIRST (B-842), NOT JUST UNDER PYTEST. Six of the ids
+this manifest pins (B1, B11, B19, B20, B85, B188) read a fixture path's real filesystem
+permission bits, and every OTHER audit of this corpus (pytest, via ``conftest.py``'s
+autouse ``_deterministic_fixture_perms`` fixture) pins those bits to a fixed 0600/0700
+before fingerprinting -- but this file's ``__main__`` block runs OUTSIDE pytest, so
+without doing the same thing itself it fingerprinted whatever mode the checkout happened
+to produce. A fresh ``git worktree`` checks out fixture files at 0644 and directories at
+0755 (git records no permission bit but owner-execute), so a ``--write`` run there wrote a
+manifest that a subsequent ``pytest`` run then rejected -- 608 of 757 rows, across exactly
+those six ids -- even though nothing about the fixtures' CONTENT had changed. ``--write``
+therefore calls ``tests/_fixtureperms.pin_fixture_modes()`` -- the same function
+``conftest.py``'s fixture calls -- before generating a single line, from ANY starting mode
+state (a fresh checkout or an already-pinned tree); see
+``test_write_pins_fixture_modes_from_any_starting_state`` below.
 """
 from __future__ import annotations
 
@@ -210,6 +225,19 @@ def _load_manifest() -> dict[str, str]:
 
 
 def _write_manifest() -> None:
+    """Regenerate the manifest from a live ``audit()`` pass over ``CORPUS``.
+
+    B-842: pins fixture modes FIRST, exactly as ``conftest.py``'s autouse
+    ``_deterministic_fixture_perms`` fixture does for every pytest run -- by calling that
+    same shared function, not by re-deriving the chmod loop here. Six ids (B1, B11, B19,
+    B20, B85, B188) fingerprint a fixture path's real permission bits, so without this a
+    ``--write`` run outside pytest (this function's only caller) would fingerprint
+    whatever mode the checkout happened to produce instead of the pinned mode pytest
+    itself audits under -- silently writing a manifest the very next pytest run rejects.
+    """
+    from _fixtureperms import pin_fixture_modes
+
+    pin_fixture_modes()
     lines = [_manifest_line(h) for h in CORPUS]
     MANIFEST.write_text(_HEADER + "\n".join(lines) + "\n", encoding="utf-8")
 
@@ -544,6 +572,85 @@ def test_no_finding_detail_leaks_a_machine_specific_path():
         "Finding.detail quotes an absolute path outside the repo, so its fingerprint "
         f"is specific to one machine's filesystem layout: {sorted(leaked.items())[:5]}"
     )
+
+
+# ---------------------------------------------------------------------------------------
+# B-842: --write must pin fixture modes itself, from ANY starting mode state, so a fresh
+# `git worktree` checkout (files 0644, dirs 0755 -- git records no permission bit but
+# owner-execute) cannot make a hand-run regeneration disagree with what pytest's own
+# autouse `_deterministic_fixture_perms` fixture (`tests/_fixtureperms.pin_fixture_modes`)
+# pins for every OTHER run of this same guard.
+# ---------------------------------------------------------------------------------------
+
+# Confirmed by direct measurement to carry a live, mode-sensitive B1 and B11 finding --
+# i.e. a home where getting the pin wrong actually changes the fingerprint. The test below
+# re-proves this itself (rather than trusting the comment) so it cannot go vacuous if the
+# corpus changes underneath it.
+_MODE_SENSITIVE_HOME = FIXTURES / "b334_nearmiss_documented_helper"
+
+
+def _set_fresh_checkout_like_modes(home: Path) -> None:
+    """Chmod every real path under *home* to what a fresh `git worktree add` actually
+    produces: 0644 files, 0755 dirs (git tracks no permission bit but owner-execute)."""
+    for p in (home, *home.rglob("*")):
+        if p.is_symlink():
+            continue
+        p.chmod(0o755 if p.is_dir() else 0o644)
+
+
+def test_write_pins_fixture_modes_from_any_starting_state(monkeypatch):
+    """The regression this file exists to prevent (B-842). Reproduces a fresh worktree's
+    checkout modes on a fixture confirmed mode-sensitive, then requires `--write`'s own
+    code path (`_write_manifest`, via the shared `_fixtureperms.pin_fixture_modes`) to
+    land on the exact value the committed, pytest-accepted manifest holds for it --
+    whether it started from that unpinned checkout state or from an already-pinned tree.
+
+    Without the fix (`_write_manifest` not calling `pin_fixture_modes`), the first loop
+    iteration below fails: fingerprinting the checkout-like (0644/0755) state produces a
+    manifest entry that disagrees with `committed`, exactly as it did in the real B-842
+    incident (608 of 757 rows, across B1/B11/B19/B20/B85/B188).
+    """
+    from _fixtureperms import pin_fixture_modes
+
+    home = _MODE_SENSITIVE_HOME
+    rel = str(home.relative_to(FIXTURES))
+    committed = _load_manifest()[rel]
+
+    real_paths = [p for p in (home, *home.rglob("*")) if not p.is_symlink()]
+    saved_modes = {p: p.stat().st_mode & 0o777 for p in real_paths}
+
+    tmp_manifest = MANIFEST.parent / "_b842_scratch_manifest.txt"
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST", tmp_manifest)
+    monkeypatch.setattr(sys.modules[__name__], "CORPUS", [home])
+
+    try:
+        _set_fresh_checkout_like_modes(home)
+
+        # Guard the guard: this home must actually BE mode-sensitive, or the loop below
+        # would pass regardless of whether the fix exists.
+        raw_unpinned = _encode_pairs(_fingerprint_pairs(home))
+        assert raw_unpinned != committed, (
+            f"{rel} no longer differs between checkout-like and pinned modes -- pick a "
+            "new fixture with a live B1/B11/B19/B20/B85/B188 finding so this regression "
+            "test is not vacuous"
+        )
+
+        for label, prime in (
+            ("a fresh checkout (0644 files / 0755 dirs)", lambda: None),  # already set
+            ("an already-pinned tree (0600 files / 0700 dirs)", pin_fixture_modes),
+        ):
+            prime()
+            _write_manifest()
+            written = _load_manifest()[rel]
+            assert written == committed, (
+                f"--write starting from {label} produced a manifest entry for {rel} "
+                f"that pytest would reject: got {written!r}, want {committed!r}"
+            )
+    finally:
+        tmp_manifest.unlink(missing_ok=True)
+        for p, mode in saved_modes.items():
+            p.chmod(mode)
+        pin_fixture_modes()  # restore the corpus-wide invariant for every later test
 
 
 if __name__ == "__main__":  # pragma: no cover
