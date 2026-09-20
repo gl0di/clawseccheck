@@ -5726,7 +5726,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                 "config_machine_state['plugins.installedIndex'] in "
-                f"{db_path} exceeded the {_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — "
+                f"'{db_path}' exceeded the {_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — "
                 "content was NOT scanned (no partial parse was attempted)",
             )
             ctx.plugin_trust_found = True
@@ -5781,7 +5781,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                     "plugin trust/index data comes from a persisted CACHE -- "
-                    f"config_machine_state['plugins.installedIndex'] in {db_path}, "
+                    f"config_machine_state['plugins.installedIndex'] in '{db_path}', "
                     "written at the runtime's last refresh -- this collector reads "
                     "that row and cannot certify it still matches what the gateway "
                     "currently has loaded",
@@ -5820,7 +5820,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     note_limit(
                         ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                         "config_machine_state['plugins.installedIndex'] in "
-                        f"{db_path} has {len(installs)} install record(s) — only the "
+                        f"'{db_path}' has {len(installs)} install record(s) — only the "
                         f"first {_MAX_PLUGIN_TRUST_RECORDS} were scanned",
                     )
 
@@ -5833,7 +5833,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     note_limit(
                         ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                         "config_machine_state['plugins.installedIndex'] in "
-                        f"{db_path} has {len(plugins_list)} plugin record(s) — only "
+                        f"'{db_path}' has {len(plugins_list)} plugin record(s) — only "
                         f"the first {_MAX_PLUGIN_INDEX_RECORDS} were scanned",
                     )
 
@@ -5846,7 +5846,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     note_limit(
                         ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
                         "config_machine_state['plugins.installedIndex'] in "
-                        f"{db_path} lists {len(plugins_list)} plugin(s) but carries "
+                        f"'{db_path}' lists {len(plugins_list)} plugin(s) but carries "
                         f"install records for only {len(installs)} — the ClawHub "
                         "trust verdict is only defined over those; the rest have no "
                         "verdict on record",
@@ -5865,7 +5865,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         if len(raw) > _MAX_PLUGIN_TRUST_BYTES:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
-                f"installed_plugin_index.install_records_json in {db_path} exceeded the "
+                f"installed_plugin_index.install_records_json in '{db_path}' exceeded the "
                 f"{_MAX_PLUGIN_TRUST_BYTES // 1_000_000}MB cap — content beyond the cap was "
                 "NOT scanned",
             )
@@ -5892,7 +5892,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             if len(installs) > _MAX_PLUGIN_TRUST_RECORDS:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
-                    f"installed_plugin_index in {db_path} has {len(installs)} install "
+                    f"installed_plugin_index in '{db_path}' has {len(installs)} install "
                     f"record(s) — only the first {_MAX_PLUGIN_TRUST_RECORDS} were scanned",
                 )
 
@@ -5902,7 +5902,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
         if len(raw2) > _MAX_PLUGIN_INDEX_BYTES:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
-                f"installed_plugin_index.plugins_json in {db_path} exceeded the "
+                f"installed_plugin_index.plugins_json in '{db_path}' exceeded the "
                 f"{_MAX_PLUGIN_INDEX_BYTES // 1_000_000}MB cap — content beyond the cap "
                 "was NOT scanned",
             )
@@ -5929,7 +5929,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             if len(plugins) > _MAX_PLUGIN_INDEX_RECORDS:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
-                    f"installed_plugin_index.plugins_json in {db_path} has "
+                    f"installed_plugin_index.plugins_json in '{db_path}' has "
                     f"{len(plugins)} plugin record(s) — only the first "
                     f"{_MAX_PLUGIN_INDEX_RECORDS} were scanned",
                 )
