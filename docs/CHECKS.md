@@ -505,6 +505,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - config: `browser.extraArgs` - remove --remote-allow-origins; keep browser.cdpUrl and every profile cdpUrl on loopback
 
+### B383 - browser.extensionRelay.allowLegacyAuth accepts legacy relay auth by default
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Browser / SSRF
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: browser.extensionRelay.allowLegacyAuth accepts legacy relay auth by default
+- Remediation:
+  - config: `browser.extensionRelay.allowLegacyAuth` = `false` - only after every paired Chrome extension and external CDP client speaks Browser Relay Authentication v2
+
 ### B321 - browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs
 
 - Severity: HIGH
@@ -1314,6 +1326,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: LLM06 Excessive Agency
 - What it checks: Node command deny-list entries that are silently ineffective
+- Remediation:
+  - none
+
+### B386 - gateway.nodes.allowSkills defaults to accepting paired-node skill publishing
+
+- Severity: MEDIUM
+- Block: hardening
+- Framework: Least Privilege / Node Skills
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM06 Excessive Agency
+- What it checks: gateway.nodes.allowSkills defaults to accepting paired-node skill publishing
 - Remediation:
   - none
 
@@ -2145,6 +2169,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+### B385 - desktop.host.passwordFile (VNC credential) readable by others
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Secrets Vault
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: desktop.host.passwordFile (VNC credential) readable by others
+- Remediation:
+  - none
+
 ### B183 - Audited config file differs from the one OpenClaw resolves
 
 - Severity: MEDIUM
@@ -2358,6 +2394,18 @@ Advisory checks are recorded for coverage but are not scored.
 - Confidence: HIGH
 - OWASP: none
 - What it checks: Effective-bind verification (declared gateway.bind vs. the actual listening socket)
+- Remediation:
+  - none
+
+### B384 - Gateway-host desktop (VNC/RFB) listener exposure (loopback-only design vs. actual)
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Zero Trust / Gateway
+- Scored: yes
+- Confidence: HIGH
+- OWASP: none
+- What it checks: Gateway-host desktop (VNC/RFB) listener exposure (loopback-only design vs. actual)
 - Remediation:
   - none
 
