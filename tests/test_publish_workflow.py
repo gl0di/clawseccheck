@@ -1495,7 +1495,11 @@ echo "$*" >> "$STUB/argv.log"
 case "$1 $2" in
   "release view")
     [ -f "$STUB/exists" ] || exit 1
-    case " $* " in *" --json "*) cat "$STUB/assets" ;; esac
+    case " $* " in
+      *" --json isDraft "*)
+        if [ -f "$STUB/draft" ]; then echo true; else echo false; fi ;;
+      *" --json "*) cat "$STUB/assets" ;;
+    esac
     exit 0 ;;
   "release create")
     [ -z "${GH_FAIL_CREATE:-}" ] || exit 1
@@ -1510,12 +1514,16 @@ case "$1 $2" in
       for a in "$@"; do case "$a" in SHA256SUMS*) echo "$a" >> "$STUB/assets" ;; esac; done
     fi
     exit 0 ;;
+  "release edit")
+    [ -z "${GH_FAIL_EDIT:-}" ] || exit 1
+    rm -f "$STUB/draft"
+    exit 0 ;;
 esac
 exit 99
 """
 
 
-def _run_create_step(tmp_path, existing=None, **flags):
+def _run_create_step(tmp_path, existing=None, draft=False, **flags):
     """Run the real Create GitHub Release shell against a stateful stub gh."""
     stub = tmp_path / "stub"
     stub.mkdir()
@@ -1529,6 +1537,8 @@ def _run_create_step(tmp_path, existing=None, **flags):
     if existing is not None:
         (stub / "exists").write_text("", encoding="utf-8")
         (stub / "assets").write_text("".join(f"{a}\n" for a in existing), encoding="utf-8")
+    if draft:
+        (stub / "draft").write_text("", encoding="utf-8")
     work = tmp_path / "work"
     work.mkdir()
     (work / "CHANGELOG.md").write_text("## [9.9.9]\n- something\n", encoding="utf-8")
@@ -1581,6 +1591,38 @@ def test_create_release_step_fails_loudly_and_asserts_both_assets(
     assert "--clobber" not in log, ctx
     if not ok:
         assert "::error::" in proc.stdout, ctx
+
+
+
+# ---------------------------------------------------------------------------------
+# CLAWSECCHECK-B-837: `gh release create` with assets is several API calls under the
+# hood (create as a draft, upload the assets, then publish). If the publish call
+# fails after the upload, the release is left as a DRAFT that already carries both
+# asset names — the retry's "already carries both assets" short-circuit, and the
+# final name-only assertion, both used to treat that as success. These prove the
+# step now also reads isDraft and either publishes the lingering draft or fails.
+# ---------------------------------------------------------------------------------
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_fails_on_a_lingering_draft_it_cannot_publish(tmp_path) -> None:
+    """Both assets already present but the release is still a draft, and the recovery
+    `gh release edit --draft=false` call also fails: the job must turn red, not
+    report success on asset-names-alone."""
+    proc, log = _run_create_step(tmp_path, existing=_BOTH, draft=True, GH_FAIL_EDIT=1)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode != 0, ctx
+    assert "::error::" in proc.stdout, ctx
+    assert "release edit" in log, ctx
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_publishes_a_lingering_draft_when_it_can(tmp_path) -> None:
+    """Same starting state, but `gh release edit --draft=false` succeeds: the step
+    recovers the draft and the job passes."""
+    proc, log = _run_create_step(tmp_path, existing=_BOTH, draft=True)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode == 0, ctx
+    assert "release edit" in log, ctx
+    assert "isDraft=false" in proc.stdout, ctx
 
 
 def test_create_release_step_never_swallows_errors_or_clobbers() -> None:
