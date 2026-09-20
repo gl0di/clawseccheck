@@ -65,6 +65,7 @@ from ._shared import (
     _enabled_tools,
     EXPOSED_BINDS,
     _external_input_channels,
+    _file_readable_by_others,
     _finding,
     _gateway_remote_exposure_reason,
     _hint,
@@ -5160,6 +5161,398 @@ def check_effective_bind(ctx: Context) -> Finding:
         "See B2/B70 for the auth/exposure posture of this bind.",
         evidence=evidence,
         scored=False,
+    )
+
+
+# B384/B385 (F-197): desktop.host is a SECOND network listener beside the gateway -- a
+# VNC/RFB service (default port 5900) that desktop.host.enabled opts into, plus an
+# absolute path to a VNC password file. Grounded against the installed OpenClaw 2026.9.5
+# dist (zod-schema-DN2u5FdA.mjs, src/config/zod-schema.desktop.ts + host-source-
+# v64nW4u1.mjs, src/gateway/desktop/{host-source,managed-linux}.ts). Before this, nothing
+# read `desktop.{enabled,port,managed,passwordFile}` at all (re-verified 2026-09-16: grep
+# -rn "desktop" clawseccheck/checks/*.py clawseccheck/*.py finds only unrelated prose in
+# pdf.py/logscan.py).
+#
+# RE-GROUNDING CORRECTION vs. the task's own framing: the tracker entry assumed a
+# `desktop.host` HOST-RESTRICTION field analogous to `gateway.bind`, so a config could
+# "declare" a non-loopback bind. The real schema has no such field -- OpenClaw's own
+# managed desktop is unconditionally launched `-localhost yes` (buildTigerVncArgv,
+# host-source-v64nW4u1.mjs), and OpenClaw's own probe of the desktop connects only to
+# `127.0.0.1:port` (inspectHostDesktop, same file). There is nothing here for an operator
+# to widen. The real gap is corroborative, same spirit as B340: does reality match that
+# always-loopback assumption? Two ways it would not: (1) a bug/version skew in the
+# vendor's own `-localhost yes` enforcement for a MANAGED desktop -- checkable, because
+# the managed child process has one grounded, fixed name, `Xtigervnc`
+# (spawnRun("Xtigervnc", ...), same file); (2) an UNMANAGED desktop.host, which connects
+# to "an already-running VNC server" the operator set up entirely outside OpenClaw --
+# nothing in OpenClaw enforces loopback for that at all, so an operator who left it
+# reachable is a real, live gap this closes.
+#
+# B384 FAILs only when BOTH hold: (a) desktop.host.managed is true, AND (b) a
+# non-loopback listener on the resolved port is POSITIVELY confirmed (the same
+# /proc/*/fd inode -> kernel-resolved-exe correlation B340 uses, see
+# _classify_desktop_listener_identity) to run the exact binary OpenClaw's managed-desktop
+# supervisor spawns -- an exact /proc/<pid>/exe basename match, never a substring/comm
+# guess (comm is attacker-settable and truncates at 15 chars). Everything else --
+# unmanaged, unconfirmed, or both -- WARNs instead (scored=False).
+#
+# C-135 FALSE-POSITIVE FOUND AND FIXED (2026-09-20): the first cut FAILed on identity
+# match alone, without checking `managed`. `Xtigervnc` is not an OpenClaw-exclusive
+# binary name -- it is the literal binary Debian/Ubuntu's `tigervnc-standalone-server`
+# package installs at /usr/bin/Xtigervnc, and what `vncserver`/`tigervncserver` spawn --
+# i.e. the natural choice for exactly the UNMANAGED use case bullet (2) above describes
+# (operator's own, pre-existing, intentionally-non-loopback VNC server for LAN access,
+# gated by VNC password auth). A config with `managed` false/absent and a real
+# `/usr/bin/Xtigervnc` listener bound non-loopback -- benign and disclosed by name in
+# bullet (2) -- reproducibly FAILed and told the operator to "disable
+# desktop.host.managed" even though it was never true. Binary-name identity proves the
+# process runs TigerVNC; it does NOT prove OpenClaw is the one supervising it, so FAIL
+# additionally requires the config's own `managed` flag. The same port-number-alone
+# match that C-135 caught as a false-FAIL risk for B340 (Docker's userland proxy sharing
+# 8080) applies here just as much, and there is no reliable positive-identity signal for
+# an arbitrary THIRD-PARTY VNC server (Golden Rule #4 forbids inventing one) -- so the
+# unmanaged-but-confirmed-vnc shape WARNs, disclosing the ambiguity by name, rather than
+# FAILing on a guess. This is a deliberate, disclosed accepted-uncertainty trade for the
+# C-135 reviewer, not a guess dressed up as a FAIL.
+#
+# B385 is the simpler, unambiguous sibling: desktop.host.passwordFile is the SOLE
+# credential TigerVNC's `-SecurityTypes VncAuth -PasswordFile` uses (buildTigerVncArgv);
+# its DES-based obfuscation is not a real secret boundary once the file itself is
+# readable, so this is an ordinary at-rest-credential-file permission check, same idiom
+# as B182/B193 (`_file_readable_by_others`, which never counts a user-private group as an
+# exposure, per B-127). The file's CONTENT is never read (only its existence and mode
+# bits, per §8).
+_DESKTOP_DEFAULT_VNC_PORT = 5900  # grounded: DEFAULT_HOST_DESKTOP_PORT, host-source-v64nW4u1.mjs
+
+
+def _classify_desktop_listener_identity(identity: "object | None") -> str:
+    """Classify a resolved ``sockets.ProcessIdentity`` (or ``None``) for B384.
+
+    "vnc"        -- the KERNEL-RESOLVED /proc/<pid>/exe basename is exactly "Xtigervnc",
+                    the literal binary name OpenClaw's managed-desktop supervisor spawns
+                    (buildTigerVncArgv, host-source-v64nW4u1.mjs) -- positively OpenClaw's
+                    own managed VNC child.
+    "other"      -- exe resolved to a different binary: a positively-identified process
+                    that is NOT OpenClaw's managed desktop (an unrelated program, or a
+                    third-party VNC server the operator runs unmanaged).
+    "unresolved" -- identity is None, or exe could not be read (permission denied reading
+                    another UID's /proc/<pid>/exe is the common, expected case). Never
+                    trusts `name`/`comm` alone: comm is attacker-settable and truncates at
+                    15 chars -- same doctrine as `_classify_listener_identity` above.
+    """
+    if identity is None or not getattr(identity, "exe", ""):
+        return "unresolved"
+    if Path(identity.exe).name == "Xtigervnc":
+        return "vnc"
+    return "other"
+
+
+def check_desktop_host_exposure(ctx: Context) -> Finding:
+    """B384 (F-197): corroborate desktop.host's always-loopback design assumption
+    against the actual listening socket on its resolved port. See the module comment
+    above for the full grounding and severity rationale.
+
+    PASS    -- desktop.host is absent, not enabled, or enabled and every listener found
+               on the resolved port is loopback-only (matches the vendor's own design).
+    WARN    -- enabled, and a non-loopback listener was found on the resolved port, but
+               either it could not be positively tied to the Xtigervnc binary, or it
+               was, but desktop.host.managed is not true so OpenClaw cannot be
+               positively identified as the one supervising it (an operator's own,
+               separately-run TigerVNC server matches the same binary name).
+               scored=False (an unproven guess in the FAIL direction, Golden Rule #5).
+    FAIL    -- enabled, desktop.host.managed is true, AND a non-loopback listener on the
+               resolved port is POSITIVELY confirmed to run the Xtigervnc binary --
+               the vendor's own `-localhost yes` enforcement did not hold for OpenClaw's
+               own managed desktop.
+    UNKNOWN -- no config, malformed desktop.host, an invalid desktop.host.port, the
+               socket scan was not run / unavailable, or nothing is listening on the
+               resolved port yet (Labs feature enabled but the gateway not restarted).
+    """
+    cfg = ctx.config
+    if not cfg:
+        return _finding(
+            "B384",
+            UNKNOWN,
+            "No config loaded — cannot assess desktop.host's network exposure.",
+            "Run on the host with ~/.openclaw present.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    desktop = dig(cfg, "desktop.host")
+    if desktop is None:
+        return _finding(
+            "B384",
+            PASS,
+            "desktop.host is not configured — the experimental gateway-host desktop "
+            "source (a second, VNC/RFB network listener beside the gateway) is off by "
+            "default and absent here.",
+            "No action needed unless you intend to use the Desktop lab feature.",
+        )
+    if not isinstance(desktop, dict):
+        return _finding(
+            "B384",
+            UNKNOWN,
+            "desktop.host is present but malformed (not an object) — cannot assess its "
+            "network exposure.",
+            "Fix `desktop.host` to be a config object, or remove the key.",
+        )
+    if desktop.get("enabled") is not True:
+        return _finding(
+            "B384",
+            PASS,
+            "desktop.host.enabled is not true — the gateway-host VNC/RFB desktop source "
+            "is off.",
+            "No action needed unless you intend to use the Desktop lab feature.",
+        )
+
+    port_raw = desktop.get("port")
+    if port_raw is None:
+        port = _DESKTOP_DEFAULT_VNC_PORT
+        used_default_port = True
+    elif (
+        isinstance(port_raw, int)
+        and not isinstance(port_raw, bool)
+        and 1 <= port_raw <= 65535
+    ):
+        port = port_raw
+        used_default_port = False
+    else:
+        return _finding(
+            "B384",
+            UNKNOWN,
+            f"desktop.host.port={port_raw!r} is not a valid TCP port (1-65535) — cannot "
+            "look up which listening socket to corroborate.",
+            "Set desktop.host.port to a valid port (1-65535), or remove it to use "
+            f"OpenClaw's own default ({_DESKTOP_DEFAULT_VNC_PORT}).",
+        )
+
+    sockets_result = getattr(ctx, "sockets", None)
+    if sockets_result is None:
+        return _finding(
+            "B384",
+            UNKNOWN,
+            "The listening-socket scan was not run (audit(include_sockets=True), or the "
+            "CLI's --no-sockets was passed) — cannot corroborate desktop.host against "
+            "reality.",
+            "Run the full CLI audit (omit --no-sockets) so this check can read "
+            "/proc/net/tcp{,6} and corroborate desktop.host's exposure.",
+        )
+    if not sockets_result.available:
+        return _finding(
+            "B384",
+            UNKNOWN,
+            f"Could not read the host's listening-socket table: {sockets_result.reason}.",
+            "Run ClawSecCheck on Linux with /proc mounted (the standard case) so this "
+            "check can corroborate desktop.host's exposure against reality.",
+        )
+
+    port_source = (
+        f"OpenClaw's own default VNC port {port}"
+        if used_default_port
+        else f"the configured desktop.host.port {port}"
+    )
+    matches = _sockets.listeners_for_port(sockets_result, port)
+    managed = desktop.get("managed") is True
+    if not matches:
+        return _finding(
+            "B384",
+            UNKNOWN,
+            f"desktop.host.enabled is true, but nothing is listening on port {port} "
+            f"({port_source}) yet — the Labs feature needs a gateway restart after "
+            "being enabled, or the desktop has not started.",
+            "Restart the gateway and re-run the audit so this check can corroborate the "
+            "listener.",
+        )
+
+    classes = {_sockets.classify_host(m.host) for m in matches}
+    evidence = [
+        f"desktop.host.enabled=true, managed={managed!r}, resolved port {port} "
+        f"({port_source})",
+        "effective listener(s): "
+        + ", ".join(f"{m.host}:{m.port} ({_sockets.classify_host(m.host)})" for m in matches),
+    ]
+    if classes <= {"loopback"}:
+        return _finding(
+            "B384",
+            PASS,
+            f"desktop.host is enabled and the actual listener on port {port} is "
+            "loopback-only, matching OpenClaw's own design (a managed desktop is always "
+            "launched with `-localhost yes`; an unmanaged one is expected to be a "
+            "loopback-only VNC server too).",
+            "Keep it loopback-only.",
+            evidence=evidence,
+        )
+
+    non_loopback = [m for m in matches if _sockets.classify_host(m.host) != "loopback"]
+    proc_root = getattr(ctx, "proc_root", None) or "/proc"
+    inode_index = _sockets.build_inode_index(proc_root=proc_root)
+    identities = [
+        _sockets.identify_listener_process(
+            getattr(m, "inode", ""), proc_root=proc_root, index=inode_index
+        )
+        for m in non_loopback
+    ]
+    confirmed_vnc = [
+        m
+        for m, ident in zip(non_loopback, identities)
+        if _classify_desktop_listener_identity(ident) == "vnc"
+    ]
+    # FAIL requires BOTH: the binary is positively Xtigervnc, AND the config itself says
+    # OpenClaw is supervising it (managed=True). Binary identity alone is not enough —
+    # Xtigervnc is the stock Debian/Ubuntu tigervnc-standalone-server binary, so an
+    # operator's own unmanaged VNC server matches it too (C-135, see module comment).
+    if confirmed_vnc and managed:
+        return _finding(
+            "B384",
+            FAIL,
+            f"desktop.host.enabled is true, desktop.host.managed is true, and the "
+            f"VNC/RFB desktop listener on port {port} — confirmed as running the "
+            "Xtigervnc binary OpenClaw's managed-desktop supervisor spawns — is "
+            "ACTUALLY reachable on a non-loopback address. This is a second network "
+            "listener beside the gateway, gated only by VNC password auth "
+            "(desktop.host.passwordFile, see B385), not OpenClaw's own channel auth.",
+            "Find why the managed desktop is not loopback-only (an env override or a "
+            "TigerVNC config outside OpenClaw's control is the usual cause) and restart "
+            "the gateway once fixed.",
+            evidence=evidence
+            + [
+                f"{m.host}:{m.port} confirmed via pid {ident.pid} (exe={ident.exe})"
+                for m, ident in zip(non_loopback, identities)
+                if _classify_desktop_listener_identity(ident) == "vnc"
+            ],
+            scored=True,
+        )
+
+    reasons = []
+    for m, ident in zip(non_loopback, identities):
+        classification = _classify_desktop_listener_identity(ident)
+        if classification == "unresolved":
+            reasons.append(f"{m.host}:{m.port} — process identity unresolvable")
+        elif classification == "vnc":
+            # confirmed_vnc is non-empty here only when `managed` is not True (the
+            # managed+confirmed combination returned FAIL above already).
+            reasons.append(
+                f"{m.host}:{m.port} held by pid {ident.pid} (exe={ident.exe}) — runs "
+                "the exact binary OpenClaw's managed desktop spawns, but "
+                "desktop.host.managed is not true, so this is just as consistent with "
+                "an operator-run TigerVNC server entirely outside OpenClaw's control"
+            )
+        else:
+            reasons.append(
+                f"{m.host}:{m.port} held by pid {ident.pid} (exe={ident.exe}) — not "
+                "identifiable as OpenClaw's managed desktop"
+            )
+    return _finding(
+        "B384",
+        WARN,
+        f"desktop.host.enabled is true, and a non-loopback listener was found on port "
+        f"{port} ({port_source}), but it could not be positively tied to OpenClaw's "
+        "own managed desktop process: " + "; ".join(reasons) + ". This could be the "
+        "VNC server desktop.host relies on (managed or an existing one) actually "
+        "reachable from the network rather than loopback-only, or an unrelated process "
+        "coincidentally sharing the port — not distinguishable from a config file and a "
+        "/proc read alone.",
+        f"Confirm what is listening on port {port} (e.g. `ss -tlnp` as root, or `lsof "
+        f"-i :{port}`). If desktop.host.managed is not set, the VNC server is entirely "
+        "external to OpenClaw and nothing here enforces loopback for it — bind it to "
+        "127.0.0.1 explicitly.",
+        evidence=evidence + reasons,
+        scored=False,
+    )
+
+
+def check_desktop_host_password_file(ctx: Context) -> Finding:
+    """B385 (F-197): desktop.host.passwordFile's at-rest permissions. See the module
+    comment above `_DESKTOP_DEFAULT_VNC_PORT` for the full grounding.
+
+    FAIL    -- the file exists and is readable by another local account
+               (`_file_readable_by_others` -- world-readable, or group-readable with a
+               group known to have members beyond the owner; a user-private group is not
+               flagged, per B-127).
+    PASS    -- the file exists and only its owner can read it, or passwordFile is not
+               set at all (nothing to check).
+    UNKNOWN -- passwordFile is set but the file does not exist / could not be stat'ed, or
+               the platform is non-POSIX (NTFS ACLs -- never a false PASS).
+
+    Never reads the file's CONTENT (still a VNC-obfuscated password, §8-sensitive) --
+    only whether it exists and its mode bits.
+    """
+    cfg = ctx.config
+    if not cfg:
+        return _finding(
+            "B385",
+            UNKNOWN,
+            "No config loaded — cannot assess desktop.host.passwordFile.",
+            "Run on the host with ~/.openclaw present.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    desktop = dig(cfg, "desktop.host")
+    if desktop is None:
+        return _finding(
+            "B385",
+            PASS,
+            "desktop.host is not configured, so there is no VNC passwordFile to assess.",
+            "No action needed unless you enable the Desktop lab feature.",
+        )
+    if not isinstance(desktop, dict):
+        return _finding(
+            "B385",
+            UNKNOWN,
+            "desktop.host is present but malformed (not an object) — cannot assess its "
+            "passwordFile.",
+            "Fix `desktop.host` to be a config object, or remove the key.",
+        )
+    raw_path = desktop.get("passwordFile")
+    if not (isinstance(raw_path, str) and raw_path.strip()):
+        return _finding(
+            "B385",
+            PASS,
+            "desktop.host.passwordFile is not set — no VNC password file to assess.",
+            "No action needed.",
+        )
+    if not _is_posix():
+        return _finding(
+            "B385",
+            UNKNOWN,
+            "On Windows, file security uses NTFS ACLs, not POSIX mode bits — "
+            "desktop.host.passwordFile's at-rest permissions are UNKNOWN, never a false "
+            "PASS.",
+            f"Check the ACLs yourself: `icacls {raw_path}` should not grant read to "
+            "Users / Everyone / Authenticated Users.",
+        )
+    pw_path = Path(raw_path)
+    try:
+        exists = pw_path.is_file()
+    except OSError:
+        exists = False
+    if not exists:
+        return _finding(
+            "B385",
+            UNKNOWN,
+            f"desktop.host.passwordFile is set to {raw_path!r}, but no readable file "
+            "exists there — cannot assess its permissions.",
+            "If this install does use the Desktop lab feature, ensure the password "
+            "file is readable by the audit so a future run can check its permissions.",
+        )
+    why = _file_readable_by_others(pw_path)
+    if why:
+        return _finding(
+            "B385",
+            FAIL,
+            f"desktop.host.passwordFile ({raw_path}) is {why}. This is the sole "
+            "credential gating the gateway-host VNC/RFB desktop listener (TigerVNC "
+            "VncAuth's DES-based obfuscation is not a real secret boundary once the "
+            "file itself can be read) — anyone who can read it can unlock remote "
+            "control of the desktop.",
+            f"Run `chmod 600 {raw_path}`. If you cannot rule out that it was already "
+            "read, regenerate it (your VNC server's password tool, e.g. "
+            "`tigervncpasswd -f`) so a copy taken while it was readable stops working.",
+            evidence=[f"{raw_path} is {why}"],
+        )
+    return _finding(
+        "B385",
+        PASS,
+        f"desktop.host.passwordFile ({raw_path}) exists and only its owner can read it.",
+        "No action needed.",
     )
 
 

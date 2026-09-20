@@ -352,6 +352,8 @@ from ._config import (
     check_config_externally_managed,
     check_retired_config_keys_invalid,
     check_dangerous_overrides,
+    check_desktop_host_exposure,
+    check_desktop_host_password_file,
     check_effective_bind,
     check_gateway,
     check_gateway_operator_terminal,
@@ -1477,6 +1479,14 @@ CHECKS = [
     check_session_approval_policy,
     check_gateway_rate_limit,
     check_effective_bind,  # B340 — corroborate declared gateway.bind against the actual listening socket (F-156)
+    # B384/B385 (F-197): desktop.host is a second network listener beside the gateway
+    # (a VNC/RFB service, default port 5900) plus its passwordFile credential — both
+    # completely unread before this. B384 corroborates the always-loopback design
+    # assumption against the actual listening socket (sockets.py, same spirit as
+    # B340); B385 checks the password file's at-rest permissions (same idiom as
+    # B182/B193).
+    check_desktop_host_exposure,
+    check_desktop_host_password_file,
     # B350 — the gateway operator terminal: a PTY-backed shell carrying the gateway
     # process environment, served to Control UI and mobile clients. WARN-only.
     check_gateway_operator_terminal,
