@@ -144,9 +144,12 @@ def test_non_loopback_listener_without_attribution_is_warn_not_fail():
     assert r.scored is False
 
 
-def test_non_loopback_listener_confirmed_xtigervnc_is_fail(tmp_path):
+def test_non_loopback_listener_confirmed_xtigervnc_and_managed_is_fail(tmp_path):
+    # The real attack: OpenClaw is supposed to be supervising this desktop
+    # (managed=True) and its own `-localhost yes` enforcement did not hold.
     _make_pid(tmp_path, "42", {3: "socket:[9]"}, exe="/usr/bin/Xtigervnc")
-    ctx = _ctx(_ENABLED, _scan(ListenSocket("0.0.0.0", 5900, "inet", inode="9")))
+    cfg = {"desktop": {"host": {"enabled": True, "managed": True}}}
+    ctx = _ctx(cfg, _scan(ListenSocket("0.0.0.0", 5900, "inet", inode="9")))
     ctx.proc_root = str(tmp_path)
     r = check_desktop_host_exposure(ctx)
     assert r.status == FAIL
@@ -157,7 +160,60 @@ def test_non_loopback_listener_confirmed_xtigervnc_is_fail(tmp_path):
 def test_non_loopback_listener_confirmed_other_process_is_warn_not_fail(tmp_path):
     # A different, positively-resolved binary sharing the port -- never a guessed FAIL.
     _make_pid(tmp_path, "42", {3: "socket:[9]"}, exe="/usr/bin/some-other-daemon")
+    cfg = {"desktop": {"host": {"enabled": True, "managed": True}}}
+    ctx = _ctx(cfg, _scan(ListenSocket("0.0.0.0", 5900, "inet", inode="9")))
+    ctx.proc_root = str(tmp_path)
+    r = check_desktop_host_exposure(ctx)
+    assert r.status == WARN
+    assert r.status != FAIL
+    assert r.scored is False
+
+
+# ---------------------------------------------------------------------------
+# C-135 false positive (found + fixed): confirmed Xtigervnc binary is NOT
+# sufficient on its own -- desktop.host.managed must also be true. Xtigervnc is
+# the stock Debian/Ubuntu tigervnc-standalone-server binary, so an operator's own,
+# separately-run, unmanaged VNC server matches the exact same identity check.
+# ---------------------------------------------------------------------------
+
+
+def test_non_loopback_confirmed_xtigervnc_but_unmanaged_absent_is_warn_not_fail(tmp_path):
+    # Reviewer's exact offending input: managed absent entirely (falls back to falsy).
+    _make_pid(tmp_path, "42", {3: "socket:[9]"}, exe="/usr/bin/Xtigervnc")
     ctx = _ctx(_ENABLED, _scan(ListenSocket("0.0.0.0", 5900, "inet", inode="9")))
+    ctx.proc_root = str(tmp_path)
+    r = check_desktop_host_exposure(ctx)
+    assert r.status == WARN
+    assert r.status != FAIL
+    assert r.scored is False
+    assert "managed" in r.detail
+
+
+def test_non_loopback_confirmed_xtigervnc_but_managed_explicitly_false_is_warn(tmp_path):
+    # Near-neighbour of the reviewer's input: managed explicitly False, not just absent.
+    _make_pid(tmp_path, "42", {3: "socket:[9]"}, exe="/usr/bin/Xtigervnc")
+    cfg = {
+        "desktop": {
+            "host": {
+                "enabled": True,
+                "managed": False,
+                "passwordFile": "/home/user/.vnc/passwd",
+            }
+        }
+    }
+    ctx = _ctx(cfg, _scan(ListenSocket("0.0.0.0", 5900, "inet", inode="9")))
+    ctx.proc_root = str(tmp_path)
+    r = check_desktop_host_exposure(ctx)
+    assert r.status == WARN
+    assert r.status != FAIL
+    assert r.scored is False
+
+
+def test_non_loopback_confirmed_xtigervnc_unmanaged_nondefault_port_is_warn(tmp_path):
+    # Near-neighbour: same shape, non-default port, still no false FAIL.
+    _make_pid(tmp_path, "42", {3: "socket:[9]"}, exe="/usr/bin/Xtigervnc")
+    cfg = {"desktop": {"host": {"enabled": True, "managed": False, "port": 5901}}}
+    ctx = _ctx(cfg, _scan(ListenSocket("0.0.0.0", 5901, "inet", inode="9")))
     ctx.proc_root = str(tmp_path)
     r = check_desktop_host_exposure(ctx)
     assert r.status == WARN

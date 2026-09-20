@@ -5104,17 +5104,32 @@ def check_effective_bind(ctx: Context) -> Finding:
 # nothing in OpenClaw enforces loopback for that at all, so an operator who left it
 # reachable is a real, live gap this closes.
 #
-# B384 FAILs only when a non-loopback listener on the resolved port is POSITIVELY
-# confirmed (the same /proc/*/fd inode -> kernel-resolved-exe correlation B340 uses, see
-# _classify_desktop_listener_identity) to be OpenClaw's own managed Xtigervnc process --
-# an exact /proc/<pid>/exe basename match, never a substring/comm guess (comm is
-# attacker-settable and truncates at 15 chars). An unmanaged/unconfirmed non-loopback
-# listener WARNs instead (scored=False): the same port-number-alone match that C-135
-# caught as a false-FAIL risk for B340 (Docker's userland proxy sharing 8080) applies
-# here just as much, and there is no reliable positive-identity signal for an arbitrary
-# THIRD-PARTY VNC server (Golden Rule #4 forbids inventing one). This is a deliberate,
-# disclosed accepted-uncertainty trade for the C-135 reviewer, not a guess dressed up as
-# a FAIL.
+# B384 FAILs only when BOTH hold: (a) desktop.host.managed is true, AND (b) a
+# non-loopback listener on the resolved port is POSITIVELY confirmed (the same
+# /proc/*/fd inode -> kernel-resolved-exe correlation B340 uses, see
+# _classify_desktop_listener_identity) to run the exact binary OpenClaw's managed-desktop
+# supervisor spawns -- an exact /proc/<pid>/exe basename match, never a substring/comm
+# guess (comm is attacker-settable and truncates at 15 chars). Everything else --
+# unmanaged, unconfirmed, or both -- WARNs instead (scored=False).
+#
+# C-135 FALSE-POSITIVE FOUND AND FIXED (2026-09-20): the first cut FAILed on identity
+# match alone, without checking `managed`. `Xtigervnc` is not an OpenClaw-exclusive
+# binary name -- it is the literal binary Debian/Ubuntu's `tigervnc-standalone-server`
+# package installs at /usr/bin/Xtigervnc, and what `vncserver`/`tigervncserver` spawn --
+# i.e. the natural choice for exactly the UNMANAGED use case bullet (2) above describes
+# (operator's own, pre-existing, intentionally-non-loopback VNC server for LAN access,
+# gated by VNC password auth). A config with `managed` false/absent and a real
+# `/usr/bin/Xtigervnc` listener bound non-loopback -- benign and disclosed by name in
+# bullet (2) -- reproducibly FAILed and told the operator to "disable
+# desktop.host.managed" even though it was never true. Binary-name identity proves the
+# process runs TigerVNC; it does NOT prove OpenClaw is the one supervising it, so FAIL
+# additionally requires the config's own `managed` flag. The same port-number-alone
+# match that C-135 caught as a false-FAIL risk for B340 (Docker's userland proxy sharing
+# 8080) applies here just as much, and there is no reliable positive-identity signal for
+# an arbitrary THIRD-PARTY VNC server (Golden Rule #4 forbids inventing one) -- so the
+# unmanaged-but-confirmed-vnc shape WARNs, disclosing the ambiguity by name, rather than
+# FAILing on a guess. This is a deliberate, disclosed accepted-uncertainty trade for the
+# C-135 reviewer, not a guess dressed up as a FAIL.
 #
 # B385 is the simpler, unambiguous sibling: desktop.host.passwordFile is the SOLE
 # credential TigerVNC's `-SecurityTypes VncAuth -PasswordFile` uses (buildTigerVncArgv);
@@ -5156,11 +5171,15 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
     PASS    -- desktop.host is absent, not enabled, or enabled and every listener found
                on the resolved port is loopback-only (matches the vendor's own design).
     WARN    -- enabled, and a non-loopback listener was found on the resolved port, but
-               it could not be positively tied to OpenClaw's managed Xtigervnc process.
+               either it could not be positively tied to the Xtigervnc binary, or it
+               was, but desktop.host.managed is not true so OpenClaw cannot be
+               positively identified as the one supervising it (an operator's own,
+               separately-run TigerVNC server matches the same binary name).
                scored=False (an unproven guess in the FAIL direction, Golden Rule #5).
-    FAIL    -- enabled, and a non-loopback listener on the resolved port is POSITIVELY
-               confirmed to be OpenClaw's own managed Xtigervnc process -- the vendor's
-               own `-localhost yes` enforcement did not hold.
+    FAIL    -- enabled, desktop.host.managed is true, AND a non-loopback listener on the
+               resolved port is POSITIVELY confirmed to run the Xtigervnc binary --
+               the vendor's own `-localhost yes` enforcement did not hold for OpenClaw's
+               own managed desktop.
     UNKNOWN -- no config, malformed desktop.host, an invalid desktop.host.port, the
                socket scan was not run / unavailable, or nothing is listening on the
                resolved port yet (Labs feature enabled but the gateway not restarted).
@@ -5293,18 +5312,23 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         for m, ident in zip(non_loopback, identities)
         if _classify_desktop_listener_identity(ident) == "vnc"
     ]
-    if confirmed_vnc:
+    # FAIL requires BOTH: the binary is positively Xtigervnc, AND the config itself says
+    # OpenClaw is supervising it (managed=True). Binary identity alone is not enough —
+    # Xtigervnc is the stock Debian/Ubuntu tigervnc-standalone-server binary, so an
+    # operator's own unmanaged VNC server matches it too (C-135, see module comment).
+    if confirmed_vnc and managed:
         return _finding(
             "B384",
             FAIL,
-            f"desktop.host.enabled is true, and the VNC/RFB desktop listener on port "
-            f"{port} — confirmed as OpenClaw's own managed Xtigervnc process — is "
+            f"desktop.host.enabled is true, desktop.host.managed is true, and the "
+            f"VNC/RFB desktop listener on port {port} — confirmed as running the "
+            "Xtigervnc binary OpenClaw's managed-desktop supervisor spawns — is "
             "ACTUALLY reachable on a non-loopback address. This is a second network "
             "listener beside the gateway, gated only by VNC password auth "
             "(desktop.host.passwordFile, see B385), not OpenClaw's own channel auth.",
             "Find why the managed desktop is not loopback-only (an env override or a "
             "TigerVNC config outside OpenClaw's control is the usual cause) and restart "
-            "the gateway once fixed, or disable desktop.host.managed.",
+            "the gateway once fixed.",
             evidence=evidence
             + [
                 f"{m.host}:{m.port} confirmed via pid {ident.pid} (exe={ident.exe})"
@@ -5316,8 +5340,18 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
 
     reasons = []
     for m, ident in zip(non_loopback, identities):
-        if ident is None or not getattr(ident, "exe", ""):
+        classification = _classify_desktop_listener_identity(ident)
+        if classification == "unresolved":
             reasons.append(f"{m.host}:{m.port} — process identity unresolvable")
+        elif classification == "vnc":
+            # confirmed_vnc is non-empty here only when `managed` is not True (the
+            # managed+confirmed combination returned FAIL above already).
+            reasons.append(
+                f"{m.host}:{m.port} held by pid {ident.pid} (exe={ident.exe}) — runs "
+                "the exact binary OpenClaw's managed desktop spawns, but "
+                "desktop.host.managed is not true, so this is just as consistent with "
+                "an operator-run TigerVNC server entirely outside OpenClaw's control"
+            )
         else:
             reasons.append(
                 f"{m.host}:{m.port} held by pid {ident.pid} (exe={ident.exe}) — not "
@@ -5328,9 +5362,9 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         WARN,
         f"desktop.host.enabled is true, and a non-loopback listener was found on port "
         f"{port} ({port_source}), but it could not be positively tied to OpenClaw's "
-        "managed desktop process: " + "; ".join(reasons) + ". This could be the VNC "
-        "server desktop.host relies on (managed or an existing one) actually reachable "
-        "from the network rather than loopback-only, or an unrelated process "
+        "own managed desktop process: " + "; ".join(reasons) + ". This could be the "
+        "VNC server desktop.host relies on (managed or an existing one) actually "
+        "reachable from the network rather than loopback-only, or an unrelated process "
         "coincidentally sharing the port — not distinguishable from a config file and a "
         "/proc read alone.",
         f"Confirm what is listening on port {port} (e.g. `ss -tlnp` as root, or `lsof "
