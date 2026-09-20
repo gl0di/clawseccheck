@@ -431,3 +431,32 @@ def package_digest(
     ).hexdigest()
 
     return combined, per_file
+
+
+_FINGERPRINT_LEN = 12
+
+
+def build_fingerprint(pkg_dir: Path | None = None) -> str:
+    """Return a short (12 hex char) build-identity fingerprint for status surfaces.
+
+    B-869: ``__version__``/``__released__`` are strings a human edits by hand and can
+    forget to bump, so a local dev checkout and the release it was branched from can
+    print an identical version while the files underneath differ — exactly what let a
+    stale dev install pass as the release in a real incident (the menu banner and the
+    report header both quoted the release string back with no way to tell the two
+    builds apart). This is a prefix of :func:`package_digest`'s ``combined`` SHA-256,
+    computed from the files actually on disk every call, so it moves the moment the
+    content does, with no separate embedding/bump step to forget or fall out of sync.
+
+    Deliberately NOT ``--verify-self``'s job: that command's ``package_digest(notes=[])``
+    call is a security comparison against a trusted release digest, with a full
+    per-file breakdown and note-by-note disclosure of symlinks/unreadable/vanished
+    paths. This is a cheap, always-on "did the content change" signal for a one-line
+    status surface, not a verification tool — it carries no verdict, so it passes
+    ``notes=[]`` through and silently accepts whatever ``package_digest`` computed over
+    the readable tree rather than raising or disclosing: a menu banner or report header
+    is not the place to surface a fresh unreadable-file diagnosis that ``--verify-self``
+    already owns.
+    """
+    combined, _ = package_digest(pkg_dir, notes=[])
+    return combined[:_FINGERPRINT_LEN]
