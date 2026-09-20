@@ -17,8 +17,10 @@ stub on several points:
   reasoning (this module) for why agentRuntime.id's value vocabulary is not safely
   characterizable from config alone.
 
-- B370's real path is agents.{defaults,entries.<id>}.models.<ref>.agentRuntime.id, NOT
-  the stub's cited models.providers.*.agentRuntime.id.
+- B370's real paths are agents.{defaults,entries.<id>}.models.<ref>.agentRuntime.id AND
+  (B-832, re-grounded against openclaw@2026.9.5) models.providers.<p>.agentRuntime.id /
+  models.providers.<p>.models[].agentRuntime.id — an earlier pass wrongly declared the
+  provider-level pair absent from the schema.
 
 - memory.qmd.mcporter.* (the stub's fifth item) is dropped entirely: memory.qmd is
   RETIRED (confirmed during C-412's grounding — the QMD memory backend was removed).
@@ -327,6 +329,73 @@ class TestAgentRuntimeIdInventory:
     def test_unreadable_config_is_unknown(self, tmp_path):
         f = check_agent_runtime_id_inventory(_ctx({}, tmp_path, parse_error=True))
         assert f.status == UNKNOWN
+
+    # B-832: models.providers.<p>.agentRuntime.id and
+    # models.providers.<p>.models[].agentRuntime.id are real, current fields
+    # (openclaw@2026.9.5, ModelProviderSchema / ModelDefinitionSchema) that an earlier
+    # grounding pass wrongly declared absent — B370 was blind to them.
+    def test_provider_level_runtime_id_warns(self, tmp_path):
+        cfg = {
+            "models": {"providers": {"myprov": {
+                "baseUrl": "https://example.invalid",
+                "agentRuntime": {"id": "codex"},
+                "models": [],
+            }}}
+        }
+        f = check_agent_runtime_id_inventory(_ctx(cfg, tmp_path))
+        assert f.status == WARN
+        assert "models.providers.myprov.agentRuntime.id" in _blob(f)
+        assert "codex" in _blob(f)
+
+    def test_provider_model_definition_runtime_id_warns(self, tmp_path):
+        cfg = {
+            "models": {"providers": {"myprov": {
+                "baseUrl": "https://example.invalid",
+                "models": [
+                    {"id": "m1", "name": "M1"},
+                    {"id": "m2", "name": "M2", "agentRuntime": {"id": "claude-cli"}},
+                ],
+            }}}
+        }
+        f = check_agent_runtime_id_inventory(_ctx(cfg, tmp_path))
+        assert f.status == WARN
+        assert "models.providers.myprov.models[1].agentRuntime.id" in _blob(f)
+        assert "claude-cli" in _blob(f)
+
+    def test_provider_empty_agent_runtime_id_not_flagged(self, tmp_path):
+        cfg = {
+            "models": {"providers": {"myprov": {
+                "baseUrl": "https://example.invalid",
+                "agentRuntime": {"id": ""},
+                "models": [{"id": "m1", "name": "M1", "agentRuntime": {"id": ""}}],
+            }}}
+        }
+        f = check_agent_runtime_id_inventory(_ctx(cfg, tmp_path))
+        assert f.status == PASS
+
+    def test_provider_not_a_dict_not_flagged(self, tmp_path):
+        cfg = {"models": {"providers": {"myprov": "not-an-object"}}}
+        f = check_agent_runtime_id_inventory(_ctx(cfg, tmp_path))
+        assert f.status == PASS
+
+    def test_provider_models_not_a_list_not_flagged(self, tmp_path):
+        cfg = {"models": {"providers": {"myprov": {
+            "baseUrl": "https://example.invalid",
+            "models": "not-a-list",
+        }}}}
+        f = check_agent_runtime_id_inventory(_ctx(cfg, tmp_path))
+        assert f.status == PASS
+
+    # The deprecated whole-agent spelling is neither a declared field of
+    # AgentDefaultsSchema nor AgentEntryBaseSchema (both `.strict()`) on the installed
+    # dist, so it can never survive config validation to reach this check — confirmed via
+    # OpenClawSchema.safeParse() rejecting it with `unrecognized_keys`. This check does
+    # not scan for it, and setting it would make the WHOLE config unreadable (UNKNOWN),
+    # never a value this check silently misses.
+    def test_deprecated_whole_agent_spelling_not_scanned(self, tmp_path):
+        cfg = {"agents": {"defaults": {"agentRuntime": {"id": "codex"}}}}
+        f = check_agent_runtime_id_inventory(_ctx(cfg, tmp_path))
+        assert f.status == PASS
 
     def test_never_scored(self):
         assert BY_ID["B370"].scored is False

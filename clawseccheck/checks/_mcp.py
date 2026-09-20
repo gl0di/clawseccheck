@@ -5036,16 +5036,47 @@ def check_agent_runtime_id_inventory(ctx: Context) -> Finding:
     """B370 (C-413) — agentRuntime.id decides which external process runs a model's
     turns.
 
-    Grounded against the INSTALLED dist (openclaw@2026.9.3), correcting the filed
-    task's cited path (``models.providers.*.agentRuntime.id`` — not a real path on this
-    build): ``agentRuntime.id`` (``AgentRuntimePolicySchema``, ``{id: string().optional()}``
-    .strict().optional(), zod-schema.agent-runtime-BigQghiZ.mjs:569-576) is a field of
-    ``AgentModelRuntimeEntrySchema``, itself the value type of ``AgentModelMapSchema`` —
-    which is used as ``models`` at exactly TWO config locations: ``AgentDefaultsSchema``
-    (global — reachable at ``agents.defaults.models.<modelRef>.agentRuntime.id``) and
-    ``AgentEntrySchema`` (per-agent — ``agents.entries.<id>.models.<modelRef>
-    .agentRuntime.id`` / legacy ``agents.list[].models.<modelRef>.agentRuntime.id``, both
-    read via the shared ``agent_roster()``, B-699).
+    Grounded against the INSTALLED dist (openclaw@2026.9.5). ``agentRuntime.id``
+    (``{id: string().optional()}.strict().optional()``,
+    zod-schema.agent-runtime-DQfiImgc.mjs:28 / zod-schema.core-CZ0zDyHR.mjs:528) is a
+    field of BOTH ``AgentModelRuntimeEntrySchema`` (the value type of
+    ``AgentModelMapSchema``, i.e. a per-model-ref entry) and ``ModelProviderSchema`` /
+    ``ModelDefinitionSchema`` (the provider-level and per-model-definition entries under
+    ``models.providers``) — FOUR real config locations in total, not two:
+
+    * ``agents.defaults.models.<modelRef>.agentRuntime.id`` (global default)
+    * ``agents.entries.<id>.models.<modelRef>.agentRuntime.id`` / legacy
+      ``agents.list[].models.<modelRef>.agentRuntime.id`` (per-agent, both read via the
+      shared ``agent_roster()``, B-699)
+    * ``models.providers.<p>.agentRuntime.id`` (provider-level default)
+    * ``models.providers.<p>.models[].agentRuntime.id`` (per-model-definition, array
+      element keyed by its own ``id`` field, not a map key)
+
+    B-832 corrects this docstring and B370's catalog comment: an earlier grounding pass
+    (against openclaw@2026.9.3-2026.9.4) declared the last two provider-level paths NOT
+    real. They are — confirmed both by reading ``ModelProviderSchema``/
+    ``ModelDefinitionSchema`` (zod-schema.core-CZ0zDyHR.mjs:594,643) and, independently,
+    by ``OpenClawSchema.safeParse()`` on the installed dist accepting both shapes. B-708's
+    ``harnessruntime.py`` already reads exactly these two provider-level paths (its
+    ``_analyse``/``_pin``, C-413's differential oracle counts them as runtime pins) —
+    this check was the one left blind, not the vendor schema.
+
+    Deliberately NOT scanned: the deprecated WHOLE-AGENT spelling
+    (``agents.defaults.agentRuntime.id`` / ``agents.entries.<id>.agentRuntime.id``, still
+    read defensively by the vendor's ``resolveAgentScopedRuntimeOverride`` at run time).
+    Confirmed via ``OpenClawSchema.safeParse()``: neither ``AgentDefaultsSchema`` nor
+    ``AgentEntryBaseSchema`` declares an ``agentRuntime`` field at that level — both are
+    ``.strict()``, so a config authoring that key is REJECTED WHOLESALE at load time
+    (``unrecognized_keys``), the same as any other malformed config, and never reaches
+    this check as a parsed value to disclose. The vendor's own harness-runtime collector
+    (``collectConfiguredAgentHarnessRuntimes``) agrees — it never reads this spelling
+    either. The per-model-entry spelling (the four paths above) is therefore the only
+    spelling that can ever survive config validation, and this check does not grow a
+    second reader of harnessruntime.py's differentially-validated (but private,
+    normalizing, default-filtering) pin list for it — B370 answers a different question
+    (flat disclosure of every raw configured value) than harnessruntime.py's yes/no/
+    unknown Codex-harness determination, matching this module's own B369 precedent of a
+    dedicated, simple reader rather than reusing that leaf's internals.
 
     This module's own B331 grounding note (above, dated 2026-07-25 against
     openclaw@2026.7.1-2) describes ``agentRuntime.id`` as reachable from "5 different
@@ -5060,7 +5091,7 @@ def check_agent_runtime_id_inventory(ctx: Context) -> Finding:
     found — matching B364's precedent — is what stays inside what this check actually
     knows.
 
-    WARN  — at least one agentRuntime.id is a non-empty string, at either scope.
+    WARN  — at least one agentRuntime.id is a non-empty string, at any of the four scopes.
     PASS  — none found.
     UNKNOWN — unread config.
     """
@@ -5095,10 +5126,35 @@ def check_agent_runtime_id_inventory(ctx: Context) -> Finding:
             if isinstance(runtime_id, str) and runtime_id.strip():
                 found.append(f"{label}.models.{model_ref}.agentRuntime.id={runtime_id!r}")
 
+    def _scan_providers(providers) -> None:
+        if not isinstance(providers, dict):
+            return
+        for provider_id, provider in providers.items():
+            if not isinstance(provider, dict):
+                continue
+            runtime_id = dig(provider, "agentRuntime.id")
+            if isinstance(runtime_id, str) and runtime_id.strip():
+                found.append(
+                    f"models.providers.{provider_id}.agentRuntime.id={runtime_id!r}"
+                )
+            provider_models = provider.get("models")
+            if not isinstance(provider_models, list):
+                continue
+            for i, model_def in enumerate(provider_models):
+                if not isinstance(model_def, dict):
+                    continue
+                runtime_id = dig(model_def, "agentRuntime.id")
+                if isinstance(runtime_id, str) and runtime_id.strip():
+                    found.append(
+                        f"models.providers.{provider_id}.models[{i}]"
+                        f".agentRuntime.id={runtime_id!r}"
+                    )
+
     _scan(dig(cfg, "agents.defaults.models"), "agents.defaults")
     for agent in agent_roster(cfg):
         name = agent.entry.get("name") or agent.id or agent.index
         _scan(dig(agent.entry, "models"), agent.labelled(name))
+    _scan_providers(dig(cfg, "models.providers"))
 
     if not found:
         return _finding(
