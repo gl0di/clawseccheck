@@ -196,6 +196,7 @@ from ._egress import (
     check_browser_executable_path,
     check_browser_existing_session_profile,
     check_browser_cdp_control_port,
+    check_browser_extension_relay_legacy_auth,
     _cdp_url_classify,
     _cdp_url_display,
     _cdp_allow_origins_findings,
@@ -1550,6 +1551,7 @@ CHECKS = [
     check_browser_executable_path,  # B321 — browser.executablePath / profiles.*.executablePath / mcpCommand / mcpArgs (E-060 item 4, B-653)
     check_browser_existing_session_profile,  # B322 — browser.profiles.*.userDataDir / cdpUrl / driver:"existing-session" (E-060 item 5)
     check_browser_cdp_control_port,  # B330 — unauthenticated CDP control port: off-host cdpUrl / --remote-allow-origins (C-298)
+    check_browser_extension_relay_legacy_auth,  # B383 — browser.extensionRelay.allowLegacyAuth accepts legacy relay auth by default (F-195)
     check_marketplace_feed_provenance,  # B325 — marketplaces.feeds non-canonical registry (E-060 item 8)
     check_exec_safe_bin_trusted_dirs,  # B328 — tools.exec.safeBinTrustedDirs writable-dir promotion (E-060 item 11)
     # B191 (F-134, DISK-1) is DELIBERATELY NOT REGISTERED HERE. It is cataloged in

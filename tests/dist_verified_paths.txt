@@ -35,6 +35,7 @@ agents.defaults.subagents.maxConcurrent
 agents.defaults.subagents.maxSpawnDepth
 agents.defaults.workspace
 auth.profiles
+browser.extensionRelay.allowLegacyAuth
 browser.ssrfPolicy.dangerouslyAllowPrivateNetwork
 channels
 channels.defaults.contextVisibility
