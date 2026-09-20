@@ -528,12 +528,15 @@ CATALOG: list[CheckMeta] = [
     # as safe/risky, only discloses it. acp.backend/fallbacks/runtime.installCommand
     # (openclaw@2026.9.4, zod-schema-Q1KXOooO.mjs:1390-1403) are real, current,
     # top-level fields — a richer surface than the filed task's stub named.
-    # agentRuntime.id's real path is
-    # agents.{defaults,entries.<id>}.models.<ref>.agentRuntime.id
-    # (openclaw@2026.9.4, zod-schema.agent-runtime-Ca6cjqf9.mjs:28-32), NOT the stub's cited
-    # models.providers.*.agentRuntime.id — B331's own pre-existing grounding note
-    # (above) already declined to characterize this field's value vocabulary as
-    # safe/risky for the same reasons B370 inherits.
+    # agentRuntime.id's real paths (B-832, re-grounded against openclaw@2026.9.5) are
+    # agents.{defaults,entries.<id>}.models.<ref>.agentRuntime.id AND
+    # models.providers.<p>.{agentRuntime.id, models[].agentRuntime.id}
+    # (zod-schema.agent-runtime-DQfiImgc.mjs:28, zod-schema.core-CZ0zDyHR.mjs:528,594,643)
+    # — an earlier pass (openclaw@2026.9.3-2026.9.4) wrongly declared the provider-level
+    # pair NOT real; B370 was blind to them even though B-708's harnessruntime.py already
+    # reads both. B331's own pre-existing grounding note (above) already declined to
+    # characterize this field's value vocabulary as safe/risky for the same reasons B370
+    # inherits.
     CheckMeta(
         "B369",
         "acp.backend routes agent turn execution to a plugin backend",
