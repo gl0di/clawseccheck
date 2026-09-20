@@ -9,7 +9,7 @@ updates:
     schedule:
       interval: "weekly"
     labels:
-      - "ci"
+      - "dependencies"
     commit-message:
       prefix: "ci"
     # Bundle all GitHub Actions bumps into a single weekly PR instead of one

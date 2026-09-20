@@ -18,7 +18,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="214 security checks · 26 attack-chain detectors · 24,869 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.9.4 verified" width="900">
+    <img src="docs/assets/stats-light.svg" alt="215 security checks · 26 attack-chain detectors · 26,268 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.9.4 verified" width="900">
   </picture>
 </p>
 
@@ -229,7 +229,7 @@ These are the areas a full check covers across its five layers:
 | 🔐 **Secrets & data at rest** | Are your tokens, keys, and conversations lying around readable? |
 | 📡 **Monitoring & readiness** | Would you even notice a compromise — and could you investigate it? |
 
-On top of the 214 individual checks, a **risk engine** hunts for deadly
+On top of the 215 individual checks, a **risk engine** hunts for deadly
 *combinations* — chains like "untrusted input → reachable secrets → outbound
 tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)**.
 
@@ -262,7 +262,7 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
   capabilities — plus a documented zero-false-positive-FAIL release
   discipline: an alarm reaching you is a specific, reproducible, test-pinned
   condition in your own config, not a keyword match dressed up as a scan.
-- **Built like it matters.** 24,869 automated tests run on every change, a
+- **Built like it matters.** 26,268 automated tests run on every change, a
   false alarm is treated as a release-blocking bug, and every release is
   cryptographically signed.
 - **Free and readable.** MIT-licensed, pure Python standard library, zero
@@ -331,6 +331,12 @@ cosign verify-blob \
 
 A passing verification proves the reference digest was produced by this repo's
 release workflow and hasn't been altered since.
+
+`SHA256SUMS.txt` also lists the files shipped beside the engine package
+(`SKILL.md`, `audit.py`, `pyproject.toml`, `references/cli-flags.md`, `docs/`, …)
+under a separate, labelled section, as they sit in the installed bundle. Compare
+any of them with `sha256sum <file>` from the install directory. The published
+`CHANGELOG.md` is the trimmed copy, so its digest is of that copy.
 
 </details>
 
@@ -493,7 +499,7 @@ as unprotected on Windows — see the [User guide](docs/USAGE.md) for the detail
 | Document | What it covers |
 |---|---|
 | [User guide](docs/USAGE.md) | Recipes, monitoring modes, and trust details |
-| [Check catalog](docs/CHECKS.md) | All 214 checks: what they verify and how to remediate |
+| [Check catalog](docs/CHECKS.md) | All 215 checks: what they verify and how to remediate |
 | [Threat coverage](docs/THREAT_COVERAGE.md) | OWASP LLM Top 10 / Agentic threat mapping |
 | [Bundled IOC dataset](docs/IOC_DATA.md) | Provenance policy, refresh cadence, and freshness discipline for the known-bad catalog |
 | [Output schema](docs/OUTPUT_SCHEMA.md) | The frozen `--json` / SARIF contract |

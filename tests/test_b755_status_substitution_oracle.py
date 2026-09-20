@@ -500,6 +500,31 @@ def _is_status_operand(node) -> bool:
     return False
 
 
+def _function_tree(fn):
+    """The AST of ``fn``, found BY NAME in its module's own source.
+
+    ``inspect.getsource`` locates a function by the line number recorded at import time and
+    then reads whatever the file holds NOW (through ``linecache``). If the file is edited
+    after the import -- a concurrent edit, a scratch copy, an editor save mid-run -- every
+    recorded line number is stale and it returns the wrong function's body, so the oracle
+    judged a different function than the one it named. Looking the definition up by name
+    over one parse of the source makes the answer independent of line numbers.
+    """
+    mod = importlib.import_module(fn.__module__)
+    try:
+        tree = _module_ast(Path(inspect.getsourcefile(mod)))
+    except (OSError, TypeError, SyntaxError):
+        return None
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == fn.__name__:
+            return node
+    return None
+
+
+def _module_ast(path):
+    return ast.parse(path.read_text(encoding="utf-8"))
+
+
 def _touches_status(fn) -> bool:
     """Does this callable COMPARE something against a FAIL-weight value?
 
@@ -517,9 +542,8 @@ def _touches_status(fn) -> bool:
     The distinction that separates them is grammatical, not semantic. A consumer COMPARES a
     status; a producer PASSES one. So only comparison operands count.
     """
-    try:
-        tree = ast.parse(inspect.getsource(fn).lstrip())
-    except (OSError, SyntaxError, IndentationError):
+    tree = _function_tree(fn)
+    if tree is None:
         return False
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "status":
@@ -1094,3 +1118,47 @@ def test_a_pool_of_only_a_fail_weight_finding_counts_as_assessed():
             f"carrying only 'FAIL':\n  {[(a.axis, a.status) for a in raw.axes]}\n"
             f"  {[(a.axis, a.status) for a in control.axes]}"
         )
+
+
+# ------------------------------------------- the oracle's source lookup survives file drift
+
+
+def test_touches_status_is_independent_of_line_numbers(tmp_path, monkeypatch):
+    """A line inserted into a module after import must not change what is judged.
+
+    Reproduces the full-suite-only failure: an edit above a rule shifts every later line, and a
+    line-number lookup then reads the neighbouring function. The old lookup is shown to fail
+    on the same drift so this test cannot pass vacuously.
+    """
+    import linecache
+    import sys
+    import types
+
+    src = (
+        "FAIL = 'FAIL'\n"
+        "def reads(status):\n    return status == FAIL\n"
+        "def plain(x):\n    return x + 1\n"
+    )
+    f = tmp_path / "drift_mod.py"
+    f.write_text(src, encoding="utf-8")
+    mod = types.ModuleType("drift_mod")
+    mod.__file__ = str(f)
+    exec(compile(src, str(f), "exec"), mod.__dict__)
+    monkeypatch.setitem(sys.modules, "drift_mod", mod)
+    # drift: one line inserted above everything, after the import
+    f.write_text("# inserted\n" + src, encoding="utf-8")
+    linecache.checkcache(str(f))
+
+    # the OLD lookup (inspect.getsource) now reads the wrong body -- proves the drift is real
+    assert "x + 1" not in inspect.getsource(mod.plain)
+    assert _touches_status(mod.reads) is True
+    assert _touches_status(mod.plain) is False
+
+
+def _reads_status_undriven(finding):
+    return finding.status == "FAIL"
+
+
+def test_touches_status_still_flags_a_genuine_status_read():
+    assert _touches_status(_reads_status_undriven) is True
+    assert _touches_status(_module_ast) is False

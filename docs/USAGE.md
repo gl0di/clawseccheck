@@ -461,6 +461,12 @@ workflow and hasn't been altered since — not that the CI pipeline itself is un
 This closes the loop against opportunistic tampering of a downloaded copy; it is not a
 guarantee against a targeted adversary who also compromises the CI pipeline.
 
+The same file also lists the files shipped beside the engine package (`SKILL.md`,
+`audit.py`, `pyproject.toml`, `references/cli-flags.md`, `docs/`, …) under a separate,
+labelled section, as they sit in the installed bundle. `--verify-self` covers only the
+package, so compare those with `sha256sum <file>` from the install directory. The
+published `CHANGELOG.md` is the trimmed copy, so its digest is of that copy.
+
 **What the digest covers, and when the command exits non-zero.** The walk hashes every file
 in the package tree at every depth, *except* the contents of the regenerated-artifact
 directories `__pycache__`, `.ruff_cache`, `.mypy_cache`, `.pytest_cache` and `.git` — those
@@ -2110,10 +2116,13 @@ hard false positives on real configs.
   (SkillTrustBench, malicious-class recall). Most misses were attacks *described in prose*
   rather than shipped as code — a blind spot dedicated detectors have since started closing,
   though the fix hasn't been re-measured against the same benchmark yet. Detection patterns
-  are English-word literals plus a narrow hand-authored Chinese/Russian override table for
-  one high-signal family (blanket "ignore previous instructions"-style overrides); other
-  scripts and languages — Japanese, Korean, Arabic, and Russian/Chinese outside that one
-  family — are not covered, so a PASS on non-English/non-covered content proves nothing
+  are English-word literals plus a hand-authored override table covering Chinese, Russian,
+  Japanese and Korean for four families only (B64's blanket "ignore previous
+  instructions"-style override, developer-mode, "no longer bound" and reveal-the-system-prompt
+  phrasings), plus a narrow Russian bare-secrecy phrase list in B63 that reaches WARN at most.
+  B63 (Chinese/Japanese/Korean), B66, B156 and B160 remain English-only, and every other
+  script and language, Arabic included, is not covered, so a PASS on non-English/non-covered
+  content proves nothing
   about it. A PASS tells you what the scanner recognized, not that nothing is wrong.
 - **Does not replace runtime red-teaming.** Static configuration analysis is a starting
   point, not a substitute for adversarial testing against a running agent.
@@ -2198,7 +2207,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested — so it is: 864 test files and 24,869
+A security tool should be heavily tested — so it is: 872 test files and 26,268
 tests, run in CI on **Python 3.9 and 3.12** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

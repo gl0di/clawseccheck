@@ -1169,7 +1169,7 @@ def test_size_guard_threshold_clears_the_last_known_good_publish() -> None:
     # Measured from the v3.59.0 tag by replaying the staging step above, not quoted from a
     # `du -sh` figure: du reports allocated blocks, the guard sums real file bytes, and
     # conflating the two is what put the original threshold on the wrong side of this tree.
-    last_known_good_publish = 5_235_253   # v3.59.0, published 2026-08-05 via the Convex route
+    last_known_good_publish = 8_092_721   # v4.1.0, replayed from the tag; published to ClawHub 2026-09
     assert threshold > last_known_good_publish, (
         f"MAX_STAGED_BYTES={threshold} is at or below {last_known_good_publish} bytes — a "
         "staged tree that is known to have published successfully. A guard set below a "
@@ -1249,6 +1249,369 @@ def test_size_guard_passes_on_a_staged_bundle_within_budget(tmp_path) -> None:
     assert "Staged bundle size OK" in proc.stdout, (
         f"Expected the OK confirmation line in stdout.\nstdout: {proc.stdout!r}"
     )
+
+
+def _staging_shell_block() -> str:
+    """Extract the literal `run: |` body of the 'Stage publishable files' step."""
+    lines = _lines()
+    start = next(
+        (
+            i for i, ln in enumerate(lines)
+            if ln.strip().startswith("- name:") and "Stage publishable files" in ln
+        ),
+        None,
+    )
+    assert start is not None, (
+        "No '- name: Stage publishable files' step in the workflow; update this extractor."
+    )
+    run_i = None
+    for i in range(start + 1, len(lines)):
+        if lines[i].strip().startswith("- name:"):
+            break
+        if lines[i].strip() == "run: |":
+            run_i = i
+            break
+    assert run_i is not None, (
+        "The staging step no longer uses a 'run: |' literal block; update this extractor."
+    )
+    indent = len(lines[run_i]) - len(lines[run_i].lstrip())
+    body = []
+    for ln in lines[run_i + 1:]:
+        if ln.strip() and (len(ln) - len(ln.lstrip())) <= indent:
+            break
+        body.append(ln)
+    return textwrap.dedent("\n".join(body))
+
+
+def _replay_staged_tree(tmp_path: Path):
+    """Replay the REAL staging step over the working tree; return (work_dir, total, per_top).
+
+    Copies exactly the paths the step stages (repo-visible files only, so ignored caches
+    stay out) into a scratch dir and runs the workflow's own shell there. The changelog
+    scratch file is redirected into tmp_path so nothing is written outside it.
+    """
+    staged = sorted(_staged_paths(WORKFLOW_PATH.read_text(encoding="utf-8")))
+    assert staged, "No staged root paths derived from the workflow; the parser is vacuous."
+    listed = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", *staged],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    work = tmp_path / "work"
+    work.mkdir()
+    for rel in listed:
+        src = REPO_ROOT / rel
+        if not src.is_file():
+            continue  # deleted-but-still-indexed
+        dst = work / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    block = _staging_shell_block()
+    assert "/tmp/changelog-trimmed.md" in block, (
+        "The staging step no longer uses /tmp/changelog-trimmed.md; update this replay so "
+        "it still redirects the scratch file into tmp_path."
+    )
+    block = block.replace("/tmp/changelog-trimmed.md", str(tmp_path / "changelog-trimmed.md"))
+    proc = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", block],
+        cwd=str(work), capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, (
+        f"Replaying the staging step failed.\nstdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    )
+    root = work / "dist" / "clawseccheck"
+    assert (root / "SKILL.md").is_file(), "Replay staged no SKILL.md; the replay is broken."
+    per_top: dict = {}
+    total = 0
+    for f in root.rglob("*"):
+        if f.is_file():
+            size = f.stat().st_size
+            total += size
+            top = f.relative_to(root).parts[0]
+            per_top[top] = per_top.get(top, 0) + size
+    assert total > 1024 * 1024, "Replayed staged tree is implausibly small; replay is broken."
+    return work, total, per_top
+
+
+def _size_budget_verdict(measured: int, threshold: int, tripwire: float = 0.8):
+    """(within_limit, under_tripwire) for a measured staged size."""
+    return measured <= threshold, measured <= tripwire * threshold
+
+
+def test_size_budget_verdict_has_teeth_at_the_tripwire() -> None:
+    limit = 1_000_000
+    assert _size_budget_verdict(int(limit * 0.79), limit) == (True, True)
+    assert _size_budget_verdict(int(limit * 0.81), limit) == (True, False)
+    assert _size_budget_verdict(int(limit * 1.01), limit) == (False, False)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_staged_bundle_is_within_the_publish_guard(tmp_path) -> None:
+    """Measure the REAL staged tree, so the guard cannot surprise a release.
+
+    The workflow guard only runs after the approval click. This replays the staging step
+    in the suite and fails a release early: over the limit is a hard failure, over 80% of
+    it is the tripwire that gives a release of lead time to respond.
+    """
+    inside = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True,
+    )
+    if inside.returncode != 0:
+        pytest.skip("not a git checkout (source tarball): nothing to replay")
+    threshold = _size_guard_threshold_bytes()
+    work, total, per_top = _replay_staged_tree(tmp_path)
+    within, under_tripwire = _size_budget_verdict(total, threshold)
+    breakdown = ", ".join(
+        f"{k}={v:,}" for k, v in sorted(per_top.items(), key=lambda kv: -kv[1])[:6]
+    )
+    context = (
+        f"Staged bundle is {total:,} bytes = {100 * total / threshold:.1f}% of "
+        f"MAX_STAGED_BYTES={threshold:,}. Largest entries: {breakdown}. Reference: the "
+        "last published bundle (v4.1.0) staged 8,092,721 bytes and growth is about 0.5 MB "
+        "per release, so growth in clawseccheck/ is normal; compare with the previous "
+        "release before assuming bloat. Either raise MAX_STAGED_BYTES in the workflow "
+        "(keep it <= 25 MiB, see test_size_guard_threshold_clears_the_last_known_good_publish) "
+        "and re-ground its comment, or trim the bundle."
+    )
+    assert within, "The release would hard-fail at the size guard AFTER approval. " + context
+    assert under_tripwire, "Over 80% of the guard: tripwire, act one release early. " + context
+
+    # The exact CI guard must also pass on the replayed real tree.
+    script = tmp_path / "guard.sh"
+    script.write_text(_size_guard_shell_block(), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(script)], cwd=str(work), capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+
+
+# ---------------------------------------------------------------------------------
+# C-545: the release tail — sign after staging, verify the bundle in CI, and never let a
+# GitHub Release go green without both signed assets.
+# ---------------------------------------------------------------------------------
+
+_SIGN_TAIL = (
+    "Generate trusted engine digest (SHA256SUMS.txt)",
+    "sigstore/cosign-installer",
+    "Sign SHA256SUMS.txt (cosign keyless/OIDC)",
+    "Verify the signed bundle with the documented command",
+)
+
+
+def _step_index(names: list, needle: str) -> int:
+    idx = next((i for i, n in enumerate(names) if needle in n), None)
+    assert idx is not None, f"No step containing {needle!r} in {names!r}"
+    return idx
+
+
+def test_signing_runs_after_staging_and_the_size_guard_and_before_any_publish() -> None:
+    steps = _steps()
+    names = [_step_name(s) for s in steps]
+    stage_i = _step_index(names, "Stage publishable files")
+    guard_i = _step_index(names, "Guard")
+    assert guard_i == stage_i + 1, "the size guard must stay the step right after staging"
+
+    idxs = [_step_index(names, n) for n in _SIGN_TAIL]
+    assert idxs == list(range(idxs[0], idxs[0] + len(idxs))), (
+        "digest, cosign-installer, sign and verify must be consecutive steps, verify "
+        f"immediately after sign; got positions {idxs}"
+    )
+    assert idxs[0] > guard_i, "signing must attest the STAGED tree: run it after staging"
+    probe_i = _step_index(names, "Probe pre-publish liveness")
+    assert idxs[-1] < probe_i, "signing and verification must finish before publishing starts"
+    verify_lines = [ln for ln, _ in steps[idxs[-1]]]
+    assert max(verify_lines) < _real_publish_invocation()["line"], (
+        "the bundle must be verified before the real (non dry-run) publish."
+    )
+
+
+def _cosign_tokens(text: str) -> list:
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines) if "cosign verify-blob" in ln)
+    tokens = []
+    for ln in lines[start:]:
+        tok = ln.strip().rstrip("\\").strip()
+        tok = tok.removeprefix("if ") if hasattr(tok, "removeprefix") else (
+            tok[3:] if tok.startswith("if ") else tok
+        )
+        tok = tok.strip()
+        tokens.append(tok)
+        if tok.startswith("SHA256SUMS.txt"):
+            break
+    else:
+        raise AssertionError("cosign command block never reached SHA256SUMS.txt")
+    tokens[-1] = "SHA256SUMS.txt"
+    return tokens
+
+
+def test_ci_verifies_the_bundle_with_exactly_the_readme_command() -> None:
+    block = _step_shell_block("Verify the signed bundle with the documented command")
+    ci_cmd = _cosign_tokens(block)
+    readme_cmd = _cosign_tokens((REPO_ROOT / "README.md").read_text(encoding="utf-8"))
+    assert ci_cmd == readme_cmd
+    assert len(ci_cmd) == 5, ci_cmd
+    assert "insecure" not in block.lower()
+    assert "set -euo pipefail" in block
+
+
+def _run_verify_step(tmp_path, results: list) -> subprocess.CompletedProcess:
+    """Run the verify step with a stub cosign that returns *results* per attempt."""
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    counter = tmp_path / "calls"
+    (stub / "cosign").write_text(
+        "#!/bin/bash\n"
+        'echo "$*" >> "' + str(counter) + '"\n'
+        'n=$(wc -l < "' + str(counter) + '")\n'
+        'codes=(' + " ".join(str(r) for r in results) + ')\n'
+        'exit "${codes[$((n - 1))]:-1}"\n',
+        encoding="utf-8",
+    )
+    (stub / "sleep").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    for f in stub.iterdir():
+        f.chmod(0o755)
+    env = dict(os.environ, PATH=f"{stub}:{os.environ['PATH']}")
+    return subprocess.run(
+        ["bash", "-eo", "pipefail", "-c",
+         _step_shell_block("Verify the signed bundle with the documented command")],
+        cwd=str(tmp_path), capture_output=True, text=True, env=env,
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.parametrize(
+    "results,ok,calls",
+    [([0], True, 1), ([1, 1, 0], True, 3), ([1, 1, 1], False, 3)],
+)
+def test_verify_step_retries_flake_but_fails_a_bad_signature(tmp_path, results, ok, calls):
+    proc = _run_verify_step(tmp_path, results)
+    assert (proc.returncode == 0) is ok, f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    assert len((tmp_path / "calls").read_text().splitlines()) == calls
+
+
+_GH_STUB = r"""#!/bin/bash
+echo "$*" >> "$STUB/argv.log"
+case "$1 $2" in
+  "release view")
+    [ -f "$STUB/exists" ] || exit 1
+    case " $* " in *" --json "*) cat "$STUB/assets" ;; esac
+    exit 0 ;;
+  "release create")
+    [ -z "${GH_FAIL_CREATE:-}" ] || exit 1
+    touch "$STUB/exists"
+    if [ -z "${GH_NO_ASSETS_ADDED:-}" ]; then
+      for a in "$@"; do case "$a" in SHA256SUMS*) echo "$a" >> "$STUB/assets" ;; esac; done
+    fi
+    exit 0 ;;
+  "release upload")
+    [ -z "${GH_FAIL_UPLOAD:-}" ] || exit 1
+    if [ -z "${GH_NO_ASSETS_ADDED:-}" ]; then
+      for a in "$@"; do case "$a" in SHA256SUMS*) echo "$a" >> "$STUB/assets" ;; esac; done
+    fi
+    exit 0 ;;
+esac
+exit 99
+"""
+
+
+def _run_create_step(tmp_path, existing=None, **flags):
+    """Run the real Create GitHub Release shell against a stateful stub gh."""
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "gh").write_text(_GH_STUB, encoding="utf-8")
+    (bindir / "sleep").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    for f in bindir.iterdir():
+        f.chmod(0o755)
+    (stub / "assets").write_text("", encoding="utf-8")
+    if existing is not None:
+        (stub / "exists").write_text("", encoding="utf-8")
+        (stub / "assets").write_text("".join(f"{a}\n" for a in existing), encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "CHANGELOG.md").write_text("## [9.9.9]\n- something\n", encoding="utf-8")
+    env = dict(
+        os.environ, PATH=f"{bindir}:{os.environ['PATH']}", STUB=str(stub),
+        GITHUB_REF_NAME="v9.9.9", GITHUB_REPOSITORY="owner/repo", GH_TOKEN="x",
+    )
+    env.update({k: "1" for k, v in flags.items() if v})
+    proc = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", _step_shell_block("Create GitHub Release")],
+        cwd=str(work), capture_output=True, text=True, env=env,
+    )
+    log = (stub / "argv.log").read_text(encoding="utf-8") if (stub / "argv.log").exists() else ""
+    return proc, log
+
+
+_BOTH = ["SHA256SUMS.txt", "SHA256SUMS.txt.bundle"]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.parametrize(
+    "case_id,existing,flags,ok,expect_in_log,expect_not_in_log",
+    [
+        ("no-release-creates-with-both-assets", None, {}, True,
+         ["release create v9.9.9", "SHA256SUMS.txt SHA256SUMS.txt.bundle"], ["release upload"]),
+        ("create-fails", None, {"GH_FAIL_CREATE": 1}, False, ["release create"], []),
+        ("create-succeeds-but-assets-absent", None, {"GH_NO_ASSETS_ADDED": 1}, False,
+         ["release create"], []),
+        ("exists-with-both-assets-is-left-alone", _BOTH, {}, True, [],
+         ["release create", "release upload"]),
+        ("exists-with-neither-gets-an-upload", [], {}, True, ["release upload"],
+         ["release create"]),
+        ("upload-fails", [], {"GH_FAIL_UPLOAD": 1}, False, ["release upload"], []),
+        ("upload-claims-success-but-assets-absent", [], {"GH_NO_ASSETS_ADDED": 1}, False,
+         ["release upload"], []),
+        ("exactly-one-asset-present", ["SHA256SUMS.txt"], {}, False, [],
+         ["release create", "release upload"]),
+    ],
+)
+def test_create_release_step_fails_loudly_and_asserts_both_assets(
+    tmp_path, case_id, existing, flags, ok, expect_in_log, expect_not_in_log,
+) -> None:
+    proc, log = _run_create_step(tmp_path, existing, **flags)
+    ctx = f"[{case_id}] stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert (proc.returncode == 0) is ok, ctx
+    for needle in expect_in_log:
+        assert needle in log, ctx
+    for needle in expect_not_in_log:
+        assert needle not in log, ctx
+    assert "--clobber" not in log, ctx
+    if not ok:
+        assert "::error::" in proc.stdout, ctx
+
+
+def test_create_release_step_never_swallows_errors_or_clobbers() -> None:
+    block = _step_shell_block("Create GitHub Release")
+    code = [ln for ln in block.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("|| echo" in ln for ln in code), "an error path is being swallowed"
+    assert not any("--clobber" in ln for ln in code)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_generator_accepts_the_real_replayed_staged_tree(tmp_path) -> None:
+    """End to end on the real tree: the staged package equals the checkout the digest reads."""
+    inside = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True,
+    )
+    if inside.returncode != 0:
+        pytest.skip("not a git checkout (source tarball): nothing to replay")
+    work, _total, _per_top = _replay_staged_tree(tmp_path)
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    block = text.split("python3 - <<'PYEOF'\n")[1].split("          PYEOF")[0]
+    proc = subprocess.run(
+        ["python3", "-c", textwrap.dedent(block)],
+        cwd=str(work), capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    published = (work / "SHA256SUMS.txt").read_text(encoding="utf-8")
+    section2 = published.split("Bundle files outside the engine package", 1)[1]
+    for rel in ("SKILL.md", "audit.py", "pyproject.toml", "references/cli-flags.md"):
+        assert f"  {rel}" in section2, rel
 
 
 # ---------------------------------------------------------------------------------

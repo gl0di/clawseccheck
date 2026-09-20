@@ -3367,9 +3367,29 @@ def _default_pdf_target(home: str) -> "tuple[str, bool]":
     return "~/.clawseccheck/report.pdf", False
 
 
+class _SuggestingParser(argparse.ArgumentParser):
+    """ArgumentParser that adds a did-you-mean hint for a misspelled flag."""
+
+    def error(self, message):
+        import difflib
+        import re as _re
+        m = _re.search(r"unrecognized arguments: (.*)", message)
+        if m:
+            known = [o for a in self._actions for o in a.option_strings]
+            hints = []
+            for tok in m.group(1).split():
+                if tok.startswith("--"):
+                    near = difflib.get_close_matches(tok.split("=")[0], known, n=1)
+                    if near:
+                        hints.append(f"{tok} -> did you mean {near[0]}?")
+            if hints:
+                message += "\n" + "\n".join(hints)
+        super().error(message)
+
+
 def _main(argv=None) -> int:
     _JUDGED_BUNDLE_CACHE.clear()
-    p = argparse.ArgumentParser(
+    p = _SuggestingParser(
         prog="clawseccheck",
         description=(
             "ClawSecCheck OpenClaw security self-audit — read-only with respect to your "

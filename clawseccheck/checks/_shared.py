@@ -832,9 +832,12 @@ SENSITIVE_TOOL_IDS = frozenset({"read", "memory_get", "memory_search"})
 
 
 # B-674 decision: keep the bare "fs_read" / "fs_write" substring hints below rather than
-# deleting them, even though neither is a real OpenClaw tool id (grounded against the
-# installed dist's `tool-catalog-*.js` CORE_TOOL_DEFINITIONS, sectionId "fs" — the real
-# ids are `read`/`write`/`edit`/`apply_patch`; see SENSITIVE_TOOL_IDS / OUTBOUND_TOOL_IDS
+# deleting them, even though neither is in CORE_TOOL_DEFINITIONS (installed dist
+# `tool-catalog-*.js`, sectionId "fs" — the core ids are `read`/`write`/`edit`/`apply_patch`).
+# `fs_write` is not absent from the dist altogether: it is named in two vendor deny lists
+# (DEFAULT_GATEWAY_HTTP_TOOL_DENY, ACP_UNSUPPORTED_INHERITED_TOOL_DENY), so whether it is
+# ever dispatchable is UNPROVEN, not disproven — B55's own notes treat it as a real id.
+# See SENSITIVE_TOOL_IDS / OUTBOUND_TOOL_IDS
 # below for the exact-id layer that answers "did the runtime actually grant this"). Two
 # reasons to keep the substring, not one: it still catches a REAL namespaced MCP tool such
 # as `mcp__files__fs_read`, and a bare invented id in a core `tools.allow` still shows the
@@ -1145,6 +1148,63 @@ def _cross_context_default(ctx) -> str:
     if stamped is not None and stamped >= _CROSS_CONTEXT_DEFAULT_ALLOW_MIN:
         return "allow"
     return "unknown"
+
+
+# B382: keys a newer OpenClaw build REMOVED from its strict root config schema, so a file
+# that still holds one is rejected by `openclaw config validate` and by every CLI command
+# that loads the config, until `openclaw doctor --fix` migrates it.
+#
+# dotted key -> (replacement key or None when removed outright, first build that rejects it).
+# Every entry was MEASURED by executing the installed root schema's `safeParse` (see
+# tests/test_f184_retired_key_config_invalid.py, whose local-only oracle re-asks the vendor,
+# and tests/test_b700_version_aware_advice.py, which owns the 8.1 and 9.3 subsets). A key the
+# vendor still accepts must not be added. Deliberately leaves out the bare `marketplaces`
+# root: only the measured leaves are listed. The min build is per key because retirement is
+# per build -- eleven keys left in 2026.8.1, the ssrf key was measured rejected on 2026.9.1
+# (8.x was not measured, so the gate is not lowered), the symlink knob left in 2026.9.3.
+_RETIRED_CONFIG_KEYS = {
+    "audit.enabled": ("logging.audit.enabled", (2026, 8, 1)),
+    "gateway.nodes.allowCommands": ("gateway.nodes.commands.allow", (2026, 8, 1)),
+    "gateway.nodes.denyCommands": ("gateway.nodes.commands.deny", (2026, 8, 1)),
+    "skills.workshop.autonomous.enabled": ("skills.workshop.autonomous.mode", (2026, 8, 1)),
+    "agents.list": ("agents.entries", (2026, 8, 1)),
+    "logging.redactSensitive": (None, (2026, 8, 1)),
+    "commands.useAccessGroups": (None, (2026, 8, 1)),
+    "gateway.controlUi.allowInsecureAuth": (None, (2026, 8, 1)),
+    "diagnostics.cacheTrace.filePath": (None, (2026, 8, 1)),
+    "marketplaces.feeds": (None, (2026, 8, 1)),
+    "marketplaces.sources": (None, (2026, 8, 1)),
+    "browser.ssrfPolicy.hostnameAllowlist": ("browser.ssrfPolicy.allowedHostnames",
+                                             (2026, 9, 1)),
+    "skills.workshop.allowSymlinkTargetWrites": (None, _SYMLINK_KNOB_RETIRED_MIN),
+}
+
+
+def _has_key_path(cfg, dotted: str) -> bool:
+    """Structural presence of a dotted key: walks dicts with ``in``, any value counts
+    (``false`` and ``null`` included), and a non-dict intermediate ends the walk."""
+    node = cfg
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
+    """Retired keys (with replacement) that the config holds AND the installed build rejects.
+
+    Reads ONLY ``ctx.installed_dist_version``. ``meta.lastTouchedVersion`` is never
+    consulted: it records which build last SAVED the file, and a user who downgraded since
+    would be told the file is invalid on a build that still reads every key. An unknown
+    installed build returns ``[]`` -- silence, not a guess.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    cfg = getattr(ctx, "config", None)
+    if installed is None or not isinstance(cfg, dict):
+        return []
+    return [(key, repl) for key, (repl, min_build) in _RETIRED_CONFIG_KEYS.items()
+            if installed >= min_build and _has_key_path(cfg, key)]
 
 
 def _meta(cid: str):
@@ -2263,7 +2323,7 @@ def _agent_tools_widenings(cfg: dict) -> "tuple[list, list]":
         also = entry_tools.get("alsoAllow")
         if isinstance(also, list):
             for t in also:
-                if _toolgrant.granted(cfg, str(t), agent.id):
+                if _toolgrant.granted(cfg, str(t), agent.id, agent=True):
                     also_allow.append((agent.labelled(name), t))
         profile = entry_tools.get("profile")
         if isinstance(profile, str) and profile and _profile_is_powerful(profile):
@@ -4103,8 +4163,10 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     # B-674: the generic hints above cannot see OpenClaw's own write-capable tool ids —
     # see OUTBOUND_TOOL_IDS. Exact match, alias-folded, over the config's grants and over
     # an attested roster, mirroring B-667's SENSITIVE_TOOL_IDS treatment of the inbound
-    # leg exactly (same helpers, same shape, no confinement guard — no vetted per-scope
-    # write-confinement model exists yet, see F-186).
+    # leg exactly (same helpers, same shape). No confinement guard, by decision: a write
+    # confined to the workspace can still tamper SOUL.md / memory / skills, which is what
+    # this leg exists to catch, so the outbound leg does not honour confinement (B55 does,
+    # because it asks a different question — reach outside the workspace).
     outbound.extend(_tool_id_sources(cfg, OUTBOUND_TOOL_IDS))
     outbound.extend(_attested_tool_id_sources(ctx, OUTBOUND_TOOL_IDS))
     if dig(cfg, "tools.elevated.allowFrom"):
