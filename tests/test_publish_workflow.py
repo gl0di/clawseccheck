@@ -219,25 +219,91 @@ def _real_publish_invocation() -> dict:
     return real[0]
 
 
-def test_publish_workflow_pins_clawhub() -> None:
-    """clawhub must be installed at an exact pinned version (clawhub@X.Y.Z).
+TOOLS_DIR = REPO_ROOT / ".github" / "tools"
 
-    A bare 'npm i -g clawhub' line (with no '@' version suffix) must not exist.
+
+def test_publish_workflow_pins_clawhub() -> None:
+    """clawhub is installed via a pinned, script-free lockfile install.
+
+    CLAWSECCHECK-C-548: 'npm i -g clawhub@X.Y.Z' pins one package name+version, but
+    npm still resolves clawhub's WHOLE transitive dependency tree fresh at install
+    time and may run any package's lifecycle scripts — inside the job that holds
+    CLAWHUB_TOKEN, contents:write and id-token:write. 'npm ci --ignore-scripts'
+    against the committed .github/tools/package-lock.json pins that entire tree and
+    refuses to execute any lifecycle script. A future edit that quietly reverts to
+    'npm i -g' (global, unpinned tree, scripts allowed) must fail this test.
     """
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    # The pinned form must be present.
-    assert "clawhub@" in text, (
-        "Expected 'clawhub@<version>' pin in workflow but found none."
+    assert "npm ci --ignore-scripts" in text, (
+        "Expected clawhub to be installed with 'npm ci --ignore-scripts' against "
+        "the committed .github/tools lockfile, but found no such line."
     )
-    # No bare unpinned install line (the pattern: contains 'npm' and 'clawhub'
-    # but lacks '@' on the same line as 'clawhub').
+    # No bare global npm install may reappear anywhere in the workflow (comments
+    # excluded, so prose mentioning the old form doesn't false-positive here).
     for line in _lines():
         stripped = line.strip()
-        if "npm" in stripped and "clawhub" in stripped:
-            assert "@" in stripped, (
-                f"Found unpinned clawhub install line: {line!r}\n"
-                "Change it to 'npm i -g clawhub@<version>'."
+        if stripped.startswith("#"):
+            continue
+        if re.search(r"\bnpm\s+(i|install)\b", stripped) and "-g" in stripped:
+            raise AssertionError(
+                f"Found a global npm install line: {line!r}\n"
+                "clawhub/markdownlint-cli must be installed from the pinned "
+                ".github/tools lockfile with 'npm ci --ignore-scripts', not '-g'."
             )
+    # The manifest itself pins an exact version — no caret/tilde/range — so the
+    # committed lockfile's resolved tree is reproducible, not just "some 0.23.x".
+    manifest = json.loads((TOOLS_DIR / "package.json").read_text(encoding="utf-8"))
+    clawhub_spec = manifest.get("devDependencies", {}).get("clawhub", "")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", clawhub_spec), (
+        f".github/tools/package.json must pin clawhub to an exact version, "
+        f"got {clawhub_spec!r}"
+    )
+    lock = json.loads((TOOLS_DIR / "package-lock.json").read_text(encoding="utf-8"))
+    locked_spec = lock["packages"][""]["devDependencies"]["clawhub"]
+    assert locked_spec == clawhub_spec, (
+        f"package.json pins clawhub@{clawhub_spec} but package-lock.json's root "
+        f"devDependencies entry says {locked_spec!r} — regenerate the lockfile."
+    )
+
+
+def test_publish_workflow_pins_pytest_ruff_with_hashes() -> None:
+    """The smoke-gate pip install is hash-pinned against a committed lockfile.
+
+    CLAWSECCHECK-C-548: a bare 'pip install pytest==X ruff==Y' pins the two direct
+    packages but still resolves their transitive deps (iniconfig/packaging/pluggy)
+    unpinned, with no hash check — the same job that holds CLAWHUB_TOKEN /
+    contents:write / id-token:write. '--require-hashes -r .github/tools/
+    requirements-ci.txt' refuses to install anything whose hash isn't in the
+    committed, pip-compile-generated manifest.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "pip install --require-hashes -r .github/tools/requirements-ci.txt" in text, (
+        "Expected the smoke gate to install pytest/ruff via "
+        "'pip install --require-hashes -r .github/tools/requirements-ci.txt'."
+    )
+    for line in _lines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        assert not re.search(r"pip install (?!--require-hashes)\S*pytest==", stripped), (
+            f"Found an unhashed pytest install line: {line!r}"
+        )
+    req_txt = (TOOLS_DIR / "requirements-ci.txt").read_text(encoding="utf-8")
+    for pkg in ("pytest==7.4.4", "ruff==0.15.20"):
+        assert pkg in req_txt, f"{pkg!r} missing from .github/tools/requirements-ci.txt"
+    # --require-hashes refuses the WHOLE install if even one resolved package (direct
+    # or transitive) lacks a hash — so every "name==version" block, up to the next
+    # such line or EOF, must carry at least one --hash=sha256: line.
+    lines = req_txt.splitlines()
+    pkg_starts = [i for i, ln in enumerate(lines) if re.match(r"^[A-Za-z0-9_.-]+==", ln)]
+    assert pkg_starts, "requirements-ci.txt has no pinned '==' package lines at all."
+    for idx, start in enumerate(pkg_starts):
+        end = pkg_starts[idx + 1] if idx + 1 < len(pkg_starts) else len(lines)
+        block = "\n".join(lines[start:end])
+        assert "--hash=sha256:" in block, (
+            f"Package pinned at line {start + 1} ({lines[start]!r}) has no "
+            "--hash=sha256: entry; --require-hashes would refuse this file."
+        )
 
 
 def test_publish_workflow_runs_smoke_before_publish() -> None:

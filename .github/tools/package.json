@@ -1,0 +1,9 @@
+{
+  "name": "clawseccheck-ci-tools",
+  "private": true,
+  "description": "Pinned CLI tools used by CI/publish workflows, installed with `npm ci --ignore-scripts` against a committed lockfile so the transitive tree is reproducible and lifecycle scripts never run in a token-holding job.",
+  "devDependencies": {
+    "clawhub": "0.23.3",
+    "markdownlint-cli": "0.44.0"
+  }
+}

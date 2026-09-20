@@ -270,6 +270,49 @@ def test_dependabot_labels_exist() -> None:
     assert labels and set(labels) <= set(_KNOWN_LABELS), labels
 
 
+def test_dependabot_watches_the_ci_toolchain_manifests() -> None:
+    """npm/pip ecosystems watch .github/tools, closing the update-channel blind spot.
+
+    CLAWSECCHECK-C-548: before this, clawhub/markdownlint-cli (npm, `npm i -g`) and
+    pytest/ruff (pip, inline `pip install`) had no update channel or advisory path —
+    Dependabot's github-actions ecosystem only ever parses `uses:` lines.
+    """
+    text = (REPO_ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    for ecosystem in ("npm", "pip"):
+        m = re.search(
+            rf'package-ecosystem:\s*"{ecosystem}"\s*\n\s*directory:\s*"([^"]+)"',
+            text,
+        )
+        assert m, f"No {ecosystem!r} package-ecosystem block found in dependabot.yml"
+        assert m.group(1).rstrip("/").endswith(".github/tools"), (
+            f"{ecosystem} ecosystem directory {m.group(1)!r} should scope to "
+            ".github/tools, not the whole repo — a repo-root directory would also "
+            "pick up the intentionally-vulnerable fixtures/**/requirements.txt "
+            "test vectors, which must NOT be touched by Dependabot."
+        )
+
+
+def test_ci_uses_pinned_toolchain_manifests() -> None:
+    """markdownlint-cli and pytest/ruff install from the pinned .github/tools manifests.
+
+    CLAWSECCHECK-C-548: 'npm install -g markdownlint-cli@X' and a bare
+    'pip install pytest==X ruff==Y' each resolve their own transitive tree fresh at
+    install time, with no lockfile and no hash check. Both jobs now install from the
+    committed .github/tools/package-lock.json ('npm ci --ignore-scripts') and
+    .github/tools/requirements-ci.txt ('pip install --require-hashes').
+    """
+    markdownlint_body = _step_body("Install markdownlint-cli")
+    assert "npm ci --ignore-scripts --prefix .github/tools" in markdownlint_body
+    assert "GITHUB_PATH" in markdownlint_body
+    assert "npm install -g" not in _strip_comments(CI_PATH.read_text(encoding="utf-8"))
+
+    test_job_body = _job_blocks()["test"]
+    assert (
+        "pip install --require-hashes -r .github/tools/requirements-ci.txt"
+        in test_job_body
+    )
+
+
 def _step_body(name_fragment: str) -> str:
     lines = CI_PATH.read_text(encoding="utf-8").splitlines()
     start = next(
