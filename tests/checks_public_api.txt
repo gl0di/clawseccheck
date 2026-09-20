@@ -138,6 +138,7 @@ _mcp_servers
 _mcp_value_looks_secret
 _negation_context
 _negation_governs_trigger
+_node_allow_skills
 _node_commands
 _norm_group_policy
 _open_channels
@@ -280,6 +281,7 @@ check_memory_poisoning
 check_memory_reconsumption_injection
 check_monitoring
 check_multiagent_exposure
+check_node_allowskills_default_on
 check_node_denycommands_ineffective
 check_offboarding_hygiene
 check_outbound_proxy

@@ -4599,6 +4599,60 @@ def _node_commands(cfg: dict, kind: str) -> "tuple[object, str]":
     return None, new_path
 
 
+def _node_allow_skills(cfg: dict) -> "tuple[object, str]":
+    """Whether paired gateway nodes may publish skills, from EITHER config shape.
+
+    Returns ``(value, path)`` — the value exactly as found (the caller type-checks it
+    itself, as callers did when reading ``dig()`` directly) and the config path to name
+    in evidence.
+
+    F-199. OpenClaw 2026.8.1 moved ``gateway.nodes.skills.enabled`` to a flat
+    ``gateway.nodes.allowSkills`` (docs/nodes/mcp-and-skills.md's own migration table
+    lists the two renames back to back, this one and the sibling ``commands`` rename
+    ``_node_commands`` above already handles per B-698). The DIRECTION is the mirror
+    image of that sibling: commands went flat -> nested (``allowCommands`` ->
+    ``commands.allow``), this one goes nested -> flat (``skills.enabled`` ->
+    ``allowSkills``). Re-verified against the installed 2026.9.5 dist (not merely the
+    docs page): ``zod-schema*.mjs`` types ``allowSkills`` as a plain
+    ``boolean().optional()`` sibling of ``commands`` on the ``nodes`` object, and
+    ``legacy-*.mjs``'s own migration (``if (nodes.allowSkills === void 0) nodes
+    .allowSkills = skills.enabled``) confirms both the rename and its precedence.
+
+    Both shapes are read, permanently — same rule as ``_node_commands``: the vendor's
+    own migration is DEFERRED (``openclaw doctor --fix``), so an un-migrated config
+    still carries the legacy nested key, and an operator on an older OpenClaw is not
+    migrating at all.
+
+    Precedence mirrors the vendor's own migration verbatim (``legacy-*.mjs``)::
+
+        const skills = getRecord(nodes.skills);
+        if (skills && Object.hasOwn(skills, "enabled")) {
+            if (nodes.allowSkills === void 0) nodes.allowSkills = skills.enabled;
+
+    so the NEW key wins whenever it is PRESENT — including an explicit ``null``, which
+    ``=== void 0`` does not treat as absent. Same "present, not truthy" precedence as
+    ``_node_commands``, so a config carrying both during a mid-migration window is read
+    the same way OpenClaw itself reads it, not "new key if truthy".
+
+    BOTH spellings are read through ``dig`` so both keep an entry in
+    ``tests/grounded_schema_paths.txt``. The legacy path does not resolve against the
+    installed dist (``t.safeParse`` on a config carrying it fails with
+    ``unrecognized_keys@gateway.nodes keys=["skills"]`` — the object no longer declares
+    a ``skills`` key at all, not merely a changed leaf under one), so it is registered in
+    ``tests/test_schema_grounding.py``'s ``_NOT_IN_CURRENT_SCHEMA`` with that measured
+    disproof, the same way ``gateway.nodes.allowCommands``/``denyCommands`` are.
+    """
+    gateway = cfg.get("gateway") if isinstance(cfg, dict) else None
+    nodes = gateway.get("nodes") if isinstance(gateway, dict) else None
+    new_path = "gateway.nodes.allowSkills"
+    if isinstance(nodes, dict) and "allowSkills" in nodes:
+        return dig(cfg, "gateway.nodes.allowSkills"), new_path
+    legacy = dig(cfg, "gateway.nodes.skills.enabled")
+    if legacy is not None:
+        return legacy, "gateway.nodes.skills.enabled"
+    return None, new_path
+
+
 _CANONICAL_IPV4_RE = re.compile(r"\A(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\Z", re.ASCII)
 
 

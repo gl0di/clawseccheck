@@ -179,7 +179,7 @@ from ._host import (
 
 from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_tool_texts, _mcp_url_is_local, _read_jsonl_tail, correlation_indicators, _CORR_INDICATOR_CAP,)
 from ._shared import (_RETIRED_CONFIG_KEYS, _retired_keys_present,)
-from ._shared import (_key_advice, _openclaw_generation, _retired_key_note, _MCP_DATA_CAP_RE, _MCP_FS_PKG_RE, _MCP_BROAD_FS_ROOTS, _mcp_fs_root_is_broad, _mcp_sensitive_reason, _mcp_leg_contributions, _node_commands,)
+from ._shared import (_key_advice, _openclaw_generation, _retired_key_note, _MCP_DATA_CAP_RE, _MCP_FS_PKG_RE, _MCP_BROAD_FS_ROOTS, _mcp_fs_root_is_broad, _mcp_sensitive_reason, _mcp_leg_contributions, _node_commands, _node_allow_skills,)
 from ._shared import (_MCP_INTAKE_CAP_RE, _mcp_intake_reason,)
 # B-297: the wildcard-group ingress predicate — risk.py's ingress leg reaches it only
 # through this aggregator (CLAUDE.md §3.1-a), never by importing a topic module.
@@ -303,6 +303,7 @@ from ._capability import (
     check_exec_applypatch_workspace,
     check_exec_strict_inline_eval,
     check_fs_write_exposure,
+    check_node_allowskills_default_on,
     check_node_denycommands_ineffective,
     check_path_safety,
     _b378_normalize_path_for_compare,
@@ -1470,6 +1471,7 @@ CHECKS = [
     check_exec_strict_inline_eval,
     check_trustedproxy_loopback,
     check_node_denycommands_ineffective,
+    check_node_allowskills_default_on,  # B386 — paired-node skill push default-on (F-199)
     check_subagents_allow_agents,
     check_discovery_mdns_mode,
     check_mcp_tool_inheritance,

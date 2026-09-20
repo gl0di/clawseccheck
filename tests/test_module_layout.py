@@ -222,7 +222,8 @@ _EXEMPT = {
                          "and risk.py, the same cross-topic-leaf shape B-247 already "
                          "established. A finer split (the grounding prose into a doc, the "
                          "tables kept here) is a later cycle, not this one.",
-    "checks/_capability.py": "~2,460 lines — the declared-vs-effective capability / "
+    "checks/_capability.py": "~2,977 lines (restated 2026-09-20, F-199 — was ~2,460) — "
+                             "the declared-vs-effective capability / "
                              "manifest topic (B44/B55/B68/B84/B326 + helpers). Crossed the "
                              "budget with CLAWSECCHECK-B-376/B-369's B55 WARN->FAIL "
                              "escalation: an independent C-135 adversarial pass found and "
@@ -241,6 +242,10 @@ _EXEMPT = {
                              "wired into _b68_fs_tools_granted plus grounding comments on "
                              "why it's WARN-only and correcting a prior false "
                              "\"per-agent layers can only narrow\" claim in two docstrings. "
+                             "Grew again with CLAWSECCHECK-F-199: check_node_"
+                             "allowskills_default_on (B386), the sibling of B71's "
+                             "gateway.nodes.commands dual-shape read for the "
+                             "gateway.nodes.allowSkills / legacy skills.enabled rename. "
                              "A finer split is a later cycle.",
     "checks/_agents.py": "~2,239 lines (restated 2026-09-19, B-833 — was ~1,798 on 2026-09-11, ~1,358 before C-411) — "
                         "the multi-agent / subagent-exposure topic "
