@@ -1455,6 +1455,82 @@ def test_ci_verifies_the_bundle_with_exactly_the_readme_command() -> None:
     assert "set -euo pipefail" in block
 
 
+def _extract_identity_regexp(tokens: list) -> str:
+    tok = next(t for t in tokens if t.startswith("--certificate-identity-regexp"))
+    m = re.search(r'"([^"]+)"', tok)
+    assert m, f"Could not parse the identity regexp out of {tok!r}"
+    return m.group(1)
+
+
+def test_certificate_identity_regexp_pins_workflow_and_tag_ref() -> None:
+    """CLAWSECCHECK-B-875 regression test.
+
+    Pre-fix, both CI and README used `^https://github.com/gl0di/clawseccheck/`:
+    anchored only at the START, with unescaped dots. cosign's `--certificate-
+    identity-regexp` match (Go's regexp.MatchString, a substring/prefix search, not
+    a full-string match — mirrored here with Python's `re.match`, which has the same
+    "anchor at start, don't require consuming the whole string" semantics) therefore
+    accepted a signature from ANY workflow on ANY ref of this repo, and let any
+    single character stand in for a literal '.'. Neither half is what the README
+    claims the check proves ("the release workflow produced it").
+    """
+    block = _step_shell_block("Verify the signed bundle with the documented command")
+    ci_tokens = _cosign_tokens(block)
+    readme_tokens = _cosign_tokens(README_PATH.read_text(encoding="utf-8"))
+    new_pattern = _extract_identity_regexp(ci_tokens)
+    assert new_pattern == _extract_identity_regexp(readme_tokens), (
+        "CI and README must use the identical identity regexp"
+    )
+    # Pin the exact fixed shape so a future edit can't quietly re-loosen either end.
+    assert new_pattern == (
+        r"^https://github\.com/gl0di/clawseccheck/\.github/workflows/"
+        r"clawhub-publish\.yml@refs/tags/v"
+    ), new_pattern
+
+    # The exact pre-fix pattern this bug report was filed against.
+    old_pattern = "^https://github.com/gl0di/clawseccheck/"
+
+    # A signature from a DIFFERENT workflow, on a non-tag ref of the SAME repo —
+    # exactly the "any workflow, any ref" shape the bug report describes. This is
+    # what a `workflow_dispatch` run off a branch (or a compromised workflow added
+    # to some other ref of this same repo) would present.
+    forged_workflow_and_ref = (
+        "https://github.com/gl0di/clawseccheck/.github/workflows/"
+        "some-other-workflow.yml@refs/heads/attacker-controlled-branch"
+    )
+    # Unescaped-dot half of the same defect: a non-'.' character standing in for the
+    # literal dot in "github.com".
+    forged_host = (
+        "https://githubXcom/gl0di/clawseccheck/.github/workflows/"
+        "clawhub-publish.yml@refs/tags/v4.2.1"
+    )
+    # The genuine identity a real tag-triggered release run signs with.
+    genuine_identity = (
+        "https://github.com/gl0di/clawseccheck/.github/workflows/"
+        "clawhub-publish.yml@refs/tags/v4.2.1"
+    )
+
+    assert re.match(old_pattern, forged_workflow_and_ref), (
+        "sanity check: the pre-fix pattern must reproduce the reported defect by "
+        "accepting a different workflow on a different ref"
+    )
+    assert re.match(old_pattern, forged_host), (
+        "sanity check: the pre-fix pattern must reproduce the reported defect by "
+        "accepting a non-'.' character where the pattern intends a literal dot"
+    )
+
+    assert not re.match(new_pattern, forged_workflow_and_ref), (
+        f"tightened pattern {new_pattern!r} must reject a different workflow/ref"
+    )
+    assert not re.match(new_pattern, forged_host), (
+        f"tightened pattern {new_pattern!r} must reject an unescaped-dot lookalike host"
+    )
+    assert re.match(new_pattern, genuine_identity), (
+        f"tightened pattern {new_pattern!r} must still accept the genuine "
+        "tag-triggered identity"
+    )
+
+
 def _run_verify_step(tmp_path, results: list) -> subprocess.CompletedProcess:
     """Run the verify step with a stub cosign that returns *results* per attempt."""
     stub = tmp_path / "bin"
