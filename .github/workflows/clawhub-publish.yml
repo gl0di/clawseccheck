@@ -908,6 +908,15 @@ jobs:
           asset_names() {
             gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
           }
+          # B-837: `gh release create` with assets is several API calls under the hood
+          # (create as a draft, upload the assets, then publish). If the publish call
+          # fails after the upload succeeded, the release is left as a draft that
+          # already carries both asset names — the name-only check below used to treat
+          # that as success, so the job went green while the release never went public
+          # (README's releases/download/... URLs 404 on a draft).
+          is_draft() {
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft'
+          }
           ensure_release() {
             if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               names="$(asset_names)" || return 1
@@ -948,7 +957,26 @@ jobs:
               exit 1
             fi
           done
-          echo "Release ${TAG} carries ${ASSETS[*]}."
+          draft="$(is_draft)" || {
+            echo "::error::Could not read isDraft state for release ${TAG}."
+            exit 1
+          }
+          if [ "$draft" = "true" ]; then
+            echo "Release ${TAG} carries both assets but is still a draft; publishing it."
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false || {
+              echo "::error::Release ${TAG} is a draft and could not be published."
+              exit 1
+            }
+            draft="$(is_draft)" || {
+              echo "::error::Could not re-read isDraft state for release ${TAG} after publishing."
+              exit 1
+            }
+          fi
+          if [ "$draft" != "false" ]; then
+            echo "::error::Release ${TAG} still reports isDraft=${draft} after attempting to publish it."
+            exit 1
+          fi
+          echo "Release ${TAG} carries ${ASSETS[*]} and is published (isDraft=false)."
 
       - name: Finalize job status
         # C-368: the single pass/fail point for this job's publish outcome. Every step
