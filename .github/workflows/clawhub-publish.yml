@@ -683,13 +683,29 @@ jobs:
         # rejects could ship. This runs the exact user-facing command against the fresh
         # bundle. A few attempts absorb TUF/network flake; a genuinely invalid signature
         # fails every attempt and fails the job.
+        #
+        # B-875: the identity regexp used to be anchored only at the start with
+        # unescaped dots (`^https://github.com/gl0di/clawseccheck/`), which — because
+        # cosign's Go regexp match is a substring search, not a full-string match —
+        # accepted a signature from ANY workflow on ANY ref of this repo, not
+        # specifically this release workflow on a release tag. It now pins the exact
+        # workflow file and requires a `refs/tags/v` ref prefix. Checked what ref a
+        # `workflow_dispatch` run actually signs with: it is whatever ref was used to
+        # dispatch (e.g. `refs/heads/main`), which will NOT match this tightened
+        # pattern and will correctly fail this step. That is intentional, not a
+        # regression — docs/RELEASING.md: "Publishing is deliberately tag-gated —
+        # there is no auto-release", and `Create GitHub Release` below already only
+        # runs `if: github.ref_type == 'tag'`, so a workflow_dispatch run off a branch
+        # never produces a publicly downloadable, release-attached bundle anyway. A
+        # workflow_dispatch retry of an already-tagged version (dispatched with that
+        # tag selected as the ref) still signs `refs/tags/vX.Y.Z` and passes here.
         run: |
           set -euo pipefail
           ok=0
           for attempt in 1 2 3; do
             if cosign verify-blob \
               --bundle SHA256SUMS.txt.bundle \
-              --certificate-identity-regexp "^https://github.com/gl0di/clawseccheck/" \
+              --certificate-identity-regexp "^https://github\.com/gl0di/clawseccheck/\.github/workflows/clawhub-publish\.yml@refs/tags/v" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               SHA256SUMS.txt; then
               ok=1
