@@ -193,13 +193,14 @@ def _has_sensitive_data(tools: list[str], ctx: Context) -> bool:
     # the uncertainty still reaches the user -- through A1's WARN, not through a HIGH
     # chain built on a store the audit could not read.
     #
-    # KNOWN, UNSETTLED (B-730 follow-up): A1 excludes `gateway.auth.password` from this
-    # leg on the stated grounds that it is "the gateway's own auth secret, not
-    # agent-readable data" and that B1 flags it -- verified: check_secrets emits B1
-    # FAIL/CRITICAL on it. This module still counts it, so a home with only that key set
-    # reproduces the same A1-vs-RISK-02 disagreement through a different term. Left in
-    # place on purpose: removing it narrows detection, which is the false-negative
-    # direction, and it deserves its own measurement rather than a ride on this fix.
+    # SETTLED (CLAWSECCHECK-B-876, 2026-09-20): A1 used to exclude `gateway.auth.password`
+    # from its leg on the stated grounds that it is "the gateway's own auth secret, not
+    # agent-readable data" and that B1 flags it -- true, but this module and report.py's
+    # capability graph both counted it anyway, so a home with only that key set reproduced
+    # the same A1-vs-RISK-02 disagreement through a different term. Dave's decision was to
+    # widen A1 to match this term (see `checks/_shared.py::_trifecta_leg_sources`) rather
+    # than narrow it away here -- narrowing is the false-negative direction. This term is
+    # unchanged; the three models agree again.
     home = getattr(ctx, "home", None)
     return (
         _hint(tools, SENSITIVE_TOOL_HINTS)

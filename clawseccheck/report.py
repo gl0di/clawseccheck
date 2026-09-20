@@ -1597,10 +1597,10 @@ def _capability_graph(ctx) -> dict:
     # rejected means the term is unreachable, ignored means the key is not agent-reachable
     # either -- but the stronger claim is not made here.
     #
-    # `gateway.auth.password` deliberately STAYS, and stays divergent from A1. It is the
-    # same question as this one and it is tracked as B-730 item 2; settling it is a
-    # narrowing on a key that IS in the schema, so it needs its own measurement and its
-    # own C-135, not a ride on this change.
+    # `gateway.auth.password` STAYS, unchanged -- CLAWSECCHECK-B-876 settled its
+    # divergence from A1 by widening A1 to match this term (see
+    # `checks/_shared.py::_trifecta_leg_sources`) rather than narrowing this one away.
+    # The three models agree again.
     main_secrets = bool(
         dig(cfg, "gateway.auth.password")
         or _credential_store_state(getattr(ctx, "home", None))["secret_files"]
