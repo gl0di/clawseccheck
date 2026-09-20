@@ -2491,8 +2491,8 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="secrets",
     ),
-    # B384 (F-197): desktop.host.passwordFile's at-rest permissions -- the sole VNC
-    # credential gating the B383 listener (TigerVNC's -SecurityTypes VncAuth
+    # B385 (F-197): desktop.host.passwordFile's at-rest permissions -- the sole VNC
+    # credential gating the B384 listener (TigerVNC's -SecurityTypes VncAuth
     # -PasswordFile, buildTigerVncArgv, host-source-v64nW4u1.mjs; VncAuth's DES-based
     # obfuscation is not a real secret boundary once the file itself is readable). FAIL
     # only when the file exists and is readable by another local account
@@ -2500,7 +2500,7 @@ CATALOG: list[CheckMeta] = [
     # flagged, per B-127). HIGH: an exposed password file hands remote desktop control to
     # any local account that can read it.
     CheckMeta(
-        "B384",
+        "B385",
         "desktop.host.passwordFile (VNC credential) readable by others",
         HIGH,
         "hardening",
@@ -2959,7 +2959,7 @@ CATALOG: list[CheckMeta] = [
         "Zero Trust / Gateway",
         surface="gateway",
     ),
-    # B383 (F-197): desktop.host is a second network listener beside the gateway (a
+    # B384 (F-197): desktop.host is a second network listener beside the gateway (a
     # VNC/RFB service opted into by desktop.host.enabled, default port 5900) --
     # completely unread before this. Grounded against the installed OpenClaw 2026.9.5
     # dist (zod-schema-DN2u5FdA.mjs + host-source-v64nW4u1.mjs): the schema has no
@@ -2972,7 +2972,7 @@ CATALOG: list[CheckMeta] = [
     # to avoid the exact port-sharing false-FAIL C-135 caught for B340. HIGH: a confirmed
     # exposure is a second, less-audited path to full remote desktop control.
     CheckMeta(
-        "B383",
+        "B384",
         "Gateway-host desktop (VNC/RFB) listener exposure (loopback-only design vs. actual)",
         HIGH,
         "hardening",

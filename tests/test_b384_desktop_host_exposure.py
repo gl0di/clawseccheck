@@ -1,4 +1,4 @@
-"""B383 (F-197): corroborate desktop.host's always-loopback design assumption against the
+"""B384 (F-197): corroborate desktop.host's always-loopback design assumption against the
 actual listening socket on its resolved port.
 
 Same offline/injected-state approach as tests/test_b340_effective_bind.py: ctx.sockets is
@@ -171,6 +171,6 @@ def test_non_loopback_listener_confirmed_other_process_is_warn_not_fail(tmp_path
 
 
 def test_catalog_entry():
-    m = next(c for c in CATALOG if c.id == "B383")
+    m = next(c for c in CATALOG if c.id == "B384")
     assert m.surface == "gateway"
     assert m.block == "hardening"

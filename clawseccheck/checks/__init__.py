@@ -1478,11 +1478,11 @@ CHECKS = [
     check_session_approval_policy,
     check_gateway_rate_limit,
     check_effective_bind,  # B340 — corroborate declared gateway.bind against the actual listening socket (F-156)
-    # B383/B384 (F-197): desktop.host is a second network listener beside the gateway
+    # B384/B385 (F-197): desktop.host is a second network listener beside the gateway
     # (a VNC/RFB service, default port 5900) plus its passwordFile credential — both
-    # completely unread before this. B383 corroborates the always-loopback design
+    # completely unread before this. B384 corroborates the always-loopback design
     # assumption against the actual listening socket (sockets.py, same spirit as
-    # B340); B384 checks the password file's at-rest permissions (same idiom as
+    # B340); B385 checks the password file's at-rest permissions (same idiom as
     # B182/B193).
     check_desktop_host_exposure,
     check_desktop_host_password_file,

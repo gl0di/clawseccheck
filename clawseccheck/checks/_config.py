@@ -5080,7 +5080,7 @@ def check_effective_bind(ctx: Context) -> Finding:
     )
 
 
-# B383/B384 (F-197): desktop.host is a SECOND network listener beside the gateway -- a
+# B384/B385 (F-197): desktop.host is a SECOND network listener beside the gateway -- a
 # VNC/RFB service (default port 5900) that desktop.host.enabled opts into, plus an
 # absolute path to a VNC password file. Grounded against the installed OpenClaw 2026.9.5
 # dist (zod-schema-DN2u5FdA.mjs, src/config/zod-schema.desktop.ts + host-source-
@@ -5104,7 +5104,7 @@ def check_effective_bind(ctx: Context) -> Finding:
 # nothing in OpenClaw enforces loopback for that at all, so an operator who left it
 # reachable is a real, live gap this closes.
 #
-# B383 FAILs only when a non-loopback listener on the resolved port is POSITIVELY
+# B384 FAILs only when a non-loopback listener on the resolved port is POSITIVELY
 # confirmed (the same /proc/*/fd inode -> kernel-resolved-exe correlation B340 uses, see
 # _classify_desktop_listener_identity) to be OpenClaw's own managed Xtigervnc process --
 # an exact /proc/<pid>/exe basename match, never a substring/comm guess (comm is
@@ -5116,7 +5116,7 @@ def check_effective_bind(ctx: Context) -> Finding:
 # disclosed accepted-uncertainty trade for the C-135 reviewer, not a guess dressed up as
 # a FAIL.
 #
-# B384 is the simpler, unambiguous sibling: desktop.host.passwordFile is the SOLE
+# B385 is the simpler, unambiguous sibling: desktop.host.passwordFile is the SOLE
 # credential TigerVNC's `-SecurityTypes VncAuth -PasswordFile` uses (buildTigerVncArgv);
 # its DES-based obfuscation is not a real secret boundary once the file itself is
 # readable, so this is an ordinary at-rest-credential-file permission check, same idiom
@@ -5127,7 +5127,7 @@ _DESKTOP_DEFAULT_VNC_PORT = 5900  # grounded: DEFAULT_HOST_DESKTOP_PORT, host-so
 
 
 def _classify_desktop_listener_identity(identity: "object | None") -> str:
-    """Classify a resolved ``sockets.ProcessIdentity`` (or ``None``) for B383.
+    """Classify a resolved ``sockets.ProcessIdentity`` (or ``None``) for B384.
 
     "vnc"        -- the KERNEL-RESOLVED /proc/<pid>/exe basename is exactly "Xtigervnc",
                     the literal binary name OpenClaw's managed-desktop supervisor spawns
@@ -5149,7 +5149,7 @@ def _classify_desktop_listener_identity(identity: "object | None") -> str:
 
 
 def check_desktop_host_exposure(ctx: Context) -> Finding:
-    """B383 (F-197): corroborate desktop.host's always-loopback design assumption
+    """B384 (F-197): corroborate desktop.host's always-loopback design assumption
     against the actual listening socket on its resolved port. See the module comment
     above for the full grounding and severity rationale.
 
@@ -5168,7 +5168,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
     cfg = ctx.config
     if not cfg:
         return _finding(
-            "B383",
+            "B384",
             UNKNOWN,
             "No config loaded — cannot assess desktop.host's network exposure.",
             "Run on the host with ~/.openclaw present.",
@@ -5177,7 +5177,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
     desktop = dig(cfg, "desktop.host")
     if desktop is None:
         return _finding(
-            "B383",
+            "B384",
             PASS,
             "desktop.host is not configured — the experimental gateway-host desktop "
             "source (a second, VNC/RFB network listener beside the gateway) is off by "
@@ -5186,7 +5186,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         )
     if not isinstance(desktop, dict):
         return _finding(
-            "B383",
+            "B384",
             UNKNOWN,
             "desktop.host is present but malformed (not an object) — cannot assess its "
             "network exposure.",
@@ -5194,7 +5194,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         )
     if desktop.get("enabled") is not True:
         return _finding(
-            "B383",
+            "B384",
             PASS,
             "desktop.host.enabled is not true — the gateway-host VNC/RFB desktop source "
             "is off.",
@@ -5214,7 +5214,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         used_default_port = False
     else:
         return _finding(
-            "B383",
+            "B384",
             UNKNOWN,
             f"desktop.host.port={port_raw!r} is not a valid TCP port (1-65535) — cannot "
             "look up which listening socket to corroborate.",
@@ -5225,7 +5225,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
     sockets_result = getattr(ctx, "sockets", None)
     if sockets_result is None:
         return _finding(
-            "B383",
+            "B384",
             UNKNOWN,
             "The listening-socket scan was not run (audit(include_sockets=True), or the "
             "CLI's --no-sockets was passed) — cannot corroborate desktop.host against "
@@ -5235,7 +5235,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
         )
     if not sockets_result.available:
         return _finding(
-            "B383",
+            "B384",
             UNKNOWN,
             f"Could not read the host's listening-socket table: {sockets_result.reason}.",
             "Run ClawSecCheck on Linux with /proc mounted (the standard case) so this "
@@ -5251,7 +5251,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
     managed = desktop.get("managed") is True
     if not matches:
         return _finding(
-            "B383",
+            "B384",
             UNKNOWN,
             f"desktop.host.enabled is true, but nothing is listening on port {port} "
             f"({port_source}) yet — the Labs feature needs a gateway restart after "
@@ -5269,7 +5269,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
     ]
     if classes <= {"loopback"}:
         return _finding(
-            "B383",
+            "B384",
             PASS,
             f"desktop.host is enabled and the actual listener on port {port} is "
             "loopback-only, matching OpenClaw's own design (a managed desktop is always "
@@ -5295,13 +5295,13 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
     ]
     if confirmed_vnc:
         return _finding(
-            "B383",
+            "B384",
             FAIL,
             f"desktop.host.enabled is true, and the VNC/RFB desktop listener on port "
             f"{port} — confirmed as OpenClaw's own managed Xtigervnc process — is "
             "ACTUALLY reachable on a non-loopback address. This is a second network "
             "listener beside the gateway, gated only by VNC password auth "
-            "(desktop.host.passwordFile, see B384), not OpenClaw's own channel auth.",
+            "(desktop.host.passwordFile, see B385), not OpenClaw's own channel auth.",
             "Find why the managed desktop is not loopback-only (an env override or a "
             "TigerVNC config outside OpenClaw's control is the usual cause) and restart "
             "the gateway once fixed, or disable desktop.host.managed.",
@@ -5324,7 +5324,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
                 "identifiable as OpenClaw's managed desktop"
             )
     return _finding(
-        "B383",
+        "B384",
         WARN,
         f"desktop.host.enabled is true, and a non-loopback listener was found on port "
         f"{port} ({port_source}), but it could not be positively tied to OpenClaw's "
@@ -5343,7 +5343,7 @@ def check_desktop_host_exposure(ctx: Context) -> Finding:
 
 
 def check_desktop_host_password_file(ctx: Context) -> Finding:
-    """B384 (F-197): desktop.host.passwordFile's at-rest permissions. See the module
+    """B385 (F-197): desktop.host.passwordFile's at-rest permissions. See the module
     comment above `_DESKTOP_DEFAULT_VNC_PORT` for the full grounding.
 
     FAIL    -- the file exists and is readable by another local account
@@ -5361,7 +5361,7 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
     cfg = ctx.config
     if not cfg:
         return _finding(
-            "B384",
+            "B385",
             UNKNOWN,
             "No config loaded — cannot assess desktop.host.passwordFile.",
             "Run on the host with ~/.openclaw present.",
@@ -5370,14 +5370,14 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
     desktop = dig(cfg, "desktop.host")
     if desktop is None:
         return _finding(
-            "B384",
+            "B385",
             PASS,
             "desktop.host is not configured, so there is no VNC passwordFile to assess.",
             "No action needed unless you enable the Desktop lab feature.",
         )
     if not isinstance(desktop, dict):
         return _finding(
-            "B384",
+            "B385",
             UNKNOWN,
             "desktop.host is present but malformed (not an object) — cannot assess its "
             "passwordFile.",
@@ -5386,14 +5386,14 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
     raw_path = desktop.get("passwordFile")
     if not (isinstance(raw_path, str) and raw_path.strip()):
         return _finding(
-            "B384",
+            "B385",
             PASS,
             "desktop.host.passwordFile is not set — no VNC password file to assess.",
             "No action needed.",
         )
     if not _is_posix():
         return _finding(
-            "B384",
+            "B385",
             UNKNOWN,
             "On Windows, file security uses NTFS ACLs, not POSIX mode bits — "
             "desktop.host.passwordFile's at-rest permissions are UNKNOWN, never a false "
@@ -5408,7 +5408,7 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
         exists = False
     if not exists:
         return _finding(
-            "B384",
+            "B385",
             UNKNOWN,
             f"desktop.host.passwordFile is set to {raw_path!r}, but no readable file "
             "exists there — cannot assess its permissions.",
@@ -5418,7 +5418,7 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
     why = _file_readable_by_others(pw_path)
     if why:
         return _finding(
-            "B384",
+            "B385",
             FAIL,
             f"desktop.host.passwordFile ({raw_path}) is {why}. This is the sole "
             "credential gating the gateway-host VNC/RFB desktop listener (TigerVNC "
@@ -5431,7 +5431,7 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
             evidence=[f"{raw_path} is {why}"],
         )
     return _finding(
-        "B384",
+        "B385",
         PASS,
         f"desktop.host.passwordFile ({raw_path}) exists and only its owner can read it.",
         "No action needed.",

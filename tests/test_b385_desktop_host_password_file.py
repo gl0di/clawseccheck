@@ -1,4 +1,4 @@
-"""B384 (F-197): desktop.host.passwordFile's at-rest permissions.
+"""B385 (F-197): desktop.host.passwordFile's at-rest permissions.
 
 Grounded against the installed OpenClaw dist: `desktop.host.passwordFile` is the sole
 `-PasswordFile` TigerVNC's `-SecurityTypes VncAuth` uses (buildTigerVncArgv,
@@ -90,6 +90,6 @@ def test_no_mode_based_finding_on_non_posix(tmp_path, monkeypatch):
 
 
 def test_catalog_entry():
-    m = next(c for c in CATALOG if c.id == "B384")
+    m = next(c for c in CATALOG if c.id == "B385")
     assert m.surface == "secrets"
     assert m.scored is True
