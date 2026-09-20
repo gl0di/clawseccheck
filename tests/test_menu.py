@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date
 
 from clawseccheck.cli import main
+from clawseccheck.integrity import build_fingerprint
 from clawseccheck.menu import compute_ages, render_menu
 
 
@@ -103,3 +104,32 @@ def test_cli_menu_ascii(tmp_path, capsys):
     out = capsys.readouterr().out
     out.encode("ascii")  # must not raise
     assert "🦞" not in out
+
+
+# ── B-869: build-identity line ────────────────────────────────────────────────
+
+def test_render_menu_shows_build_digest_when_given():
+    out = render_menu(version="1.0.0", build_digest="deadbeef1234")
+    assert "🔧 Build: deadbeef1234" in out
+
+
+def test_render_menu_omits_build_line_when_digest_not_given():
+    """Optional and additive: every pre-existing caller that omits it is unaffected."""
+    out = render_menu(version="1.0.0")
+    assert "Build:" not in out
+
+
+def test_render_menu_build_line_is_ascii_safe():
+    out = render_menu(version="1.0.0", ascii_only=True, build_digest="deadbeef1234")
+    out.encode("ascii")  # must not raise
+    assert "Build: deadbeef1234" in out
+    assert "🔧" not in out
+
+
+def test_cli_menu_prints_the_real_build_fingerprint(tmp_path, capsys):
+    """The version string alone can't tell a dev checkout from the release it
+    diverged from (B-869) — --menu must also print a self-computed digest."""
+    rc = main(["--menu", "--history", str(tmp_path / "history.jsonl")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"Build: {build_fingerprint()}" in out

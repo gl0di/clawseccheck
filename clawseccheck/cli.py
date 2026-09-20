@@ -70,6 +70,7 @@ from .integrity import (
     NOTE_UNCHECKED_PYC,
     NOTE_UNREADABLE,
     NOTE_VANISHED,
+    build_fingerprint,
     package_digest,
 )
 from .report import _missing_layers_sentence
@@ -4395,8 +4396,12 @@ def _main(argv=None) -> int:
         last_check = rows[-1]["date"] if rows else None
         build_age, last_days = compute_ages(released=__released__, last_check=last_check)
         stale = bool(update_notice(__version__, released=__released__))
+        # B-869: a self-computed content fingerprint, distinct from __version__ — see
+        # integrity.build_fingerprint()'s docstring for why the version string alone
+        # cannot tell a dev checkout apart from the release it diverged from.
         _emit(render_menu(version=__version__, build_age_days=build_age,
-                          last_check_days=last_days, stale=stale, ascii_only=ascii_only))
+                          last_check_days=last_days, stale=stale, ascii_only=ascii_only,
+                          build_digest=build_fingerprint()))
         return 0
 
     if _mode == "brief":
@@ -6615,6 +6620,9 @@ def _main(argv=None) -> int:
                                risk=paths, update_notice=notice, freshness_notice=f_notice,
                                openclaw_detected=ctx.config_found, ctx=ctx, color=use_color,
                                tamper=tamper,
+                               # B-869: self-computed content fingerprint, so a dev
+                               # checkout says so even when __version__ is unchanged.
+                               build_digest=build_fingerprint(),
                                # B-473: the plugin sweep is pipeline phase P7, which runs
                                # BELOW this body (the tee block). There is no sweep object
                                # to render here, but "not scanned — run --full" is a lie on

@@ -66,6 +66,19 @@ def _last_check_line(days, ascii_only: bool) -> str:
     return f"{label} {days} {unit} ago"
 
 
+def _build_line(build_digest: str, ascii_only: bool) -> str:
+    """B-869: a self-computed content fingerprint, distinct from the version string.
+
+    ``version``/``build_age_days`` above both come from ``__version__``/``__released__``
+    — strings a human edits and can forget to bump, so a dev checkout can print the
+    same version as the release it diverged from. This line is a prefix of
+    ``integrity.build_fingerprint()``, computed from the files actually on disk, so a
+    dev install whose content differs says so even when the version line does not.
+    """
+    label = "Build:" if ascii_only else "🔧 Build:"
+    return f"{label} {build_digest}"
+
+
 def _update_line(build_age_days, stale: bool, ascii_only: bool) -> str:
     """The 🆙 update affordance. Always shown so "update" is discoverable; louder when stale."""
     label = "Update:" if ascii_only else "🆙"
@@ -164,8 +177,15 @@ def render_onboarding(*, reason: str, home: str, n_checks: int | None = None,
 
 
 def render_menu(*, version, build_age_days=None, last_check_days=None,
-                stale: bool = False, ascii_only: bool = False) -> str:
-    """Render the capability menu as plain text. Pure — no I/O, no clock read."""
+                stale: bool = False, ascii_only: bool = False,
+                build_digest: str | None = None) -> str:
+    """Render the capability menu as plain text. Pure — no I/O, no clock read.
+
+    ``build_digest``, when given (B-869), is a short self-computed content
+    fingerprint from ``integrity.build_fingerprint()`` — optional and additive so
+    every pre-existing caller/test that omits it reproduces the prior output
+    unchanged; ``cli.py`` wires the real value in for the actual ``--menu`` run.
+    """
     head = brand.header(subtitle=f"v{version}", ascii_only=ascii_only)
     lines = [head, ""]
 
@@ -180,4 +200,6 @@ def render_menu(*, version, build_age_days=None, last_check_days=None,
     lines.append("")
     lines.append("  " + _last_check_line(last_check_days, ascii_only))
     lines.append("  " + _update_line(build_age_days, stale, ascii_only))
+    if build_digest:
+        lines.append("  " + _build_line(build_digest, ascii_only))
     return "\n".join(lines)

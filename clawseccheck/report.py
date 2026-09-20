@@ -3091,7 +3091,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
                   openclaw_detected: bool = True, ctx=None,
                   verbose: bool = False, color: bool = False,
                   tamper: ScoreResult | None = None, plugin_sweep=None,
-                  plugins_deferred: bool = False) -> str:
+                  plugins_deferred: bool = False,
+                  build_digest: str | None = None) -> str:
     findings = deduplicate_findings(findings)
     icon = _color_icons(_ICON_ASCII if ascii_only else _ICON, color)
     ok = "[OK]" if ascii_only else "✅"
@@ -3108,7 +3109,15 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # Mascot + wordmark: header line only, once (design-system Foundations);
     # --ascii drops the mascot and folds the separator (brand.header()).
     head = brand.header(subtitle="OpenClaw Security Audit", ascii_only=ascii_only)
-    lines = [head, "=" * 44]
+    lines = [head]
+    # B-869: an optional self-computed content fingerprint (integrity.build_fingerprint(),
+    # wired in by cli.py), distinct from __version__/__released__ — strings a human edits
+    # by hand and can forget to bump, so a dev checkout can print the exact release
+    # version while its files differ. Omitted by every pre-existing caller/test, which
+    # reproduces the prior header unchanged.
+    if build_digest:
+        lines.append(f"Build: {build_digest}")
+    lines.append("=" * 44)
     # B-313/B-399: disclosed ABOVE the grade, unconditionally whenever any check degraded
     # this run (crashed, timed out, or — B-399 — ran to completion but could not reach a
     # verdict for an engine-side reason, e.g. an input it expected to read that turned out
