@@ -428,3 +428,71 @@ def test_empty_range_falls_back_to_tip_and_still_catches_trailer(repo, case) -> 
     assert r.returncode == 0 and "Inspecting 1 commit(s)" in r.stdout, r.stdout + r.stderr
     r2, _ = _chain("No AI-agent co-author", rng, repo)
     assert r2.returncode == 1 and "OK: no AI co-author tags" not in r2.stdout
+
+
+# ---------------------------------------------------------------------------
+# B-840: "No agent config files" was fail-open (root-only pathspec, no `set -e`)
+# ---------------------------------------------------------------------------
+
+
+@needs_bash
+def test_agent_config_guard_catches_a_nested_config_file(repo) -> None:
+    """A bare `git ls-files CLAUDE.md` pathspec matches only the repo root.
+
+    Before B-840 this step passed with "OK" on a tracked sub/CLAUDE.md, since the
+    pathspec never looked below the top level. The guard must inspect the whole
+    tracked-file list so a match at any depth is caught.
+    """
+    (repo / "sub").mkdir()
+    (repo / "sub" / "CLAUDE.md").write_text("nested agent config")
+    _git(repo, "add", "sub/CLAUDE.md")
+    _commit(repo, "add nested config")
+    r, _ = _bash(_step_body("No agent config files"), repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "sub/CLAUDE.md" in r.stdout
+    assert "OK: no agent config files in git tree" not in r.stdout
+
+
+@needs_bash
+def test_agent_config_guard_catches_a_nested_dotdir(repo) -> None:
+    """Same defect, a different forbidden name: a nested `.claude/` directory."""
+    (repo / "sub" / ".claude").mkdir(parents=True)
+    (repo / "sub" / ".claude" / "settings.json").write_text("{}")
+    _git(repo, "add", "sub/.claude/settings.json")
+    _commit(repo, "add nested dotdir")
+    r, _ = _bash(_step_body("No agent config files"), repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "sub/.claude/settings.json" in r.stdout
+
+
+def test_agent_config_guard_passes_on_the_real_tree() -> None:
+    """The real tree's only match is the allowlisted fixture; the guard stays green.
+
+    Run against REPO_ROOT itself (not the `repo` fixture, which has no bash
+    dependency requirement here since REPO_ROOT is a real git checkout).
+    """
+    if shutil.which("bash") is None:
+        pytest.skip("bash not available")
+    r, _ = _bash(_step_body("No agent config files"), REPO_ROOT)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "OK: no agent config files in git tree" in r.stdout
+
+
+# ---------------------------------------------------------------------------
+# B-840: "Author identity check" warned spuriously on an empty log
+# ---------------------------------------------------------------------------
+
+
+@needs_bash
+def test_author_check_is_silent_on_an_empty_range(repo) -> None:
+    """An empty range (e.g. a merge-only HEAD^! fallback) must not fake a warning.
+
+    Before B-840, `grep -vE "$OK" <<<""` fed one blank line to grep, which "matched"
+    (a blank line is not a canonical author) and printed "Non-canonical author(s)"
+    with nothing after it — noise on every empty range.
+    """
+    _commit(repo, "root")
+    r, _ = _chain("Author identity check", "HEAD..HEAD", repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "::warning::" not in r.stdout
+    assert "OK: no non-merge commits in range to check" in r.stdout
