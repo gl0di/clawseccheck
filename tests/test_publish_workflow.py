@@ -1578,6 +1578,11 @@ case "$1 $2" in
     esac
     exit 0 ;;
   "release create")
+    if [ -n "${GH_FAIL_CREATE_TIMES:-}" ]; then
+      n=$(( $(cat "$STUB/create_calls" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$STUB/create_calls"
+      [ "$n" -gt "$GH_FAIL_CREATE_TIMES" ] || exit 1
+    fi
     [ -z "${GH_FAIL_CREATE:-}" ] || exit 1
     touch "$STUB/exists"
     if [ -z "${GH_NO_ASSETS_ADDED:-}" ]; then
@@ -1622,7 +1627,7 @@ def _run_create_step(tmp_path, existing=None, draft=False, **flags):
         os.environ, PATH=f"{bindir}:{os.environ['PATH']}", STUB=str(stub),
         GITHUB_REF_NAME="v9.9.9", GITHUB_REPOSITORY="owner/repo", GH_TOKEN="x",
     )
-    env.update({k: "1" for k, v in flags.items() if v})
+    env.update({k: str(v) for k, v in flags.items() if v})
     proc = subprocess.run(
         ["bash", "-eo", "pipefail", "-c", _step_shell_block("Create GitHub Release")],
         cwd=str(work), capture_output=True, text=True, env=env,
@@ -1699,6 +1704,48 @@ def test_create_release_step_publishes_a_lingering_draft_when_it_can(tmp_path) -
     assert proc.returncode == 0, ctx
     assert "release edit" in log, ctx
     assert "isDraft=false" in proc.stdout, ctx
+
+
+# ---------------------------------------------------------------------------------
+# CLAWSECCHECK-B-874: the outer `for attempt in 1 2 3; do ... done` retry loop around
+# `ensure_release` was never pinned by a test. A test that only checks pass/fail (as
+# the existing `create-fails` parametrized case does) cannot distinguish a correctly
+# bounded 3-attempt retry from one that gives up after a single try, or from one that
+# would loop forever on a permanent failure -- all three "look the same" from a bare
+# return-code assertion when the failure is permanent. These count the actual number
+# of `gh release create` invocations to pin the bound in both directions: retries
+# really happen (a transient failure recovers) and they are capped (a permanent
+# failure exits non-zero after exactly 3 attempts, not 1 and not forever).
+# ---------------------------------------------------------------------------------
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_retries_a_transient_failure_then_succeeds(tmp_path) -> None:
+    """`gh release create` fails once, then succeeds: the job must pass, and it must
+    have actually retried (two calls), not failed outright on the first try."""
+    proc, log = _run_create_step(tmp_path, existing=None, GH_FAIL_CREATE_TIMES=1)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode == 0, ctx
+    calls = log.count("release create v9.9.9")
+    assert calls == 2, f"expected exactly one retry (2 calls), got {calls}\n{ctx}"
+    assert "Release attempt 1 failed." in proc.stdout, ctx
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_create_release_step_retry_loop_is_bounded_and_fails_red(tmp_path) -> None:
+    """A permanent `gh release create` failure must exhaust a BOUNDED number of
+    attempts (3, per the workflow's `for attempt in 1 2 3`) and then fail the job --
+    not retry once and give up, and not retry indefinitely."""
+    proc, log = _run_create_step(tmp_path, existing=None, GH_FAIL_CREATE=1)
+    ctx = f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}\nlog: {log!r}"
+    assert proc.returncode != 0, ctx
+    calls = log.count("release create v9.9.9")
+    assert calls == 3, f"expected exactly 3 bounded attempts, got {calls}\n{ctx}"
+    assert "Release attempt 1 failed." in proc.stdout, ctx
+    assert "Release attempt 2 failed." in proc.stdout, ctx
+    assert "Release attempt 3 failed." in proc.stdout, ctx
+    assert "Release attempt 4 failed." not in proc.stdout, (
+        "a 4th attempt means the retry bound was loosened or removed" + f"\n{ctx}"
+    )
+    assert "::error::Could not create or complete the GitHub Release for v9.9.9." in proc.stdout, ctx
 
 
 def test_create_release_step_never_swallows_errors_or_clobbers() -> None:
