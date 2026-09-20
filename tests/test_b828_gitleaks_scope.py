@@ -126,7 +126,7 @@ def _allow_regexes(code=None):
     if code is None:
         code = CODE
     regexes = []
-    for m in re.finditer(r"\bregexes\s*=\s*(\[)", code):
+    for m in re.finditer(r"\bregexes\s*=\s*(\[)", code, re.I):
         content, _end = _find_bracket_span(code, m.start(1))
         items = _parse_string_list(content)
         assert items, f"empty regexes list: {m.group(0)!r}"
@@ -135,13 +135,29 @@ def _allow_regexes(code=None):
 
 
 def _forbidden_scope_keys(code=None):
-    """Any key or table this config must never contain -- see `_FORBIDDEN_SCOPE_KEYS`."""
+    """Any key or table this config must never contain -- see `_FORBIDDEN_SCOPE_KEYS`.
+
+    Matched case-INSENSITIVELY, and that is load-bearing rather than defensive. gitleaks
+    decodes this file into Go structs whose fields are `Paths`, `Regexes`, `StopWords`,
+    `Commits`, `RegexTarget`; BurntSushi/toml binds a TOML key to a struct field by a
+    case-insensitive fallback when no explicit tag names it, which is exactly why the
+    config's own lowercase `regexes` works against the Go field `Regexes` today.
+
+    So a capitalised spelling is honoured by the real scanner while a case-SENSITIVE guard
+    sees nothing. Measured on the pinned gitleaks 8.24.3 against a `clh_`-shaped value:
+    the stock config reports `leaks found: 1`, and appending an allowlist whose key is
+    spelled `Paths` (capital P) reports `no leaks found` -- while `_forbidden_scope_keys`
+    returned `[]` for that same text. A one-character change, indistinguishable from a typo
+    in review, silently disabled the scanner and left every test in this file green. Do not
+    "tidy" these flags away.
+    """
     if code is None:
         code = CODE
-    hits = [key for key in _FORBIDDEN_SCOPE_KEYS if re.search(rf"^\s*{key}\s*=", code, re.M)]
-    if re.search(r"^\s*\[allowlist\]", code, re.M):
+    hits = [key for key in _FORBIDDEN_SCOPE_KEYS
+            if re.search(rf"^\s*{key}\s*=", code, re.M | re.I)]
+    if re.search(r"^\s*\[allowlist\]", code, re.M | re.I):
         hits.append("[allowlist]")
-    if re.search(r"^\s*\[\[allowlists\]\]", code, re.M):
+    if re.search(r"^\s*\[\[allowlists\]\]", code, re.M | re.I):
         hits.append("[[allowlists]]")
     return hits
 
@@ -244,6 +260,32 @@ description = "scratch bypass: exempt an entire commit instead of one value"
 commits = ["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"]
 """
 
+# gitleaks decodes this file into Go structs (`Paths`, `Regexes`, `StopWords`, ...) and
+# BurntSushi/toml binds a key to a field case-insensitively when no tag names it -- which
+# is why the lowercase spellings above work at all. So a capitalised key is honoured by the
+# real scanner. Measured on the pinned gitleaks 8.24.3 with a `clh_`-shaped value: the stock
+# config reports `leaks found: 1`; appending the `Paths` block below reports `no leaks
+# found`. Before this was fixed the guard matched case-SENSITIVELY and returned nothing for
+# either, leaving every test in this file green while the scanner was disabled.
+
+_BYPASS_CAPITALISED_PATHS = """
+[[rules.allowlists]]
+description = "scratch bypass: path exemption spelled to dodge a case-sensitive guard"
+Paths = ['''somepath/leak\\.py''']
+"""
+
+_BYPASS_CAPITALISED_REGEXES = """
+[[rules.allowlists]]
+description = "scratch bypass: blanket regex spelled to dodge a case-sensitive guard"
+Regexes = ['''.*''']
+"""
+
+_BYPASS_CAPITALISED_STOPWORDS = """
+[[rules.allowlists]]
+description = "scratch bypass: stopword exemption spelled to dodge a case-sensitive guard"
+StopWords = ["AKIA"]
+"""
+
 
 @pytest.mark.parametrize(
     "bypass",
@@ -252,8 +294,12 @@ commits = ["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"]
         _BYPASS_MULTI_ENTRY_LIST,
         _BYPASS_REGEX_TARGET_LINE,
         _BYPASS_COMMITS,
+        _BYPASS_CAPITALISED_PATHS,
+        _BYPASS_CAPITALISED_REGEXES,
+        _BYPASS_CAPITALISED_STOPWORDS,
     ],
-    ids=["double_quoted_blanket", "multi_entry_list", "regex_target_line", "commits_scope"],
+    ids=["double_quoted_blanket", "multi_entry_list", "regex_target_line", "commits_scope",
+         "capitalised_paths", "capitalised_regexes", "capitalised_stopwords"],
 )
 def test_guard_catches_known_bypass_shapes(bypass):
     mutated = CODE + bypass
