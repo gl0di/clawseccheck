@@ -4,9 +4,22 @@ The old config exempted `fixtures/` and `tests/` wholesale (about 93% of tracked
 plus a global stopword list, so a real-shaped secret pasted into a test was invisible to
 the only mechanical enforcement of the no-secrets-in-source rule. These tests read the
 config as TEXT (tomllib is 3.11+, the CI floor is 3.9) and pin the narrow shape.
+
+B-841: the original `_allow_regexes()` understood exactly one shape --
+`regexes = ['''...''']`, a single triple-single-quoted entry per list. A double-quoted
+list (`regexes = [".*"]`), a multi-entry list (`regexes = ['''a''', '''b''']`), or scope
+broadened through `paths` / `stopwords` / `commits` / `regexTarget` / `condition` all
+slipped past every test in this module untouched -- an adversarial review of B-828 could
+append any of them and watch all seven tests stay green. The parsing below understands
+the actual grammar (both quote styles, any number of entries) and a fixed vocabulary of
+scope-broadening keys, and fails loudly on anything it doesn't recognize instead of
+silently contributing nothing. `test_guard_catches_known_bypass_shapes` mutates a copy of
+the real config text with each reported bypass and proves the guard now rejects it.
 """
 import re
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = (ROOT / ".gitleaks.toml").read_text(encoding="utf-8")
@@ -22,6 +35,12 @@ _PINNED_FINGERPRINTS = {
     "24995977c5e45bf0221ad56348cc28b79da12fd2:tests/test_logsafe.py:gcp-api-key:60",
 }
 
+# gitleaks allowlist keys that broaden an exemption beyond one exact, anchored value:
+# a file path, a whole commit, a stopword list, matching the entire line instead of just
+# the value, or an AND/OR combinator. None of them is ever legitimate in this file.
+_FORBIDDEN_SCOPE_KEYS = ("paths", "stopwords", "commits", "regexTarget", "condition")
+_EXPECTED_REGEX_COUNT = 7
+
 
 def _strip_comments(text):
     return "\n".join(re.sub(r"^\s*#.*$", "", ln) for ln in text.splitlines())
@@ -30,19 +49,131 @@ def _strip_comments(text):
 CODE = _strip_comments(CONFIG)
 
 
-def _allow_regexes():
-    return re.findall(r"regexes\s*=\s*\[\s*'''(.*?)'''\s*\]", CODE, re.S)
+def _find_bracket_span(text, start):
+    """Return `(content, end)` for the `[ ... ]` array whose `[` is at `text[start]`.
+
+    Walks the array by hand instead of with one regex so a `]` or `,` inside a quoted
+    string can't be mistaken for the array's own delimiters.
+    """
+    assert text[start] == "[", text[start:start + 20]
+    i, n = start + 1, len(text)
+    while i < n:
+        c = text[i]
+        if c == "]":
+            return text[start + 1:i], i + 1
+        if text.startswith("'''", i):
+            end = text.find("'''", i + 3)
+            assert end != -1, f"unterminated ''' inside list: {text[start:start + 80]!r}"
+            i = end + 3
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            assert j < n, f"unterminated \" inside list: {text[start:start + 80]!r}"
+            i = j + 1
+            continue
+        i += 1
+    raise AssertionError(f"unterminated [ ... ] list: {text[start:start + 80]!r}")
+
+
+def _parse_string_list(content):
+    """Parse comma-separated string literals -- `'''...'''` or `"..."` -- out of the
+    inside of a `[ ... ]` array. Raises on any other token (a bare identifier, a
+    number, string concatenation, ...) so an unrecognized shape fails loudly instead
+    of silently contributing zero entries.
+    """
+    items = []
+    i, n = 0, len(content)
+    while i < n:
+        c = content[i]
+        if c in " \t\r\n,":
+            i += 1
+            continue
+        if content.startswith("'''", i):
+            end = content.find("'''", i + 3)
+            assert end != -1, f"unterminated ''' string: {content!r}"
+            items.append(content[i + 3:end])
+            i = end + 3
+            continue
+        if c == '"':
+            j = i + 1
+            buf = []
+            while j < n and content[j] != '"':
+                if content[j] == "\\":
+                    assert j + 1 < n and content[j + 1] in ('"', "\\"), (
+                        f"unsupported escape in: {content!r}"
+                    )
+                    buf.append(content[j + 1])
+                    j += 2
+                    continue
+                buf.append(content[j])
+                j += 1
+            assert j < n, f"unterminated \" string: {content!r}"
+            items.append("".join(buf))
+            i = j + 1
+            continue
+        raise AssertionError(f"unrecognized token {content[i:i + 20]!r} in list: {content!r}")
+    return items
+
+
+def _allow_regexes(code=None):
+    """Every individual regex string inside every `regexes = [...]` list in `code`
+    (the real config by default). Understands both TOML string-quoting styles
+    gitleaks accepts and both single- and multi-entry lists -- unlike the original
+    version this replaces, which only matched a single `'''...'''` entry.
+    """
+    if code is None:
+        code = CODE
+    regexes = []
+    for m in re.finditer(r"\bregexes\s*=\s*(\[)", code):
+        content, _end = _find_bracket_span(code, m.start(1))
+        items = _parse_string_list(content)
+        assert items, f"empty regexes list: {m.group(0)!r}"
+        regexes.extend(items)
+    return regexes
+
+
+def _forbidden_scope_keys(code=None):
+    """Any key or table this config must never contain -- see `_FORBIDDEN_SCOPE_KEYS`."""
+    if code is None:
+        code = CODE
+    hits = [key for key in _FORBIDDEN_SCOPE_KEYS if re.search(rf"^\s*{key}\s*=", code, re.M)]
+    if re.search(r"^\s*\[allowlist\]", code, re.M):
+        hits.append("[allowlist]")
+    if re.search(r"^\s*\[\[allowlists\]\]", code, re.M):
+        hits.append("[[allowlists]]")
+    return hits
 
 
 def _tok(prefix, n, alphabet="abcdefghijklmnopqrstuvwxyz0123456789"):
     return prefix + (alphabet * 3)[:n]
 
 
+_PROBES = (
+    _tok("gh" + "p_", 36),
+    _tok("AK" + "IA", 16, "ABCDEFGHIJKLMNOP"),
+    _tok("cl" + "h_", 40),
+    _tok("s" + "k-", 48),
+    _tok("sk_" + "live_", 24),
+    _tok("AI" + "za", 35),
+)
+
+
+def _assert_exemptions_are_exact(code):
+    """The full guard, parameterized on config text so both the real file and the
+    bypass mutations below run through the exact same checks."""
+    hits = _forbidden_scope_keys(code)
+    assert not hits, hits
+    for rx in _allow_regexes(code):
+        assert rx.startswith("^") and rx.endswith("$"), rx
+        assert ".*" not in rx and ".+" not in rx and "|" not in rx, rx
+        for p in _PROBES:
+            assert not re.search(rx, p), (rx, p[:6])
+
+
 def test_no_path_or_global_stopword_exemption():
-    assert not re.search(r"^\s*paths\s*=", CODE, re.M)
-    assert not re.search(r"^\s*stopwords\s*=", CODE, re.M)
-    assert not re.search(r"^\s*\[allowlist\]", CODE, re.M)
-    assert not re.search(r"^\s*\[\[allowlists\]\]", CODE, re.M)
+    assert _forbidden_scope_keys() == []
 
 
 def test_default_rules_still_extended():
@@ -51,23 +182,13 @@ def test_default_rules_still_extended():
 
 def test_exemptions_are_anchored_exact_values():
     regexes = _allow_regexes()
-    assert len(regexes) == 7
-    for rx in regexes:
-        assert rx.startswith("^") and rx.endswith("$"), rx
-        assert ".*" not in rx and ".+" not in rx and "|" not in rx, rx
+    assert len(regexes) == _EXPECTED_REGEX_COUNT
+    _assert_exemptions_are_exact(CODE)
 
 
 def test_exemptions_do_not_match_real_shaped_tokens():
-    probes = [
-        _tok("gh" + "p_", 36),
-        _tok("AK" + "IA", 16, "ABCDEFGHIJKLMNOP"),
-        _tok("cl" + "h_", 40),
-        _tok("s" + "k-", 48),
-        _tok("sk_" + "live_", 24),
-        _tok("AI" + "za", 35),
-    ]
     for rx in _allow_regexes():
-        for p in probes:
+        for p in _PROBES:
             assert not re.search(rx, p), (rx, p[:6])
 
 
@@ -90,3 +211,57 @@ def test_ignore_file_is_exactly_the_pinned_history_fingerprints():
 
 def test_ci_secret_scan_uses_this_config():
     assert "--config=.gitleaks.toml" in CI
+
+
+# --- B-841: each of these, appended to a scratch copy of the real config, was
+# reported to leave all seven tests above green under the original `_allow_regexes()`
+# / forbidden-key check. `_assert_exemptions_are_exact` must now reject every one.
+
+_BYPASS_DOUBLE_QUOTED_BLANKET = """
+[[rules.allowlists]]
+description = "scratch bypass: double-quoted blanket regex"
+regexes = [".*"]
+"""
+
+_BYPASS_MULTI_ENTRY_LIST = """
+[[rules.allowlists]]
+description = "scratch bypass: a second, unanchored entry riding a valid one"
+regexes = [
+  '''^ok-value$''',
+  '''.*''',
+]
+"""
+
+_BYPASS_REGEX_TARGET_LINE = """
+[[rules.allowlists]]
+description = "scratch bypass: match the whole line, not just the value"
+regexTarget = "line"
+"""
+
+_BYPASS_COMMITS = """
+[[rules.allowlists]]
+description = "scratch bypass: exempt an entire commit instead of one value"
+commits = ["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"]
+"""
+
+
+@pytest.mark.parametrize(
+    "bypass",
+    [
+        _BYPASS_DOUBLE_QUOTED_BLANKET,
+        _BYPASS_MULTI_ENTRY_LIST,
+        _BYPASS_REGEX_TARGET_LINE,
+        _BYPASS_COMMITS,
+    ],
+    ids=["double_quoted_blanket", "multi_entry_list", "regex_target_line", "commits_scope"],
+)
+def test_guard_catches_known_bypass_shapes(bypass):
+    mutated = CODE + bypass
+    with pytest.raises(AssertionError):
+        _assert_exemptions_are_exact(mutated)
+
+
+def test_guard_accepts_the_real_config_unmutated():
+    # A sanity check that the mutation tests above exercise the guard logic itself
+    # and not some incidental text search that would also reject well-formed input.
+    _assert_exemptions_are_exact(CODE)
